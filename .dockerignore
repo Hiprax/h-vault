@@ -1,0 +1,53 @@
+# Build context = the repo root (see docker-compose.yml). Everything the images
+# need is a package.json, a lockfile, a tsconfig, or a package's src/ + public/.
+# Anything else only slows the build and, worse, risks leaking host state into an
+# image layer.
+
+# Never ship secrets. `.env` is the operator's live configuration and is handed to
+# the containers at RUN time via `env_file:` in compose — it must never be baked in.
+#
+# `**/.env`, NOT `.env`. Docker matches these patterns against the whole
+# context-relative path, so a bare `.env` excludes ONLY the root one. This repo also
+# carries `packages/server/.env` (a local, gitignored dev config), and the
+# `build-server` stage does `COPY packages/server ./packages/server` — so with the
+# bare pattern that file, JWT/session secrets and all, was baked straight into the
+# `bootstrap` image layer, recoverable by anyone who could pull it. Same reasoning as
+# `**/logs` below.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Host artefacts. `**/dist` matters for correctness, not just size: the images build
+# every package from source, and a stale host build sneaking in could shadow it.
+**/node_modules
+**/dist
+**/build
+**/coverage
+**/*.tsbuildinfo
+# `**/logs`, NOT `logs`. Docker matches these patterns against the whole
+# context-relative path, so a bare `logs` excludes ONLY the root logs/ — and
+# `packages/server/logs/` (the rotating request/audit logs a developer's local
+# `npm run dev` leaves behind, full of real IPs, user-agents and emails) would be
+# copied straight into the shipped images. It also made the build depend on
+# whether the developer happened to have that directory: its presence masked a
+# hard failure in the bootstrap image (see docker/Dockerfile's bootstrap stage).
+**/logs
+dev-dist
+test-results
+playwright-report
+
+# Not needed to build or run.
+.git
+.gitignore
+.gitattributes
+.github
+.husky
+.vscode
+.idea
+e2e
+**/tests
+# Depth-agnostic for the same reason as `**/.env`: a bare `*.md` / `*.tmp` would only
+# ever match at the context root, letting a package-level README — or a stray `.tmp`
+# backup left mid-edit — ride into an image layer.
+**/*.md
+**/*.tmp

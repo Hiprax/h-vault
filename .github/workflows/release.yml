@@ -1,0 +1,92 @@
+name: Release
+
+# The only workflow in this repository, and the only thing here that spends
+# GitHub Actions minutes. Everything the old CI workflow did — build, lint,
+# type-check, unit tests, dependency audit, E2E, container builds, Trivy, static
+# analysis — now runs on the developer's machine before the push, via the
+# pre-push hook (`npm run ci`). A commit that reaches `main` has already passed
+# all of it, which is precisely why nothing here is gated on tests: re-running
+# them on a hosted runner would spend money to learn something already known.
+#
+# Cost: one job, no dependency install, no build. It finishes in well under a
+# minute — and GitHub bills Actions per job, rounded up to the minute.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The minimum that lets GITHUB_TOKEN push a tag and publish a Release. Every
+# other scope is dropped, including the `security-events: write` the deleted
+# CodeQL job needed.
+permissions:
+  contents: write
+
+# Serialised, and deliberately NOT cancel-in-progress. Two pushes landing
+# seconds apart would otherwise both read the same "highest existing tag" and
+# race to create the same one, and the loser fails with a red X — the exact
+# thing this repository is trying to stop seeing. Serialised, the second run
+# starts after the first has pushed its tag, sees it, and picks the next one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The next tag is derived from the tags that already exist, so a shallow
+          # clone (the default) would compute the wrong one — it would see none at
+          # all and re-mint the version already in package.json.
+          fetch-depth: 0
+
+      # No actions/setup-node: the runner image already ships Node, this script
+      # has no dependencies, and skipping the install keeps the job short.
+      - name: Compute the release tag
+        id: version
+        run: |
+          git fetch --tags --force --quiet
+          node scripts/ci/next-version.mjs
+
+      # Skipped when HEAD is already tagged — a re-run, or a workflow_dispatch on
+      # an unchanged commit. The next step still reconciles the Release itself,
+      # so a run interrupted between tagging and publishing heals on the retry.
+      - name: Create the tag
+        if: steps.version.outputs.tag_exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "refs/tags/$TAG"
+
+      # Pushing this tag with GITHUB_TOKEN cannot start another workflow run —
+      # GitHub suppresses that to prevent recursion — and this workflow only
+      # listens on branch pushes anyway, which a `refs/tags/*` push never matches.
+      # Two independent reasons the release cannot release itself.
+      #
+      # --verify-tag is not optional. Left off, and given a tag that does not
+      # exist on the remote, `gh release create` does not fail — it silently
+      # creates the tag "from the latest state of the default branch", which on a
+      # busy repo is a DIFFERENT commit than the one this run built. Better to
+      # abort and let the next push retry than to publish a release pointing at
+      # code nobody reviewed under this tag.
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — nothing to do."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --verify-tag \
+            --generate-notes

@@ -1,0 +1,1 @@
+node scripts/ci/local-ci.mjs --hook=pre-push

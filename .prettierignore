@@ -1,0 +1,12 @@
+node_modules
+dist
+build
+coverage
+.cache
+test-results
+playwright-report
+dev-dist
+package-lock.json
+logs
+packages/shared/src/generated
+*.tmp

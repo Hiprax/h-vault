@@ -1,0 +1,16 @@
+# CodeQL scan configuration for the local SAST gate (scripts/ci/sast-gate.mjs).
+#
+# `.cache` MUST be excluded: it is where the CodeQL bundle itself is unpacked, and
+# indexing the analyzer's own JavaScript with the analyzer is both very slow and
+# entirely meaningless. Build output and coverage reports are generated artifacts —
+# analyzing them re-reports every finding a second time, attributed to a file no one
+# can fix.
+paths-ignore:
+  - node_modules
+  - .cache
+  - '**/dist'
+  - '**/coverage'
+  - playwright-report
+  - test-results
+  - dev-dist
+  - packages/shared/src/generated

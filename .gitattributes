@@ -1,0 +1,46 @@
+# Auto-detect text files and ensure LF line endings
+* text=auto eol=lf
+
+# Explicit text files
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.svg text eol=lf
+*.xml text eol=lf
+*.sh text eol=lf
+
+# Docker. LF is not cosmetic here: keyfile-entrypoint.sh runs as the MongoDB
+# container's ENTRYPOINT, and a CRLF line ending would make the kernel look for an
+# interpreter literally named "/usr/bin/env bash" — the container would never boot.
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
+.dockerignore text eol=lf
+*.conf text eol=lf
+
+# Binary files - do not modify
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.avif binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.otf binary
+*.pdf binary
+*.zip binary
+*.tar.gz binary
+
+# Lockfiles - exact (no diff noise)
+package-lock.json -diff linguist-generated=true

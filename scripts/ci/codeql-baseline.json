@@ -1,0 +1,96 @@
+{
+  "note": "Pre-existing CodeQL error-severity findings, accepted so the gate fails only on NEW ones. Regenerate with: npm run ci:sast -- --update-baseline",
+  "suite": "codeql/javascript-queries:codeql-suites/javascript-security-and-quality.qls",
+  "findings": [
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/authController.ts::a88598472695f57d:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/authController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/authController.ts::ba094deabdd5ff56:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/authController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/authController.ts::fcca8a7e54d5c3b0:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/authController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/folderController.ts::7a993502d9b00f9e:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/folderController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/folderController.ts::7a993502d9b00f9e:2",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/folderController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/userController.ts::e27c13edf88f3689:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/userController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/userController.ts::eb84f82c7f70a8be:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/userController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::1f9732490e3513d2:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::1f9732490e3513d2:2",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::3ee55f2fd237199c:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::8da04d2988137e79:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::b1261a09b2b1c41d:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::b2787cebd4b4590:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::b2787cebd4b4590:2",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::c673bac1e7219691:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::e2f7709a6f865f39:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::edbeec4dc7b8e2c:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::f22100b9725347f7:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+# =============================================================================
+# H-Vault — development stack
+# =============================================================================
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# Deliberately NOT a miniature of the production stack. There is no internal Nginx
+# and no replica set here: Vite serves the SPA on :3000 with hot reload and proxies
+# /api to Express on :5000, and MongoDB runs unauthenticated as a standalone. That
+# keeps the loop fast. It also means the transactional code paths take their
+# sequential fallback, and the CSP nonce / single-port routing are NOT exercised —
+# use the production stack (`docker compose up -d --build`) to test those.
+#
+# The database is also useful on its own for `npm run dev` on the host:
+#   docker compose -f docker-compose.dev.yml up -d hvault-db
+
+name: hvault-dev
+
+services:
+  hvault-db:
+    # Same major as production (docker/mongo.Dockerfile), so a behaviour difference
+    # between the two can never be a MongoDB version difference. No auth and no
+    # replica set here, though — see the header.
+    image: mongo:8.0
+    container_name: hvault-db-dev
+    restart: unless-stopped
+    ports:
+      # Published for host-side tooling (mongosh, Compass, the E2E helpers).
+      - '127.0.0.1:27017:27017'
+    environment:
+      MONGO_INITDB_DATABASE: hvault
+      # LOAD-BEARING on the 8.x line: without it mongod aborts at startup on any
+      # Linux 6.19+ kernel (Ubuntu 26.04) — SERVER-121912, still unpatched — and
+      # `restart: unless-stopped` turns that into a silent crash loop. Never set it
+      # to 0; that is the value that breaks. See docker-compose.yml for the detail.
+      GLIBC_TUNABLES: glibc.pthread.rseq=1
+    volumes:
+      - hvault-data-dev:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  hvault-app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: hvault-app-dev
+    restart: unless-stopped
+    command: npm run dev
+    ports:
+      - '127.0.0.1:3000:3000'
+      - '127.0.0.1:5000:5000'
+    volumes:
+      - ./packages/shared/src:/app/packages/shared/src
+      - ./packages/server/src:/app/packages/server/src
+      - ./packages/client/src:/app/packages/client/src
+      - ./packages/client/public:/app/packages/client/public
+      # Keep the image's node_modules; do not let an empty/host one shadow it.
+      - /app/node_modules
+    environment:
+      NODE_ENV: development
+      PORT: '5000'
+      # Bind Vite to every container interface so the published port reaches it —
+      # Docker DNATs to eth0, not loopback. Outside Docker, vite.config.ts defaults
+      # to 127.0.0.1.
+      VITE_HOST: 0.0.0.0
+      MONGODB_URI: mongodb://hvault-db:27017/hvault
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-jwt-access-secret-do-not-use-in-production!!}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev-jwt-refresh-secret-do-not-use-in-production!}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-do-not-use-in-production!!}
+      CORS_ORIGIN: http://localhost:3000
+      APP_URL: http://localhost:3000
+    depends_on:
+      hvault-db:
+        condition: service_healthy
+
+volumes:
+  hvault-data-dev:

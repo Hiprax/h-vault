@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
+test-results/
+playwright-report/
+
+# Local pipeline scratch space (scripts/ci): the CodeQL bundle a developer
+# unpacks, the database it builds, and the SARIF it produces. Hundreds of MB,
+# regenerated on every run, and specific to one machine.
+.cache/
+
+# Editor/assistant
+.claude/
+claude/
+CLAUDE.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Package artifacts
+*.tgz
+
+# Auto-generated files
+packages/shared/src/generated/
+
+# PWA generated files
+dev-dist/
+
+# Orchestrator
+.orchestrator/
+orchestrator/
+.orchestrator.ps1
+.orchestrator.env
+orchestrator.ps1
+orchestrator.env
+phases.json
+PLAN.md
+plan.md
+plan-*.md
+
+# Temporary backup copies created while editing (never commit)
+*.tmp

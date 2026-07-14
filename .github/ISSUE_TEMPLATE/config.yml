@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Hiprax/h-vault/security/advisories/new
+    about: Never report a vulnerability in a public issue. Disclose it privately here — see SECURITY.md.
+  - name: Question or idea
+    url: https://github.com/Hiprax/h-vault/discussions
+    about: Ask a question, or float an idea before opening a feature request.

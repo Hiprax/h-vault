@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "composite": true,
+    // TypeScript 6 defaults `types` to `[]` (no auto-loading of `@types/*`).
+    // The shared utils use the Web Crypto `crypto` global (available in both
+    // Node and the browser); `@types/node` provides its `Crypto` global type.
+    "types": ["node"]
+  },
+  "include": ["src/**/*"]
+}

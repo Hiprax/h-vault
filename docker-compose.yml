@@ -1,0 +1,533 @@
+# =============================================================================
+# H-Vault — production stack (self-contained)
+# =============================================================================
+# Everything H-Vault needs to run lives in here: the API, the SPA, the database,
+# and the Nginx that fronts them. The stack publishes exactly ONE host port —
+# 127.0.0.1:${HVAULT_HTTP_PORT:-8080} — and the host's own system Nginx terminates
+# TLS and reverse-proxies to it (see docker/nginx/system.docker.example.conf).
+#
+#   internet -> :443  host Nginx (TLS)
+#                 -> 127.0.0.1:8080  hvault-nginx     [edge]
+#                       ├── /assets/*, favicons, sw.js   served from disk
+#                       └── /api/* and every HTML document  -> hvault-app:5000
+#                                                       hvault-app        [edge+data]
+#                                                       hvault-db:27017   [data]
+#
+#   hvault-bootstrap  one-shot: creates the MongoDB indexes, then exits [data]
+#
+# Configuration comes from ONE file: ./.env at the repo root. It is handed to the
+# app container wholesale via `env_file`, so there is no per-package .env to keep
+# in sync. The only values this file overrides are the ones the CONTAINER TOPOLOGY
+# fixes and .env cannot know: NODE_ENV, the in-network MongoDB address, the app's
+# internal port, and the proxy hop count. Those overrides win, because `environment`
+# takes precedence over `env_file` in Compose.
+#
+#   Quick start:  cp .env.example .env   # then fill in the secrets it names
+#                 docker compose up -d --build --wait   # exits non-zero unless
+#                                                       # every service is healthy
+#
+# Requires Docker Compose >= 2.24 (the `env_file` long syntax below landed there).
+
+# The Compose PROJECT name, which also prefixes every network and volume the stack
+# creates. It is a variable rather than the bare literal it used to be, because a
+# hard-coded project name is precisely what makes a SECOND H-Vault on the same host go
+# wrong — and the docs actively invite that, since these stacks are designed to sit
+# several-to-a-host behind one system Nginx. Two checkouts both claiming the project
+# `hvault` do not collide loudly: Compose treats them as the SAME project, so the
+# second `up` recreates the first one's containers and adopts its volumes. Set
+# HVAULT_STACK_NAME (alongside HVAULT_HTTP_PORT and the two subnets) and the second
+# stack is namespaced end to end — project, containers, networks and volumes.
+name: ${HVAULT_STACK_NAME:-hvault}
+
+# --- shared building blocks --------------------------------------------------
+
+# One image definition builds `app`, `web` and `bootstrap` (see docker/Dockerfile).
+# `app` and `web` MUST come from the same client build — `app` serves the
+# index.html that references the content-hashed assets `web` serves — and sharing
+# one Dockerfile is what guarantees they do.
+x-hvault-build: &hvault-build
+  context: .
+  dockerfile: docker/Dockerfile
+
+# The single source of configuration. Every variable in .env reaches the app
+# container unchanged; the `environment:` block on each service then pins the few
+# values that belong to the container topology rather than to the operator.
+#
+# `required: false` does NOT mean the stack will quietly boot on defaults if the
+# operator forgets the file — two independent guards make that impossible:
+#   * Compose itself refuses to resolve this file without MONGO_ROOT_PASSWORD (the
+#     `:?` guard on the URI below), so `up` fails before a container is created;
+#   * the app validates its own configuration at boot (Zod) and exits on a missing
+#     or `dev-`-prefixed secret in production.
+# What it DOES buy is that `docker compose config` still parses in a checkout with
+# no .env (CI, a reviewer reading the stack), instead of erroring on a missing file
+# before it can tell you anything else about the stack.
+x-hvault-env-file: &hvault-env-file
+  - path: .env
+    required: false
+
+# Container topology. These OVERRIDE the same-named keys from .env, because the
+# in-stack addresses are fixed and a stale MONGODB_URI or PORT in .env (the local,
+# non-Docker development values) must not reach a container.
+x-hvault-app-environment: &hvault-app-environment
+  NODE_ENV: production
+  # The port Express listens on INSIDE the container. It is never published; Nginx
+  # is the only thing that connects to it. Pinned here so a PORT meant for local
+  # development in .env cannot desynchronise the Nginx upstream from the app.
+  PORT: '5000'
+  # Single-node replica set (rs0), initiated by the db healthcheck below. The app
+  # needs a replica set for its transactional paths (vault key rotation, account
+  # cascade-delete, refresh-token rotation), all of which check the driver's
+  # reported topology and fall back to non-atomic sequential writes without one.
+  # The set advertises `hvault-db:27017`, so this URI resolves to the primary from
+  # anywhere on the `data` network without directConnection.
+  # authSource=admin because MONGO_INITDB_ROOT_* creates the user in `admin`.
+  #
+  # NOTE: MONGO_ROOT_PASSWORD is interpolated into a URI. Keep it URL-safe —
+  # generate it with `openssl rand -hex 32`. A raw '@', ':', '/' or '?' in the
+  # password would be parsed as URI syntax and the connection would fail.
+  MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-hvault}:${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD is required}@hvault-db:27017/hvault?replicaSet=rs0&authSource=admin
+  # Proxies in front of Express, for a correct req.ip in rate limiting and audit
+  # logs. This count must match reality EXACTLY: Express trusts the last N entries
+  # of X-Forwarded-For, so a count higher than the real number of proxies lets a
+  # client spoof its own IP by sending the header, and a lower one attributes every
+  # request to the proxy.
+  #   2 = the host's system Nginx + this stack's Nginx  (the documented topology)
+  #   1 = this stack's Nginx only (you hit 127.0.0.1:${HVAULT_HTTP_PORT} directly)
+  TRUST_PROXY: '${TRUST_PROXY_HOPS:-2}'
+
+# Rotate container logs so a long-running deployment cannot fill the host disk.
+x-hvault-logging: &hvault-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+services:
+  # --- Nginx — the only published surface ------------------------------------
+  hvault-nginx:
+    build:
+      <<: *hvault-build
+      target: web
+    # Tagged with the release it was built from (HVAULT_VERSION in .env, which must
+    # track package.json's `version` — a unit test asserts the default below does).
+    # A rollback is then `git checkout <tag> && docker compose up -d --build`: the
+    # previous release's images are still on the host under their own tags, and the
+    # tag names themselves say which release is running.
+    image: hvault-web:${HVAULT_VERSION:-0.1.0}
+    container_name: ${HVAULT_STACK_NAME:-hvault}-nginx
+    restart: unless-stopped
+    # No `init:` here, deliberately (it is set on the two Node services, which need
+    # it). The nginx master is already a proper PID 1: it reaps its own workers and
+    # handles its signals — so tini adds nothing. Measured, `docker compose stop` exits
+    # 0 in ~2 s with or without it, and on MongoDB the same "tidy-up" addition was
+    # actively harmful (see hvault-db below). Which signal it is stopped WITH is a
+    # separate matter, and does need fixing — see `stop_signal` further down.
+
+    # THE single published port for the entire stack, bound to loopback so it is
+    # unreachable from the network — the host's system Nginx is the only thing that
+    # talks to it, and it is what terminates TLS. The container always listens on
+    # 8080 (nginx-unprivileged's baked-in listen), so the host port can be changed
+    # here without rebuilding the image; keep the outer Nginx upstream in sync.
+    ports:
+      - '127.0.0.1:${HVAULT_HTTP_PORT:-8080}:8080'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # nginx-unprivileged already runs as uid 101 on port 8080, so it needs no
+    # capabilities at all — not even NET_BIND_SERVICE.
+    read_only: true
+    tmpfs:
+      # nginx-unprivileged relocates its pid file and every temp path under /tmp.
+      # Ownership is pinned to its uid (101) rather than left to Docker's default,
+      # for the same reason the app's tmpfs is (see hvault-app below): a tmpfs whose
+      # root the container's user cannot write to turns into a boot failure that only
+      # shows up on a restart, long after the deploy looked fine.
+      - /tmp:size=64m,uid=101,gid=101,mode=1777
+    # Resource ceilings, so one leaky or compromised container cannot take the host
+    # down with it. `mem_limit`/`cpus`/`pids_limit` are the Compose-native, non-Swarm
+    # form of `deploy.resources.limits.{memory,cpus,pids}` — `docker compose up`
+    # applies them directly (verify with
+    # `docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}} {{.HostConfig.PidsLimit}}'`).
+    mem_limit: 256m
+    cpus: '0.5'
+    pids_limit: 100
+    # nginx's signals are the opposite way round from almost everything else:
+    # SIGTERM (Docker's default) is its FAST shutdown, which closes every open
+    # connection immediately, and SIGQUIT is the GRACEFUL one, which stops accepting
+    # new connections and lets in-flight requests finish. Left at the default, a
+    # deploy that recreates this container guillotines whatever is passing through
+    # it — and what passes through it includes the long operations this very config
+    # sets `proxy_read_timeout 300s` for: a full-vault key rotation or a 30 MB backup
+    # restore, which can legitimately run for minutes. The app behind it was
+    # deliberately given a 40 s drain window for exactly that reason; without this
+    # line the front door does not honour it.
+    stop_signal: SIGQUIT
+    # Matches the app's drain window, so both tiers get the same chance to finish.
+    # It is a bound, not a promise: a request still in flight after 40 s is cut.
+    stop_grace_period: 40s
+    logging: *hvault-logging
+    networks:
+      # `edge` only. Nginx is never on `data`, so a compromised Nginx cannot reach
+      # MongoDB at all — it can only talk to the app, exactly like a browser can.
+      - edge
+    depends_on:
+      hvault-app:
+        condition: service_healthy
+    healthcheck:
+      # Probe the API THROUGH the proxy rather than just the static root, so a
+      # green check proves the whole single-port path: Nginx is up, its upstream
+      # resolves, and the app behind it answers. Output is discarded so a failing
+      # probe cannot leak internal URLs or errors into `docker inspect`.
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:8080/api/v1/health || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # --- Express API + SPA shell ----------------------------------------------
+  hvault-app:
+    build:
+      <<: *hvault-build
+      target: app
+    image: hvault-app:${HVAULT_VERSION:-0.1.0}
+    container_name: ${HVAULT_STACK_NAME:-hvault}-app
+    restart: unless-stopped
+    # tini as PID 1: reaps zombies and forwards SIGTERM to node, which drains
+    # in-flight requests and background jobs before exiting (createGracefulShutdown).
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Node listens on 5000, an unprivileged port, as a non-root user. No capability
+    # is required to do that, so none is granted.
+    read_only: true
+    tmpfs:
+      # `uid`/`gid` pin these to the image's non-root `node` user (1000:1000), and
+      # `mode` makes the permissions explicit rather than inherited. That is not
+      # tidiness — it is the difference between a container that survives a restart
+      # and one that does not. @hiprax/logger creates a SUBDIRECTORY per module
+      # whose name contains a slash (`jobs/trashCleanup` -> /app/logs/jobs), and a
+      # tmpfs whose root ends up owned by root:root is one the `node` user cannot
+      # mkdir into. The failure is nasty: the logger throws during module
+      # evaluation, before the app has any error handling installed, so the process
+      # dies with exit code 0 and NO output at all — an app that boots clean the
+      # first time and then, after any `docker compose restart` or an automatic
+      # restart-on-failure, silently refuses to come back.
+      - /tmp:size=64m,uid=1000,gid=1000,mode=1777
+      # The logger's rotating file transports. A tmpfs keeps the root filesystem
+      # read-only while still giving them somewhere to go; the authoritative log
+      # stream is stdout, which Docker captures and rotates (see `logging` above).
+      - /app/logs:size=64m,uid=1000,gid=1000,mode=0700
+    # 1 GB rather than 512 MB, for headroom on the heaviest thing this app legitimately
+    # does: a 30 MB backup restore or full-vault key rotation, which decrypts,
+    # re-encrypts and rewrites up to 10,000 items.
+    #
+    # There is deliberately NO `--max-old-space-size` alongside it, and the reason is
+    # worth writing down because the folklore says otherwise. Node 24 IS cgroup-aware:
+    # it reads the container's memory limit and sizes V8's heap from it. Measured in
+    # this exact image:
+    #
+    #     mem_limit 512m -> V8 heap ceiling 259 MB
+    #     mem_limit 1g   -> V8 heap ceiling 560 MB
+    #     no limit at all-> V8 heap ceiling 4288 MB   <- the "V8 ignores the cgroup"
+    #                                                    story, true ONLY here
+    #
+    # So pinning `--max-old-space-size` under this limit would be a no-op at best (512
+    # yields the same 560 MB Node already picks) and would only ever SHRINK the
+    # headroom this limit exists to provide.
+    #
+    # The limit is not chosen from fear, either: parsing a full 25 MiB restore payload
+    # (45,000 rows) measures 57 MB of heap, so even the old 512 MB container was not in
+    # OOM territory for the parse itself. What 1 GB buys is room for the rest of the
+    # operation — the 30 MB body buffer, per-row Mongoose documents, and ordinary
+    # traffic served concurrently — instead of running a password manager's heaviest
+    # write path a couple of hundred megabytes from a hard heap failure.
+    mem_limit: 1g
+    cpus: '1.0'
+    # Hard cap on processes/threads to blunt fork-bomb style exhaustion. Node +
+    # Express sits around 20 threads steady-state; 200 leaves room for libuv worker
+    # growth under load without letting a compromised process spawn without bound.
+    pids_limit: 200
+    # Must exceed the app's own graceful-drain window (createGracefulShutdown's
+    # 30 s force-shutdown deadline), or Docker SIGKILLs it mid-drain and in-flight
+    # requests are severed.
+    stop_grace_period: 40s
+    logging: *hvault-logging
+    env_file: *hvault-env-file
+    environment: *hvault-app-environment
+    networks:
+      # This is the ONE container on both tiers, so it is also the one whose DEFAULT
+      # ROUTE decides how its outbound traffic leaves — SMTP (verification, reset,
+      # unlock and backup mail) and the HIBP breach-check API.
+      #
+      # The field is `gw_priority`, NOT `priority`, and the difference is the whole
+      # point: `priority` only orders the network ATTACHMENTS and has no say in which
+      # gateway wins. Measured on this stack, with `data` temporarily made
+      # non-internal so that it had a gateway at all:
+      #
+      #   edge: priority 100     -> default via 172.28.1.1  (the DATA gateway)   WRONG
+      #   edge: gw_priority 100  -> default via 172.28.0.1  (the EDGE gateway)   RIGHT
+      #
+      # Today `data` IS internal, and an internal network is handed no default route,
+      # so `edge` would win regardless — this is insurance, not a live fix. But it is
+      # insurance that actually works: drop the `internal:` flag while debugging, or
+      # add a second non-internal network, and without `gw_priority` the app's egress
+      # silently moves to whichever gateway Docker picks — as the measurement above
+      # shows it does.
+      #
+      # edge: reachable by Nginx, and the route out for SMTP + the HIBP breach API.
+      # data: reach MongoDB (which has no egress of its own).
+      edge:
+        gw_priority: 100
+      data:
+        gw_priority: 10
+    depends_on:
+      hvault-db:
+        condition: service_healthy
+      # Never start the API against a database whose indexes have not been built.
+      hvault-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      # Silent probe: any failure (network, non-2xx, unexpected error) exits 1
+      # without printing why. That keeps internal paths, URLs and stack traces out
+      # of `docker inspect`, which is readable by anyone with socket access.
+      #
+      # It exits EXPLICITLY on success rather than letting the event loop drain,
+      # because the drain is not the app's to control: an unconsumed fetch body
+      # leaves undici's pooled socket ref'd, so the process lingers for as long as
+      # the keep-alive timer says it should. Measured here at ~1.06 s against ~1.18 s
+      # for the explicit form — comfortably inside the 5 s timeout either way — but a
+      # probe whose runtime is set by an HTTP library's connection-pool heuristics is
+      # one undici release away from crossing that line, and a health check that
+      # times out is reported as a FAILURE: `retries: 5` would exhaust, Nginx (which
+      # gates on `service_healthy`) would never start, and `up --wait` would fail an
+      # entirely healthy stack.
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- One-shot bootstrap: MongoDB indexes, then exits -----------------------
+  # In production Mongoose runs with `autoIndex: false`, so indexes are never
+  # created implicitly. They are not just a performance matter here: the Folder
+  # (userId, searchHash) UNIQUE partial index is what makes duplicate-folder
+  # detection return 409 instead of silently inserting, and the AuditLog /
+  # RefreshToken TTL indexes are what bound those collections' growth. Without this
+  # step the stack boots and looks healthy while quietly losing both guarantees —
+  # which is why the app gates on it completing successfully.
+  #
+  # It is idempotent (createIndexes on an existing index is a no-op), so it runs on
+  # every `up` and picks up any index a new release added.
+  hvault-bootstrap:
+    build:
+      <<: *hvault-build
+      target: bootstrap
+    image: hvault-bootstrap:${HVAULT_VERSION:-0.1.0}
+    container_name: ${HVAULT_STACK_NAME:-hvault}-bootstrap
+    # A one-shot job: run once to completion and stay exited. Never restart — a
+    # restart policy here would make `service_completed_successfully` unreachable.
+    restart: 'no'
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # This image carries the full devDependency tree (it runs the TypeScript
+    # create-indexes script through tsx), which makes it the widest attack surface
+    # in the stack — so it gets the same read-only root as the app rather than being
+    # let off because it only lives for two seconds. Everything it writes is routed
+    # to tmpfs: npm's cache (relocated to /tmp/.npm by the environment override
+    # below, since $HOME is on the now read-only root) and @hiprax/logger's log
+    # directory, which it creates at module scope from cwd=/app/packages/server.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,uid=1000,gid=1000,mode=1777
+      - /app/packages/server/logs:size=16m,uid=1000,gid=1000,mode=0700
+    mem_limit: 512m
+    cpus: '1.0'
+    pids_limit: 100
+    logging: *hvault-logging
+    env_file: *hvault-env-file
+    environment:
+      <<: *hvault-app-environment
+      # $HOME (/home/node) sits on the read-only root filesystem, and npm insists on
+      # a writable cache directory even for `npm run <script>`. Point it at the tmpfs.
+      npm_config_cache: /tmp/.npm
+    networks:
+      # `data` only. It opens one MongoDB connection and makes no outbound call, so
+      # it is deliberately kept off `edge` and has no route to the internet.
+      - data
+    depends_on:
+      hvault-db:
+        condition: service_healthy
+
+  # --- MongoDB (single-node replica set, authenticated) ----------------------
+  hvault-db:
+    build:
+      context: .
+      dockerfile: docker/mongo.Dockerfile
+    # 8.0 is the current MongoDB LTS (supported to 2029-10-31; the 7.0 line this
+    # stack used to pin runs out on 2027-08-31). The tag tracks the upstream major
+    # rather than HVAULT_VERSION: the image is stock mongo plus a key-file
+    # entrypoint, and it is the DATABASE version an operator needs to see here.
+    image: hvault-db:8.0
+    container_name: ${HVAULT_STACK_NAME:-hvault}-db
+    restart: unless-stopped
+    # Deliberately NO `init: true`, and this is a measured decision rather than an
+    # oversight. mongod is already a well-behaved PID 1: the entrypoint chain execs
+    # it (through gosu), and it handles SIGTERM by flushing and shutting down
+    # cleanly. Adding Docker's init in front of it made the CONTAINER exit 1 on an
+    # ordinary `docker compose stop` — the mongod log still showed a clean "mongod
+    # shutdown complete", but the container's recorded exit code went from 0 to 1,
+    # which is a false failure signal in `docker compose ps`, in monitoring, and in
+    # the middle of an incident when the one thing you want to know is whether the
+    # database went down cleanly. Without it: exit 0, every time.
+    #
+    # The two Node services keep `init: true` — they genuinely need a reaper.
+    # The key file mongod requires when auth and a replica set are combined is
+    # generated on first boot by the image's entrypoint wrapper; see
+    # docker/mongo/keyfile-entrypoint.sh for why it cannot come from the host.
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --keyFile
+      - /data/configdb/replica.key
+      - --bind_ip_all
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # The official entrypoint runs as root, fixes ownership on the data volume
+      # and the key file, then drops to the `mongodb` user with gosu. That needs
+      # exactly these five capabilities and nothing else — notably NOT NET_RAW,
+      # SYS_CHROOT, MKNOD, SETFCAP or SETPCAP, which the Docker default grants.
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    # Deliberately NOT read_only. Unlike the app and Nginx, whose runtime writes
+    # all fit in a tmpfs, mongod's entrypoint chowns paths in place, and mongosh
+    # (which the healthcheck runs) wants a writable HOME. The container carries no
+    # published port and sits on an egress-less network, so a writable root
+    # filesystem here buys an attacker who is already inside it very little.
+    environment:
+      MONGO_INITDB_DATABASE: hvault
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-hvault}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD is required}
+      # SERVER-121912 — LOAD-BEARING on the 8.0 image above. Do not remove it, and
+      # never set it to 0.
+      #
+      # MongoDB 8.0 switched TCMalloc to per-CPU caches, and that TCMalloc drives
+      # them with restartable sequences in a way that violates the rseq ABI as it
+      # changed in kernel 6.19 (Ubuntu 26.04 and newer). mongod's startup self-check
+      # aborts, and `restart: unless-stopped` turns that into an endless crash loop
+      # with no hint of the cause. It is still unpatched upstream.
+      #
+      # Handing restartable sequences back to glibc deactivates TCMalloc's
+      # ABI-violating per-CPU cache path, so mongod starts and stays up. It costs a
+      # little allocator throughput. 0 is mongod's own default and is precisely the
+      # value that crashes. The tunable is a glibc feature — inert on kernels < 6.19
+      # and off glibc entirely — so setting it unconditionally is safe everywhere,
+      # which is why it is here rather than behind a host check.
+      GLIBC_TUNABLES: glibc.pthread.rseq=1
+    volumes:
+      - hvault-db-data:/data/db
+      # Holds the generated replica-set key file, so it survives a container
+      # rebuild and the set keeps the identity it was initiated with.
+      - hvault-db-config:/data/configdb
+    mem_limit: 1g
+    cpus: '1.0'
+    # MongoDB runs a far larger thread pool than Node (connection pool + WiredTiger
+    # workers), so it gets more headroom than the app.
+    pids_limit: 400
+    stop_grace_period: 30s
+    logging: *hvault-logging
+    networks:
+      # `data` only — no published port and, because the network is internal, no
+      # route to the internet either.
+      - data
+    healthcheck:
+      # Idempotently initiate the single-node replica set, advertising the
+      # `hvault-db` service name so in-network clients resolve the primary, and
+      # report healthy only once this node IS a writable primary — i.e. once
+      # transactions are actually available. `$$` is Compose's escape for a literal
+      # `$`, so the credentials are read from the container's own environment and
+      # never appear in the command line stored in `docker inspect`. Output is
+      # discarded so a failing probe leaks no replica-set state or stack frames.
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet
+          -u "$$MONGO_INITDB_ROOT_USERNAME" -p "$$MONGO_INITDB_ROOT_PASSWORD"
+          --authenticationDatabase admin
+          --eval '
+            try { rs.status() } catch (e) {
+              try { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "hvault-db:27017" }] }) } catch (e2) {}
+            }
+            quit(db.hello().isWritablePrimary ? 0 : 1)
+          ' >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      # Generous: a first boot creates the data files, the root user and the key
+      # file before the set can even be initiated.
+      start_period: 40s
+
+# --- networks ----------------------------------------------------------------
+# Two networks separate the public-facing edge from the data tier:
+#   edge — Nginx <-> app, plus the app's outbound route (SMTP, the HIBP breach API).
+#          Nginx never joins `data`, so it cannot reach MongoDB.
+#   data — app/bootstrap <-> MongoDB. `internal: true` denies this tier any route to
+#          the internet, so the database can neither be reached from outside nor
+#          reach out itself.
+#
+# The subnets are PINNED rather than auto-allocated. Docker hands an unpinned
+# bridge the next free block in its default pool, so the stack's addresses depend
+# on whatever else happens to exist on the host that day — they move when another
+# project's network is created or removed, which makes an incident impossible to
+# reason about, and an auto-allocated block that ends up overlapping another
+# network's subnet breaks forwarding in ways that look like an application bug
+# (name resolves, ARP answers, packets vanish). Fixed blocks make the stack
+# deterministic and self-describing.
+#
+# They are pinned but OVERRIDABLE, and that second half matters as much as the
+# first. This stack is designed to sit alongside other stacks behind one system
+# Nginx, and a hard-coded block that collides with a neighbour is not a warning —
+# Docker refuses to create the network at all ("Pool overlaps with other one on
+# this address space") and the stack simply will not start. Set HVAULT_EDGE_SUBNET
+# / HVAULT_DATA_SUBNET in .env to move them; `docker network ls` and
+# `docker network inspect <name>` show what the host has already taken. Keep the
+# two distinct from each other and from every other network on the machine.
+networks:
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${HVAULT_EDGE_SUBNET:-172.28.0.0/24}
+  data:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${HVAULT_DATA_SUBNET:-172.28.1.0/24}
+
+# --- volumes -----------------------------------------------------------------
+volumes:
+  # The vault. Encrypted at rest by the client (the server never sees plaintext),
+  # but still the only copy — back it up out of band.
+  hvault-db-data:
+  # The generated replica-set key file (see docker/mongo/keyfile-entrypoint.sh).
+  hvault-db-config:
