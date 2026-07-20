@@ -26,6 +26,19 @@ describe('README documentation sync', () => {
     expect(readme).toContain('/auth/lock');
   });
 
+  it('the documented HVAULT_VERSION default matches the root package.json version', () => {
+    // The Compose-variable table quotes a concrete default. A release that bumps
+    // package.json, docker-compose.yml and .env.example but forgets this cell tells
+    // operators to pin the PREVIOUS tag: on a host that still holds the old images,
+    // following the README produces a stack that silently serves the old release.
+    const rootPackageJson = JSON.parse(
+      readFileSync(path.resolve(testDir, '..', '..', '..', 'package.json'), 'utf-8'),
+    ) as { version: string };
+
+    const documented = /\|\s*`HVAULT_VERSION`\s*\|\s*`([^`]+)`\s*\|/.exec(readme)?.[1];
+    expect(documented).toBe(rootPackageJson.version);
+  });
+
   it('the audit-operations count matches AUDIT_ACTIONS.length', () => {
     expect(readme).toContain(`${String(AUDIT_ACTIONS.length)} distinct operations`);
   });

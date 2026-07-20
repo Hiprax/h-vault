@@ -30,6 +30,7 @@ playwright-report/
 .claude/
 claude/
 CLAUDE.md
+CLAUDE_INTERNALS.md
 
 # OS files
 .DS_Store

@@ -246,6 +246,13 @@ describe('Docker deployment', () => {
       // ...and .env.example must carry the key, or a fresh clone silently takes the
       // fallback and never knows the knob exists.
       expect(envExample).toMatch(/^HVAULT_VERSION=/m);
+      // The VALUE has to track package.json too, not merely be present. A release
+      // that bumps the Compose defaults but leaves .env.example on the previous
+      // version hands operators a file that pins the stack to the OLD tag: on a host
+      // that still has the previous release's images, `docker compose up -d` then
+      // serves the old stack and reports success.
+      const envVersion = /^HVAULT_VERSION=(.*)$/m.exec(envExample)?.[1]?.trim();
+      expect(envVersion).toBe(rootPackageJson.version);
     });
 
     it('namespaces the project AND the container names, so a second stack can coexist', () => {
@@ -723,6 +730,43 @@ describe('Docker deployment', () => {
       for (const source of sources) {
         expect(['build-client', 'web-root']).toContain(source);
       }
+    });
+
+    it('ships a lockfile carrying integrity metadata for every registry package', () => {
+      // Every image stage installs with `npm ci`, which verifies each downloaded
+      // tarball against the Subresource-Integrity hash recorded in the lockfile. A
+      // lockfile regenerated while node_modules was still on disk is re-serialised
+      // from that tree rather than from registry packuments, and silently loses
+      // `resolved`/`integrity` on every package npm did not have to re-download —
+      // leaving `npm ci` to install the bulk of the tree with no integrity
+      // verification and no pinned tarball URL. For a zero-knowledge password
+      // manager that is a supply-chain control disappearing in silence: the install
+      // still succeeds, `npm audit` still reports zero, and .gitattributes marks
+      // package-lock.json linguist-generated, so the regression shows up as no
+      // reviewable diff at all. Assert it structurally instead.
+      const lockfile = JSON.parse(
+        readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf-8'),
+      ) as {
+        packages: Record<
+          string,
+          { version?: string; link?: boolean; resolved?: string; integrity?: string }
+        >;
+      };
+
+      // Only real registry artifacts qualify. The root entry ("") and the workspace
+      // sources ("packages/…") are not downloaded, and the `node_modules/@hvault/*`
+      // entries are symlinks into this repo — none of them can carry a hash.
+      const registryPackages = Object.entries(lockfile.packages).filter(
+        ([name, entry]) => name.startsWith('node_modules/') && !entry.link && entry.version,
+      );
+      expect(registryPackages.length).toBeGreaterThan(500);
+
+      expect(
+        registryPackages.filter(([, entry]) => !entry.integrity).map(([name]) => name),
+      ).toEqual([]);
+      expect(registryPackages.filter(([, entry]) => !entry.resolved).map(([name]) => name)).toEqual(
+        [],
+      );
     });
 
     it('removes index.html from the Nginx document root', () => {

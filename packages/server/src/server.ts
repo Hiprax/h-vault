@@ -14,7 +14,11 @@ import { createGracefulShutdown } from './utils/gracefulShutdown.js';
 
 const logger = createLogger({ moduleName: 'server' });
 
-// Increase listener limit — multiple modules (logger, database, jobs) register process handlers
+// Defensive listener-limit margin. @hiprax/logger v1's crash-capture coordinator
+// installs a single process-wide uncaughtException/unhandledRejection listener pair
+// (no longer one pair per logger), and this file adds only SIGTERM/SIGINT, so the
+// process sits well under Node's default of 10 per event; the raised cap simply
+// absorbs any handlers third-party libraries register without a spurious warning.
 process.setMaxListeners(20);
 
 async function startServer(): Promise<void> {
@@ -76,19 +80,16 @@ async function startServer(): Promise<void> {
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
     process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-    process.on('unhandledRejection', (reason: unknown) => {
-      const message = reason instanceof Error ? reason.message : 'Unknown reason';
-      logger.error(`Unhandled rejection: ${message}`);
-      // Exit after a brief delay to allow the logger to flush.
-      // An unhandled rejection indicates a code path without proper error
-      // handling, so continuing could leave the process in an undefined state.
-      setTimeout(() => process.exit(1), 100);
-    });
-
-    process.on('uncaughtException', (error: Error) => {
-      logger.error(`Uncaught exception: ${error.message}`);
-      process.exit(1);
-    });
+    // Fatal-crash capture (uncaughtException / unhandledRejection) is owned by
+    // @hiprax/logger v1's process-wide coordinator: it records the crash once
+    // through the elected logger (with full stack, process/OS context and a
+    // parsed trace), flushes that logger's transports under a bounded timeout,
+    // then exits the process with code 1 (exitOnUncaught defaults to true). That
+    // supersedes the hand-rolled handlers this file used to install, which merely
+    // logged a one-line message and exited — and whose synchronous exit truncated
+    // the coordinator's richer, fully-flushed crash record. Delegating avoids the
+    // double-handling and preserves the crash → exit(1) contract that
+    // jobTracker's bookkeeping catch relies on.
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     logger.error(`Failed to start server: ${message}`);

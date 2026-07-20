@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-20
+
+### Changed
+
+- Upgraded server, client and tooling dependencies to their latest compatible releases, including `@hiprax/logger` 1.1, `helmet` 8.3, `express-rate-limit` 8.6, `mongodb` 7.5, `react-hook-form` 7.82, `lucide-react` 1.25, `vite` 8.1.5, `tailwindcss` / `@tailwindcss/vite` 4.3.3, `postcss` 8.5.20, `autoprefixer` 10.5.4, `eslint` 10.7, `typescript-eslint` 8.64, `prettier` 3.9.5, `tsx` 4.23.1 and `lint-staged` 17.1. TypeScript is deliberately held at the 6.x line and `@types/node` at the 24.x line to stay aligned with the supported type-check toolchain and the Node 24 runtime.
+- Fatal-crash handling (uncaught exceptions and unhandled rejections) is now captured through the logger's process-wide coordinator, which records a single crash entry with a full stack trace plus process and OS context and flushes the log transports under a bounded timeout before the process exits with a non-zero code.
+
 ## [0.1.0] - 2026-07-14
 
 First public release.
@@ -49,5 +56,6 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Hiprax/h-vault/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Hiprax/h-vault/releases/tag/v0.1.0
