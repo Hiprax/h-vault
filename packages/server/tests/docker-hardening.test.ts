@@ -94,6 +94,8 @@ const app = compose.services['hvault-app'];
 const db = compose.services['hvault-db'];
 const nginx = compose.services['hvault-nginx'];
 const bootstrap = compose.services['hvault-bootstrap'];
+/** One-shot that provisions the least-privilege application database user. */
+const dbInit = compose.services['hvault-db-init'];
 
 const longRunning: [string, ServiceConfig | undefined][] = [
   ['hvault-nginx', nginx],
@@ -103,6 +105,7 @@ const longRunning: [string, ServiceConfig | undefined][] = [
 const everyService: [string, ServiceConfig | undefined][] = [
   ...longRunning,
   ['hvault-bootstrap', bootstrap],
+  ['hvault-db-init', dbInit],
 ];
 
 /** tmpfs entries look like `"/path:opt=val,opt=val"`; pull the options for one path. */
@@ -412,12 +415,17 @@ describe('Docker deployment', () => {
 
     it('cannot boot on a default database password even with no .env present', () => {
       // The env file is `required: false`, so `docker compose config` still parses in
-      // a checkout that has none. That is NOT a licence to boot on defaults: the
-      // MONGODB_URI below interpolates `${MONGO_ROOT_PASSWORD:?…}`, which makes
+      // a checkout that has none. That is NOT a licence to boot on defaults: each
+      // credential below is interpolated with a `${VAR:?…}` guard, which makes
       // Compose refuse to resolve the stack at all when the value is missing — the
       // failure happens before a container exists, and it names the variable.
-      expect(app?.environment?.['MONGODB_URI']).toMatch(/\$\{MONGO_ROOT_PASSWORD:\?/);
+      // Both passwords are covered: the app now authenticates with the scoped
+      // MONGO_APP_PASSWORD, while root still guards the database and its
+      // provisioning one-shot.
+      expect(app?.environment?.['MONGODB_URI']).toMatch(/\$\{MONGO_APP_PASSWORD:\?/);
       expect(db?.environment?.['MONGO_INITDB_ROOT_PASSWORD']).toMatch(/\$\{MONGO_ROOT_PASSWORD:\?/);
+      expect(dbInit?.environment?.['MONGO_ROOT_PASSWORD']).toMatch(/\$\{MONGO_ROOT_PASSWORD:\?/);
+      expect(dbInit?.environment?.['MONGO_APP_PASSWORD']).toMatch(/\$\{MONGO_APP_PASSWORD:\?/);
     });
 
     it('overrides only the values the container topology fixes', () => {
@@ -463,12 +471,92 @@ describe('Docker deployment', () => {
       // refresh, deleteFolder) silently degrades to non-atomic sequential writes.
       const uri = app?.environment?.['MONGODB_URI'] ?? '';
       expect(uri).toContain('replicaSet=rs0');
-      // Root credentials live in `admin`.
-      expect(uri).toContain('authSource=admin');
+      // The app authenticates as the least-privilege user, which is created IN
+      // `hvault` — not as root, which lives in `admin`.
+      expect(uri).toContain('authSource=hvault');
       // directConnection would force a Single topology and defeat the point: the set
       // advertises `hvault-db:27017`, which resolves inside the stack, so the driver
       // discovers the primary properly.
       expect(uri).not.toContain('directConnection');
+    });
+
+    it('authenticates as the scoped user, never as cluster root', () => {
+      // The whole point of hvault-db-init. If a refactor ever points the app back
+      // at MONGO_ROOT_*, a compromise of the app container regains admin over every
+      // database — the failure this separation exists to prevent, and one that
+      // nothing else in the suite would notice (no test authenticates to MongoDB).
+      const appUri = app?.environment?.['MONGODB_URI'] ?? '';
+      expect(appUri).not.toContain('MONGO_ROOT_PASSWORD');
+      expect(appUri).not.toContain('MONGO_ROOT_USERNAME');
+      expect(appUri).toMatch(/\$\{MONGO_APP_PASSWORD:\?/);
+
+      // The bootstrap inherits the same URI through the YAML anchor; assert it
+      // rather than assume, since the anchor could be overridden per-service.
+      const bootstrapUri = bootstrap?.environment?.['MONGODB_URI'] ?? '';
+      expect(bootstrapUri).toBe(appUri);
+
+      // hvault-db-init is the ONLY non-database service that INTERPOLATES root.
+      expect(JSON.stringify(dbInit?.environment ?? {})).toContain('MONGO_ROOT_PASSWORD');
+    });
+
+    it('scrubs the discrete MongoDB credentials out of the app and bootstrap containers', () => {
+      // The subtle half of the least-privilege change, and the one a review caught
+      // after the first pass shipped: `env_file: .env` injects EVERY key from the
+      // single root .env into the container, INCLUDING the root credential that only
+      // the database services need — so without an explicit override the app would
+      // still carry MONGO_ROOT_PASSWORD in process.env, and an RCE could open a
+      // fresh ROOT connection, defeating the entire point of the scoped user.
+      // `environment:` is the only per-key override Compose offers over `env_file:`,
+      // so the app-environment anchor blanks all four discrete MONGO_* creds. The
+      // app reads only MONGODB_URI, so this is invisible to it. Verified on the live
+      // container: `printenv MONGO_ROOT_PASSWORD` is empty.
+      for (const [label, service] of [
+        ['hvault-app', app],
+        ['hvault-bootstrap', bootstrap],
+      ] as const) {
+        for (const key of [
+          'MONGO_ROOT_USERNAME',
+          'MONGO_ROOT_PASSWORD',
+          'MONGO_APP_USERNAME',
+          'MONGO_APP_PASSWORD',
+        ]) {
+          // Present-and-empty, not merely absent: absent would let `env_file`'s
+          // value through, which is exactly the bug. The empty string is what
+          // overrides it.
+          expect(service?.environment, `${label}.${key}`).toHaveProperty(key, '');
+        }
+      }
+      // Nginx never joins the data network and needs no database credential at all.
+      expect(JSON.stringify(nginx?.environment ?? {})).not.toContain('MONGO_ROOT_PASSWORD');
+    });
+
+    it('provisions the scoped user from a gated, egress-less one-shot', () => {
+      // Ordering: createUser is a WRITE, so it needs a writable primary — which is
+      // exactly what hvault-db's healthcheck proves before this is allowed to run.
+      expect(dbInit?.depends_on?.['hvault-db']?.condition).toBe('service_healthy');
+      // One-shot. A restart policy would make `service_completed_successfully`
+      // unreachable and wedge every service gating on it.
+      expect(dbInit?.restart).toBe('no');
+      // It holds root, so it must not be able to reach the internet.
+      expect(networksOf(dbInit)).toEqual(['data']);
+      expect(dbInit?.ports).toBeUndefined();
+      // Neither secret may be passed on the command line, where `docker inspect`
+      // and the process table would expose it — the script reads them from env.
+      const entrypoint = [dbInit?.entrypoint ?? []].flat().join(' ');
+      expect(entrypoint).toContain('provision-app-user.js');
+      expect(entrypoint).not.toContain('--password');
+      expect(entrypoint).not.toContain('--username');
+      // ...and the bootstrap must wait for the user to exist before authenticating.
+      expect(bootstrap?.depends_on?.['hvault-db-init']?.condition).toBe(
+        'service_completed_successfully',
+      );
+    });
+
+    it('ships the app-user password key in .env.example, empty so it fails closed', () => {
+      // Mirrors the MONGO_ROOT_PASSWORD check: a placeholder would be a working
+      // database credential published in this repository.
+      expect(envExample).toMatch(/^MONGO_APP_PASSWORD=$/m);
+      expect(envExample).toMatch(/^MONGO_APP_USERNAME=/m);
     });
 
     it('waits for the index bootstrap to finish before it starts', () => {
@@ -767,6 +855,29 @@ describe('Docker deployment', () => {
       expect(registryPackages.filter(([, entry]) => !entry.resolved).map(([name]) => name)).toEqual(
         [],
       );
+    });
+
+    it('bounds nginx worker_processes to the CPU limit instead of the host core count', () => {
+      // nginx's shipped `worker_processes auto` resolves through
+      // sysconf(_SC_NPROCESSORS_ONLN), which reports the HOST's cores and ignores
+      // the container's CFS quota. Measured: on a 4-core host the service spawned
+      // 4 workers while capped at `cpus: '0.5'`; on a 32-core host that is 32
+      // workers in the same half-core, 256 MB box, and past ~99 cores they cannot
+      // all be forked under `pids_limit: 100`. The pin has to be baked into the
+      // image — the runtime autotune hook rewrites nginx.conf on boot, which the
+      // service's read-only root filesystem forbids.
+      // Directives only: the comment above the fix quotes `worker_processes auto`
+      // to explain what is being replaced, and prose must not trip the guard.
+      const webStageDirectives = dockerfile
+        .slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'))
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .join('\n');
+      expect(webStageDirectives).toMatch(/worker_processes \d+;/);
+      expect(webStageDirectives).not.toMatch(/worker_processes\s+auto/);
+      // ...and the cap only means something while the CPU limit it was chosen for
+      // is still in place.
+      expect(nginx?.cpus).toBeDefined();
     });
 
     it('removes index.html from the Nginx document root', () => {

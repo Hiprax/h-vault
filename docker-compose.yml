@@ -81,12 +81,21 @@ x-hvault-app-environment: &hvault-app-environment
   # reported topology and fall back to non-atomic sequential writes without one.
   # The set advertises `hvault-db:27017`, so this URI resolves to the primary from
   # anywhere on the `data` network without directConnection.
-  # authSource=admin because MONGO_INITDB_ROOT_* creates the user in `admin`.
   #
-  # NOTE: MONGO_ROOT_PASSWORD is interpolated into a URI. Keep it URL-safe —
+  # This is the LEAST-PRIVILEGE application account, not root: `hvault-db-init`
+  # creates it inside the `hvault` database with the built-in `readWrite` role on
+  # `hvault` and nothing else, which is why authSource is `hvault` and not
+  # `admin`. Root now exists in exactly two containers — hvault-db itself and the
+  # ~1-second hvault-db-init one-shot — so a compromise of the app or the
+  # bootstrap image cannot read another database, create users, or reach the
+  # cluster. `readWrite` is the FLOOR, not a starting point to trim: it is what
+  # grants `createIndex`, and ensureLockIndexes() runs on every boot with no
+  # try/catch, so a narrower role would kill startup.
+  #
+  # NOTE: MONGO_APP_PASSWORD is interpolated into a URI. Keep it URL-safe —
   # generate it with `openssl rand -hex 32`. A raw '@', ':', '/' or '?' in the
   # password would be parsed as URI syntax and the connection would fail.
-  MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-hvault}:${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD is required}@hvault-db:27017/hvault?replicaSet=rs0&authSource=admin
+  MONGODB_URI: mongodb://${MONGO_APP_USERNAME:-hvault_app}:${MONGO_APP_PASSWORD:?MONGO_APP_PASSWORD is required}@hvault-db:27017/hvault?replicaSet=rs0&authSource=hvault
   # Proxies in front of Express, for a correct req.ip in rate limiting and audit
   # logs. This count must match reality EXACTLY: Express trusts the last N entries
   # of X-Forwarded-For, so a count higher than the real number of proxies lets a
@@ -95,6 +104,21 @@ x-hvault-app-environment: &hvault-app-environment
   #   2 = the host's system Nginx + this stack's Nginx  (the documented topology)
   #   1 = this stack's Nginx only (you hit 127.0.0.1:${HVAULT_HTTP_PORT} directly)
   TRUST_PROXY: '${TRUST_PROXY_HOPS:-2}'
+  # Scrub the discrete MongoDB credentials out of the app and bootstrap containers.
+  # `env_file: .env` injects EVERY key from the single root .env — including the
+  # root credential that only hvault-db and hvault-db-init legitimately need — and
+  # `environment:` is the only per-key override Compose offers. Without these lines
+  # a compromise of the app (a bad dependency, an RCE) could read
+  # process.env.MONGO_ROOT_PASSWORD and open a brand-new ROOT connection to the
+  # database, defeating the whole point of the scoped user. The app consumes only
+  # MONGODB_URI (which already carries the scoped user inline), so blanking these
+  # four is invisible to it. Empty string, not `!reset`, so the override works on
+  # Compose < 2.24 too. .env keeps the real values for interpolation and for the
+  # database services' own `environment:` blocks; this just stops them leaking here.
+  MONGO_ROOT_USERNAME: ''
+  MONGO_ROOT_PASSWORD: ''
+  MONGO_APP_USERNAME: ''
+  MONGO_APP_PASSWORD: ''
 
 # Rotate container logs so a long-running deployment cannot fill the host disk.
 x-hvault-logging: &hvault-logging
@@ -114,7 +138,7 @@ services:
     # A rollback is then `git checkout <tag> && docker compose up -d --build`: the
     # previous release's images are still on the host under their own tags, and the
     # tag names themselves say which release is running.
-    image: hvault-web:${HVAULT_VERSION:-0.1.1}
+    image: hvault-web:${HVAULT_VERSION:-0.1.2}
     container_name: ${HVAULT_STACK_NAME:-hvault}-nginx
     restart: unless-stopped
     # No `init:` here, deliberately (it is set on the two Node services, which need
@@ -191,7 +215,7 @@ services:
     build:
       <<: *hvault-build
       target: app
-    image: hvault-app:${HVAULT_VERSION:-0.1.1}
+    image: hvault-app:${HVAULT_VERSION:-0.1.2}
     container_name: ${HVAULT_STACK_NAME:-hvault}-app
     restart: unless-stopped
     # tini as PID 1: reaps zombies and forwards SIGTERM to node, which drains
@@ -332,7 +356,7 @@ services:
     build:
       <<: *hvault-build
       target: bootstrap
-    image: hvault-bootstrap:${HVAULT_VERSION:-0.1.1}
+    image: hvault-bootstrap:${HVAULT_VERSION:-0.1.2}
     container_name: ${HVAULT_STACK_NAME:-hvault}-bootstrap
     # A one-shot job: run once to completion and stay exited. Never restart — a
     # restart policy here would make `service_completed_successfully` unreachable.
@@ -370,6 +394,73 @@ services:
     depends_on:
       hvault-db:
         condition: service_healthy
+      # The scoped user this service authenticates as must exist before it runs.
+      hvault-db-init:
+        condition: service_completed_successfully
+
+  # --- Database user provisioning (one-shot, holds root) ---------------------
+  # Creates the least-privilege `readWrite`-on-hvault account that the app and the
+  # index bootstrap authenticate as, so neither of them holds cluster root. This
+  # is the ONLY service besides the database itself that is given the root
+  # credentials, and it lives about a second on an egress-less network.
+  #
+  # Why a service and not /docker-entrypoint-initdb.d: that directory runs ONLY on
+  # a first boot against an empty data directory. On any existing deployment the
+  # data volume already exists, so the script would be skipped silently and the app
+  # would crash-loop on authentication. A gated one-shot runs on EVERY `up` and is
+  # idempotent — it reconciles roles and never rewrites an existing password.
+  #
+  # It reuses hvault-db's image and repeats the same `build:` block on purpose:
+  # Compose dedupes and builds once, but a service that names an `image:` WITHOUT
+  # its own `build:` is pull-only, so dropping this block would make a fresh
+  # `docker compose up` (no --build) try to pull hvault-db:8.0 from Docker Hub.
+  hvault-db-init:
+    build:
+      context: .
+      dockerfile: docker/mongo.Dockerfile
+    image: hvault-db:8.0
+    container_name: ${HVAULT_STACK_NAME:-hvault}-db-init
+    # One-shot: a restart policy would make `service_completed_successfully`
+    # unreachable for the services gating on it.
+    restart: 'no'
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # mongosh insists on a writable HOME even for --file, so HOME is pointed at a
+    # tmpfs rather than leaving the root filesystem writable.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 256m
+    cpus: '0.5'
+    pids_limit: 50
+    logging: *hvault-logging
+    environment:
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-hvault}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD is required}
+      MONGO_APP_USERNAME: ${MONGO_APP_USERNAME:-hvault_app}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:?MONGO_APP_PASSWORD is required}
+      HOME: /tmp
+    networks:
+      # `data` only — it talks to MongoDB and nothing else, and has no route out.
+      - data
+    depends_on:
+      hvault-db:
+        # The db healthcheck ends on `isWritablePrimary`, so this guarantees a
+        # writable primary — createUser is a write and would fail on a secondary.
+        condition: service_healthy
+    # Overrides the key-file ENTRYPOINT baked into the shared image. Neither
+    # password is passed on the command line: the script reads both from the
+    # environment and authenticates in-script, so no secret enters argv.
+    entrypoint:
+      - mongosh
+      - --quiet
+      - --host
+      - hvault-db:27017
+      - --file
+      - /usr/local/share/hvault/provision-app-user.js
 
   # --- MongoDB (single-node replica set, authenticated) ----------------------
   hvault-db:
@@ -511,18 +602,25 @@ services:
 # / HVAULT_DATA_SUBNET in .env to move them; `docker network ls` and
 # `docker network inspect <name>` show what the host has already taken. Keep the
 # two distinct from each other and from every other network on the machine.
+#
+# The defaults sit high in 172.31.x deliberately. Docker hands out its own
+# auto-allocated bridges from the BOTTOM of 172.17.0.0/12 (172.17, 172.18, …), and
+# the low 172.2x blocks are what other hand-pinned stacks reach for first, so a
+# neighbour is far likelier to be sitting there. If even this collides, the durable
+# host-level fix is to narrow Docker's own pool in /etc/docker/daemon.json
+# (`default-address-pools`) rather than to keep chasing free /24s.
 networks:
   edge:
     driver: bridge
     ipam:
       config:
-        - subnet: ${HVAULT_EDGE_SUBNET:-172.28.0.0/24}
+        - subnet: ${HVAULT_EDGE_SUBNET:-172.31.240.0/24}
   data:
     driver: bridge
     internal: true
     ipam:
       config:
-        - subnet: ${HVAULT_DATA_SUBNET:-172.28.1.0/24}
+        - subnet: ${HVAULT_DATA_SUBNET:-172.31.241.0/24}
 
 # --- volumes -----------------------------------------------------------------
 volumes:

@@ -27,5 +27,28 @@ FROM mongo:8.0
 # and an entrypoint that is not executable turns into an unbootable stack.
 COPY --chmod=0755 docker/mongo/keyfile-entrypoint.sh /usr/local/bin/hvault-mongo-entrypoint.sh
 
+# The least-privilege user provisioner, baked in rather than bind-mounted for the
+# same reason the Nginx config is: a bind mount makes the stack non-portable and
+# deploys mutable. It is read-only (0444) — nothing in the stack should be able to
+# rewrite the script that hands out database grants.
+#
+# NOT placed in /docker-entrypoint-initdb.d/. That directory is honoured ONLY on a
+# first boot against an empty data directory (the official entrypoint probes for
+# /data/db/WiredTiger and friends and skips initialisation if any exists), so on
+# any existing deployment the script would be silently ignored, the app user would
+# never be created, and the app would crash-loop on authentication. It is instead
+# run explicitly by the `hvault-db-init` one-shot, which overrides `entrypoint:`
+# and therefore bypasses the key-file wrapper below.
+#
+# The directory is created FIRST, deliberately. A `COPY --chmod=0444` into a path
+# whose parent does not exist applies that same mode to the directory BuildKit
+# creates for it, producing `dr--r--r--` — no execute bit, so the directory cannot
+# be traversed and every non-root user gets EACCES on the file inside. The image
+# runs as `mongodb`, so the one-shot failed with "permission denied" while `ls` as
+# root still showed a world-readable file. Creating the directory up front leaves
+# it 0755 and COPY then only sets the mode of the file itself.
+RUN mkdir -p /usr/local/share/hvault
+COPY --chmod=0444 docker/mongo/provision-app-user.js /usr/local/share/hvault/provision-app-user.js
+
 ENTRYPOINT ["/usr/local/bin/hvault-mongo-entrypoint.sh"]
 CMD ["mongod"]

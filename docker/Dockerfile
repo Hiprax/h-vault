@@ -237,6 +237,17 @@ FROM nginxinc/nginx-unprivileged:1.29-alpine AS web
 # unchanged, and --no-cache leaves no apk index behind in the layer.
 USER root
 RUN apk upgrade --no-cache
+# Bound the worker count to this container's CPU budget, not the host's core
+# count. nginx ships `worker_processes auto`, which resolves through
+# sysconf(_SC_NPROCESSORS_ONLN) — that reports the HOST's cores and is blind to
+# the CFS quota, so on a 32-core machine nginx forks 32 workers inside a service
+# capped at `cpus: '0.5'` / `mem_limit: 256m`, and past ~99 cores it cannot fork
+# them all under `pids_limit: 100`. Two workers comfortably saturate half a core
+# for a reverse proxy while leaving a spare if one blocks on a static-file read.
+# This is baked at build time on purpose: the runtime alternative
+# (NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE) rewrites nginx.conf on boot, which
+# cannot work against this service's `read_only: true` root filesystem.
+RUN sed -i 's/^worker_processes .*/worker_processes 2;/' /etc/nginx/nginx.conf
 USER 101
 
 # The bundle is served from /srv/hvault, NOT from the base image's

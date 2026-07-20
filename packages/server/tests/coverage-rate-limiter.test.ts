@@ -50,6 +50,10 @@ vi.mock('../src/config/index.js', async (importOriginal) => {
 // from the package report entirely.)
 import * as limiters from '../src/middleware/rateLimiter.js';
 import { RATE_LIMIT_COLLECTION, MongoRateLimitStore } from '../src/middleware/rateLimitStore.js';
+// The real controller and the real error middleware, so the outage test asserts
+// what a production client would actually receive rather than a stand-in.
+import { createErrorMiddleware } from '@hiprax/errors';
+import { healthCheck } from '../src/controllers/healthController.js';
 
 type RateLimiterModule = typeof limiters;
 
@@ -193,18 +197,10 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
         prefix: 'heavy:',
         message: 'Too many requests, please try again later',
       },
-      {
-        name: 'healthLimiter',
-        limit: 60,
-        prefix: 'health:',
-        message: 'Too many requests, please try again later',
-      },
-      {
-        name: 'metricsLimiter',
-        limit: 60,
-        prefix: 'metrics:',
-        message: 'Too many requests, please try again later',
-      },
+      // healthLimiter and metricsLimiter are deliberately ABSENT from this table:
+      // they are in-memory and never persist a counter. Their thresholds, prefixes
+      // and isolation are covered in 'diagnostic limiters' below, which asserts the
+      // INVERSE — that nothing reaches the `rateLimits` collection.
     ];
 
     for (const testCase of cases) {
@@ -338,12 +334,15 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
     });
 
     it('still serves an identifiable request on the same app', async () => {
-      const app = createApp(limiters.healthLimiter as RequestHandler, { allowIdentityStrip: true });
+      // Retargeted from healthLimiter to csrfLimiter: the guard is unchanged, but
+      // only a still-MongoDB-backed limiter can demonstrate that the identifiable
+      // request was actually counted.
+      const app = createApp(limiters.csrfLimiter as RequestHandler, { allowIdentityStrip: true });
 
       expect((await request(app).get('/t').set('x-test-strip-identity', '1')).status).toBe(500);
       const ok = await request(app).get('/t').set('x-forwarded-for', '203.0.113.5');
       expect(ok.status).toBe(200);
-      expect(await storedKeys()).toEqual(['health:203.0.113.5']);
+      expect(await storedKeys()).toEqual(['csrf:203.0.113.5']);
     });
   });
 
@@ -664,5 +663,123 @@ describe('MongoRateLimitStore failure paths', () => {
     await expect(store.increment('auth:no-record')).rejects.toThrow(
       'Rate limit store: upsert returned no record',
     );
+  });
+});
+
+/**
+ * The two DIAGNOSTIC limiters must not depend on the database they exist to
+ * report on.
+ *
+ * `/health`, `/config` and `/metrics` all answer from process memory —
+ * `mongoose.connection.readyState`, `process.memoryUsage()`, a static config
+ * number — so none of them needs MongoDB to produce a correct answer. Backing
+ * their limiters with the Mongo store made them need it anyway, and the failure
+ * was worse than a plain error: mongoose never clears `connection.db`, so the
+ * store's upsert went to a stale-but-live handle and blocked for the whole
+ * `serverSelectionTimeoutMS` before rejecting. Since both container healthchecks
+ * use `timeout: 5s`, Docker killed the probe before the response was written —
+ * the designed 503 `{ database: 'disconnected' }` never reached anyone, and the
+ * app and nginx both went unhealthy with no diagnostic anywhere.
+ *
+ * These tests pin the in-memory store from both directions: the limit is still
+ * enforced (so the fix cannot decay into "just remove the limiter"), and NOTHING
+ * reaches MongoDB (so it cannot decay back into `createStore()` — or into
+ * `passOnStoreError: true`, which would still stall for 5 s and still fail open).
+ */
+describe('diagnostic limiters are in-memory and never touch MongoDB', () => {
+  /** The driver Collection prototype shared by every `db.collection()` handle. */
+  function driverCollectionPrototype(): {
+    findOneAndUpdate: (...args: never[]) => Promise<unknown>;
+  } {
+    const handle = mongoose.connection.db!.collection(RATE_LIMIT_COLLECTION);
+    return Object.getPrototypeOf(handle) as ReturnType<typeof driverCollectionPrototype>;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const diagnostic = [
+    { name: 'healthLimiter', prefix: 'health:', ip: '203.0.113.60' },
+    { name: 'metricsLimiter', prefix: 'metrics:', ip: '203.0.113.61' },
+  ] as const;
+
+  for (const testCase of diagnostic) {
+    it(`${testCase.name}: still allows 60 then 429s, but persists no counter`, async () => {
+      const app = createApp(limiters[testCase.name as keyof RateLimiterModule] as RequestHandler);
+
+      const { statuses } = await hitFromIp(app, testCase.ip, 60);
+      expect(statuses.every((status) => status === 200)).toBe(true);
+
+      const blocked = await request(app).get('/t').set('x-forwarded-for', testCase.ip);
+      expect(blocked.status).toBe(429);
+      expect((blocked.body as { message: string }).message).toBe(
+        'Too many requests, please try again later',
+      );
+
+      // The inversion that pins the fix: the limit is real, yet the shared
+      // `rateLimits` collection never saw it.
+      expect(await storedKeys()).toEqual([]);
+    });
+  }
+
+  it('keys are still per-client: a second IP keeps its own budget', async () => {
+    const app = createApp(limiters.healthLimiter as RequestHandler);
+
+    const exhausted = await hitFromIp(app, '203.0.113.70', 61);
+    expect(exhausted.statuses[60]).toBe(429);
+
+    // A different client is unaffected — the in-memory store is still keyed.
+    const fresh = await request(app).get('/t').set('x-forwarded-for', '203.0.113.71');
+    expect(fresh.status).toBe(200);
+    expect(await storedKeys()).toEqual([]);
+  });
+
+  it('a healthy request through healthLimiter performs no rate-limit store I/O at all', async () => {
+    const increment = vi.spyOn(MongoRateLimitStore.prototype, 'increment');
+    const findOneAndUpdate = vi.spyOn(driverCollectionPrototype(), 'findOneAndUpdate');
+
+    const app = createApp(limiters.healthLimiter as RequestHandler);
+    expect((await request(app).get('/t').set('x-forwarded-for', '203.0.113.72')).status).toBe(200);
+
+    // Expressed as spies, never as a stopwatch: the property under test is "no
+    // driver call", and a wall-clock threshold here could not fail honestly.
+    expect(increment).not.toHaveBeenCalled();
+    expect(findOneAndUpdate).not.toHaveBeenCalled();
+    expect(await storedKeys()).toEqual([]);
+  });
+
+  it('/health reports the real 503 during a database outage instead of a store-driven 500', async () => {
+    const increment = vi
+      .spyOn(MongoRateLimitStore.prototype, 'increment')
+      .mockRejectedValue(new Error('Server selection timed out after 5000 ms'));
+
+    // Shadow the getter the controller reads, exactly as a lost primary would.
+    Object.defineProperty(mongoose.connection, 'readyState', {
+      value: mongoose.ConnectionStates.disconnected,
+      configurable: true,
+    });
+
+    try {
+      const app = express();
+      app.set('trust proxy', 1);
+      app.get('/health', limiters.healthLimiter as RequestHandler, healthCheck);
+      app.use(createErrorMiddleware({ exposeServerErrors: false }));
+
+      const res = await request(app).get('/health').set('x-forwarded-for', '203.0.113.73');
+
+      expect(res.status).toBe(503);
+      const body = res.body as { success: boolean; data: { status: string; database: string } };
+      expect(body.success).toBe(false);
+      expect(body.data.status).toBe('error');
+      expect(body.data.database).toBe('disconnected');
+
+      // Load-bearing. A 503 alone would ALSO pass under `passOnStoreError: true`;
+      // asserting the Mongo store was never consulted is what distinguishes the
+      // in-memory fix from failing open after a five-second stall.
+      expect(increment).not.toHaveBeenCalled();
+    } finally {
+      delete (mongoose.connection as unknown as Record<string, unknown>)['readyState'];
+    }
   });
 });

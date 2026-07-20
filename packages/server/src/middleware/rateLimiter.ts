@@ -575,8 +575,27 @@ export const heavyOpLimiter =
  * limiter, an attacker can flood the endpoint indefinitely with no signal.
  * Successful healthchecks remain quiet (the logger still skips 200s); 429
  * responses fall through the error path and surface abuse loudly.
+ *
+ * Deliberately NOT `createStore()`. This limiter guards /health and /config —
+ * the two endpoints that must still answer while MongoDB is unreachable, and
+ * neither of which touches the database (health reads
+ * `mongoose.connection.readyState`, an in-process integer; config returns a
+ * static number). A MongoDB-backed store made them depend on the very thing
+ * they exist to report on: mongoose never clears `connection.db`, so the store
+ * issued its upsert against a stale-but-live handle and blocked for the whole
+ * `serverSelectionTimeoutMS` (5 s) before rejecting, and express-rate-limit
+ * fails closed by default — so an outage turned the designed 503
+ * `{ database: 'disconnected' }` into a redacted 500 that BOTH container
+ * healthchecks (`timeout: 5s`) killed as a timeout before it was even written.
+ * Omitting `store` falls back to express-rate-limit's own MemoryStore, whose
+ * increment is a synchronous Map write: no I/O, no stall, the true 503 in
+ * milliseconds. The trade is a per-process counter instead of a cluster-shared
+ * one — under PM2 the ceiling becomes 60/min/IP *per instance* on two endpoints
+ * that perform no I/O and return sub-kilobyte JSON, which is immaterial.
+ * `passOnStoreError` is NOT the fix: it fires only after the 5 s rejection, so
+ * it removes neither the stall nor the timeout, and it would drop the limit
+ * entirely on two unauthenticated endpoints exactly when the database is down.
  */
-const healthStore = createStore(ONE_MINUTE_MS);
 export const healthLimiter =
   noopIfNonProduction() ??
   withClientKeyGuard(
@@ -588,7 +607,6 @@ export const healthLimiter =
       legacyHeaders: false,
       validate: { singleCount: false },
       keyGenerator: prefixedKeyGenerator('health:'),
-      ...(healthStore ? { store: healthStore } : {}),
       handler: (_req, _res, next, options) => {
         logger.warn('Health check rate limit exceeded', {
           windowMs: options.windowMs,
@@ -607,10 +625,20 @@ export const healthLimiter =
  * `x-metrics-token` header) and is only mounted when METRICS_TOKEN is set.
  * Without a limiter an attacker can flood it and make unlimited timing-safe
  * token-guess attempts. Mirrors healthLimiter, but with an isolated `metrics:`
- * counter so health-check traffic and metrics traffic never share a bucket in
- * the shared `rateLimits` collection.
+ * counter so health-check traffic and metrics traffic never share a bucket.
+ *
+ * In-memory for the same reason as {@link healthLimiter}, and the case is
+ * stronger here: /metrics is a pure in-process diagnostic (uptime,
+ * `process.memoryUsage()`, `mongoose.connection.readyState`) whose entire value
+ * during an outage is reporting `database.state: 'disconnected'` — the very
+ * field monitoring scrapes to DETECT the outage. Backing it with MongoDB meant
+ * a database outage replaced that signal with a redacted 500. Note also that
+ * `passOnStoreError` would be especially wrong on this endpoint: bounding
+ * timing-safe token-guess attempts is this limiter's whole job, and failing
+ * open on any store error would remove that bound. The token comparison runs in
+ * the controller AFTER this limiter, so a valid and an invalid token remain
+ * indistinguishable here — the in-memory store introduces no new oracle.
  */
-const metricsStore = createStore(ONE_MINUTE_MS);
 export const metricsLimiter =
   noopIfNonProduction() ??
   withClientKeyGuard(
@@ -622,7 +650,6 @@ export const metricsLimiter =
       legacyHeaders: false,
       validate: { singleCount: false },
       keyGenerator: prefixedKeyGenerator('metrics:'),
-      ...(metricsStore ? { store: metricsStore } : {}),
       handler: (_req, _res, next, options) => {
         logger.warn('Metrics rate limit exceeded', {
           windowMs: options.windowMs,

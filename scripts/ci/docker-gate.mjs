@@ -152,7 +152,13 @@ if (createdEnv) {
 try {
   const config = captureExe('docker', ['compose', 'config', '--quiet'], {
     // captureExe merges this over process.env for the child only.
-    env: { MONGO_ROOT_PASSWORD: 'docker-gate-throwaway-not-a-real-secret' },
+    // Both guarded secrets: the app/bootstrap URI interpolates
+    // ${MONGO_APP_PASSWORD:?...} and hvault-db-init interpolates both, so
+    // supplying only the root password makes `compose config` fail here.
+    env: {
+      MONGO_ROOT_PASSWORD: 'docker-gate-throwaway-not-a-real-secret',
+      MONGO_APP_PASSWORD: 'docker-gate-throwaway-not-a-real-secret',
+    },
   });
   if (!config.ok) {
     fail(`docker compose config rejected the stack:\n${config.stderr.trim()}`);

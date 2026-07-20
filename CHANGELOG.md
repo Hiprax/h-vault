@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-20
+
+### Added
+
+- `MONGO_APP_USERNAME` and `MONGO_APP_PASSWORD` environment variables for the least-privilege database account. `MONGO_APP_PASSWORD` is required and ships empty, so the stack refuses to start until it is set — existing deployments must add it to `.env` before the next `docker compose up`.
+
+### Changed
+
+- Moved the default Docker network blocks from `172.28.0.0/24` / `172.28.1.0/24` to `172.31.240.0/24` / `172.31.241.0/24`. Docker allocates its own bridges from the bottom of `172.17.0.0/12` and hand-pinned stacks tend to claim the low `172.2x` blocks, so the previous defaults collided with an existing stack and `docker compose up` failed outright with "Pool overlaps with other one on this address space". Both blocks remain overridable via `HVAULT_EDGE_SUBNET` / `HVAULT_DATA_SUBNET`.
+- Documented that `docker compose up -d --wait` can report `container hvault-nginx is unhealthy` while the stack is serving normally, which happens only when re-running it to recover from an app outage longer than about 75 seconds. Nginx's probe runs through the proxy, so it is marked unhealthy during the outage and Compose treats that as terminal rather than waiting for the next probe. The deep probe is deliberate and is retained: it is what proves the whole single-port path at deploy time.
+
+### Fixed
+
+- `GET /api/v1/health`, `GET /api/v1/config` and `GET /api/v1/metrics` now answer correctly while MongoDB is unreachable. Their rate limiters were backed by MongoDB, so a database outage made each request stall for the driver's full server-selection timeout and then fail closed — replacing the intended `503` with `database: "disconnected"` with a generic 500 that both container health probes timed out on before it was even written. Those two limiters now count in process memory, so the endpoints no longer depend on the database they exist to report on. The ten limiters guarding database-dependent routes are unchanged and still fail closed.
+- Pinned the internal Nginx to two worker processes instead of `worker_processes auto`. `auto` counts the **host's** CPUs and ignores the container's quota, so the web service forked one worker per host core inside its `cpus: '0.5'` / `mem_limit: 256m` / `pids_limit: 100` budget — measured as four workers on a four-core host, and unbounded on larger machines.
+
+### Security
+
+- The application and index-bootstrap containers now authenticate to MongoDB as a user restricted to `readWrite` on the `hvault` database, instead of as the cluster root user. A new one-shot `hvault-db-init` service provisions that account before the rest of the stack starts, and the app/bootstrap `environment:` blocks blank the discrete `MONGO_ROOT_*` / `MONGO_APP_*` keys that `env_file` would otherwise inject, so the root credential reaches only the database itself and that one short-lived container. A compromise of the application no longer confers administrative access to the cluster, other databases, or user management.
+
 ## [0.1.1] - 2026-07-20
 
 ### Changed
@@ -56,6 +76,7 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Hiprax/h-vault/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Hiprax/h-vault/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Hiprax/h-vault/releases/tag/v0.1.0

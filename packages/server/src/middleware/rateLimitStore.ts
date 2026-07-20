@@ -5,10 +5,15 @@ import { createLogger } from '@hiprax/logger';
 const logger = createLogger({ moduleName: 'rate-limit-store' });
 
 /**
- * The single collection every keyed rate-limit counter lives in. Limiters
- * disambiguate themselves with a key prefix (`auth:`, `account:`, `refresh:`,
- * `unlock:`, `breach:`, `general:`, `pwverify:`, `heavy:`, `health:`, `metrics:`,
+ * The single collection every MongoDB-backed rate-limit counter lives in.
+ * Limiters disambiguate themselves with a key prefix (`auth:`, `account:`,
+ * `token:`, `refresh:`, `unlock:`, `breach:`, `general:`, `pwverify:`, `heavy:`,
  * `csrf:`), so one collection with one TTL index serves all of them.
+ *
+ * The `health:` and `metrics:` counters are deliberately NOT here. Those two
+ * limiters guard the diagnostic endpoints that have to keep answering while
+ * MongoDB is unreachable, so they use express-rate-limit's in-memory store and
+ * never reach this collection — see `healthLimiter` in `rateLimiter.ts`.
  */
 export const RATE_LIMIT_COLLECTION = 'rateLimits';
 
