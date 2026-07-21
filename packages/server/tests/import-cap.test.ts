@@ -70,12 +70,21 @@ function importRow(
 }
 
 /**
- * Pins the user's existing item count one below the cap for the single
- * `countDocuments` call `importVault` makes, so a 1+ row net-new insert would
- * cross it. Seeding 10,000 real rows would be prohibitively slow.
+ * Pins the user's existing item count one below the cap, so a 1+ row net-new
+ * insert would cross it. Seeding 10,000 real rows would be prohibitively slow.
+ *
+ * The stub is PERSISTENT (`mockResolvedValue`), not single-shot. `vi.spyOn`
+ * retains the real implementation, so with `mockResolvedValueOnce` a second
+ * `countDocuments` call anywhere in the request would quietly fall through to
+ * the true count (3, say) and the pin would stop pinning — the assertions below
+ * would then pass or fail for a reason unrelated to the cap. The structured
+ * `operations` executor deliberately counts TWICE (once before taking the
+ * per-user lock, once again against the state the writes observe), so a
+ * single-shot pin is no longer safe to reach for on this endpoint at all.
+ * `vi.restoreAllMocks()` in `afterEach` clears it between tests.
  */
 function pinExistingItemCount(count: number): void {
-  vi.spyOn(VaultItem, 'countDocuments').mockResolvedValueOnce(count as never);
+  vi.spyOn(VaultItem, 'countDocuments').mockResolvedValue(count as never);
 }
 
 describe('Phase 4 — import per-user cap counts net-new inserts', () => {

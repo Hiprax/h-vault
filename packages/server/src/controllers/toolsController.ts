@@ -3,7 +3,7 @@ import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createLogger } from '@hiprax/logger';
 import axios from 'axios';
 import bcrypt from 'bcryptjs';
-import type { Types } from 'mongoose';
+import mongoose from 'mongoose';
 import { VaultItem } from '../models/VaultItem.js';
 import { Folder } from '../models/Folder.js';
 import { User } from '../models/User.js';
@@ -14,7 +14,10 @@ import {
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  vaultImportLockName,
 } from '../utils/controllerHelpers.js';
+import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
+import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import {
   APP_VERSION,
@@ -127,6 +130,45 @@ const ALLOWED_ITEM_FIELDS = new Set([
   'passwordHistory',
 ]);
 
+/**
+ * Fields an import UPDATE is allowed to write. Deliberately NARROWER than
+ * {@link ALLOWED_ITEM_FIELDS}: the six ciphertext fields, the client-recomputed
+ * `searchHash` (an overwrite replaces `encryptedName`, so the stored hash must
+ * be refreshed alongside it or it strands against the old name), and the
+ * optional `passwordHistory` — and nothing else.
+ *
+ * `tags`, `favorite`, `folderId` and `itemType` are absent on purpose: an import
+ * updates CONTENT and must never silently reorganize or retype a vault the user
+ * has already curated. Projecting updates through the broader insert allowlist
+ * would reintroduce exactly that, which is why this is a separate constant
+ * rather than a reuse.
+ */
+const ALLOWED_UPDATE_FIELDS = new Set([
+  'encryptedName',
+  'nameIv',
+  'nameTag',
+  'encryptedData',
+  'dataIv',
+  'dataTag',
+  'searchHash',
+  'passwordHistory',
+]);
+
+/**
+ * TTL of the per-user import lock (`vault-import:<userId>`).
+ *
+ * Comfortably longer than one request's execution — a single batch is bounded
+ * by the global 2 MB body parser and by `MAX_IMPORT_ITEMS` — yet short enough
+ * that a process that dies mid-import does not lock the user out of retrying
+ * for long.
+ */
+const IMPORT_LOCK_TTL_MS = 2 * 60 * 1000;
+
+/** Single source of the per-user cap rejection message (both cap checks). */
+function importCapExceededMessage(existingItemCount: number, netNewItems: number): string {
+  return `Import would exceed the per-user item limit (${String(MAX_ITEMS_PER_USER)}). You currently have ${String(existingItemCount)} items and this import would add ${String(netNewItems)}.`;
+}
+
 // ── Export size estimation ──────────────────────────────────────────
 // Per-row size estimation lives in `utils/sizeEstimator.ts` so the export and
 // backup paths share the same conservative overhead constants. The
@@ -187,19 +229,25 @@ const IMPORT_FIELD_MAXLENGTHS: readonly { readonly field: string; readonly max: 
 ];
 
 /**
- * Rejects the whole import with a clear 400 if any item has an over-length
- * encrypted field. The shared `importSchema` only bounds the entire `data`
- * blob (1 MB), and the controller's non-empty filter ignores length — so
- * without this check an over-length field trips a Mongoose validator only
- * mid-write. In the `overwrite` conflict loop that means earlier items are
- * already persisted before the throw, and the success-only `import` audit log
- * is skipped, leaving a partial, unaudited import. Validating up front (before
- * any DB write) keeps import atomic: all-or-nothing.
+ * Rejects the whole import with a clear 400 if any row has an over-length
+ * encrypted field. Applied to BOTH the rows a structured import inserts and the
+ * rows it updates, and to every row of a legacy `data` envelope.
+ *
+ * On the legacy shape the schema only bounds the entire `data` blob (1 MB) and
+ * the controller's non-empty filter ignores length, so without this check an
+ * over-length field trips a Mongoose validator only mid-write: in the
+ * `overwrite` conflict loop earlier items are already persisted before the
+ * throw, and the success-only `import` audit log is skipped, leaving a partial,
+ * unaudited import. On the structured shape `importInsertItemSchema` /
+ * `importUpdateItemSchema` already enforce the same ceilings, so this is the
+ * defense-in-depth layer that keeps import all-or-nothing if those bounds are
+ * ever loosened. Validating up front (before any DB write) keeps import atomic.
  */
-function assertImportFieldLengths(items: Record<string, unknown>[]): void {
+function assertImportFieldLengths(items: readonly object[]): void {
   for (const item of items) {
+    const row = item as Record<string, unknown>;
     for (const { field, max } of IMPORT_FIELD_MAXLENGTHS) {
-      const value = item[field];
+      const value = row[field];
       if (typeof value === 'string' && value.length > max) {
         throw httpErrors.badRequest(
           `Import rejected: item field "${field}" exceeds the maximum length of ${String(max)} characters.`,
@@ -353,23 +401,245 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
   res.status(200).send(exportJson);
 });
 
-export const importVault = catchAsync(async (req: Request, res: Response): Promise<void> => {
-  const userId = getUserId(req);
-  const { format, data, conflictStrategy } = req.body as ImportInput;
+interface ImportOperationsParams {
+  userId: string;
+  format: ImportInput['format'];
+  conflictStrategy: ImportInput['conflictStrategy'];
+  operations: NonNullable<ImportInput['operations']>;
+}
 
-  // Every imported row carries ciphertext encrypted with the caller's current
-  // vault key — a rotation in flight would strand all of it. Fence before any
-  // parsing so the rejection is cheap.
-  await assertVaultNotRotating(userId);
+/**
+ * Executes a structured `operations` import.
+ *
+ * The server is a validated EXECUTOR here, never a matcher. Conflict resolution
+ * happens on the CLIENT — the match key for a login is its site and username,
+ * both of which live inside the encrypted blob, so the server physically cannot
+ * compute it. This path therefore performs NO `searchHash` / `encryptedName`
+ * matching and does not act on `conflictStrategy` (retained as audit metadata
+ * only): it validates ownership, caps and field lengths, then applies exactly
+ * the `inserts` and `updates` it was handed.
+ *
+ * Order of operations is load-bearing:
+ *   1. per-item encrypted-field lengths, over BOTH arrays, before any DB work
+ *   2. strip `folderId`s the caller does not own (inserts only)
+ *   3. verify every update target is a LIVE item of the caller's — a foreign,
+ *      unknown or trashed id is a 400, never a silent skip
+ *   4. the per-user item cap, measured against net-new INSERTS only
+ *   5. the writes
+ *
+ * Steps 4 and 5 run under the per-user `vault-import:<userId>` JobLock and,
+ * where the topology allows, a transaction — see the block comments below.
+ */
+async function executeImportOperations(
+  req: Request,
+  res: Response,
+  { userId, format, conflictStrategy, operations }: ImportOperationsParams,
+): Promise<void> {
+  const { inserts, updates } = operations;
 
-  // The schema guarantees exactly one of `data` / `operations`. The structured
-  // `operations` executor is wired in a later phase; until then this controller
-  // handles only the legacy `data` envelope, so an `operations`-only request has
-  // no handler yet and is rejected up front (no shipped client sends one).
-  if (data === undefined) {
-    throw httpErrors.badRequest('Invalid import request: expected a "data" payload.');
+  // 1 ── Encrypted-field lengths across inserts AND updates, before any write.
+  assertImportFieldLengths([...inserts, ...updates]);
+
+  // 2 ── folderId ownership. A folder the caller does not own is stripped from
+  // the row rather than failing it, matching the legacy branch: the item is
+  // still imported, it just lands at the vault root.
+  const requestedFolderIds = inserts
+    .map((item) => item.folderId)
+    .filter((folderId): folderId is string => folderId !== undefined);
+  const ownedFolderIds = new Set<string>();
+  if (requestedFolderIds.length > 0) {
+    const folders = await Folder.find({ _id: { $in: requestedFolderIds }, userId })
+      .select('_id')
+      .lean();
+    for (const folder of folders) {
+      ownedFolderIds.add(String(folder._id));
+    }
   }
 
+  // Every insert is mapped through the FIXED `ALLOWED_ITEM_FIELDS` projection,
+  // never a spread, so an injected or prototype-polluting key on an import row
+  // is inert even if the schema's `.strip()` is ever relaxed.
+  const insertDocs = inserts.map((item) => {
+    const doc = pickAllowedFields(item, ALLOWED_ITEM_FIELDS);
+    if (typeof doc.folderId === 'string' && !ownedFolderIds.has(doc.folderId)) {
+      delete doc.folderId;
+    }
+    return { ...doc, userId };
+  });
+
+  // 3 ── Update-target ownership. The lookup is scoped to LIVE items of this
+  // user so it mirrors the client resolver's own matching scope (non-trashed,
+  // owned). Anything unresolved rejects the whole request: silently skipping it
+  // would report an update the vault never received, and re-running the import
+  // would then not repair it.
+  const updateIds = updates.map((update) => update.id);
+  if (updateIds.length > 0) {
+    // Two rows naming one id would both be applied (last write wins) and would
+    // report `updatedCount` 2 for a single modified item, so the caller's own
+    // accounting could no longer be reconciled against the response. Resolution
+    // collapses to at most one operation per target, so a duplicate is a caller
+    // defect: surface it rather than silently double-writing.
+    if (new Set(updateIds).size !== updateIds.length) {
+      throw httpErrors.badRequest(
+        'Import rejected: the same item id appears more than once in "updates".',
+      );
+    }
+
+    const ownedItems = await VaultItem.find({
+      _id: { $in: updateIds },
+      userId,
+      deletedAt: { $exists: false },
+    })
+      .select('_id')
+      .lean();
+    const ownedItemIds = new Set(ownedItems.map((item) => String(item._id)));
+    const unresolvedIds = new Set(updateIds.filter((id) => !ownedItemIds.has(id)));
+    if (unresolvedIds.size > 0) {
+      throw httpErrors.badRequest(
+        `Import rejected: ${String(unresolvedIds.size)} update target(s) do not exist, are in the trash, or do not belong to you.`,
+      );
+    }
+  }
+
+  // 4+5 ── Serialize the cap check and the writes per user.
+  //
+  // Two mechanisms, both required. A transaction alone does not bound
+  // concurrency on every topology — a standalone deployment rejects
+  // multi-document transactions outright — so the JobLock is what actually
+  // makes the cap unbreachable: `acquireJobLock` is an atomic upsert against the
+  // unique `jobName` index and holds with or without transactions. The client
+  // sends its batches sequentially, so it never self-contends.
+  const lockName = vaultImportLockName(userId);
+  const lockId = await acquireJobLock(lockName, IMPORT_LOCK_TTL_MS);
+  if (lockId === null) {
+    throw httpErrors.conflict('An import is already in progress. Please wait and retry.');
+  }
+
+  let insertedCount = 0;
+  let updatedCount = 0;
+
+  try {
+    // Cap measured against NET-NEW inserts only (updates rewrite rows that
+    // already exist), before any write, so a rejected import leaves nothing.
+    const existingItemCount = await VaultItem.countDocuments({ userId });
+    if (existingItemCount + insertDocs.length > MAX_ITEMS_PER_USER) {
+      throw httpErrors.badRequest(importCapExceededMessage(existingItemCount, insertDocs.length));
+    }
+
+    const execute = async (session?: mongoose.ClientSession): Promise<void> => {
+      const sessionOpt = session ? { session } : {};
+      const updateOptions = session ? { runValidators: true, session } : { runValidators: true };
+
+      // Re-measure against the state the writes will observe. The lock already
+      // excludes a second import; this NARROWS — it does not close — the window
+      // against rows created by other endpoints (`POST /items`,
+      // `POST /backup/restore`) between the pre-check and the insert. A row those
+      // commit after this transaction's read snapshot is invisible here and does
+      // not write-conflict with our inserts, so the cap can still be overshot by
+      // such a row. That hairline is pre-existing and shared with
+      // `vaultController.createItem`'s own count-then-write check.
+      const liveItemCount = await VaultItem.countDocuments({ userId }, sessionOpt);
+      if (liveItemCount + insertDocs.length > MAX_ITEMS_PER_USER) {
+        throw httpErrors.badRequest(importCapExceededMessage(liveItemCount, insertDocs.length));
+      }
+
+      // Reset per attempt: `withTransaction` may re-run this callback after a
+      // transient error, and the aborted attempt's rows no longer exist.
+      insertedCount = 0;
+      updatedCount = 0;
+
+      if (insertDocs.length > 0) {
+        const created = await VaultItem.insertMany(insertDocs, sessionOpt);
+        insertedCount = created.length;
+      }
+
+      for (const update of updates) {
+        // `runValidators: true` is load-bearing, not decoration: without it the
+        // model's `passwordHistory` count and per-entry length validators never
+        // fire on an update. Projected through the NARROW allowlist so an update
+        // cannot reach `tags` / `favorite` / `folderId` / `itemType`.
+        const result = await VaultItem.updateOne(
+          { _id: update.id, userId, deletedAt: { $exists: false } },
+          { $set: pickAllowedFields(update, ALLOWED_UPDATE_FIELDS) },
+          updateOptions,
+        );
+        if (result.matchedCount === 0) {
+          throw httpErrors.conflict(
+            'Import failed: an item it targeted was modified or removed mid-request. Please retry.',
+          );
+        }
+        updatedCount++;
+      }
+    };
+
+    // `supportsTransactions` inspects the URI's `replicaSet` option, so a single
+    // node advertising one passes the check and then throws at `withTransaction`
+    // — hence a real, working non-transactional fallback rather than an
+    // optimistic single path. The fallback still fails closed on the cap: the
+    // lock serializes imports and the re-check runs there too.
+    const session = supportsTransactions(mongoose.connection)
+      ? await mongoose.startSession()
+      : null;
+    if (session) {
+      try {
+        await session.withTransaction(async () => {
+          await execute(session);
+        });
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      await execute();
+    }
+  } finally {
+    await releaseJobLock(lockName, lockId);
+  }
+
+  // The lock is released BEFORE the response is written, deliberately. The
+  // client sends its batches sequentially and fires batch n+1 the moment
+  // batch n's response lands; responding while the release round-trip is still
+  // in flight would 409 a legitimate multi-batch migration against its own lock.
+  const importCtx = getRequestContext(req);
+  await createAuditLog(
+    userId,
+    'import',
+    { format, conflictStrategy, insertedCount, updatedCount },
+    importCtx.ip,
+    importCtx.userAgent,
+  );
+
+  logger.info('Vault imported', { userId, format, conflictStrategy, insertedCount, updatedCount });
+
+  res.status(201).json({
+    success: true,
+    data: { insertedCount, updatedCount },
+    message: `${String(insertedCount)} items imported, ${String(updatedCount)} items updated`,
+  });
+}
+
+interface LegacyImportParams {
+  userId: string;
+  format: ImportInput['format'];
+  conflictStrategy: ImportInput['conflictStrategy'];
+  data: string;
+}
+
+/**
+ * DEPRECATED legacy `data`-envelope import, retained verbatim for exactly one
+ * phase so both consumers can migrate to `operations` before it is retired.
+ *
+ * This is the ONLY place name-based matching still lives: it de-duplicates by
+ * `searchHash` with an `encryptedName` fallback, which is precisely the defect
+ * the structured contract replaces (ten accounts on one site collapse into one,
+ * because a name is a display label and not an identity). Nothing new should be
+ * routed here, and this function — with its private helpers — is deleted whole
+ * when the legacy field is removed from `importSchema`.
+ */
+async function executeLegacyDataImport(
+  req: Request,
+  res: Response,
+  { userId, format, conflictStrategy, data }: LegacyImportParams,
+): Promise<void> {
   // Zero-knowledge import: the client already parsed the source file, converted
   // each entry to a vault item, and encrypted it with the vault key. Every format
   // therefore arrives as the same native `{ items: [...] }` envelope of already-
@@ -473,7 +743,8 @@ export const importVault = catchAsync(async (req: Request, res: Response): Promi
   // so there every valid item counts — that is the growth the cap bounds.
   let duplicateCount = 0;
   let itemsToInsert = validItems;
-  const overwriteTargets: { existingId: Types.ObjectId; item: Record<string, unknown> }[] = [];
+  const overwriteTargets: { existingId: mongoose.Types.ObjectId; item: Record<string, unknown> }[] =
+    [];
 
   if (conflictStrategy !== 'keep_both') {
     const importHashes = validItems
@@ -553,9 +824,7 @@ export const importVault = catchAsync(async (req: Request, res: Response): Promi
   // write, so an import that the cap rejects leaves nothing behind.
   const existingItemCount = await VaultItem.countDocuments({ userId });
   if (existingItemCount + itemsToInsert.length > MAX_ITEMS_PER_USER) {
-    throw httpErrors.badRequest(
-      `Import would exceed the per-user item limit (${String(MAX_ITEMS_PER_USER)}). You currently have ${String(existingItemCount)} items and this import would add ${String(itemsToInsert.length)}.`,
-    );
+    throw httpErrors.badRequest(importCapExceededMessage(existingItemCount, itemsToInsert.length));
   }
 
   for (const { existingId, item } of overwriteTargets) {
@@ -608,4 +877,30 @@ export const importVault = catchAsync(async (req: Request, res: Response): Promi
       return parts.join(' (') + (parts.length > 1 ? ')' : '');
     })(),
   });
+}
+
+export const importVault = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { format, data, conflictStrategy, operations } = req.body as ImportInput;
+
+  // Every imported row carries ciphertext encrypted with the caller's current
+  // vault key — a rotation in flight would strand all of it. Fence before any
+  // parsing or dispatch so the rejection is cheap and BOTH wire shapes inherit
+  // it from one call site.
+  await assertVaultNotRotating(userId);
+
+  if (operations !== undefined) {
+    await executeImportOperations(req, res, { userId, format, conflictStrategy, operations });
+    return;
+  }
+
+  // `importSchema` refines exactly one of `data` / `operations` into existence,
+  // so this is unreachable through the route. It is kept as a typed narrowing
+  // guard: were that refinement ever loosened, the legacy branch would otherwise
+  // JSON.parse `undefined` and 500 instead of returning a clear 400.
+  if (data === undefined) {
+    throw httpErrors.badRequest('Invalid import request: expected a "data" payload.');
+  }
+
+  await executeLegacyDataImport(req, res, { userId, format, conflictStrategy, data });
 });

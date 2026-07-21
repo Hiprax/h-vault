@@ -346,13 +346,12 @@ describe('Tools routes', () => {
       expect(res.body.success).toBe(false);
     });
 
-    it('rejects a schema-valid operations body until the executor is wired', async () => {
-      // Phase 2 adds the `operations` wire shape additively: the schema now
-      // ACCEPTS an operations-only body (so it reaches the controller), but the
-      // structured executor is wired in a later phase. Until then the controller
-      // handles only the legacy `data` envelope and rejects an operations-only
-      // request up front. This pins that intermediate contract and covers the
-      // `data === undefined` guard.
+    it('executes a schema-valid operations body and persists the inserts', async () => {
+      // Phase 2 added the `operations` wire shape additively and the controller
+      // rejected it until an executor existed; that executor now ships, so the
+      // same body must be EXECUTED rather than refused. This replaces the
+      // interim 400-on-`operations` contract that pinned the gap. The structured
+      // path's full behavior lives in `import-operations.test.ts`.
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
       const res = await agent
@@ -367,8 +366,10 @@ describe('Tools routes', () => {
           },
         });
 
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
     });
   });
 

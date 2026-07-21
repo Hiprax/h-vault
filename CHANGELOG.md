@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- `POST /api/v1/tools/import` accepts a structured `operations` payload — explicit `inserts` and `updates`, where each update names the id of the existing item it replaces — and answers with `{ insertedCount, updatedCount }`. The legacy `data` envelope is still accepted and behaves exactly as before; it is removed in a following release. Two new rejections come with the structured shape: `400` when an update names an item that does not exist, is in the trash, or belongs to someone else (it is never silently skipped), and `409` when another import for the same account is already running.
+
+### Changed
+
+- On the structured import path the server no longer decides what is a duplicate. It validates ownership, field lengths and the per-account item limit, then applies exactly the operations it was given; `conflictStrategy` is recorded for the audit log but no longer acted on, because matching now happens in the browser where the decrypted content lives. An import update rewrites item content only — it can never change an item's tags, favorite flag, folder or type.
+- Concurrent imports for one account are now serialized, so two overlapping imports can no longer both pass the per-account item limit and push the vault over it. Where the database supports transactions, an import's writes also commit or roll back as a unit, and the limit is re-checked against the state those writes actually see.
+
 ### Fixed
 
 - Bitwarden import no longer silently drops parts of an item. An identity's `title`, `middleName`, `username` and `licenseNumber` — none of which the vault has a dedicated field for — are now preserved in the item's notes under clear labels instead of being discarded. Bitwarden SSH-key items (previously imported as an empty note that lost the key entirely) are now imported as a login whose private key, public key and fingerprint are kept in clearly-labelled custom fields, with the private key masked. A Firefox export's `httpRealm` column (which identifies an HTTP Basic/Digest auth entry) is now preserved in notes; the remaining Firefox metadata columns (`formActionOrigin`, `guid`, and the `time*` timestamps) are intentionally not imported, as they have no vault field and would clutter every row.

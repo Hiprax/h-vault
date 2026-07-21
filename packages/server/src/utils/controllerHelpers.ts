@@ -120,6 +120,31 @@ export function vaultRotationLockName(userId: string): string {
 }
 
 /**
+ * The distributed-lock name a vault import holds for its user, mirroring
+ * {@link vaultRotationLockName}.
+ *
+ * `toolsController.importVault` checks the per-user item cap and then writes;
+ * without serialization two overlapping imports can each read a count that fits
+ * and then both insert, breaching `MAX_ITEMS_PER_USER`. A transaction alone does
+ * NOT close that race on every topology — a standalone deployment (and the
+ * default test harness) rejects multi-document transactions entirely — so the
+ * lock is what actually bounds concurrency. `acquireJobLock` is an atomic upsert
+ * against the unique `jobName` index, which holds with or without transactions.
+ *
+ * Scope, deliberately: the STRUCTURED `operations` executor takes this lock; the
+ * deprecated legacy `data` branch does not. Both write the same per-user rows
+ * against the same cap, so for as long as both shapes are served the legacy one
+ * can still race itself — exactly as it always has. That is accepted for the one
+ * release in which the legacy envelope survives (no shipped client sends
+ * `operations` yet, so today's races are legacy-vs-legacy, i.e. no regression),
+ * and it closes when that branch is deleted. Do not read this helper as already
+ * covering both shapes.
+ */
+export function vaultImportLockName(userId: string): string {
+  return `vault-import:${userId}`;
+}
+
+/**
  * True while a vault-key rotation is ACTIVELY processing for `userId`.
  *
  * `bulkReEncrypt` acquires the {@link vaultRotationLockName} JobLock BEFORE it
