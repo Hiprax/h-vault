@@ -7,7 +7,14 @@ import {
   MAX_BACKUP_EMAILS,
   MAX_RESTORE_DATA_LENGTH,
   MAX_IMPORT_DATA_LENGTH,
+  MAX_IMPORT_ITEMS,
+  MAX_TAGS_PER_ITEM,
+  MAX_ENCRYPTED_NAME_LENGTH,
+  MAX_ENCRYPTED_DATA_LENGTH,
+  PASSWORD_HISTORY_MAX,
+  ITEM_TYPES,
 } from '../constants/index.js';
+import { objectIdSchema } from './common.js';
 
 export const passwordGenOptionsSchema = z
   .object({
@@ -172,24 +179,129 @@ export const exportSchema = z.object({
   authHash: z.string().min(1).max(100),
 });
 
-export const importSchema = z.object({
-  // Zero-knowledge import: the browser parses the source file, converts each entry
-  // to a vault item, encrypts it with the vault key, and sends already-encrypted
-  // native items in `data` as JSON `{ items: [...] }`. The server never parses
-  // plaintext and never encrypts. `format` is therefore audit-only metadata that
-  // records which source the user imported from; every value is handled
-  // identically server-side. `csv`/`json` cover generic CSV and native H-Vault
-  // exports respectively.
-  format: z.enum([
-    'bitwarden',
-    'lastpass',
-    'keepass',
-    'chrome',
-    'firefox',
-    'onepassword',
-    'csv',
-    'json',
-  ]),
-  data: z.string().min(1).max(MAX_IMPORT_DATA_LENGTH),
-  conflictStrategy: z.enum(['skip', 'overwrite', 'keep_both']).optional().default('skip'),
+// ---------------------------------------------------------------------------
+// Import wire contract
+// ---------------------------------------------------------------------------
+// Two shapes coexist during the migration (added additively, see PLAN.md Phase
+// 2). The legacy `data` shape carries a JSON string of already-encrypted native
+// items; the new `operations` shape carries explicit `inserts` and `updates`,
+// where each update names the `_id` it targets. Conflict resolution has moved to
+// the client (the only place the plaintext exists), so the server becomes a
+// validated executor: it validates ownership, caps, and field lengths but makes
+// no matching decisions of its own. Exactly one of `data`/`operations` must be
+// present. The legacy field is retired once both consumers have switched.
+
+/**
+ * One encrypted item to INSERT. This mirrors today's import item shape (the
+ * fields the server maps through its fixed `ALLOWED_ITEM_FIELDS` projection).
+ * `searchHash` is required because every non-import creation path writes one and
+ * the backup/restore flow relies on its presence (see PLAN.md § 1.4).
+ */
+export const importInsertItemSchema = z.object({
+  itemType: z.enum(ITEM_TYPES),
+  encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
+  nameIv: z.string().min(1).max(24),
+  nameTag: z.string().min(1).max(32),
+  encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
+  dataIv: z.string().min(1).max(24),
+  dataTag: z.string().min(1).max(32),
+  searchHash: z.string().regex(/^[a-f0-9]{64}$/),
+  tags: z.array(z.string().trim().min(1).max(50)).max(MAX_TAGS_PER_ITEM).default([]),
+  favorite: z.boolean().default(false),
+  folderId: objectIdSchema.optional(),
 });
+
+/**
+ * A password-history entry carried on an import update. Bounded in the schema
+ * (not just by the model validators, which fire only under `runValidators`)
+ * because `assertImportFieldLengths` walks only top-level string fields and would
+ * not catch an oversized nested history array. The per-entry caps mirror
+ * `models/VaultItem.ts` (`encryptedPassword` maxlength 5_000, iv 24, tag 32).
+ */
+export const importUpdatePasswordHistoryEntrySchema = z.object({
+  encryptedPassword: z.string().min(1).max(5_000),
+  iv: z.string().min(1).max(24),
+  tag: z.string().min(1).max(32),
+  // Accept both UTC (Z) and timezone offsets (+05:00), matching vault.ts.
+  changedAt: z.iso.datetime({ offset: true }),
+});
+
+/**
+ * One existing item to UPDATE in place. Carries `id` (reusing the shared
+ * `objectIdSchema` — a case-insensitive hex ObjectId with a lowercase transform),
+ * the six ciphertext fields, a client-recomputed `searchHash` (an overwrite
+ * replaces `encryptedName`, so the stored hash must be refreshed alongside it),
+ * and an optional bounded `passwordHistory`. It deliberately does NOT carry
+ * `tags`/`favorite`/`folderId`: an import updates content only and must not
+ * silently reorganize an existing vault.
+ */
+export const importUpdateItemSchema = z.object({
+  id: objectIdSchema,
+  encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
+  nameIv: z.string().min(1).max(24),
+  nameTag: z.string().min(1).max(32),
+  encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
+  dataIv: z.string().min(1).max(24),
+  dataTag: z.string().min(1).max(32),
+  searchHash: z.string().regex(/^[a-f0-9]{64}$/),
+  passwordHistory: z
+    .array(importUpdatePasswordHistoryEntrySchema)
+    .max(PASSWORD_HISTORY_MAX)
+    .optional(),
+});
+
+/**
+ * The structured import payload: explicit `inserts` and `updates`. Both default
+ * to `[]` so a caller may send only one kind. The combined length bound (1..
+ * `MAX_IMPORT_ITEMS`) is enforced on `importSchema` itself, so it can produce a
+ * clear message when `operations` is present but empty.
+ */
+export const importOperationsSchema = z.object({
+  inserts: z.array(importInsertItemSchema).default([]),
+  updates: z.array(importUpdateItemSchema).default([]),
+});
+
+export const importSchema = z
+  .object({
+    // Zero-knowledge import: the browser parses the source file, converts each
+    // entry to a vault item, encrypts it with the vault key, and sends
+    // already-encrypted items. The server never parses plaintext and never
+    // encrypts. `format` and `conflictStrategy` are audit-only metadata that
+    // record which source the user imported from and which strategy the client
+    // applied; the server acts on neither (resolution already happened on the
+    // client). `csv`/`json` cover generic CSV and native H-Vault exports.
+    format: z.enum([
+      'bitwarden',
+      'lastpass',
+      'keepass',
+      'chrome',
+      'firefox',
+      'onepassword',
+      'csv',
+      'json',
+    ]),
+    conflictStrategy: z.enum(['skip', 'overwrite', 'keep_both']).optional().default('skip'),
+    // Legacy shape (retired in a later phase): a JSON string of encrypted items.
+    data: z.string().min(1).max(MAX_IMPORT_DATA_LENGTH).optional(),
+    // New shape: explicit inserts/updates the server validates and executes.
+    operations: importOperationsSchema.optional(),
+  })
+  // Exactly one of `data` / `operations` must be present (XOR). Neither is an
+  // empty request; both is ambiguous.
+  .refine((val) => (val.data !== undefined) !== (val.operations !== undefined), {
+    message: 'Provide exactly one of "data" or "operations"',
+    path: ['operations'],
+  })
+  // When `operations` is present, its combined item count must be in range. The
+  // legacy `data` byte cap does not apply to the structured shape (PLAN.md §1.7).
+  .refine(
+    (val) => {
+      if (val.operations === undefined) return true;
+      const total = val.operations.inserts.length + val.operations.updates.length;
+      return total >= 1 && total <= MAX_IMPORT_ITEMS;
+    },
+    {
+      message: `operations must contain between 1 and ${String(MAX_IMPORT_ITEMS)} items`,
+      path: ['operations'],
+    },
+  );

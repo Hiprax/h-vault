@@ -43,6 +43,9 @@ import type {
   backupHistorySchema,
   exportSchema,
   importSchema,
+  importInsertItemSchema,
+  importUpdateItemSchema,
+  importOperationsSchema,
   setup2faSchema,
   verify2faSchema,
   disable2faSchema,
@@ -98,6 +101,9 @@ export type AuditLogQueryInput = z.infer<typeof auditLogQuerySchema>;
 export type BackupHistoryInput = z.infer<typeof backupHistorySchema>;
 export type ExportInput = z.infer<typeof exportSchema>;
 export type ImportInput = z.infer<typeof importSchema>;
+export type ImportInsertItem = z.infer<typeof importInsertItemSchema>;
+export type ImportUpdateItem = z.infer<typeof importUpdateItemSchema>;
+export type ImportOperations = z.infer<typeof importOperationsSchema>;
 export type PaginationInput = z.infer<typeof paginationSchema>;
 
 // API response types

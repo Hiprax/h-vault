@@ -53,6 +53,7 @@ import {
   regenerateBackupCodesSchema,
   deleteAccountSchema,
 } from '../src/schemas/user.js';
+import { MAX_IMPORT_ITEMS, PASSWORD_HISTORY_MAX } from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
 
@@ -2816,6 +2817,195 @@ describe('importSchema', () => {
       conflictStrategy: 'delete_all',
     });
     expect(result.success).toBe(false);
+  });
+});
+
+// =========================================================================
+// importSchema — the additive `operations` contract (Phase 2)
+// =========================================================================
+
+describe('importSchema operations contract', () => {
+  const validInsert = {
+    itemType: 'login' as const,
+    encryptedName: 'enc-name',
+    nameIv: 'name-iv',
+    nameTag: 'name-tag',
+    encryptedData: 'enc-data',
+    dataIv: 'data-iv',
+    dataTag: 'data-tag',
+    searchHash: 'a'.repeat(64),
+    tags: ['work'],
+    favorite: false,
+  };
+
+  const validUpdate = {
+    id: '507f1f77bcf86cd799439011',
+    encryptedName: 'enc-name',
+    nameIv: 'name-iv',
+    nameTag: 'name-tag',
+    encryptedData: 'enc-data',
+    dataIv: 'data-iv',
+    dataTag: 'data-tag',
+    searchHash: 'b'.repeat(64),
+  };
+
+  const validHistoryEntry = {
+    encryptedPassword: 'enc-pw',
+    iv: 'iv',
+    tag: 'tag',
+    changedAt: '2026-07-21T00:00:00.000Z',
+  };
+
+  it('still accepts a legacy data-only body unchanged', () => {
+    const result = importSchema.safeParse({ format: 'json', data: 'legacy-data' });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.data).toBe('legacy-data');
+    expect(result.success && result.data.operations).toBeUndefined();
+  });
+
+  it('accepts an inserts-only operations body and applies item defaults', () => {
+    const result = importSchema.safeParse({
+      format: 'bitwarden',
+      operations: { inserts: [{ ...validInsert, tags: undefined, favorite: undefined }] },
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.operations?.inserts).toHaveLength(1);
+    // Array/boolean defaults are applied by the item schema.
+    expect(result.data.operations?.inserts[0]?.tags).toEqual([]);
+    expect(result.data.operations?.inserts[0]?.favorite).toBe(false);
+    // Absent `updates` defaults to an empty array.
+    expect(result.data.operations?.updates).toEqual([]);
+  });
+
+  it('accepts an updates-only operations body', () => {
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: { updates: [validUpdate] },
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.operations?.updates).toHaveLength(1);
+    expect(result.success && result.data.operations?.inserts).toEqual([]);
+  });
+
+  it('accepts a mixed inserts + updates operations body', () => {
+    const result = importSchema.safeParse({
+      format: 'lastpass',
+      operations: { inserts: [validInsert], updates: [validUpdate] },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('lowercases a mixed-case update id via the shared objectIdSchema', () => {
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: { updates: [{ ...validUpdate, id: '507F1F77BCF86CD799439011' }] },
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.operations?.updates[0]?.id).toBe(
+      '507f1f77bcf86cd799439011',
+    );
+  });
+
+  it('accepts an optional bounded passwordHistory on an update', () => {
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: { updates: [{ ...validUpdate, passwordHistory: [validHistoryEntry] }] },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a body carrying BOTH data and operations', () => {
+    const result = importSchema.safeParse({
+      format: 'json',
+      data: 'legacy',
+      operations: { inserts: [validInsert] },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a body carrying NEITHER data nor operations', () => {
+    const result = importSchema.safeParse({ format: 'json' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an operations body with no inserts and no updates', () => {
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: { inserts: [], updates: [] },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an empty operations object (defaults to zero items)', () => {
+    const result = importSchema.safeParse({ format: 'json', operations: {} });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an insert missing its required searchHash', () => {
+    const { searchHash: _omit, ...noHash } = validInsert;
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: { inserts: [noHash] },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a non-hex update id', () => {
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: { updates: [{ ...validUpdate, id: 'not-a-hex-object-id' }] },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a combined length over MAX_IMPORT_ITEMS', () => {
+    const inserts = Array.from({ length: MAX_IMPORT_ITEMS }, () => validInsert);
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: { inserts, updates: [validUpdate] },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an over-count passwordHistory (more than PASSWORD_HISTORY_MAX)', () => {
+    const passwordHistory = Array.from(
+      { length: PASSWORD_HISTORY_MAX + 1 },
+      () => validHistoryEntry,
+    );
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: { updates: [{ ...validUpdate, passwordHistory }] },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an over-length encryptedPassword in passwordHistory', () => {
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: {
+        updates: [
+          {
+            ...validUpdate,
+            passwordHistory: [{ ...validHistoryEntry, encryptedPassword: 'x'.repeat(5_001) }],
+          },
+        ],
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('strips unknown keys from operation items (.strip semantics preserved)', () => {
+    const result = importSchema.safeParse({
+      format: 'json',
+      operations: {
+        inserts: [{ ...validInsert, sourceRefId: 'injected', __proto__polluted: true }],
+      },
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && 'sourceRefId' in (result.data.operations?.inserts[0] ?? {})).toBe(
+      false,
+    );
   });
 });
 

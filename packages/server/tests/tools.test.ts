@@ -345,6 +345,31 @@ describe('Tools routes', () => {
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
     });
+
+    it('rejects a schema-valid operations body until the executor is wired', async () => {
+      // Phase 2 adds the `operations` wire shape additively: the schema now
+      // ACCEPTS an operations-only body (so it reaches the controller), but the
+      // structured executor is wired in a later phase. Until then the controller
+      // handles only the legacy `data` envelope and rejects an operations-only
+      // request up front. This pins that intermediate contract and covers the
+      // `data === undefined` guard.
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [sampleVaultItem({ searchHash: 'a'.repeat(64) })],
+          },
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    });
   });
 
   // ── Import Encryption Field Validation ──────────────────────────

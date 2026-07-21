@@ -362,6 +362,14 @@ export const importVault = catchAsync(async (req: Request, res: Response): Promi
   // parsing so the rejection is cheap.
   await assertVaultNotRotating(userId);
 
+  // The schema guarantees exactly one of `data` / `operations`. The structured
+  // `operations` executor is wired in a later phase; until then this controller
+  // handles only the legacy `data` envelope, so an `operations`-only request has
+  // no handler yet and is rejected up front (no shipped client sends one).
+  if (data === undefined) {
+    throw httpErrors.badRequest('Invalid import request: expected a "data" payload.');
+  }
+
   // Zero-knowledge import: the client already parsed the source file, converted
   // each entry to a vault item, and encrypted it with the vault key. Every format
   // therefore arrives as the same native `{ items: [...] }` envelope of already-

@@ -52,6 +52,9 @@ import {
   restoreBackupSchema,
   exportSchema,
   importSchema,
+  importInsertItemSchema,
+  importUpdateItemSchema,
+  importOperationsSchema,
   // Schemas — config
   publicConfigDataSchema,
   publicConfigResponseSchema,
@@ -153,6 +156,9 @@ describe('barrel exports (src/index.ts)', () => {
     expect(restoreBackupSchema).toBeDefined();
     expect(exportSchema).toBeDefined();
     expect(importSchema).toBeDefined();
+    expect(importInsertItemSchema).toBeDefined();
+    expect(importUpdateItemSchema).toBeDefined();
+    expect(importOperationsSchema).toBeDefined();
   });
 
   it('exports config schemas', () => {
