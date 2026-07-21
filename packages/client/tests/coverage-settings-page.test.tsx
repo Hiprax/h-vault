@@ -945,19 +945,31 @@ describe('SettingsPage — error paths and branches', () => {
   // Reporting only a count ("1 could not be converted") leaves the user unable to
   // tell WHICH entry was lost or why, and re-running the import cannot reveal it,
   // so the per-item reason must reach the toast.
+  //
+  // Over-long free-text/login fields (username, password, notes, URLs, custom
+  // fields) are now CLAMPED rather than dropped (fidelity-clamp), so they no
+  // longer trigger this path. A scalar, structured field with its own tight
+  // bound — a card `number` (max 30), read from a fixed source column — is left
+  // to the parser and still fails validation, which is the case exercised here.
   it('tells the user which item was skipped and why, not just how many', async () => {
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
-    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
-    // A URL past the shared `uri` cap (2048) fails validation for the whole item.
-    const longUrl = `https://example.com/${'a'.repeat(2100)}`;
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), {
+      target: { value: 'bitwarden' },
+    });
+    // A card number far past the shared `number` cap (30) fails validation for
+    // the whole item — that field is not clamped by import (see fidelity-clamp).
+    const overlong = JSON.stringify({
+      items: [{ type: 3, name: 'Overlong', card: { number: '4'.repeat(60) } }],
+    });
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
-      target: { value: `Name,URL\nOverlong,${longUrl}` },
+      target: { value: overlong },
     });
 
-    await waitFor(() => screen.getByText('Map CSV Columns'));
-    fireEvent.click(screen.getByRole('button', { name: 'Import', exact: true }));
+    await act(async () => {
+      fireEvent.click(screen.getByText('Import'));
+    });
 
     await waitFor(() =>
       expect(mockToast).toHaveBeenCalledWith(
@@ -970,7 +982,38 @@ describe('SettingsPage — error paths and branches', () => {
       .map(([arg]) => arg as { title: string; description?: string })
       .find((arg) => /could not be converted/i.test(arg.title));
     expect(call?.description).toMatch(/Overlong/);
-    expect(call?.description).toMatch(/uri/i);
+    expect(call?.description).toMatch(/number/i);
+  });
+
+  // The mirror of the case above: an over-long free-text field (here a URL well
+  // past the 2048 cap) is CLAMPED and the item still imports, rather than being
+  // dropped wholesale — the fidelity-clamp guarantee at the SettingsPage level.
+  it('imports an item with an over-long URL instead of dropping it (fidelity clamp)', async () => {
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { importedCount: 1, skippedCount: 0 } },
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
+    const longUrl = `https://example.com/${'a'.repeat(2100)}`;
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: `Name,URL\nOverlong,${longUrl}` },
+    });
+
+    await waitFor(() => screen.getByText('Map CSV Columns'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import', exact: true }));
+    });
+
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    // One encrypted item was sent (not skipped), and the success toast reports it.
+    const payload = mockImportVaultApi.mock.calls[0]?.[0] as { data: string };
+    const sent = JSON.parse(payload.data) as { items: unknown[] };
+    expect(sent.items).toHaveLength(1);
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Imported 1 items', type: 'success' }),
+    );
   });
 
   // The preview shows 3 sample rows out of the file's true total. That total is

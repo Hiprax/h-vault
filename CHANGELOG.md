@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Fixed
+
+- Importing an entry with an over-long field no longer discards the whole item. A username, password, note, URL, or custom-field value that exceeds the vault's per-field limit is now clamped to that limit instead of failing validation and dropping the entire entry (password included). The truncated overflow — and the full original URL or username — is preserved in the item's notes under a clear label; a password is clamped but, for safety, is never copied into notes. Custom fields beyond the 100-per-item limit are summarized in notes rather than lost. A scheme-less URL is clamped with room for the `https://` the vault adds, so a very long bare domain no longer becomes a permanently unreadable item.
+
 ## [0.2.0] - 2026-07-21
 
 ### Added
