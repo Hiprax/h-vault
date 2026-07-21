@@ -8,6 +8,13 @@ import type { ParsedImportItem } from '../types';
  * Columns: `"Group","Title","Username","Password","URL","Notes"` (some exports
  * add a `TOTP` column). `Group` is a path like `Root/Internet`; its last segment
  * is preserved as a tag.
+ *
+ * Column audit: every column of the standard KeePass 2.x CSV export is consumed
+ * (group→tag, title→name, username, password, url, notes, totp). KeePass can be
+ * configured to export extra columns (per-entry custom string fields, creation /
+ * modification times, icon); those are deliberately not imported — they have no
+ * stable header names and no dedicated vault field, and timestamps/icons are not
+ * user-meaningful in another manager.
  */
 export function parseKeepass(text: string): ParsedImportItem[] {
   const { records } = rowsToRecords(text);

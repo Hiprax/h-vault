@@ -52,8 +52,12 @@ const BITWARDEN = JSON.stringify({
       // email + phone that pass a naive check but fail the shared schema refines;
       // Fix requires the parser to fold them into notes so the item stays valid.
       identity: {
+        title: 'Dr',
         firstName: 'A',
+        middleName: 'M',
         lastName: 'B',
+        username: 'ab_user',
+        licenseNumber: 'DL-1',
         email: 'a@b..c',
         phone: '+1 555 CALL-NOW',
         address1: '1 Main St',
@@ -62,6 +66,15 @@ const BITWARDEN = JSON.stringify({
         postalCode: '90001',
         country: 'US',
         passportNumber: 'X1',
+      },
+    },
+    {
+      type: 5,
+      name: 'SSH Key',
+      sshKey: {
+        privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----',
+        publicKey: 'ssh-ed25519 AAAA key@host',
+        keyFingerprint: 'SHA256:zzz',
       },
     },
   ],
@@ -98,7 +111,7 @@ const cases: Case[] = [
     mapping: { Name: 'name', User: 'username', Pass: 'password', Site: 'url' },
     minItems: 1,
   },
-  { format: 'bitwarden', text: BITWARDEN, minItems: 4 },
+  { format: 'bitwarden', text: BITWARDEN, minItems: 5 },
 ];
 
 describe('every parser emits schema-conformant decrypted data', () => {

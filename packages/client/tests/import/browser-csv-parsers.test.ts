@@ -34,6 +34,25 @@ describe('Firefox CSV', () => {
     const { items } = parseImportData('firefox', 'url,username,password\n,,\nhttps://x.com,u,p');
     expect(items).toHaveLength(1);
   });
+
+  it('preserves a populated httpRealm column in notes', () => {
+    const withRealm =
+      'url,username,password,httpRealm,formActionOrigin,guid\n' +
+      'https://intranet.example.com,alice,pw,Corp Intranet,,{guid-1}';
+    const { items } = parseImportData('firefox', withRealm);
+    expect(items).toHaveLength(1);
+    const d = login(items[0]!);
+    expect(String(d.notes)).toContain('HTTP realm: Corp Intranet');
+    // The dropped internal columns never leak into the item.
+    expect(String(d.notes)).not.toContain('guid-1');
+  });
+
+  it('adds no notes when httpRealm is empty', () => {
+    // The two base fixture rows both leave httpRealm empty; neither gains notes.
+    const { items } = parseImportData('firefox', csv);
+    expect(login(items[0]!).notes).toBeUndefined();
+    expect(login(items[1]!).notes).toBeUndefined();
+  });
 });
 
 describe('Chrome/Edge CSV', () => {

@@ -119,10 +119,23 @@ function parseBitwardenJson(text: string): ParsedImportItem[] {
         const passport = str(id.passportNumber);
         if (passport) data.passport = passport;
 
+        // Bitwarden's identity object carries several fields the vault's
+        // identityDataSchema has no home for — `title`, `middleName`, `username`
+        // and `licenseNumber`. Rather than drop them (silent data loss), fold each
+        // into notes under a clear label, mirroring the email/phone fallback below.
+        let extraNote = '';
+        const title = str(id.title);
+        if (title) extraNote += `Title: ${title}\n`;
+        const middleName = str(id.middleName);
+        if (middleName) extraNote += `Middle name: ${middleName}\n`;
+        const identityUsername = str(id.username);
+        if (identityUsername) extraNote += `Username: ${identityUsername}\n`;
+        const licenseNumber = str(id.licenseNumber);
+        if (licenseNumber) extraNote += `License number: ${licenseNumber}\n`;
+
         // email/phone have strict shared validators; only set them when they look
         // valid, otherwise fold them into notes so a malformed value never sinks
         // the whole identity.
-        let extraNote = '';
         const email = str(id.email);
         if (email && identityFieldValid('email', email)) data.email = email;
         else if (email) extraNote += `Email: ${email}\n`;
@@ -137,6 +150,36 @@ function parseBitwardenJson(text: string): ParsedImportItem[] {
 
         const derivedName = name || [str(id.firstName), str(id.lastName)].filter(Boolean).join(' ');
         items.push(makeItem('identity', derivedName, data, { tags, favorite }));
+        break;
+      }
+      case 5: {
+        // SSH key (Bitwarden `sshKey`: { privateKey, publicKey, keyFingerprint }).
+        // H-Vault has no SSH item type. Without an explicit case this fell through
+        // to the note branch, which keeps only `notes` (and folded custom fields)
+        // and drops the key entirely. `noteDataSchema` has no `customFields`, so a
+        // note cannot hold the key parts as labelled fields. Import it as a `login`
+        // instead — a credential type that carries every key part in clearly-
+        // labelled custom fields (private key masked as `hidden`), keeping them
+        // retrievable and searchable. Any Bitwarden custom fields and notes on the
+        // item are preserved alongside.
+        const sshKey = (it.sshKey ?? {}) as Record<string, unknown>;
+        const sshFields: BwField[] = [];
+        const privateKey = str(sshKey.privateKey);
+        if (privateKey) sshFields.push({ name: 'SSH Private Key', value: privateKey, type: 1 });
+        const publicKey = str(sshKey.publicKey);
+        if (publicKey) sshFields.push({ name: 'SSH Public Key', value: publicKey, type: 0 });
+        const fingerprint = str(sshKey.keyFingerprint);
+        if (fingerprint)
+          sshFields.push({ name: 'SSH Key Fingerprint', value: fingerprint, type: 0 });
+        items.push(
+          buildLogin({
+            name,
+            notes,
+            customFields: [...sshFields, ...fields],
+            tags,
+            favorite,
+          }),
+        );
         break;
       }
       default: {

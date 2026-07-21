@@ -6,6 +6,9 @@ import type { ParsedImportItem } from '../types';
  * Chrome / Edge password export (`Passwords.csv`).
  *
  * Columns: `name,url,username,password,note`. `name` is usually the site host.
+ *
+ * Column audit: the Chrome/Edge `Passwords.csv` export has exactly these five
+ * columns and every one is consumed. No column is read and discarded.
  */
 export function parseChrome(text: string): ParsedImportItem[] {
   const { records } = rowsToRecords(text);

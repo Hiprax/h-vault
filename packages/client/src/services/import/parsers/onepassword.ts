@@ -8,6 +8,13 @@ import type { ParsedImportItem } from '../types';
  * Recognizes the common headers used across 1Password 7/8 CSV exports:
  * `title/name`, `website/url/urls`, `username`, `password`, `otpauth/otp/totp`,
  * `notes`, and `tags` (comma/`;`-separated). Everything is imported as a login.
+ *
+ * Column audit: 1Password's CSV column set varies by version and item type, so
+ * this parser is best-effort and consumes every column it recognizes above. Any
+ * additional columns a given export carries (section-specific fields from non-login
+ * item types, per-version extras) are deliberately not imported: there is no stable
+ * schema to map them to a vault field, and 1Password's own recommended migration is
+ * its `.1pux` archive, not CSV.
  */
 export function parseOnepassword(text: string): ParsedImportItem[] {
   const { records } = rowsToRecords(text);
