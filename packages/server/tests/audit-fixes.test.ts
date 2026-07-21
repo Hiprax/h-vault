@@ -11,7 +11,8 @@
  * - Task 3.5: disable2fa requires password
  * - Task 3.7: Swagger UI restricted in production
  * - Task 3.16: Token fields have max length
- * - Task 3.17: csvMapping max key count
+ * - Task 3.17: import payload key constraints (the former csvMapping cap; column
+ *   mapping is now client-side only and no longer part of the wire schema)
  * - Task 4.1: formatBytes edge cases
  * - Task 4.3: Named constants exist
  * - Task 5.8: Dev-prefix secrets rejected in non-development

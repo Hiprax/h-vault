@@ -89,7 +89,11 @@ security posture, not a disclaimer.
 - **Metadata.** The server necessarily learns what it must in order to function: your
   email, when you logged in and from where, how many items and folders you have, when they
   were changed, and their type. Item _contents_ and _names_ are encrypted; their _existence_
-  is not.
+  is not. **Tags are stored in plaintext** — they are indexed so the server can filter by
+  them — so a tag is a label the server can read. Importing from another password manager
+  converts that export's folder/group names into tags, which means the server learns your
+  source folder taxonomy (for example `Banking`, `Work SSO`). Do not put anything sensitive
+  in a tag; use the item's name or a field instead, both of which are encrypted.
 - **Your deployment.** An exposed MongoDB port, a `TRUST_PROXY` set higher than the number
   of proxies actually in front of the app, secrets committed to a repository, or a missing
   TLS certificate will undo the guarantees above. The deployment checklist in the README

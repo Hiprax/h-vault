@@ -5,6 +5,7 @@ import {
   heavyOpLimiter,
   breachCheckLimiter,
   passwordVerifyLimiter,
+  importLimiter,
 } from '../middleware/rateLimiter.js';
 import { checkBreachSchema, exportSchema, importSchema } from '@hvault/shared';
 import { checkPasswordBreach, exportVault, importVault } from '../controllers/toolsController.js';
@@ -27,6 +28,6 @@ router.post(
   validate(exportSchema, 'body'),
   exportVault,
 );
-router.post('/import', heavyOpLimiter, validate(importSchema, 'body'), importVault);
+router.post('/import', importLimiter, validate(importSchema, 'body'), importVault);
 
 export default router;

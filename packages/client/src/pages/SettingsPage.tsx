@@ -24,7 +24,7 @@ import {
 import QRCode from 'qrcode';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../lib/lazyZxcvbn';
-import { cn } from '../lib/utils';
+import { cn, getApiErrorMessage } from '../lib/utils';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
 import {
   Dialog,
@@ -50,8 +50,24 @@ import {
   exportVaultApi,
   importVaultApi,
 } from '../services/api/userApi';
+import {
+  MAX_IMPORT_DATA_LENGTH,
+  MAX_IMPORT_FILE_SIZE_BYTES,
+  MAX_ITEMS_PER_USER,
+} from '@hvault/shared';
 import type { IUserProfile } from '@hvault/shared';
 import { clearSettingsCache } from '../hooks/useUserSettings';
+import { useVaultStore } from '../stores/vaultStore';
+import { parseCsv } from '../services/import/csv';
+import {
+  IMPORT_FORMATS,
+  ImportParseError,
+  buildEncryptedImportItems,
+  chunkBySize,
+  detectCsvFormat,
+  parseImportData,
+} from '../services/import';
+import type { ImportSourceFormat } from '../services/import';
 
 // ---------------------------------------------------------------------------
 // CSV helpers
@@ -68,36 +84,57 @@ const HVAULT_FIELDS = [
   { value: 'folder', label: 'Folder' },
 ];
 
-function parseCSVRow(row: string): string[] {
-  const fields: string[] = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < row.length; i++) {
-    const ch = row[i] ?? '';
-    if (ch === '"') {
-      if (inQuotes && row[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (ch === ',' && !inQuotes) {
-      fields.push(current.trim());
-      current = '';
-    } else {
-      current += ch;
-    }
-  }
-  fields.push(current.trim());
-  return fields;
+// The CSV mapping preview reuses the shared RFC-4180 tokenizer (services/import),
+// which correctly handles quoted fields containing commas AND embedded newlines
+// (a naive line-split parser corrupts those). The actual import parsing/encryption
+// lives in services/import; this thin adapter only feeds the column-mapping UI.
+function parseCSV(text: string): { headers: string[]; rows: string[][] } {
+  const rows = parseCsv(text);
+  if (rows.length === 0) return { headers: [], rows: [] };
+  return { headers: rows[0] ?? [], rows: rows.slice(1) };
 }
 
-function parseCSV(text: string): { headers: string[]; rows: string[][] } {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim());
-  if (lines.length === 0) return { headers: [], rows: [] };
-  const headers = parseCSVRow(lines[0] ?? '');
-  const rows = lines.slice(1).map(parseCSVRow);
-  return { headers, rows };
+/**
+ * Validate and unwrap a native H-Vault export for (batched) re-import. Items are
+ * already encrypted; we confirm each decrypts with the current vault key and keep
+ * the encrypted rows verbatim. Undecryptable rows (e.g. a different vault key) are
+ * counted and dropped.
+ */
+async function extractNativeItems(
+  raw: string,
+  vaultKey: CryptoKey,
+): Promise<{ items: Record<string, unknown>[]; filtered: number }> {
+  let parsed: { items?: unknown };
+  try {
+    parsed = JSON.parse(raw) as { items?: unknown };
+  } catch {
+    throw new ImportParseError('Invalid H-Vault export: the file is not valid JSON.');
+  }
+  if (!Array.isArray(parsed.items)) {
+    throw new ImportParseError('Invalid H-Vault export: expected an object with an "items" array.');
+  }
+  const items: Record<string, unknown>[] = [];
+  let filtered = 0;
+  for (const item of parsed.items as Record<string, unknown>[]) {
+    const enc = item.encryptedData as string | undefined;
+    const iv = item.dataIv as string | undefined;
+    const tag = item.dataTag as string | undefined;
+    const encName = item.encryptedName as string | undefined;
+    const nameIv = item.nameIv as string | undefined;
+    const nameTag = item.nameTag as string | undefined;
+    if (!enc || !iv || !tag || !encName || !nameIv || !nameTag) {
+      filtered++;
+      continue;
+    }
+    try {
+      await cryptoService.decryptData(enc, iv, tag, vaultKey);
+      await cryptoService.decryptData(encName, nameIv, nameTag, vaultKey);
+      items.push(item);
+    } catch {
+      filtered++;
+    }
+  }
+  return { items, filtered };
 }
 
 // ---------------------------------------------------------------------------
@@ -184,10 +221,11 @@ export default function SettingsPage() {
   // Import state
   const [showImport, setShowImport] = useState(false);
   const [importData, setImportData] = useState('');
-  const [importFormat, setImportFormat] = useState<
-    'json' | 'csv' | 'bitwarden' | 'lastpass' | 'keepass'
-  >('json');
+  const [importFormat, setImportFormat] = useState<ImportSourceFormat>('json');
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ current: number; total: number } | null>(
+    null,
+  );
   const [conflictStrategy, setConflictStrategy] = useState<'skip' | 'overwrite' | 'keep_both'>(
     'skip',
   );
@@ -198,6 +236,11 @@ export default function SettingsPage() {
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
   const [csvMapping, setCsvMapping] = useState<Record<string, string>>({});
   const [csvPreview, setCsvPreview] = useState<string[][]>([]);
+  // Total data-row count for the preview header. Captured here from the single
+  // parse below rather than re-derived in the JSX: an import file may be up to
+  // MAX_IMPORT_FILE_SIZE_BYTES (8 MiB), and re-tokenizing it on every render —
+  // every keystroke, every mapping dropdown change — blocks the main thread.
+  const [csvRowCount, setCsvRowCount] = useState(0);
 
   // Vault key rotation state
   const [rotatingVaultKey, setRotatingVaultKey] = useState(false);
@@ -218,6 +261,7 @@ export default function SettingsPage() {
       const { headers, rows } = parseCSV(importData);
       setCsvHeaders(headers);
       setCsvPreview(rows.slice(0, 3));
+      setCsvRowCount(rows.length);
       // Auto-map common column names
       const mapping: Record<string, string> = {};
       for (const header of headers) {
@@ -238,6 +282,7 @@ export default function SettingsPage() {
       setCsvHeaders([]);
       setCsvMapping({});
       setCsvPreview([]);
+      setCsvRowCount(0);
     }
   }, [importFormat, importData]);
 
@@ -514,9 +559,14 @@ export default function SettingsPage() {
         return;
       }
 
-      // Validate file size (1MB limit matches server MAX_IMPORT_PAYLOAD)
-      if (file.size > 1_048_576) {
-        toast({ title: 'File too large (max 1MB)', type: 'error' });
+      // Validate file size. Parsing + encryption happen in the browser and the
+      // encrypted payload is sent in size-bounded batches, so the raw file may be
+      // larger than a single request body (the real ceiling is MAX_ITEMS_PER_USER).
+      if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+        toast({
+          title: `File too large (max ${String(Math.round(MAX_IMPORT_FILE_SIZE_BYTES / 1_048_576))}MB)`,
+          type: 'error',
+        });
         return;
       }
 
@@ -528,7 +578,9 @@ export default function SettingsPage() {
 
           // Auto-detect format from file extension
           if (file.name.endsWith('.csv')) {
-            setImportFormat('csv');
+            // Sniff the header row to pre-select the matching source (Firefox,
+            // LastPass, KeePass, Chrome, …); falls back to generic 'csv'.
+            setImportFormat(detectCsvFormat(text));
           } else if (file.name.endsWith('.json') || file.name.endsWith('.enc')) {
             // `.enc` = a native H-Vault export (JSON content), detected as json below.
             // Try to detect specific format
@@ -567,112 +619,154 @@ export default function SettingsPage() {
     [toast],
   );
 
-  // Import
+  // Import.
+  //
+  // Zero-knowledge pipeline: for any external source the browser parses the file,
+  // converts each entry to a vault item, validates + encrypts it with the vault
+  // key, and sends already-encrypted native items in size-bounded batches. The
+  // native H-Vault (`json`) format is already encrypted, so it is only validated
+  // for decryptability and re-sent. Plaintext never leaves the browser.
   const handleImport = useCallback(async () => {
     if (!importData.trim()) return;
 
-    // Validate CSV field mapping: "name" must be mapped
-    if (importFormat === 'csv' && !Object.values(csvMapping).includes('name')) {
-      toast({ title: 'Please map at least the "name" field before importing', type: 'error' });
+    const vaultKey = useAuthStore.getState().vaultKey;
+    if (!vaultKey) {
+      toast({ title: 'Unlock your vault before importing', type: 'error' });
+      return;
+    }
+
+    // Generic CSV needs at least one identifying column mapped; name is derived
+    // from URL/username when unmapped, so any of the three suffices.
+    if (
+      importFormat === 'csv' &&
+      !Object.values(csvMapping).some((v) => v === 'name' || v === 'url' || v === 'username')
+    ) {
+      toast({
+        title: 'Map at least one of Name, URL, or Username before importing',
+        type: 'error',
+      });
       return;
     }
 
     setImporting(true);
+    setImportProgress(null);
     try {
-      let dataToSend = importData;
-      let clientFilteredCount = 0;
+      let sendItems: unknown[];
+      let clientSkipped = 0;
+      // Why individual items were dropped during parse/encrypt. These are computed
+      // by buildEncryptedImportItems and MUST be surfaced: a bare "7 skipped" gives
+      // the user no way to tell which entries were lost or why (an over-long field
+      // fails the whole item), and re-running the import cannot reveal it either.
+      let skipReasons: string[] = [];
 
-      // For JSON format (H-Vault native), validate items are decryptable
-      // before sending to server to prevent adding undecryptable items
       if (importFormat === 'json') {
-        const vaultKey = useAuthStore.getState().vaultKey;
-        if (vaultKey) {
-          try {
-            const parsed = JSON.parse(importData) as {
-              items?: Record<string, unknown>[];
-              [k: string]: unknown;
-            };
-            if (parsed.items && Array.isArray(parsed.items)) {
-              const validItems: Record<string, unknown>[] = [];
-              for (const item of parsed.items) {
-                const enc = item.encryptedData as string | undefined;
-                const iv = item.dataIv as string | undefined;
-                const tag = item.dataTag as string | undefined;
-                const encName = item.encryptedName as string | undefined;
-                const nameIv = item.nameIv as string | undefined;
-                const nameTag = item.nameTag as string | undefined;
-                if (!enc || !iv || !tag || !encName || !nameIv || !nameTag) {
-                  clientFilteredCount++;
-                  continue;
-                }
-                try {
-                  await cryptoService.decryptData(enc, iv, tag, vaultKey);
-                  await cryptoService.decryptData(encName, nameIv, nameTag, vaultKey);
-                  validItems.push(item);
-                } catch {
-                  clientFilteredCount++;
-                }
-              }
-
-              if (validItems.length === 0 && clientFilteredCount > 0) {
-                toast({
-                  title: `All ${String(clientFilteredCount)} items failed decryption and were rejected. They may be encrypted with a different vault key.`,
-                  type: 'error',
-                });
-                return;
-              }
-
-              parsed.items = validItems;
-              dataToSend = JSON.stringify(parsed);
-            }
-          } catch {
-            // Parse error - let server handle validation
-          }
+        const native = await extractNativeItems(importData, vaultKey);
+        sendItems = native.items;
+        clientSkipped = native.filtered;
+        if (sendItems.length === 0) {
+          toast({
+            title:
+              native.filtered > 0
+                ? `All ${String(native.filtered)} items failed decryption and were rejected. They may be encrypted with a different vault key.`
+                : 'No items found to import.',
+            type: 'error',
+          });
+          return;
+        }
+      } else {
+        const { items: parsed } = parseImportData(importFormat, importData, csvMapping);
+        if (parsed.length === 0) {
+          toast({ title: 'No items found in the file to import.', type: 'error' });
+          return;
+        }
+        if (parsed.length > MAX_ITEMS_PER_USER) {
+          toast({
+            title: `Too many items (${String(parsed.length)}); the maximum is ${String(MAX_ITEMS_PER_USER)} per account.`,
+            type: 'error',
+          });
+          return;
+        }
+        const built = await buildEncryptedImportItems(parsed, vaultKey);
+        sendItems = built.items;
+        clientSkipped = built.skipped;
+        skipReasons = built.warnings;
+        if (sendItems.length === 0) {
+          toast({
+            title: `No valid items to import; ${String(built.skipped)} could not be converted.`,
+            ...(built.warnings.length > 0 ? { description: built.warnings.join('\n') } : {}),
+            type: 'error',
+          });
+          return;
         }
       }
 
-      const payload: {
-        format: typeof importFormat;
-        data: string;
-        csvMapping?: Record<string, string>;
-        conflictStrategy: typeof conflictStrategy;
-      } = {
-        format: importFormat,
-        data: dataToSend,
-        conflictStrategy,
-      };
-      if (importFormat === 'csv') {
-        payload.csvMapping = csvMapping;
+      // Split into requests each safely under the server's per-request data cap.
+      const batches = chunkBySize(sendItems, Math.floor(MAX_IMPORT_DATA_LENGTH * 0.9));
+      let imported = 0;
+      let serverSkipped = 0;
+      let duplicates = 0;
+      let sentBatches = 0;
+
+      try {
+        for (let i = 0; i < batches.length; i++) {
+          setImportProgress({ current: i + 1, total: batches.length });
+          const res = await importVaultApi({
+            format: importFormat,
+            data: JSON.stringify({ items: batches[i] }),
+            conflictStrategy,
+          });
+          const body = res.data;
+          if (!body.success) throw new Error('Failed to import vault data');
+          const r = body.data as {
+            importedCount: number;
+            skippedCount: number;
+            duplicateCount?: number;
+            overwrittenCount?: number;
+          };
+          imported += r.importedCount;
+          serverSkipped += r.skippedCount;
+          duplicates += r.duplicateCount ?? 0;
+          sentBatches++;
+        }
+      } catch (batchErr) {
+        // A later batch failed; earlier batches are already committed. Report the
+        // partial result honestly and refresh so imported rows appear.
+        const msg = getApiErrorMessage(batchErr, 'Failed to import some items');
+        toast({
+          title: sentBatches > 0 ? `Imported ${String(imported)} items, then stopped: ${msg}` : msg,
+          type: 'error',
+        });
+        if (imported > 0) void useVaultStore.getState().fetchItems();
+        return;
       }
-      const res = await importVaultApi(payload);
-      const importResult = res.data;
-      if (!importResult.success) throw new Error('Failed to import vault data');
-      const result = importResult.data as {
-        importedCount: number;
-        skippedCount: number;
-        duplicateCount?: number;
-        overwrittenCount?: number;
-      };
-      const parts = [`Imported ${String(result.importedCount)} items`];
-      if (result.duplicateCount && result.duplicateCount > 0) {
+
+      const parts = [`Imported ${String(imported)} items`];
+      if (duplicates > 0) {
         parts.push(
-          `${String(result.duplicateCount)} duplicates ${conflictStrategy === 'skip' ? 'skipped' : 'handled'}`,
+          `${String(duplicates)} duplicates ${conflictStrategy === 'skip' ? 'skipped' : 'handled'}`,
         );
       }
-      const totalSkipped = result.skippedCount + clientFilteredCount;
-      if (totalSkipped > 0) {
-        parts.push(`${String(totalSkipped)} undecryptable skipped`);
-      }
+      const totalSkipped = clientSkipped + serverSkipped;
+      if (totalSkipped > 0) parts.push(`${String(totalSkipped)} skipped`);
+
       toast({
         title: parts.join(', '),
-        type: clientFilteredCount > 0 ? 'warning' : 'success',
+        // Name the entries that were dropped and why, rather than only counting them.
+        ...(skipReasons.length > 0 ? { description: skipReasons.join('\n') } : {}),
+        type: totalSkipped > 0 ? 'warning' : 'success',
       });
+      void useVaultStore.getState().fetchItems();
       setShowImport(false);
       setImportData('');
-    } catch {
-      toast({ title: 'Failed to import vault data', type: 'error' });
+    } catch (err) {
+      const msg =
+        err instanceof ImportParseError
+          ? err.message
+          : getApiErrorMessage(err, 'Failed to import vault data');
+      toast({ title: msg, type: 'error' });
     } finally {
       setImporting(false);
+      setImportProgress(null);
     }
   }, [importData, importFormat, csvMapping, conflictStrategy, toast]);
 
@@ -1751,14 +1845,14 @@ export default function SettingsPage() {
             <div className="space-y-3 rounded-lg border border-[hsl(var(--border))] p-4">
               <select
                 value={importFormat}
-                onChange={(e) => setImportFormat(e.target.value as typeof importFormat)}
+                onChange={(e) => setImportFormat(e.target.value as ImportSourceFormat)}
                 className={inputClass}
               >
-                <option value="json">JSON</option>
-                <option value="csv">CSV</option>
-                <option value="bitwarden">Bitwarden</option>
-                <option value="lastpass">LastPass</option>
-                <option value="keepass">KeePass</option>
+                {IMPORT_FORMATS.map((f) => (
+                  <option key={f.value} value={f.value}>
+                    {f.label}
+                  </option>
+                ))}
               </select>
               <div className="flex items-center gap-3">
                 <input
@@ -1777,7 +1871,8 @@ export default function SettingsPage() {
                   Upload File
                 </button>
                 <span className="text-xs text-[hsl(var(--muted-foreground))]">
-                  H-Vault (.enc), JSON, or CSV (max 1MB)
+                  H-Vault (.enc), JSON, or CSV (max{' '}
+                  {String(Math.round(MAX_IMPORT_FILE_SIZE_BYTES / 1_048_576))}MB)
                 </span>
               </div>
               <p className="text-xs text-[hsl(var(--muted-foreground))]">Or paste data below:</p>
@@ -1826,7 +1921,7 @@ export default function SettingsPage() {
                   {csvPreview.length > 0 && (
                     <div className="space-y-2">
                       <h4 className="text-sm font-medium text-[hsl(var(--foreground))]">
-                        Preview ({csvPreview.length} of {parseCSV(importData).rows.length} rows)
+                        Preview ({csvPreview.length} of {csvRowCount} rows)
                       </h4>
                       <div className="overflow-x-auto rounded-md border border-[hsl(var(--border))]">
                         <table className="w-full text-xs">
@@ -1913,7 +2008,11 @@ export default function SettingsPage() {
                   disabled={importing || !importData.trim()}
                   className="rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
                 >
-                  {importing ? 'Importing...' : 'Import'}
+                  {importing
+                    ? importProgress
+                      ? `Importing (${String(importProgress.current)}/${String(importProgress.total)})...`
+                      : 'Importing...'
+                    : 'Import'}
                 </button>
               </div>
             </div>

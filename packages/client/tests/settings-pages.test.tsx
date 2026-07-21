@@ -1287,7 +1287,7 @@ describe('SettingsPage', () => {
 
     fireEvent.click(screen.getByText('Import Vault'));
 
-    expect(screen.getByText('JSON')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('H-Vault (.enc / JSON)')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Paste exported data here...')).toBeInTheDocument();
   });
 
@@ -1297,21 +1297,32 @@ describe('SettingsPage', () => {
 
     fireEvent.click(screen.getByText('Import Vault'));
 
-    const select = screen.getByDisplayValue('JSON');
+    const select = screen.getByDisplayValue('H-Vault (.enc / JSON)');
     expect(select).toBeInTheDocument();
-    expect(select.querySelectorAll('option')).toHaveLength(5);
+    // json, bitwarden, lastpass, keepass, chrome, firefox, onepassword, csv.
+    expect(select.querySelectorAll('option')).toHaveLength(8);
   });
 
-  it('calls importVaultApi with JSON data', async () => {
+  it('calls importVaultApi with encrypted native items for a JSON import', async () => {
     mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { importedCount: 3, skippedCount: 0 } },
+      data: { success: true, data: { importedCount: 1, skippedCount: 0 } },
     });
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
 
     fireEvent.click(screen.getByText('Import Vault'));
+    // A native item carrying all six ciphertext fields (mocked decrypt never throws).
+    const nativeItem = {
+      itemType: 'login',
+      encryptedData: 'ed',
+      dataIv: 'di',
+      dataTag: 'dt',
+      encryptedName: 'en',
+      nameIv: 'ni',
+      nameTag: 'nt',
+    };
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
-      target: { value: '{"items":[]}' },
+      target: { value: JSON.stringify({ items: [nativeItem] }) },
     });
 
     await act(async () => {
@@ -1320,9 +1331,12 @@ describe('SettingsPage', () => {
 
     await waitFor(() => {
       expect(mockImportVaultApi).toHaveBeenCalledWith(
-        expect.objectContaining({ format: 'json', data: '{"items":[]}' }),
+        expect.objectContaining({ format: 'json', conflictStrategy: 'skip' }),
       );
     });
+    const payload = mockImportVaultApi.mock.calls[0]?.[0] as { data: string };
+    const sent = JSON.parse(payload.data) as { items: unknown[] };
+    expect(sent.items).toHaveLength(1);
   });
 
   it('shows CSV field mapping UI when CSV format is selected', async () => {
@@ -1332,7 +1346,7 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByText('Import Vault'));
 
     // Switch to CSV
-    fireEvent.change(screen.getByDisplayValue('JSON'), {
+    fireEvent.change(screen.getByDisplayValue('H-Vault (.enc / JSON)'), {
       target: { value: 'csv' },
     });
 
@@ -1346,17 +1360,17 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('shows error when CSV import lacks name mapping', async () => {
+  it('shows an error when a generic CSV maps no identifying column', async () => {
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
 
     fireEvent.click(screen.getByText('Import Vault'));
 
-    fireEvent.change(screen.getByDisplayValue('JSON'), {
+    fireEvent.change(screen.getByDisplayValue('H-Vault (.enc / JSON)'), {
       target: { value: 'csv' },
     });
 
-    // CSV data with columns that wont auto-map to name
+    // CSV data with columns that won't auto-map to name/url/username
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
       target: { value: 'Foo,Bar\nval1,val2' },
     });
@@ -1370,7 +1384,7 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({
-          title: expect.stringContaining('map at least the "name" field') as string,
+          title: expect.stringContaining('Map at least one of Name, URL, or Username') as string,
         }),
       );
     });
@@ -1399,7 +1413,7 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByText('Import Vault'));
 
     expect(screen.getByText('Upload File')).toBeInTheDocument();
-    expect(screen.getByText('H-Vault (.enc), JSON, or CSV (max 1MB)')).toBeInTheDocument();
+    expect(screen.getByText(/H-Vault \(\.enc\), JSON, or CSV \(max\s*8MB\)/)).toBeInTheDocument();
     expect(screen.getByText('Or paste data below:')).toBeInTheDocument();
   });
 
@@ -1461,8 +1475,8 @@ describe('SettingsPage', () => {
       expect(textarea.value).toBe(csvContent);
     });
 
-    // Format should have switched to csv
-    const select = screen.getByDisplayValue('CSV') as HTMLSelectElement;
+    // Format should have switched to the generic CSV option (no signature match).
+    const select = screen.getByDisplayValue('Generic CSV (map columns)') as HTMLSelectElement;
     expect(select).toBeInTheDocument();
   });
 
@@ -1487,15 +1501,15 @@ describe('SettingsPage', () => {
     );
   });
 
-  it('shows error toast for files exceeding 1MB', async () => {
+  it('shows error toast for files exceeding the size cap', async () => {
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
 
     fireEvent.click(screen.getByText('Import Vault'));
 
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
-    // Create a file that exceeds 1MB
-    const largeContent = 'x'.repeat(1_048_577);
+    // Create a file that exceeds the 8MB cap. `File.size` reflects the byte length.
+    const largeContent = 'x'.repeat(8_388_609);
     const file = new File([largeContent], 'big.json', { type: 'application/json' });
 
     await act(async () => {
@@ -1503,7 +1517,7 @@ describe('SettingsPage', () => {
     });
 
     expect(mockToast).toHaveBeenCalledWith(
-      expect.objectContaining({ title: 'File too large (max 1MB)', type: 'error' }),
+      expect.objectContaining({ title: 'File too large (max 8MB)', type: 'error' }),
     );
   });
 
@@ -1527,7 +1541,7 @@ describe('SettingsPage', () => {
     // Format auto-detection runs after the FileReader resolves; wait on that
     // observable rather than a fixed sleep.
     await waitFor(() => {
-      const select = screen.getByDisplayValue('Bitwarden') as HTMLSelectElement;
+      const select = screen.getByDisplayValue('Bitwarden (JSON or CSV)') as HTMLSelectElement;
       expect(select).toBeInTheDocument();
     });
   });
@@ -2096,7 +2110,7 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByText('Import Vault'));
 
     // Switch to bitwarden format
-    fireEvent.change(screen.getByDisplayValue('JSON'), {
+    fireEvent.change(screen.getByDisplayValue('H-Vault (.enc / JSON)'), {
       target: { value: 'bitwarden' },
     });
 

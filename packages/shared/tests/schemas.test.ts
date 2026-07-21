@@ -2751,13 +2751,24 @@ describe('exportSchema', () => {
 
 describe('importSchema', () => {
   it('accepts all valid formats', () => {
-    for (const format of ['bitwarden', 'lastpass', 'keepass', 'csv', 'json']) {
+    for (const format of [
+      'bitwarden',
+      'lastpass',
+      'keepass',
+      'chrome',
+      'firefox',
+      'onepassword',
+      'csv',
+      'json',
+    ]) {
       expect(importSchema.safeParse({ format, data: 'some-data' }).success).toBe(true);
     }
   });
 
-  it('rejects invalid format', () => {
+  it('rejects an unknown format', () => {
+    // `onepassword` is the accepted 1Password value; `1password` (and others) are rejected.
     expect(importSchema.safeParse({ format: '1password', data: 'data' }).success).toBe(false);
+    expect(importSchema.safeParse({ format: 'dashlane', data: 'data' }).success).toBe(false);
   });
 
   it('rejects empty data', () => {
@@ -2770,39 +2781,16 @@ describe('importSchema', () => {
     );
   });
 
-  it('accepts optional csvMapping', () => {
+  it('strips a legacy csvMapping field (column mapping is now client-side only)', () => {
+    // Parsing + encryption happen in the browser; the server contract carries only
+    // already-encrypted items, so csvMapping is no longer part of the wire schema.
     const result = importSchema.safeParse({
       format: 'csv',
       data: 'some-csv',
       csvMapping: { name: 'col1', password: 'col2' },
     });
     expect(result.success).toBe(true);
-  });
-
-  it('accepts csvMapping with exactly 50 keys', () => {
-    const mapping: Record<string, string> = {};
-    for (let i = 0; i < 50; i++) {
-      mapping[`key${i}`] = `val${i}`;
-    }
-    const result = importSchema.safeParse({
-      format: 'csv',
-      data: 'some-csv',
-      csvMapping: mapping,
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it('rejects csvMapping with more than 50 keys', () => {
-    const mapping: Record<string, string> = {};
-    for (let i = 0; i < 51; i++) {
-      mapping[`key${i}`] = `val${i}`;
-    }
-    const result = importSchema.safeParse({
-      format: 'csv',
-      data: 'some-csv',
-      csvMapping: mapping,
-    });
-    expect(result.success).toBe(false);
+    expect(result.success && 'csvMapping' in result.data).toBe(false);
   });
 
   it('accepts valid conflictStrategy values', () => {

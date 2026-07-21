@@ -389,38 +389,6 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
       expect(rows[0]!.encryptedName).toBe('keepass-complete');
     });
 
-    it('skips a ragged CSV row whose mapped column is absent, and still imports the complete row', async () => {
-      // A short data row leaves `row[index] === undefined` for the trailing
-      // column, so that target field never lands in the mapped object and
-      // defaults to ''. The row must be skipped — never persisted half-formed.
-      const csvData = [
-        'eData,eIv,eTag,nIv,nTag,encName',
-        'edata-1,div-1,dtag-1,niv-1,ntag-1,name-1',
-        'edata-2,div-2,dtag-2,niv-2,ntag-2',
-      ].join('\n');
-      const csvMapping = {
-        eData: 'encryptedData',
-        eIv: 'dataIv',
-        eTag: 'dataTag',
-        nIv: 'nameIv',
-        nTag: 'nameTag',
-        encName: 'encryptedName',
-      };
-
-      const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
-        format: 'csv',
-        data: csvData,
-        csvMapping,
-      });
-
-      expect(res.status).toBe(201);
-      expect(res.body.data).toMatchObject({ importedCount: 1, skippedCount: 1 });
-
-      const rows = await VaultItem.find({ userId: user.id }).lean();
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.encryptedName).toBe('name-1');
-    });
-
     it('does not blow up on a non-string encrypted field (it is coerced, not .trim()-ed)', async () => {
       // The validity filter guards every field with `typeof x === 'string' ?
       // x.trim() : x`. Drop the guard and a numeric field from a tampered/legacy

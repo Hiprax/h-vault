@@ -567,6 +567,45 @@ export const heavyOpLimiter =
   );
 
 /**
+ * Import rate limiter.
+ * Allows **60 requests per 15-minute window** per authenticated user.
+ *
+ * Import is a zero-knowledge bulk operation: the client parses and encrypts every
+ * item locally, then sends the encrypted rows in several sequential requests
+ * (see the client's `chunkBySize`), so a large migration needs a higher,
+ * DEDICATED budget. Sharing `heavyOpLimiter`'s 10-req/IP budget with export /
+ * backup / bulk operations would let a multi-batch import stall mid-migration (or
+ * a prior export burn a slot). Keyed by userId, not IP, so IP rotation cannot
+ * bypass it and a shared IP does not conflate distinct users' imports; per-user
+ * data growth stays independently bounded by MAX_ITEMS_PER_USER.
+ */
+const importStore = createStore(FIFTEEN_MINUTES_MS);
+export const importLimiter =
+  noopIfNonProduction() ??
+  withClientKeyGuard(
+    'importLimiter',
+    rateLimit({
+      windowMs: FIFTEEN_MINUTES_MS,
+      limit: 60,
+      standardHeaders: true,
+      legacyHeaders: false,
+      validate: { singleCount: false },
+      keyGenerator: (req: Request) => {
+        const userId = req.user?._id ?? resolveClientKey(req) ?? '';
+        return `import:${userId}`;
+      },
+      ...(importStore ? { store: importStore } : {}),
+      handler: (_req, _res, next, options) => {
+        logger.warn('Import rate limit exceeded', {
+          windowMs: options.windowMs,
+          limit: options.limit,
+        });
+        next(httpErrors.tooManyRequests('Too many import requests, please try again later'));
+      },
+    }),
+  );
+
+/**
  * Health check rate limiter.
  * Allows **60 requests per 1-minute window** per IP address.
  *

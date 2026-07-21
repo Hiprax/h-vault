@@ -116,8 +116,15 @@ export function exportVaultApi(
   return api.post('/tools/export', data);
 }
 
-export function importVaultApi(
-  data: ImportInput,
-): Promise<AxiosResponse<ApiResponse<{ importedCount: number; skippedCount: number }>>> {
+export function importVaultApi(data: ImportInput): Promise<
+  AxiosResponse<
+    ApiResponse<{
+      importedCount: number;
+      skippedCount: number;
+      duplicateCount: number;
+      overwrittenCount: number;
+    }>
+  >
+> {
   return api.post('/tools/import', data);
 }

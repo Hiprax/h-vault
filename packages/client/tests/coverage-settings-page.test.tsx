@@ -822,22 +822,34 @@ describe('SettingsPage — error paths and branches', () => {
     expect(mockExportVaultApi).not.toHaveBeenCalled();
   });
 
+  // A native H-Vault item carrying all six ciphertext fields. The mocked
+  // decryptData never throws, so it passes the client-side decryptability check.
+  const nativeItem = {
+    itemType: 'login',
+    encryptedData: 'ed',
+    dataIv: 'di',
+    dataTag: 'dt',
+    encryptedName: 'en',
+    nameIv: 'ni',
+    nameTag: 'nt',
+  };
+  const JSON_FORMAT_LABEL = 'H-Vault (.enc / JSON)';
+
   it('reports a failed import and leaves the import panel open', async () => {
-    mockImportVaultApi.mockRejectedValue(new Error('400'));
+    mockImportVaultApi.mockRejectedValue(new Error('server said no'));
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
-      target: { value: '{"items":[]}' },
+      target: { value: JSON.stringify({ items: [nativeItem] }) },
     });
     await act(async () => {
       fireEvent.click(screen.getByText('Import'));
     });
 
     await waitFor(() => {
-      expect(mockToast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: 'Failed to import vault data', type: 'error' }),
-      );
+      expect(mockImportVaultApi).toHaveBeenCalled();
+      expect(mockToast).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
     });
     expect(screen.getByPlaceholderText('Paste exported data here...')).toBeInTheDocument();
   });
@@ -850,7 +862,7 @@ describe('SettingsPage — error paths and branches', () => {
 
     fireEvent.click(screen.getByText('Import Vault'));
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
-      target: { value: '{"noItems":true}' },
+      target: { value: JSON.stringify({ items: [nativeItem] }) },
     });
     fireEvent.change(screen.getByDisplayValue('Skip duplicates'), {
       target: { value: 'overwrite' },
@@ -861,8 +873,8 @@ describe('SettingsPage — error paths and branches', () => {
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith({
-        title: 'Imported 2 items, 3 duplicates handled, 1 undecryptable skipped',
-        type: 'success',
+        title: 'Imported 2 items, 3 duplicates handled, 1 skipped',
+        type: 'warning',
       });
     });
     expect(mockImportVaultApi).toHaveBeenCalledWith(
@@ -872,51 +884,53 @@ describe('SettingsPage — error paths and branches', () => {
     expect(screen.queryByPlaceholderText('Paste exported data here...')).not.toBeInTheDocument();
   });
 
-  it('auto-maps CSV headers and sends the (user-adjusted) mapping with the import', async () => {
+  it('parses a CSV via column mapping, encrypts client-side, and sends encrypted items (never plaintext or a mapping)', async () => {
     mockImportVaultApi.mockResolvedValue({
       data: { success: true, data: { importedCount: 1, skippedCount: 0 } },
     });
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
-    fireEvent.change(screen.getByDisplayValue('JSON'), { target: { value: 'csv' } });
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
-      target: { value: 'Title,Website,OTP,Comment\nGithub,https://gh.com,SEC,hi' },
+      target: { value: 'Title,Website,Secret\nGithub,https://gh.com,p@ss' },
     });
 
     await waitFor(() => screen.getByText('Map CSV Columns'));
-    // Auto-detection: title→name, website→url, otp→totp, comment→notes.
+    // Auto-detection: title→name, website→url. "Secret" matches nothing → Skip.
     expect(screen.getByDisplayValue('Name')).toBeInTheDocument();
     expect(screen.getByDisplayValue('URL')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('TOTP Secret')).toBeInTheDocument();
-
-    // The user re-points the "Comment" column at Username.
-    fireEvent.change(screen.getByDisplayValue('Notes'), { target: { value: 'username' } });
+    // The user maps the unmapped "Secret" column to Password.
+    fireEvent.change(screen.getByDisplayValue('-- Skip --'), { target: { value: 'password' } });
 
     await act(async () => {
       fireEvent.click(screen.getByText('Import'));
     });
 
-    await waitFor(() => {
-      expect(mockImportVaultApi).toHaveBeenCalledWith({
-        format: 'csv',
-        data: 'Title,Website,OTP,Comment\nGithub,https://gh.com,SEC,hi',
-        conflictStrategy: 'skip',
-        csvMapping: {
-          Title: 'name',
-          Website: 'url',
-          OTP: 'totp',
-          Comment: 'username',
-        },
-      });
-    });
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    const payload = mockImportVaultApi.mock.calls[0]?.[0] as {
+      format: string;
+      data: string;
+      conflictStrategy: string;
+      csvMapping?: unknown;
+    };
+    expect(payload.format).toBe('csv');
+    // The mapping is a client-side concern now; it is NOT sent to the server.
+    expect(payload.csvMapping).toBeUndefined();
+    const sent = JSON.parse(payload.data) as { items: Record<string, string>[] };
+    expect(sent.items).toHaveLength(1);
+    // Client-side encryption ran (mocked encryptData → `enc:<plain>`): the wire
+    // payload carries ciphertext fields + a search hash, not raw columns.
+    expect(sent.items[0]?.encryptedData).toMatch(/^enc:/);
+    expect(sent.items[0]?.encryptedName).toMatch(/^enc:/);
+    expect(sent.items[0]?.searchHash).toMatch(/^sh:/);
   });
 
   it('parses quoted CSV fields containing commas and escaped quotes as single cells', async () => {
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
-    fireEvent.change(screen.getByDisplayValue('JSON'), { target: { value: 'csv' } });
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
       target: { value: 'Name,Notes\nAcme,"one, two ""quoted"""' },
     });
@@ -927,10 +941,64 @@ describe('SettingsPage — error paths and branches', () => {
     expect(screen.getByText('Preview (1 of 1 rows)')).toBeInTheDocument();
   });
 
+  // An item that fails the shared schema is dropped by buildEncryptedImportItems.
+  // Reporting only a count ("1 could not be converted") leaves the user unable to
+  // tell WHICH entry was lost or why, and re-running the import cannot reveal it,
+  // so the per-item reason must reach the toast.
+  it('tells the user which item was skipped and why, not just how many', async () => {
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
+    // A URL past the shared `uri` cap (2048) fails validation for the whole item.
+    const longUrl = `https://example.com/${'a'.repeat(2100)}`;
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: `Name,URL\nOverlong,${longUrl}` },
+    });
+
+    await waitFor(() => screen.getByText('Map CSV Columns'));
+    fireEvent.click(screen.getByRole('button', { name: 'Import', exact: true }));
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: expect.stringMatching(/could not be converted/i) }),
+      ),
+    );
+    // The reason names the offending item and the field that failed — without it
+    // the user only learns that "1" item vanished.
+    const call = mockToast.mock.calls
+      .map(([arg]) => arg as { title: string; description?: string })
+      .find((arg) => /could not be converted/i.test(arg.title));
+    expect(call?.description).toMatch(/Overlong/);
+    expect(call?.description).toMatch(/uri/i);
+  });
+
+  // The preview shows 3 sample rows out of the file's true total. That total is
+  // captured from the single parse in the effect, not re-derived during render —
+  // an 8 MiB import file re-tokenized on every mapping change would block the
+  // main thread. Changing a mapping dropdown must not disturb the count.
+  it('reports the full row count in the preview and keeps it across a mapping change', async () => {
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: 'Name,Secret\na,1\nb,2\nc,3\nd,4\ne,5' },
+    });
+
+    await waitFor(() => screen.getByText('Map CSV Columns'));
+    expect(screen.getByText('Preview (3 of 5 rows)')).toBeInTheDocument();
+
+    const mappingSelect = screen.getAllByDisplayValue('-- Skip --')[0]!;
+    fireEvent.change(mappingSelect, { target: { value: 'notes' } });
+
+    await waitFor(() => expect(screen.getByText('Preview (3 of 5 rows)')).toBeInTheDocument());
+  });
+
   it('treats an uploaded .enc export as JSON and loads its contents', async () => {
     await renderSettings();
     fireEvent.click(screen.getByText('Import Vault'));
-    fireEvent.change(screen.getByDisplayValue('JSON'), { target: { value: 'csv' } });
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
 
     const fileInput = document.querySelector('input[type="file"]')!;
     const content = JSON.stringify({ items: [{ encryptedData: 'abc' }] });
@@ -944,7 +1012,7 @@ describe('SettingsPage — error paths and branches', () => {
     expect(
       (screen.getByPlaceholderText('Paste exported data here...') as HTMLTextAreaElement).value,
     ).toBe(content);
-    expect(screen.getByDisplayValue('JSON')).toBeInTheDocument();
+    expect(screen.getByDisplayValue(JSON_FORMAT_LABEL)).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------

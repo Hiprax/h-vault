@@ -569,7 +569,7 @@ describe('Phase 8.6: CSV import validation in SettingsPage', () => {
     });
   });
 
-  it('shows error toast when CSV import is attempted without mapping the "name" field', async () => {
+  it('does not call the import API when a generic CSV maps no identifying column', async () => {
     const { default: SettingsPage } = await import('../src/pages/SettingsPage');
 
     renderWithRouter(<SettingsPage />);
@@ -582,10 +582,10 @@ describe('Phase 8.6: CSV import validation in SettingsPage', () => {
     // Click "Import Vault" to show the import form
     fireEvent.click(screen.getByText('Import Vault'));
 
-    // Select CSV format
+    // Select the generic CSV format (label reflects the IMPORT_FORMATS registry).
     const formatSelect = screen.getAllByRole('combobox').find((s) => {
       const options = s.querySelectorAll('option');
-      return Array.from(options).some((o) => o.textContent === 'CSV');
+      return Array.from(options).some((o) => o.textContent === 'Generic CSV (map columns)');
     });
     expect(formatSelect).toBeDefined();
     fireEvent.change(formatSelect!, { target: { value: 'csv' } });

@@ -511,83 +511,65 @@ describe('Tools routes', () => {
       expect(res.body.data.importedCount).toBe(3);
     });
 
-    it('should import items in CSV format with mapping', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
+    it('accepts each source format as already-encrypted items and records it in the audit log', async () => {
+      // Import is zero-knowledge: parsing + encryption happen client-side, so every
+      // format arrives as the same native `{ items: [...] }` envelope. `format` is
+      // audit-only metadata and every value is handled identically.
+      for (const format of ['chrome', 'firefox', 'onepassword', 'lastpass'] as const) {
+        const { csrfToken, csrfCookie } = await getCsrf(agent);
+        const importData = JSON.stringify({
+          items: [sampleVaultItem({ encryptedName: `enc-${format}` })],
+        });
 
-      // Build CSV data with headers mapping to encryption fields
-      const csvData = [
-        'name,data,niv,ntag,edata,div,dtag',
-        'enc-name-1,enc-data-1,niv-1,ntag-1,edata-1,div-1,dtag-1',
-        'enc-name-2,enc-data-2,niv-2,ntag-2,edata-2,div-2,dtag-2',
-      ].join('\n');
+        const res = await agent
+          .post('/api/v1/tools/import')
+          .set('Authorization', authHeader(user.accessToken))
+          .set('x-csrf-token', csrfToken)
+          .set('Cookie', csrfCookie)
+          .send({ format, data: importData });
 
-      const csvMapping: Record<string, string> = {
-        name: 'encryptedName',
-        niv: 'nameIv',
-        ntag: 'nameTag',
-        edata: 'encryptedData',
-        div: 'dataIv',
-        dtag: 'dataTag',
-      };
+        expect(res.status, format).toBe(201);
+        expect(res.body.data.importedCount).toBe(1);
 
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'csv', data: csvData, csvMapping });
-
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(2);
+        const auditEntry = await AuditLog.findOne({ userId: user.id, action: 'import' }).sort({
+          createdAt: -1,
+        });
+        expect(auditEntry).not.toBeNull();
+        expect((auditEntry!.metadata as Record<string, unknown>).format).toBe(format);
+      }
     });
 
-    it('should reject CSV import with only header row', async () => {
+    it('rejects a raw plaintext CSV payload (the server never parses plaintext)', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const csvData = 'name,data,niv,ntag,edata,div,dtag';
-      const csvMapping: Record<string, string> = {
-        name: 'encryptedName',
-      };
+      const csvData = 'url,username,password\nhttps://example.com,alice,s3cret';
 
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'csv', data: csvData, csvMapping });
+        .send({ format: 'csv', data: csvData });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
     });
 
-    it('should handle CSV with quoted fields and escaped quotes', async () => {
+    it('rejects a JSON payload whose items carry plaintext instead of ciphertext', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const csvData = [
-        'encryptedName,nameIv,nameTag,encryptedData,dataIv,dataTag',
-        '"enc-name-""with-quotes""",niv-1,ntag-1,edata-1,div-1,dtag-1',
-      ].join('\n');
-
-      const csvMapping: Record<string, string> = {
-        encryptedName: 'encryptedName',
-        nameIv: 'nameIv',
-        nameTag: 'nameTag',
-        encryptedData: 'encryptedData',
-        dataIv: 'dataIv',
-        dataTag: 'dataTag',
-      };
+      // Items with no encryption fields — a zero-knowledge server drops them all.
+      const importData = JSON.stringify({
+        items: [{ itemType: 'login', name: 'plain', username: 'alice', password: 's3cret' }],
+      });
 
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'csv', data: csvData, csvMapping });
+        .send({ format: 'bitwarden', data: importData });
 
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(1);
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('No valid items');
     });
 
     it('should reject invalid JSON in bitwarden format', async () => {
@@ -618,10 +600,11 @@ describe('Tools routes', () => {
       expect(res.body.success).toBe(false);
     });
 
-    it('should fall back to JSON parsing for csv format without mapping', async () => {
+    it('imports a csv-format payload of already-encrypted items via the single server path', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      // When CSV format is used without csvMapping, controller falls to the else branch
+      // The server no longer parses CSV; a `csv` format simply carries encrypted
+      // items in the native `{ items: [...] }` envelope like every other format.
       const importData = JSON.stringify({
         items: [sampleVaultItem({ encryptedName: 'csv-fallback-item' })],
       });

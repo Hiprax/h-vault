@@ -265,102 +265,48 @@ describe('Phase 6 — Import Validation and Edge Cases', () => {
     });
   });
 
-  // ── CSV with embedded commas and quotes (real-world edge case) ──────
+  // ── Field-injection safety on the JSON import path ─────────────────
 
-  describe('CSV import with embedded commas and quotes', () => {
-    it('should parse CSV rows with commas inside quoted fields', async () => {
-      // Build a CSV row with a comma embedded inside a quoted field — the parser
-      // must not split on that comma. Headers map to encryption fields.
-      const csvData = [
-        'encName,eData,eIv,eTag,nIv,nTag',
-        '"name,with,commas","data,with,commas",iv1,tag1,niv1,ntag1',
-      ].join('\n');
-
-      const csvMapping: Record<string, string> = {
-        encName: 'encryptedName',
-        eData: 'encryptedData',
-        eIv: 'dataIv',
-        eTag: 'dataTag',
-        nIv: 'nameIv',
-        nTag: 'nameTag',
-      };
-
-      const res = await postImport(user.accessToken, {
-        format: 'csv',
-        data: csvData,
-        csvMapping,
+  describe('import honours only the safe field projection for JSON items', () => {
+    it('ignores attacker-supplied non-allowlisted fields (_id, timestamps, bad searchHash)', async () => {
+      // Parsing + encryption are client-side; the server receives native encrypted
+      // items and maps ONLY a fixed set of fields. A tampered item that smuggles a
+      // chosen _id, timestamps, or a malformed searchHash must not have those
+      // honoured — the server mints its own id and sanitizes searchHash.
+      const importData = JSON.stringify({
+        items: [
+          {
+            itemType: 'login',
+            encryptedName: 'safeName',
+            nameIv: 'niv1',
+            nameTag: 'ntag1',
+            encryptedData: 'safeData',
+            dataIv: 'iv1',
+            dataTag: 'tag1',
+            favorite: true,
+            tags: ['legit'],
+            searchHash: 'not-a-valid-hash', // not 64-hex → sanitized away
+            _id: 'aaaaaaaaaaaaaaaaaaaaaaaa', // attacker-chosen id → must be ignored
+            createdAt: '2000-01-01T00:00:00.000Z', // must be ignored
+          },
+        ],
       });
 
-      expect(res.status).toBe(201);
-      expect(res.body.data.importedCount).toBe(1);
-
-      const item = await VaultItem.findOne({ userId: user.id }).lean();
-      expect(item).not.toBeNull();
-      expect(item!.encryptedName).toBe('name,with,commas');
-      expect(item!.encryptedData).toBe('data,with,commas');
-    });
-
-    it('a hostile CSV mapping cannot inject non-encryption fields or pollute the prototype', async () => {
-      // A hostile/tampered mapping points columns at high-value NON-encryption
-      // targets (itemType, favorite, tags, searchHash) and at a prototype-
-      // pollution vector (__proto__). The CSV row builder honours ONLY the six
-      // encrypted columns (encryptedData/dataIv/dataTag/encryptedName/nameIv/
-      // nameTag) and hardcodes every other field to a server default. This test
-      // pins that safe projection: if the builder ever started trusting the raw
-      // mapping (e.g. spreading it into the row), the injected itemType/favorite/
-      // tags/searchHash would leak and these assertions would go red.
-      //
-      // Note: CSV_ALLOWED_TARGET_FIELDS is defense-in-depth LAYERED BEHIND that
-      // explicit field-picking — removing the allowlist line alone has no
-      // observable effect here (a non-read key in the intermediate object is
-      // inert, and `obj['__proto__'] = <string>` is a no-op). The observable,
-      // regression-catching contract is the safe projection asserted below.
-      const csvData = [
-        'encName,eData,eIv,eTag,nIv,nTag,evilType,evilFav,evilTags,evilHash,proto',
-        'safeName,safeData,iv1,tag1,niv1,ntag1,secret,true,injected-tag,deadbeef,polluted',
-      ].join('\n');
-
-      const csvMapping: Record<string, string> = {
-        encName: 'encryptedName',
-        eData: 'encryptedData',
-        eIv: 'dataIv',
-        eTag: 'dataTag',
-        nIv: 'nameIv',
-        nTag: 'nameTag',
-        evilType: 'itemType', // non-encryption target -> must be ignored
-        evilFav: 'favorite', // non-encryption target -> must be ignored
-        evilTags: 'tags', // non-encryption target -> must be ignored
-        evilHash: 'searchHash', // non-encryption target -> must be ignored
-        proto: '__proto__', // prototype-pollution vector -> must be inert
-      };
-
-      const res = await postImport(user.accessToken, {
-        format: 'csv',
-        data: csvData,
-        csvMapping,
-      });
-
+      const res = await postImport(user.accessToken, { format: 'json', data: importData });
       expect(res.status).toBe(201);
       expect(res.body.data.importedCount).toBe(1);
 
       const item = await VaultItem.findOne({ userId: user.id, encryptedName: 'safeName' }).lean();
       expect(item).not.toBeNull();
-      // The six encryption columns ARE honoured.
+      // Legitimate fields ARE honoured.
       expect(item!.encryptedData).toBe('safeData');
-      expect(item!.dataIv).toBe('iv1');
-      expect(item!.dataTag).toBe('tag1');
-      expect(item!.nameIv).toBe('niv1');
-      expect(item!.nameTag).toBe('ntag1');
-      // Every non-encryption target is dropped — the fields stay at their server
-      // defaults instead of the injected 'secret' / 'true' / 'injected-tag' /
-      // 'deadbeef' values.
       expect(item!.itemType).toBe('login');
-      expect(item!.favorite).toBe(false);
-      expect(item!.tags).toEqual([]);
+      expect(item!.favorite).toBe(true);
+      expect(item!.tags).toEqual(['legit']);
+      // A non-64-hex searchHash is stripped by sanitizeImportFields.
       expect(item!.searchHash).toBeUndefined();
-      // The '__proto__' mapping did not pollute Object.prototype.
-      expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
-      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+      // The attacker-chosen _id must NOT be honoured (server mints its own).
+      expect(String(item!._id)).not.toBe('aaaaaaaaaaaaaaaaaaaaaaaa');
     });
   });
 });

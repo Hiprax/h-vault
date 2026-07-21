@@ -41,6 +41,12 @@ export const MAX_ENCRYPTED_DATA_LENGTH = 500_000;
 export const MAX_NOTE_CONTENT_LENGTH = 50_000;
 export const MAX_RESTORE_DATA_LENGTH = 26_214_400;
 export const MAX_IMPORT_DATA_LENGTH = 1_048_576;
+// Client-side raw-import-file ceiling. Import parsing + encryption happen in the
+// browser, and the encrypted payload is split into batches each kept under
+// MAX_IMPORT_DATA_LENGTH before upload, so the raw file itself may be larger than
+// a single request body. This guards the browser from an unbounded FileReader
+// read; the real per-user ceiling stays MAX_ITEMS_PER_USER.
+export const MAX_IMPORT_FILE_SIZE_BYTES = 8_388_608;
 
 // File Encryption tool (client-side, account-agnostic). The size cap is a
 // client-enforced guardrail (the file is encrypted in the browser and never

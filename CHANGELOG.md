@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-21
+
+### Added
+
+- Real client-side import for external sources: Bitwarden (JSON and CSV), LastPass, KeePass, Chrome/Edge, Firefox, 1Password, and a generic column-mapping CSV. The browser parses the export, converts each entry to a vault item, and encrypts it with the vault key before upload — no credential, note or field value leaves the device in the clear. Source folders/groups are preserved as tags, and tags are stored in plaintext (they are indexed server-side), so an import makes your source folder names visible to the server; see `SECURITY.md`. A source without a title (e.g. Firefox) derives the item name from the URL host.
+- `chrome`, `firefox`, and `onepassword` added to the `/tools/import` `format` values; unsafe-scheme URLs (e.g. `android:`) are dropped from a login's URI list and preserved in its notes.
+- `MAX_IMPORT_FILE_SIZE_BYTES` (8 MiB) client-side import-file ceiling; large imports are now split into several size-bounded requests automatically, with per-batch progress shown on the Import button.
+
+### Changed
+
+- Import parsing and encryption are now entirely client-side. The `/tools/import` endpoint accepts only already-encrypted native items (`{ items: [...] }`) regardless of `format`, which is retained purely as audit metadata; the request no longer accepts `csvMapping`.
+- Duplicate detection during import matches an incoming item against items already stored, never against other items in the same request — unchanged — but a large import is now split into several sequential requests, so items sharing a name across a batch boundary are treated as duplicates of each other. Two entries both named "Amazon" land as two items when they fall in the same batch, and as one (under `skip`) when they straddle two. Imports small enough to fit one request are unaffected. If you need every same-named entry kept, use the `keep both` conflict strategy.
+- `/tools/import` now has its own rate limit (60 requests per user per 15 minutes) instead of sharing the 10-per-IP heavy-operation budget with export, backup and bulk operations. A large migration is uploaded as several encrypted batches, which could otherwise exhaust that shared budget part-way through and stall the import.
+
+### Fixed
+
+- Importing an external export (e.g. a Firefox-exported `.csv`) no longer fails with "No valid items found to import (all items had missing encryption fields)". External formats were never parsed or encrypted on the client, so the zero-knowledge server rejected every row; they are now parsed and encrypted in the browser first.
+- Re-importing a large native H-Vault export no longer fails on the 1 MB per-request cap: the encrypted payload is sent in batches.
+- The CSV mapping preview now uses an RFC-4180 parser that correctly handles quoted fields containing embedded newlines (the previous line-split parser split them into broken rows).
+- A Bitwarden identity carrying an unusual email or phone number (for example a number with an extension, or `+1 555 CALL-NOW`) is no longer discarded wholesale. Those two fields are validated against the same rules the vault enforces and moved into the item's notes when they don't fit, so the rest of the identity — name, address, passport, SSN — is preserved.
+
+### Security
+
+- Removed the server-side plaintext-CSV import branch. It mapped raw CSV cells straight into fields named `encrypted*`, so a mis-triggered client could have stored plaintext secrets server-side, defeating the zero-knowledge guarantee. The server now never parses plaintext on the import path.
+
 ## [0.1.2] - 2026-07-20
 
 ### Added
@@ -76,7 +101,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Hiprax/h-vault/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/Hiprax/h-vault/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Hiprax/h-vault/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Hiprax/h-vault/releases/tag/v0.1.0

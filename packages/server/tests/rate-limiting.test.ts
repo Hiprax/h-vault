@@ -8,6 +8,7 @@ import {
   accountLimiter,
   tokenVerifyLimiter,
   heavyOpLimiter,
+  importLimiter,
   passwordVerifyLimiter,
   healthLimiter,
 } from '../src/middleware/rateLimiter.js';
@@ -164,9 +165,9 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
     });
   });
 
-  // ── 7.3 — Import has strictLimiter ──────────────────────────────
+  // ── 7.3 — Import has its own importLimiter ──────────────────────
 
-  describe('7.3 — POST /api/v1/tools/import (strictLimiter)', () => {
+  describe('7.3 — POST /api/v1/tools/import (importLimiter)', () => {
     it('should accept import requests through rate limiter middleware', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
@@ -626,7 +627,7 @@ describe('Rate limiter route wiring (structural)', () => {
     ],
     ['heavyOpLimiter on POST /tools/export', 'post', '/export', heavyOpLimiter],
     ['passwordVerifyLimiter on POST /tools/export', 'post', '/export', passwordVerifyLimiter],
-    ['heavyOpLimiter on POST /tools/import', 'post', '/import', heavyOpLimiter],
+    ['importLimiter on POST /tools/import', 'post', '/import', importLimiter],
     ['heavyOpLimiter on POST /backup/trigger', 'post', '/trigger', heavyOpLimiter],
     ['heavyOpLimiter on GET /backup/download', 'get', '/download', heavyOpLimiter],
     ['passwordVerifyLimiter on POST /backup/setup', 'post', '/setup', passwordVerifyLimiter],

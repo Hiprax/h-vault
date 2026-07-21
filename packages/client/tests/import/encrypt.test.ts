@@ -1,0 +1,146 @@
+// @vitest-environment node
+import { describe, it, expect, beforeAll } from 'vitest';
+import { buildEncryptedImportItems, parseImportData } from '../../src/services/import';
+import type { ParsedImportItem } from '../../src/services/import';
+import { cryptoService } from '../../src/services/crypto/cryptoService';
+
+let vaultKey: CryptoKey;
+
+beforeAll(async () => {
+  vaultKey = await globalThis.crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
+    'encrypt',
+    'decrypt',
+  ]);
+});
+
+describe('buildEncryptedImportItems', () => {
+  it('encrypts valid items (all six ciphertext fields + searchHash) and round-trips', async () => {
+    const parsed: ParsedImportItem[] = [
+      {
+        itemType: 'login',
+        name: 'GitHub',
+        data: {
+          username: 'octocat',
+          password: 'hunter2',
+          uris: [{ uri: 'https://github.com', match: 'domain' }],
+        },
+        tags: ['Work'],
+        favorite: true,
+      },
+    ];
+    const { items, skipped } = await buildEncryptedImportItems(parsed, vaultKey);
+    expect(skipped).toBe(0);
+    expect(items).toHaveLength(1);
+    const item = items[0]!;
+    for (const f of [
+      'encryptedName',
+      'nameIv',
+      'nameTag',
+      'encryptedData',
+      'dataIv',
+      'dataTag',
+    ] as const) {
+      expect(item[f].length).toBeGreaterThan(0);
+    }
+    expect(item.searchHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(item.tags).toEqual(['Work']);
+    expect(item.favorite).toBe(true);
+
+    const name = await cryptoService.decryptData(
+      item.encryptedName,
+      item.nameIv,
+      item.nameTag,
+      vaultKey,
+    );
+    expect(name).toBe('GitHub');
+    const data = JSON.parse(
+      await cryptoService.decryptData(item.encryptedData, item.dataIv, item.dataTag, vaultKey),
+    ) as { username: string; uris: { uri: string }[] };
+    expect(data.username).toBe('octocat');
+    expect(data.uris[0]?.uri).toBe('https://github.com');
+  });
+
+  it('skips items whose data fails schema validation and counts them', async () => {
+    const parsed: ParsedImportItem[] = [
+      { itemType: 'login', name: 'ok', data: { username: 'a' }, tags: [], favorite: false },
+      {
+        itemType: 'login',
+        name: 'bad',
+        data: { uris: [{ uri: 'https://x.com', match: 'not-a-match' }] },
+        tags: [],
+        favorite: false,
+      },
+    ];
+    const { items, skipped, warnings } = await buildEncryptedImportItems(parsed, vaultKey);
+    expect(items).toHaveLength(1);
+    expect(skipped).toBe(1);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('skips an item whose data is not an object at all (root-level validation error)', async () => {
+    const parsed = [
+      {
+        itemType: 'login' as const,
+        name: 'bad',
+        data: 'i-am-a-string' as unknown as Record<string, unknown>,
+        tags: [],
+        favorite: false,
+      },
+    ];
+    const { items, skipped, warnings } = await buildEncryptedImportItems(parsed, vaultKey);
+    expect(items).toHaveLength(0);
+    expect(skipped).toBe(1);
+    expect(warnings[0]).toContain('bad');
+  });
+
+  it('produces a deterministic search hash for the same name', async () => {
+    const parsed: ParsedImportItem[] = [
+      { itemType: 'note', name: 'Same', data: { content: 'x' }, tags: [], favorite: false },
+    ];
+    const a = await buildEncryptedImportItems(parsed, vaultKey);
+    const b = await buildEncryptedImportItems(parsed, vaultKey);
+    expect(a.items[0]!.searchHash).toBe(b.items[0]!.searchHash);
+  });
+
+  it('keeps a Bitwarden identity whose source email/phone fail the shared schema', async () => {
+    // End-to-end of the parse→validate→encrypt path: the parser folds the
+    // schema-invalid email/phone into notes, so the identity survives instead of
+    // being skipped wholesale (which would lose name, address, passport, …).
+    const bw = JSON.stringify({
+      items: [
+        {
+          type: 4,
+          name: 'Weird Identity',
+          identity: {
+            firstName: 'A',
+            lastName: 'B',
+            passportNumber: 'X1',
+            email: 'a@b..c',
+            phone: '+1 555 CALL-NOW',
+          },
+        },
+      ],
+    });
+    const { items: parsed } = parseImportData('bitwarden', bw);
+    const { items, skipped } = await buildEncryptedImportItems(parsed, vaultKey);
+    expect(skipped).toBe(0);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.itemType).toBe('identity');
+  });
+
+  it('never emits plaintext: ciphertext differs from the source name/data', async () => {
+    const parsed: ParsedImportItem[] = [
+      {
+        itemType: 'login',
+        name: 'PlaintextName',
+        data: { password: 'PlaintextSecret' },
+        tags: [],
+        favorite: false,
+      },
+    ];
+    const { items } = await buildEncryptedImportItems(parsed, vaultKey);
+    const item = items[0]!;
+    expect(item.encryptedName).not.toContain('PlaintextName');
+    expect(item.encryptedData).not.toContain('PlaintextSecret');
+  });
+});

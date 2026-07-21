@@ -173,11 +173,23 @@ export const exportSchema = z.object({
 });
 
 export const importSchema = z.object({
-  format: z.enum(['bitwarden', 'lastpass', 'keepass', 'csv', 'json']),
+  // Zero-knowledge import: the browser parses the source file, converts each entry
+  // to a vault item, encrypts it with the vault key, and sends already-encrypted
+  // native items in `data` as JSON `{ items: [...] }`. The server never parses
+  // plaintext and never encrypts. `format` is therefore audit-only metadata that
+  // records which source the user imported from; every value is handled
+  // identically server-side. `csv`/`json` cover generic CSV and native H-Vault
+  // exports respectively.
+  format: z.enum([
+    'bitwarden',
+    'lastpass',
+    'keepass',
+    'chrome',
+    'firefox',
+    'onepassword',
+    'csv',
+    'json',
+  ]),
   data: z.string().min(1).max(MAX_IMPORT_DATA_LENGTH),
-  csvMapping: z
-    .record(z.string().max(100), z.string().max(50))
-    .optional()
-    .refine((m) => !m || Object.keys(m).length <= 50, 'Too many mappings'),
   conflictStrategy: z.enum(['skip', 'overwrite', 'keep_both']).optional().default('skip'),
 });

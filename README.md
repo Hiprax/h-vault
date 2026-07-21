@@ -78,7 +78,7 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 | **Session management**        | Refresh-token rotation with reuse detection and family revocation. Access tokens are invalidated the instant a password changes. A locked-out, unverified or pending-deletion account cannot mint new ones. |
 | **No enumeration oracles**    | Registration, login, lockout, password reset and verification-resend are all built so that response body _and_ response time are identical whether or not the account exists.                               |
 | **Account lockout**           | 30 minutes after 10 failed attempts, with progressive delays and an unlock email — and evaluated _after_ the password check, so it never reveals that an account exists.                                    |
-| **CSRF + rate limiting**      | HMAC-SHA256 double-submit tokens with constant-time verification, and [twelve rate-limit tiers](#rate-limiting) backed by MongoDB, keyed per IP, email, user or session, with IPv6 `/64` aggregation.       |
+| **CSRF + rate limiting**      | HMAC-SHA256 double-submit tokens with constant-time verification, and [thirteen rate-limit tiers](#rate-limiting) backed by MongoDB, keyed per IP, email, user or session, with IPv6 `/64` aggregation.     |
 | **Breach detection**          | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                    |
 | **Audit log**                 | A searchable security log covering **37 distinct operations**, with TTL-based retention.                                                                                                                    |
 | **Account deletion**          | GDPR-complete, password-confirmed, and cascaded atomically across every collection.                                                                                                                         |
@@ -92,9 +92,12 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   re-encrypts incoming rows to the key you already have — and previously-restored content is
   matched by provenance, so re-running the same backup doesn't accumulate duplicates. Any
   folder cycle a malicious file plants is detected and broken.
-- **Import / export.** Import from Bitwarden, LastPass, KeePass, CSV and JSON, with
-  skip / overwrite / keep-both conflict strategies and hash-based deduplication. Undecryptable
-  rows are filtered client-side before they are sent. Export is encrypted JSON and requires
+- **Import / export.** Import from Bitwarden, LastPass, KeePass, Chrome/Edge, Firefox, 1Password
+  and generic CSV, with skip / overwrite / keep-both conflict strategies and hash-based
+  deduplication. Every source is parsed and encrypted **in the browser** before upload, so no
+  credential, note or field value ever reaches the server in the clear. Source folders/groups are
+  carried over as tags — and tags, as always, are stored in plaintext so the server can index
+  them, so your source folder names are visible to it. Export is encrypted JSON and requires
   re-entering your master password. (CSV is import-only.)
 - **File encryption tool.** A standalone, entirely client-side tool: pick any file, set a
   password, download a self-contained `.enc` container — Argon2id envelope encryption, the
@@ -609,7 +612,7 @@ start** rather than run misconfigured.
 | --------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
 | `HVAULT_HTTP_PORT`    | `8080`            | The one host port published, always bound to `127.0.0.1`                                 |
 | `HVAULT_STACK_NAME`   | `hvault`          | Namespaces the project, containers, networks and volumes                                 |
-| `HVAULT_VERSION`      | `0.1.2`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
+| `HVAULT_VERSION`      | `0.2.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
 | `HVAULT_EDGE_SUBNET`  | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                       |
 | `HVAULT_DATA_SUBNET`  | `172.31.241.0/24` | App ↔ MongoDB. Internal: no published port, no route out                                 |
 | `TRUST_PROXY_HOPS`    | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                              |
@@ -706,18 +709,18 @@ authoritative.
 <details>
 <summary><b>Tools and backup</b> — <code>/api/v1/tools</code>, <code>/api/v1/backup</code></summary>
 
-| Method | Endpoint                       | Description                                                               |
-| ------ | ------------------------------ | ------------------------------------------------------------------------- |
-| POST   | `/tools/check-password-breach` | HaveIBeenPwned k-anonymity check (5-char hash prefix)                     |
-| POST   | `/tools/export`                | Encrypted JSON export (master password required)                          |
-| POST   | `/tools/import`                | Import (Bitwarden, LastPass, KeePass, CSV, JSON) with conflict strategies |
-| POST   | `/backup/setup`                | Configure backup encryption (master password required)                    |
-| PUT    | `/backup/settings`             | Schedule and recipients                                                   |
-| POST   | `/backup/trigger`              | Create a backup and email it                                              |
-| GET    | `/backup/download`             | Download an encrypted backup file                                         |
-| GET    | `/backup/history`              | Backup history (paginated)                                                |
-| PUT    | `/backup/change-password`      | Change the backup password                                                |
-| POST   | `/backup/restore`              | Restore from an encrypted backup                                          |
+| Method | Endpoint                       | Description                                                                                                                                    |
+| ------ | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/tools/check-password-breach` | HaveIBeenPwned k-anonymity check (5-char hash prefix)                                                                                          |
+| POST   | `/tools/export`                | Encrypted JSON export (master password required)                                                                                               |
+| POST   | `/tools/import`                | Import already-encrypted items (client parses/encrypts Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, CSV) with conflict strategies |
+| POST   | `/backup/setup`                | Configure backup encryption (master password required)                                                                                         |
+| PUT    | `/backup/settings`             | Schedule and recipients                                                                                                                        |
+| POST   | `/backup/trigger`              | Create a backup and email it                                                                                                                   |
+| GET    | `/backup/download`             | Download an encrypted backup file                                                                                                              |
+| GET    | `/backup/history`              | Backup history (paginated)                                                                                                                     |
+| PUT    | `/backup/change-password`      | Change the backup password                                                                                                                     |
+| POST   | `/backup/restore`              | Restore from an encrypted backup                                                                                                               |
 
 </details>
 
@@ -755,7 +758,7 @@ are replaced with the generic status text, so an internal failure cannot leak it
 
 ## Rate limiting
 
-Twelve tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-keyed limiters collapse
+Thirteen tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-keyed limiters collapse
 an IPv6 address to its `/64` prefix, so rotating the source address inside one allocation does not
 buy an attacker a fresh bucket.
 
@@ -769,7 +772,8 @@ buy an attacker a fresh bucket.
 | Password verify | 5 / user    | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password |
 | Breach check    | 30 / user   | 15 min | HaveIBeenPwned lookups                                                                                                                                   |
 | General auth    | 60 / user   | 1 min  | profile, sessions, audit log, folder list, lock, logout, logout-all                                                                                      |
-| Heavy Ops       | 10 / IP     | 15 min | empty trash, bulk delete, bulk move, export, import, backup trigger, backup download                                                                     |
+| Heavy Ops       | 10 / IP     | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                             |
+| Import          | 60 / user   | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                   |
 | CSRF            | 30 / IP     | 15 min | the CSRF token endpoint                                                                                                                                  |
 | Health          | 60 / IP     | 1 min  | health and public config — counted **in memory**, per process (see below)                                                                                |
 | Metrics         | 60 / IP     | 1 min  | the metrics endpoint — counted **in memory**, per process (see below)                                                                                    |
@@ -870,9 +874,9 @@ npm run test:e2e                # Playwright
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                         |
 | ---------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Server** | 93    | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
-| **Client** | 68    | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, and the file-encryption tool against the **real** crypto library                                                                                                                       |
+| **Client** | 76    | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                   |
 | **Shared** | 6     | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                          |
-| **E2E**    | 9     | Playwright (Chromium): 184 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock and file-encryption journeys                                                                                                                                                                                              |
+| **E2E**    | 10    | Playwright (Chromium): 186 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock and file-encryption journeys                                                                                                                                                                                              |
 
 **Coverage** is measured with `@vitest/coverage-v8` and enforced as a build gate — a regression
 fails the push rather than being quietly absorbed. `server` and `client` must clear **90%** on all

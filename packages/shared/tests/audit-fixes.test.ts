@@ -162,12 +162,15 @@ describe('Task 3.16: Token fields max length', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Task 3.17: csvMapping max 50 keys
+// Task 3.17 (revised): import is zero-knowledge — csvMapping is no longer part
+// of the wire schema. Column mapping happens client-side before encryption, and
+// the server receives only already-encrypted items. A legacy csvMapping field is
+// silently stripped rather than validated.
 // ---------------------------------------------------------------------------
-describe('Task 3.17: csvMapping max key count', () => {
-  it('should accept csvMapping with exactly 50 keys', () => {
+describe('importSchema no longer carries csvMapping', () => {
+  it('strips a legacy csvMapping field of any size', () => {
     const mapping: Record<string, string> = {};
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 60; i++) {
       mapping[`key${i}`] = `val${i}`;
     }
     const result = importSchema.safeParse({
@@ -176,19 +179,7 @@ describe('Task 3.17: csvMapping max key count', () => {
       csvMapping: mapping,
     });
     expect(result.success).toBe(true);
-  });
-
-  it('should reject csvMapping with more than 50 keys', () => {
-    const mapping: Record<string, string> = {};
-    for (let i = 0; i < 51; i++) {
-      mapping[`key${i}`] = `val${i}`;
-    }
-    const result = importSchema.safeParse({
-      format: 'csv',
-      data: 'some-csv-data',
-      csvMapping: mapping,
-    });
-    expect(result.success).toBe(false);
+    expect(result.success && 'csvMapping' in result.data).toBe(false);
   });
 });
 

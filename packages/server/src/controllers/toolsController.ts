@@ -106,53 +106,6 @@ export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-// CSV import maps user-supplied column headers onto target field names via the
-// request's `csvMapping`. Only these six encrypted fields are ever read back
-// when the item is built, so writes are restricted to them: a mapping that
-// points at any other key — including prototype-pollution vectors such as
-// `__proto__`, `constructor` or `prototype` — is ignored instead of being
-// written into the row. Defense-in-depth behind Zod, and it removes a
-// remote-property-injection sink outright.
-const CSV_ALLOWED_TARGET_FIELDS = new Set<string>([
-  'encryptedData',
-  'dataIv',
-  'dataTag',
-  'encryptedName',
-  'nameIv',
-  'nameTag',
-]);
-
-/**
- * Parses CSV text into an array of rows (each row is an array of field strings).
- * Handles quoted fields and escaped double-quotes per RFC 4180.
- */
-function parseCSVData(text: string): string[][] {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim());
-  return lines.map((line) => {
-    const fields: string[] = [];
-    let current = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i] ?? '';
-      if (ch === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-      } else if (ch === ',' && !inQuotes) {
-        fields.push(current.trim());
-        current = '';
-      } else {
-        current += ch;
-      }
-    }
-    fields.push(current.trim());
-    return fields;
-  });
-}
-
 // ── Handlers ─────────────────────────────────────────────────────────
 
 const HEX_PREFIX_RE = /^[0-9a-fA-F]{5}$/;
@@ -402,139 +355,61 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
 
 export const importVault = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
-  const { format, data, csvMapping, conflictStrategy } = req.body as ImportInput;
+  const { format, data, conflictStrategy } = req.body as ImportInput;
 
   // Every imported row carries ciphertext encrypted with the caller's current
   // vault key — a rotation in flight would strand all of it. Fence before any
   // parsing so the rejection is cheap.
   await assertVaultNotRotating(userId);
 
-  let itemsToCreate: Record<string, unknown>[] = [];
+  // Zero-knowledge import: the client already parsed the source file, converted
+  // each entry to a vault item, and encrypted it with the vault key. Every format
+  // therefore arrives as the same native `{ items: [...] }` envelope of already-
+  // encrypted rows — `format` is audit-only metadata here. The server never parses
+  // plaintext and never encrypts (it holds no vault key), so there is a single
+  // code path. Rows missing the ciphertext fields are dropped by the filter below.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    throw httpErrors.badRequest(
+      'Invalid import data: expected a JSON object of already-encrypted items ({ items: [...] }).',
+    );
+  }
 
-  if (format === 'json') {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      throw httpErrors.badRequest('Invalid JSON data');
-    }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('items' in parsed) ||
+    !Array.isArray(parsed.items)
+  ) {
+    throw httpErrors.badRequest('Invalid import format: expected { items: [...] }');
+  }
 
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !('items' in parsed) ||
-      !Array.isArray(parsed.items)
-    ) {
-      throw httpErrors.badRequest('Invalid import format: expected { items: [...] }');
-    }
+  const importData = parsed as { items: Record<string, unknown>[] };
 
-    const importData = parsed as { items: Record<string, unknown>[] };
-
-    itemsToCreate = importData.items
-      .filter((item) => {
-        const type = (item.itemType as string | undefined) ?? 'login';
-        return (ITEM_TYPES as readonly string[]).includes(type);
-      })
-      .map((item) => {
-        const sanitized = sanitizeImportFields(item);
-        return {
-          userId,
-          itemType: ((item.itemType as string | undefined) ?? 'login') as ItemType,
-          encryptedData: (item.encryptedData as string | undefined) ?? '',
-          dataIv: (item.dataIv as string | undefined) ?? '',
-          dataTag: (item.dataTag as string | undefined) ?? '',
-          encryptedName: (item.encryptedName as string | undefined) ?? '',
-          nameIv: (item.nameIv as string | undefined) ?? '',
-          nameTag: (item.nameTag as string | undefined) ?? '',
-          tags: sanitized.tags,
-          favorite: item.favorite === true,
-          folderId: sanitized.folderId,
-          searchHash: sanitized.searchHash,
-        };
-      });
-  } else if (format === 'csv' && csvMapping && Object.keys(csvMapping).length > 0) {
-    // Parse raw CSV data using the column-to-field mapping provided by the client
-    const rows = parseCSVData(data);
-    if (rows.length < 2) {
-      throw httpErrors.badRequest('CSV data must have a header row and at least one data row');
-    }
-
-    const headers = rows[0] ?? [];
-    const dataRows = rows.slice(1);
-
-    itemsToCreate = dataRows.map((row) => {
-      const mapped: Record<string, string> = {};
-      headers.forEach((header, index) => {
-        const fieldName = csvMapping[header];
-        const cellValue = row[index];
-        if (fieldName && CSV_ALLOWED_TARGET_FIELDS.has(fieldName) && cellValue !== undefined) {
-          mapped[fieldName] = cellValue;
-        }
-      });
-
+  const itemsToCreate: Record<string, unknown>[] = importData.items
+    .filter((item) => {
+      const type = (item.itemType as string | undefined) ?? 'login';
+      return (ITEM_TYPES as readonly string[]).includes(type);
+    })
+    .map((item) => {
+      const sanitized = sanitizeImportFields(item);
       return {
         userId,
-        itemType: 'login' as const,
-        // CSV imports store plaintext data as-is; actual encryption must happen on the client
-        // before calling this endpoint. Here we pass through the mapped fields for items
-        // that are already encrypted by the client.
-        encryptedData: mapped.encryptedData ?? '',
-        dataIv: mapped.dataIv ?? '',
-        dataTag: mapped.dataTag ?? '',
-        encryptedName: mapped.encryptedName ?? '',
-        nameIv: mapped.nameIv ?? '',
-        nameTag: mapped.nameTag ?? '',
-        tags: [] as string[],
-        favorite: false,
+        itemType: ((item.itemType as string | undefined) ?? 'login') as ItemType,
+        encryptedData: (item.encryptedData as string | undefined) ?? '',
+        dataIv: (item.dataIv as string | undefined) ?? '',
+        dataTag: (item.dataTag as string | undefined) ?? '',
+        encryptedName: (item.encryptedName as string | undefined) ?? '',
+        nameIv: (item.nameIv as string | undefined) ?? '',
+        nameTag: (item.nameTag as string | undefined) ?? '',
+        tags: sanitized.tags,
+        favorite: item.favorite === true,
+        folderId: sanitized.folderId,
+        searchHash: sanitized.searchHash,
       };
     });
-  } else {
-    // For other formats (bitwarden, lastpass, keepass, csv without mapping),
-    // attempt basic parsing. The data is expected to be already
-    // re-encrypted by the client, so we just parse the structure.
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      throw httpErrors.badRequest(
-        `Unable to parse ${format} import data. Please ensure the data is in the correct format.`,
-      );
-    }
-
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !('items' in parsed) ||
-      !Array.isArray(parsed.items)
-    ) {
-      throw httpErrors.badRequest('Invalid import format: expected { items: [...] }');
-    }
-
-    const importData = parsed as { items: Record<string, unknown>[] };
-
-    itemsToCreate = importData.items
-      .filter((item) => {
-        const type = (item.itemType as string | undefined) ?? 'login';
-        return (ITEM_TYPES as readonly string[]).includes(type);
-      })
-      .map((item) => {
-        const sanitized = sanitizeImportFields(item);
-        return {
-          userId,
-          itemType: ((item.itemType as string | undefined) ?? 'login') as ItemType,
-          encryptedData: (item.encryptedData as string | undefined) ?? '',
-          dataIv: (item.dataIv as string | undefined) ?? '',
-          dataTag: (item.dataTag as string | undefined) ?? '',
-          encryptedName: (item.encryptedName as string | undefined) ?? '',
-          nameIv: (item.nameIv as string | undefined) ?? '',
-          nameTag: (item.nameTag as string | undefined) ?? '',
-          tags: sanitized.tags,
-          favorite: item.favorite === true,
-          folderId: sanitized.folderId,
-          searchHash: sanitized.searchHash,
-        };
-      });
-  }
 
   if (itemsToCreate.length > MAX_IMPORT_ITEMS) {
     throw httpErrors.badRequest(

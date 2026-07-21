@@ -618,18 +618,20 @@ describe('vault + tools controller edge branches', () => {
     });
   });
 
-  describe('POST /tools/import — CSV mapping defaults', () => {
-    it('rejects the import when the mapping leaves required encrypted fields empty, persisting nothing', async () => {
-      const csvData = ['name,secret', 'enc-name-1,enc-data-1', 'enc-name-2,enc-data-2'].join('\n');
+  describe('POST /tools/import — items missing encryption fields', () => {
+    it('rejects the import when items lack ciphertext, persisting nothing', async () => {
+      // A native envelope whose items carry no encrypted fields (e.g. plaintext
+      // that never went through client-side encryption). The non-empty filter
+      // drops them all and the whole import is rejected before any write.
+      const importData = JSON.stringify({
+        items: [
+          { itemType: 'login', name: 'a', username: 'x' },
+          { itemType: 'login', name: 'b', password: 'y' },
+        ],
+      });
 
-      // Only encryptedName is mapped — every other encrypted field falls back to
-      // '' and the row fails the non-empty filter.
       const res = await post('/api/v1/tools/import', user, csrf, agent)
-        .send({
-          format: 'csv',
-          data: csvData,
-          csvMapping: { name: 'encryptedName' },
-        })
+        .send({ format: 'csv', data: importData })
         .expect(400);
 
       expect(res.body.success).toBe(false);

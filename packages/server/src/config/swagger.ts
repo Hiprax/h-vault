@@ -545,17 +545,34 @@ export const swaggerSpec: JsonObject = {
         type: 'object',
         required: ['format', 'data'],
         properties: {
-          format: { type: 'string', enum: ['bitwarden', 'lastpass', 'keepass', 'csv', 'json'] },
+          format: {
+            type: 'string',
+            enum: [
+              'bitwarden',
+              'lastpass',
+              'keepass',
+              'chrome',
+              'firefox',
+              'onepassword',
+              'csv',
+              'json',
+            ],
+            description:
+              'Source the items originated from (audit metadata only). All parsing and encryption happen client-side; the server receives already-encrypted native items regardless of format.',
+          },
           data: {
             type: 'string',
             minLength: 1,
             maxLength: 1048576,
-            description: 'Exported data (max 1 MB)',
+            description:
+              'A JSON object of already-encrypted native items: `{ "items": [ ... ] }` (max 1 MB per request; large imports are split into several requests by the client).',
           },
-          csvMapping: {
-            type: 'object',
-            additionalProperties: { type: 'string' },
-            description: 'Optional column name mappings for CSV import',
+          conflictStrategy: {
+            type: 'string',
+            enum: ['skip', 'overwrite', 'keep_both'],
+            default: 'skip',
+            description:
+              "How to treat an incoming item whose search hash matches one already in the vault. Duplicates are matched against items ALREADY STORED, never against other items in the same request. Note that a large import is split into several sequential requests, so an earlier batch's inserts are visible to a later batch.",
           },
         },
       },
@@ -1983,7 +2000,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Tools'],
         summary: 'Import vault items',
         description:
-          'Imports vault items from various formats (JSON, Bitwarden, LastPass, KeePass, CSV). Max 10,000 items, 1 MB payload. Rate limited: 3 req/IP per 15 min.',
+          'Stores already-encrypted vault items. The client parses the source export (Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, or generic CSV) and encrypts every item locally before calling this endpoint; the server never sees plaintext and never parses the source format (`format` is audit metadata only). Max 10,000 items per request, 1 MB payload per request (large imports are split into several requests by the client). Rate limited by `importLimiter`: 60 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -1994,7 +2011,7 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          200: {
+          201: {
             description: 'Import result',
             content: {
               'application/json': {
@@ -2005,7 +2022,10 @@ export const swaggerSpec: JsonObject = {
                     data: {
                       type: 'object',
                       properties: {
-                        itemsImported: { type: 'integer' },
+                        importedCount: { type: 'integer' },
+                        skippedCount: { type: 'integer' },
+                        duplicateCount: { type: 'integer' },
+                        overwrittenCount: { type: 'integer' },
                       },
                     },
                   },
