@@ -149,19 +149,69 @@ export async function computeItemIdentity(input: ItemIdentityInput): Promise<str
   const { itemType, name } = input;
   const data = schemaValidated(itemType, input.data);
 
-  if (itemType === 'login') {
-    const host = normalizeHost(firstUri(data));
-    const username = normalizeUsername(data.username);
-    // Only a key with BOTH halves is discriminating enough to match on.
-    if (host && username) return `login${SEP}${host}${SEP}${username}`;
-  }
+  const logical = logicalLoginKey(itemType, data);
+  if (logical !== undefined) return logical;
 
-  return `${itemType}${SEP}${await sha256Hex(canonicalJson({ name, data }))}`;
+  // Non-logical items (and logins missing a discriminating half) hash to their
+  // exact content; this branch never computes the hash for a logical login.
+  return contentKeyFrom(itemType, name, data);
+}
+
+/**
+ * The exact-content key for an item: `<itemType>\0<sha256hex>` of the canonical
+ * JSON of its schema-validated `{ name, data }`. This is the SAME key
+ * `computeItemIdentity` returns for a non-logical item, exposed on its own so a
+ * caller can decide whether two items that share a LOGICAL key (e.g. a login's
+ * host+username) also have identical content — which is what the resolver needs
+ * to tell an `overwrite` that must write from one that is already a no-op, and
+ * to collapse only truly byte-identical intra-file duplicates.
+ */
+export async function computeContentKey(input: ItemIdentityInput): Promise<string> {
+  const data = schemaValidated(input.itemType, input.data);
+  return contentKeyFrom(input.itemType, input.name, data);
+}
+
+/**
+ * Compute BOTH the identity key and the exact-content key in a single pass,
+ * validating the data only once. For a logical login the two differ (a
+ * host+username identity vs a content hash); for everything else they are
+ * identical. The resolver computes both keys for every item, so this avoids a
+ * redundant second schema parse per item.
+ */
+export async function computeItemKeys(
+  input: ItemIdentityInput,
+): Promise<{ identityKey: string; contentKey: string }> {
+  const { itemType, name } = input;
+  const data = schemaValidated(itemType, input.data);
+  const contentKey = await contentKeyFrom(itemType, name, data);
+  const logical = logicalLoginKey(itemType, data);
+  return { identityKey: logical ?? contentKey, contentKey };
 }
 
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+/**
+ * The logical login key `login\0<host>\0<username>`, or `undefined` when the
+ * item is not a login or is missing a discriminating half. A key with only one
+ * half would merge every account-less entry on a site, so it is not used.
+ */
+function logicalLoginKey(itemType: ItemType, data: Record<string, unknown>): string | undefined {
+  if (itemType !== 'login') return undefined;
+  const host = normalizeHost(firstUri(data));
+  const username = normalizeUsername(data.username);
+  if (host && username) return `login${SEP}${host}${SEP}${username}`;
+  return undefined;
+}
+
+async function contentKeyFrom(
+  itemType: ItemType,
+  name: string,
+  data: Record<string, unknown>,
+): Promise<string> {
+  return `${itemType}${SEP}${await sha256Hex(canonicalJson({ name, data }))}`;
+}
 
 function schemaValidated(
   itemType: ItemType,

@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { cn, isSafeUrl } from '../../lib/utils';
+import { isUndecodableData } from '../../lib/vaultData';
 import { ErrorBoundary } from '../layout/ErrorBoundary';
 import { useVaultStore, type DecryptedVaultItem } from '../../stores/vaultStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -708,18 +709,12 @@ function UndecodableNotice() {
   );
 }
 
-/**
- * True when the decrypted data object is the un-defaulted raw fallback that
- * vaultStore keeps after a schema-validation or JSON-parse failure. Such
- * objects may be missing the array fields the type views iterate over.
- */
-function isUndecodableData(data: Record<string, unknown>): boolean {
-  return data._validationError === true || '_raw' in data;
-}
-
 // ---------------------------------------------------------------------------
 // Main detail component
 // ---------------------------------------------------------------------------
+
+// `isUndecodableData` lives in `lib/vaultData` so this view and the import
+// resolver share one definition (see that module for why they must agree).
 
 interface VaultItemDetailProps {
   item: DecryptedVaultItem;

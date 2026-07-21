@@ -8,6 +8,7 @@
 
 import { create } from 'zustand';
 import { cryptoService } from '../services/crypto/cryptoService.js';
+import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
 import { offlineCache } from '../services/offlineCache.js';
 import { logger } from '../lib/logger.js';
 import { useAuthStore } from './authStore.js';
@@ -901,7 +902,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
   ): Promise<void> => {
     const vaultKey = getVaultKey();
     const myGeneration = mutationGeneration;
-    const MAX_PASSWORD_HISTORY = 10;
 
     const encryptedName = await cryptoService.encryptData(name, vaultKey);
     const encryptedData = await cryptoService.encryptData(JSON.stringify(data), vaultKey);
@@ -909,38 +909,19 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     assertEncryptedSizes(encryptedName, encryptedData);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
-    // Build password history for login items when password changes
-    let passwordHistoryPayload:
-      { encryptedPassword: string; iv: string; tag: string; changedAt: string }[] | undefined;
-
+    // Build password history for login items when the password changes. The
+    // detection + payload construction is shared with the import flow via
+    // buildPasswordHistoryPayload so the two paths cannot diverge.
     const existingItem = get().items.find((item) => item.id === id);
-    const existingPassword = existingItem?.data.password;
-    if (
-      existingItem?.itemType === 'login' &&
-      typeof existingPassword === 'string' &&
-      existingPassword.length > 0 &&
-      typeof data.password === 'string' &&
-      existingPassword !== data.password
-    ) {
-      const encrypted = await cryptoService.encryptData(existingPassword, vaultKey);
-
-      const existingHistory = (existingItem._raw.passwordHistory ?? []).map((entry) => ({
-        encryptedPassword: entry.encryptedPassword,
-        iv: entry.iv,
-        tag: entry.tag,
-        changedAt: entry.changedAt,
-      }));
-
-      passwordHistoryPayload = [
-        {
-          encryptedPassword: encrypted.encrypted,
-          iv: encrypted.iv,
-          tag: encrypted.tag,
-          changedAt: new Date().toISOString(),
-        },
-        ...existingHistory,
-      ].slice(0, MAX_PASSWORD_HISTORY);
-    }
+    const passwordHistoryPayload =
+      existingItem?.itemType === 'login'
+        ? await buildPasswordHistoryPayload({
+            existingRawHistory: existingItem._raw.passwordHistory,
+            oldPassword: existingItem.data.password,
+            newPassword: data.password,
+            vaultKey,
+          })
+        : undefined;
 
     const response = await updateItemApi(id, {
       encryptedName: encryptedName.encrypted,
