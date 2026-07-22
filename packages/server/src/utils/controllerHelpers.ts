@@ -131,14 +131,13 @@ export function vaultRotationLockName(userId: string): string {
  * lock is what actually bounds concurrency. `acquireJobLock` is an atomic upsert
  * against the unique `jobName` index, which holds with or without transactions.
  *
- * Scope, deliberately: the STRUCTURED `operations` executor takes this lock; the
- * deprecated legacy `data` branch does not. Both write the same per-user rows
- * against the same cap, so for as long as both shapes are served the legacy one
- * can still race itself — exactly as it always has. That is accepted for the one
- * release in which the legacy envelope survives (no shipped client sends
- * `operations` yet, so today's races are legacy-vs-legacy, i.e. no regression),
- * and it closes when that branch is deleted. Do not read this helper as already
- * covering both shapes.
+ * Scope: `operations` is now the only import wire shape, so this lock covers
+ * every import — import-vs-import cannot breach the cap on any topology. What it
+ * does NOT cover is a row committed by a DIFFERENT endpoint (`POST /items`,
+ * `POST /backup/restore`) between the executor's count and its insert; that
+ * narrower window is pre-existing, is shared with `vaultController.createItem`'s
+ * own count-then-write check, and is documented where it is taken in
+ * `toolsController.executeImportOperations`.
  */
 export function vaultImportLockName(userId: string): string {
   return `vault-import:${userId}`;

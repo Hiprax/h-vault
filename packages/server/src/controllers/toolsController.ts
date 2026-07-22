@@ -105,8 +105,6 @@ export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-// ── Handlers ─────────────────────────────────────────────────────────
-
 const HEX_PREFIX_RE = /^[0-9a-fA-F]{5}$/;
 
 const ALLOWED_ITEM_FIELDS = new Set([
@@ -213,6 +211,8 @@ function assertImportFieldLengths(items: readonly object[]): void {
     }
   }
 }
+
+// ── Handlers ─────────────────────────────────────────────────────────
 
 export const checkPasswordBreach = catchAsync(
   async (req: Request, res: Response): Promise<void> => {
@@ -398,8 +398,11 @@ async function executeImportOperations(
   assertImportFieldLengths([...inserts, ...updates]);
 
   // 2 ── folderId ownership. A folder the caller does not own is stripped from
-  // the row rather than failing it, matching the legacy branch: the item is
-  // still imported, it just lands at the vault root.
+  // the row rather than failing it — unlike an unresolvable update target below,
+  // which rejects the request. The asymmetry is deliberate: a foreign folder id
+  // costs the item nothing but its placement, so importing it at the vault root
+  // preserves the credential, whereas an update naming an item that is not the
+  // caller's has no safe interpretation at all.
   const requestedFolderIds = inserts
     .map((item) => item.folderId)
     .filter((folderId): folderId is string => folderId !== undefined);

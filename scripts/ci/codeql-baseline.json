@@ -28,6 +28,11 @@
       "file": "packages/server/src/controllers/folderController.ts"
     },
     {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/toolsController.ts::e73c1ff455fba960:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/toolsController.ts"
+    },
+    {
       "fingerprint": "js/sql-injection::packages/server/src/controllers/userController.ts::e27c13edf88f3689:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/userController.ts"
