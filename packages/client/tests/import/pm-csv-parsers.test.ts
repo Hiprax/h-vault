@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseImportData, detectCsvFormat } from '../../src/services/import';
+import { computeItemIdentity } from '../../src/services/import/identity';
 
 describe('LastPass CSV', () => {
   const csv =
@@ -71,16 +72,49 @@ describe('1Password CSV', () => {
 });
 
 describe('Generic CSV with column mapping', () => {
-  it('maps user columns and derives name from URL when name is unmapped', () => {
+  it('maps user columns and derives name from URL + username when name is unmapped', () => {
     const csv = 'Website,Login,Secret\nhttps://foo.com,user@foo.com,p@ss';
     const mapping = { Website: 'url', Login: 'username', Secret: 'password' };
     const { items } = parseImportData('csv', csv, mapping);
     expect(items).toHaveLength(1);
     const item = items[0]!;
     expect(item.itemType).toBe('login');
-    expect(item.name).toBe('foo.com'); // derived from URL host
+    // Derived from the URL host, with the username appended so several accounts
+    // on one site do not all land under the same name.
+    expect(item.name).toBe('foo.com (user@foo.com)');
     expect(item.data.username).toBe('user@foo.com');
     expect(item.data.password).toBe('p@ss');
+  });
+
+  it('leaves a mapped name column verbatim, username or not', () => {
+    // Only a DERIVED name is disambiguated; a title the source supplied is the
+    // user's own label and is never rewritten.
+    const csv = 'Title,Website,Login\nWork Google,https://accounts.google.com,alice@example.com';
+    const { items } = parseImportData('csv', csv, {
+      Title: 'name',
+      Website: 'url',
+      Login: 'username',
+    });
+    expect(items[0]?.name).toBe('Work Google');
+  });
+
+  it('names an unsafe-scheme row from its host but keys it on exact content', async () => {
+    // The realistic member of the "host-NAMED but exact-content-KEYED" class: a
+    // mobile export's `android://` URI. `toUriEntry` drops it from `uris`, so the
+    // strict `normalizeHost` has nothing to read and the row falls back to
+    // exact-content matching — while the permissive `hostFromUrl` still names it.
+    // Appending the username therefore moves this row's key, which splits it from
+    // a copy imported before the rename rather than merging it with anything: a
+    // visible duplicate, never a silent overwrite of a different account.
+    const csv = 'URL,User\nandroid://com.example,alice';
+    const { items } = parseImportData('csv', csv, { URL: 'url', User: 'username' });
+    const item = items[0]!;
+
+    expect(item.name).toBe('com.example (alice)');
+    expect(item.data.uris).toEqual([]);
+    const key = await computeItemIdentity(item);
+    expect(key).toMatch(/^login\u0000[0-9a-f]{64}$/);
+    expect(key).not.toBe(await computeItemIdentity({ ...item, name: 'com.example' }));
   });
 
   it('drops unsafe-scheme URLs but keeps the item (preserved in notes)', () => {

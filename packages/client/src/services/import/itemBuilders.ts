@@ -271,17 +271,60 @@ export function buildLogin(input: LoginInput): ParsedImportItem {
   };
 }
 
+/**
+ * Derive the display name of an imported login.
+ *
+ * An explicit source title is used verbatim (trimmed and clamped) and is NEVER
+ * modified — the user named that entry, and rewriting their label would be a
+ * surprise. Only a name DERIVED from the URL host is disambiguated: a source
+ * with no title column (Firefox, an unmapped generic CSV) would otherwise name
+ * every account on one site `accounts.google.com`, so ten Google accounts arrive
+ * as ten visually identical rows that cannot be told apart. Appending the
+ * username fixes that at the source, for every list, search result and picker at
+ * once.
+ *
+ * This is a DISPLAY change only. Import matching keys a login off its host and
+ * username (`identity.ts`), never its name, so a login with a resolvable host
+ * and a username keeps exactly the identity it had before — which is what makes
+ * a re-import of the same file still a no-op.
+ */
 function deriveLoginName(input: LoginInput): string {
   const explicit = clampName(input.name ?? '');
   if (explicit) return explicit;
   const firstUrl = (input.urls ?? []).find((u) => typeof u === 'string' && u.trim());
   if (typeof firstUrl === 'string') {
-    const host = clampName(hostFromUrl(firstUrl));
-    if (host) return host;
+    const host = hostFromUrl(firstUrl).trim();
+    if (host) return hostDerivedName(host, input.username ?? '');
   }
+  // No usable host: the username alone already distinguishes the row.
   const user = clampName(input.username ?? '');
   if (user) return user;
   return DEFAULT_NAMES.login;
+}
+
+/** Characters `hostDerivedName` spends on decoration: a space and two parens. */
+const USERNAME_SUFFIX_OVERHEAD = 3;
+
+/**
+ * `"<host> (<username>)"`, or the bare host when there is no username, bounded
+ * by {@link MAX_IMPORT_NAME_LENGTH}.
+ *
+ * Both halves carry meaning — the host says WHERE the account is, the username
+ * says WHICH account it is — so when the pair does not fit, the budget is split
+ * fairly instead of letting one half crowd the other out: whichever half is
+ * under its share keeps all of it and yields the slack to the other. A
+ * pathologically long host can therefore never squeeze out the very
+ * disambiguator this exists to add, and a pathologically long username can never
+ * hide the host.
+ */
+function hostDerivedName(host: string, rawUsername: string): string {
+  const username = rawUsername.trim();
+  if (!username) return clampName(host);
+
+  const budget = MAX_IMPORT_NAME_LENGTH - USERNAME_SUFFIX_OVERHEAD;
+  const share = Math.floor(budget / 2);
+  const hostBudget = host.length <= share ? host.length : Math.max(share, budget - username.length);
+  return `${host.slice(0, hostBudget)} (${username.slice(0, budget - hostBudget)})`;
 }
 
 export interface NoteInput {
