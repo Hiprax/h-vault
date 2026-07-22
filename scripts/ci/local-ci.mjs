@@ -47,7 +47,7 @@ const pkg = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')
  * Enforces the Node floor the project actually supports.
  *
  * This is what remains of the old Node 22 + 24 CI matrix. The matrix itself is
- * not reproduced: the repo pins Node 24 (.nvmrc, `node:24-alpine` in every
+ * not reproduced: the repo pins Node 24 (.nvmrc, `node:24-alpine3.23` in every
  * production image), and `engines.node` was tightened to `>=24` to match — so the
  * old 22 leg tested a runtime nothing here ships on, and standing a second
  * toolchain up on every push would cost more than it defends. Enforcing `engines`
@@ -148,7 +148,8 @@ const GATES = [
     ci: 'e2e job',
     // --forbid-only mirrors the CI config's `forbidOnly: !!process.env.CI`, but CI
     // is deliberately NOT set: that would also flip `reuseExistingServer` off and
-    // make the gate fail outright whenever a dev server already holds port 3000.
+    // make the gate fail outright whenever a dev server already holds the client
+    // dev port (5173 by default — see vite.config.helpers' resolveDevPort).
     // The list reporter matters just as much — the default HTML reporter opens a
     // browser on failure, which would hang a git hook forever.
     run: () => runNpm(['run', 'test:e2e', '--', '--forbid-only', '--retries=2', '--reporter=list']),

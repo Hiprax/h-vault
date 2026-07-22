@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import axios from 'axios';
-import { MAX_ENCRYPTED_DATA_LENGTH, MAX_IMPORT_ITEMS, PASSWORD_HISTORY_MAX } from '@hvault/shared';
+import {
+  MAX_ENCRYPTED_DATA_LENGTH,
+  MAX_IMPORT_ITEMS,
+  PASSWORD_HISTORY_MAX,
+  HIBP_BATCH_MAX_PREFIXES,
+} from '@hvault/shared';
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
@@ -134,12 +139,17 @@ describe('Tools routes', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data).toBe(hibpBody);
 
-      // The request is the k-anonymity range URL and carries the SSRF hardening
-      // (maxRedirects:0). A regression that dropped either would fail here.
+      // The request is the k-anonymity range URL, carries the SSRF hardening
+      // (maxRedirects:0), and the `Add-Padding` privacy header. A regression that
+      // dropped any of these would fail here.
       expect(getSpy).toHaveBeenCalledTimes(1);
       expect(getSpy).toHaveBeenCalledWith(
         'https://api.pwnedpasswords.com/range/5BAA6',
-        expect.objectContaining({ maxRedirects: 0, timeout: 10_000 }),
+        expect.objectContaining({
+          maxRedirects: 0,
+          timeout: 10_000,
+          headers: expect.objectContaining({ 'Add-Padding': 'true' }),
+        }),
       );
 
       // Second identical request must be served from the module-level cache —
@@ -155,6 +165,36 @@ describe('Tools routes', () => {
       expect(res2.status).toBe(200);
       expect(res2.body.data).toBe(hibpBody);
       expect(getSpy).toHaveBeenCalledTimes(1);
+
+      getSpy.mockRestore();
+      hibpCache.clear();
+    });
+
+    it('requests Add-Padding and strips count-0 padding rows from the response', async () => {
+      // Add-Padding returns dummy rows with COUNT === 0 that must be discarded;
+      // a high-count row (:100) must NOT be mistaken for a padding row.
+      hibpCache.clear();
+      const padded =
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:2\r\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB:0\r\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC:100';
+      const getSpy = vi.spyOn(axios, 'get').mockResolvedValue({ data: padded });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/check-password-breach')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ hashPrefix: 'ABCDE' });
+
+      expect(res.status).toBe(200);
+      // The :0 padding row is gone; the real and high-count rows survive.
+      expect(res.body.data).toBe(
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:2\r\nCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC:100',
+      );
+      expect(getSpy).toHaveBeenCalledWith(
+        'https://api.pwnedpasswords.com/range/ABCDE',
+        expect.objectContaining({ headers: expect.objectContaining({ 'Add-Padding': 'true' }) }),
+      );
 
       getSpy.mockRestore();
       hibpCache.clear();
@@ -212,6 +252,130 @@ describe('Tools routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
+    });
+  });
+
+  // ── Check Password Breach (batch) ─────────────────────────────────
+
+  describe('POST /api/v1/tools/check-password-breach/batch', () => {
+    it('fans out unique prefixes, dedupes + uppercase-normalizes, and caches', async () => {
+      hibpCache.clear();
+      const bodies: Record<string, string> = {
+        '5BAA6': 'AAA:1\r\nBBB:2',
+        ABCDE: 'CCC:3',
+      };
+      const getSpy = vi
+        .spyOn(axios, 'get')
+        .mockImplementation((url: string) =>
+          Promise.resolve({ data: bodies[url.split('/range/')[1] ?? ''] ?? '' }),
+        );
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      // '5baa6' (lowercase) collapses onto '5BAA6'; three inputs -> two lookups.
+      const res = await agent
+        .post('/api/v1/tools/check-password-breach/batch')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ hashPrefixes: ['5BAA6', '5baa6', 'ABCDE'] });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data['5BAA6']).toBe(bodies['5BAA6']);
+      expect(res.body.data.ABCDE).toBe(bodies.ABCDE);
+      expect(res.body.errors).toEqual([]);
+      expect(getSpy).toHaveBeenCalledTimes(2); // one per unique prefix
+      // Uppercase-normalized URL + SSRF hardening preserved.
+      expect(getSpy).toHaveBeenCalledWith(
+        'https://api.pwnedpasswords.com/range/5BAA6',
+        expect.objectContaining({ maxRedirects: 0, timeout: 10_000 }),
+      );
+
+      // Second identical request is fully served from cache.
+      getSpy.mockClear();
+      const { csrfToken: c2, csrfCookie: k2 } = await getCsrf(agent);
+      const res2 = await agent
+        .post('/api/v1/tools/check-password-breach/batch')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', c2)
+        .set('Cookie', k2)
+        .send({ hashPrefixes: ['5BAA6', 'ABCDE'] });
+      expect(res2.status).toBe(200);
+      expect(getSpy).not.toHaveBeenCalled();
+
+      getSpy.mockRestore();
+      hibpCache.clear();
+    });
+
+    it('reports a failed prefix in errors[] instead of dropping it silently', async () => {
+      hibpCache.clear();
+      const getSpy = vi.spyOn(axios, 'get').mockImplementation((url: string) => {
+        if (url.endsWith('/range/FFFFF')) return Promise.reject(new Error('upstream 500'));
+        return Promise.resolve({ data: 'ZZZ:9' });
+      });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/check-password-breach/batch')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ hashPrefixes: ['5BAA6', 'FFFFF'] });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data['5BAA6']).toBe('ZZZ:9');
+      expect(res.body.data.FFFFF).toBeUndefined();
+      expect(res.body.errors).toEqual(['FFFFF']);
+
+      getSpy.mockRestore();
+      hibpCache.clear();
+    });
+
+    it('rejects an array containing a non-hex prefix', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/check-password-breach/batch')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ hashPrefixes: ['5BAA6', 'ZZZZZ'] });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    });
+
+    it('rejects an empty array', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/check-password-breach/batch')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ hashPrefixes: [] });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects an array over the prefix cap', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const tooMany = Array.from({ length: HIBP_BATCH_MAX_PREFIXES + 1 }, (_, i) =>
+        i.toString(16).padStart(5, '0'),
+      );
+      const res = await agent
+        .post('/api/v1/tools/check-password-breach/batch')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ hashPrefixes: tooMany });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 401 without an auth token', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/check-password-breach/batch')
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ hashPrefixes: ['5BAA6'] });
+      expect(res.status).toBe(401);
     });
   });
 

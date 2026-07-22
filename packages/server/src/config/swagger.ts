@@ -1,5 +1,5 @@
 import type { JsonObject } from 'swagger-ui-express';
-import { APP_VERSION } from '@hvault/shared';
+import { APP_VERSION, HIBP_BATCH_MAX_PREFIXES } from '@hvault/shared';
 
 /**
  * OpenAPI 3.0.3 specification for the H-Vault REST API.
@@ -538,6 +538,24 @@ export const swaggerSpec: JsonObject = {
             minLength: 5,
             maxLength: 5,
             description: 'First 5 hex chars of SHA-1 hash (k-anonymity)',
+          },
+        },
+      },
+      CheckBreachBatchRequest: {
+        type: 'object',
+        required: ['hashPrefixes'],
+        properties: {
+          hashPrefixes: {
+            type: 'array',
+            minItems: 1,
+            maxItems: HIBP_BATCH_MAX_PREFIXES,
+            items: {
+              type: 'string',
+              minLength: 5,
+              maxLength: 5,
+            },
+            description:
+              'Deduplicated 5-char SHA-1 prefixes of the caller’s unique passwords (k-anonymity). Only prefixes are sent; the full hash never leaves the client.',
           },
         },
       },
@@ -2051,11 +2069,11 @@ export const swaggerSpec: JsonObject = {
                   properties: {
                     success: { type: 'boolean', example: true },
                     data: {
-                      type: 'object',
-                      properties: {
-                        found: { type: 'boolean' },
-                        count: { type: 'integer' },
-                      },
+                      type: 'string',
+                      description:
+                        'The Have I Been Pwned range for the submitted prefix: newline-separated `SUFFIX:COUNT` rows, with the count-0 padding rows removed. The client matches the remaining 35 characters of its own SHA-1 hash against these rows locally, so the server never learns which suffix — if any — matched.',
+                      example:
+                        '0018A45C4D1DEF81644B54AB7F969B88D65:1\n00D4F6E8FA6EECAD2A3AA415EEC418D38EC:2',
                     },
                   },
                 },
@@ -2064,6 +2082,51 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+        },
+      },
+    },
+    '/tools/check-password-breach/batch': {
+      post: {
+        tags: ['Tools'],
+        summary: 'Check password breaches in bulk (HIBP)',
+        description:
+          'Checks several password hash prefixes against Have I Been Pwned in one request, preserving k-anonymity (only the first 5 hex chars of each SHA-1 hash are sent; the client deduplicates its passwords first). The server serves warm results from its per-process cache and fans the rest out to HIBP with bounded concurrency. The response maps each resolved prefix to its HIBP range text and reports any prefixes whose lookup failed under `errors`, so the client can mark those passwords as not-checked rather than not-breached.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/CheckBreachBatchRequest' },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'Batched breach check result',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: {
+                      type: 'object',
+                      additionalProperties: { type: 'string' },
+                      description: 'Map of hash prefix to its HIBP range text.',
+                    },
+                    errors: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description: 'Prefixes whose lookup failed (reported, not silently dropped).',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          400: { $ref: '#/components/responses/ValidationError' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },

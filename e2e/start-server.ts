@@ -23,7 +23,10 @@ const E2E_ENV: Record<string, string> = {
   JWT_REFRESH_SECRET: 'e2e-test-refresh-secret-minimum-32-characters-long',
   SESSION_SECRET: 'e2e-test-session-secret-minimum-32-characters-long',
   // Pin Vite to loopback regardless of the developer's shell environment, so the
-  // dev server matches Playwright's baseURL/health probe (http://127.0.0.1:3000).
+  // dev server matches Playwright's baseURL / health probe. The PORT is
+  // deliberately NOT pinned here: it is forwarded from the parent process, and
+  // playwright.config.ts resolves it through the same `resolveDevPort` helper
+  // Vite uses, so a `VITE_PORT` override moves both together (default 5173).
   VITE_HOST: '127.0.0.1',
   // Explicitly disable email to prevent the developer's .env SMTP/Gmail settings
   // from leaking into E2E tests. Without this, backup trigger tests fail because

@@ -4,11 +4,22 @@ import { validate } from '../middleware/validate.js';
 import {
   heavyOpLimiter,
   breachCheckLimiter,
+  breachBatchLimiter,
   passwordVerifyLimiter,
   importLimiter,
 } from '../middleware/rateLimiter.js';
-import { checkBreachSchema, exportSchema, importSchema } from '@hvault/shared';
-import { checkPasswordBreach, exportVault, importVault } from '../controllers/toolsController.js';
+import {
+  checkBreachSchema,
+  checkBreachBatchSchema,
+  exportSchema,
+  importSchema,
+} from '@hvault/shared';
+import {
+  checkPasswordBreach,
+  checkPasswordBreachBatch,
+  exportVault,
+  importVault,
+} from '../controllers/toolsController.js';
 
 const router = Router();
 
@@ -20,6 +31,12 @@ router.post(
   breachCheckLimiter,
   validate(checkBreachSchema, 'body'),
   checkPasswordBreach,
+);
+router.post(
+  '/check-password-breach/batch',
+  breachBatchLimiter,
+  validate(checkBreachBatchSchema, 'body'),
+  checkPasswordBreachBatch,
 );
 router.post(
   '/export',

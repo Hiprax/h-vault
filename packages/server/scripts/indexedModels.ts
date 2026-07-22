@@ -20,6 +20,7 @@ import { AuditLog } from '../src/models/AuditLog.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
 import { Migration } from '../src/models/Migration.js';
+import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
 
 export const indexedModels = [
   { name: 'User', model: User },
@@ -30,4 +31,5 @@ export const indexedModels = [
   { name: 'BackupLog', model: BackupLog },
   { name: 'JobLock', model: JobLock },
   { name: 'Migration', model: Migration },
+  { name: 'PwnedRangeCache', model: PwnedRangeCache },
 ];

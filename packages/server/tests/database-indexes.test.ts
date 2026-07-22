@@ -7,6 +7,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
+import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
 
 // ---- Helpers for explain()-based index-usage assertions ----
 // A query may be served by an index (IXSCAN) or a full collection scan
@@ -516,6 +517,27 @@ describe('Database indexes', () => {
       );
 
       expect(ttlIndex).toBeDefined();
+    });
+  });
+
+  describe('PwnedRangeCache model indexes', () => {
+    it('should have a unique index on prefix and NO TTL index', async () => {
+      await PwnedRangeCache.ensureIndexes();
+      const indexes = (await PwnedRangeCache.collection.indexes()) as {
+        key: Record<string, number>;
+        unique?: boolean;
+        expireAfterSeconds?: number;
+        [k: string]: unknown;
+      }[];
+
+      const prefixIndex = indexes.find((idx) => idx.key['prefix'] === 1);
+      expect(prefixIndex).toBeDefined();
+      expect(prefixIndex!.unique).toBe(true);
+
+      // Deliberately no TTL: staleness is application-level so seed entries can
+      // be exempt from the on-demand refresh window. A hard TTL would evict the
+      // stale-fallback entry and force needless re-fetches.
+      expect(indexes.some((idx) => typeof idx.expireAfterSeconds === 'number')).toBe(false);
     });
   });
 

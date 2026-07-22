@@ -31,7 +31,7 @@ describe('Server Config Validation', () => {
       JWT_ACCESS_SECRET: 'test-access-secret-for-testing-only-32chars!',
       JWT_REFRESH_SECRET: 'test-refresh-secret-for-testing-only-32chars!',
       SESSION_SECRET: 'TestSessionSecret4Testing!!12345',
-      CORS_ORIGIN: 'http://localhost:3000',
+      CORS_ORIGIN: 'http://localhost:5173',
       APP_URL: 'http://localhost:5000',
       ...envOverrides,
     };
@@ -105,6 +105,36 @@ describe('Server Config Validation', () => {
     it('AUDIT_LOG_RETENTION_DAYS defaults to 365', async () => {
       const { config } = await loadConfigWithEnv({ AUDIT_LOG_RETENTION_DAYS: undefined });
       expect(config.AUDIT_LOG_RETENTION_DAYS).toBe(365);
+    });
+
+    it('BREACH_CACHE_TTL_DAYS defaults to 30', async () => {
+      const { config } = await loadConfigWithEnv({ BREACH_CACHE_TTL_DAYS: undefined });
+      expect(config.BREACH_CACHE_TTL_DAYS).toBe(30);
+    });
+
+    it('BREACH_CACHE_TTL_DAYS coerces a provided value', async () => {
+      const { config } = await loadConfigWithEnv({ BREACH_CACHE_TTL_DAYS: '7' });
+      expect(config.BREACH_CACHE_TTL_DAYS).toBe(7);
+    });
+
+    it('BREACH_SEED_AUTO defaults to false', async () => {
+      const { config } = await loadConfigWithEnv({ BREACH_SEED_AUTO: undefined });
+      expect(config.BREACH_SEED_AUTO).toBe(false);
+    });
+
+    it('BREACH_SEED_AUTO parses "true"', async () => {
+      const { config } = await loadConfigWithEnv({ BREACH_SEED_AUTO: 'true' });
+      expect(config.BREACH_SEED_AUTO).toBe(true);
+    });
+
+    it('BREACH_SEED_REFRESH_CRON is undefined when empty', async () => {
+      const { config } = await loadConfigWithEnv({ BREACH_SEED_REFRESH_CRON: '' });
+      expect(config.BREACH_SEED_REFRESH_CRON).toBeUndefined();
+    });
+
+    it('BREACH_SEED_REFRESH_CRON is preserved when set', async () => {
+      const { config } = await loadConfigWithEnv({ BREACH_SEED_REFRESH_CRON: '0 3 * * 0' });
+      expect(config.BREACH_SEED_REFRESH_CRON).toBe('0 3 * * 0');
     });
 
     it('FILE_ENCRYPTION_MAX_SIZE_MB defaults to 100', async () => {
@@ -277,9 +307,9 @@ describe('Server Config Validation', () => {
     it('CORS_ORIGIN with HTTP in development is accepted', async () => {
       const { config } = await loadConfigWithEnv({
         NODE_ENV: 'development',
-        CORS_ORIGIN: 'http://localhost:3000',
+        CORS_ORIGIN: 'http://localhost:5173',
       });
-      expect(config.CORS_ORIGIN).toBe('http://localhost:3000');
+      expect(config.CORS_ORIGIN).toBe('http://localhost:5173');
     });
   });
 

@@ -19,11 +19,24 @@ npm install                                   # installs all workspaces
 cp .env.example .env                          # then set the three required secrets
 docker compose -f docker-compose.dev.yml up -d   # MongoDB
 npm run build:shared                          # shared must be built before server/client
-npm run dev                                   # http://localhost:3000
+npm run dev                                   # http://localhost:5173
 ```
 
 `packages/shared` is a build-time dependency of both other packages. If the server or
 client fails to resolve `@hvault/shared`, you skipped `npm run build:shared`.
+
+The client dev server binds **5173** (Vite's default) and the API binds 5000. If 5173 is
+taken on your machine, override it through the process environment — Playwright's E2E
+config reads the same variable, so both move together:
+
+```bash
+VITE_PORT=5180 npm run dev
+```
+
+Set it in your shell, not in `.env`: Vite does not load the root `.env`. On Windows, if a
+dev port fails with `EACCES` rather than `EADDRINUSE`, the OS has reserved it (Hyper-V /
+WSL2 / Docker claim dynamic ranges); list them with
+`netsh int ipv4 show excludedportrange protocol=tcp` and pick a port outside them.
 
 ## The pipeline runs on your machine, not on a runner
 

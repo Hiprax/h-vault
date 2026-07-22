@@ -2,10 +2,16 @@
  * VaultHealthPage behavior coverage.
  *
  * Exercises each health detector independently (weak / reused / old / missing
- * TOTP / breached), the health-score arithmetic, the breach-check flow
- * (hit, miss, per-item request failure, in-flight state), the loading state,
- * the initial fetch branch, section expand/collapse and navigation from a
- * finding to its item.
+ * TOTP / breached), the health-score arithmetic, the batched breach-check flow
+ * (hit, miss, partial failure surfaced honestly, determinate progress, in-flight
+ * state), the loading state, the initial fetch branch, finding-list virtualization
+ * above the threshold, section expand/collapse and navigation from a finding to
+ * its item.
+ *
+ * Weak-password scoring now runs through the strength analyzer, which in jsdom
+ * (no `Worker`) takes its main-thread fallback and calls the mocked `getZxcvbn`.
+ * Findings therefore arrive asynchronously via an effect, so they are asserted
+ * with `waitFor`.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -17,8 +23,8 @@ import React from 'react';
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockCheckBreachApi, mockNavigate, mockGetZxcvbn, zxcvbnScores } = vi.hoisted(() => ({
-  mockCheckBreachApi: vi.fn(),
+const { mockCheckBreachBatchApi, mockNavigate, mockGetZxcvbn, zxcvbnScores } = vi.hoisted(() => ({
+  mockCheckBreachBatchApi: vi.fn(),
   mockNavigate: vi.fn(),
   mockGetZxcvbn: vi.fn(),
   zxcvbnScores: new Map<string, number>(),
@@ -29,8 +35,39 @@ vi.mock('react-router-dom', async () => {
   return { ...actual, useNavigate: () => mockNavigate };
 });
 
+// Render every virtualized row deterministically so the >50-finding branch is
+// assertable in jsdom (the real react-window renders 0 rows against a 0-height
+// layout).
+vi.mock('react-window', () => ({
+  List: ({
+    rowComponent: RowComponent,
+    rowCount,
+    rowHeight,
+    rowProps,
+  }: {
+    rowComponent: React.ComponentType<Record<string, unknown>>;
+    rowCount: number;
+    rowHeight: number;
+    rowProps: Record<string, unknown>;
+  }) => {
+    const rows = [];
+    for (let i = 0; i < Math.min(rowCount, 20); i++) {
+      rows.push(
+        React.createElement(RowComponent, {
+          key: i,
+          index: i,
+          style: { height: rowHeight },
+          ...rowProps,
+        }),
+      );
+    }
+    return React.createElement('div', { role: 'list', 'data-testid': 'virtual-list' }, ...rows);
+  },
+}));
+
 vi.mock('../src/services/api/userApi', () => ({
-  checkBreachApi: (...args: unknown[]) => mockCheckBreachApi(...args),
+  checkBreachApi: vi.fn(),
+  checkBreachBatchApi: (...args: unknown[]) => mockCheckBreachBatchApi(...args),
 }));
 
 vi.mock('../src/lib/lazyZxcvbn', () => ({
@@ -91,12 +128,22 @@ vi.mock('../src/services/offlineCache', () => ({
   },
 }));
 
+// Keep these detector-focused tests hermetic: no real IndexedDB hydration/persist.
+// (The persistence behavior has its own suite in vault-health-persistence.test.tsx.)
+vi.mock('../src/services/health/healthResultsStore', () => ({
+  loadHealthResults: vi.fn().mockResolvedValue(null),
+  saveBreachResults: vi.fn().mockResolvedValue(undefined),
+  saveStrengthScores: vi.fn().mockResolvedValue(undefined),
+  clearHealthResults: vi.fn().mockResolvedValue(undefined),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
 import VaultHealthPage from '../src/pages/VaultHealthPage';
 import { useVaultStore, type DecryptedVaultItem } from '../src/stores/vaultStore';
+import { clearScoreCache } from '../src/services/health/strengthCache';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -112,10 +159,13 @@ const fakeZxcvbn = (password: string): FakeResult => ({
   score: zxcvbnScores.get(password) ?? 4,
 });
 
+let itemSeq = 0;
 function makeLogin(
   overrides: Partial<DecryptedVaultItem> & { id: string; name: string },
 ): DecryptedVaultItem {
-  const now = new Date().toISOString();
+  // Unique timestamps keep the strength cache keyed by `id:updatedAt` from ever
+  // colliding across items/tests.
+  const now = new Date(Date.now() + itemSeq++).toISOString();
   return {
     itemType: 'login',
     favorite: false,
@@ -143,8 +193,11 @@ async function renderPage(): Promise<void> {
       <VaultHealthPage />
     </MemoryRouter>,
   );
-  // The lazy zxcvbn load resolves in a microtask after mount.
   await act(async () => {
+    // Two microtask flushes: the first lets the hydration effect settle
+    // (`hydrated` flips true), the second lets the now-ungated weak-strength
+    // effect run.
+    await Promise.resolve();
     await Promise.resolve();
   });
 }
@@ -173,9 +226,18 @@ async function sha1Hex(password: string): Promise<string> {
     .toUpperCase();
 }
 
+/** Build a batch response body keyed by full-hash prefixes. */
+function batchBody(
+  ranges: Record<string, string>,
+  errors: string[] = [],
+): { data: { success: boolean; data: Record<string, string>; errors: string[] } } {
+  return { data: { success: true, data: ranges, errors } };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   zxcvbnScores.clear();
+  clearScoreCache();
   mockGetZxcvbn.mockResolvedValue(fakeZxcvbn);
   setItems([]);
 });
@@ -225,7 +287,7 @@ describe('VaultHealthPage - loading and initial fetch', () => {
 // ---------------------------------------------------------------------------
 
 describe('VaultHealthPage - weak password detection', () => {
-  it('flags only passwords scoring below 3 and labels them by score', async () => {
+  it('flags only passwords scoring below the threshold and labels them by score', async () => {
     zxcvbnScores.set('pw-very-weak', 0);
     zxcvbnScores.set('pw-fair', 2);
     zxcvbnScores.set('pw-good', 3);
@@ -238,7 +300,7 @@ describe('VaultHealthPage - weak password detection', () => {
     await renderPage();
 
     const weak = section('Weak Passwords');
-    expect(within(weak).getByText('Very Weak Site')).toBeInTheDocument();
+    await waitFor(() => expect(within(weak).getByText('Very Weak Site')).toBeInTheDocument());
     expect(within(weak).getByText('Password strength: Very weak')).toBeInTheDocument();
     expect(within(weak).getByText('Fair Site')).toBeInTheDocument();
     expect(within(weak).getByText('Password strength: Fair')).toBeInTheDocument();
@@ -262,17 +324,36 @@ describe('VaultHealthPage - weak password detection', () => {
     expect(screen.getAllByText('of 1 items').length).toBe(4);
   });
 
-  it('reports no weak passwords until zxcvbn has loaded', async () => {
+  it('shows an Analyzing state and no findings until scoring resolves', async () => {
     zxcvbnScores.set('pw-very-weak', 0);
     mockGetZxcvbn.mockReturnValue(new Promise<never>(() => {})); // never resolves
     setItems([makeLogin({ id: 'w0', name: 'Very Weak Site', data: { password: 'pw-very-weak' } })]);
 
     await renderPage();
 
+    // The Weak score card shows a spinner while analysis is pending.
+    expect(screen.getByLabelText('Analyzing Weak')).toBeInTheDocument();
     const weak = section('Weak Passwords');
     expect(within(weak).queryByText('Very Weak Site')).not.toBeInTheDocument();
-    // Other detectors still run: the item has no TOTP.
+    // Other detectors still run synchronously: the item has no TOTP.
     expect(within(section('Missing 2FA')).getByText('Very Weak Site')).toBeInTheDocument();
+  });
+
+  it('surfaces a strength-analysis failure and never a false "No issues found"', async () => {
+    // Both the worker (absent in jsdom) and the lazy zxcvbn fallback fail.
+    mockGetZxcvbn.mockRejectedValue(new Error('chunk load failed'));
+    setItems([makeLogin({ id: 'x', name: 'Some Site', data: { password: 'whatever' } })]);
+
+    await renderPage();
+
+    // The Weak score card shows a failure indicator, not a (misleading) zero.
+    await waitFor(() => expect(screen.getByLabelText('Weak analysis failed')).toBeInTheDocument());
+
+    const weak = section('Weak Passwords');
+    await clickAsync(within(weak).getByRole('button', { name: /Weak Passwords/ }));
+    expect(within(weak).getByText(/Could not analyze password strength/)).toBeInTheDocument();
+    // The critical guarantee: a failed analysis must NOT read as "all clear".
+    expect(within(weak).queryByText('No issues found')).not.toBeInTheDocument();
   });
 
   it('does not flag an undecodable item (no password) as weak or reused', async () => {
@@ -320,6 +401,20 @@ describe('VaultHealthPage - reused password detection', () => {
     // Empty sections start collapsed; expanding shows the healthy state.
     await clickAsync(within(reused).getByRole('button', { name: /Reused Passwords/ }));
     expect(within(reused).getByText('No issues found')).toBeInTheDocument();
+  });
+
+  it('virtualizes the finding list above the threshold', async () => {
+    const items = Array.from({ length: 51 }, (_, i) =>
+      makeLogin({ id: `dup-${i}`, name: `Dup Site ${i}`, data: { password: 'one-shared-pw' } }),
+    );
+    setItems(items);
+
+    await renderPage();
+
+    const reused = section('Reused Passwords');
+    expect(within(reused).getByTestId('virtual-list')).toBeInTheDocument();
+    // The mocked window renders the first rows; the first finding is present.
+    expect(within(reused).getByText('Dup Site 0')).toBeInTheDocument();
   });
 });
 
@@ -384,8 +479,7 @@ describe('VaultHealthPage - health score', () => {
 
     await renderPage();
 
-    expect(screen.getByText('100')).toBeInTheDocument();
-    // Missing 2FA is not part of the score, and none of these are flagged anyway.
+    await waitFor(() => expect(screen.getByText('100')).toBeInTheDocument());
     const weak = section('Weak Passwords');
     await clickAsync(within(weak).getByRole('button', { name: /Weak Passwords/ }));
     expect(within(weak).getByText('No issues found')).toBeInTheDocument();
@@ -401,21 +495,22 @@ describe('VaultHealthPage - health score', () => {
     await renderPage();
 
     // weak 2 + reused 2 + old 0 = 4 issues over (2 items x 3 categories) = 6 -> 33
-    expect(screen.getByText('33')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('33')).toBeInTheDocument());
   });
 
   it('adds breached items as a 4th category once the breach check has run', async () => {
     zxcvbnScores.set('shared-weak', 0);
     const hash = await sha1Hex('shared-weak');
-    mockCheckBreachApi.mockResolvedValue({
-      data: { success: true, data: `${hash.substring(5)}:5000` },
-    });
+    mockCheckBreachBatchApi.mockResolvedValue(
+      batchBody({ [hash.substring(0, 5)]: `${hash.substring(5)}:5000` }),
+    );
     setItems([
       makeLogin({ id: 's1', name: 'Site One', data: { password: 'shared-weak' } }),
       makeLogin({ id: 's2', name: 'Site Two', data: { password: 'shared-weak' } }),
     ]);
 
     await renderPage();
+    await waitFor(() => expect(screen.getByText('33')).toBeInTheDocument());
     await clickAsync(screen.getByRole('button', { name: /Check for Breaches/ }));
 
     // weak 2 + reused 2 + breached 2 = 6 over (2 items x 4 categories) = 8 -> 25
@@ -428,14 +523,14 @@ describe('VaultHealthPage - health score', () => {
 // ---------------------------------------------------------------------------
 
 describe('VaultHealthPage - breach check', () => {
-  it('sends only the 5-char SHA-1 prefix and reports a matching suffix as breached', async () => {
+  it('sends only 5-char prefixes and reports a matching suffix as breached', async () => {
     const hash = await sha1Hex('pwned-password');
-    mockCheckBreachApi.mockResolvedValue({
-      data: {
-        success: true,
-        data: `0000000000000000000000000000000000000:1\r\n${hash.substring(5)}:1234`,
-      },
-    });
+    mockCheckBreachBatchApi.mockResolvedValue(
+      batchBody({
+        [hash.substring(0, 5)]:
+          `0000000000000000000000000000000000000:1\r\n${hash.substring(5)}:1234`,
+      }),
+    );
     setItems([
       makeLogin({ id: 'b1', name: 'Breached Site', data: { password: 'pwned-password' } }),
     ]);
@@ -448,17 +543,19 @@ describe('VaultHealthPage - breach check', () => {
     await waitFor(() =>
       expect(screen.getByText('Found in 1,234 data breach(es)')).toBeInTheDocument(),
     );
-    expect(mockCheckBreachApi).toHaveBeenCalledWith(hash.substring(0, 5));
-    // k-anonymity: the full hash is never sent
-    expect(mockCheckBreachApi).not.toHaveBeenCalledWith(hash);
+    // k-anonymity: exactly the 5-char prefix is sent, never the full hash.
+    const sentPrefixes = mockCheckBreachBatchApi.mock.calls[0]?.[0] as string[];
+    expect(sentPrefixes).toEqual([hash.substring(0, 5)]);
+    expect(sentPrefixes.every((p) => p.length === 5)).toBe(true);
     const breachSection = section('Breached Passwords');
     expect(within(breachSection).getByText('Breached Site')).toBeInTheDocument();
   });
 
   it('reports no breaches when the range response contains no matching suffix', async () => {
-    mockCheckBreachApi.mockResolvedValue({
-      data: { success: true, data: 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF:9\r\nAAAAA:2' },
-    });
+    const hash = await sha1Hex('clean-password');
+    mockCheckBreachBatchApi.mockResolvedValue(
+      batchBody({ [hash.substring(0, 5)]: 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF:9\r\nAAAAA:2' }),
+    );
     setItems([makeLogin({ id: 'c1', name: 'Clean Site', data: { password: 'clean-password' } })]);
 
     await renderPage();
@@ -470,26 +567,14 @@ describe('VaultHealthPage - breach check', () => {
     expect(within(section('Breached Passwords')).queryByText('Clean Site')).not.toBeInTheDocument();
   });
 
-  it('ignores an unsuccessful API envelope', async () => {
-    mockCheckBreachApi.mockResolvedValue({ data: { success: false, data: undefined } });
-    setItems([makeLogin({ id: 'c1', name: 'Clean Site', data: { password: 'pw' } })]);
-
-    await renderPage();
-    await clickAsync(screen.getByRole('button', { name: /Check for Breaches/ }));
-
-    await waitFor(() =>
-      expect(screen.getByText('No breached passwords found')).toBeInTheDocument(),
+  it('surfaces passwords that could not be checked instead of calling them safe', async () => {
+    const hashOk = await sha1Hex('pwned-password');
+    const hashFail = await sha1Hex('network-error-password');
+    mockCheckBreachBatchApi.mockResolvedValue(
+      batchBody({ [hashOk.substring(0, 5)]: `${hashOk.substring(5)}:7` }, [
+        hashFail.substring(0, 5),
+      ]),
     );
-  });
-
-  it('skips an item whose breach request fails and still reports the others', async () => {
-    const hash = await sha1Hex('pwned-password');
-    mockCheckBreachApi.mockImplementation((prefix: string) => {
-      if (prefix === hash.substring(0, 5)) {
-        return Promise.resolve({ data: { success: true, data: `${hash.substring(5)}:7` } });
-      }
-      return Promise.reject(new Error('rate limited'));
-    });
     setItems([
       makeLogin({ id: 'f1', name: 'Failing Site', data: { password: 'network-error-password' } }),
       makeLogin({ id: 'b1', name: 'Breached Site', data: { password: 'pwned-password' } }),
@@ -498,19 +583,33 @@ describe('VaultHealthPage - breach check', () => {
     await renderPage();
     await clickAsync(screen.getByRole('button', { name: /Check for Breaches/ }));
 
-    await waitFor(
-      () => expect(screen.getByText('Found in 7 data breach(es)')).toBeInTheDocument(),
-      { timeout: 5000 },
-    );
+    await waitFor(() => expect(screen.getByText('Found in 7 data breach(es)')).toBeInTheDocument());
+    // The unresolved password is reported as unchecked, NOT as "no breach".
+    expect(screen.getByText(/1 password\(s\) could not be checked/)).toBeInTheDocument();
     const breachSection = section('Breached Passwords');
     expect(within(breachSection).getByText('Breached Site')).toBeInTheDocument();
     expect(within(breachSection).queryByText('Failing Site')).not.toBeInTheDocument();
   });
 
-  it('disables the button and shows "Checking..." while the check is in flight', async () => {
-    let resolveApi: (value: { data: { success: boolean; data: string } }) => void = () => {};
-    mockCheckBreachApi.mockReturnValue(
-      new Promise<{ data: { success: boolean; data: string } }>((resolve) => {
+  it('marks the whole batch unchecked when the request itself fails', async () => {
+    mockCheckBreachBatchApi.mockRejectedValue(new Error('network down'));
+    setItems([makeLogin({ id: 'x1', name: 'Some Site', data: { password: 'a-password' } })]);
+
+    await renderPage();
+    await clickAsync(screen.getByRole('button', { name: /Check for Breaches/ }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/1 password\(s\) could not be checked/)).toBeInTheDocument(),
+    );
+    // Nothing is reported breached, and the misleading "no breaches" line is hidden.
+    expect(screen.queryByText('No breached passwords found')).not.toBeInTheDocument();
+  });
+
+  it('shows a determinate progress indicator while a scan is in flight', async () => {
+    const hash = await sha1Hex('pw');
+    let resolveApi: (value: ReturnType<typeof batchBody>) => void = () => {};
+    mockCheckBreachBatchApi.mockReturnValue(
+      new Promise<ReturnType<typeof batchBody>>((resolve) => {
         resolveApi = resolve;
       }),
     );
@@ -521,13 +620,35 @@ describe('VaultHealthPage - breach check', () => {
 
     const checking = await screen.findByRole('button', { name: /Checking/ });
     expect(checking).toBeDisabled();
+    expect(await screen.findByRole('progressbar')).toBeInTheDocument();
+    expect(screen.getByText('0 / 1')).toBeInTheDocument();
 
     await act(async () => {
-      resolveApi({ data: { success: true, data: 'AAAA:1' } });
+      resolveApi(batchBody({ [hash.substring(0, 5)]: `${hash.substring(5)}:1` }));
     });
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /Check for Breaches/ })).toBeEnabled(),
     );
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  it('checks each unique password once even when several items share it', async () => {
+    const hash = await sha1Hex('reused-pw');
+    mockCheckBreachBatchApi.mockResolvedValue(
+      batchBody({ [hash.substring(0, 5)]: `${hash.substring(5)}:3` }),
+    );
+    setItems([
+      makeLogin({ id: 'a', name: 'Site A', data: { password: 'reused-pw' } }),
+      makeLogin({ id: 'b', name: 'Site B', data: { password: 'reused-pw' } }),
+    ]);
+
+    await renderPage();
+    await clickAsync(screen.getByRole('button', { name: /Check for Breaches/ }));
+
+    await waitFor(() => expect(screen.getAllByText('Found in 3 data breach(es)')).toHaveLength(2));
+    // One request, one unique prefix — not one per item.
+    expect(mockCheckBreachBatchApi).toHaveBeenCalledTimes(1);
+    expect(mockCheckBreachBatchApi.mock.calls[0]?.[0]).toEqual([hash.substring(0, 5)]);
   });
 
   it('does not call the breach API when no login has a password', async () => {
@@ -542,7 +663,7 @@ describe('VaultHealthPage - breach check', () => {
     await waitFor(() =>
       expect(screen.getByText('No breached passwords found')).toBeInTheDocument(),
     );
-    expect(mockCheckBreachApi).not.toHaveBeenCalled();
+    expect(mockCheckBreachBatchApi).not.toHaveBeenCalled();
   });
 });
 
@@ -556,16 +677,18 @@ describe('VaultHealthPage - sections and navigation', () => {
     setItems([makeLogin({ id: 'item-42', name: 'Weak Site', data: { password: 'pw-weak' } })]);
 
     await renderPage();
-    await clickAsync(within(section('Weak Passwords')).getByText('Weak Site'));
+    const weak = section('Weak Passwords');
+    await waitFor(() => expect(within(weak).getByText('Weak Site')).toBeInTheDocument());
+    await clickAsync(within(weak).getByText('Weak Site'));
 
     expect(mockNavigate).toHaveBeenCalledWith('/vault/item-42');
   });
 
   it('navigates to the item when a breached finding is clicked', async () => {
     const hash = await sha1Hex('pwned');
-    mockCheckBreachApi.mockResolvedValue({
-      data: { success: true, data: `${hash.substring(5)}:3` },
-    });
+    mockCheckBreachBatchApi.mockResolvedValue(
+      batchBody({ [hash.substring(0, 5)]: `${hash.substring(5)}:3` }),
+    );
     setItems([makeLogin({ id: 'item-99', name: 'Breached Site', data: { password: 'pwned' } })]);
 
     await renderPage();
@@ -584,16 +707,14 @@ describe('VaultHealthPage - sections and navigation', () => {
 
     await renderPage();
     const weak = section('Weak Passwords');
-    expect(within(weak).getByText('Weak Site')).toBeInTheDocument();
+    await waitFor(() => expect(within(weak).getByText('Weak Site')).toBeInTheDocument());
 
     await clickAsync(within(weak).getByRole('button', { name: /Weak Passwords/ }));
 
     expect(within(weak).queryByText('Weak Site')).not.toBeInTheDocument();
   });
 
-  it('auto-expands the Weak Passwords section once the async zxcvbn load produces findings', async () => {
-    // zxcvbn resolves AFTER the first render, so the weak section is initially
-    // constructed with zero items. It must still open when the findings land.
+  it('auto-expands the Weak Passwords section once async scoring produces findings', async () => {
     zxcvbnScores.set('pw-weak', 1);
     let resolveZxcvbn: (fn: typeof fakeZxcvbn) => void = () => {};
     mockGetZxcvbn.mockReturnValue(
@@ -612,6 +733,6 @@ describe('VaultHealthPage - sections and navigation', () => {
       await Promise.resolve();
     });
 
-    expect(within(weak).getByText('Weak Site')).toBeInTheDocument();
+    await waitFor(() => expect(within(weak).getByText('Weak Site')).toBeInTheDocument());
   });
 });

@@ -12,6 +12,7 @@ import {
   MAX_ENCRYPTED_DATA_LENGTH,
   PASSWORD_HISTORY_MAX,
   ITEM_TYPES,
+  HIBP_BATCH_MAX_PREFIXES,
 } from '../constants/index.js';
 import { objectIdSchema } from './common.js';
 
@@ -82,6 +83,18 @@ export const regenerateBackupCodesSchema = z.object({
 
 export const checkBreachSchema = z.object({
   hashPrefix: z.string().regex(/^[0-9a-fA-F]{5}$/),
+});
+
+// Batched breach check: the client sends the 5-char SHA-1 prefixes of its unique
+// passwords (deduplicated client-side, k-anonymity preserved — only prefixes ever
+// leave the device), and the server proxies each to HIBP once. Bounded by
+// HIBP_BATCH_MAX_PREFIXES so one request's HIBP fan-out stays finite; the client
+// splits larger vaults across several requests.
+export const checkBreachBatchSchema = z.object({
+  hashPrefixes: z
+    .array(z.string().regex(/^[0-9a-fA-F]{5}$/))
+    .min(1)
+    .max(HIBP_BATCH_MAX_PREFIXES),
 });
 
 export const backupSetupSchema = z

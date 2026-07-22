@@ -110,6 +110,33 @@ export function checkBreachApi(hashPrefix: string): Promise<AxiosResponse<ApiRes
   return api.post('/tools/check-password-breach', { hashPrefix });
 }
 
+/**
+ * Server envelope for the batched breach check. `data` maps each 5-char hash
+ * prefix to its raw HIBP range text; `errors` lists prefixes whose upstream
+ * lookup failed (reported explicitly so the client marks those passwords
+ * not-checked rather than not-breached).
+ */
+export interface BreachBatchResponse {
+  success: boolean;
+  data: Record<string, string>;
+  errors: string[];
+}
+
+/**
+ * Check several password hash prefixes in one request (k-anonymity: only the
+ * first 5 hex chars of each SHA-1 hash are sent; the client deduplicates first).
+ * Accepts an optional AbortSignal so an in-flight scan can be cancelled.
+ */
+export function checkBreachBatchApi(
+  hashPrefixes: string[],
+  signal?: AbortSignal,
+): Promise<AxiosResponse<BreachBatchResponse>> {
+  if (signal) {
+    return api.post('/tools/check-password-breach/batch', { hashPrefixes }, { signal });
+  }
+  return api.post('/tools/check-password-breach/batch', { hashPrefixes });
+}
+
 export function exportVaultApi(
   data?: ExportInput,
 ): Promise<AxiosResponse<ApiResponse<ExportResponse>>> {

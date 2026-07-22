@@ -106,6 +106,7 @@ const SERVER_ROUTES = new Set<string>([
   'PUT /folders/:id/sort',
   // routes/tools.ts
   'POST /tools/check-password-breach',
+  'POST /tools/check-password-breach/batch',
   'POST /tools/export',
   'POST /tools/import',
 ]);
@@ -330,6 +331,14 @@ describe('userApi wire contract', () => {
     expectCall(mockPost, 'POST', '/tools/check-password-breach', { hashPrefix: 'ABCDE' });
   });
 
+  // k-anonymity: the batch tool sends only an array of 5-char prefixes.
+  it('sends only hash prefixes to the batched breach-check tool', async () => {
+    await userApi.checkBreachBatchApi(['ABCDE', 'FF012']);
+    expectCall(mockPost, 'POST', '/tools/check-password-breach/batch', {
+      hashPrefixes: ['ABCDE', 'FF012'],
+    });
+  });
+
   it('POSTs export and import to the tools routes', async () => {
     await userApi.exportVaultApi({ format: 'json', authHash: 'h' } as never);
     expectCall(mockPost, 'POST', '/tools/export', { format: 'json', authHash: 'h' });
@@ -539,6 +548,7 @@ describe('API surface', () => {
       'revokeSessionApi',
       'getAuditLogApi',
       'checkBreachApi',
+      'checkBreachBatchApi',
       'exportVaultApi',
       'importVaultApi',
       'listItemsApi',

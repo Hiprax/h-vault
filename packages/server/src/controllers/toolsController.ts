@@ -1,12 +1,12 @@
 import type { Request, Response } from 'express';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createLogger } from '@hiprax/logger';
-import axios from 'axios';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 import { VaultItem } from '../models/VaultItem.js';
 import { Folder } from '../models/Folder.js';
 import { User } from '../models/User.js';
+import { PwnedRangeCache } from '../models/PwnedRangeCache.js';
 import { createAuditLog } from '../services/auditService.js';
 import { config } from '../config/index.js';
 import {
@@ -19,13 +19,19 @@ import {
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
+import { fetchRangeFromHibp } from '../utils/hibp.js';
 import {
   APP_VERSION,
   MAX_ENCRYPTED_DATA_LENGTH,
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_ITEMS_PER_USER,
 } from '@hvault/shared';
-import type { CheckBreachInput, ImportInput, ExportInput } from '@hvault/shared';
+import type {
+  CheckBreachInput,
+  CheckBreachBatchInput,
+  ImportInput,
+  ExportInput,
+} from '@hvault/shared';
 
 const logger = createLogger({ moduleName: 'tools-controller' });
 
@@ -53,6 +59,15 @@ const HIBP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
  * accumulate.
  */
 export const HIBP_CACHE_MAX_ENTRIES = 10_000;
+
+/**
+ * Maximum number of concurrent outbound HIBP lookups a single batch request may
+ * have in flight. Bounds how many sockets one request opens and caps its
+ * wall-clock (each lookup carries a 10 s timeout), while still parallelizing
+ * enough that a batch of cache-miss prefixes resolves quickly. Cache hits never
+ * count against it (they are served without an outbound call).
+ */
+export const HIBP_FANOUT_CONCURRENCY = 8;
 
 export const hibpCache = new Map<string, HibpCacheEntry>();
 
@@ -101,6 +116,89 @@ export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
   }
 
   hibpCache.set(key, entry);
+}
+
+// ── Layered range lookup (L1 in-memory → L2 MongoDB → L3 HIBP) ───────
+//
+// L2 (`PwnedRangeCache`) is a PERSISTENT, CROSS-ACCOUNT cache of PUBLIC HIBP
+// range data (survives restarts, shared across workers). Zero-knowledge is
+// preserved: the server only ever receives the 5-char prefix, never a suffix or
+// full hash, and nothing user-linked is stored. Fail-safe: a cache miss falls
+// through to HIBP, and an HIBP failure with no cache surfaces as 500 (single) /
+// errors[] (batch) — never a false "not breached".
+
+/** Per-process coalescing of concurrent duplicate L3 fetches (thundering-herd guard). */
+export const rangeInFlight = new Map<string, Promise<string>>();
+
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Whether an L2 entry may be served without re-fetching. `seed`-sourced entries
+ * (bulk-imported by the seed job) are TTL-exempt — their freshness is owned by
+ * the operator re-running the seed, not by per-request refresh. `hibp`-sourced
+ * entries expire after `BREACH_CACHE_TTL_DAYS`; the corpus is additive, so a
+ * stale entry can only miss a very recently added breach, never wrongly clear one.
+ */
+function isRangeFresh(doc: { source: string; fetchedAt: Date }, now: number): boolean {
+  if (doc.source === 'seed') return true;
+  return doc.fetchedAt.getTime() + config.BREACH_CACHE_TTL_DAYS * MS_PER_DAY > now;
+}
+
+/**
+ * Resolve the (padding-stripped) HIBP range for a prefix through the cache
+ * layers. Throws ONLY when L3 fails and there is no L2 fallback at all.
+ */
+export async function getRange(rawPrefix: string): Promise<string> {
+  const prefix = rawPrefix.toUpperCase(); // canonical key (matches HIBP + the DB)
+  const now = Date.now();
+
+  const l1 = hibpCache.get(prefix);
+  if (l1 && l1.expires > now) return l1.data;
+
+  const pending = rangeInFlight.get(prefix);
+  if (pending) return pending;
+
+  const task = (async (): Promise<string> => {
+    const doc = await PwnedRangeCache.findOne({ prefix }).lean();
+    if (doc && isRangeFresh(doc, now)) {
+      setHibpCacheEntry(prefix, { data: doc.range, expires: now + HIBP_CACHE_TTL_MS });
+      return doc.range;
+    }
+    try {
+      const range = await fetchRangeFromHibp(prefix);
+      // `runValidators` is deliberately OMITTED here (unlike most update sites in
+      // this codebase). Mongoose's `required` check on a String rejects '', and an
+      // EMPTY range is a legitimate value: a prefix whose every row was count-0
+      // padding has no real breached suffixes. Adding the flag would make those
+      // prefixes fail to cache and re-hit HIBP forever.
+      await PwnedRangeCache.updateOne(
+        { prefix },
+        { $set: { range, source: 'hibp', fetchedAt: new Date() } },
+        { upsert: true },
+      );
+      setHibpCacheEntry(prefix, { data: range, expires: Date.now() + HIBP_CACHE_TTL_MS });
+      return range;
+    } catch (err) {
+      if (doc) {
+        // Resilience: serve the stale L2 entry — REAL cached range data, so every
+        // breach it already recorded is still reported. The only residual gap is a
+        // breach ADDED upstream after this entry was cached (bounded by
+        // BREACH_CACHE_TTL_DAYS), which serving stale-real-data risks but reporting
+        // the prefix as "unchecked" would too; stale-real is the better fallback.
+        // Deliberately NOT written to L1, so the next request retries L3.
+        logger.warn('HIBP fetch failed; serving stale range-cache entry', { prefix });
+        return doc.range;
+      }
+      throw err;
+    }
+  })();
+
+  rangeInFlight.set(prefix, task);
+  try {
+    return await task;
+  } finally {
+    rangeInFlight.delete(prefix);
+  }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -236,35 +334,96 @@ export const checkPasswordBreach = catchAsync(
       throw httpErrors.badRequest('Invalid hash prefix: must be exactly 5 hex characters');
     }
 
-    // Check in-memory cache first
-    const cached = hibpCache.get(hashPrefix);
-    if (cached && cached.expires > Date.now()) {
-      res.status(200).json({
-        success: true,
-        data: cached.data,
-      });
-      return;
-    }
-
-    const response = await axios.get<string>(`https://api.pwnedpasswords.com/range/${hashPrefix}`, {
-      headers: {
-        'User-Agent': 'H-Vault-Password-Manager',
-      },
-      timeout: 10_000,
-      responseType: 'text',
-      maxRedirects: 0,
-    });
-
-    // Cache the response (bounded LRU with TTL — see setHibpCacheEntry)
-    setHibpCacheEntry(hashPrefix, {
-      data: response.data,
-      expires: Date.now() + HIBP_CACHE_TTL_MS,
-    });
+    // Layered lookup: L1 in-memory → L2 pwned_range_cache → L3 HIBP.
+    const data = await getRange(hashPrefix);
 
     res.status(200).json({
       success: true,
-      data: response.data,
+      data,
     });
+  },
+);
+
+/**
+ * Run `task` over `items` with at most `limit` promises in flight at once.
+ *
+ * A worker-pool pattern: `limit` workers each pull the next index from a shared
+ * cursor (grabbed synchronously, so no two workers claim the same index) until
+ * the list is exhausted. The task is responsible for handling its own rejections
+ * — the batch handler catches per prefix — so this never rejects for a single
+ * failed item.
+ */
+async function runWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const workerCount = Math.min(limit, items.length);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      await task(items[index] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+
+/**
+ * Batched breach check: proxy several HIBP k-anonymity range lookups in one
+ * request. The client sends the 5-char SHA-1 prefixes of its UNIQUE passwords
+ * (deduplicated client-side); only prefixes ever leave the device, so the full
+ * hash is never revealed to the server or to HIBP. Prefixes are deduped and
+ * uppercase-normalized here too (so mixed-case duplicates collapse to one lookup
+ * and share a canonical cache key), then resolved through the layered range cache
+ * ({@link getRange}: in-memory L1 → persistent MongoDB L2 → HIBP L3) with bounded
+ * fan-out concurrency for the cache-miss prefixes.
+ *
+ * The response carries `data` (prefix -> HIBP range text) for every resolved
+ * prefix and `errors` (prefixes whose lookup failed). A failed prefix is reported
+ * EXPLICITLY and never silently omitted or returned empty: the client counts it
+ * as "not checked" rather than "not breached", so a transient upstream failure
+ * can never be mistaken for a clean bill of health.
+ */
+export const checkPasswordBreachBatch = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const { hashPrefixes } = req.body as CheckBreachBatchInput;
+
+    pruneHibpCache();
+
+    // Dedupe + uppercase-normalize before any lookup.
+    const uniquePrefixes = [...new Set(hashPrefixes.map((p) => p.toUpperCase()))];
+
+    // Defense-in-depth: re-validate every prefix even though the Zod schema
+    // already did, keeping the SSRF guard local to the outbound call site.
+    for (const prefix of uniquePrefixes) {
+      if (!HEX_PREFIX_RE.test(prefix)) {
+        throw httpErrors.badRequest('Invalid hash prefix: must be exactly 5 hex characters');
+      }
+    }
+
+    const data: Record<string, string> = {};
+    const errors: string[] = [];
+
+    // Every unique prefix routes through the layered cache (L1 in-memory →
+    // L2 pwned_range_cache → L3 HIBP). L1/L2-warm prefixes resolve without any
+    // outbound call, so fanning out over ALL prefixes (not just misses) is cheap
+    // and preserves the exact response contract.
+    await runWithConcurrency(uniquePrefixes, HIBP_FANOUT_CONCURRENCY, async (prefix) => {
+      try {
+        data[prefix] = await getRange(prefix);
+      } catch (err) {
+        // Report the prefix as unchecked — never omit it silently (the client
+        // would read a missing prefix as "no breach").
+        errors.push(prefix);
+        logger.warn('HIBP batch lookup failed', {
+          error: err instanceof Error ? err.message : 'unknown',
+        });
+      }
+    });
+
+    res.status(200).json({ success: true, data, errors });
   },
 );
 

@@ -51,6 +51,12 @@ export const MAX_IMPORT_DATA_LENGTH = 1_048_576;
 // read; the real per-user ceiling stays MAX_ITEMS_PER_USER.
 export const MAX_IMPORT_FILE_SIZE_BYTES = 8_388_608;
 
+// Maximum number of 5-char SHA-1 hash prefixes the breach-check batch endpoint
+// accepts (and the client sends) per request. It bounds the server's per-request
+// HIBP fan-out and is the divisor the batch rate-limit budget is sized against,
+// so a full-vault breach scan never exhausts the limiter mid-scan.
+export const HIBP_BATCH_MAX_PREFIXES = 100;
+
 // File Encryption tool (client-side, account-agnostic). The size cap is a
 // client-enforced guardrail (the file is encrypted in the browser and never
 // uploaded, so the server cannot enforce it); this value is the fallback used

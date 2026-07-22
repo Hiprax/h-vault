@@ -35,6 +35,7 @@ import type {
   updateSettingsSchema,
   passwordGenOptionsSchema,
   checkBreachSchema,
+  checkBreachBatchSchema,
   backupSetupSchema,
   backupSettingsSchema,
   backupChangePasswordSchema,
@@ -93,6 +94,7 @@ export type ReorderFolderInput = z.infer<typeof reorderFolderSchema>;
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 export type PasswordGenOptions = z.infer<typeof passwordGenOptionsSchema>;
 export type CheckBreachInput = z.infer<typeof checkBreachSchema>;
+export type CheckBreachBatchInput = z.infer<typeof checkBreachBatchSchema>;
 export type BackupSetupInput = z.infer<typeof backupSetupSchema>;
 export type BackupSettingsInput = z.infer<typeof backupSettingsSchema>;
 export type BackupChangePasswordInput = z.infer<typeof backupChangePasswordSchema>;

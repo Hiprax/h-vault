@@ -20,7 +20,14 @@
 #
 # Build context is the repo ROOT (see docker-compose.yml), not this directory.
 
-FROM node:24-alpine AS base
+# Base tag is pinned to the Alpine 3.23 variant, NOT the floating `node:24-alpine`.
+# The floating tag rolled onto Alpine 3.24, whose musl/userspace SIGSEGVs `npm` at
+# process launch under the WSL2 kernel used for local builds (exit 139 on `npm ci`,
+# so the image cannot be built there at all). The 3.23 variant carries the identical
+# Node (v24.18.0) and is unaffected; `node:24-alpine3.22`/`3.21` are older Node lines.
+# This is the same Node runtime, still musl/Alpine — every apk/undici/Trivy note below
+# holds. Revisit when the Alpine 3.24+ musl regression is resolved upstream.
+FROM node:24-alpine3.23 AS base
 WORKDIR /app
 # mongodb-memory-server (a server devDependency) downloads a ~150 MB mongod
 # binary in its postinstall. Nothing in any image runs it — the unit tests do,
@@ -228,13 +235,13 @@ RUN rm -f /app/packages/client/dist/index.html
 FROM nginxinc/nginx-unprivileged:1.29-alpine AS web
 
 # Patch the base image's OS packages before serving anything from it. The
-# nginx-unprivileged:1.29-alpine base trails a full Alpine minor behind
-# node:24-alpine (3.23 vs 3.24) and ships fixable HIGH CVEs in c-ares, openssl
+# nginx-unprivileged:1.29-alpine base ships fixable HIGH CVEs in c-ares, openssl
 # (libcrypto3 / libssl3), libexpat and libxml2 — exactly the kind the Trivy gate
-# refuses to let through. Upgrading pulls the patched packages from the pinned
-# Alpine release. The base runs as the unprivileged uid 101, so switch to root
-# ONLY for the apk transaction and drop straight back; the final runtime user is
-# unchanged, and --no-cache leaves no apk index behind in the layer.
+# refuses to let through. Upgrading pulls the patched packages from its pinned
+# Alpine release (3.23, matching the node base above). The base runs as the
+# unprivileged uid 101, so switch to root ONLY for the apk transaction and drop
+# straight back; the final runtime user is unchanged, and --no-cache leaves no apk
+# index behind in the layer.
 USER root
 RUN apk upgrade --no-cache
 # Bound the worker count to this container's CPU budget, not the host's core

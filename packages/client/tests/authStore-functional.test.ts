@@ -96,6 +96,11 @@ vi.mock('../src/services/api/client', () => ({
   clearCsrfToken: vi.fn(),
 }));
 
+const mockClearHealthResults = vi.fn().mockResolvedValue(undefined);
+vi.mock('../src/services/health/healthResultsStore', () => ({
+  clearHealthResults: (...args: unknown[]) => mockClearHealthResults(...args),
+}));
+
 const mockLoggerWarn = vi.fn();
 vi.mock('../src/lib/logger', () => ({
   logger: {
@@ -1140,5 +1145,67 @@ describe('Phase 5.2 — lock/logout secure state before the network call', () =>
     expect(state.isAuthenticated).toBe(false);
     expect(state.vaultKey).toBeNull();
     expect(state.mek).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Encrypted Vault Health snapshot is cleared on logout ONLY (never on lock —
+// it is encrypted at rest under the vault key and must survive refresh/auto-lock).
+// ---------------------------------------------------------------------------
+
+describe('logout clears the encrypted Vault Health snapshot (lock does not)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useAuthStore.setState({ ...authInitialState });
+    vi.mocked(logoutApi).mockResolvedValue(undefined as never);
+    vi.mocked(lockApi).mockResolvedValue({ data: { success: true } } as never);
+  });
+
+  it('logout() clears health results for the logged-in user', async () => {
+    useAuthStore.setState({
+      isAuthenticated: true,
+      isLocked: false,
+      user: { userId: 'user-123', email: 'user@example.com' },
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect(mockClearHealthResults).toHaveBeenCalledWith('user-123');
+  });
+
+  it('lock() does NOT clear health results', async () => {
+    useAuthStore.setState({
+      isAuthenticated: true,
+      isLocked: false,
+      user: { userId: 'user-123', email: 'user@example.com' },
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().lock();
+
+    expect(mockClearHealthResults).not.toHaveBeenCalled();
+  });
+
+  it('logout() completes and logs when clearing health results rejects', async () => {
+    mockClearHealthResults.mockRejectedValueOnce(new Error('idb boom'));
+    useAuthStore.setState({
+      isAuthenticated: true,
+      isLocked: false,
+      user: { userId: 'user-123', email: 'user@example.com' },
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect(mockClearHealthResults).toHaveBeenCalledWith('user-123');
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      'Failed to clear health results during logout',
+      expect.any(Error),
+    );
   });
 });

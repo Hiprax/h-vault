@@ -10,6 +10,7 @@ import '../models/RefreshToken.js';
 import '../models/AuditLog.js';
 import '../models/BackupLog.js';
 import '../models/JobLock.js';
+import '../models/PwnedRangeCache.js';
 
 const logger = createLogger({ moduleName: 'database' });
 

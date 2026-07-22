@@ -74,6 +74,13 @@ app.use(
         imgSrc: ["'self'", 'data:', 'blob:'],
         connectSrc: ["'self'"],
         fontSrc: ["'self'"],
+        // Web Workers are same-origin bundled files (the Vault Health page runs
+        // zxcvbn password-strength scoring off the main thread in a worker). This
+        // is set explicitly so worker loading is decoupled from `script-src` (a
+        // future tightening of `script-src` must not silently break the worker);
+        // it stays 'self' only, and the worker is a plain bundled file — never a
+        // `blob:` (which would require loosening this to `blob:`).
+        workerSrc: ["'self'"],
         objectSrc: ["'none'"],
         mediaSrc: ["'none'"],
         frameSrc: ["'none'"],

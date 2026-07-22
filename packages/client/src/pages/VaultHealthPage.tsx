@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type zxcvbnType from 'zxcvbn';
-import { getZxcvbn } from '../lib/lazyZxcvbn';
+import { List } from 'react-window';
+import type { RowComponentProps } from 'react-window';
 import {
   Shield,
   ShieldAlert,
@@ -16,8 +16,24 @@ import {
   ChevronUp,
   ExternalLink,
 } from 'lucide-react';
-import { useVaultStore, type DecryptedVaultItem } from '../stores/vaultStore';
-import { checkBreachApi } from '../services/api/userApi';
+import { useVaultStore, getHealthGeneration, type DecryptedVaultItem } from '../stores/vaultStore';
+import { useAuthStore } from '../stores/authStore';
+import { analyzeStrength, type StrengthEntry } from '../services/health/strengthAnalyzer';
+import { WEAK_SCORE_THRESHOLD } from '../services/health/passwordStrength';
+import { setScore, strengthCacheKey } from '../services/health/strengthCache';
+import {
+  runBreachCheck,
+  type BreachCheckResult,
+  type BreachFinding,
+} from '../services/health/breachCheck';
+import {
+  loadHealthResults,
+  saveBreachResults,
+  saveStrengthScores,
+  type HealthResultsPayload,
+  type BreachSaveEntry,
+  type StrengthSaveEntry,
+} from '../services/health/healthResultsStore';
 import { cn } from '../lib/utils';
 
 // Health check categories
@@ -27,22 +43,153 @@ interface HealthIssue {
   severity: 'critical' | 'warning' | 'info';
 }
 
+// ---------------------------------------------------------------------------
+// Finding lists (virtualized above a threshold, like the main vault list)
+// ---------------------------------------------------------------------------
+
+const FINDING_ROW_HEIGHT = 60;
+const FINDING_ROW_GAP = 4;
+const FINDING_ROW_TOTAL_HEIGHT = FINDING_ROW_HEIGHT + FINDING_ROW_GAP;
+const FINDING_VIRTUALIZATION_THRESHOLD = 50;
+// Cap the virtualized list height so a section with thousands of findings scrolls
+// inside a bounded panel rather than growing the page unboundedly.
+const FINDING_LIST_MAX_HEIGHT = 480;
+
+const DEFAULT_REASON_CLASS = 'text-[hsl(var(--muted-foreground))]';
+
+function FindingButton({
+  issue,
+  onItemClick,
+  reasonClassName,
+}: {
+  issue: HealthIssue;
+  onItemClick: (id: string) => void;
+  reasonClassName: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onItemClick(issue.item.id)}
+      className="flex h-full w-full items-center justify-between rounded-md px-3 py-2 text-left hover:bg-[hsl(var(--accent))] transition-colors"
+    >
+      <div className="min-w-0">
+        <p className="truncate text-sm font-medium text-[hsl(var(--card-foreground))]">
+          {issue.item.name}
+        </p>
+        <p className={cn('truncate text-xs', reasonClassName)}>{issue.reason}</p>
+      </div>
+      <ExternalLink className="h-4 w-4 shrink-0 text-[hsl(var(--muted-foreground))]" />
+    </button>
+  );
+}
+
+interface FindingRowData {
+  issues: HealthIssue[];
+  onItemClick: (id: string) => void;
+  reasonClassName: string;
+}
+
+function VirtualizedFindingRow(props: RowComponentProps<FindingRowData>) {
+  const { index, style, ariaAttributes, issues, onItemClick, reasonClassName } = props;
+  const issue = issues[index];
+  if (!issue) return null;
+  return (
+    <div style={{ ...style, paddingBottom: FINDING_ROW_GAP }} {...ariaAttributes}>
+      <FindingButton issue={issue} onItemClick={onItemClick} reasonClassName={reasonClassName} />
+    </div>
+  );
+}
+
+/**
+ * Renders a list of findings. Above {@link FINDING_VIRTUALIZATION_THRESHOLD} it
+ * windows the rows with react-window (bounded, scrollable) so a vault where most
+ * passwords are flagged does not render thousands of DOM nodes at once.
+ */
+function FindingList({
+  issues,
+  onItemClick,
+  reasonClassName,
+}: {
+  issues: HealthIssue[];
+  onItemClick: (id: string) => void;
+  reasonClassName?: string;
+}) {
+  const resolvedReasonClass = reasonClassName ?? DEFAULT_REASON_CLASS;
+
+  if (issues.length > FINDING_VIRTUALIZATION_THRESHOLD) {
+    const height = Math.min(issues.length * FINDING_ROW_TOTAL_HEIGHT, FINDING_LIST_MAX_HEIGHT);
+    const rowData: FindingRowData = {
+      issues,
+      onItemClick,
+      reasonClassName: resolvedReasonClass,
+    };
+    return (
+      <List<FindingRowData>
+        aria-label="Findings"
+        style={{ height }}
+        rowComponent={VirtualizedFindingRow}
+        rowCount={issues.length}
+        rowHeight={FINDING_ROW_TOTAL_HEIGHT}
+        rowProps={rowData}
+        overscanCount={5}
+        role="list"
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-1" role="list">
+      {issues.map((issue, index) => (
+        <div
+          key={issue.item.id}
+          role="listitem"
+          aria-setsize={issues.length}
+          aria-posinset={index + 1}
+        >
+          <FindingButton
+            issue={issue}
+            onItemClick={onItemClick}
+            reasonClassName={resolvedReasonClass}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Score card component
 function ScoreCard({
   label,
   count,
   total,
   color,
+  loading = false,
+  failed = false,
 }: {
   label: string;
   count: number;
   total: number;
   color: string;
+  loading?: boolean;
+  failed?: boolean;
 }) {
   return (
     <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4">
       <p className="text-sm text-[hsl(var(--muted-foreground))]">{label}</p>
-      <p className={cn('text-2xl font-bold', color)}>{count}</p>
+      {loading ? (
+        <Loader2
+          className={cn('my-1 h-6 w-6 animate-spin', color)}
+          aria-label={`Analyzing ${label}`}
+        />
+      ) : failed ? (
+        // Analysis could not complete — show a warning, never a (misleading) zero.
+        <AlertTriangle
+          className="my-1 h-6 w-6 text-yellow-600 dark:text-yellow-400"
+          aria-label={`${label} analysis failed`}
+        />
+      ) : (
+        <p className={cn('text-2xl font-bold', color)}>{count}</p>
+      )}
       <p className="text-xs text-[hsl(var(--muted-foreground))]">of {total} items</p>
     </div>
   );
@@ -55,20 +202,24 @@ function HealthSection({
   items,
   severity,
   onItemClick,
+  isAnalyzing = false,
+  analysisFailed = false,
 }: {
   title: string;
   icon: React.ComponentType<{ className?: string }>;
   items: HealthIssue[];
   severity: 'critical' | 'warning' | 'info';
   onItemClick: (id: string) => void;
+  isAnalyzing?: boolean;
+  analysisFailed?: boolean;
 }) {
   const [expanded, setExpanded] = useState(items.length > 0);
   const prevCount = useRef(items.length);
 
   // Findings can arrive after the first render (the weak-password check only
-  // runs once zxcvbn has lazily loaded). The `useState` initializer above does
-  // not re-run, so auto-expand on the 0 -> N transition; a section the user
-  // collapsed by hand keeps its state, since its count does not change.
+  // resolves once the Web Worker has scored the vault). The `useState` initializer
+  // above does not re-run, so auto-expand on the 0 -> N transition; a section the
+  // user collapsed by hand keeps its state, since its count does not change.
   useEffect(() => {
     if (prevCount.current === 0 && items.length > 0) setExpanded(true);
     prevCount.current = items.length;
@@ -93,16 +244,18 @@ function HealthSection({
           <span
             className={cn(
               'rounded-full px-2 py-0.5 text-xs font-medium',
-              items.length === 0
-                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
-                : severity === 'critical'
-                  ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
-                  : severity === 'warning'
-                    ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
-                    : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+              analysisFailed
+                ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
+                : items.length === 0
+                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                  : severity === 'critical'
+                    ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                    : severity === 'warning'
+                      ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
+                      : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
             )}
           >
-            {items.length}
+            {analysisFailed ? '!' : items.length}
           </span>
         </div>
         {expanded ? (
@@ -113,31 +266,82 @@ function HealthSection({
       </button>
       {expanded && items.length > 0 && (
         <div className="border-t border-[hsl(var(--border))] p-2">
-          {items.map((issue) => (
-            <button
-              key={issue.item.id}
-              type="button"
-              onClick={() => onItemClick(issue.item.id)}
-              className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left hover:bg-[hsl(var(--accent))] transition-colors"
-            >
-              <div>
-                <p className="text-sm font-medium text-[hsl(var(--card-foreground))]">
-                  {issue.item.name}
-                </p>
-                <p className="text-xs text-[hsl(var(--muted-foreground))]">{issue.reason}</p>
-              </div>
-              <ExternalLink className="h-4 w-4 shrink-0 text-[hsl(var(--muted-foreground))]" />
-            </button>
-          ))}
+          <FindingList issues={items} onItemClick={onItemClick} />
         </div>
       )}
       {expanded && items.length === 0 && (
         <div className="border-t border-[hsl(var(--border))] p-4">
-          <p className="text-sm text-green-600 dark:text-green-400">No issues found</p>
+          {isAnalyzing ? (
+            <p className="flex items-center gap-2 text-sm text-[hsl(var(--muted-foreground))]">
+              <Loader2 className="h-4 w-4 animate-spin" /> Analyzing…
+            </p>
+          ) : analysisFailed ? (
+            <p className="flex items-center gap-2 text-sm text-yellow-700 dark:text-yellow-400">
+              <AlertTriangle className="h-4 w-4 shrink-0" /> Could not analyze password strength.
+              Reload the page to try again.
+            </p>
+          ) : (
+            <p className="text-sm text-green-600 dark:text-green-400">No issues found</p>
+          )}
         </div>
       )}
     </div>
   );
+}
+
+/** Human-friendly relative time for the "Last checked" label. */
+export function formatLastChecked(ts: number): string {
+  const diff = Date.now() - ts;
+  const MIN = 60_000;
+  const HOUR = 3_600_000;
+  const DAY = 86_400_000;
+  if (diff < MIN) return 'just now';
+  if (diff < HOUR) return `${String(Math.floor(diff / MIN))} min ago`;
+  if (diff < DAY) return `${String(Math.floor(diff / HOUR))} h ago`;
+  return `${String(Math.floor(diff / DAY))} d ago`;
+}
+
+/**
+ * Rebuild a BreachCheckResult from a persisted snapshot, joining ONLY against the
+ * current login items and only where the stored version matches the item's
+ * `updatedAt` (a stale/edited item is treated as unchecked). Returns null when no
+ * breach scan has ever completed, so the UI keeps the un-checked state.
+ *
+ * A password the snapshot does not cover — an item added or edited since the scan —
+ * MUST be counted into `failedCount`, never dropped. Dropping it made a snapshot of
+ * two clean logins render "No breached passwords found" after 500 more were
+ * imported: the green all-clear is gated on `failedCount === 0`, and a persisted
+ * `breachFailedCount` is always 0 by construction (a scan is only persisted when it
+ * fully succeeded). An unchecked password must never be presented as a safe one.
+ */
+export function reconstructBreachResult(
+  payload: HealthResultsPayload,
+  items: readonly DecryptedVaultItem[],
+): BreachCheckResult | null {
+  if (payload.scanCompletedAt === null) return null;
+  const breached: BreachFinding[] = [];
+  let checkedCount = 0;
+  let unverifiedCount = 0;
+  for (const item of items) {
+    const password = typeof item.data.password === 'string' ? item.data.password : '';
+    if (!password) continue;
+    const datum = payload.perItem[item.id];
+    if (datum?.v !== item.updatedAt) {
+      unverifiedCount++;
+      continue;
+    }
+    checkedCount++;
+    if (datum.breach !== undefined && datum.breach > 0) {
+      breached.push({ item, count: datum.breach });
+    }
+  }
+  const failedCount = payload.breachFailedCount + unverifiedCount;
+  return {
+    breached,
+    totalCount: checkedCount + failedCount,
+    checkedCount,
+    failedCount,
+  };
 }
 
 export default function VaultHealthPage() {
@@ -145,16 +349,24 @@ export default function VaultHealthPage() {
   const loading = useVaultStore((s) => s.loading);
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const navigate = useNavigate();
-  const [breachedItems, setBreachedItems] = useState<HealthIssue[]>([]);
+
+  const [weakPasswords, setWeakPasswords] = useState<HealthIssue[]>([]);
+  const [analyzingStrength, setAnalyzingStrength] = useState(false);
+  const [strengthFailed, setStrengthFailed] = useState(false);
+
+  const [breachResult, setBreachResult] = useState<BreachCheckResult | null>(null);
   const [checkingBreaches, setCheckingBreaches] = useState(false);
-  const [breachChecked, setBreachChecked] = useState(false);
+  const [breachProgress, setBreachProgress] = useState<{ processed: number; total: number }>({
+    processed: 0,
+    total: 0,
+  });
   const initialFetchDone = useRef(false);
   const breachAbortRef = useRef<AbortController | null>(null);
-  const [zxcvbnFn, setZxcvbnFn] = useState<typeof zxcvbnType | null>(null);
 
-  useEffect(() => {
-    void getZxcvbn().then((fn) => setZxcvbnFn(() => fn));
-  }, []);
+  // Persisted (encrypted) results survive refresh / browser close. `hydrated`
+  // gates the weak-strength effect so the primed strength cache is read first.
+  const [hydrated, setHydrated] = useState(false);
+  const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null);
 
   // Fetch items if not loaded yet
   useEffect(() => {
@@ -174,25 +386,125 @@ export default function VaultHealthPage() {
   // Get login items only
   const loginItems = useMemo(() => items.filter((i) => i.itemType === 'login'), [items]);
 
-  // Weak passwords (zxcvbn score < 3)
-  const weakPasswords = useMemo<HealthIssue[]>(() => {
-    if (!zxcvbnFn) return [];
-    const labels = ['Very weak', 'Weak', 'Fair'];
-    const issues: HealthIssue[] = [];
-    for (const item of loginItems) {
-      const password = item.data.password as string | undefined;
-      if (!password) continue;
-      const result = zxcvbnFn(password);
-      if (result.score < 3) {
-        issues.push({
-          item,
-          reason: `Password strength: ${labels[result.score] ?? 'Very weak'}`,
-          severity: 'critical',
-        });
-      }
+  // A ref mirror of loginItems so the hydration effect can read the current list
+  // WITHOUT depending on it — hydration must run once after load, never re-run on
+  // every item change (which would overwrite a fresh scan with persisted data).
+  const loginItemsRef = useRef(loginItems);
+  loginItemsRef.current = loginItems;
+
+  // Hydrate the persisted, encrypted health snapshot after unlock so a refresh or
+  // browser-close does not force a re-scan. Runs once the vault has finished
+  // loading. Guarded by the health generation so a lock landing mid-load cannot
+  // repopulate results into a cleared session.
+  useEffect(() => {
+    if (loading) return;
+    const { user, vaultKey } = useAuthStore.getState();
+    if (!user?.userId || !vaultKey) {
+      setHydrated(true);
+      return;
     }
-    return issues;
-  }, [loginItems, zxcvbnFn]);
+    const generation = getHealthGeneration();
+    let cancelled = false;
+    void loadHealthResults(user.userId, vaultKey)
+      .then((payload) => {
+        if (cancelled || generation !== getHealthGeneration()) return;
+        if (payload) {
+          // Prime the in-memory strength cache so the weak-password effect
+          // resolves instantly from cache instead of re-running the worker.
+          for (const item of loginItemsRef.current) {
+            const datum = payload.perItem[item.id];
+            if (datum?.v === item.updatedAt && datum.strength !== undefined) {
+              setScore(strengthCacheKey(item.id, item.updatedAt), datum.strength);
+            }
+          }
+          const reconstructed = reconstructBreachResult(payload, loginItemsRef.current);
+          if (reconstructed) setBreachResult(reconstructed);
+          setLastCheckedAt(payload.scanCompletedAt);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loading]);
+
+  // Weak passwords (zxcvbn score below the weak threshold), scored OFF the main
+  // thread in a Web Worker so a large vault never freezes the page. Runs once the
+  // vault has finished loading; the analyzer caches per item + version, so the
+  // occasional re-run after an edit only rescores what changed.
+  useEffect(() => {
+    if (loading || !hydrated) return;
+
+    const entries: StrengthEntry[] = [];
+    for (const item of loginItems) {
+      const password = typeof item.data.password === 'string' ? item.data.password : '';
+      if (!password) continue;
+      entries.push({ id: item.id, password, version: item.updatedAt });
+    }
+
+    if (entries.length === 0) {
+      setWeakPasswords([]);
+      setAnalyzingStrength(false);
+      setStrengthFailed(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const generation = getHealthGeneration();
+    setAnalyzingStrength(true);
+    setStrengthFailed(false);
+    void analyzeStrength(entries, { signal: controller.signal })
+      .then((scores) => {
+        if (controller.signal.aborted) return;
+        const labels = ['Very weak', 'Weak', 'Fair'];
+        const issues: HealthIssue[] = [];
+        for (const item of loginItems) {
+          const score = scores.get(item.id);
+          if (score === undefined) continue;
+          if (score < WEAK_SCORE_THRESHOLD) {
+            issues.push({
+              item,
+              reason: `Password strength: ${labels[score] ?? 'Very weak'}`,
+              severity: 'critical',
+            });
+          }
+        }
+        setWeakPasswords(issues);
+        setAnalyzingStrength(false);
+
+        // Persist the computed strength scores (encrypted) so the weak-password
+        // findings survive a refresh. Guarded by the health generation so a lock
+        // during analysis cannot write results into a cleared session.
+        if (generation === getHealthGeneration()) {
+          const { user, vaultKey } = useAuthStore.getState();
+          if (user?.userId && vaultKey) {
+            const strengthEntries: StrengthSaveEntry[] = [];
+            for (const item of loginItems) {
+              const score = scores.get(item.id);
+              if (score !== undefined) {
+                strengthEntries.push({ id: item.id, v: item.updatedAt, strength: score });
+              }
+            }
+            if (strengthEntries.length > 0) {
+              void saveStrengthScores(user.userId, vaultKey, strengthEntries);
+            }
+          }
+        }
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        // Analysis failed entirely (e.g. the worker AND the lazy zxcvbn fallback
+        // both errored — a stale chunk hash after a deploy, offline, a blocked
+        // request). Surface it as a failure, NEVER as a clean "no issues found":
+        // this page is a security signal and must not report safe on no data.
+        setAnalyzingStrength(false);
+        setStrengthFailed(true);
+      });
+
+    return () => controller.abort();
+  }, [loginItems, loading, hydrated]);
 
   // Reused passwords
   const reusedPasswords = useMemo<HealthIssue[]>(() => {
@@ -250,10 +562,22 @@ export default function VaultHealthPage() {
       }));
   }, [loginItems]);
 
+  const breachChecked = breachResult !== null;
+
+  // Breached findings map back to every item sharing a breached password.
+  const breachedIssues = useMemo<HealthIssue[]>(() => {
+    if (!breachResult) return [];
+    return breachResult.breached.map(({ item, count }) => ({
+      item,
+      reason: `Found in ${count.toLocaleString()} data breach(es)`,
+      severity: 'critical' as const,
+    }));
+  }, [breachResult]);
+
   // Calculate overall health score
   const healthScore = useMemo(() => {
     if (loginItems.length === 0) return 100;
-    const breachedCount = breachChecked ? breachedItems.length : 0;
+    const breachedCount = breachChecked ? breachedIssues.length : 0;
     const categories = breachChecked ? 4 : 3;
     const totalIssues =
       weakPasswords.length + reusedPasswords.length + oldPasswords.length + breachedCount;
@@ -266,7 +590,7 @@ export default function VaultHealthPage() {
     reusedPasswords.length,
     oldPasswords.length,
     breachChecked,
-    breachedItems.length,
+    breachedIssues.length,
   ]);
 
   const scoreColor =
@@ -277,76 +601,61 @@ export default function VaultHealthPage() {
         : 'text-[hsl(var(--destructive))]';
   const ScoreIcon = healthScore >= 80 ? ShieldCheck : healthScore >= 50 ? Shield : ShieldAlert;
 
-  // Helper to check abort state; prevents TypeScript from narrowing the
-  // readonly `aborted` property to `false` after an earlier branch.
-  const isAborted = (c: AbortController): boolean => c.signal.aborted;
-
-  // Breach check handler using SHA-1 k-anonymity
+  // Breach check handler — deduplicates passwords, checks them in batches with a
+  // determinate progress indicator, and reports any that could NOT be checked
+  // rather than passing them off as safe.
   const checkBreaches = useCallback(async () => {
-    // Abort any previous check
     breachAbortRef.current?.abort();
     const controller = new AbortController();
     breachAbortRef.current = controller;
+    const generation = getHealthGeneration();
 
     setCheckingBreaches(true);
-    setBreachedItems([]);
-    const issues: HealthIssue[] = [];
+    setBreachProgress({ processed: 0, total: 0 });
 
     try {
-      for (const item of loginItems) {
-        if (isAborted(controller)) break;
+      const result = await runBreachCheck(loginItems, {
+        signal: controller.signal,
+        onProgress: (processed, total) => {
+          if (!controller.signal.aborted) setBreachProgress({ processed, total });
+        },
+      });
+      if (controller.signal.aborted) return;
+      setBreachResult(result);
+      const completedAt = Date.now();
+      setLastCheckedAt(completedAt);
 
-        const password = item.data.password as string | undefined;
-        if (!password) continue;
-
-        // SHA-1 hash the password
-        const encoder = new TextEncoder();
-        const data = encoder.encode(password);
-        const hashBuffer = await crypto.subtle.digest('SHA-1', data);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        const hashHex = hashArray
-          .map((b) => b.toString(16).padStart(2, '0'))
-          .join('')
-          .toUpperCase();
-        const prefix = hashHex.substring(0, 5);
-
-        if (isAborted(controller)) break;
-
-        try {
-          const response = await checkBreachApi(prefix);
-          const result = response.data;
-          if (result.success && typeof result.data === 'string') {
-            const suffix = hashHex.substring(5);
-            const lines = result.data.split('\r\n');
-            for (const line of lines) {
-              const [hashSuffix, countStr] = line.split(':');
-              if (hashSuffix?.toUpperCase() === suffix) {
-                const count = parseInt(countStr ?? '0', 10);
-                issues.push({
-                  item,
-                  reason: `Found in ${count.toLocaleString()} data breach(es)`,
-                  severity: 'critical',
-                });
-                break;
-              }
-            }
+      // Persist (encrypted) so results survive refresh / browser close. This runs
+      // ONLY after a FULLY successful scan (no unchecked passwords), so a failed or
+      // aborted run keeps the previous persisted result and we never persist a
+      // not-actually-checked item as "clean". Guarded by the health generation so a
+      // lock mid-scan cannot write into a cleared session.
+      if (result.failedCount === 0 && generation === getHealthGeneration()) {
+        const { user, vaultKey } = useAuthStore.getState();
+        if (user?.userId && vaultKey) {
+          const countById = new Map(result.breached.map((b) => [b.item.id, b.count]));
+          const breachEntries: BreachSaveEntry[] = [];
+          for (const item of loginItems) {
+            const password = typeof item.data.password === 'string' ? item.data.password : '';
+            if (!password) continue;
+            const count = countById.get(item.id);
+            breachEntries.push({
+              id: item.id,
+              v: item.updatedAt,
+              ...(count !== undefined ? { breach: count } : {}),
+            });
           }
-        } catch {
-          // Skip individual failures
-        }
-
-        // Add small delay to avoid overwhelming the API
-        if (!isAborted(controller)) {
-          await new Promise((resolve) => setTimeout(resolve, 200));
+          void saveBreachResults(
+            user.userId,
+            vaultKey,
+            breachEntries,
+            result.failedCount,
+            completedAt,
+          );
         }
       }
     } finally {
-      // Only update state if not aborted (component still mounted)
-      if (!isAborted(controller)) {
-        setBreachedItems(issues);
-        setCheckingBreaches(false);
-        setBreachChecked(true);
-      }
+      if (!controller.signal.aborted) setCheckingBreaches(false);
     }
   }, [loginItems]);
 
@@ -367,6 +676,11 @@ export default function VaultHealthPage() {
       </div>
     );
   }
+
+  const breachProgressPct =
+    breachProgress.total > 0
+      ? Math.round((breachProgress.processed / breachProgress.total) * 100)
+      : 0;
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -393,6 +707,8 @@ export default function VaultHealthPage() {
           count={weakPasswords.length}
           total={loginItems.length}
           color="text-[hsl(var(--destructive))]"
+          loading={analyzingStrength}
+          failed={strengthFailed}
         />
         <ScoreCard
           label="Reused"
@@ -422,6 +738,8 @@ export default function VaultHealthPage() {
           items={weakPasswords}
           severity="critical"
           onItemClick={handleItemClick}
+          isAnalyzing={analyzingStrength}
+          analysisFailed={strengthFailed}
         />
         <HealthSection
           title="Reused Passwords"
@@ -457,12 +775,17 @@ export default function VaultHealthPage() {
                 <span
                   className={cn(
                     'rounded-full px-2 py-0.5 text-xs font-medium',
-                    breachedItems.length === 0
+                    breachedIssues.length === 0
                       ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
                       : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
                   )}
                 >
-                  {breachedItems.length}
+                  {breachedIssues.length}
+                </span>
+              )}
+              {lastCheckedAt !== null && (
+                <span className="text-xs text-[hsl(var(--muted-foreground))]">
+                  Last checked {formatLastChecked(lastCheckedAt)}
                 </span>
               )}
             </div>
@@ -483,33 +806,66 @@ export default function VaultHealthPage() {
               )}
             </button>
           </div>
-          {breachChecked && breachedItems.length > 0 && (
-            <div className="border-t border-[hsl(var(--border))] p-2">
-              {breachedItems.map((issue) => (
-                <button
-                  key={issue.item.id}
-                  type="button"
-                  onClick={() => handleItemClick(issue.item.id)}
-                  className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left hover:bg-[hsl(var(--accent))] transition-colors"
-                >
-                  <div>
-                    <p className="text-sm font-medium text-[hsl(var(--card-foreground))]">
-                      {issue.item.name}
-                    </p>
-                    <p className="text-xs text-[hsl(var(--destructive))]">{issue.reason}</p>
-                  </div>
-                  <ExternalLink className="h-4 w-4 shrink-0 text-[hsl(var(--muted-foreground))]" />
-                </button>
-              ))}
+
+          {/* Determinate progress while a scan runs */}
+          {checkingBreaches && (
+            <div className="space-y-2 border-t border-[hsl(var(--border))] p-4">
+              <div className="flex items-center justify-between text-sm text-[hsl(var(--muted-foreground))]">
+                <span>Checking your unique passwords…</span>
+                <span className="tabular-nums">
+                  {breachProgress.total > 0
+                    ? `${breachProgress.processed} / ${breachProgress.total}`
+                    : '…'}
+                </span>
+              </div>
+              <div
+                className="h-2 w-full overflow-hidden rounded-full bg-[hsl(var(--muted))]"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={breachProgress.total}
+                aria-valuenow={breachProgress.processed}
+                aria-label="Breach check progress"
+              >
+                <div
+                  className="h-full bg-[hsl(var(--primary))] transition-[width] duration-300"
+                  style={{ width: `${breachProgressPct}%` }}
+                />
+              </div>
             </div>
           )}
-          {breachChecked && breachedItems.length === 0 && (
+
+          {/* Partial-result warning: some passwords could not be checked. Covers a
+              failed lookup during a live scan AND a password the restored snapshot
+              never covered (added or edited since it was taken). */}
+          {!checkingBreaches && breachResult && breachResult.failedCount > 0 && (
             <div className="border-t border-[hsl(var(--border))] p-4">
-              <p className="text-sm text-green-600 dark:text-green-400">
-                No breached passwords found
+              <p className="flex items-center gap-2 text-sm text-yellow-700 dark:text-yellow-400">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                {breachResult.failedCount.toLocaleString()} password(s) could not be checked. Run a
+                fresh check to verify them.
               </p>
             </div>
           )}
+
+          {!checkingBreaches && breachChecked && breachedIssues.length > 0 && (
+            <div className="border-t border-[hsl(var(--border))] p-2">
+              <FindingList
+                issues={breachedIssues}
+                onItemClick={handleItemClick}
+                reasonClassName="text-[hsl(var(--destructive))]"
+              />
+            </div>
+          )}
+          {!checkingBreaches &&
+            breachChecked &&
+            breachedIssues.length === 0 &&
+            breachResult.failedCount === 0 && (
+              <div className="border-t border-[hsl(var(--border))] p-4">
+                <p className="text-sm text-green-600 dark:text-green-400">
+                  No breached passwords found
+                </p>
+              </div>
+            )}
           {!breachChecked && !checkingBreaches && (
             <div className="border-t border-[hsl(var(--border))] p-4">
               <p className="text-sm text-[hsl(var(--muted-foreground))]">

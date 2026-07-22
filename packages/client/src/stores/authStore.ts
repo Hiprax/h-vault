@@ -14,6 +14,7 @@ import { cryptoService } from '../services/crypto/cryptoService.js';
 import { registerApi, loginApi, login2faApi, logoutApi, lockApi } from '../services/api/authApi.js';
 import { clearCsrfToken } from '../services/api/client.js';
 import { offlineCache } from '../services/offlineCache.js';
+import { clearHealthResults } from '../services/health/healthResultsStore.js';
 import { clearSettingsCache } from '../hooks/useUserSettings.js';
 import { clearClipboardIfDirty } from '../hooks/useClipboardGuard.js';
 import { logger } from '../lib/logger.js';
@@ -523,7 +524,7 @@ export const useAuthStore = create<AuthState>()(
       // Logout (full cleanup)
       // -------------------------------------------------------------------
       logout: async (): Promise<void> => {
-        const { vaultKey, mek, accessToken } = get();
+        const { vaultKey, mek, accessToken, user } = get();
 
         // Call server logout BEFORE clearing state so the Axios interceptor
         // can still read the access token from the store and send a valid
@@ -586,6 +587,20 @@ export const useAuthStore = create<AuthState>()(
           await offlineCache.setUser(null);
         } catch (err) {
           logger.warn('Failed to clear offline cache during logout', err);
+        }
+
+        // Clear the per-user encrypted Vault Health snapshot (breach + strength).
+        // Logout ONLY — NOT lock: the snapshot is encrypted at rest under the
+        // vault key, so keeping it across a lock is exactly as safe as the
+        // already-persisted wrapped vault key, and is required for results to
+        // survive a refresh / auto-lock. clearHealthResults never throws; the
+        // try/catch is defense-in-depth so logout teardown always completes.
+        if (user?.userId) {
+          try {
+            await clearHealthResults(user.userId);
+          } catch (err) {
+            logger.warn('Failed to clear health results during logout', err);
+          }
         }
 
         // Clear cached user settings so the next session fetches fresh data.

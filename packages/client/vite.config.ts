@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import { manualChunks, resolveDevHost } from './vite.config.helpers';
+import { manualChunks, resolveDevHost, resolveDevPort } from './vite.config.helpers';
 
 export default defineConfig({
   plugins: [
@@ -46,10 +46,15 @@ export default defineConfig({
     }),
   ],
   server: {
-    port: 3000,
+    // 5173 by default (Vite's own), overridable via VITE_PORT. NOT 3000: Windows
+    // reserves dynamic ranges that swallow it, and the bind then fails EACCES.
+    // See resolveDevPort in vite.config.helpers.ts.
+    port: resolveDevPort(),
     // Loopback by default (local dev / E2E / CI). Docker dev sets VITE_HOST=0.0.0.0
     // so the container's published port is reachable from the host.
     host: resolveDevHost(),
+    // Fail loudly rather than silently sliding to another port, which would
+    // desync Playwright's fixed probe URL and the documented dev URL.
     strictPort: true,
     proxy: {
       '/api': {

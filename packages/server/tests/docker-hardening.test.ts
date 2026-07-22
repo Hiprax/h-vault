@@ -898,9 +898,8 @@ describe('Docker deployment', () => {
     });
 
     it('patches the Nginx base image OS packages that Trivy flags as fixable HIGH', () => {
-      // nginx-unprivileged:1.29-alpine trails node:24-alpine by a full Alpine
-      // minor (3.23 vs 3.24) and ships fixable HIGH CVEs in c-ares, openssl
-      // (libcrypto3 / libssl3), libexpat and libxml2. The web stage runs
+      // The nginx-unprivileged:1.29-alpine base ships fixable HIGH CVEs in c-ares,
+      // openssl (libcrypto3 / libssl3), libexpat and libxml2. The web stage runs
       // `apk upgrade` to pull the patched packages; dropping this reopens the
       // Docker/Trivy gate, so it is asserted rather than merely commented.
       const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
@@ -910,6 +909,21 @@ describe('Docker deployment', () => {
       // Assert the ORDER: root, then the apk RUN, then drop back to 101 as the
       // final (serving) user — not merely that all three tokens appear somewhere.
       expect(webStage).toMatch(/USER root[\s\S]*RUN apk upgrade --no-cache[\s\S]*USER 101/);
+    });
+
+    it('pins the node base image to an explicit Alpine minor, not the floating tag', () => {
+      // The floating `node:24-alpine` tag rolled onto Alpine 3.24, whose musl
+      // userspace SIGSEGVs npm at process launch under the WSL2 kernel used for
+      // local image builds (`npm ci` exits 139 — the image cannot be built there).
+      // The 3.23 variant carries the identical Node runtime and is unaffected, so
+      // the base is pinned to it. Reverting to the floating tag reopens the crash,
+      // and does so invisibly (it builds fine on hosts unaffected by the 3.24
+      // regression), so pin it structurally.
+      const baseLine = /^FROM (node:24-alpine[^\s]*) AS base$/m.exec(dockerfile);
+      expect(baseLine).not.toBeNull();
+      // An explicit Alpine minor suffix (e.g. `node:24-alpine3.23`), never the bare
+      // floating `node:24-alpine`.
+      expect(baseLine?.[1]).toMatch(/^node:24-alpine\d+\.\d+$/);
     });
 
     it('mitigates the npm bundled-undici HIGH in the node images', () => {

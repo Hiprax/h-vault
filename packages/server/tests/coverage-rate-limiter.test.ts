@@ -489,6 +489,30 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
 
       expect(await storedKeys()).toEqual(['unlock:203.0.113.90']);
     });
+
+    // breachBatchLimiter shares the exact keyGenerator/handler shape as
+    // breachCheckLimiter (exhaustively driven above), so this only pins its
+    // distinct concerns: its own `breachBatch:` prefix and userId keying that a
+    // rotating source IP cannot fragment. Its 300-request budget is verified in
+    // breach-batch-budget.test.ts rather than exhausted here.
+    it('breachBatchLimiter keys per user under its own prefix, immune to IP rotation', async () => {
+      const app = createApp(limiters.breachBatchLimiter as RequestHandler, { injectUser: true });
+      const userId = 'cccccccccccccccccccccccc';
+
+      const first = await request(app)
+        .get('/t')
+        .set('x-test-user', userId)
+        .set('x-forwarded-for', '203.0.113.5');
+      const second = await request(app)
+        .get('/t')
+        .set('x-test-user', userId)
+        .set('x-forwarded-for', '203.0.113.200');
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(await storedKeys()).toEqual([`breachBatch:${userId}`]);
+      expect(await counterFor(`breachBatch:${userId}`)).toBe(2);
+    });
   });
 
   describe('refreshLimiter (IP + UA + refresh-token session)', () => {

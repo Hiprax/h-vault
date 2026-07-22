@@ -112,6 +112,7 @@ vi.mock('../src/services/api/userApi', () => ({
   revokeSessionApi: (...args: unknown[]) => mockRevokeSessionApi(...args),
   getAuditLogApi: (...args: unknown[]) => mockGetAuditLogApi(...args),
   checkBreachApi: vi.fn(),
+  checkBreachBatchApi: vi.fn(),
 }));
 
 vi.mock('../src/services/api/authApi', () => ({

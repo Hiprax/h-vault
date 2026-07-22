@@ -56,14 +56,17 @@ describe('MEDIUM-4: HIBP in-memory cache', () => {
     const user = await createTestUser();
 
     // Seed an already-expired entry for the prefix the request will use.
+    // Uses a valid SUFFIX:COUNT range line (the only shape HIBP ever returns).
     hibpCache.set('5BAA6', {
-      data: 'STALE-must-not-be-served',
+      data: 'STALESUFFIXAAAAAAAAAAAAAAAAAAAAAAA:1',
       expires: Date.now() - 1000,
     });
 
     // The controller must fall through to HIBP on an expired hit; stub the
     // upstream fetch so no real network call happens and its value is distinct.
-    const getSpy = vi.spyOn(axios, 'get').mockResolvedValue({ data: 'FRESH-from-hibp' } as never);
+    const getSpy = vi
+      .spyOn(axios, 'get')
+      .mockResolvedValue({ data: 'FRESHSUFFIXBBBBBBBBBBBBBBBBBBBBBBB:5' } as never);
 
     try {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
@@ -76,12 +79,12 @@ describe('MEDIUM-4: HIBP in-memory cache', () => {
 
       expect(res.status).toBe(200);
       // The stale value must NOT be returned — the freshly fetched one is.
-      expect(res.body.data).toBe('FRESH-from-hibp');
-      expect(res.body.data).not.toBe('STALE-must-not-be-served');
+      expect(res.body.data).toBe('FRESHSUFFIXBBBBBBBBBBBBBBBBBBBBBBB:5');
+      expect(res.body.data).not.toBe('STALESUFFIXAAAAAAAAAAAAAAAAAAAAAAA:1');
       // The upstream was actually consulted (proving the expired entry was a miss).
       expect(getSpy).toHaveBeenCalledTimes(1);
       // The cache was refreshed with the new value.
-      expect(hibpCache.get('5BAA6')?.data).toBe('FRESH-from-hibp');
+      expect(hibpCache.get('5BAA6')?.data).toBe('FRESHSUFFIXBBBBBBBBBBBBBBBBBBBBBBB:5');
     } finally {
       getSpy.mockRestore();
     }

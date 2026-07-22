@@ -78,7 +78,7 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 | **Session management**        | Refresh-token rotation with reuse detection and family revocation. Access tokens are invalidated the instant a password changes. A locked-out, unverified or pending-deletion account cannot mint new ones. |
 | **No enumeration oracles**    | Registration, login, lockout, password reset and verification-resend are all built so that response body _and_ response time are identical whether or not the account exists.                               |
 | **Account lockout**           | 30 minutes after 10 failed attempts, with progressive delays and an unlock email — and evaluated _after_ the password check, so it never reveals that an account exists.                                    |
-| **CSRF + rate limiting**      | HMAC-SHA256 double-submit tokens with constant-time verification, and [thirteen rate-limit tiers](#rate-limiting) backed by MongoDB, keyed per IP, email, user or session, with IPv6 `/64` aggregation.     |
+| **CSRF + rate limiting**      | HMAC-SHA256 double-submit tokens with constant-time verification, and [fourteen rate-limit tiers](#rate-limiting) backed by MongoDB, keyed per IP, email, user or session, with IPv6 `/64` aggregation.     |
 | **Breach detection**          | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                    |
 | **Audit log**                 | A searchable security log covering **37 distinct operations**, with TTL-based retention.                                                                                                                    |
 | **Account deletion**          | GDPR-complete, password-confirmed, and cascaded atomically across every collection.                                                                                                                         |
@@ -296,14 +296,14 @@ npm run dev
 
 |                    |                                  |
 | ------------------ | -------------------------------- |
-| Frontend           | <http://localhost:3000>          |
+| Frontend           | <http://localhost:5173>          |
 | API                | <http://localhost:5000/api/v1>   |
 | API docs (Swagger) | <http://localhost:5000/api/docs> |
 
 > **Prefer not to run Node on the host?** Drop the service name — `docker compose -f
 docker-compose.dev.yml up -d` — and the same file also starts a hot-reload **app** container
 > serving those two ports, so you skip `npm run dev` entirely. Start only one of the two: the
-> container publishes 3000 and 5000, so running both collides on the ports.
+> container publishes 5173 and 5000, so running both collides on the ports.
 
 ---
 
@@ -353,6 +353,14 @@ the only thing you install yourself is the system Nginx that terminates TLS in f
   IP is reachable from the whole internet **even behind an active `ufw deny`** — Docker's iptables
   rules are evaluated before `INPUT`.
 - ~2 GB free RAM and ~3 GB disk **to build**, if you build on the production host.
+
+> **Building images on WSL2.** The Node image base is pinned to `node:24-alpine3.23` on purpose: the
+> floating `node:24-alpine` tag moved onto Alpine 3.24, whose musl userspace crashes `npm` at launch
+> (SIGSEGV) under recent WSL2 kernels, so `npm ci` dies with exit 139 during the build. The pin uses
+> the identical Node runtime and builds everywhere. If you build on WSL2 and still see Node crash on
+> launch, the WSL2 6.18 kernel series has separate known Node instability; pin the WSL2 kernel to the
+> 6.6 LTS series via `%UserProfile%\.wslconfig` (`[wsl2]` `kernel=<path to a 6.6 microsoft-standard
+bzImage>`), then `wsl --shutdown`. Do not chase a 6.19+ kernel — it regresses MongoDB instead.
 
 ### 1. Configure
 
@@ -590,7 +598,7 @@ start** rather than run misconfigured.
 | `MONGODB_URI`                 | No       | `mongodb://localhost:27017/hvault` | Overridden inside the Docker stack                                                                                              |
 | `JWT_ACCESS_EXPIRY`           | No       | `5m`                               | Access token lifetime                                                                                                           |
 | `JWT_REFRESH_EXPIRY`          | No       | `7d`                               | Refresh token lifetime                                                                                                          |
-| `CORS_ORIGIN`                 | No       | `http://localhost:3000`            | **Must be HTTPS in production** or the app will not boot                                                                        |
+| `CORS_ORIGIN`                 | No       | `http://localhost:5173`            | **Must be HTTPS in production** or the app will not boot                                                                        |
 | `TWO_FACTOR_ENCRYPTION_KEY`   | No       | falls back to `SESSION_SECRET`     | Min 32 chars. An empty assignment is treated as unset                                                                           |
 | `BCRYPT_ROUNDS`               | No       | `12`                               | 4–31                                                                                                                            |
 | `EMAIL_PROVIDER`              | No       | `smtp`                             | `smtp` or `gmail`                                                                                                               |
@@ -604,6 +612,9 @@ start** rather than run misconfigured.
 | `EXPORT_MAX_SIZE_MB`          | No       | `25`                               | 1–100                                                                                                                           |
 | `FILE_ENCRYPTION_MAX_SIZE_MB` | No       | `100`                              | 1–1024. A client-side guardrail advertised via `GET /config` — the file is never uploaded, so it cannot be enforced server-side |
 | `AUDIT_LOG_RETENTION_DAYS`    | No       | `365`                              | 1–3650                                                                                                                          |
+| `BREACH_CACHE_TTL_DAYS`       | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries; seed-imported entries are TTL-exempt                     |
+| `BREACH_SEED_AUTO`            | No       | `false`                            | When `true`, the refresh cron may fetch missing/stale ranges from HIBP (tens of GB over a full corpus). Off by default          |
+| `BREACH_SEED_REFRESH_CRON`    | No       | —                                  | Cron expression (UTC) for the breach-range refresh job. Unset disables it. Requires `BREACH_SEED_AUTO=true` to fetch            |
 | `MONGO_MAX_POOL_SIZE`         | No       | `10`                               | 1–100, and must be ≥ the min pool size                                                                                          |
 | `MONGO_MIN_POOL_SIZE`         | No       | `2`                                | 0–50                                                                                                                            |
 | `TRUST_PROXY`                 | No       | `false`                            | `false` · `true` · `1` · a named range · a subnet list · a hop count (0–10)                                                     |
@@ -621,7 +632,7 @@ start** rather than run misconfigured.
 | --------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
 | `HVAULT_HTTP_PORT`    | `8080`            | The one host port published, always bound to `127.0.0.1`                                 |
 | `HVAULT_STACK_NAME`   | `hvault`          | Namespaces the project, containers, networks and volumes                                 |
-| `HVAULT_VERSION`      | `0.3.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
+| `HVAULT_VERSION`      | `0.4.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
 | `HVAULT_EDGE_SUBNET`  | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                       |
 | `HVAULT_DATA_SUBNET`  | `172.31.241.0/24` | App ↔ MongoDB. Internal: no published port, no route out                                 |
 | `TRUST_PROXY_HOPS`    | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                              |
@@ -718,18 +729,19 @@ authoritative.
 <details>
 <summary><b>Tools and backup</b> — <code>/api/v1/tools</code>, <code>/api/v1/backup</code></summary>
 
-| Method | Endpoint                       | Description                                            |
-| ------ | ------------------------------ | ------------------------------------------------------ |
-| POST   | `/tools/check-password-breach` | HaveIBeenPwned k-anonymity check (5-char hash prefix)  |
-| POST   | `/tools/export`                | Encrypted JSON export (master password required)       |
-| POST   | `/tools/import`                | Execute already-resolved import operations (see below) |
-| POST   | `/backup/setup`                | Configure backup encryption (master password required) |
-| PUT    | `/backup/settings`             | Schedule and recipients                                |
-| POST   | `/backup/trigger`              | Create a backup and email it                           |
-| GET    | `/backup/download`             | Download an encrypted backup file                      |
-| GET    | `/backup/history`              | Backup history (paginated)                             |
-| PUT    | `/backup/change-password`      | Change the backup password                             |
-| POST   | `/backup/restore`              | Restore from an encrypted backup                       |
+| Method | Endpoint                             | Description                                            |
+| ------ | ------------------------------------ | ------------------------------------------------------ |
+| POST   | `/tools/check-password-breach`       | HaveIBeenPwned k-anonymity check (5-char hash prefix)  |
+| POST   | `/tools/check-password-breach/batch` | Batched HaveIBeenPwned check (many 5-char prefixes)    |
+| POST   | `/tools/export`                      | Encrypted JSON export (master password required)       |
+| POST   | `/tools/import`                      | Execute already-resolved import operations (see below) |
+| POST   | `/backup/setup`                      | Configure backup encryption (master password required) |
+| PUT    | `/backup/settings`                   | Schedule and recipients                                |
+| POST   | `/backup/trigger`                    | Create a backup and email it                           |
+| GET    | `/backup/download`                   | Download an encrypted backup file                      |
+| GET    | `/backup/history`                    | Backup history (paginated)                             |
+| PUT    | `/backup/change-password`            | Change the backup password                             |
+| POST   | `/backup/restore`                    | Restore from an encrypted backup                       |
 
 `POST /tools/import` takes `{ format, conflictStrategy, operations: { inserts, updates } }` and
 answers `{ insertedCount, updatedCount }`. The client parses the source (Bitwarden, LastPass,
@@ -782,7 +794,7 @@ are replaced with the generic status text, so an internal failure cannot leak it
 
 ## Rate limiting
 
-Thirteen tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-keyed limiters collapse
+Fourteen tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-keyed limiters collapse
 an IPv6 address to its `/64` prefix, so rotating the source address inside one allocation does not
 buy an attacker a fresh bucket.
 
@@ -794,7 +806,8 @@ buy an attacker a fresh bucket.
 | Refresh         | 5 / session | 5 min  | token refresh — keyed by IP + user-agent + a hash of the refresh cookie                                                                                  |
 | Unlock          | 5 / user    | 5 min  | vault unlock verification                                                                                                                                |
 | Password verify | 5 / user    | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password |
-| Breach check    | 30 / user   | 15 min | HaveIBeenPwned lookups                                                                                                                                   |
+| Breach check    | 30 / user   | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                   |
+| Breach batch    | 300 / user  | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                   |
 | General auth    | 60 / user   | 1 min  | profile, sessions, audit log, folder list, lock, logout, logout-all                                                                                      |
 | Heavy Ops       | 10 / IP     | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                             |
 | Import          | 60 / user   | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                   |
@@ -973,7 +986,7 @@ git push --no-verify                    # skip the hook entirely
 
 **Known gap, stated plainly:** the old CI ran the unit tests on a Node 22 + 24 matrix. The local
 pipeline runs them on your Node only. The project pins Node 24 everywhere that matters (`.nvmrc`,
-`node:24-alpine` in every production image), so the 22 leg was testing a runtime nothing here ships
+`node:24-alpine3.23` in every production image), so the 22 leg was testing a runtime nothing here ships
 on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ### Scripts

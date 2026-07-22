@@ -195,7 +195,11 @@ import { useToast } from '../src/components/ui/Toast';
 // ---------------------------------------------------------------------------
 
 import { FolderSidebar } from '../src/components/vault/FolderSidebar';
-import { AppLayout } from '../src/components/layout/AppLayout';
+import {
+  AppLayout,
+  isNavItemActive,
+  isVaultSectionActive,
+} from '../src/components/layout/AppLayout';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1789,5 +1793,76 @@ describe('AppLayout - comprehensive coverage', () => {
     const toggleButton = screen.getByLabelText('Expand sidebar');
     expect(toggleButton.className).toContain('opacity-100');
     expect(toggleButton.className).not.toContain('pointer-events-none');
+  });
+});
+
+describe('AppLayout - nav active matching (pure helpers)', () => {
+  it('isVaultSectionActive: /vault and /vault/:id active, /vault/health not', () => {
+    expect(isVaultSectionActive('/vault')).toBe(true);
+    expect(isVaultSectionActive('/vault/abc123')).toBe(true);
+    expect(isVaultSectionActive('/vault/health')).toBe(false);
+    // A hypothetical Vault Health child route must not re-highlight "Vault".
+    expect(isVaultSectionActive('/vault/health/details')).toBe(false);
+    // Guards the prefix boundary so `/vaulting` never matches `/vault`.
+    expect(isVaultSectionActive('/vaulting')).toBe(false);
+  });
+
+  it('isNavItemActive: default rule is exact-or-descendant', () => {
+    expect(isNavItemActive({ to: '/settings' }, '/settings')).toBe(true);
+    expect(isNavItemActive({ to: '/settings' }, '/settings/backup')).toBe(true);
+    expect(isNavItemActive({ to: '/settings' }, '/generator')).toBe(false);
+  });
+
+  it('isNavItemActive: an item with a custom matcher defers to it', () => {
+    const item = { to: '/vault', match: isVaultSectionActive };
+    expect(isNavItemActive(item, '/vault/health')).toBe(false);
+    expect(isNavItemActive(item, '/vault/abc')).toBe(true);
+  });
+});
+
+describe('AppLayout - active nav highlighting (regression)', () => {
+  function renderAt(route: string) {
+    return render(
+      <MemoryRouter initialEntries={[route]}>
+        <Routes>
+          <Route element={<AppLayout />}>
+            <Route path="/vault" element={<div>vault-outlet</div>} />
+            <Route path="/vault/health" element={<div>health-outlet</div>} />
+            <Route path="/vault/:id" element={<div>item-outlet</div>} />
+            <Route path="/settings" element={<div>settings-outlet</div>} />
+            <Route path="/settings/backup" element={<div>backup-outlet</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  const navAnchor = (label: string): HTMLAnchorElement => {
+    const el = screen.getByText(label).closest('a');
+    if (!el) throw new Error(`nav link ${label} not found`);
+    return el as HTMLAnchorElement;
+  };
+
+  it('marks only Vault active on /vault', () => {
+    renderAt('/vault');
+    expect(navAnchor('Vault')).toHaveAttribute('aria-current', 'page');
+    expect(navAnchor('Vault Health')).not.toHaveAttribute('aria-current');
+  });
+
+  it('marks only Vault Health active on /vault/health (no double-highlight)', () => {
+    renderAt('/vault/health');
+    expect(navAnchor('Vault Health')).toHaveAttribute('aria-current', 'page');
+    expect(navAnchor('Vault')).not.toHaveAttribute('aria-current');
+  });
+
+  it('keeps Vault active on an item detail page but not Vault Health', () => {
+    renderAt('/vault/abc123');
+    expect(navAnchor('Vault')).toHaveAttribute('aria-current', 'page');
+    expect(navAnchor('Vault Health')).not.toHaveAttribute('aria-current');
+  });
+
+  it('keeps Settings active on a settings sub-page', () => {
+    renderAt('/settings/backup');
+    expect(navAnchor('Settings')).toHaveAttribute('aria-current', 'page');
   });
 });

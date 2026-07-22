@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-22
+
+### Added
+
+- New `POST /api/v1/tools/check-password-breach/batch` endpoint that checks many password hash prefixes in one request (k-anonymity preserved: only the first 5 hex chars of each SHA-1 hash ever leave the device). A breach scan of a large vault now costs a handful of requests instead of one per password. A dedicated rate-limit tier (`breachBatchLimiter`, 300 / user / 15 min) sizes it to cover a full-vault scan without ever returning a partial result.
+- The Vault Health "Check for Breaches" control now shows a determinate progress indicator ("Checked X of Y") while a scan runs, so a large check no longer looks stuck.
+- Vault Health breach findings and weak-password scores now persist on the device, encrypted with your vault key, so they survive a page refresh, an auto-lock, and a browser close — you no longer have to re-run the long breach scan and wait on the page each time you return. A "Last checked" label shows how old the saved results are, "Check for Breaches" runs a fresh scan and replaces the saved results only after it fully succeeds (a failed or interrupted scan keeps the previous results), and the saved snapshot is cleared on logout.
+- A persistent, cross-account server-side cache of breach-range lookups (MongoDB): once any account has checked a given hash prefix, subsequent checks by any account are served locally until the entry ages out, so repeat scans no longer re-query the third party and survive server restarts. If the upstream service is unreachable, a cached range is served as a fallback and a prefix is never reported as "not breached" on failure.
+- New opt-in command `npm run seed-breaches -w packages/server` imports the full Have I Been Pwned Pwned Passwords corpus into the local cache for fully-offline / zero-third-party-dependency breach checking. It is idempotent and resumable; an optional scheduled refresh is available via `BREACH_SEED_REFRESH_CRON` and `BREACH_SEED_AUTO`.
+- New environment variables `BREACH_CACHE_TTL_DAYS` (default 30), `BREACH_SEED_AUTO` (default `false`), and `BREACH_SEED_REFRESH_CRON` (unset) to tune the breach-range cache and the optional seed refresh.
+
+### Changed
+
+- Vault Health scores password strength in a background Web Worker and windows long result lists, so the page stays responsive on large vaults instead of freezing the browser. The breach check also deduplicates passwords first, so identical/reused passwords cost a single lookup.
+- Breach-range requests to Have I Been Pwned now send the `Add-Padding` header and discard the count-0 padding rows, so the queried prefix cannot be inferred from the response size by an on-path observer.
+- **The local development server now runs on port 5173 (Vite's default) instead of 3000.** On Windows, Hyper-V/WSL2/Docker reserve dynamic TCP ranges that routinely include 3000; a reserved port fails to bind with `EACCES` rather than `EADDRINUSE`, which aborted `npm run dev` outright and made the whole Playwright E2E suite fail with an unexplained "Timed out waiting from config.webServer". The port is resolved by a single helper (`resolveDevPort`) that both the Vite config and the Playwright config read, so they can never drift, and it is overridable through the process environment with `VITE_PORT` (for example `VITE_PORT=5180 npm run dev`). The dev Docker stack now publishes `127.0.0.1:5173` and the default `CORS_ORIGIN` is `http://localhost:5173`. Production is unaffected: the built SPA is served by Nginx behind the single published port, not by Vite.
+- The "Vault" sidebar item is highlighted on the vault list and on an individual item page, but no longer lights up at the same time as "Vault Health" when you open the Vault Health page.
+- Pin the production Docker image base to `node:24-alpine3.23` instead of the floating `node:24-alpine` tag. The floating tag had rolled onto Alpine 3.24, whose musl userspace crashes `npm` at process launch (SIGSEGV, exit 139) under the WSL2 kernel used for local image builds, so `npm ci` failed and the images could not be built there. The pinned variant carries the identical Node 24.18.0 runtime and builds cleanly; there is no change to the running application.
+
+### Fixed
+
+- The Vault Health page no longer freezes or hangs the browser on vaults with many passwords; password-strength analysis was moved off the main thread.
+- The OpenAPI document now describes the `POST /api/v1/tools/check-password-breach` response as the range text the endpoint actually returns, instead of a `{ found, count }` object it has never returned. A client generated from the spec no longer reads fields that are not there.
+- The sidebar no longer highlights both "Vault" and "Vault Health" at once when viewing the `/vault/health` route.
+
+### Security
+
+- The breach check now surfaces passwords it could not verify (for example a failed or rate-limited lookup) instead of reporting them as "not breached", so an unchecked password can no longer be mistaken for a safe one. Restored results are held to the same rule: a password the saved snapshot never covered — one added or edited since the last scan, such as every entry of a large import — is counted as unverified and keeps the "could not be checked" warning on screen, rather than being quietly omitted and leaving a green "No breached passwords found" over credentials nothing has looked at.
+- If password-strength analysis cannot complete (for example the analyzer fails to load), Vault Health now shows an explicit "could not analyze" warning instead of a misleading "No issues found", so a failed analysis is never mistaken for a clean result.
+- Added an explicit `worker-src 'self'` Content-Security-Policy directive for the new password-strength Web Worker (same-origin only; never a `blob:` worker).
+- The persistent breach-range cache stores only PUBLIC Have I Been Pwned data keyed by the 5-char SHA-1 prefix, with no per-user linkage and no stored suffix match, so it preserves the zero-knowledge model (the server still only ever receives the prefix, never a password or full hash). The on-device saved Vault Health results are encrypted with the vault key and remain encrypted at rest across a lock, exactly like the wrapped vault key.
+- Force `shell-quote` to `>=1.9.0` through a dependency override, resolving CVE-2026-13311 (HIGH: denial of service via inefficient input parsing). It was pulled in transitively at `1.8.4` by the `concurrently` dev dependency and surfaced in the `bootstrap` image once the image build was unblocked.
+
 ## [0.3.0] - 2026-07-22
 
 ### Added
@@ -138,7 +171,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Hiprax/h-vault/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Hiprax/h-vault/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Hiprax/h-vault/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/Hiprax/h-vault/compare/v0.1.1...v0.1.2

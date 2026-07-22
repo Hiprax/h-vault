@@ -46,6 +46,22 @@ describe('Security Headers & Middleware', () => {
       expect(csp).not.toMatch(/(^|[\s;])'unsafe-eval'/);
     });
 
+    it("restricts worker-src to 'self' (Vault Health password-strength worker) and never blob:", async () => {
+      const res = await request(app).get('/api/v1/health');
+
+      expect(res.status).toBe(200);
+      const csp = res.headers['content-security-policy'] as string;
+      expect(csp).toBeDefined();
+
+      const workerSrcMatch = csp.match(/worker-src([^;]*)/);
+      expect(workerSrcMatch).not.toBeNull();
+      const workerSrc = workerSrcMatch![1]!;
+      expect(workerSrc).toContain("'self'");
+      // The worker is a same-origin bundled file — a blob: worker would be an
+      // XSS-amplification vector and is deliberately NOT permitted.
+      expect(workerSrc).not.toContain('blob:');
+    });
+
     it('should generate unique CSP nonce per request', async () => {
       const res1 = await request(app).get('/api/v1/health');
       const res2 = await request(app).get('/api/v1/health');
@@ -350,7 +366,7 @@ describe('Security Headers & Middleware', () => {
 
   describe('CORS headers', () => {
     it('should include Access-Control-Allow-Credentials header', async () => {
-      const res = await request(app).get('/api/v1/health').set('Origin', 'http://localhost:3000');
+      const res = await request(app).get('/api/v1/health').set('Origin', 'http://localhost:5173');
 
       expect(res.headers['access-control-allow-credentials']).toBe('true');
     });
@@ -358,7 +374,7 @@ describe('Security Headers & Middleware', () => {
     it('should respond to OPTIONS preflight with allowed methods', async () => {
       const res = await request(app)
         .options('/api/v1/health')
-        .set('Origin', 'http://localhost:3000')
+        .set('Origin', 'http://localhost:5173')
         .set('Access-Control-Request-Method', 'POST')
         .set('Access-Control-Request-Headers', 'Content-Type, Authorization, x-csrf-token');
 

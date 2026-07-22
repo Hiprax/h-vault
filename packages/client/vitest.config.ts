@@ -70,6 +70,13 @@ export default defineConfig({
         // node as an import side effect. Nothing to assert that the build does
         // not already prove.
         'src/main.tsx',
+        // Web Worker thread entry points. jsdom has no `Worker`, so these files
+        // never execute under the test runner (the analyzer takes its main-thread
+        // fallback). They are deliberately thin wires — `onmessage -> scorePasswords
+        // -> postMessage` — with every unit of real logic living in the directly
+        // tested pure modules they import. Measuring them would only report a
+        // structurally-unreachable 0%, exactly like `main.tsx`.
+        'src/**/*.worker.ts',
       ],
       thresholds: {
         lines: 90,

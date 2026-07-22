@@ -64,7 +64,7 @@ const envSchema = z
     CORS_ORIGIN: z
       .string()
       .min(1)
-      .default('http://localhost:3000')
+      .default('http://localhost:5173')
       .refine((url) => process.env.NODE_ENV !== 'production' || url.startsWith('https://'), {
         message: 'CORS_ORIGIN must use HTTPS in production',
       }),
@@ -154,6 +154,27 @@ const envSchema = z
 
     // Audit
     AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
+
+    // Breach range cache (persistent, cross-account HIBP range cache)
+    // On-demand (`source: 'hibp'`) entries are re-fetched once older than this
+    // many days; seed-imported entries are exempt (refreshed by re-running the
+    // seed). The HIBP corpus is additive, so a stale entry can only miss a very
+    // recently added breach, never wrongly clear a known one — set 7 for a
+    // stricter freshness posture.
+    BREACH_CACHE_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    // When true, the refresh cron below fetches missing/stale ranges from HIBP
+    // (tens of GB over a full corpus). Off by default.
+    BREACH_SEED_AUTO: z
+      .enum(['true', 'false', ''])
+      .optional()
+      .transform((val) => val === 'true'),
+    // Cron expression (UTC) for the range-cache refresh job. Unset disables it.
+    // Requires BREACH_SEED_AUTO=true to actually fetch. Empty normalises to
+    // undefined before the optional string check.
+    BREACH_SEED_REFRESH_CRON: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z.string().optional(),
+    ),
 
     // Feature flags
     ENABLE_SWAGGER: z

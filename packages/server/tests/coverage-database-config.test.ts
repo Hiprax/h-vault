@@ -364,7 +364,7 @@ describe('config/index.ts — Gmail provider + development security warning', ()
       JWT_ACCESS_SECRET: 'test-access-secret-for-testing-only-32chars!',
       JWT_REFRESH_SECRET: 'test-refresh-secret-for-testing-only-32chars!',
       SESSION_SECRET: 'TestSessionSecret4Testing!!12345',
-      CORS_ORIGIN: 'http://localhost:3000',
+      CORS_ORIGIN: 'http://localhost:5173',
       APP_URL: 'http://localhost:5000',
       ...envOverrides,
     };
@@ -499,7 +499,7 @@ describe('config/index.ts — Gmail provider + development security warning', ()
     it('warns when CORS is plain HTTP and MONGODB_URI points at a remote host', async () => {
       await loadConfigWithEnv({
         NODE_ENV: 'development',
-        CORS_ORIGIN: 'http://localhost:3000',
+        CORS_ORIGIN: 'http://localhost:5173',
         MONGODB_URI: 'mongodb://db.remote.example.com:27017/hvault',
       });
 
@@ -522,7 +522,7 @@ describe('config/index.ts — Gmail provider + development security warning', ()
         vi.resetModules();
         await loadConfigWithEnv({
           NODE_ENV: 'development',
-          CORS_ORIGIN: 'http://localhost:3000',
+          CORS_ORIGIN: 'http://localhost:5173',
           MONGODB_URI: uri,
         });
         expect(mockWarn).not.toHaveBeenCalledWith(expect.stringContaining('SECURITY WARNING'));
@@ -541,7 +541,7 @@ describe('config/index.ts — Gmail provider + development security warning', ()
     it('tolerates an unparseable MONGODB_URI without throwing or warning', async () => {
       const { config: cfg } = await loadConfigWithEnv({
         NODE_ENV: 'development',
-        CORS_ORIGIN: 'http://localhost:3000',
+        CORS_ORIGIN: 'http://localhost:5173',
         MONGODB_URI: 'not-a-parseable-uri',
       });
 

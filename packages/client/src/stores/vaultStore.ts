@@ -10,6 +10,7 @@ import { create } from 'zustand';
 import { cryptoService } from '../services/crypto/cryptoService.js';
 import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
 import { offlineCache } from '../services/offlineCache.js';
+import { clearScoreCache } from '../services/health/strengthCache.js';
 import { logger } from '../lib/logger.js';
 import { useAuthStore } from './authStore.js';
 import { useUIStore } from './uiStore.js';
@@ -239,6 +240,16 @@ let mutationGeneration = 0;
  */
 export function getItemsFetchGeneration(): number {
   return fetchItemsGeneration;
+}
+
+// Bumped by clearStore() (lock/logout). The Vault Health page captures this
+// before loading/persisting its encrypted results cache and re-checks it before
+// writing decrypted findings into React state, so a scan that resolves AFTER a
+// lock cannot repopulate results (the captured CryptoKey still decrypts, exactly
+// like the mutation-generation guard). One counter covers breach + strength.
+let healthGeneration = 0;
+export function getHealthGeneration(): number {
+  return healthGeneration;
 }
 
 const inFlightDeletedItemIds = new Set<string>();
@@ -1278,8 +1289,14 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // response resolves after this clear cannot write decrypted plaintext back
     // into the just-emptied store.
     mutationGeneration += 1;
+    // Invalidate any in-flight Vault Health hydrate/persist so a scan resolving
+    // after this clear cannot write results back into the just-emptied session.
+    healthGeneration += 1;
     inFlightDeletedItemIds.clear();
     inFlightDeletedTrashIds.clear();
+    // Drop cached password-strength scores (keyed by item id + version). They hold
+    // no secret, but a fresh session must not reuse the previous vault's scores.
+    clearScoreCache();
 
     set({
       items: [],

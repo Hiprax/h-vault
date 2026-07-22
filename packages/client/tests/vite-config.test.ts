@@ -1,6 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { manualChunks, resolveDevHost } from '../vite.config.helpers';
+import {
+  manualChunks,
+  resolveDevHost,
+  resolveDevPort,
+  DEFAULT_DEV_PORT,
+} from '../vite.config.helpers';
 
 // T31 — the Vite dev-server host must be overridable via VITE_HOST so the dev
 // Docker container can bind 0.0.0.0 (and thus be reachable through Docker's
@@ -30,6 +35,58 @@ describe('resolveDevHost (T31 — dev Docker reachability)', () => {
         delete process.env.VITE_HOST;
       } else {
         process.env.VITE_HOST = original;
+      }
+    }
+  });
+});
+
+// The dev-server port must be overridable via VITE_PORT (Docker dev, or a host
+// where the default is taken) and must NEVER silently resolve to 0 — Vite would
+// then bind a RANDOM free port and Playwright's fixed probe URL would hang until
+// its 180s webServer timeout. The default is deliberately not 3000: Windows
+// reserves dynamic TCP ranges that routinely include it, and a reserved port
+// fails to bind with EACCES, which aborts a `strictPort: true` dev server.
+describe('resolveDevPort (dev-server port resolution)', () => {
+  it('defaults to Vite’s 5173 when VITE_PORT is unset', () => {
+    expect(resolveDevPort({})).toBe(5173);
+    expect(DEFAULT_DEV_PORT).toBe(5173);
+  });
+
+  it('never defaults to a Windows-reserved 3000', () => {
+    expect(resolveDevPort({})).not.toBe(3000);
+  });
+
+  it('uses a valid VITE_PORT override', () => {
+    expect(resolveDevPort({ VITE_PORT: '5180' })).toBe(5180);
+  });
+
+  it('treats an empty VITE_PORT as unset', () => {
+    expect(resolveDevPort({ VITE_PORT: '' })).toBe(DEFAULT_DEV_PORT);
+  });
+
+  it('falls back rather than binding a random port on a non-numeric value', () => {
+    expect(resolveDevPort({ VITE_PORT: 'not-a-port' })).toBe(DEFAULT_DEV_PORT);
+  });
+
+  it('rejects out-of-range and non-integer values', () => {
+    expect(resolveDevPort({ VITE_PORT: '0' })).toBe(DEFAULT_DEV_PORT);
+    expect(resolveDevPort({ VITE_PORT: '70000' })).toBe(DEFAULT_DEV_PORT);
+    expect(resolveDevPort({ VITE_PORT: '-1' })).toBe(DEFAULT_DEV_PORT);
+    expect(resolveDevPort({ VITE_PORT: '5173.5' })).toBe(DEFAULT_DEV_PORT);
+  });
+
+  it('reads from process.env by default', () => {
+    const original = process.env.VITE_PORT;
+    try {
+      process.env.VITE_PORT = '5181';
+      expect(resolveDevPort()).toBe(5181);
+      delete process.env.VITE_PORT;
+      expect(resolveDevPort()).toBe(DEFAULT_DEV_PORT);
+    } finally {
+      if (original === undefined) {
+        delete process.env.VITE_PORT;
+      } else {
+        process.env.VITE_PORT = original;
       }
     }
   });
@@ -90,7 +147,12 @@ describe('vite.config wiring', () => {
 
     expect(config.server?.host).toBe(resolveDevHost());
     expect(config.server?.strictPort).toBe(true);
-    expect(config.server?.port).toBe(3000);
+    // Resolved through the shared helper (the same one playwright.config.ts uses),
+    // never a second hardcoded literal that could drift from the probe URL. Compared
+    // against the helper rather than the 5173 literal so a developer running with
+    // VITE_PORT set does not see a spurious failure; the default itself is pinned
+    // environment-independently in the resolveDevPort suite above.
+    expect(config.server?.port).toBe(resolveDevPort());
     expect(config.build?.rollupOptions?.output?.manualChunks).toBe(manualChunks);
     expect(config.build?.chunkSizeWarningLimit).toBe(850);
   });

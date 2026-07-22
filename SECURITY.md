@@ -106,6 +106,33 @@ security posture, not a disclaimer.
   TLS certificate will undo the guarantees above. The deployment checklist in the README
   exists for this reason.
 
+### Password breach checking (Have I Been Pwned)
+
+Vault Health checks passwords against the Have I Been Pwned Pwned Passwords corpus using
+**k-anonymity**: the browser SHA-1-hashes each password and sends only the first **5 hex
+characters** of the hash to the server, which proxies the query to HIBP and returns the
+list of matching hash suffixes; the full-suffix comparison happens **in the browser**. A
+password, or a hash that could identify one, never reaches the server. Outbound requests
+to HIBP set `Add-Padding` (so the queried prefix cannot be inferred from the response
+size on the wire) and follow no redirects.
+
+- **Server-side breach cache (`pwned_range_cache`).** To avoid re-querying the third
+  party, the server persists the range responses it fetches, keyed by that 5-char prefix,
+  and shares them across all accounts. Everything stored here is **public HIBP data** —
+  identical for everyone and fetchable by anyone — so it is stored in plaintext;
+  encrypting public data adds no confidentiality. Crucially there is **no per-user linkage
+  and no stored record of which suffix matched**, so the cache cannot reveal whose
+  password, or which password, produced a lookup, and the zero-knowledge model is
+  preserved. An operator may optionally pre-seed the full corpus (`npm run seed-breaches`)
+  for offline / zero-third-party-dependency operation. The cache is **fail-safe**: a miss
+  falls through to HIBP, and an upstream failure with no cached fallback surfaces as an
+  error, never as a "not breached" result.
+- **On-device saved results.** The breach findings and weak-password scores shown on the
+  Vault Health page are cached in the browser (IndexedDB) **encrypted with your vault key**,
+  so they survive a page refresh or browser close without forcing a re-scan. They stay
+  encrypted at rest across a lock — exactly as safe as the wrapped vault key already
+  persisted for unlock — and are erased on logout.
+
 ## Security practices in this repository
 
 - Every push runs `npm run ci` locally through the `pre-push` hook: dependency audit,

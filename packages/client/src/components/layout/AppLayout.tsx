@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Shield,
   Key,
@@ -34,10 +34,38 @@ interface NavItem {
   label: string;
   to: string;
   icon: React.ComponentType<{ className?: string }>;
+  /** Optional active predicate; defaults to exact-or-descendant path matching. */
+  match?: (pathname: string) => boolean;
+}
+
+/**
+ * "Vault" is active on the list (`/vault`) and on an individual item
+ * (`/vault/:id`), but NOT on the sibling `/vault/health` route — that page has its
+ * own nav item. The default descendant match cannot express this (it would light
+ * up "Vault" on `/vault/health` too), which is the double-highlight bug this
+ * replaces.
+ */
+export function isVaultSectionActive(pathname: string): boolean {
+  if (pathname === '/vault') return true;
+  // Any /vault/* item page, EXCEPT the Vault Health route (and any future child of
+  // it), which owns its own nav item.
+  if (pathname === '/vault/health' || pathname.startsWith('/vault/health/')) return false;
+  return pathname.startsWith('/vault/');
+}
+
+/**
+ * Whether a nav item is active for the given pathname. Default: the item's exact
+ * path or any descendant of it (so `/settings` stays highlighted on
+ * `/settings/backup`, `/settings/sessions`, etc.). An item may override with its
+ * own `match`.
+ */
+export function isNavItemActive(item: Pick<NavItem, 'to' | 'match'>, pathname: string): boolean {
+  if (item.match) return item.match(pathname);
+  return pathname === item.to || pathname.startsWith(`${item.to}/`);
 }
 
 const navItems: NavItem[] = [
-  { label: 'Vault', to: '/vault', icon: Shield },
+  { label: 'Vault', to: '/vault', icon: Shield, match: isVaultSectionActive },
   { label: 'Password Generator', to: '/generator', icon: Key },
   { label: 'File Encryption', to: '/tools/file-encryption', icon: FileLock2 },
   { label: 'Vault Health', to: '/vault/health', icon: Activity },
@@ -54,6 +82,7 @@ export function AppLayout() {
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
 
   // Reflects real server reachability (a lightweight /health poll), not just
@@ -219,33 +248,35 @@ export function AppLayout() {
 
         {/* Navigation */}
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              onClick={closeSidebar}
-              title={!expanded ? item.label : undefined}
-              className={({ isActive }) =>
-                cn(
+          {navItems.map((item) => {
+            const active = isNavItemActive(item, location.pathname);
+            return (
+              <Link
+                key={item.to}
+                to={item.to}
+                onClick={closeSidebar}
+                title={!expanded ? item.label : undefined}
+                aria-current={active ? 'page' : undefined}
+                className={cn(
                   'flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors',
                   expanded ? 'gap-3' : 'justify-center',
-                  isActive
+                  active
                     ? 'bg-[hsl(var(--sidebar-accent))] text-[hsl(var(--sidebar-accent-foreground))]'
                     : 'text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-accent))] hover:text-[hsl(var(--sidebar-accent-foreground))]',
-                )
-              }
-            >
-              <item.icon className="h-4 w-4 shrink-0" />
-              <span
-                className={cn(
-                  'whitespace-nowrap transition-opacity duration-200',
-                  expanded ? 'opacity-100' : 'opacity-0 w-0 overflow-hidden',
                 )}
               >
-                {item.label}
-              </span>
-            </NavLink>
-          ))}
+                <item.icon className="h-4 w-4 shrink-0" />
+                <span
+                  className={cn(
+                    'whitespace-nowrap transition-opacity duration-200',
+                    expanded ? 'opacity-100' : 'opacity-0 w-0 overflow-hidden',
+                  )}
+                >
+                  {item.label}
+                </span>
+              </Link>
+            );
+          })}
         </nav>
 
         {/* Online/offline indicator */}

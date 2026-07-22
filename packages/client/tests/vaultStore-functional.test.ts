@@ -114,6 +114,12 @@ vi.mock('@hvault/shared', async () => {
 
 import { useAuthStore } from '../src/stores/authStore';
 import { useVaultStore } from '../src/stores/vaultStore';
+import {
+  getScore,
+  setScore,
+  clearScoreCache,
+  strengthCacheKey,
+} from '../src/services/health/strengthCache';
 import { cryptoService } from '../src/services/crypto/cryptoService';
 import {
   createItemApi,
@@ -1435,5 +1441,19 @@ describe('vaultStore – CRUD actions', () => {
       await fetchB;
       await fetchC;
     });
+  });
+});
+
+describe('vaultStore – clearStore clears the strength score cache', () => {
+  it('drops cached password-strength scores on lock/logout', () => {
+    clearScoreCache();
+    const key = strengthCacheKey('item-1', '2026-07-22T00:00:00.000Z');
+    setScore(key, 1);
+    expect(getScore(key)).toBe(1);
+
+    useVaultStore.getState().clearStore();
+
+    // The one line under test: clearStore() must call clearScoreCache().
+    expect(getScore(key)).toBeUndefined();
   });
 });

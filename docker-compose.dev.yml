@@ -4,7 +4,7 @@
 #   docker compose -f docker-compose.dev.yml up -d
 #
 # Deliberately NOT a miniature of the production stack. There is no internal Nginx
-# and no replica set here: Vite serves the SPA on :3000 with hot reload and proxies
+# and no replica set here: Vite serves the SPA on :5173 with hot reload and proxies
 # /api to Express on :5000, and MongoDB runs unauthenticated as a standalone. That
 # keeps the loop fast. It also means the transactional code paths take their
 # sequential fallback, and the CSP nonce / single-port routing are NOT exercised —
@@ -51,7 +51,7 @@ services:
     restart: unless-stopped
     command: npm run dev
     ports:
-      - '127.0.0.1:3000:3000'
+      - '127.0.0.1:5173:5173'
       - '127.0.0.1:5000:5000'
     volumes:
       - ./packages/shared/src:/app/packages/shared/src
@@ -67,12 +67,14 @@ services:
       # Docker DNATs to eth0, not loopback. Outside Docker, vite.config.ts defaults
       # to 127.0.0.1.
       VITE_HOST: 0.0.0.0
+      # Must match the published port above and vite.config.helpers' DEFAULT_DEV_PORT.
+      VITE_PORT: '5173'
       MONGODB_URI: mongodb://hvault-db:27017/hvault
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-jwt-access-secret-do-not-use-in-production!!}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev-jwt-refresh-secret-do-not-use-in-production!}
       SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-do-not-use-in-production!!}
-      CORS_ORIGIN: http://localhost:3000
-      APP_URL: http://localhost:3000
+      CORS_ORIGIN: http://localhost:5173
+      APP_URL: http://localhost:5173
     depends_on:
       hvault-db:
         condition: service_healthy

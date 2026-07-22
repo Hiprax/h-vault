@@ -6,6 +6,7 @@ import { httpErrors } from '@hiprax/errors';
 import { createLogger } from '@hiprax/logger';
 import { isProduction } from '../config/index.js';
 import { REFRESH_COOKIE_NAME } from '../constants/index.js';
+import { MAX_ITEMS_PER_USER, HIBP_BATCH_MAX_PREFIXES } from '@hvault/shared';
 import { MAX_IP_ADDRESS_LENGTH } from '../utils/controllerHelpers.js';
 
 const logger = createLogger({ moduleName: 'rate-limiter' });
@@ -395,6 +396,59 @@ export const breachCheckLimiter =
       ...(breachCheckStore ? { store: breachCheckStore } : {}),
       handler: (_req, _res, next, options) => {
         logger.warn('Breach check rate limit exceeded', {
+          windowMs: options.windowMs,
+          limit: options.limit,
+        });
+        next(httpErrors.tooManyRequests('Too many breach check requests, please try again later'));
+      },
+    }),
+  );
+
+/**
+ * Batched breach check rate limiter (HIBP password breach batch endpoint).
+ *
+ * The batch endpoint checks up to {@link HIBP_BATCH_MAX_PREFIXES} prefixes per
+ * request, so a full-vault scan of the worst case (an all-distinct vault at
+ * {@link MAX_ITEMS_PER_USER}) needs `ceil(MAX_ITEMS_PER_USER /
+ * HIBP_BATCH_MAX_PREFIXES)` requests. The budget MUST cover that in a single
+ * window, or a legitimate scan would be 429'd partway and the unchecked
+ * passwords would be reported as "not checked" — a partial result, never a false
+ * "safe". The 3x multiplier leaves room for a few full re-scans (the server's
+ * HIBP cache makes re-scans cheap) without becoming an open-ended proxy. Keyed by
+ * userId so IP rotation cannot bypass it.
+ */
+const breachBatchStore = createStore(FIFTEEN_MINUTES_MS);
+
+/**
+ * Requests one authenticated user may spend on `/tools/check-password-breach/batch`
+ * per window. Exported so it can be checked against the worst-case batch count a
+ * full-vault scan implies rather than restated from memory — see
+ * `tests/breach-batch-budget.test.ts`, which derives that count from the real
+ * shared constants and fails if the two drift apart.
+ */
+export const BREACH_BATCH_RATE_LIMIT_MAX =
+  Math.ceil(MAX_ITEMS_PER_USER / HIBP_BATCH_MAX_PREFIXES) * 3;
+
+/** Window the {@link BREACH_BATCH_RATE_LIMIT_MAX} budget is spent over. */
+export const BREACH_BATCH_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
+
+export const breachBatchLimiter =
+  noopIfNonProduction() ??
+  withClientKeyGuard(
+    'breachBatchLimiter',
+    rateLimit({
+      windowMs: BREACH_BATCH_RATE_LIMIT_WINDOW_MS,
+      limit: BREACH_BATCH_RATE_LIMIT_MAX,
+      standardHeaders: true,
+      legacyHeaders: false,
+      validate: { singleCount: false },
+      keyGenerator: (req: Request) => {
+        const userId = req.user?._id ?? resolveClientKey(req) ?? '';
+        return `breachBatch:${userId}`;
+      },
+      ...(breachBatchStore ? { store: breachBatchStore } : {}),
+      handler: (_req, _res, next, options) => {
+        logger.warn('Breach batch rate limit exceeded', {
           windowMs: options.windowMs,
           limit: options.limit,
         });

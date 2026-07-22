@@ -7,6 +7,7 @@ import app from './app.js';
 import { startTrashCleanupJob } from './jobs/trashCleanup.js';
 import { startTokenCleanupJob } from './jobs/tokenCleanup.js';
 import { startBackupScheduler } from './jobs/backupScheduler.js';
+import { initBreachRangeCache } from './jobs/breachSeed.js';
 import { closeRateLimitStore } from './middleware/rateLimiter.js';
 import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
@@ -35,6 +36,10 @@ async function startServer(): Promise<void> {
     const trashCleanupTask = isPrimaryWorker ? startTrashCleanupJob() : null;
     const tokenCleanupTask = isPrimaryWorker ? startTokenCleanupJob() : null;
     const backupSchedulerTask = isPrimaryWorker ? startBackupScheduler() : null;
+    // Boot-time breach-cache init: logs a hint if empty and optionally schedules
+    // the refresh cron. NEVER downloads the corpus on boot (that is the opt-in
+    // `npm run seed-breaches` command). Primary worker only.
+    const breachSeedTask = isPrimaryWorker ? await initBreachRangeCache() : null;
     if (!isPrimaryWorker) {
       logger.info(
         'Skipping background jobs on worker instance ' +
@@ -65,7 +70,7 @@ async function startServer(): Promise<void> {
     // Graceful shutdown (re-entrancy-safe; double signals run it once)
     const gracefulShutdown = createGracefulShutdown({
       logger,
-      tasks: [trashCleanupTask, tokenCleanupTask, backupSchedulerTask],
+      tasks: [trashCleanupTask, tokenCleanupTask, backupSchedulerTask, breachSeedTask],
       server,
       activeConnections,
       getRunningJobs,

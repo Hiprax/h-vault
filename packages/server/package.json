@@ -1,6 +1,6 @@
 {
   "name": "@hvault/server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,8 @@
     "start": "node dist/server.js",
     "test": "vitest run --coverage",
     "type-check": "tsc --noEmit",
-    "create-indexes": "tsx scripts/create-indexes.ts"
+    "create-indexes": "tsx scripts/create-indexes.ts",
+    "seed-breaches": "tsx scripts/seed-breaches.ts"
   },
   "dependencies": {
     "@hiprax/crypto": "^1.5.0",

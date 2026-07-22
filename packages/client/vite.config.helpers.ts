@@ -23,6 +23,37 @@ export function resolveDevHost(env: Record<string, string | undefined> = process
 }
 
 /**
+ * Default Vite dev-server port.
+ *
+ * 5173 is Vite's own canonical default. It is deliberately NOT 3000: on Windows,
+ * Hyper-V / WSL2 / Docker reserve dynamic TCP ranges that routinely swallow 3000
+ * (observed: 2932-3031). A reserved port fails the bind with **EACCES**, not
+ * EADDRINUSE, and because the dev server runs with `strictPort: true` that aborts
+ * Vite outright — which also takes the Playwright E2E suite down, since its
+ * webServer probe waits on this port. 5173 sits outside those reserved ranges.
+ *
+ * Override with `VITE_PORT` if 5173 is ever taken. `playwright.config.ts` imports
+ * this same helper, so the dev server and the E2E probe URL can never drift apart.
+ */
+export const DEFAULT_DEV_PORT = 5173;
+
+/**
+ * Resolves the Vite dev-server port from `VITE_PORT`, falling back to
+ * {@link DEFAULT_DEV_PORT}.
+ *
+ * An empty, non-numeric, or out-of-range value is treated as unset rather than
+ * passed through: `Number('') === 0` would otherwise bind a RANDOM free port,
+ * silently desyncing Playwright's fixed probe URL and every documented dev URL.
+ */
+export function resolveDevPort(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.VITE_PORT;
+  if (!raw) return DEFAULT_DEV_PORT;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) return DEFAULT_DEV_PORT;
+  return parsed;
+}
+
+/**
  * Rollup `manualChunks` strategy for the production build.
  *
  * Goals:
