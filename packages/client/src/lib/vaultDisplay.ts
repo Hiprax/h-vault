@@ -1,5 +1,5 @@
 import type { ItemType } from '@hvault/shared';
-import { firstUri, normalizeHost } from '../services/import/identity';
+import { normalizeHost, siteUri } from '../services/import/identity';
 import { isUndecodableData } from './vaultData';
 
 /**
@@ -59,8 +59,10 @@ export interface SubtitleItem {
  *    {@link isUndecodableData}), so any label derived from it would describe the
  *    placeholder rather than the item.
  *
- * The login fallback reuses the importer's `firstUri` + `normalizeHost`, so the
- * host a user reads is the same one the import resolver matches on.
+ * The login fallback reuses the importer's `siteUri` + `normalizeHost`, so the
+ * host a user reads is the same one the import resolver matches on — including
+ * when there is nothing to read: a URI that names a pattern rather than a site
+ * yields no subtitle, because it identifies no host to either of them.
  */
 export function getItemSubtitle(item: SubtitleItem): string {
   const { data } = item;
@@ -88,7 +90,7 @@ function loginSubtitle(data: Record<string, unknown>): string {
   if (username) return username;
   // No username to tell accounts apart — fall back to the site itself, which at
   // least separates a login from a same-named item on another host.
-  return normalizeHost(firstUri(data));
+  return normalizeHost(siteUri(data));
 }
 
 function cardSubtitle(data: Record<string, unknown>): string {

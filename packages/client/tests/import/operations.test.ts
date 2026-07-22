@@ -4,10 +4,15 @@ import {
   buildImportOperations,
   chunkImportOperations,
   IMPORT_BATCH_MAX_BYTES,
+  MAX_IMPORT_WARNINGS,
 } from '../../src/services/import';
 import type { ResolvableImportItem } from '../../src/services/import';
 import { cryptoService } from '../../src/services/crypto/cryptoService';
-import { importInsertItemSchema, importUpdateItemSchema } from '@hvault/shared';
+import {
+  MAX_ENCRYPTED_DATA_LENGTH,
+  importInsertItemSchema,
+  importUpdateItemSchema,
+} from '@hvault/shared';
 import type { ImportInsertItem, ImportUpdateItem } from '@hvault/shared';
 
 /**
@@ -215,6 +220,55 @@ describe('buildImportOperations', () => {
     expect(built.inserts).toEqual([]);
     expect(built.failedCount).toBe(1);
     expect(built.failureReasons[0]).toMatch(/too large/i);
+  });
+
+  it('reports an over-large NATIVE row without re-encrypting or sending it', async () => {
+    // A native row skips encryption entirely — its ciphertext is forwarded
+    // verbatim — so the plaintext size check above never sees it. This separate
+    // guard is what turns a hand-edited export into ONE reported row instead of
+    // a server-side 400 that kills the whole batch it rides in.
+    const oversized = loginRow({
+      name: 'Tampered export row',
+      cipher: {
+        encryptedName: 'en',
+        nameIv: 'ni',
+        nameTag: 'nt',
+        encryptedData: 'x'.repeat(MAX_ENCRYPTED_DATA_LENGTH + 1),
+        dataIv: 'di',
+        dataTag: 'dt',
+      },
+    });
+
+    const built = await buildImportOperations({
+      inserts: [oversized, loginRow()],
+      updates: [],
+      vaultKey,
+    });
+
+    // The healthy row still goes; only the offending one is withheld.
+    expect(built.inserts).toHaveLength(1);
+    expect(built.failedCount).toBe(1);
+    expect(built.failureReasons[0]).toMatch(/too large/i);
+    expect(built.failureReasons[0]).toMatch(/Tampered export row/);
+  });
+
+  it('stops collecting failure reasons at MAX_IMPORT_WARNINGS but keeps counting', async () => {
+    // The reasons feed a toast description and the caller spreads them
+    // UNBOUNDED, so this cap is the only thing standing between a wholly
+    // invalid file and a multi-hundred-kilobyte string rendered into the DOM.
+    const bad = (i: number): ResolvableImportItem => ({
+      itemType: 'card',
+      name: `Overlong ${String(i)}`,
+      data: { number: '4'.repeat(60) },
+      tags: [],
+      favorite: false,
+    });
+    const rows = Array.from({ length: MAX_IMPORT_WARNINGS + 2 }, (_, i) => bad(i));
+
+    const built = await buildImportOperations({ inserts: rows, updates: [], vaultKey });
+
+    expect(built.failedCount).toBe(MAX_IMPORT_WARNINGS + 2);
+    expect(built.failureReasons).toHaveLength(MAX_IMPORT_WARNINGS);
   });
 
   it('reports an unsealable row as a counted failure rather than dropping it silently', async () => {

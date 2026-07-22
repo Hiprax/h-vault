@@ -276,6 +276,20 @@ describe('getItemSubtitle', () => {
     expect(getItemSubtitle({ itemType: 'login', data })).toBe('');
   });
 
+  it('shows no host for a login whose URI is a match PATTERN rather than a site', () => {
+    // The list and the import resolver share `siteUri`, so they agree that a
+    // regex identifies no site. Rendering the URL parser's truncated read of it
+    // (`accounts`) would label the row with a fragment of a pattern the user
+    // never wrote — and mislabel two different sites identically.
+    const data = {
+      username: '',
+      password: 'p',
+      uris: [{ uri: String.raw`https://accounts\.google\.com/.*`, match: 'regex' }],
+      customFields: [],
+    };
+    expect(getItemSubtitle({ itemType: 'login', data })).toBe('');
+  });
+
   it('NEVER exposes a login password, TOTP seed or custom-field value', () => {
     const data = {
       username: '',

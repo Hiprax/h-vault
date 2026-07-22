@@ -33,7 +33,9 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { User } from '../src/models/User.js';
 import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
-import { vaultImportLockName } from '../src/utils/controllerHelpers.js';
+import { JobLock } from '../src/models/JobLock.js';
+import { pickAllowedFields, vaultImportLockName } from '../src/utils/controllerHelpers.js';
+import { ALLOWED_ITEM_FIELDS, ALLOWED_UPDATE_FIELDS } from '../src/controllers/toolsController.js';
 import {
   createTestUser,
   authHeader,
@@ -288,10 +290,12 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
 
     // Every one of these keys is smuggled onto the update row. `importUpdateItemSchema`
     // strips unknown keys, so they are already gone by the time the controller
-    // runs; the narrow `ALLOWED_UPDATE_FIELDS` projection is the second line of
-    // defence that keeps this true if the schema is ever widened. The `$set`
-    // assertion below pins that projection's actual output, since the end-to-end
-    // assertions alone would still pass on the broader insert allowlist.
+    // runs — which is also why the `$set` assertion below CANNOT tell the two
+    // allowlists apart: post-Zod the projections are identical whichever set is
+    // passed. It is still worth pinning (it fails if the schema and the
+    // allowlist are BOTH widened), but the narrow allowlist itself is proved
+    // where the difference is observable — see the `pickAllowedFields` unit test
+    // at the bottom of this file, which projects a RAW, un-stripped row.
     const setSpy = vi.spyOn(VaultItem, 'updateOne');
 
     const res = await postOperations(user.accessToken, {
@@ -597,5 +601,167 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
 
     expect(res.status).toBe(400);
     expect(await AuditLog.countDocuments({ userId: user.id, action: 'import' })).toBe(0);
+  });
+});
+
+// ── The projections and the lock name, proved where the difference shows ──
+//
+// Three things the HTTP-level tests above structurally cannot falsify, because
+// Zod strips the offending keys and the lock name is computed by the very
+// function under test. Each is pinned here against the real production value.
+
+describe('import projections and lock naming', () => {
+  it('projects an update through a NARROWER allowlist than an insert', () => {
+    // Deliberately a RAW row — not one that has been through the schema.
+    //
+    // Be exact about what this does and does not pin, because it was previously
+    // overclaimed. The update allowlist is the SECOND of two layers: Zod strips
+    // the forbidden keys first, so after validation the two allowlists produce
+    // byte-identical output and NO runtime test — here or end-to-end — can
+    // observe which one the controller passes. What is provable, and what this
+    // asserts, is that the second layer is real and genuinely narrower, so it
+    // still holds the line on the day the schema is widened. That day is the
+    // only one on which the choice becomes observable.
+    const raw: Record<string, unknown> = {
+      encryptedName: 'en',
+      nameIv: 'ni',
+      nameTag: 'nt',
+      encryptedData: 'ed',
+      dataIv: 'di',
+      dataTag: 'dt',
+      searchHash: 'a'.repeat(64),
+      passwordHistory: [],
+      itemType: 'login',
+      tags: ['injected'],
+      favorite: true,
+      folderId: '507f1f77bcf86cd799439011',
+    };
+
+    const asUpdate = pickAllowedFields(raw, ALLOWED_UPDATE_FIELDS);
+    const asInsert = pickAllowedFields(raw, ALLOWED_ITEM_FIELDS);
+
+    // An import updates CONTENT only; it must never reorganize or retype a vault.
+    for (const forbidden of ['itemType', 'tags', 'favorite', 'folderId']) {
+      expect(Object.keys(asUpdate)).not.toContain(forbidden);
+      // …and the insert allowlist genuinely does carry them, so the assertion
+      // above is a real distinction rather than a property of the input.
+      expect(Object.keys(asInsert)).toContain(forbidden);
+    }
+    expect(Object.keys(asUpdate).sort()).toEqual([
+      'dataIv',
+      'dataTag',
+      'encryptedData',
+      'encryptedName',
+      'nameIv',
+      'nameTag',
+      'passwordHistory',
+      'searchHash',
+    ]);
+  });
+
+  it('names the import lock per user, not globally', () => {
+    // Every concurrency test above builds the contended key by calling this same
+    // function, so none of them can distinguish a per-user lock from a global
+    // one. Pinned literally here, and behaviourally in the two-user test below.
+    expect(vaultImportLockName('507f1f77bcf86cd799439011')).toBe(
+      'vault-import:507f1f77bcf86cd799439011',
+    );
+    expect(vaultImportLockName('a')).not.toBe(vaultImportLockName('b'));
+  });
+});
+
+describe('the import lock is per user', () => {
+  it('lets a second user import while the first user holds the lock', async () => {
+    const alice = await createTestUser({ email: 'alice-lock@example.com' });
+    const bob = await createTestUser({ email: 'bob-lock@example.com' });
+
+    // Hold ALICE's lock for the duration of Bob's request. A global lock name
+    // would refuse Bob with a 409; a per-user one must not notice.
+    const heldByAlice = await acquireJobLock(vaultImportLockName(alice.id), 60_000);
+    expect(heldByAlice).not.toBeNull();
+
+    try {
+      const bobRes = await postOperations(bob.accessToken, { inserts: [insertRow(1)] });
+      expect(bobRes.status).toBe(201);
+      expect(bobRes.body.data.insertedCount).toBe(1);
+
+      // And Alice really is still locked out, so the test is not passing simply
+      // because the lock was never held.
+      const aliceRes = await postOperations(alice.accessToken, { inserts: [insertRow(2)] });
+      expect(aliceRes.status).toBe(409);
+    } finally {
+      await releaseJobLock(vaultImportLockName(alice.id), heldByAlice!);
+    }
+  });
+});
+
+describe('an update whose target moves mid-request', () => {
+  it('409s rather than silently reporting an update that never landed', async () => {
+    // The window between the ownership pre-check and the write: another session
+    // trashes or deletes the row. `updateOne` matches nothing, and the contract
+    // is a retryable 409 — never a silent skip that would report `updatedCount`
+    // for an item the vault never changed.
+    const user = await createTestUser({ email: 'moved-target@example.com' });
+    const existing = await seedItem(user.id, { encryptedData: 'original-data' });
+
+    vi.spyOn(VaultItem, 'updateOne').mockResolvedValue({
+      acknowledged: true,
+      matchedCount: 0,
+      modifiedCount: 0,
+      upsertedCount: 0,
+      upsertedId: null,
+    } as never);
+
+    // Updates-only on purpose: this harness is standalone, so a mixed request
+    // would leave its inserts committed and "nothing was written" would be false.
+    const res = await postOperations(user.accessToken, {
+      updates: [updateRow(String(existing._id))],
+    });
+
+    expect(res.status).toBe(409);
+    expect(JSON.stringify(res.body)).toMatch(/retry/i);
+
+    vi.restoreAllMocks();
+    const stored = await rawItems(user.id);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]!.encryptedData).toBe('original-data');
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'import' })).toBe(0);
+  });
+});
+
+describe('the import lock is released before the response is written', () => {
+  // The spy below replaces a model method, so restore it rather than relying on
+  // this staying the last block in the file.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('has already freed the lock by the time the client sees 201', async () => {
+    // PLAN Task 6.2 calls this ordering load-bearing: the client fires batch n+1
+    // the moment batch n's response lands, so responding while the release is
+    // still in flight would 409 a legitimate multi-batch migration against its
+    // own lock. Move `releaseJobLock` after `res.json(...)` and every other test
+    // in this file still passes — each one's next request is separated by a full
+    // CSRF round-trip. This asserts the order directly instead.
+    const user = await createTestUser({ email: 'release-order@example.com' });
+    const order: string[] = [];
+
+    const realDeleteOne = JobLock.deleteOne.bind(JobLock);
+    vi.spyOn(JobLock, 'deleteOne').mockImplementation(((filter: Record<string, unknown>) => {
+      // Delay the release so a post-response ordering would be caught rather
+      // than racing us to completion.
+      return (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        const result = await realDeleteOne(filter);
+        order.push('lock-released');
+        return result;
+      })();
+    }) as never);
+
+    const res = await postOperations(user.accessToken, { inserts: [insertRow(1)] });
+    order.push('response-received');
+
+    expect(res.status).toBe(201);
+    expect(order).toEqual(['lock-released', 'response-received']);
   });
 });

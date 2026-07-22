@@ -107,7 +107,7 @@ export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
 
 const HEX_PREFIX_RE = /^[0-9a-fA-F]{5}$/;
 
-const ALLOWED_ITEM_FIELDS = new Set([
+export const ALLOWED_ITEM_FIELDS = new Set([
   'encryptedData',
   'dataIv',
   'dataTag',
@@ -134,8 +134,14 @@ const ALLOWED_ITEM_FIELDS = new Set([
  * has already curated. Projecting updates through the broader insert allowlist
  * would reintroduce exactly that, which is why this is a separate constant
  * rather than a reuse.
+ *
+ * This is the SECOND of two layers. `importUpdateItemSchema` has no such fields,
+ * and Zod strips unknown keys before the controller runs, so today those keys
+ * are already gone by the time this projection happens — which also means no
+ * runtime test can observe which allowlist is passed here. This constant earns
+ * its keep on the day someone widens that schema; keep both layers.
  */
-const ALLOWED_UPDATE_FIELDS = new Set([
+export const ALLOWED_UPDATE_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
@@ -192,11 +198,15 @@ const IMPORT_FIELD_MAXLENGTHS: readonly { readonly field: string; readonly max: 
  * updates.
  *
  * `importInsertItemSchema` / `importUpdateItemSchema` already enforce the same
- * ceilings, so this is the defense-in-depth layer that keeps an import
- * all-or-nothing if those bounds are ever loosened: an over-length field
- * otherwise trips a Mongoose validator only mid-write, leaving earlier rows
- * persisted and the success-only `import` audit log skipped — a partial,
- * unaudited import. Validating up front (before any DB write) keeps it atomic.
+ * ceilings, so this is the defense-in-depth layer that matters only if those
+ * bounds are ever loosened: an over-length field would otherwise trip a Mongoose
+ * validator mid-write, leaving earlier rows persisted and the success-only
+ * `import` audit log skipped — a partial, unaudited import.
+ *
+ * Scope the claim honestly: validating up front removes the FIELD-LENGTH route
+ * to a partial import, not every route. On a topology with transactions the
+ * request is genuinely atomic; on the sequential fallback a mid-loop 409 from
+ * `matchedCount === 0` still leaves the preceding `insertMany` committed.
  */
 function assertImportFieldLengths(items: readonly object[]): void {
   for (const item of items) {
@@ -532,11 +542,19 @@ async function executeImportOperations(
       }
     };
 
-    // `supportsTransactions` inspects the URI's `replicaSet` option, so a single
-    // node advertising one passes the check and then throws at `withTransaction`
-    // — hence a real, working non-transactional fallback rather than an
-    // optimistic single path. The fallback still fails closed on the cap: the
-    // lock serializes imports and the re-check runs there too.
+    // The `else` covers the topology that never had transactions at all — a
+    // standalone deployment, and the default test harness. It is a real path,
+    // not an optimistic one, and it still fails closed on the cap: the lock
+    // serializes imports and the re-check runs there too.
+    //
+    // What it deliberately does NOT cover: `supportsTransactions` only inspects
+    // the URI's `replicaSet` option (`utils/transactionSupport.ts`), so a single
+    // node ADVERTISING a replica set returns true here, takes the branch below,
+    // and throws at `withTransaction` — a 500 that writes nothing. Catching that
+    // to retry non-transactionally would be unsafe, because `execute` also
+    // throws the cap 400 and the mid-request 409 from inside the callback, and
+    // re-running after either would double-insert. `config/database.ts`'s
+    // `verifyTopology` warns about the mismatch at boot instead.
     const session = supportsTransactions(mongoose.connection)
       ? await mongoose.startSession()
       : null;

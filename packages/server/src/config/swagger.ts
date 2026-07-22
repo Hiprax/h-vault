@@ -575,9 +575,20 @@ export const swaggerSpec: JsonObject = {
           dataIv: { type: 'string', minLength: 1, maxLength: 24 },
           dataTag: { type: 'string', minLength: 1, maxLength: 32 },
           searchHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
-          tags: { type: 'array', items: { type: 'string', maxLength: 50 }, maxItems: 20 },
+          tags: {
+            type: 'array',
+            items: { type: 'string', minLength: 1, maxLength: 50 },
+            maxItems: 20,
+            default: [],
+            description:
+              'Each tag is trimmed before its length is checked, so a whitespace-only tag is rejected.',
+          },
           favorite: { type: 'boolean', default: false },
-          folderId: { type: 'string', description: 'ObjectId; stripped when not owned by you.' },
+          folderId: {
+            type: 'string',
+            pattern: '^[0-9a-fA-F]{24}$',
+            description: 'ObjectId; stripped when not owned by you.',
+          },
           passwordHistory: {
             type: 'array',
             maxItems: 10,
@@ -602,6 +613,7 @@ export const swaggerSpec: JsonObject = {
         properties: {
           id: {
             type: 'string',
+            pattern: '^[0-9a-fA-F]{24}$',
             description: 'ObjectId of the LIVE item of yours this operation replaces.',
           },
           encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
@@ -652,10 +664,12 @@ export const swaggerSpec: JsonObject = {
             properties: {
               inserts: {
                 type: 'array',
+                default: [],
                 items: { $ref: '#/components/schemas/ImportInsertItem' },
               },
               updates: {
                 type: 'array',
+                default: [],
                 items: { $ref: '#/components/schemas/ImportUpdateItem' },
               },
             },
@@ -2119,6 +2133,7 @@ export const swaggerSpec: JsonObject = {
                         updatedCount: { type: 'integer' },
                       },
                     },
+                    message: { type: 'string' },
                   },
                 },
               },

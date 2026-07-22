@@ -18,7 +18,11 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { importInsertItemSchema, importUpdateItemSchema } from '@hvault/shared';
+import {
+  PASSWORD_HISTORY_MAX,
+  importInsertItemSchema,
+  importUpdateItemSchema,
+} from '@hvault/shared';
 
 const mockToast = vi.fn();
 const mockGetProfileApi = vi.fn();
@@ -450,6 +454,165 @@ describe('SettingsPage import flow', () => {
     expect(summary?.title).toBe(
       'Imported 1 items, 1 duplicates skipped, 1 duplicate rows in file (3 rows)',
     );
+  });
+
+  it('carries a native export’s password history, tags and folder back onto the item', async () => {
+    // Re-importing your own H-Vault export must not quietly strip the item down
+    // to its ciphertext. `packages/shared/src/schemas/user.ts` states the
+    // guarantee — "re-importing a native H-Vault export must not erase the
+    // history of an item it restores" — and this is the only test that drives
+    // the code which extracts those fields from the file. Every other native
+    // fixture in the suite is a bare six-ciphertext-field row, so without this
+    // the whole extraction block could be deleted and the suite would stay green.
+    const FOLDER_ID = '507f1f77bcf86cd799439013';
+    const entry = (encryptedPassword: string, changedAt: string) => ({
+      encryptedPassword,
+      iv: 'iv',
+      tag: 'tag',
+      changedAt,
+    });
+    const nativeRow = {
+      itemType: 'login',
+      encryptedName: seal('Work GitHub'),
+      nameIv: 'iv',
+      nameTag: 'tag',
+      encryptedData: seal(JSON.stringify({ username: 'octocat', password: 'p', uris: [] })),
+      dataIv: 'iv',
+      dataTag: 'tag',
+      folderId: FOLDER_ID,
+      // Two survive; the rest are each rejected by a DIFFERENT arm of the
+      // validation chain, so no single arm can be deleted unnoticed.
+      tags: ['  Work  ', '', 42, 'x'.repeat(200)],
+      passwordHistory: [
+        entry(seal('older'), '2026-01-02T03:04:05.000Z'),
+        entry(seal('non-iso-but-parseable'), 'Tue, 02 Jan 2026 03:04:05 GMT'),
+        { encryptedPassword: seal('no-changedAt'), iv: 'iv', tag: 'tag' },
+        entry(seal('bad-date'), 'not-a-date'),
+        entry('', '2026-01-02T03:04:05.000Z'),
+        'not-an-object',
+      ],
+    };
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
+    });
+
+    await renderSettings();
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: [nativeRow] }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    const insert = lastImportBody().operations.inserts[0] as {
+      folderId?: string;
+      tags: string[];
+      passwordHistory?: { encryptedPassword: string; changedAt: string }[];
+    };
+
+    expect(insert.folderId).toBe(FOLDER_ID);
+    // Trimmed, and the empty / non-string / over-long entries dropped.
+    expect(insert.tags).toEqual(['Work']);
+
+    // Only the two well-formed entries survive, in file order, and the
+    // non-ISO timestamp is re-serialized so the wire schema accepts it.
+    expect(insert.passwordHistory).toHaveLength(2);
+    expect(open(insert.passwordHistory?.[0]?.encryptedPassword ?? '')).toBe('older');
+    expect(open(insert.passwordHistory?.[1]?.encryptedPassword ?? '')).toBe(
+      'non-iso-but-parseable',
+    );
+    expect(insert.passwordHistory?.[1]?.changedAt).toBe('2026-01-02T03:04:05.000Z');
+
+    // And the whole row still satisfies the contract the server enforces.
+    expect(importInsertItemSchema.safeParse(insert).success).toBe(true);
+  });
+
+  it('keeps at most PASSWORD_HISTORY_MAX entries from a native export', async () => {
+    const nativeRow = {
+      itemType: 'login',
+      encryptedName: seal('Overfull'),
+      nameIv: 'iv',
+      nameTag: 'tag',
+      encryptedData: seal(JSON.stringify({ username: 'u', password: 'p', uris: [] })),
+      dataIv: 'iv',
+      dataTag: 'tag',
+      passwordHistory: Array.from({ length: PASSWORD_HISTORY_MAX + 5 }, (_, i) => ({
+        encryptedPassword: seal(`pw-${String(i)}`),
+        iv: 'iv',
+        tag: 'tag',
+        changedAt: '2026-01-02T03:04:05.000Z',
+      })),
+    };
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
+    });
+
+    await renderSettings();
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: [nativeRow] }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    const insert = lastImportBody().operations.inserts[0] as {
+      passwordHistory?: unknown[];
+    };
+    // Truncated to the cap the wire schema enforces, so an over-full export
+    // cannot 400 the whole batch it rides in.
+    expect(insert.passwordHistory).toHaveLength(PASSWORD_HISTORY_MAX);
+    expect(importInsertItemSchema.safeParse(insert).success).toBe(true);
+  });
+
+  it('surfaces the parse error for a native file that is not usable JSON', async () => {
+    // `handleImport`'s outer catch is the only thing that turns an
+    // ImportParseError into a message a user can act on; without it a malformed
+    // paste produces a generic failure, or none at all.
+    await renderSettings();
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: '{not json' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Invalid H-Vault export: the file is not valid JSON.',
+          type: 'error',
+        }),
+      ),
+    );
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the parse error for a native file with no items array', async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: 3 }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Invalid H-Vault export: expected an object with an "items" array.',
+          type: 'error',
+        }),
+      ),
+    );
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
   });
 
   it('reports what committed when a later batch fails, and says a re-run is safe', async () => {

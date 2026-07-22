@@ -739,7 +739,12 @@ names the id of the item it replaces and **the server matches nothing**. `format
 `conflictStrategy` are recorded for the audit log only. It answers `400` when the body fails schema
 validation or when an update names an item that is unknown, trashed or someone else's, and `409`
 while a vault-key rotation or another import for the same account is running, or when an item an
-update targeted was changed or removed mid-request. Nothing is written on any of those.
+update targeted was changed or removed mid-request. Nothing is written on any `400`, nor on the
+rotation or already-running `409` — those are all refused before the first write. The
+changed-mid-request `409` is the one exception: on a replica set the whole request rolls back, but
+on a standalone MongoDB (the default `MONGODB_URI`) earlier operations in that same request may
+already have committed. Re-running is safe under `skip` and `overwrite`, which re-resolve against
+the current vault and send only what is left.
 
 </details>
 

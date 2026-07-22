@@ -81,9 +81,10 @@ export function canonicalJson(value: unknown): string {
  * `new URL(...).hostname`, NFC, lowercase, strip ONE leading `www.`, strip a
  * trailing `.`.
  *
- * Anything that throws or yields nothing — a `mailto:` address, a regex match
- * pattern, a malformed value — returns `''`, which demotes the item to
- * exact-content matching rather than merging it with something unrelated.
+ * A `mailto:` address, a malformed value, or anything that throws returns `''`,
+ * which demotes the item to exact-content matching rather than merging it with
+ * something unrelated. A URI naming a PATTERN rather than a site never reaches
+ * here — {@link siteUri} withholds it (see there for why).
  *
  * Stripping `www.` is deliberate: `www.amazon.com` and `amazon.com` are the
  * same site and two password managers commonly disagree about the prefix.
@@ -92,9 +93,22 @@ export function normalizeHost(rawUri: string): string {
   const trimmed = rawUri.trim();
   if (!trimmed) return '';
 
+  const normalized = normalizeUri(trimmed);
+  // `new URL` does not reject these two classes — it silently REWRITES them,
+  // which is worse, because the result looks like a perfectly ordinary host.
+  // For a special scheme a backslash terminates the authority, so
+  // `https://foo\bar.com` parses as host `foo`; and ASCII tab/CR/LF are
+  // stripped before parsing, so `https://ac<TAB>counts.example.com` splices
+  // into `accounts.example.com`. Either way the host is a fragment of, or a
+  // splice of, something the user never wrote — and two unrelated logins can
+  // land on one of them, which is exactly the false merge a logical key must
+  // never produce. A real authority contains none of these characters, so
+  // refuse rather than match on a value the parser rewrote.
+  if (AUTHORITY_REWRITING_CHARS.test(authorityOf(normalized))) return '';
+
   let host: string;
   try {
-    host = new URL(normalizeUri(trimmed)).hostname;
+    host = new URL(normalized).hostname;
   } catch {
     return '';
   }
@@ -189,23 +203,36 @@ export async function computeItemKeys(
 }
 
 /**
- * The first URI of a login, as a raw string, or `''` when it has none.
+ * The first URI of a login IF it names a concrete site, else `''`.
  *
  * Tolerates both the stored shape (`{ uri, match }`) and a bare string, so
- * pre-validation parser output works too.
+ * pre-validation parser output works too. A bare string carries no match type
+ * and is therefore treated as a plain URI, which is what every parser produces
+ * (`toUriEntry` always stamps `match: 'domain'`).
+ *
+ * A `match: 'regex'` entry is deliberately withheld. `uriEntrySchema` stores a
+ * regex VERBATIM and exempts it from the http/https/mailto check, so it is the
+ * one value in a schema-valid login that is a PATTERN rather than an address —
+ * and a pattern names no single site. Feeding one to `normalizeHost` does not
+ * fail loudly: `https://accounts\.google\.com/.*` parses to the host
+ * `accounts`, so a Google and an Okta login sharing a username would collapse
+ * onto one identity key and `overwrite` would replace one with the other. A
+ * pattern therefore demotes the item to exact-content matching, exactly as a
+ * missing host does.
  *
  * Shared with the vault list's subtitle (`lib/vaultDisplay.ts`) on purpose: the
  * label a user reads to tell two rows apart must be derived from the SAME URI
  * that decides the item's logical identity, or the list would distinguish rows
  * on one host while the importer matched them on another.
  */
-export function firstUri(data: Record<string, unknown>): string {
+export function siteUri(data: Record<string, unknown>): string {
   const uris = data.uris;
   if (!Array.isArray(uris)) return '';
   const first: unknown = uris[0];
   if (typeof first === 'string') return first;
-  if (isRecord(first) && typeof first.uri === 'string') return first.uri;
-  return '';
+  if (!isRecord(first) || typeof first.uri !== 'string') return '';
+  if (first.match === 'regex') return '';
+  return first.uri;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +246,7 @@ export function firstUri(data: Record<string, unknown>): string {
  */
 function logicalLoginKey(itemType: ItemType, data: Record<string, unknown>): string | undefined {
   if (itemType !== 'login') return undefined;
-  const host = normalizeHost(firstUri(data));
+  const host = normalizeHost(siteUri(data));
   const username = normalizeUsername(data.username);
   if (host && username) return `login${SEP}${host}${SEP}${username}`;
   return undefined;
@@ -267,6 +294,29 @@ function canonicalize(value: unknown): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Characters the URL parser rewrites the authority around instead of rejecting:
+ * a backslash (an authority terminator for a special scheme) and the ASCII
+ * tab/CR/LF it strips before parsing. See {@link normalizeHost}.
+ */
+const AUTHORITY_REWRITING_CHARS = /[\\\t\n\r]/;
+
+/**
+ * The authority of an already-normalized URI — everything between `//` and the
+ * first `/`, `?` or `#`, or the whole remainder when it has none.
+ *
+ * Scoped to the authority on purpose: a backslash in a PATH is harmless (the
+ * host is already decided by then), and demoting such a URI would cost a
+ * legitimate match for nothing. A schemeless value has no `//` after
+ * `normalizeUri` only when it carried an opaque scheme like `mailto:`, which
+ * yields an empty hostname and is demoted by the emptiness check anyway.
+ */
+function authorityOf(normalized: string): string {
+  const separator = normalized.indexOf('//');
+  const rest = separator >= 0 ? normalized.slice(separator + 2) : normalized;
+  return rest.split(/[/?#]/, 1)[0] ?? '';
 }
 
 async function sha256Hex(input: string): Promise<string> {

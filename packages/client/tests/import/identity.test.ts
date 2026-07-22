@@ -5,6 +5,7 @@ import {
   computeItemIdentity,
   normalizeHost,
   normalizeUsername,
+  siteUri,
 } from '../../src/services/import/identity';
 
 /**
@@ -75,6 +76,129 @@ describe('normalizeHost', () => {
     expect(() => normalizeHost('ht tp://not a url')).not.toThrow();
     expect(normalizeHost('ht tp://not a url')).toBe('');
     expect(normalizeHost('^https://.*regex.*$')).toBe('');
+  });
+
+  // `new URL` does not reject these — it REWRITES them and hands back a host
+  // that looks perfectly ordinary. Left alone, two unrelated logins collapse
+  // onto one of those hosts, which is the false merge a logical key must never
+  // produce. Asserted on the raw parser behaviour too, so these stay honest if
+  // a future runtime changes: each raw host below is non-empty and WRONG.
+  it('refuses a host the URL parser truncated at a backslash', () => {
+    expect(new URL(String.raw`https://accounts\.google\.com/.*`).hostname).toBe('accounts');
+    expect(normalizeHost(String.raw`https://accounts\.google\.com/.*`)).toBe('');
+    expect(normalizeHost(String.raw`https://accounts\.okta\.com/.*`)).toBe('');
+    // Reachable with no regex at all: every parser stamps `match: 'domain'`,
+    // and a backslash-corrupted URL column passes `toUriEntry` untouched.
+    expect(normalizeHost(String.raw`https://foo\bar.com`)).toBe('');
+    expect(normalizeHost(String.raw`foo\bar.com`)).toBe('');
+  });
+
+  it('refuses a host the URL parser spliced together across stripped whitespace', () => {
+    expect(new URL('https://ac\tcounts.google.com').hostname).toBe('accounts.google.com');
+    expect(normalizeHost('https://ac\tcounts.google.com')).toBe('');
+    expect(normalizeHost('https://exa\nmple.com')).toBe('');
+    expect(normalizeHost('https://exa\rmple.com')).toBe('');
+  });
+
+  it('still resolves a URI whose PATH — not authority — carries a backslash', () => {
+    // The host is already decided by then, so demoting these would cost a
+    // legitimate match for nothing.
+    expect(normalizeHost(String.raw`https://example.com/a\b`)).toBe('example.com');
+    expect(normalizeHost(String.raw`https://example.com/?q=a\b`)).toBe('example.com');
+  });
+
+  it('leaves an internationalized domain alone', () => {
+    // Guards the authority check against over-reach: punycode conversion means
+    // the parsed host is NOT a substring of what the user wrote, so any rule
+    // phrased as "the host must appear in the authority" would break IDN.
+    expect(normalizeHost('https://例え.jp')).toBe('xn--r8jz45g.jp');
+  });
+});
+
+describe('siteUri', () => {
+  it('returns the first URI of an ordinary login', () => {
+    expect(siteUri({ uris: uris('https://amazon.com', 'https://a.co') })).toBe(
+      'https://amazon.com',
+    );
+  });
+
+  it('tolerates a bare string entry, which no parser marks as a pattern', () => {
+    expect(siteUri({ uris: ['https://amazon.com'] })).toBe('https://amazon.com');
+  });
+
+  it('returns nothing when there are no URIs at all', () => {
+    expect(siteUri({})).toBe('');
+    expect(siteUri({ uris: [] })).toBe('');
+    expect(siteUri({ uris: 'not-an-array' })).toBe('');
+    expect(siteUri({ uris: [{ match: 'domain' }] })).toBe('');
+  });
+
+  it('withholds a regex entry, because a pattern names no single site', () => {
+    const pattern = { uri: String.raw`https://accounts\.google\.com/.*`, match: 'regex' };
+    expect(siteUri({ uris: [pattern] })).toBe('');
+  });
+});
+
+describe('computeItemIdentity — a URI that names a pattern cannot forge a logical key', () => {
+  /**
+   * `uriEntrySchema` stores a `match: 'regex'` URI verbatim and exempts it from
+   * the http/https/mailto check, so it is the one value in a schema-valid login
+   * that is a PATTERN rather than an address. Feeding one to the URL parser does
+   * not fail loudly — it truncates at the first backslash — so without the
+   * withholding in `siteUri` two unrelated sites collapse onto one key.
+   */
+  const regexLogin = (name: string, uri: string, username: string) =>
+    login(name, { username, password: 'p', uris: [{ uri, match: 'regex' }] });
+
+  it('keeps two regex logins on different sites apart, same username or not', async () => {
+    const google = await computeItemIdentity(
+      regexLogin('Google', String.raw`https://accounts\.google\.com/.*`, 'alice@example.com'),
+    );
+    const okta = await computeItemIdentity(
+      regexLogin('Okta', String.raw`https://accounts\.okta\.com/.*`, 'alice@example.com'),
+    );
+
+    expect(google).not.toBe(okta);
+    // Both fell back to exact content rather than to a truncated `accounts` host.
+    for (const key of [google, okta]) {
+      expect(key.startsWith(`login${SEP}`)).toBe(true);
+      expect(key.split(SEP)).toHaveLength(2);
+      expect(key.split(SEP)[1]).toMatch(HEX_64);
+    }
+  });
+
+  it('never emits a logical key built from a truncated host', async () => {
+    const key = await computeItemIdentity(
+      regexLogin('Google', String.raw`https://accounts\.google\.com/.*`, 'alice@example.com'),
+    );
+    expect(key).not.toContain(`${SEP}accounts${SEP}`);
+  });
+
+  it('still keys a regex login on exact content, so a re-import stays a no-op', async () => {
+    const row = () =>
+      regexLogin('Google', String.raw`https://accounts\.google\.com/.*`, 'alice@example.com');
+    expect(await computeItemIdentity(row())).toBe(await computeItemIdentity(row()));
+  });
+
+  it('applies the same rule to a plain login whose URL was backslash-corrupted', async () => {
+    // No regex needed: every parser stamps `match: 'domain'`, and `toUriEntry`
+    // passes a backslash straight through.
+    const one = await computeItemIdentity(
+      login('Intranet', {
+        username: 'alice',
+        password: 'p',
+        uris: uris(String.raw`https://foo\bar.com`),
+      }),
+    );
+    const two = await computeItemIdentity(
+      login('Other', {
+        username: 'alice',
+        password: 'p',
+        uris: uris(String.raw`https://foo\baz.com`),
+      }),
+    );
+    expect(one).not.toBe(two);
+    expect(one).not.toContain(`${SEP}foo${SEP}`);
   });
 });
 
