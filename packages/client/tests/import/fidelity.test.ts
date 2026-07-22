@@ -1,14 +1,14 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll } from 'vitest';
 import { vaultItemDataSchemas } from '@hvault/shared';
-import { buildEncryptedImportItems } from '../../src/services/import';
+import { buildImportOperations } from '../../src/services/import';
 import { buildLogin, buildNote, makeItem } from '../../src/services/import/itemBuilders';
 
 /**
  * Phase 3 (fidelity-clamp): a single over-long field must be clamped to the
  * shared schema bound and its overflow preserved in the item's notes, rather
  * than failing `vaultItemDataSchemas` and discarding the WHOLE item — password
- * included — at the encryption step (`buildEncryptedImportItems`).
+ * included — at the encryption step (`buildImportOperations`).
  */
 
 let vaultKey: CryptoKey;
@@ -54,7 +54,11 @@ describe('import fidelity clamp — logins', () => {
     expect(parsed.uris[0]!.uri.length).toBe(2048);
 
     // And it is NOT skipped by the real encrypt/validate step.
-    const { items, skipped } = await buildEncryptedImportItems([item], vaultKey);
+    const { inserts: items, failedCount: skipped } = await buildImportOperations({
+      inserts: [item],
+      updates: [],
+      vaultKey,
+    });
     expect(skipped).toBe(0);
     expect(items).toHaveLength(1);
   });
@@ -76,7 +80,11 @@ describe('import fidelity clamp — logins', () => {
     expect(String(item.data.notes)).toContain(fullUsername);
     assertRoundTrips('login', item.data);
 
-    const { skipped } = await buildEncryptedImportItems([item], vaultKey);
+    const { failedCount: skipped } = await buildImportOperations({
+      inserts: [item],
+      updates: [],
+      vaultKey,
+    });
     expect(skipped).toBe(0);
   });
 
@@ -106,7 +114,11 @@ describe('import fidelity clamp — logins', () => {
     expect(String(item.data.notes)).toContain('field149: value149');
     assertRoundTrips('login', item.data);
 
-    const { skipped } = await buildEncryptedImportItems([item], vaultKey);
+    const { failedCount: skipped } = await buildImportOperations({
+      inserts: [item],
+      updates: [],
+      vaultKey,
+    });
     expect(skipped).toBe(0);
   });
 

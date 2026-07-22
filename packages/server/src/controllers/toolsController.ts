@@ -21,15 +21,11 @@ import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import {
   APP_VERSION,
-  ITEM_TYPES,
   MAX_ENCRYPTED_DATA_LENGTH,
   MAX_ENCRYPTED_NAME_LENGTH,
-  MAX_IMPORT_ITEMS,
   MAX_ITEMS_PER_USER,
-  MAX_TAG_LENGTH,
-  MAX_TAGS_PER_ITEM,
 } from '@hvault/shared';
-import type { CheckBreachInput, ImportInput, ExportInput, ItemType } from '@hvault/shared';
+import type { CheckBreachInput, ImportInput, ExportInput } from '@hvault/shared';
 
 const logger = createLogger({ moduleName: 'tools-controller' });
 
@@ -112,8 +108,6 @@ export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
 // ── Handlers ─────────────────────────────────────────────────────────
 
 const HEX_PREFIX_RE = /^[0-9a-fA-F]{5}$/;
-const SEARCH_HASH_RE = /^[a-f0-9]{64}$/;
-const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
 
 const ALLOWED_ITEM_FIELDS = new Set([
   'encryptedData',
@@ -180,40 +174,6 @@ function importCapExceededMessage(existingItemCount: number, netNewItems: number
 const RESPONSE_WRAPPER_OVERHEAD = 1024;
 
 /**
- * Sanitizes an import item's searchHash, tags, and folderId to match the same
- * validation rules enforced by create/update schemas.
- */
-function sanitizeImportFields(item: Record<string, unknown>): {
-  tags: string[];
-  searchHash: string | undefined;
-  folderId: string | undefined;
-} {
-  // searchHash: must be 64-char lowercase hex string
-  let searchHash: string | undefined;
-  if (typeof item.searchHash === 'string' && SEARCH_HASH_RE.test(item.searchHash)) {
-    searchHash = item.searchHash;
-  }
-
-  // folderId: must be valid 24-char hex ObjectId
-  let folderId: string | undefined;
-  if (typeof item.folderId === 'string' && OBJECT_ID_RE.test(item.folderId)) {
-    folderId = item.folderId;
-  }
-
-  // tags: array of trimmed, non-empty strings, max length 50, max 20 items
-  let tags: string[] = [];
-  if (Array.isArray(item.tags)) {
-    tags = (item.tags as unknown[])
-      .filter((t): t is string => typeof t === 'string')
-      .map((t) => t.trim())
-      .filter((t) => t.length >= 1 && t.length <= MAX_TAG_LENGTH)
-      .slice(0, MAX_TAGS_PER_ITEM);
-  }
-
-  return { tags, searchHash, folderId };
-}
-
-/**
  * Per-field length caps for imported items. These mirror the `maxlength`
  * constraints declared on the VaultItem model (see
  * `packages/server/src/models/VaultItem.ts`): the IV (24) and auth-tag (32)
@@ -230,18 +190,15 @@ const IMPORT_FIELD_MAXLENGTHS: readonly { readonly field: string; readonly max: 
 
 /**
  * Rejects the whole import with a clear 400 if any row has an over-length
- * encrypted field. Applied to BOTH the rows a structured import inserts and the
- * rows it updates, and to every row of a legacy `data` envelope.
+ * encrypted field. Applied to BOTH the rows an import inserts and the rows it
+ * updates.
  *
- * On the legacy shape the schema only bounds the entire `data` blob (1 MB) and
- * the controller's non-empty filter ignores length, so without this check an
- * over-length field trips a Mongoose validator only mid-write: in the
- * `overwrite` conflict loop earlier items are already persisted before the
- * throw, and the success-only `import` audit log is skipped, leaving a partial,
- * unaudited import. On the structured shape `importInsertItemSchema` /
- * `importUpdateItemSchema` already enforce the same ceilings, so this is the
- * defense-in-depth layer that keeps import all-or-nothing if those bounds are
- * ever loosened. Validating up front (before any DB write) keeps import atomic.
+ * `importInsertItemSchema` / `importUpdateItemSchema` already enforce the same
+ * ceilings, so this is the defense-in-depth layer that keeps an import
+ * all-or-nothing if those bounds are ever loosened: an over-length field
+ * otherwise trips a Mongoose validator only mid-write, leaving earlier rows
+ * persisted and the success-only `import` audit log skipped — a partial,
+ * unaudited import. Validating up front (before any DB write) keeps it atomic.
  */
 function assertImportFieldLengths(items: readonly object[]): void {
   for (const item of items) {
@@ -405,7 +362,7 @@ interface ImportOperationsParams {
   userId: string;
   format: ImportInput['format'];
   conflictStrategy: ImportInput['conflictStrategy'];
-  operations: NonNullable<ImportInput['operations']>;
+  operations: ImportInput['operations'];
 }
 
 /**
@@ -617,290 +574,14 @@ async function executeImportOperations(
   });
 }
 
-interface LegacyImportParams {
-  userId: string;
-  format: ImportInput['format'];
-  conflictStrategy: ImportInput['conflictStrategy'];
-  data: string;
-}
-
-/**
- * DEPRECATED legacy `data`-envelope import, retained verbatim for exactly one
- * phase so both consumers can migrate to `operations` before it is retired.
- *
- * This is the ONLY place name-based matching still lives: it de-duplicates by
- * `searchHash` with an `encryptedName` fallback, which is precisely the defect
- * the structured contract replaces (ten accounts on one site collapse into one,
- * because a name is a display label and not an identity). Nothing new should be
- * routed here, and this function — with its private helpers — is deleted whole
- * when the legacy field is removed from `importSchema`.
- */
-async function executeLegacyDataImport(
-  req: Request,
-  res: Response,
-  { userId, format, conflictStrategy, data }: LegacyImportParams,
-): Promise<void> {
-  // Zero-knowledge import: the client already parsed the source file, converted
-  // each entry to a vault item, and encrypted it with the vault key. Every format
-  // therefore arrives as the same native `{ items: [...] }` envelope of already-
-  // encrypted rows — `format` is audit-only metadata here. The server never parses
-  // plaintext and never encrypts (it holds no vault key), so there is a single
-  // code path. Rows missing the ciphertext fields are dropped by the filter below.
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    throw httpErrors.badRequest(
-      'Invalid import data: expected a JSON object of already-encrypted items ({ items: [...] }).',
-    );
-  }
-
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    !('items' in parsed) ||
-    !Array.isArray(parsed.items)
-  ) {
-    throw httpErrors.badRequest('Invalid import format: expected { items: [...] }');
-  }
-
-  const importData = parsed as { items: Record<string, unknown>[] };
-
-  const itemsToCreate: Record<string, unknown>[] = importData.items
-    .filter((item) => {
-      const type = (item.itemType as string | undefined) ?? 'login';
-      return (ITEM_TYPES as readonly string[]).includes(type);
-    })
-    .map((item) => {
-      const sanitized = sanitizeImportFields(item);
-      return {
-        userId,
-        itemType: ((item.itemType as string | undefined) ?? 'login') as ItemType,
-        encryptedData: (item.encryptedData as string | undefined) ?? '',
-        dataIv: (item.dataIv as string | undefined) ?? '',
-        dataTag: (item.dataTag as string | undefined) ?? '',
-        encryptedName: (item.encryptedName as string | undefined) ?? '',
-        nameIv: (item.nameIv as string | undefined) ?? '',
-        nameTag: (item.nameTag as string | undefined) ?? '',
-        tags: sanitized.tags,
-        favorite: item.favorite === true,
-        folderId: sanitized.folderId,
-        searchHash: sanitized.searchHash,
-      };
-    });
-
-  if (itemsToCreate.length > MAX_IMPORT_ITEMS) {
-    throw httpErrors.badRequest(
-      `Import exceeds the maximum allowed item count (${String(MAX_IMPORT_ITEMS)}). Received ${String(itemsToCreate.length)} items.`,
-    );
-  }
-
-  // Validate folderId ownership: strip any folderId values that don't belong to the user
-  const userFolderIds = new Set(
-    (await Folder.find({ userId }).select('_id').lean()).map((f) => String(f._id)),
-  );
-  for (const item of itemsToCreate) {
-    if (typeof item.folderId === 'string' && !userFolderIds.has(item.folderId)) {
-      item.folderId = undefined;
-    }
-  }
-
-  const validItems = itemsToCreate.filter(
-    (item) =>
-      (typeof item.encryptedData === 'string' ? item.encryptedData.trim() : item.encryptedData) &&
-      (typeof item.dataIv === 'string' ? item.dataIv.trim() : item.dataIv) &&
-      (typeof item.dataTag === 'string' ? item.dataTag.trim() : item.dataTag) &&
-      (typeof item.encryptedName === 'string' ? item.encryptedName.trim() : item.encryptedName) &&
-      (typeof item.nameIv === 'string' ? item.nameIv.trim() : item.nameIv) &&
-      (typeof item.nameTag === 'string' ? item.nameTag.trim() : item.nameTag),
-  );
-  const skippedCount = itemsToCreate.length - validItems.length;
-
-  if (validItems.length === 0) {
-    throw httpErrors.badRequest(
-      'No valid items found to import (all items had missing encryption fields)',
-    );
-  }
-
-  // Enforce per-item encrypted-field length caps before any DB write so an
-  // over-length item cannot leave a partial, unaudited import (see
-  // assertImportFieldLengths).
-  assertImportFieldLengths(validItems);
-
-  // Deduplication based on searchHash, with encryptedName fallback.
-  // After vault key rotation, searchHashes change (they are HMAC-SHA256 of the item
-  // name with the vault key). Items from an old export will have hashes from the old
-  // key while existing items have hashes from the new key. To handle this, we fall
-  // back to matching by encryptedName when searchHash doesn't match.
-  //
-  // Classification is write-free: matches are collected into `overwriteTargets`
-  // and non-matches into `itemsToInsert`, so the per-user cap below can be
-  // measured against the rows this import will actually INSERT. A blunt
-  // `existing + validItems.length` sum falsely rejects a `skip` / `overwrite`
-  // re-import of a user's own export (which inserts nothing for a match), and
-  // running the overwrites during classification would persist part of the
-  // import before a cap rejection could abort it. `keep_both` always inserts,
-  // so there every valid item counts — that is the growth the cap bounds.
-  let duplicateCount = 0;
-  let itemsToInsert = validItems;
-  const overwriteTargets: { existingId: mongoose.Types.ObjectId; item: Record<string, unknown> }[] =
-    [];
-
-  if (conflictStrategy !== 'keep_both') {
-    const importHashes = validItems
-      .map((item) => item.searchHash as string | undefined)
-      .filter((h): h is string => typeof h === 'string' && h.length > 0);
-
-    // Fetch only the fields needed for deduplication (lean projection)
-    const existingItems = await VaultItem.find({
-      userId,
-      deletedAt: { $exists: false },
-    })
-      .select('_id searchHash encryptedName')
-      .lean();
-
-    // Build lookup maps for both searchHash and encryptedName
-    type DeduplicationEntry = (typeof existingItems)[number];
-    const existingHashMap = new Map<string, DeduplicationEntry>();
-    const existingNameMap = new Map<string, DeduplicationEntry>();
-    for (const existing of existingItems) {
-      if (existing.searchHash) {
-        existingHashMap.set(existing.searchHash, existing);
-      }
-      if (existing.encryptedName) {
-        existingNameMap.set(existing.encryptedName, existing);
-      }
-    }
-
-    const hasAnyHashes = importHashes.length > 0;
-    const hasAnyExisting = existingItems.length > 0;
-
-    if (hasAnyHashes || hasAnyExisting) {
-      /**
-       * Finds a matching existing item by searchHash first (fast path),
-       * then falls back to encryptedName matching (handles post-rotation imports).
-       */
-      const findExisting = (item: Record<string, unknown>) => {
-        const hash = item.searchHash as string | undefined;
-        if (hash) {
-          const byHash = existingHashMap.get(hash);
-          if (byHash) return byHash;
-        }
-        // Fallback: match by encryptedName (handles vault key rotation scenario
-        // where searchHashes differ but encrypted names are identical since the
-        // client re-encrypts with the current vault key before import)
-        const name = item.encryptedName as string | undefined;
-        if (name) {
-          return existingNameMap.get(name);
-        }
-        return undefined;
-      };
-
-      if (conflictStrategy === 'skip') {
-        itemsToInsert = validItems.filter((item) => {
-          const existing = findExisting(item);
-          if (existing) {
-            duplicateCount++;
-            return false;
-          }
-          return true;
-        });
-      } else {
-        const toInsert: typeof validItems = [];
-        for (const item of validItems) {
-          const existing = findExisting(item);
-          if (existing) {
-            overwriteTargets.push({ existingId: existing._id, item });
-          } else {
-            toInsert.push(item);
-          }
-        }
-        itemsToInsert = toInsert;
-      }
-    }
-  }
-
-  // Enforce the per-user vault item cap against net-new inserts only, BEFORE any
-  // write, so an import that the cap rejects leaves nothing behind.
-  const existingItemCount = await VaultItem.countDocuments({ userId });
-  if (existingItemCount + itemsToInsert.length > MAX_ITEMS_PER_USER) {
-    throw httpErrors.badRequest(importCapExceededMessage(existingItemCount, itemsToInsert.length));
-  }
-
-  for (const { existingId, item } of overwriteTargets) {
-    await VaultItem.findOneAndUpdate(
-      { _id: existingId, userId },
-      { $set: pickAllowedFields(item, ALLOWED_ITEM_FIELDS) },
-      { runValidators: true, upsert: false },
-    );
-  }
-  const overwrittenCount = overwriteTargets.length;
-
-  let importedCount = 0;
-  if (itemsToInsert.length > 0) {
-    const created = await VaultItem.insertMany(itemsToInsert);
-    importedCount = created.length;
-  }
-
-  const importCtx = getRequestContext(req);
-  await createAuditLog(
-    userId,
-    'import',
-    { format, itemCount: importedCount + overwrittenCount, skippedCount, duplicateCount },
-    importCtx.ip,
-    importCtx.userAgent,
-  );
-
-  logger.info('Vault imported', {
-    userId,
-    format,
-    itemCount: importedCount + overwrittenCount,
-    skippedCount,
-    duplicateCount,
-    overwrittenCount,
-  });
-
-  res.status(201).json({
-    success: true,
-    data: {
-      importedCount: importedCount + overwrittenCount,
-      skippedCount,
-      duplicateCount,
-      overwrittenCount,
-    },
-    message: (() => {
-      const total = importedCount + overwrittenCount;
-      const parts: string[] = [`${String(total)} items imported successfully`];
-      if (duplicateCount > 0) parts.push(`${String(duplicateCount)} duplicates skipped`);
-      if (skippedCount > 0)
-        parts.push(`${String(skippedCount)} skipped due to missing encryption fields`);
-      return parts.join(' (') + (parts.length > 1 ? ')' : '');
-    })(),
-  });
-}
-
 export const importVault = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
-  const { format, data, conflictStrategy, operations } = req.body as ImportInput;
+  const { format, conflictStrategy, operations } = req.body as ImportInput;
 
   // Every imported row carries ciphertext encrypted with the caller's current
   // vault key — a rotation in flight would strand all of it. Fence before any
-  // parsing or dispatch so the rejection is cheap and BOTH wire shapes inherit
-  // it from one call site.
+  // validation or writing, so the rejection is cheap.
   await assertVaultNotRotating(userId);
 
-  if (operations !== undefined) {
-    await executeImportOperations(req, res, { userId, format, conflictStrategy, operations });
-    return;
-  }
-
-  // `importSchema` refines exactly one of `data` / `operations` into existence,
-  // so this is unreachable through the route. It is kept as a typed narrowing
-  // guard: were that refinement ever loosened, the legacy branch would otherwise
-  // JSON.parse `undefined` and 500 instead of returning a clear 400.
-  if (data === undefined) {
-    throw httpErrors.badRequest('Invalid import request: expected a "data" payload.');
-  }
-
-  await executeLegacyDataImport(req, res, { userId, format, conflictStrategy, data });
+  await executeImportOperations(req, res, { userId, format, conflictStrategy, operations });
 });

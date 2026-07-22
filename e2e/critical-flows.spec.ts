@@ -3,7 +3,7 @@ import {
   createAuthenticatedUser,
   authGet,
   authMutate,
-  sampleVaultItem,
+  sampleImportInsert,
   getCsrf,
   createItem,
 } from './helpers';
@@ -112,23 +112,24 @@ test.describe('Import/Export Flow', () => {
 
     const importRes = await authMutate(request, user, 'post', '/api/v1/tools/import', {
       format: 'json',
-      data: JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'imported-item-1' }),
-          sampleVaultItem({ itemType: 'note', encryptedName: 'imported-item-2' }),
-          sampleVaultItem({ itemType: 'secret', encryptedName: 'imported-item-3' }),
-        ],
-      }),
       conflictStrategy: 'keep_both',
+      operations: {
+        inserts: [
+          sampleImportInsert({ encryptedName: 'imported-item-1' }),
+          sampleImportInsert({ itemType: 'note', encryptedName: 'imported-item-2' }),
+          sampleImportInsert({ itemType: 'secret', encryptedName: 'imported-item-3' }),
+        ],
+      },
     });
     expect(importRes.ok()).toBe(true);
 
     const importBody = (await importRes.json()) as {
       success: boolean;
-      data: { importedCount: number };
+      data: { insertedCount: number; updatedCount: number };
     };
     expect(importBody.success).toBe(true);
-    expect(importBody.data.importedCount).toBe(3);
+    expect(importBody.data.insertedCount).toBe(3);
+    expect(importBody.data.updatedCount).toBe(0);
 
     // Verify items exist in vault
     const listRes = await authGet(request, user, '/api/v1/vault/items');
@@ -155,15 +156,23 @@ test.describe('Import/Export Flow', () => {
     // Create a second user and import the exported data
     const user2 = await createAuthenticatedUser(request);
 
+    // An export row carries fields the import contract does not accept (`_id`,
+    // `userId`, timestamps); they are stripped by the schema, and the client
+    // supplies the required `searchHash` from the name it just decrypted.
     const importRes = await authMutate(request, user2, 'post', '/api/v1/tools/import', {
       format: 'json',
-      data: JSON.stringify({ items: exportBody.data.items }),
       conflictStrategy: 'keep_both',
+      operations: {
+        inserts: exportBody.data.items.map((item) => ({
+          ...item,
+          searchHash: 'a'.repeat(64),
+        })),
+      },
     });
     expect(importRes.ok()).toBe(true);
 
-    const importBody = (await importRes.json()) as { data: { importedCount: number } };
-    expect(importBody.data.importedCount).toBe(1);
+    const importBody = (await importRes.json()) as { data: { insertedCount: number } };
+    expect(importBody.data.insertedCount).toBe(1);
 
     // Verify item exists in user2's vault
     const listRes = await authGet(request, user2, '/api/v1/vault/items');

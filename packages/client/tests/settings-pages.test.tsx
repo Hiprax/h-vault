@@ -322,10 +322,24 @@ function setupDefaultProfileMock(overrides: Record<string, unknown> = {}) {
 // 1 - SettingsPage
 // ==========================================================================
 
+/** An empty, well-formed first page — enough for `fetchItems()` to complete. */
+const EMPTY_ITEMS_PAGE = {
+  data: {
+    success: true,
+    data: [],
+    pagination: { page: 1, limit: 200, total: 0, totalPages: 1 },
+  },
+};
+
 describe('SettingsPage', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     setupDefaultProfileMock();
+    // Import resolves conflicts client-side against the WHOLE vault, so it loads
+    // the item list before deciding anything. Without a well-formed page here the
+    // load fails and the import aborts before sending — by design.
+    const { listItemsApi } = await import('../src/services/api/vaultApi');
+    vi.mocked(listItemsApi).mockResolvedValue(EMPTY_ITEMS_PAGE as never);
     mockRegenerateBackupCodesApi.mockResolvedValue({
       data: { success: true, data: { backupCodes: [] } },
     });
@@ -1303,9 +1317,9 @@ describe('SettingsPage', () => {
     expect(select.querySelectorAll('option')).toHaveLength(8);
   });
 
-  it('calls importVaultApi with encrypted native items for a JSON import', async () => {
+  it('re-sends the ORIGINAL ciphertext of a native item rather than re-encrypting it', async () => {
     mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { importedCount: 1, skippedCount: 0 } },
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
     });
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
@@ -1334,9 +1348,16 @@ describe('SettingsPage', () => {
         expect.objectContaining({ format: 'json', conflictStrategy: 'skip' }),
       );
     });
-    const payload = mockImportVaultApi.mock.calls[0]?.[0] as { data: string };
-    const sent = JSON.parse(payload.data) as { items: unknown[] };
-    expect(sent.items).toHaveLength(1);
+    const payload = mockImportVaultApi.mock.calls[0]?.[0] as {
+      operations: { inserts: Record<string, string>[]; updates: unknown[] };
+    };
+    expect(payload.operations.inserts).toHaveLength(1);
+    expect(payload.operations.updates).toEqual([]);
+    // The row is already encrypted under the current vault key, so its bytes are
+    // forwarded verbatim (a re-encrypt would show the mocked `enc:` prefix).
+    expect(payload.operations.inserts[0]).toMatchObject(nativeItem);
+    // Only the search hash is recomputed — it is a deterministic HMAC of the name.
+    expect(payload.operations.inserts[0]?.searchHash).toBe('hash');
   });
 
   it('shows CSV field mapping UI when CSV format is selected', async () => {
@@ -1898,7 +1919,7 @@ describe('SettingsPage', () => {
       .mockRejectedValueOnce(new Error('Decryption failed')); // item 2 data fails
 
     mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { importedCount: 1, skippedCount: 0 } },
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
     });
 
     await renderSettings();
@@ -1909,6 +1930,7 @@ describe('SettingsPage', () => {
     const importData = JSON.stringify({
       items: [
         {
+          itemType: 'login',
           encryptedData: 'enc1',
           dataIv: 'iv1',
           dataTag: 'tag1',
@@ -1917,6 +1939,7 @@ describe('SettingsPage', () => {
           nameTag: 'ntag1',
         },
         {
+          itemType: 'login',
           encryptedData: 'enc2',
           dataIv: 'iv2',
           dataTag: 'tag2',
@@ -1958,6 +1981,7 @@ describe('SettingsPage', () => {
     const importData = JSON.stringify({
       items: [
         {
+          itemType: 'login',
           encryptedData: 'enc1',
           dataIv: 'iv1',
           dataTag: 'tag1',
@@ -1966,6 +1990,7 @@ describe('SettingsPage', () => {
           nameTag: 'ntag1',
         },
         {
+          itemType: 'login',
           encryptedData: 'enc2',
           dataIv: 'iv2',
           dataTag: 'tag2',
@@ -1985,10 +2010,12 @@ describe('SettingsPage', () => {
     });
 
     await waitFor(() => {
-      // Should show error toast about all items failing
+      // The title counts the rejected rows; the per-row reasons name the cause,
+      // rather than blaming decryption for every kind of rejection.
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({
-          title: expect.stringContaining('failed decryption') as string,
+          title: 'All 2 items were rejected and nothing was imported.',
+          description: expect.stringContaining('could not be decrypted') as string,
           type: 'error',
         }),
       );
@@ -2006,7 +2033,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce('decrypted-name');
 
     mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { importedCount: 1, skippedCount: 0 } },
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
     });
 
     await renderSettings();
@@ -2018,6 +2045,7 @@ describe('SettingsPage', () => {
       items: [
         // Valid item with all fields
         {
+          itemType: 'login',
           encryptedData: 'enc1',
           dataIv: 'iv1',
           dataTag: 'tag1',
@@ -2027,6 +2055,7 @@ describe('SettingsPage', () => {
         },
         // Missing dataIv
         {
+          itemType: 'login',
           encryptedData: 'enc2',
           dataTag: 'tag2',
           encryptedName: 'encN2',
@@ -2034,7 +2063,14 @@ describe('SettingsPage', () => {
           nameTag: 'ntag2',
         },
         // Missing encryptedName
-        { encryptedData: 'enc3', dataIv: 'iv3', dataTag: 'tag3', nameIv: 'niv3', nameTag: 'ntag3' },
+        {
+          itemType: 'login',
+          encryptedData: 'enc3',
+          dataIv: 'iv3',
+          dataTag: 'tag3',
+          nameIv: 'niv3',
+          nameTag: 'ntag3',
+        },
       ],
     });
 
@@ -2055,10 +2091,15 @@ describe('SettingsPage', () => {
 
   it('imports all valid JSON items with success toast when all pass decryption', async () => {
     const { cryptoService } = await import('../src/services/crypto/cryptoService');
-    vi.mocked(cryptoService.decryptData).mockResolvedValue('decrypted');
+    // Distinguishable plaintext per row: two rows that decrypt to the SAME
+    // content are exact duplicates and collapse to one operation, which would
+    // make a two-row assertion pass for the wrong reason.
+    vi.mocked(cryptoService.decryptData).mockImplementation((encrypted: string) =>
+      Promise.resolve(`plain:${encrypted}`),
+    );
 
     mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { importedCount: 2, skippedCount: 0, duplicateCount: 1 } },
+      data: { success: true, data: { insertedCount: 2, updatedCount: 0 } },
     });
 
     await renderSettings();
@@ -2068,6 +2109,7 @@ describe('SettingsPage', () => {
     const importData = JSON.stringify({
       items: [
         {
+          itemType: 'login',
           encryptedData: 'e1',
           dataIv: 'i1',
           dataTag: 't1',
@@ -2076,6 +2118,7 @@ describe('SettingsPage', () => {
           nameTag: 'nt1',
         },
         {
+          itemType: 'login',
           encryptedData: 'e2',
           dataIv: 'i2',
           dataTag: 't2',
@@ -2095,13 +2138,17 @@ describe('SettingsPage', () => {
 
     await waitFor(() => {
       expect(mockImportVaultApi).toHaveBeenCalled();
-      expect(mockToast).toHaveBeenCalledWith(expect.objectContaining({ type: 'success' }));
+      expect(mockToast).toHaveBeenCalledWith({ title: 'Imported 2 items', type: 'success' });
     });
+    const payload = mockImportVaultApi.mock.calls[0]?.[0] as {
+      operations: { inserts: unknown[] };
+    };
+    expect(payload.operations.inserts).toHaveLength(2);
   });
 
   it('skips validation for non-JSON import formats', async () => {
     mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { importedCount: 2, skippedCount: 0 } },
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
     });
 
     await renderSettings();

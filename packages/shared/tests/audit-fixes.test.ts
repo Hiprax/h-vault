@@ -175,16 +175,29 @@ describe('importSchema no longer carries csvMapping', () => {
     }
     const result = importSchema.safeParse({
       format: 'csv',
-      data: 'some-csv-data',
+      operations: {
+        inserts: [
+          {
+            itemType: 'login',
+            encryptedName: 'enc-name',
+            nameIv: 'name-iv',
+            nameTag: 'name-tag',
+            encryptedData: 'enc-data',
+            dataIv: 'data-iv',
+            dataTag: 'data-tag',
+            searchHash: 'a'.repeat(64),
+          },
+        ],
+      },
       csvMapping: mapping,
     });
     expect(result.success).toBe(true);
     expect(result.success && 'csvMapping' in result.data).toBe(false);
   });
 
-  it('still strips a legacy csvMapping alongside the new operations shape', () => {
-    // The additive `operations` contract must preserve the same top-level strip
-    // behavior: an unknown wire field never reaches the controller.
+  it('strips a legacy csvMapping alongside the operations shape', () => {
+    // The `operations` contract must preserve the same top-level strip behavior:
+    // an unknown wire field never reaches the controller.
     const result = importSchema.safeParse({
       format: 'csv',
       operations: {

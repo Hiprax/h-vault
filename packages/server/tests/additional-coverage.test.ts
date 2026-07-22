@@ -549,100 +549,108 @@ describe('Additional Coverage', () => {
   // ========================================================================
 
   describe('Import validation', () => {
-    it('should skip items with missing encryption fields', async () => {
+    /** One `operations.inserts[]` row that satisfies the import schema. */
+    function importInsert(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      return sampleVaultItem({ searchHash: 'a'.repeat(64), ...overrides });
+    }
+
+    async function postImport(body: Record<string, unknown>): Promise<request.Response> {
       const agent = request.agent(app);
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      const importData = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'valid-item' }),
-          {
-            itemType: 'login',
-            encryptedData: '',
-            dataIv: '',
-            dataTag: '',
-            encryptedName: '',
-            nameIv: '',
-            nameTag: '',
-          },
-        ],
-      });
-
-      const res = await agent
+      return agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
+        .send(body);
+    }
+
+    it('should execute the operations it is handed', async () => {
+      const res = await postImport({
+        format: 'json',
+        operations: { inserts: [importInsert({ encryptedName: 'valid-item' })] },
+      });
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(1);
-      expect(res.body.data.skippedCount).toBe(1);
+      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
     });
 
-    it('should handle empty items array', async () => {
-      const agent = request.agent(app);
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const importData = JSON.stringify({
-        items: [],
+    it('should reject a row with missing encryption fields', async () => {
+      // There is no per-item skip: every ciphertext field is required, so one
+      // empty row rejects the request and the well-formed row beside it is not
+      // written either.
+      const res = await postImport({
+        format: 'json',
+        operations: {
+          inserts: [
+            importInsert({ encryptedName: 'valid-item' }),
+            {
+              itemType: 'login',
+              encryptedData: '',
+              dataIv: '',
+              dataTag: '',
+              encryptedName: '',
+              nameIv: '',
+              nameTag: '',
+              searchHash: 'b'.repeat(64),
+            },
+          ],
+        },
       });
 
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    });
 
-      // Empty items array - could be 400 (no items to import) or 201 with 0 imported
-      expect([200, 201, 400]).toContain(res.status);
+    it('should reject an import that carries no operations at all', async () => {
+      const res = await postImport({
+        format: 'json',
+        operations: { inserts: [], updates: [] },
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
     });
 
     it('should reject invalid format', async () => {
-      const agent = request.agent(app);
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'invalid-format', data: '{}' });
+      const res = await postImport({
+        format: 'invalid-format',
+        operations: { inserts: [importInsert()] },
+      });
 
       // importSchema uses z.enum for format, so invalid format should be 400
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
     });
 
-    it('should reject import with missing data field', async () => {
-      const agent = request.agent(app);
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'json' });
+    it('should reject import with missing operations field', async () => {
+      const res = await postImport({ format: 'json' });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
     });
 
-    it('should reject import with empty data string', async () => {
-      const agent = request.agent(app);
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
+    it('should reject an update that names a malformed item id', async () => {
+      const res = await postImport({
+        format: 'json',
+        operations: {
+          updates: [
+            {
+              id: 'not-an-object-id',
+              encryptedName: 'updated-name',
+              nameIv: 'updated-name-iv',
+              nameTag: 'updated-name-tag',
+              encryptedData: 'updated-data',
+              dataIv: 'updated-data-iv',
+              dataTag: 'updated-data-tag',
+              searchHash: 'a'.repeat(64),
+            },
+          ],
+        },
+      });
 
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: '' });
-
-      // importSchema requires data.min(1)
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
     });

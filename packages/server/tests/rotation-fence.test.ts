@@ -107,7 +107,9 @@ describe('Vault key rotation fence', () => {
     });
     const importRes = await mutate('post', '/api/v1/tools/import', {
       format: 'json',
-      data: JSON.stringify({ items: [sampleVaultItem({ encryptedName: 'imported' })] }),
+      operations: {
+        inserts: [sampleVaultItem({ encryptedName: 'imported', searchHash: 'a'.repeat(64) })],
+      },
     });
     const restoreRes = await mutate('post', '/api/v1/backup/restore', {
       conflictStrategy: 'skip',

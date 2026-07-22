@@ -322,15 +322,23 @@ describe('Backup routes', () => {
 
       // Import some data first so there are items to download
       const { csrfToken: csrf1, csrfCookie: cookie1 } = await getCsrf(agent);
-      const importData = JSON.stringify({
-        items: [sampleVaultItem({ encryptedName: 'backup-test-item' })],
-      });
-      await agent
+      const importRes = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrf1)
         .set('Cookie', cookie1)
-        .send({ format: 'json', data: importData });
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [
+              sampleVaultItem({
+                encryptedName: 'backup-test-item',
+                searchHash: 'a'.repeat(64),
+              }),
+            ],
+          },
+        });
+      expect(importRes.status).toBe(201);
 
       const res = await agent
         .get('/api/v1/backup/download')

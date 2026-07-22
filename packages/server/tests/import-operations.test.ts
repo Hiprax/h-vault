@@ -195,6 +195,36 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(history[0]!.encryptedPassword).toBe('previous-password-ciphertext');
   });
 
+  it('carries password history onto an inserted item', async () => {
+    // Re-importing a native export recreates items that already had a history.
+    // Dropping it would silently lose every previous password of an item
+    // restored from a backup export.
+    const res = await postOperations(user.accessToken, {
+      inserts: [insertRow(1, { passwordHistory: [historyEntry()] })],
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+
+    const stored = await rawItems(user.id);
+    const history = stored[0]!.passwordHistory as { encryptedPassword: string }[];
+    expect(history).toHaveLength(1);
+    expect(history[0]!.encryptedPassword).toBe('previous-password-ciphertext');
+  });
+
+  it('rejects an over-count passwordHistory on an insert and writes nothing', async () => {
+    const res = await postOperations(user.accessToken, {
+      inserts: [
+        insertRow(1, {
+          passwordHistory: Array.from({ length: PASSWORD_HISTORY_MAX + 1 }, () => historyEntry()),
+        }),
+      ],
+    });
+
+    expect(res.status).toBe(400);
+    expect(await rawItems(user.id)).toHaveLength(0);
+  });
+
   // ── Update targets are validated, never silently skipped ─────────────
 
   it('rejects an update naming another user’s item and writes nothing', async () => {
@@ -343,7 +373,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
 
   // ── Bounded payloads ─────────────────────────────────────────────────
 
-  // These two ceilings are enforced by `importUpdatePasswordHistoryEntrySchema`
+  // These two ceilings are enforced by `importPasswordHistoryEntrySchema`
   // on the wire, which is what rejects here — `assertImportFieldLengths` walks
   // only top-level strings and would never see a nested history array, which is
   // precisely why the bound had to live in the schema. What is asserted is the

@@ -347,98 +347,112 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
     });
   });
 
-  // ── toolsController.ts: import parsing edge cases ─────────────────────
+  // ── toolsController.ts: import validation, audit trail and budget ─────
 
-  describe('POST /api/v1/tools/import — non-JSON formats with incomplete rows', () => {
-    it('rejects a bitwarden payload whose items carry NO encryption fields (400, nothing written)', async () => {
-      // The bitwarden/lastpass/keepass branch defaults every absent encrypted
-      // field to '' rather than letting `undefined` reach Mongoose (which would
-      // surface as a required-path ValidationError → 500). Every row is then
-      // dropped by the missing-encryption-fields filter.
-      const data = JSON.stringify({
-        items: [{ itemType: 'login' }, { itemType: 'note', favorite: true }],
-      });
+  describe('POST /api/v1/tools/import — rejected payloads', () => {
+    /** One `operations.inserts` row with every required field populated. */
+    function insertRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      return { ...sampleVaultItem(overrides), searchHash: 'a'.repeat(64) };
+    }
 
+    it('rejects a bitwarden payload whose rows carry NO ciphertext (400, nothing written)', async () => {
+      // A source parser that emitted plaintext rows: the six ciphertext fields
+      // are required, so the request never reaches the database and leaves no
+      // audit trail of an import that did not happen.
       const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
         format: 'bitwarden',
-        data,
+        operations: {
+          inserts: [{ itemType: 'login' }, { itemType: 'note', favorite: true }],
+        },
       });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toMatch(/no valid items/i);
       expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
       expect(await AuditLog.countDocuments({ userId: user.id, action: 'import' })).toBe(0);
     });
 
-    it('imports the complete rows of a keepass payload and skips the partial one', async () => {
-      const complete = sampleVaultItem({ encryptedName: 'keepass-complete' });
-      const partial = { ...sampleVaultItem({ encryptedName: 'keepass-partial' }) };
-      delete partial.nameTag; // one missing encrypted field is enough to drop the row
+    it('rejects a non-string ciphertext field rather than coercing it', async () => {
+      // A tampered or legacy export can carry a numeric field. It must fail
+      // validation up front: coercing it would silently store a value the
+      // client's vault key never produced.
+      const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
+        format: 'json',
+        operations: {
+          inserts: [{ ...insertRow({ encryptedName: 'numeric-tag' }), nameTag: 12345 }],
+        },
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('nameTag');
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('rejects a row missing a single ciphertext field, keeping the batch atomic', async () => {
+      const partial = insertRow({ encryptedName: 'partial' });
+      delete partial.nameTag;
 
       const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
         format: 'keepass',
-        data: JSON.stringify({ items: [complete, partial] }),
+        operations: { inserts: [insertRow({ encryptedName: 'complete' }), partial] },
       });
 
-      expect(res.status).toBe(201);
-      expect(res.body.data).toMatchObject({ importedCount: 1, skippedCount: 1 });
-
-      const rows = await VaultItem.find({ userId: user.id }).lean();
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.encryptedName).toBe('keepass-complete');
-    });
-
-    it('does not blow up on a non-string encrypted field (it is coerced, not .trim()-ed)', async () => {
-      // The validity filter guards every field with `typeof x === 'string' ?
-      // x.trim() : x`. Drop the guard and a numeric field from a tampered/legacy
-      // export throws `x.trim is not a function` → 500 for the whole import.
-      const item = { ...sampleVaultItem({ encryptedName: 'numeric-tag' }), nameTag: 12345 };
-
-      const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
-        format: 'json',
-        data: JSON.stringify({ items: [item] }),
-      });
-
-      expect(res.status).toBe(201);
-      expect(res.body.data.importedCount).toBe(1);
-
-      const saved = await VaultItem.findOne({
-        userId: user.id,
-        encryptedName: 'numeric-tag',
-      }).lean();
-      expect(saved).not.toBeNull();
-      expect(saved!.nameTag).toBe('12345');
+      expect(res.status).toBe(400);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
   });
 
-  // ── toolsController.ts: dedup falls back to encryptedName ─────────────
-
-  describe('POST /api/v1/tools/import — dedup when a searchHash is absent', () => {
-    it('deduplicates an existing hash-less item against a hash-less import by encryptedName', async () => {
-      // The post-vault-key-rotation case. A searchHash is an HMAC of the item
-      // name under the vault key, so after a rotation an old export's hashes no
-      // longer match — and an item may carry no hash at all. The dedup builds
-      // its lookup maps by skipping hash-less existing rows, and `findExisting`
-      // falls through to the encryptedName map for a hash-less import row.
-      // Without either arm the row is treated as brand new and the user's vault
-      // silently doubles on every re-import.
-      await seedItem(user.id, { encryptedName: 'no-hash-name' });
-      const before = await VaultItem.countDocuments({ userId: user.id });
-      expect(before).toBe(1);
-
-      const incoming = sampleVaultItem({ encryptedName: 'no-hash-name' });
-      delete incoming.searchHash;
+  describe('POST /api/v1/tools/import — audit trail and rate-limit budget', () => {
+    it('records the source format, the default strategy and both counts', async () => {
+      const existing = await seedItem(user.id, { encryptedName: 'to-update' });
 
       const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
-        format: 'json',
-        conflictStrategy: 'skip',
-        data: JSON.stringify({ items: [incoming] }),
+        format: 'keepass',
+        operations: {
+          inserts: [{ ...sampleVaultItem({ encryptedName: 'fresh' }), searchHash: 'b'.repeat(64) }],
+          updates: [
+            {
+              ...sampleVaultItem({ encryptedName: 'rewritten' }),
+              id: String(existing._id),
+              searchHash: 'c'.repeat(64),
+            },
+          ],
+        },
       });
 
       expect(res.status).toBe(201);
-      expect(res.body.data).toMatchObject({ duplicateCount: 1, importedCount: 0 });
-      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
+      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 1 });
+
+      const log = await AuditLog.findOne({ userId: user.id, action: 'import' }).lean();
+      expect(log).not.toBeNull();
+      // `conflictStrategy` was omitted: the schema default is what gets recorded.
+      expect(log!.metadata).toMatchObject({
+        format: 'keepass',
+        conflictStrategy: 'skip',
+        insertedCount: 1,
+        updatedCount: 1,
+      });
+    });
+
+    it('counts the request against the per-user import budget, not the shared heavy-op one', async () => {
+      // A migration arrives as several sequential batches. Sharing
+      // `heavyOpLimiter`'s 10-per-IP budget would stall it (or a prior export
+      // would burn a slot), so `/tools/import` owns a userId-keyed counter.
+      const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
+        format: 'json',
+        operations: {
+          inserts: [
+            { ...sampleVaultItem({ encryptedName: 'budgeted' }), searchHash: 'd'.repeat(64) },
+          ],
+        },
+      });
+      expect(res.status).toBe(201);
+
+      const docs = await rateLimitDocs();
+      expect(docs.filter((doc) => doc.key.startsWith('heavy:'))).toEqual([]);
+      expect(docs.filter((doc) => doc.key.startsWith('import:'))).toEqual([
+        { key: `import:${user.id}`, counter: 1 },
+      ]);
     });
   });
 

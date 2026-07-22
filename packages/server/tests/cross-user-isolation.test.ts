@@ -475,47 +475,78 @@ describe('Cross-User Data Isolation', () => {
     });
   });
 
-  // ── M10: Import overwrite userId isolation ─────────────────────────
+  // ── M10: Import userId isolation ───────────────────────────────────
 
-  describe('Import overwrite userId isolation', () => {
-    it('import overwrite only affects items owned by the requesting user', async () => {
-      const agentA = request.agent(app);
-      const agentB = request.agent(app);
+  describe('Import userId isolation', () => {
+    /** Posts an import for `token`, on its own agent so the CSRF pair matches. */
+    async function postImport(
+      token: string,
+      operations: Record<string, unknown>,
+    ): Promise<request.Response> {
+      const agent = request.agent(app);
+      const csrf = await getCsrf(agent);
+      return agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(token))
+        .set('x-csrf-token', csrf.token)
+        .set('Cookie', csrf.cookie)
+        .send({ format: 'json', operations });
+    }
 
-      // User A creates an item via import
-      const csrfA = await getCsrf(agentA);
+    it('an import insert never touches another user row that shares its searchHash', async () => {
       const searchHash = 'a'.repeat(64);
-      const itemsA = [sampleVaultItem({ encryptedName: 'userA-item', searchHash })];
 
-      await agentA
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(userA.accessToken))
-        .set('x-csrf-token', csrfA.token)
-        .set('Cookie', csrfA.cookie)
-        .send({ format: 'json', data: JSON.stringify({ items: itemsA }) });
+      const resA = await postImport(userA.accessToken, {
+        inserts: [sampleVaultItem({ encryptedName: 'userA-item', searchHash })],
+      });
+      expect(resA.status).toBe(201);
 
-      // User B imports with same searchHash and overwrite strategy
-      const csrfB = await getCsrf(agentB);
-      const itemsB = [sampleVaultItem({ encryptedName: 'userB-item', searchHash })];
+      const resB = await postImport(userB.accessToken, {
+        inserts: [sampleVaultItem({ encryptedName: 'userB-item', searchHash })],
+      });
+      expect(resB.status).toBe(201);
 
-      const res = await agentB
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('x-csrf-token', csrfB.token)
-        .set('Cookie', csrfB.cookie)
-        .send({
-          format: 'json',
-          data: JSON.stringify({ items: itemsB }),
-          conflictStrategy: 'overwrite',
-        });
+      // Each user owns exactly one row, with their own ciphertext.
+      const userAItems = await VaultItem.find({ userId: userA.id }).lean();
+      const userBItems = await VaultItem.find({ userId: userB.id }).lean();
+      expect(userAItems).toHaveLength(1);
+      expect(userBItems).toHaveLength(1);
+      expect(userAItems[0]!.encryptedName).toBe('userA-item');
+      expect(userBItems[0]!.encryptedName).toBe('userB-item');
+    });
 
-      expect(res.status).toBe(201);
+    it("rejects an import update that names another user's item and leaves it untouched", async () => {
+      const resA = await postImport(userA.accessToken, {
+        inserts: [sampleVaultItem({ encryptedName: 'userA-item', searchHash: 'a'.repeat(64) })],
+      });
+      expect(resA.status).toBe(201);
 
-      // User A's item should still have the original name (not overwritten by B)
-      const userAItems = await VaultItem.find({ userId: userA.id });
-      const userAItem = userAItems.find((i) => i.searchHash === searchHash);
-      expect(userAItem).toBeDefined();
-      expect(userAItem!.encryptedName).toBe('userA-item');
+      const targetId = String((await VaultItem.findOne({ userId: userA.id }).lean())!._id);
+
+      const res = await postImport(userB.accessToken, {
+        updates: [
+          {
+            id: targetId,
+            encryptedName: 'userB-overwrite',
+            nameIv: 'b-name-iv',
+            nameTag: 'b-name-tag',
+            encryptedData: 'b-data',
+            dataIv: 'b-data-iv',
+            dataTag: 'b-data-tag',
+            searchHash: 'b'.repeat(64),
+          },
+        ],
+      });
+
+      // A foreign target is a 400 for the whole request, never a silent skip.
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+
+      const target = await VaultItem.findById(targetId).lean();
+      expect(target).not.toBeNull();
+      expect(target!.encryptedName).toBe('userA-item');
+      expect(String(target!.userId)).toBe(userA.id);
+      expect(await VaultItem.countDocuments({ userId: userB.id })).toBe(0);
     });
   });
 });

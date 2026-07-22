@@ -205,6 +205,7 @@ let fetchFoldersInFlight: Promise<void> | null = null;
 //     appending. The Set is cleared when the fetch settles.
 let fetchItemsGeneration = 0;
 let fetchTrashGeneration = 0;
+
 // fetchFolders has no delete-race (folders aren't streamed page-by-page), but
 // it still needs a generation counter so a slow fetch (online or offline) that
 // resolves AFTER a lock/logout cannot write decrypted folders back into the
@@ -222,6 +223,24 @@ let fetchFoldersGeneration = 0;
 // This mirrors the fetch-path generation guards. The server-side write already
 // happened — only the local write is suppressed.
 let mutationGeneration = 0;
+/**
+ * The current `fetchItems` generation.
+ *
+ * A caller that needs the COMPLETE item set — import conflict resolution is the
+ * one that does — cannot rely on awaiting `fetchItems()` alone: a run that is
+ * superseded mid-stream (by `clearStore()` on lock/logout, or by a newer fetch)
+ * RESOLVES rather than rejecting, and `clearStore()` has already emptied
+ * `items`. Resolving an import against that empty list would classify the whole
+ * file as new and duplicate a vault the user still owns.
+ *
+ * So read this immediately after calling `fetchItems()` and compare it again
+ * after the await: an unchanged value means the run you awaited is the one that
+ * finished, and `items` is that run's complete result.
+ */
+export function getItemsFetchGeneration(): number {
+  return fetchItemsGeneration;
+}
+
 const inFlightDeletedItemIds = new Set<string>();
 const inFlightDeletedTrashIds = new Set<string>();
 

@@ -22,7 +22,7 @@ const MAX_URIS_PER_ITEM = 100;
  * (`packages/shared/src/schemas/vault.ts`). A source export can carry a value
  * longer than the vault permits; if it reaches encryption unclamped the item
  * fails `vaultItemDataSchemas` and is discarded WHOLESALE — password included —
- * by `buildEncryptedImportItems`. Clamp to these bounds instead and preserve the
+ * at the validation step. Clamp to these bounds instead and preserve the
  * overflow in the item's notes, so a single long field can never sink the item.
  * A `password` is the one exception: it is clamped but NEVER copied into notes.
  */

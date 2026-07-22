@@ -14,8 +14,8 @@
  *     every written row must be restored byte-for-byte, or the user loses data.
  *   * `emptyTrash`'s `$lte: startTime` bound (a concurrent soft-delete arriving
  *     mid-request must survive).
- *   * `importVault`'s tag/searchHash/folderId sanitization, itemType filtering
- *     and CSV mapping defaults.
+ *   * `importVault`'s allowlist projection, rejected-payload atomicity, update
+ *     target resolution and per-user import lock.
  *   * `exportVault`'s folder-loop size guard.
  *   * `getAncestorChain`/`hasCycle` user-scoping.
  *   * `estimateItemJsonSize`/`estimateFolderJsonSize` on malformed rows.
@@ -24,11 +24,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
 import app from '../src/app.js';
+import { MAX_ENCRYPTED_NAME_LENGTH } from '@hvault/shared';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { User } from '../src/models/User.js';
+import { AuditLog } from '../src/models/AuditLog.js';
 import { acquireJobLock } from '../src/utils/jobLock.js';
-import { vaultRotationLockName } from '../src/utils/controllerHelpers.js';
+import { vaultImportLockName, vaultRotationLockName } from '../src/utils/controllerHelpers.js';
 import { getAncestorChain, hasCycle } from '../src/utils/folderGraph.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../src/utils/sizeEstimator.js';
 import { createTestUser, authHeader, getCsrf, seedFolder, seedItem } from './helpers.js';
@@ -494,148 +496,203 @@ describe('vault + tools controller edge branches', () => {
   });
 
   // ======================================================================
-  // importVault — sanitization + format branches
+  // importVault — validation, projection and per-user serialization
   // ======================================================================
 
-  describe('POST /tools/import — field sanitization', () => {
-    it('sanitizes tags: drops non-strings and over-long tags, trims, and caps at 20', async () => {
-      const tags: unknown[] = [
-        123,
-        null,
-        '  spaced  ',
-        'x'.repeat(51), // over MAX_TAG_LENGTH (50)
-        ...Array.from({ length: 25 }, (_, i) => `tag-${String(i)}`),
-      ];
+  /** A `searchHash` shaped the way every import row must be. */
+  const IMPORT_HASH = 'a'.repeat(64);
+
+  /** One `operations.inserts` row with every required field populated. */
+  function insertRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      itemType: 'login',
+      encryptedData: 'd',
+      dataIv: 'iv',
+      dataTag: 't',
+      encryptedName: 'imported',
+      nameIv: 'niv',
+      nameTag: 'ntag',
+      searchHash: IMPORT_HASH,
+      ...overrides,
+    };
+  }
+
+  describe('POST /tools/import — field projection', () => {
+    it('maps every insert through the fixed allowlist, so injected fields never reach the row', async () => {
+      const victim = await createTestUser();
+      const foreignFolder = await seedFolder(victim.id, { encryptedName: 'foreign' });
 
       const res = await post('/api/v1/tools/import', user, csrf, agent)
         .send({
           format: 'json',
-          data: JSON.stringify({
-            items: [
+          operations: {
+            inserts: [
               {
-                itemType: 'login',
-                encryptedData: 'd',
-                dataIv: 'iv',
-                dataTag: 't',
-                encryptedName: 'tag-sanitize',
-                nameIv: 'niv',
-                nameTag: 'ntag',
-                tags,
+                ...insertRow({ encryptedName: 'projected' }),
+                // None of these may survive the projection: an import must not
+                // be able to choose an id, hand a row to another account,
+                // pre-trash it, or stamp a restore-provenance marker.
+                _id: new mongoose.Types.ObjectId().toString(),
+                userId: victim.id,
+                deletedAt: new Date().toISOString(),
+                sourceRefId: new mongoose.Types.ObjectId().toString(),
+                folderId: String(foreignFolder._id),
               },
             ],
-          }),
+          },
         })
         .expect(201);
 
-      expect(res.body.data.importedCount).toBe(1);
+      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
 
-      const persisted = await VaultItem.findOne({
-        userId: user.id,
-        encryptedName: 'tag-sanitize',
-      }).lean();
-      expect(persisted!.tags).toHaveLength(20);
-      expect(persisted!.tags[0]).toBe('spaced'); // trimmed
-      expect(persisted!.tags).not.toContain('x'.repeat(51));
-      expect(persisted!.tags.every((t) => typeof t === 'string')).toBe(true);
-      // The 20-item cap keeps the first 20 survivors in order.
-      expect(persisted!.tags[1]).toBe('tag-0');
-      expect(persisted!.tags[19]).toBe('tag-18');
-    });
-
-    it('drops a malformed searchHash and a malformed folderId instead of persisting them', async () => {
-      const res = await post('/api/v1/tools/import', user, csrf, agent)
-        .send({
-          format: 'json',
-          data: JSON.stringify({
-            items: [
-              {
-                itemType: 'login',
-                encryptedData: 'd',
-                dataIv: 'iv',
-                dataTag: 't',
-                encryptedName: 'bad-refs',
-                nameIv: 'niv',
-                nameTag: 'ntag',
-                searchHash: 'NOT-A-HASH',
-                folderId: 'not-an-objectid',
-              },
-            ],
-          }),
-        })
-        .expect(201);
-
-      expect(res.body.data.importedCount).toBe(1);
-
-      const persisted = await VaultItem.findOne({
-        userId: user.id,
-        encryptedName: 'bad-refs',
-      }).lean();
-      expect(persisted!.searchHash).toBeUndefined();
+      const persisted = await VaultItem.findOne({ encryptedName: 'projected' }).lean();
+      expect(persisted).not.toBeNull();
+      expect(String(persisted!.userId)).toBe(user.id);
+      expect(persisted!.deletedAt).toBeUndefined();
+      expect(persisted!.sourceRefId).toBeUndefined();
+      // The folder belongs to another account, so it is stripped and the row
+      // lands at the vault root rather than failing.
       expect(persisted!.folderId).toBeUndefined();
+      expect(await VaultItem.countDocuments({ userId: victim.id })).toBe(0);
     });
-  });
 
-  describe('POST /tools/import — non-JSON format item defaults', () => {
-    it('defaults a missing itemType to login and drops an unknown itemType (keepass)', async () => {
-      const res = await post('/api/v1/tools/import', user, csrf, agent)
+    it('applies tags/favorite defaults when an insert omits them', async () => {
+      await post('/api/v1/tools/import', user, csrf, agent)
         .send({
-          format: 'keepass',
-          data: JSON.stringify({
-            items: [
-              {
-                // no itemType → defaults to 'login'
-                encryptedData: 'd1',
-                dataIv: 'iv',
-                dataTag: 't',
-                encryptedName: 'defaulted-type',
-                nameIv: 'niv',
-                nameTag: 'ntag',
-                favorite: 'yes', // not === true → stored as false
-              },
-              {
-                itemType: 'bogus-type',
-                encryptedData: 'd2',
-                dataIv: 'iv',
-                dataTag: 't',
-                encryptedName: 'unknown-type',
-                nameIv: 'niv',
-                nameTag: 'ntag',
-              },
-            ],
-          }),
+          format: 'json',
+          operations: { inserts: [insertRow({ encryptedName: 'defaults' })] },
         })
         .expect(201);
 
-      // The unknown-type row is filtered out BEFORE the missing-fields filter,
-      // so it counts as neither imported nor "skipped for missing encryption".
-      expect(res.body.data.importedCount).toBe(1);
-
-      const persisted = await VaultItem.find({ userId: user.id }).lean();
-      expect(persisted).toHaveLength(1);
-      expect(persisted[0]!.encryptedName).toBe('defaulted-type');
-      expect(persisted[0]!.itemType).toBe('login');
-      expect(persisted[0]!.favorite).toBe(false);
+      const persisted = await VaultItem.findOne({ encryptedName: 'defaults' }).lean();
+      expect(persisted).not.toBeNull();
+      expect(persisted!.tags).toEqual([]);
+      expect(persisted!.favorite).toBe(false);
     });
   });
 
-  describe('POST /tools/import — items missing encryption fields', () => {
-    it('rejects the import when items lack ciphertext, persisting nothing', async () => {
-      // A native envelope whose items carry no encrypted fields (e.g. plaintext
-      // that never went through client-side encryption). The non-empty filter
-      // drops them all and the whole import is rejected before any write.
-      const importData = JSON.stringify({
-        items: [
-          { itemType: 'login', name: 'a', username: 'x' },
-          { itemType: 'login', name: 'b', password: 'y' },
-        ],
-      });
-
+  describe('POST /tools/import — rejected payloads write nothing', () => {
+    it('rejects the whole batch when one row exceeds a ciphertext length cap', async () => {
       const res = await post('/api/v1/tools/import', user, csrf, agent)
-        .send({ format: 'csv', data: importData })
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [
+              insertRow({ encryptedName: 'fits' }),
+              insertRow({ encryptedName: 'x'.repeat(MAX_ENCRYPTED_NAME_LENGTH + 1) }),
+            ],
+          },
+        })
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(JSON.stringify(res.body)).toContain('No valid items');
+      // Atomic: the valid row that rode along with it was not written either.
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('rejects rows that carry no ciphertext at all', async () => {
+      // Plaintext that never went through client-side encryption: the six
+      // ciphertext fields are required, so nothing reaches the database.
+      const res = await post('/api/v1/tools/import', user, csrf, agent)
+        .send({
+          format: 'csv',
+          operations: {
+            inserts: [
+              { itemType: 'login', searchHash: IMPORT_HASH },
+              { ...insertRow(), encryptedData: '' },
+            ],
+          },
+        })
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('rejects an unknown itemType', async () => {
+      const res = await post('/api/v1/tools/import', user, csrf, agent)
+        .send({
+          format: 'keepass',
+          operations: { inserts: [insertRow({ itemType: 'bogus-type' })] },
+        })
+        .expect(400);
+
+      expect(res.body.message).toContain('itemType');
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('rejects an empty operations payload', async () => {
+      const res = await post('/api/v1/tools/import', user, csrf, agent)
+        .send({ format: 'json', operations: { inserts: [], updates: [] } })
+        .expect(400);
+
+      expect(res.body.message).toContain('operations');
+      expect(await AuditLog.countDocuments({ userId: user.id, action: 'import' })).toBe(0);
+    });
+  });
+
+  describe('POST /tools/import — update targets', () => {
+    it('rejects an id that names no live item of the caller, writing nothing', async () => {
+      const res = await post('/api/v1/tools/import', user, csrf, agent)
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [insertRow({ encryptedName: 'rides-along' })],
+            updates: [
+              {
+                ...insertRow({ encryptedName: 'ghost' }),
+                id: new mongoose.Types.ObjectId().toString(),
+              },
+            ],
+          },
+        })
+        .expect(400);
+
+      expect(res.body.message).toMatch(/do not exist/i);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('rejects the same id twice rather than double-writing one row', async () => {
+      // Client-side resolution collapses to at most one operation per target,
+      // so a duplicate is a caller defect: applying both would report two
+      // updates for a single modified item.
+      const existing = await seedItem(user.id, { encryptedName: 'target' });
+      const id = String(existing._id);
+
+      const res = await post('/api/v1/tools/import', user, csrf, agent)
+        .send({
+          format: 'json',
+          operations: {
+            updates: [
+              { ...insertRow({ encryptedName: 'first' }), id },
+              { ...insertRow({ encryptedName: 'second' }), id },
+            ],
+          },
+        })
+        .expect(400);
+
+      expect(res.body.message).toMatch(/more than once/i);
+
+      const persisted = await VaultItem.findById(id).lean();
+      expect(persisted).not.toBeNull();
+      expect(persisted!.encryptedName).toBe('target');
+    });
+  });
+
+  describe('POST /tools/import — per-user import lock', () => {
+    it('returns 409 while another import holds the lock, and writes nothing', async () => {
+      const lockId = await acquireJobLock(vaultImportLockName(user.id), 60_000);
+      expect(lockId).not.toBeNull();
+
+      const res = await post('/api/v1/tools/import', user, csrf, agent)
+        .send({
+          format: 'json',
+          operations: { inserts: [insertRow({ encryptedName: 'contended' })] },
+        })
+        .expect(409);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toMatch(/already in progress/i);
       expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
   });

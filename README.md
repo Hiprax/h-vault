@@ -93,8 +93,12 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   matched by provenance, so re-running the same backup doesn't accumulate duplicates. Any
   folder cycle a malicious file plants is detected and broken.
 - **Import / export.** Import from Bitwarden, LastPass, KeePass, Chrome/Edge, Firefox, 1Password
-  and generic CSV, with skip / overwrite / keep-both conflict strategies and hash-based
-  deduplication. Every source is parsed and encrypted **in the browser** before upload, so no
+  and generic CSV, with skip / overwrite / keep-both conflict strategies. Duplicates are decided
+  by an item's **content**, not its name: a login is identified by its site and username, so ten
+  accounts on one site stay ten items and re-importing the same file changes nothing. `skip` (the
+  default) never modifies anything; `overwrite` updates a matched item in place — replacing its
+  name and content, keeping the previous password in that item's history — and always asks for
+  confirmation first. Every source is parsed and encrypted **in the browser** before upload, so no
   credential, note or field value ever reaches the server in the clear. Source folders/groups are
   carried over as tags — and tags, as always, are stored in plaintext so the server can index
   them, so your source folder names are visible to it. Export is encrypted JSON and requires
@@ -709,18 +713,18 @@ authoritative.
 <details>
 <summary><b>Tools and backup</b> — <code>/api/v1/tools</code>, <code>/api/v1/backup</code></summary>
 
-| Method | Endpoint                       | Description                                                                                                                                    |
-| ------ | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/tools/check-password-breach` | HaveIBeenPwned k-anonymity check (5-char hash prefix)                                                                                          |
-| POST   | `/tools/export`                | Encrypted JSON export (master password required)                                                                                               |
-| POST   | `/tools/import`                | Import already-encrypted items (client parses/encrypts Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, CSV) with conflict strategies |
-| POST   | `/backup/setup`                | Configure backup encryption (master password required)                                                                                         |
-| PUT    | `/backup/settings`             | Schedule and recipients                                                                                                                        |
-| POST   | `/backup/trigger`              | Create a backup and email it                                                                                                                   |
-| GET    | `/backup/download`             | Download an encrypted backup file                                                                                                              |
-| GET    | `/backup/history`              | Backup history (paginated)                                                                                                                     |
-| PUT    | `/backup/change-password`      | Change the backup password                                                                                                                     |
-| POST   | `/backup/restore`              | Restore from an encrypted backup                                                                                                               |
+| Method | Endpoint                       | Description                                                                                                                                           |
+| ------ | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/tools/check-password-breach` | HaveIBeenPwned k-anonymity check (5-char hash prefix)                                                                                                 |
+| POST   | `/tools/export`                | Encrypted JSON export (master password required)                                                                                                      |
+| POST   | `/tools/import`                | Execute import operations (the client parses, encrypts and resolves conflicts locally: Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, CSV) |
+| POST   | `/backup/setup`                | Configure backup encryption (master password required)                                                                                                |
+| PUT    | `/backup/settings`             | Schedule and recipients                                                                                                                               |
+| POST   | `/backup/trigger`              | Create a backup and email it                                                                                                                          |
+| GET    | `/backup/download`             | Download an encrypted backup file                                                                                                                     |
+| GET    | `/backup/history`              | Backup history (paginated)                                                                                                                            |
+| PUT    | `/backup/change-password`      | Change the backup password                                                                                                                            |
+| POST   | `/backup/restore`              | Restore from an encrypted backup                                                                                                                      |
 
 </details>
 
@@ -873,8 +877,8 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                         |
 | ---------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Server** | 93    | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
-| **Client** | 76    | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                   |
+| **Server** | 95    | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
+| **Client** | 82    | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                   |
 | **Shared** | 6     | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                          |
 | **E2E**    | 10    | Playwright (Chromium): 186 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock and file-encryption journeys                                                                                                                                                                                              |
 

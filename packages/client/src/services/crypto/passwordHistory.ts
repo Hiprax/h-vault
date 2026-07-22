@@ -30,15 +30,41 @@ export interface BuildPasswordHistoryArgs {
 }
 
 /**
+ * Whether an update replaces one password with a DIFFERENT one — the single
+ * condition under which history is retained.
+ *
+ * Exported because the import confirmation dialog must tell the user how many
+ * passwords an `overwrite` will change BEFORE anything is sent, and that count
+ * has to be derived from the very predicate that later decides what is
+ * retained. Two independent implementations would eventually disagree, and the
+ * user would be promised a history entry that never appears.
+ *
+ * A change requires a non-empty old string and a new string that differs: an
+ * item that never had a password has nothing to preserve. The return type is a
+ * predicate on `oldPassword` because that is the value the caller goes on to
+ * encrypt.
+ */
+export function passwordDidChange(
+  oldPassword: unknown,
+  newPassword: unknown,
+): oldPassword is string {
+  return (
+    typeof oldPassword === 'string' &&
+    oldPassword.length > 0 &&
+    typeof newPassword === 'string' &&
+    oldPassword !== newPassword
+  );
+}
+
+/**
  * Build the `passwordHistory` payload for an update, or `undefined` when the
  * password did not change (so the caller omits the field entirely).
  *
- * A change is recorded ONLY when the old password is a non-empty string, the new
- * password is a string, and the two differ. The old password is encrypted with
- * the vault key, stamped with the current time, prepended to the existing
- * history, and the result is sliced to the {@link PASSWORD_HISTORY_MAX} most
- * recent entries. Existing entries are copied field-by-field so no extraneous
- * keys ride along into the request body.
+ * A change is recorded ONLY when {@link passwordDidChange} holds. The old
+ * password is encrypted with the vault key, stamped with the current time,
+ * prepended to the existing history, and the result is sliced to the
+ * {@link PASSWORD_HISTORY_MAX} most recent entries. Existing entries are copied
+ * field-by-field so no extraneous keys ride along into the request body.
  */
 export async function buildPasswordHistoryPayload({
   existingRawHistory,
@@ -46,12 +72,7 @@ export async function buildPasswordHistoryPayload({
   newPassword,
   vaultKey,
 }: BuildPasswordHistoryArgs): Promise<IPasswordHistoryEntry[] | undefined> {
-  if (
-    typeof oldPassword !== 'string' ||
-    oldPassword.length === 0 ||
-    typeof newPassword !== 'string' ||
-    oldPassword === newPassword
-  ) {
+  if (!passwordDidChange(oldPassword, newPassword)) {
     return undefined;
   }
 

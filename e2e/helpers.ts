@@ -161,6 +161,17 @@ export function sampleVaultItem(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * Creates one `operations.inserts` entry for `POST /tools/import`.
+ *
+ * The import contract requires a `searchHash` on every operation — the client
+ * recomputes it alongside the encrypted name — so a plain {@link sampleVaultItem}
+ * would be rejected by the schema before the endpoint ever runs.
+ */
+export function sampleImportInsert(overrides: Record<string, unknown> = {}) {
+  return { ...sampleVaultItem(), searchHash: 'a'.repeat(64), ...overrides };
+}
+
 /** Creates a sample folder payload for API tests. */
 export function sampleFolder(overrides: Record<string, unknown> = {}) {
   return {

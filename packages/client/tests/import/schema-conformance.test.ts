@@ -6,8 +6,8 @@ import { vaultItemDataSchemas } from '@hvault/shared';
 /**
  * The load-bearing guard: whatever a parser emits as an item's decrypted `data`
  * MUST pass the shared `vaultItemDataSchemas[itemType]`. If it does not,
- * `buildEncryptedImportItems` silently skips the entire item, so a parser that
- * produces almost-valid data becomes silent data loss. This runs a representative
+ * the validation step drops the entire item — counted and reported, but still
+ * lost — so a parser that produces almost-valid data becomes data loss. This runs a representative
  * record for every format + item type through the real schema.
  */
 

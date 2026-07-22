@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll } from 'vitest';
-import { buildEncryptedImportItems, parseImportData } from '../../src/services/import';
+import { buildImportOperations, parseImportData } from '../../src/services/import';
 import type { ParsedImportItem } from '../../src/services/import';
 import { cryptoService } from '../../src/services/crypto/cryptoService';
 
@@ -13,7 +13,7 @@ beforeAll(async () => {
   ]);
 });
 
-describe('buildEncryptedImportItems', () => {
+describe('buildImportOperations — validate + encrypt', () => {
   it('encrypts valid items (all six ciphertext fields + searchHash) and round-trips', async () => {
     const parsed: ParsedImportItem[] = [
       {
@@ -28,7 +28,11 @@ describe('buildEncryptedImportItems', () => {
         favorite: true,
       },
     ];
-    const { items, skipped } = await buildEncryptedImportItems(parsed, vaultKey);
+    const { inserts: items, failedCount: skipped } = await buildImportOperations({
+      inserts: parsed,
+      updates: [],
+      vaultKey,
+    });
     expect(skipped).toBe(0);
     expect(items).toHaveLength(1);
     const item = items[0]!;
@@ -71,7 +75,11 @@ describe('buildEncryptedImportItems', () => {
         favorite: false,
       },
     ];
-    const { items, skipped, warnings } = await buildEncryptedImportItems(parsed, vaultKey);
+    const {
+      inserts: items,
+      failedCount: skipped,
+      failureReasons: warnings,
+    } = await buildImportOperations({ inserts: parsed, updates: [], vaultKey });
     expect(items).toHaveLength(1);
     expect(skipped).toBe(1);
     expect(warnings).toHaveLength(1);
@@ -87,7 +95,11 @@ describe('buildEncryptedImportItems', () => {
         favorite: false,
       },
     ];
-    const { items, skipped, warnings } = await buildEncryptedImportItems(parsed, vaultKey);
+    const {
+      inserts: items,
+      failedCount: skipped,
+      failureReasons: warnings,
+    } = await buildImportOperations({ inserts: parsed, updates: [], vaultKey });
     expect(items).toHaveLength(0);
     expect(skipped).toBe(1);
     expect(warnings[0]).toContain('bad');
@@ -97,9 +109,9 @@ describe('buildEncryptedImportItems', () => {
     const parsed: ParsedImportItem[] = [
       { itemType: 'note', name: 'Same', data: { content: 'x' }, tags: [], favorite: false },
     ];
-    const a = await buildEncryptedImportItems(parsed, vaultKey);
-    const b = await buildEncryptedImportItems(parsed, vaultKey);
-    expect(a.items[0]!.searchHash).toBe(b.items[0]!.searchHash);
+    const a = await buildImportOperations({ inserts: parsed, updates: [], vaultKey });
+    const b = await buildImportOperations({ inserts: parsed, updates: [], vaultKey });
+    expect(a.inserts[0]!.searchHash).toBe(b.inserts[0]!.searchHash);
   });
 
   it('keeps a Bitwarden identity whose source email/phone fail the shared schema', async () => {
@@ -122,7 +134,11 @@ describe('buildEncryptedImportItems', () => {
       ],
     });
     const { items: parsed } = parseImportData('bitwarden', bw);
-    const { items, skipped } = await buildEncryptedImportItems(parsed, vaultKey);
+    const { inserts: items, failedCount: skipped } = await buildImportOperations({
+      inserts: parsed,
+      updates: [],
+      vaultKey,
+    });
     expect(skipped).toBe(0);
     expect(items).toHaveLength(1);
     expect(items[0]?.itemType).toBe('identity');
@@ -138,7 +154,11 @@ describe('buildEncryptedImportItems', () => {
         favorite: false,
       },
     ];
-    const { items } = await buildEncryptedImportItems(parsed, vaultKey);
+    const { inserts: items } = await buildImportOperations({
+      inserts: parsed,
+      updates: [],
+      vaultKey,
+    });
     const item = items[0]!;
     expect(item.encryptedName).not.toContain('PlaintextName');
     expect(item.encryptedData).not.toContain('PlaintextSecret');

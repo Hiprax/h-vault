@@ -2750,6 +2750,20 @@ describe('exportSchema', () => {
   });
 });
 
+const minimalImportInsert = {
+  itemType: 'login' as const,
+  encryptedName: 'enc-name',
+  nameIv: 'name-iv',
+  nameTag: 'name-tag',
+  encryptedData: 'enc-data',
+  dataIv: 'data-iv',
+  dataTag: 'data-tag',
+  searchHash: 'c'.repeat(64),
+};
+
+/** A minimal, schema-valid `operations` payload for envelope-level tests. */
+const minimalOperations = { inserts: [minimalImportInsert] };
+
 describe('importSchema', () => {
   it('accepts all valid formats', () => {
     for (const format of [
@@ -2762,24 +2776,28 @@ describe('importSchema', () => {
       'csv',
       'json',
     ]) {
-      expect(importSchema.safeParse({ format, data: 'some-data' }).success).toBe(true);
+      expect(importSchema.safeParse({ format, operations: minimalOperations }).success).toBe(true);
     }
   });
 
   it('rejects an unknown format', () => {
     // `onepassword` is the accepted 1Password value; `1password` (and others) are rejected.
-    expect(importSchema.safeParse({ format: '1password', data: 'data' }).success).toBe(false);
-    expect(importSchema.safeParse({ format: 'dashlane', data: 'data' }).success).toBe(false);
+    expect(
+      importSchema.safeParse({ format: '1password', operations: minimalOperations }).success,
+    ).toBe(false);
+    expect(
+      importSchema.safeParse({ format: 'dashlane', operations: minimalOperations }).success,
+    ).toBe(false);
   });
 
-  it('rejects empty data', () => {
-    expect(importSchema.safeParse({ format: 'json', data: '' }).success).toBe(false);
+  it('rejects a body with no operations at all', () => {
+    expect(importSchema.safeParse({ format: 'json' }).success).toBe(false);
   });
 
-  it('rejects data over 1MB', () => {
-    expect(importSchema.safeParse({ format: 'json', data: 'a'.repeat(1_048_577) }).success).toBe(
-      false,
-    );
+  it('rejects a legacy data-envelope body — the field no longer exists', () => {
+    // An old client that sends the retired `{ data: "<json string>" }` envelope is
+    // rejected outright: `data` is stripped as unknown and `operations` is missing.
+    expect(importSchema.safeParse({ format: 'json', data: 'legacy-payload' }).success).toBe(false);
   });
 
   it('strips a legacy csvMapping field (column mapping is now client-side only)', () => {
@@ -2787,7 +2805,7 @@ describe('importSchema', () => {
     // already-encrypted items, so csvMapping is no longer part of the wire schema.
     const result = importSchema.safeParse({
       format: 'csv',
-      data: 'some-csv',
+      operations: minimalOperations,
       csvMapping: { name: 'col1', password: 'col2' },
     });
     expect(result.success).toBe(true);
@@ -2798,7 +2816,7 @@ describe('importSchema', () => {
     for (const strategy of ['skip', 'overwrite', 'keep_both']) {
       const result = importSchema.safeParse({
         format: 'json',
-        data: 'data',
+        operations: minimalOperations,
         conflictStrategy: strategy,
       });
       expect(result.success).toBe(true);
@@ -2806,14 +2824,14 @@ describe('importSchema', () => {
   });
 
   it('defaults conflictStrategy to skip when not provided', () => {
-    const result = importSchema.parse({ format: 'json', data: 'data' });
+    const result = importSchema.parse({ format: 'json', operations: minimalOperations });
     expect(result.conflictStrategy).toBe('skip');
   });
 
   it('rejects invalid conflictStrategy values', () => {
     const result = importSchema.safeParse({
       format: 'json',
-      data: 'data',
+      operations: minimalOperations,
       conflictStrategy: 'delete_all',
     });
     expect(result.success).toBe(false);
@@ -2821,7 +2839,7 @@ describe('importSchema', () => {
 });
 
 // =========================================================================
-// importSchema — the additive `operations` contract (Phase 2)
+// importSchema — the `operations` contract
 // =========================================================================
 
 describe('importSchema operations contract', () => {
@@ -2855,13 +2873,6 @@ describe('importSchema operations contract', () => {
     tag: 'tag',
     changedAt: '2026-07-21T00:00:00.000Z',
   };
-
-  it('still accepts a legacy data-only body unchanged', () => {
-    const result = importSchema.safeParse({ format: 'json', data: 'legacy-data' });
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.data).toBe('legacy-data');
-    expect(result.success && result.data.operations).toBeUndefined();
-  });
 
   it('accepts an inserts-only operations body and applies item defaults', () => {
     const result = importSchema.safeParse({
@@ -2915,16 +2926,20 @@ describe('importSchema operations contract', () => {
     expect(result.success).toBe(true);
   });
 
-  it('rejects a body carrying BOTH data and operations', () => {
+  it('strips a stray legacy data field rather than acting on it', () => {
+    // `data` is no longer part of the contract, so it is an unknown key: `.strip()`
+    // drops it and the request is executed from `operations` alone. What must NOT
+    // happen is the retired envelope influencing the import in any way.
     const result = importSchema.safeParse({
       format: 'json',
       data: 'legacy',
       operations: { inserts: [validInsert] },
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    expect(result.success && 'data' in result.data).toBe(false);
   });
 
-  it('rejects a body carrying NEITHER data nor operations', () => {
+  it('rejects a body with no operations field', () => {
     const result = importSchema.safeParse({ format: 'json' });
     expect(result.success).toBe(false);
   });

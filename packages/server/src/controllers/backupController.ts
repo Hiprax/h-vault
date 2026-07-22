@@ -73,7 +73,8 @@ const ALLOWED_ITEM_FIELDS = new Set([
 // A searchHash is an HMAC-SHA256 digest rendered as 64 lowercase hex chars. The
 // Folder/VaultItem models enforce this via a `match` validator, so a backup row
 // (legacy or tampered) carrying any other shape would otherwise throw a Mongoose
-// ValidationError mid-restore. Mirrors `sanitizeImportFields` in toolsController.
+// ValidationError mid-restore. The import path enforces the same shape through
+// its `searchHash` schema pattern.
 const SEARCH_HASH_RE = /^[a-f0-9]{64}$/;
 
 /**

@@ -541,9 +541,94 @@ export const swaggerSpec: JsonObject = {
           },
         },
       },
+      ImportPasswordHistoryEntry: {
+        type: 'object',
+        required: ['encryptedPassword', 'iv', 'tag', 'changedAt'],
+        properties: {
+          encryptedPassword: { type: 'string', minLength: 1, maxLength: 5000 },
+          iv: { type: 'string', minLength: 1, maxLength: 24 },
+          tag: { type: 'string', minLength: 1, maxLength: 32 },
+          changedAt: { type: 'string', format: 'date-time' },
+        },
+      },
+      ImportInsertItem: {
+        type: 'object',
+        required: [
+          'itemType',
+          'encryptedName',
+          'nameIv',
+          'nameTag',
+          'encryptedData',
+          'dataIv',
+          'dataTag',
+          'searchHash',
+        ],
+        properties: {
+          itemType: {
+            type: 'string',
+            enum: ['login', 'card', 'identity', 'note', 'secret'],
+          },
+          encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
+          nameIv: { type: 'string', minLength: 1, maxLength: 24 },
+          nameTag: { type: 'string', minLength: 1, maxLength: 32 },
+          encryptedData: { type: 'string', minLength: 1, maxLength: 500000 },
+          dataIv: { type: 'string', minLength: 1, maxLength: 24 },
+          dataTag: { type: 'string', minLength: 1, maxLength: 32 },
+          searchHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          tags: { type: 'array', items: { type: 'string', maxLength: 50 }, maxItems: 20 },
+          favorite: { type: 'boolean', default: false },
+          folderId: { type: 'string', description: 'ObjectId; stripped when not owned by you.' },
+          passwordHistory: {
+            type: 'array',
+            maxItems: 10,
+            items: { $ref: '#/components/schemas/ImportPasswordHistoryEntry' },
+            description:
+              "Preserves an item's previous passwords when it is recreated from a native H-Vault export.",
+          },
+        },
+      },
+      ImportUpdateItem: {
+        type: 'object',
+        required: [
+          'id',
+          'encryptedName',
+          'nameIv',
+          'nameTag',
+          'encryptedData',
+          'dataIv',
+          'dataTag',
+          'searchHash',
+        ],
+        properties: {
+          id: {
+            type: 'string',
+            description: 'ObjectId of the LIVE item of yours this operation replaces.',
+          },
+          encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
+          nameIv: { type: 'string', minLength: 1, maxLength: 24 },
+          nameTag: { type: 'string', minLength: 1, maxLength: 32 },
+          encryptedData: { type: 'string', minLength: 1, maxLength: 500000 },
+          dataIv: { type: 'string', minLength: 1, maxLength: 24 },
+          dataTag: { type: 'string', minLength: 1, maxLength: 32 },
+          searchHash: {
+            type: 'string',
+            pattern: '^[a-f0-9]{64}$',
+            description:
+              'Recomputed by the client: an update replaces the encrypted name, so the stored hash must be refreshed alongside it.',
+          },
+          passwordHistory: {
+            type: 'array',
+            maxItems: 10,
+            items: { $ref: '#/components/schemas/ImportPasswordHistoryEntry' },
+            description: "The replaced password, prepended to the item's history.",
+          },
+        },
+        description:
+          'Content only: an update deliberately cannot carry tags, favorite, folderId or itemType, so an import can never reorganize or retype an existing vault.',
+      },
       ImportRequest: {
         type: 'object',
-        required: ['format', 'data'],
+        required: ['format', 'operations'],
         properties: {
           format: {
             type: 'string',
@@ -560,19 +645,27 @@ export const swaggerSpec: JsonObject = {
             description:
               'Source the items originated from (audit metadata only). All parsing and encryption happen client-side; the server receives already-encrypted native items regardless of format.',
           },
-          data: {
-            type: 'string',
-            minLength: 1,
-            maxLength: 1048576,
+          operations: {
+            type: 'object',
             description:
-              'A JSON object of already-encrypted native items: `{ "items": [ ... ] }` (max 1 MB per request; large imports are split into several requests by the client).',
+              'The explicit work to perform. `inserts.length + updates.length` must be between 1 and 10,000; a large import is split into several sequential requests by the client, which cannot change the outcome.',
+            properties: {
+              inserts: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/ImportInsertItem' },
+              },
+              updates: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/ImportUpdateItem' },
+              },
+            },
           },
           conflictStrategy: {
             type: 'string',
             enum: ['skip', 'overwrite', 'keep_both'],
             default: 'skip',
             description:
-              "How to treat an incoming item whose search hash matches one already in the vault. Duplicates are matched against items ALREADY STORED, never against other items in the same request. Note that a large import is split into several sequential requests, so an earlier batch's inserts are visible to a later batch.",
+              'Audit metadata only. The server performs NO matching: the match key for a login is its site and username, both of which live inside the encrypted blob, so conflict resolution happens client-side and arrives here already decided.',
           },
         },
       },
@@ -2000,7 +2093,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Tools'],
         summary: 'Import vault items',
         description:
-          'Stores already-encrypted vault items. The client parses the source export (Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, or generic CSV) and encrypts every item locally before calling this endpoint; the server never sees plaintext and never parses the source format (`format` is audit metadata only). Max 10,000 items per request, 1 MB payload per request (large imports are split into several requests by the client). Rate limited by `importLimiter`: 60 req/user per 15 min.',
+          'Executes already-decided import operations. The client parses the source export (Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, or generic CSV), resolves conflicts against its own decrypted vault, and encrypts every item locally before calling this endpoint; the server never sees plaintext, never parses the source format, and performs no matching of its own. It validates ownership, field lengths and the per-account item cap, then applies exactly the `inserts` and `updates` it was given. Max 10,000 operations per request (large imports are split into several sequential requests by the client, which cannot change the outcome). Rate limited by `importLimiter`: 60 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -2022,10 +2115,8 @@ export const swaggerSpec: JsonObject = {
                     data: {
                       type: 'object',
                       properties: {
-                        importedCount: { type: 'integer' },
-                        skippedCount: { type: 'integer' },
-                        duplicateCount: { type: 'integer' },
-                        overwrittenCount: { type: 'integer' },
+                        insertedCount: { type: 'integer' },
+                        updatedCount: { type: 'integer' },
                       },
                     },
                   },
@@ -2033,7 +2124,15 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
+          400: {
+            description:
+              'An update names an item that does not exist, is in the trash, or is not yours; the same id appears twice; a field is over-length; or the import would exceed the per-account item cap. Nothing is written.',
+          },
           401: { $ref: '#/components/responses/Unauthorized' },
+          409: {
+            description:
+              'A vault-key rotation is in flight, or another import for this account is already running.',
+          },
           422: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
