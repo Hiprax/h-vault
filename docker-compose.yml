@@ -138,7 +138,7 @@ services:
     # A rollback is then `git checkout <tag> && docker compose up -d --build`: the
     # previous release's images are still on the host under their own tags, and the
     # tag names themselves say which release is running.
-    image: hvault-web:${HVAULT_VERSION:-0.2.0}
+    image: hvault-web:${HVAULT_VERSION:-0.3.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-nginx
     restart: unless-stopped
     # No `init:` here, deliberately (it is set on the two Node services, which need
@@ -215,7 +215,7 @@ services:
     build:
       <<: *hvault-build
       target: app
-    image: hvault-app:${HVAULT_VERSION:-0.2.0}
+    image: hvault-app:${HVAULT_VERSION:-0.3.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-app
     restart: unless-stopped
     # tini as PID 1: reaps zombies and forwards SIGTERM to node, which drains
@@ -356,7 +356,7 @@ services:
     build:
       <<: *hvault-build
       target: bootstrap
-    image: hvault-bootstrap:${HVAULT_VERSION:-0.2.0}
+    image: hvault-bootstrap:${HVAULT_VERSION:-0.3.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-bootstrap
     # A one-shot job: run once to completion and stay exited. Never restart — a
     # restart policy here would make `service_completed_successfully` unreachable.

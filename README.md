@@ -621,7 +621,7 @@ start** rather than run misconfigured.
 | --------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
 | `HVAULT_HTTP_PORT`    | `8080`            | The one host port published, always bound to `127.0.0.1`                                 |
 | `HVAULT_STACK_NAME`   | `hvault`          | Namespaces the project, containers, networks and volumes                                 |
-| `HVAULT_VERSION`      | `0.2.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
+| `HVAULT_VERSION`      | `0.3.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
 | `HVAULT_EDGE_SUBNET`  | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                       |
 | `HVAULT_DATA_SUBNET`  | `172.31.241.0/24` | App ↔ MongoDB. Internal: no published port, no route out                                 |
 | `TRUST_PROXY_HOPS`    | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                              |

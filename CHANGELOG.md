@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-22
+
 ### Added
 
 - `POST /api/v1/tools/import` accepts a structured `operations` payload — explicit `inserts` and `updates`, where each update names the id of the existing item it replaces — and answers with `{ insertedCount, updatedCount }`. Two new rejections come with it: `400` when an update names an item that does not exist, is in the trash, or belongs to someone else (it is never silently skipped), and `409` when another import for the same account is already running, when a vault-key rotation is in flight, or when an item an update targeted was changed or removed while the request was being applied. With `skip` or `overwrite`, re-running the import is safe: it re-resolves against the current vault and performs only what is left. With `keep both` — which by definition never matches anything — a re-run adds the rows that already landed a second time, and the client now says so instead of advising a retry.
@@ -136,7 +138,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Hiprax/h-vault/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Hiprax/h-vault/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/Hiprax/h-vault/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Hiprax/h-vault/compare/v0.1.0...v0.1.1
