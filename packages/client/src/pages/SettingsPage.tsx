@@ -1048,18 +1048,23 @@ export default function SettingsPage() {
         }
       } catch (batchErr) {
         // A later batch failed; earlier batches are already committed. Report the
-        // partial result honestly and refresh so committed rows appear. Re-running
-        // the import is safe: it re-resolves against the now-updated vault and
-        // performs only the work that remains.
+        // partial result honestly and refresh so committed rows appear. Under
+        // `skip`/`overwrite` re-running is safe: it re-resolves against the
+        // now-updated vault and performs only the work that remains. Under
+        // `keep_both` it is NOT — that strategy never matches anything (see
+        // `services/import/resolve.ts`), so a re-run would insert the committed
+        // rows a second time. Say so rather than advising a duplicate.
         const msg = getApiErrorMessage(batchErr, 'Failed to import some items');
+        const retryAdvice =
+          conflictStrategy === 'keep_both'
+            ? 'Nothing else was changed. Re-running with "keep both" would add the rows that already landed a second time — re-run with "skip" to import only what is left.'
+            : 'Nothing else was changed. Running the import again is safe.';
         toast({
           title:
             sentBatches > 0
               ? `Imported ${String(inserted)} and updated ${String(updated)} items, then stopped: ${msg}`
               : msg,
-          ...(sentBatches > 0
-            ? { description: 'Nothing else was changed. Running the import again is safe.' }
-            : {}),
+          ...(sentBatches > 0 ? { description: retryAdvice } : {}),
           type: 'error',
         });
         if (inserted > 0 || updated > 0) void useVaultStore.getState().fetchItems();

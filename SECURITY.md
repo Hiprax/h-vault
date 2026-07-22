@@ -94,6 +94,13 @@ security posture, not a disclaimer.
   converts that export's folder/group names into tags, which means the server learns your
   source folder taxonomy (for example `Banking`, `Work SSO`). Do not put anything sensitive
   in a tag; use the item's name or a field instead, both of which are encrypted.
+  Import decides what is a duplicate **in your browser**, from decrypted content — a login is
+  identified by its site and username — and that identity is never transmitted and never stored,
+  so the server never learns it. One nuance is worth stating plainly rather than claiming the
+  server simply learns less: under the `overwrite` strategy it does see _which of your own items_
+  an import updates — an equivalence between imported entries and stored items it could not
+  previously compute. That never leaves your own vault and exposes no plaintext, and `skip` (the
+  default) and `keep both` send no updates at all.
 - **Your deployment.** An exposed MongoDB port, a `TRUST_PROXY` set higher than the number
   of proxies actually in front of the app, secrets committed to a repository, or a missing
   TLS certificate will undo the guarantees above. The deployment checklist in the README

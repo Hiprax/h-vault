@@ -211,8 +211,14 @@ export const importPasswordHistoryEntrySchema = z.object({
 /**
  * One encrypted item to INSERT. This mirrors the item shape the server maps
  * through its fixed `ALLOWED_ITEM_FIELDS` projection. `searchHash` is required
- * because every non-import creation path writes one and the backup/restore flow
- * relies on its presence (see PLAN.md § 1.4).
+ * because every other creation path writes one, so an import that omitted it
+ * would be the single source of rows whose stored hash does not match their
+ * name. It is NOT required because restore matches on it — item restore matches
+ * on an owned `_id` and then `(userId, sourceRefId)`, never on content or
+ * `searchHash`, and `VaultItem`'s `(userId, searchHash)` index is non-unique
+ * sparse. (Folders are the place a `searchHash` is genuinely load-bearing:
+ * their `(userId, searchHash)` unique partial index is what makes a duplicate
+ * folder name a 409.)
  *
  * `passwordHistory` is optional and carried for one reason: re-importing a
  * native H-Vault export must not erase the history of an item it restores.

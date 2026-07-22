@@ -501,6 +501,53 @@ describe('SettingsPage import flow', () => {
     expect(screen.getByPlaceholderText('Paste exported data here...')).toBeInTheDocument();
   });
 
+  it('does not call a re-run safe after a partial "keep both" import', async () => {
+    // `keep_both` never matches anything, so a re-run re-inserts whatever the
+    // failed run already committed. Advising "running the import again is safe"
+    // there would talk the user into duplicating every landed row.
+    const bigRows = Array.from({ length: 12 }, (_, i) => ({
+      itemType: 'login',
+      encryptedData: `${'QUJDREVG'.repeat(12_500)}${String(i)}`,
+      dataIv: 'iv',
+      dataTag: 'tag',
+      encryptedName: seal(`Item ${String(i)}`),
+      nameIv: 'iv',
+      nameTag: 'tag',
+    }));
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    mockImportVaultApi
+      .mockResolvedValueOnce({
+        data: { success: true, data: { insertedCount: 9, updatedCount: 0 } },
+      })
+      .mockRejectedValueOnce(new Error('server said no'));
+
+    await renderSettings();
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue('Skip duplicates'), {
+      target: { value: 'keep_both' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: bigRows }) },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalledTimes(2));
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: expect.stringContaining('re-run with "skip"') as string,
+        type: 'error',
+      }),
+    );
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: 'Nothing else was changed. Running the import again is safe.',
+      }),
+    );
+  });
+
   it('refuses to import while the vault is locked', async () => {
     await renderSettings();
     useAuthStore.setState({ vaultKey: null } as never);
