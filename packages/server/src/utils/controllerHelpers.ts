@@ -120,6 +120,30 @@ export function vaultRotationLockName(userId: string): string {
 }
 
 /**
+ * The distributed-lock name a vault import holds for its user, mirroring
+ * {@link vaultRotationLockName}.
+ *
+ * `toolsController.importVault` checks the per-user item cap and then writes;
+ * without serialization two overlapping imports can each read a count that fits
+ * and then both insert, breaching `MAX_ITEMS_PER_USER`. A transaction alone does
+ * NOT close that race on every topology — a standalone deployment (and the
+ * default test harness) rejects multi-document transactions entirely — so the
+ * lock is what actually bounds concurrency. `acquireJobLock` is an atomic upsert
+ * against the unique `jobName` index, which holds with or without transactions.
+ *
+ * Scope: `operations` is now the only import wire shape, so this lock covers
+ * every import — import-vs-import cannot breach the cap on any topology. What it
+ * does NOT cover is a row committed by a DIFFERENT endpoint (`POST /items`,
+ * `POST /backup/restore`) between the executor's count and its insert; that
+ * narrower window is pre-existing, is shared with `vaultController.createItem`'s
+ * own count-then-write check, and is documented where it is taken in
+ * `toolsController.executeImportOperations`.
+ */
+export function vaultImportLockName(userId: string): string {
+  return `vault-import:${userId}`;
+}
+
+/**
  * True while a vault-key rotation is ACTIVELY processing for `userId`.
  *
  * `bulkReEncrypt` acquires the {@link vaultRotationLockName} JobLock BEFORE it

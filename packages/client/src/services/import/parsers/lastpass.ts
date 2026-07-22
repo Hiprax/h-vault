@@ -9,6 +9,11 @@ import type { ParsedImportItem } from '../types';
  * secure notes as rows whose `url` is the sentinel `http://sn`; those become vault
  * notes (their body lives in `extra`). `grouping` (the folder path) is preserved
  * as a tag, and `fav === '1'` marks a favorite.
+ *
+ * Column audit: every LastPass export column is consumed (url, username, password,
+ * totp, extra→notes, name, grouping→tag, fav→favorite). No column is discarded;
+ * the `http://sn` sentinel is intentionally not stored as a URL — it is a
+ * note-type marker, not a real address.
  */
 export function parseLastpass(text: string): ParsedImportItem[] {
   const { records } = rowsToRecords(text);

@@ -292,7 +292,9 @@ describe('config/database.ts', () => {
       expect(mockWarn).toHaveBeenCalledWith(
         expect.stringContaining("requests replica set 'rs0' but server reports topology without"),
       );
-      expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining('transactions disabled'));
+      // The consequence, stated as the code now states it: there is no silent
+      // fallback to sequential writes — every transactional endpoint fails.
+      expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining('will fail with a 500'));
     });
 
     it('warns on a setName mismatch between the URI and the server', async () => {

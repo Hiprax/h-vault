@@ -4,6 +4,7 @@ import {
   authGet,
   authMutate,
   sampleVaultItem,
+  sampleImportInsert,
   sampleFolder,
   createItem,
   createFolder,
@@ -588,44 +589,71 @@ test.describe('Authenticated Export & Import', () => {
 
     const importRes = await authMutate(request, user, 'post', '/api/v1/tools/import', {
       format: 'json',
-      data: JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'imported-1' }),
-          sampleVaultItem({ itemType: 'note', encryptedName: 'imported-2' }),
-        ],
-      }),
       conflictStrategy: 'keep_both',
+      operations: {
+        inserts: [
+          sampleImportInsert({ encryptedName: 'imported-1' }),
+          sampleImportInsert({ itemType: 'note', encryptedName: 'imported-2' }),
+        ],
+      },
     });
     expect(importRes.ok()).toBe(true);
 
     const importBody = (await importRes.json()) as {
-      data: { importedCount: number };
+      data: { insertedCount: number; updatedCount: number };
     };
-    expect(importBody.data.importedCount).toBe(2);
+    expect(importBody.data.insertedCount).toBe(2);
+    expect(importBody.data.updatedCount).toBe(0);
   });
 
-  test('should handle import conflict strategy: skip', async ({ request }) => {
+  test('should update the item an import names, without touching any other', async ({
+    request,
+  }) => {
     const user = await createAuthenticatedUser(request);
 
-    // Create an existing item
-    await createItem(request, user, { encryptedName: 'existing-item' });
+    const existingId = await createItem(request, user, { encryptedName: 'existing-item' });
+    const untouchedId = await createItem(request, user, { encryptedName: 'other-item' });
 
-    // Import an item with the same encryptedName — dedup should match on encryptedName fallback
+    // Conflict resolution happens on the client, which is the only place the
+    // plaintext identity of an item exists. The server executes exactly the
+    // operations it is handed: this one overwrites the item it names and leaves
+    // every other row alone. `conflictStrategy` rides along as audit metadata.
     const importRes = await authMutate(request, user, 'post', '/api/v1/tools/import', {
       format: 'json',
-      data: JSON.stringify({
-        items: [sampleVaultItem({ encryptedName: 'existing-item' })],
-      }),
-      conflictStrategy: 'skip',
+      conflictStrategy: 'overwrite',
+      operations: {
+        updates: [
+          {
+            id: existingId,
+            encryptedName: 'overwritten-item',
+            nameIv: 'e2e-name-iv',
+            nameTag: 'e2e-name-tag',
+            encryptedData: 'e2e-new-data',
+            dataIv: 'e2e-data-iv',
+            dataTag: 'e2e-data-tag',
+            searchHash: 'b'.repeat(64),
+          },
+        ],
+      },
     });
     expect(importRes.ok()).toBe(true);
 
     const body = (await importRes.json()) as {
-      data: { importedCount: number; duplicateCount: number };
+      data: { insertedCount: number; updatedCount: number };
     };
-    // Should detect the duplicate and skip it
-    expect(body.data.duplicateCount).toBe(1);
-    expect(body.data.importedCount).toBe(0);
+    expect(body.data.insertedCount).toBe(0);
+    expect(body.data.updatedCount).toBe(1);
+
+    const listRes = await authGet(request, user, '/api/v1/vault/items');
+    const listBody = (await listRes.json()) as {
+      data: { _id: string; encryptedName: string }[];
+      pagination: { total: number };
+    };
+    // No new row: the vault still holds exactly the two items it started with.
+    expect(listBody.pagination.total).toBe(2);
+    const byId = new Map(listBody.data.map((item) => [item._id, item.encryptedName]));
+    expect(byId.get(existingId)).toBe('overwritten-item');
+    expect(byId.get(untouchedId)).toBe('other-item');
   });
 
   test('should reject export with wrong authHash', async ({ request }) => {
@@ -655,13 +683,15 @@ test.describe('Authenticated Export & Import', () => {
     const user2 = await createAuthenticatedUser(request);
     const importRes = await authMutate(request, user2, 'post', '/api/v1/tools/import', {
       format: 'json',
-      data: JSON.stringify({ items: exportBody.data.items }),
       conflictStrategy: 'keep_both',
+      operations: {
+        inserts: exportBody.data.items.map((item) => ({ ...item, searchHash: 'a'.repeat(64) })),
+      },
     });
     expect(importRes.ok()).toBe(true);
 
-    const importBody = (await importRes.json()) as { data: { importedCount: number } };
-    expect(importBody.data.importedCount).toBe(1);
+    const importBody = (await importRes.json()) as { data: { insertedCount: number } };
+    expect(importBody.data.insertedCount).toBe(1);
   });
 });
 

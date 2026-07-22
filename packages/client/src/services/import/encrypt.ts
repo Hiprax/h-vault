@@ -3,18 +3,15 @@ import {
   MAX_ENCRYPTED_DATA_LENGTH,
   MAX_ENCRYPTED_NAME_LENGTH,
 } from '@hvault/shared';
-import type { ItemType } from '@hvault/shared';
 import { z } from 'zod';
 import { cryptoService } from '../crypto/cryptoService';
 import type { ParsedImportItem } from './types';
 
-/**
- * An import item that has been encrypted client-side and is ready to POST to the
- * server. Matches the native `createVaultItemSchema` / import item shape — the
- * six ciphertext fields plus metadata. NO plaintext is present.
- */
-export interface EncryptedImportItem {
-  itemType: ItemType;
+/** How many per-row reasons an import surfaces before it stops collecting. */
+export const MAX_IMPORT_WARNINGS = 10;
+
+/** The ciphertext fields (plus search hash) a sealed row puts on the wire. */
+export interface SealedImportItem {
   encryptedName: string;
   nameIv: string;
   nameTag: string;
@@ -22,64 +19,48 @@ export interface EncryptedImportItem {
   dataIv: string;
   dataTag: string;
   searchHash: string;
-  tags: string[];
-  favorite: boolean;
 }
 
-export interface BuildResult {
-  items: EncryptedImportItem[];
-  skipped: number;
-  warnings: string[];
-}
-
-const MAX_WARNINGS = 10;
+/** Either a sealed row or the reason the row could not be sealed. */
+export type SealImportResult =
+  { ok: true; sealed: SealedImportItem } | { ok: false; reason: string };
 
 /**
- * Validate each parsed item against the shared decrypted-data schema for its
- * type, then encrypt it (name + data) with the vault key and compute its search
- * hash. This is the zero-knowledge boundary: plaintext never leaves this step.
+ * Validate ONE parsed item against the shared decrypted-data schema for its
+ * type, then encrypt its name and data with the vault key and compute its
+ * search hash. This is the zero-knowledge boundary: plaintext never leaves this
+ * step.
  *
- * A single item that fails validation or exceeds the ciphertext size caps is
- * SKIPPED and counted — it never aborts the whole import. Validation also strips
- * unknown fields and applies schema defaults (e.g. normalizing URIs).
+ * Failure is reported, never thrown — a single unconvertible item must not
+ * abort a whole import — and the reason names the item and the offending field
+ * so the caller can surface it. This is the ONE place import ciphertext is
+ * produced, shared by the insert and update paths, so they cannot drift.
  */
-export async function buildEncryptedImportItems(
-  parsed: ParsedImportItem[],
+export async function sealImportItem(
+  item: ParsedImportItem,
   vaultKey: CryptoKey,
-): Promise<BuildResult> {
-  const items: EncryptedImportItem[] = [];
-  const warnings: string[] = [];
-  let skipped = 0;
+): Promise<SealImportResult> {
+  const schema = vaultItemDataSchemas[item.itemType];
+  const result = schema.safeParse(item.data);
+  if (!result.success) {
+    return { ok: false, reason: `Skipped "${item.name}": ${firstIssue(result.error)}` };
+  }
 
-  const warn = (message: string): void => {
-    if (warnings.length < MAX_WARNINGS) warnings.push(message);
-  };
+  const encName = await cryptoService.encryptData(item.name, vaultKey);
+  const encData = await cryptoService.encryptData(JSON.stringify(result.data), vaultKey);
 
-  for (const item of parsed) {
-    const schema = vaultItemDataSchemas[item.itemType];
-    const result = schema.safeParse(item.data);
-    if (!result.success) {
-      skipped++;
-      warn(`Skipped "${item.name}": ${firstIssue(result.error)}`);
-      continue;
-    }
+  if (
+    encName.encrypted.length > MAX_ENCRYPTED_NAME_LENGTH ||
+    encData.encrypted.length > MAX_ENCRYPTED_DATA_LENGTH
+  ) {
+    return { ok: false, reason: `Skipped "${item.name}": item is too large to store.` };
+  }
 
-    const encName = await cryptoService.encryptData(item.name, vaultKey);
-    const encData = await cryptoService.encryptData(JSON.stringify(result.data), vaultKey);
+  const searchHash = await cryptoService.generateSearchHash(item.name, vaultKey);
 
-    if (
-      encName.encrypted.length > MAX_ENCRYPTED_NAME_LENGTH ||
-      encData.encrypted.length > MAX_ENCRYPTED_DATA_LENGTH
-    ) {
-      skipped++;
-      warn(`Skipped "${item.name}": item is too large to store.`);
-      continue;
-    }
-
-    const searchHash = await cryptoService.generateSearchHash(item.name, vaultKey);
-
-    items.push({
-      itemType: item.itemType,
+  return {
+    ok: true,
+    sealed: {
       encryptedName: encName.encrypted,
       nameIv: encName.iv,
       nameTag: encName.tag,
@@ -87,9 +68,44 @@ export async function buildEncryptedImportItems(
       dataIv: encData.iv,
       dataTag: encData.tag,
       searchHash,
-      tags: item.tags,
-      favorite: item.favorite,
-    });
+    },
+  };
+}
+
+/** Parsed items that passed schema validation, plus the ones that did not. */
+export interface ValidationResult {
+  /** The survivors, carrying the schema's TRANSFORMED output as their `data`. */
+  items: ParsedImportItem[];
+  skipped: number;
+  warnings: string[];
+}
+
+/**
+ * Validate parsed items against `vaultItemDataSchemas`, keeping the schema's
+ * transformed OUTPUT as each survivor's `data`.
+ *
+ * This runs BEFORE conflict resolution, deliberately (PLAN §1.8 step 4): an item
+ * whose data cannot be validated has no meaningful identity, so letting it into
+ * the resolver could only mis-key it — and reporting it as a "duplicate" would
+ * hide the real reason it never reached the vault. Carrying the transformed
+ * output forward also means the row hashes exactly as the same item already
+ * stored in the vault does, which is what makes a re-import a no-op.
+ */
+export function validateImportItems(parsed: ParsedImportItem[]): ValidationResult {
+  const items: ParsedImportItem[] = [];
+  const warnings: string[] = [];
+  let skipped = 0;
+
+  for (const item of parsed) {
+    const result = vaultItemDataSchemas[item.itemType].safeParse(item.data);
+    if (!result.success) {
+      skipped++;
+      if (warnings.length < MAX_IMPORT_WARNINGS) {
+        warnings.push(`Skipped "${item.name}": ${firstIssue(result.error)}`);
+      }
+      continue;
+    }
+    items.push({ ...item, data: result.data as Record<string, unknown> });
   }
 
   return { items, skipped, warnings };

@@ -73,7 +73,8 @@ const ALLOWED_ITEM_FIELDS = new Set([
 // A searchHash is an HMAC-SHA256 digest rendered as 64 lowercase hex chars. The
 // Folder/VaultItem models enforce this via a `match` validator, so a backup row
 // (legacy or tampered) carrying any other shape would otherwise throw a Mongoose
-// ValidationError mid-restore. Mirrors `sanitizeImportFields` in toolsController.
+// ValidationError mid-restore. The import path enforces the same shape through
+// its `searchHash` schema pattern.
 const SEARCH_HASH_RE = /^[a-f0-9]{64}$/;
 
 /**
@@ -1187,8 +1188,12 @@ export const restoreBackup = catchAsync(async (req: Request, res: Response): Pro
       }
 
       // Drop a malformed searchHash (legacy/tampered backups) so it can't trip
-      // the model's `match` validator. The import path applies the same guard;
-      // restore must match it. A valid item with a bad searchHash is still
+      // the model's `match` validator. The import path enforces the same SHAPE
+      // — `/^[a-f0-9]{64}$/` — but REJECTS a violation outright, because there
+      // `searchHash` is a required schema field the client always recomputes.
+      // Restore must SANITIZE instead, and the difference is deliberate: a
+      // legacy or partially-valid backup still has to restore, so one bad hash
+      // may not fail the whole file. A valid item with a bad searchHash is still
       // restored — just without the hash, which the user rebuilds on next edit.
       if (
         sanitizedItem.searchHash !== undefined &&

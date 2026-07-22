@@ -93,9 +93,18 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   matched by provenance, so re-running the same backup doesn't accumulate duplicates. Any
   folder cycle a malicious file plants is detected and broken.
 - **Import / export.** Import from Bitwarden, LastPass, KeePass, Chrome/Edge, Firefox, 1Password
-  and generic CSV, with skip / overwrite / keep-both conflict strategies and hash-based
-  deduplication. Every source is parsed and encrypted **in the browser** before upload, so no
-  credential, note or field value ever reaches the server in the clear. Source folders/groups are
+  and generic CSV, with skip / overwrite / keep-both conflict strategies. Duplicates are decided
+  by an item's **content**, not its name: a login is identified by its site and username, so ten
+  accounts on one site stay ten items and re-importing the same file changes nothing. `skip` (the
+  default) never modifies anything; `overwrite` updates a matched item in place — replacing its
+  name and content, keeping the previous password in that item's history — and always asks for
+  confirmation first; `keep both` never matches, so it always adds. Matching runs once over the
+  whole file before anything is sent, so how a large import is split into requests cannot change
+  the result, and under `skip` or `overwrite` re-running an import that failed part-way through
+  is safe: it simply performs whatever is left. (Under `keep both` a re-run adds the rows that
+  already landed a second time — that is what "keep both" means.) Every source is
+  parsed and encrypted **in the browser** before upload, so no credential, note or field value
+  ever reaches the server in the clear. Source folders/groups are
   carried over as tags — and tags, as always, are stored in plaintext so the server can index
   them, so your source folder names are visible to it. Export is encrypted JSON and requires
   re-entering your master password. (CSV is import-only.)
@@ -193,18 +202,18 @@ BWK by HKDF, so tampering is detected at restore time rather than discovered lat
 
 ### Cryptographic parameters
 
-| Parameter                 | Value                                                                                        |
-| ------------------------- | -------------------------------------------------------------------------------------------- |
-| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)             |
-| Master-key salt           | The account email — see the note above                                                       |
-| Backup-key salt           | 16 random bytes                                                                              |
-| Encryption                | AES-256-GCM                                                                                  |
-| Key size                  | 256 bits                                                                                     |
-| IV                        | 12 bytes, freshly random for **every** field                                                 |
-| Authentication tag        | 16 bytes                                                                                     |
-| Name hash                 | HMAC-SHA256 over the item name, keyed by the vault key — for duplicate detection, not search |
-| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                       |
-| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                                   |
+| Parameter                 | Value                                                                                  |
+| ------------------------- | -------------------------------------------------------------------------------------- |
+| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)       |
+| Master-key salt           | The account email — see the note above                                                 |
+| Backup-key salt           | 16 random bytes                                                                        |
+| Encryption                | AES-256-GCM                                                                            |
+| Key size                  | 256 bits                                                                               |
+| IV                        | 12 bytes, freshly random for **every** field                                           |
+| Authentication tag        | 16 bytes                                                                               |
+| Name hash                 | HMAC-SHA256 over the name, keyed by the vault key — folder-name uniqueness, not search |
+| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                 |
+| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                             |
 
 ### Honest strength metering
 
@@ -709,18 +718,33 @@ authoritative.
 <details>
 <summary><b>Tools and backup</b> — <code>/api/v1/tools</code>, <code>/api/v1/backup</code></summary>
 
-| Method | Endpoint                       | Description                                                                                                                                    |
-| ------ | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/tools/check-password-breach` | HaveIBeenPwned k-anonymity check (5-char hash prefix)                                                                                          |
-| POST   | `/tools/export`                | Encrypted JSON export (master password required)                                                                                               |
-| POST   | `/tools/import`                | Import already-encrypted items (client parses/encrypts Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, CSV) with conflict strategies |
-| POST   | `/backup/setup`                | Configure backup encryption (master password required)                                                                                         |
-| PUT    | `/backup/settings`             | Schedule and recipients                                                                                                                        |
-| POST   | `/backup/trigger`              | Create a backup and email it                                                                                                                   |
-| GET    | `/backup/download`             | Download an encrypted backup file                                                                                                              |
-| GET    | `/backup/history`              | Backup history (paginated)                                                                                                                     |
-| PUT    | `/backup/change-password`      | Change the backup password                                                                                                                     |
-| POST   | `/backup/restore`              | Restore from an encrypted backup                                                                                                               |
+| Method | Endpoint                       | Description                                            |
+| ------ | ------------------------------ | ------------------------------------------------------ |
+| POST   | `/tools/check-password-breach` | HaveIBeenPwned k-anonymity check (5-char hash prefix)  |
+| POST   | `/tools/export`                | Encrypted JSON export (master password required)       |
+| POST   | `/tools/import`                | Execute already-resolved import operations (see below) |
+| POST   | `/backup/setup`                | Configure backup encryption (master password required) |
+| PUT    | `/backup/settings`             | Schedule and recipients                                |
+| POST   | `/backup/trigger`              | Create a backup and email it                           |
+| GET    | `/backup/download`             | Download an encrypted backup file                      |
+| GET    | `/backup/history`              | Backup history (paginated)                             |
+| PUT    | `/backup/change-password`      | Change the backup password                             |
+| POST   | `/backup/restore`              | Restore from an encrypted backup                       |
+
+`POST /tools/import` takes `{ format, conflictStrategy, operations: { inserts, updates } }` and
+answers `{ insertedCount, updatedCount }`. The client parses the source (Bitwarden, LastPass,
+KeePass, Chrome, Firefox, 1Password, generic CSV, or a native H-Vault export), decides what is a
+duplicate against its own decrypted vault, and encrypts every item before the call — so each update
+names the id of the item it replaces and **the server matches nothing**. `format` and
+`conflictStrategy` are recorded for the audit log only. It answers `400` when the body fails schema
+validation or when an update names an item that is unknown, trashed or someone else's, and `409`
+while a vault-key rotation or another import for the same account is running, or when an item an
+update targeted was changed or removed mid-request. Nothing is written on any `400`, nor on the
+rotation or already-running `409` — those are all refused before the first write. The
+changed-mid-request `409` is the one exception: on a replica set the whole request rolls back, but
+on a standalone MongoDB (the default `MONGODB_URI`) earlier operations in that same request may
+already have committed. Re-running is safe under `skip` and `overwrite`, which re-resolve against
+the current vault and send only what is left.
 
 </details>
 
@@ -873,10 +897,10 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                         |
 | ---------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Server** | 93    | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
-| **Client** | 76    | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                   |
+| **Server** | 96    | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
+| **Client** | 83    | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                    |
 | **Shared** | 6     | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                          |
-| **E2E**    | 10    | Playwright (Chromium): 186 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock and file-encryption journeys                                                                                                                                                                                              |
+| **E2E**    | 10    | Playwright (Chromium): 188 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock and file-encryption journeys                                                                                                                                                                                              |
 
 **Coverage** is measured with `@vitest/coverage-v8` and enforced as a build gate — a regression
 fails the push rather than being quietly absorbed. `server` and `client` must clear **90%** on all

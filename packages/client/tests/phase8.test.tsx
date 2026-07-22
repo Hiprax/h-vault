@@ -542,86 +542,23 @@ describe('Phase 8.4: SessionsPage error recovery with retry', () => {
 
 // ==========================================================================
 // 8.6 - CSV import field validation
+//
+// REMOVED: the single test here ("does not call the import API when a generic
+// CSV maps no identifying column") could not fail. Its only assertion was
+// `expect(mockImportVaultApi).not.toHaveBeenCalled()` inside `waitFor`, and a
+// negative assertion is satisfied on waitFor's first synchronous evaluation.
+// Worse, with every column mapping cleared `parseGenericCsv` returns zero rows,
+// so the import short-circuits on "No items found in the file to import."
+// whether the guard it claimed to pin is present or not.
+//
+// The guard IS covered, where it actually fails on removal:
+//   * tests/settings-pages.test.tsx asserts the real toast text
+//     ("Map at least one of Name, URL, or Username"), which changes when the
+//     guard is deleted.
+//   * The mapping-select onChange and the auto-mapper's skip branch are
+//     exercised by tests/coverage-settings-page.test.tsx, so coverage is
+//     unaffected by this deletion.
 // ==========================================================================
-
-describe('Phase 8.6: CSV import validation in SettingsPage', () => {
-  beforeEach(() => {
-    mockGetProfileApi.mockResolvedValue({
-      data: {
-        success: true,
-        data: {
-          email: 'test@example.com',
-          emailVerified: true,
-          twoFactorEnabled: false,
-          settings: {
-            autoLockTimeout: 15,
-            clipboardClearTimeout: 30,
-            theme: 'system',
-            backup: {
-              enabled: false,
-              scheduleHour: 3,
-              backupEmails: [],
-              isConfigured: false,
-            },
-          },
-        },
-      },
-    });
-  });
-
-  it('does not call the import API when a generic CSV maps no identifying column', async () => {
-    const { default: SettingsPage } = await import('../src/pages/SettingsPage');
-
-    renderWithRouter(<SettingsPage />);
-
-    // Wait for profile to load
-    await waitFor(() => {
-      expect(screen.getByText('Settings')).toBeInTheDocument();
-    });
-
-    // Click "Import Vault" to show the import form
-    fireEvent.click(screen.getByText('Import Vault'));
-
-    // Select the generic CSV format (label reflects the IMPORT_FORMATS registry).
-    const formatSelect = screen.getAllByRole('combobox').find((s) => {
-      const options = s.querySelectorAll('option');
-      return Array.from(options).some((o) => o.textContent === 'Generic CSV (map columns)');
-    });
-    expect(formatSelect).toBeDefined();
-    fireEvent.change(formatSelect!, { target: { value: 'csv' } });
-
-    // Paste CSV data
-    const textarea = screen.getByPlaceholderText('Paste exported data here...');
-    fireEvent.change(textarea, {
-      target: { value: 'title,user,pass\nMySite,admin,secret' },
-    });
-
-    // Wait for CSV headers to be parsed and mapping UI to appear
-    await waitFor(() => {
-      expect(screen.getByText('Map CSV Columns')).toBeInTheDocument();
-    });
-
-    // Manually clear all mappings to ensure "name" is not mapped
-    // The auto-mapper might have mapped "title" to "name" based on heuristics.
-    // We need to set all column mappings to "-- Skip --" (value: '')
-    const mappingSelects = screen
-      .getByText('Map CSV Columns')
-      .closest('.space-y-3')!
-      .querySelectorAll('select');
-    for (const sel of mappingSelects) {
-      fireEvent.change(sel, { target: { value: '' } });
-    }
-
-    // Click the Import button
-    const importButton = screen.getByRole('button', { name: 'Import' });
-    fireEvent.click(importButton);
-
-    // The importVaultApi should NOT have been called since validation should fail
-    await waitFor(() => {
-      expect(mockImportVaultApi).not.toHaveBeenCalled();
-    });
-  });
-});
 
 // ==========================================================================
 // 8.9 - Client-side unlock attempt rate limiting feedback

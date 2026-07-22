@@ -8,10 +8,29 @@ import { parseGenericCsv } from './parsers/genericCsv';
 import { parseBitwarden } from './parsers/bitwarden';
 import type { CsvFieldMapping, ImportSourceFormat, ParseResult } from './types';
 
-export type { CsvFieldMapping, ImportSourceFormat, ParsedImportItem, ParseResult } from './types';
-export { buildEncryptedImportItems } from './encrypt';
-export type { EncryptedImportItem, BuildResult } from './encrypt';
-export { chunkBySize } from './batch';
+export type {
+  CsvFieldMapping,
+  ImportSourceFormat,
+  NativeCiphertext,
+  ParsedImportItem,
+  ParseResult,
+  ResolvableImportItem,
+} from './types';
+export { MAX_IMPORT_WARNINGS, sealImportItem, validateImportItems } from './encrypt';
+export type { SealImportResult, SealedImportItem, ValidationResult } from './encrypt';
+export { IMPORT_BATCH_MAX_BYTES, chunkBySize, chunkImportOperations } from './batch';
+export type { ImportOperationBatch } from './batch';
+export { buildImportOperations } from './operations';
+export type { BuiltImportOperations, ImportUpdateTarget } from './operations';
+export { resolveImport } from './resolve';
+export type {
+  ConflictStrategy,
+  IdentityFields,
+  ImportResolution,
+  ResolvableExistingItem,
+  ResolvedUpdate,
+} from './resolve';
+export { computeContentKey, computeItemIdentity, computeItemKeys } from './identity';
 
 /** Thrown when a source file cannot be parsed into vault items. */
 export class ImportParseError extends Error {

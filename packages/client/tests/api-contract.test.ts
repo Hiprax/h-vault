@@ -335,7 +335,29 @@ describe('userApi wire contract', () => {
     expectCall(mockPost, 'POST', '/tools/export', { format: 'json', authHash: 'h' });
 
     mockPost.mockClear();
-    const imp = { format: 'json', data: '{}', conflictStrategy: 'skip' } as never;
+    // The import contract is structured: explicit inserts/updates, resolved on
+    // the client. `conflictStrategy` rides along as audit metadata only.
+    const imp = {
+      format: 'json',
+      conflictStrategy: 'skip',
+      operations: {
+        inserts: [
+          {
+            itemType: 'login',
+            encryptedName: 'en',
+            nameIv: 'ni',
+            nameTag: 'nt',
+            encryptedData: 'ed',
+            dataIv: 'di',
+            dataTag: 'dt',
+            searchHash: 'a'.repeat(64),
+            tags: [],
+            favorite: false,
+          },
+        ],
+        updates: [],
+      },
+    } as never;
     await userApi.importVaultApi(imp);
     expectCall(mockPost, 'POST', '/tools/import', imp);
   });

@@ -126,3 +126,81 @@ describe('Bitwarden CSV', () => {
     expect(items[1]?.data.content).toBe('note body');
   });
 });
+
+describe('Bitwarden identity extra fields', () => {
+  const BW_IDENTITY_EXTRAS = JSON.stringify({
+    items: [
+      {
+        type: 4,
+        name: 'Full Identity',
+        identity: {
+          title: 'Dr',
+          firstName: 'Alice',
+          middleName: 'Quinn',
+          lastName: 'Anderson',
+          username: 'aq_anderson',
+          licenseNumber: 'DL-99887766',
+        },
+      },
+    ],
+  });
+
+  it('preserves title, middleName, username and licenseNumber somewhere retrievable', () => {
+    const id = byType(parseImportData('bitwarden', BW_IDENTITY_EXTRAS).items, 'identity');
+    // The real schema fields are still mapped directly.
+    expect(id.data.firstName).toBe('Alice');
+    expect(id.data.lastName).toBe('Anderson');
+    // The four fields with no schema home are folded into notes under clear labels.
+    const notes = String(id.data.notes);
+    expect(notes).toContain('Title: Dr');
+    expect(notes).toContain('Middle name: Quinn');
+    expect(notes).toContain('Username: aq_anderson');
+    expect(notes).toContain('License number: DL-99887766');
+  });
+});
+
+describe('Bitwarden SSH keys (type 5)', () => {
+  const PRIVATE_KEY =
+    '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1r\n-----END OPENSSH PRIVATE KEY-----';
+  const PUBLIC_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 alice@laptop';
+  const FINGERPRINT = 'SHA256:abc123def456';
+  const BW_SSH = JSON.stringify({
+    items: [
+      {
+        type: 5,
+        name: 'Prod Server Key',
+        favorite: true,
+        notes: 'the box in the closet',
+        sshKey: {
+          privateKey: PRIVATE_KEY,
+          publicKey: PUBLIC_KEY,
+          keyFingerprint: FINGERPRINT,
+        },
+        fields: [{ name: 'Env', value: 'prod', type: 0 }],
+      },
+    ],
+  });
+
+  it('preserves the key material in clearly-labelled custom fields instead of dropping it', () => {
+    const { items } = parseImportData('bitwarden', BW_SSH);
+    expect(items).toHaveLength(1);
+    const item = items[0]!;
+    expect(item.itemType).toBe('login');
+    expect(item.name).toBe('Prod Server Key');
+    expect(item.favorite).toBe(true);
+
+    const fields = item.data.customFields as { name: string; value: string; type: string }[];
+    const byName = (n: string): { name: string; value: string; type: string } | undefined =>
+      fields.find((f) => f.name === n);
+
+    expect(byName('SSH Private Key')?.value).toBe(PRIVATE_KEY);
+    // The private key is masked as a hidden field.
+    expect(byName('SSH Private Key')?.type).toBe('hidden');
+    expect(byName('SSH Public Key')?.value).toBe(PUBLIC_KEY);
+    expect(byName('SSH Key Fingerprint')?.value).toBe(FINGERPRINT);
+    // The item's own Bitwarden custom fields are preserved alongside the key parts.
+    expect(byName('Env')?.value).toBe('prod');
+    // Notes survive too.
+    expect(String(item.data.notes)).toContain('the box in the closet');
+  });
+});

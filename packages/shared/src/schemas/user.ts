@@ -6,8 +6,14 @@ import {
   AUDIT_LOG_MAX_LIMIT,
   MAX_BACKUP_EMAILS,
   MAX_RESTORE_DATA_LENGTH,
-  MAX_IMPORT_DATA_LENGTH,
+  MAX_IMPORT_ITEMS,
+  MAX_TAGS_PER_ITEM,
+  MAX_ENCRYPTED_NAME_LENGTH,
+  MAX_ENCRYPTED_DATA_LENGTH,
+  PASSWORD_HISTORY_MAX,
+  ITEM_TYPES,
 } from '../constants/index.js';
+import { objectIdSchema } from './common.js';
 
 export const passwordGenOptionsSchema = z
   .object({
@@ -172,24 +178,134 @@ export const exportSchema = z.object({
   authHash: z.string().min(1).max(100),
 });
 
-export const importSchema = z.object({
-  // Zero-knowledge import: the browser parses the source file, converts each entry
-  // to a vault item, encrypts it with the vault key, and sends already-encrypted
-  // native items in `data` as JSON `{ items: [...] }`. The server never parses
-  // plaintext and never encrypts. `format` is therefore audit-only metadata that
-  // records which source the user imported from; every value is handled
-  // identically server-side. `csv`/`json` cover generic CSV and native H-Vault
-  // exports respectively.
-  format: z.enum([
-    'bitwarden',
-    'lastpass',
-    'keepass',
-    'chrome',
-    'firefox',
-    'onepassword',
-    'csv',
-    'json',
-  ]),
-  data: z.string().min(1).max(MAX_IMPORT_DATA_LENGTH),
-  conflictStrategy: z.enum(['skip', 'overwrite', 'keep_both']).optional().default('skip'),
+// ---------------------------------------------------------------------------
+// Import wire contract
+// ---------------------------------------------------------------------------
+// An import carries explicit `operations` — `inserts` plus `updates`, where each
+// update names the `_id` it targets. Conflict resolution happens on the CLIENT
+// (the match key for a login is its site and username, both of which live inside
+// the encrypted blob, so the server physically cannot compute it), which makes
+// the server a validated EXECUTOR: it validates ownership, caps and field
+// lengths but makes no matching decisions of its own.
+//
+// The former `data` envelope — a JSON string of encrypted items the server
+// de-duplicated by name/searchHash — has been removed. It is the defect this
+// contract replaces (ten accounts on one site collapsed into one), so it is not
+// accepted in any form; an old client is rejected by this schema.
+
+/**
+ * A password-history entry carried on an import operation. Bounded in the schema
+ * (not just by the model validators, which fire only under `runValidators`)
+ * because `assertImportFieldLengths` walks only top-level string fields and would
+ * not catch an oversized nested history array. The per-entry caps mirror
+ * `models/VaultItem.ts` (`encryptedPassword` maxlength 5_000, iv 24, tag 32).
+ */
+export const importPasswordHistoryEntrySchema = z.object({
+  encryptedPassword: z.string().min(1).max(5_000),
+  iv: z.string().min(1).max(24),
+  tag: z.string().min(1).max(32),
+  // Accept both UTC (Z) and timezone offsets (+05:00), matching vault.ts.
+  changedAt: z.iso.datetime({ offset: true }),
 });
+
+/**
+ * One encrypted item to INSERT. This mirrors the item shape the server maps
+ * through its fixed `ALLOWED_ITEM_FIELDS` projection. `searchHash` is required
+ * because every other creation path writes one, so an import that omitted it
+ * would be the single source of rows whose stored hash does not match their
+ * name. It is NOT required because restore matches on it — item restore matches
+ * on an owned `_id` and then `(userId, sourceRefId)`, never on content or
+ * `searchHash`, and `VaultItem`'s `(userId, searchHash)` index is non-unique
+ * sparse. (Folders are the place a `searchHash` is genuinely load-bearing:
+ * their `(userId, searchHash)` unique partial index is what makes a duplicate
+ * folder name a 409.)
+ *
+ * `passwordHistory` is optional and carried for one reason: re-importing a
+ * native H-Vault export must not erase the history of an item it restores.
+ * Dropping it would lose the previous passwords of every item recreated from an
+ * export — the exact silent loss the overwrite path takes care to prevent.
+ */
+export const importInsertItemSchema = z.object({
+  itemType: z.enum(ITEM_TYPES),
+  encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
+  nameIv: z.string().min(1).max(24),
+  nameTag: z.string().min(1).max(32),
+  encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
+  dataIv: z.string().min(1).max(24),
+  dataTag: z.string().min(1).max(32),
+  searchHash: z.string().regex(/^[a-f0-9]{64}$/),
+  tags: z.array(z.string().trim().min(1).max(50)).max(MAX_TAGS_PER_ITEM).default([]),
+  favorite: z.boolean().default(false),
+  folderId: objectIdSchema.optional(),
+  passwordHistory: z.array(importPasswordHistoryEntrySchema).max(PASSWORD_HISTORY_MAX).optional(),
+});
+
+/**
+ * One existing item to UPDATE in place. Carries `id` (reusing the shared
+ * `objectIdSchema` — a case-insensitive hex ObjectId with a lowercase transform),
+ * the six ciphertext fields, a client-recomputed `searchHash` (an overwrite
+ * replaces `encryptedName`, so the stored hash must be refreshed alongside it),
+ * and an optional bounded `passwordHistory`. It deliberately does NOT carry
+ * `tags`/`favorite`/`folderId`: an import updates content only and must not
+ * silently reorganize an existing vault.
+ */
+export const importUpdateItemSchema = z.object({
+  id: objectIdSchema,
+  encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
+  nameIv: z.string().min(1).max(24),
+  nameTag: z.string().min(1).max(32),
+  encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
+  dataIv: z.string().min(1).max(24),
+  dataTag: z.string().min(1).max(32),
+  searchHash: z.string().regex(/^[a-f0-9]{64}$/),
+  passwordHistory: z.array(importPasswordHistoryEntrySchema).max(PASSWORD_HISTORY_MAX).optional(),
+});
+
+/**
+ * The structured import payload: explicit `inserts` and `updates`. Both default
+ * to `[]` so a caller may send only one kind. The combined length bound (1..
+ * `MAX_IMPORT_ITEMS`) is enforced on `importSchema` itself, so it can produce a
+ * clear message when `operations` carries no work at all.
+ */
+export const importOperationsSchema = z.object({
+  inserts: z.array(importInsertItemSchema).default([]),
+  updates: z.array(importUpdateItemSchema).default([]),
+});
+
+export const importSchema = z
+  .object({
+    // Zero-knowledge import: the browser parses the source file, converts each
+    // entry to a vault item, encrypts it with the vault key, and sends
+    // already-encrypted items. The server never parses plaintext and never
+    // encrypts. `format` and `conflictStrategy` are audit-only metadata that
+    // record which source the user imported from and which strategy the client
+    // applied; the server acts on neither (resolution already happened on the
+    // client). `csv`/`json` cover generic CSV and native H-Vault exports.
+    format: z.enum([
+      'bitwarden',
+      'lastpass',
+      'keepass',
+      'chrome',
+      'firefox',
+      'onepassword',
+      'csv',
+      'json',
+    ]),
+    conflictStrategy: z.enum(['skip', 'overwrite', 'keep_both']).optional().default('skip'),
+    // Explicit inserts/updates the server validates and executes.
+    operations: importOperationsSchema,
+  })
+  // The combined item count must be in range. There is no byte cap on the
+  // structured shape: the real server-side byte bound is the global 2 MB body
+  // parser (`/tools/import` is not in `CUSTOM_BODY_LIMIT_PATHS`) plus this count
+  // cap — the client's size-based batching is a convention on top (PLAN.md §1.7).
+  .refine(
+    (val) => {
+      const total = val.operations.inserts.length + val.operations.updates.length;
+      return total >= 1 && total <= MAX_IMPORT_ITEMS;
+    },
+    {
+      message: `operations must contain between 1 and ${String(MAX_IMPORT_ITEMS)} items`,
+      path: ['operations'],
+    },
+  );

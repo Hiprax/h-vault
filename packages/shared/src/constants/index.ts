@@ -40,6 +40,9 @@ export const MAX_ENCRYPTED_NAME_LENGTH = 1_000;
 export const MAX_ENCRYPTED_DATA_LENGTH = 500_000;
 export const MAX_NOTE_CONTENT_LENGTH = 50_000;
 export const MAX_RESTORE_DATA_LENGTH = 26_214_400;
+// Per-request byte budget the CLIENT batches an import against. It is a client
+// convention, not a server bound: the structured `operations` body is bounded
+// server-side by the global 2 MB body parser and by MAX_IMPORT_ITEMS.
 export const MAX_IMPORT_DATA_LENGTH = 1_048_576;
 // Client-side raw-import-file ceiling. Import parsing + encryption happen in the
 // browser, and the encrypted payload is split into batches each kept under

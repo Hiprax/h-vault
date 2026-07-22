@@ -171,20 +171,26 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
     it('should accept import requests through rate limiter middleware', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      const importData = JSON.stringify({
-        items: [sampleVaultItem({ encryptedName: 'rate-limit-import-test' })],
-      });
-
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [
+              sampleVaultItem({
+                encryptedName: 'rate-limit-import-test',
+                searchHash: 'a'.repeat(64),
+              }),
+            ],
+          },
+        });
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(1);
+      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
     });
 
     it('should still enforce auth before rate limiter on import', async () => {
@@ -194,7 +200,12 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
         .post('/api/v1/tools/import')
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: '{}' });
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [sampleVaultItem({ searchHash: 'a'.repeat(64) })],
+          },
+        });
 
       expect(res.status).toBe(401);
     });

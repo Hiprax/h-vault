@@ -21,9 +21,16 @@ const RETRY_DELAY_MS = 5000;
  * advertises. If `MONGODB_URI` requests `?replicaSet=<name>` but the server's
  * `hello` response carries no `setName` (or a different one), the runtime
  * `supportsTransactions()` check still returns true (it inspects the URI
- * option) but `session.withTransaction()` will throw at runtime — meaning
- * code paths silently fall back to non-transactional writes. Surface this
- * loudly at boot rather than letting it manifest as a partial-failure later.
+ * option) but `session.withTransaction()` will throw at runtime.
+ *
+ * Be precise about what happens then, because the obvious guess is wrong: NO
+ * caller catches that throw. `vaultController.bulkReEncrypt`,
+ * `folderController` and `toolsController.executeImportOperations` all take the
+ * transactional branch and let the error surface as a 500. There is no silent
+ * fallback — the non-transactional branch is reached only when
+ * `supportsTransactions()` is false. The request therefore fails closed,
+ * writing nothing, which is safe but total: the affected endpoints simply stop
+ * working. Surface this loudly at boot rather than letting it manifest later.
  */
 export async function verifyTopology(): Promise<void> {
   try {
@@ -45,7 +52,7 @@ export async function verifyTopology(): Promise<void> {
 
     if (!actualSetName) {
       logger.warn(
-        `MONGODB_URI requests replica set '${requestedReplicaSet}' but server reports topology without a setName — transactions disabled. Multi-document transactions will silently fall back to sequential writes; ensure rs.initiate() succeeded on the deployment.`,
+        `MONGODB_URI requests replica set '${requestedReplicaSet}' but server reports topology without a setName. Every transactional endpoint (vault-key rotation, folder reorder, import) will fail with a 500 rather than falling back, because the URI still advertises a replica set; ensure rs.initiate() succeeded on the deployment.`,
       );
     } else if (actualSetName !== requestedReplicaSet) {
       logger.warn(
@@ -159,8 +166,9 @@ export async function connectDatabase(): Promise<typeof mongoose> {
       });
 
       // Surface a warning if the URI advertises a replica set but the connected
-      // server doesn't expose one — otherwise transactional code silently falls
-      // back to sequential writes.
+      // server doesn't expose one. Nothing falls back in that case: every
+      // transactional endpoint throws at `withTransaction` and answers 500, so
+      // the boot-time warning is the only notice an operator gets.
       await verifyTopology();
 
       // In production, autoIndex is disabled so indexes must be created manually.

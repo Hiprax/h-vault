@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import axios from 'axios';
-import { MAX_IMPORT_ITEMS, MAX_IMPORT_DATA_LENGTH } from '@hvault/shared';
+import { MAX_ENCRYPTED_DATA_LENGTH, MAX_IMPORT_ITEMS, PASSWORD_HISTORY_MAX } from '@hvault/shared';
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
@@ -13,6 +13,9 @@ import {
   authHeader,
   sampleVaultItem,
   sampleFolder,
+  seedFolder,
+  seedItem,
+  rawItems,
   getCsrf as getCsrfBase,
 } from './helpers.js';
 import type { TestUser } from './helpers.js';
@@ -23,6 +26,58 @@ async function getCsrf(
 ): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
+}
+
+// ── Import payload builders ──────────────────────────────────────────
+// An import carries explicit `operations` — `inserts` plus `updates`, each
+// update naming the `_id` it targets. Conflict resolution happens on the client
+// (the match key lives inside the encrypted blob, so the server cannot compute
+// it), which makes the server a validated executor: it applies exactly what it
+// is handed. Every row below is built to satisfy the wire schema, so a 400 in
+// these tests is always the guard under test and never a malformed payload.
+
+/** A distinct, well-formed (lowercase hex, 64-char) searchHash per index. */
+function searchHashFor(index: number): string {
+  return index.toString(16).padStart(64, '0');
+}
+
+/** One `operations.inserts[]` row satisfying `importInsertItemSchema`. */
+function insertRow(
+  index: number,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return sampleVaultItem({
+    encryptedName: `imported-name-${String(index)}`,
+    encryptedData: `imported-data-${String(index)}`,
+    searchHash: searchHashFor(index),
+    ...overrides,
+  });
+}
+
+/** One `operations.updates[]` row satisfying `importUpdateItemSchema`. */
+function updateRow(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    encryptedName: 'updated-encrypted-name',
+    nameIv: 'updated-name-iv',
+    nameTag: 'updated-name-tag',
+    encryptedData: 'updated-encrypted-data',
+    dataIv: 'updated-data-iv',
+    dataTag: 'updated-data-tag',
+    searchHash: searchHashFor(4095),
+    ...overrides,
+  };
+}
+
+/** One bounded `passwordHistory` entry for an update row. */
+function historyEntry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    encryptedPassword: 'previous-password-ciphertext',
+    iv: 'history-iv',
+    tag: 'history-tag',
+    changedAt: new Date().toISOString(),
+    ...overrides,
+  };
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -261,19 +316,13 @@ describe('Tools routes', () => {
       const { csrfToken: csrfToken1, csrfCookie: csrfCookie1 } = await getCsrf(agent);
 
       // Import some data first
-      const importData = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'item-1' }),
-          sampleVaultItem({ encryptedName: 'item-2' }),
-        ],
-      });
-
-      await agent
+      const importRes = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken1)
         .set('Cookie', csrfCookie1)
-        .send({ format: 'json', data: importData });
+        .send({ format: 'json', operations: { inserts: [insertRow(1), insertRow(2)] } });
+      expect(importRes.status).toBe(201);
 
       // Now export (requires re-authentication)
       const { csrfToken: csrfToken2, csrfCookie: csrfCookie2 } = await getCsrf(agent);
@@ -295,30 +344,92 @@ describe('Tools routes', () => {
   // ── Import Vault ─────────────────────────────────────────────────
 
   describe('POST /api/v1/tools/import', () => {
-    it('should import items in JSON format', async () => {
+    it('inserts every row of an inserts-only request', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const importData = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'imported-item-1' }),
-          sampleVaultItem({ encryptedName: 'imported-item-2' }),
-          sampleVaultItem({ encryptedName: 'imported-item-3' }),
-        ],
-      });
 
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
+        .send({
+          format: 'json',
+          operations: { inserts: [insertRow(1), insertRow(2), insertRow(3)] },
+        });
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(3);
+      expect(res.body.data).toEqual({ insertedCount: 3, updatedCount: 0 });
+
+      const stored = await rawItems(user.id);
+      expect(stored.map((item) => item.encryptedName).sort()).toEqual([
+        'imported-name-1',
+        'imported-name-2',
+        'imported-name-3',
+      ]);
     });
 
-    it('should reject invalid JSON data', async () => {
+    it('rewrites content in place for an updates-only request and refreshes searchHash', async () => {
+      const existing = await seedItem(user.id, {
+        encryptedName: 'original-name',
+        encryptedData: 'original-data',
+        searchHash: searchHashFor(7),
+      });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ format: 'json', operations: { updates: [updateRow(String(existing._id))] } });
+
+      expect(res.status).toBe(201);
+      expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+
+      const stored = await rawItems(user.id);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.encryptedName).toBe('updated-encrypted-name');
+      expect(stored[0]!.encryptedData).toBe('updated-encrypted-data');
+      // An update replaces `encryptedName`, so the stored hash must follow it
+      // or it strands against the old name.
+      expect(stored[0]!.searchHash).toBe(searchHashFor(4095));
+    });
+
+    it('applies inserts and updates together in one mixed request', async () => {
+      const existing = await seedItem(user.id, { encryptedData: 'original-data' });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [insertRow(1), insertRow(2)],
+            updates: [updateRow(String(existing._id))],
+          },
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.data).toEqual({ insertedCount: 2, updatedCount: 1 });
+
+      const stored = await rawItems(user.id);
+      expect(stored).toHaveLength(3);
+      expect(stored.filter((item) => item.encryptedData === 'updated-encrypted-data')).toHaveLength(
+        1,
+      );
+    });
+
+    // The "reject invalid JSON data" and "reject JSON without items array" tests
+    // went with the `data` envelope they described: an import no longer carries a
+    // JSON STRING for the server to parse, so there is no parse step left to
+    // fail. The rejection that guards the same ground now is the one below — an
+    // old client's body is not the structured shape, so it never reaches the
+    // controller at all.
+    it('rejects the removed `data` envelope with a 400 and writes nothing', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
       const res = await agent
@@ -326,13 +437,36 @@ describe('Tools routes', () => {
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: 'not-valid-json{{{' });
+        .send({
+          format: 'json',
+          data: JSON.stringify({ items: [sampleVaultItem({ encryptedName: 'legacy-item' })] }),
+        });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
 
-    it('should reject JSON without items array', async () => {
+    it('rejects an insert row without a searchHash', async () => {
+      // Every non-import creation path writes a searchHash and the restore flow
+      // relies on its presence, so it is required on the wire rather than
+      // optional-and-hopefully-present.
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const { searchHash: _omitted, ...withoutHash } = insertRow(1);
+
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ format: 'json', operations: { inserts: [withoutHash] } });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('searchHash');
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('executes a schema-valid operations body and persists the insert verbatim', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
       const res = await agent
@@ -340,203 +474,155 @@ describe('Tools routes', () => {
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: JSON.stringify({ notItems: [] }) });
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [insertRow(9, { tags: ['work'], favorite: true })],
+          },
+        });
 
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+
+      // The row lands under the CALLER's id with its ciphertext and metadata
+      // intact — the response counts alone would not prove either.
+      const stored = await VaultItem.findOne({ userId: user.id }).lean();
+      expect(stored).not.toBeNull();
+      expect(stored!.encryptedName).toBe('imported-name-9');
+      expect(stored!.encryptedData).toBe('imported-data-9');
+      expect(stored!.searchHash).toBe(searchHashFor(9));
+      expect(stored!.tags).toEqual(['work']);
+      expect(stored!.favorite).toBe(true);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
     });
   });
 
   // ── Import Encryption Field Validation ──────────────────────────
 
   describe('POST /api/v1/tools/import - encryption field validation', () => {
-    it('should skip items with missing encryption fields and report skippedCount', async () => {
+    // The legacy envelope filtered malformed rows out silently and reported them
+    // in a `skippedCount`, which meant a client could believe an item had been
+    // imported that never was. Silent per-row skipping is gone: the six
+    // ciphertext fields are required on the wire, so ONE malformed row rejects
+    // the whole request and nothing is written. There is no `skippedCount` left
+    // to report — hence the shape assertions below rather than a count.
+    it('rejects the whole request when one row has empty encryption fields, writing nothing', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const importData = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'valid-item' }),
-          {
-            itemType: 'login',
-            encryptedData: '',
-            dataIv: '',
-            dataTag: '',
-            encryptedName: '',
-            nameIv: '',
-            nameTag: '',
-          },
-          {
-            itemType: 'login',
-            encryptedData: 'data',
-            dataIv: 'iv',
-            dataTag: 'tag',
-            encryptedName: '',
-            nameIv: '',
-            nameTag: '',
-          },
-        ],
-      });
 
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
-
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(1);
-      expect(res.body.data.skippedCount).toBe(2);
-      expect(res.body.message).toMatch(/skipped/i);
-    });
-
-    it('should reject import when all items have missing encryption fields', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const importData = JSON.stringify({
-        items: [
-          {
-            itemType: 'login',
-            encryptedData: '',
-            dataIv: '',
-            dataTag: '',
-            encryptedName: '',
-            nameIv: '',
-            nameTag: '',
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [
+              insertRow(1),
+              insertRow(2, { encryptedData: '', dataIv: '', dataTag: '' }),
+              insertRow(3),
+            ],
           },
-        ],
-      });
-
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
+        });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain('encryptedData');
+      // The well-formed siblings did not land either — import is all-or-nothing.
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
 
-    it('should import all items when all have valid encryption fields', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
+    it('rejects an update row with an empty ciphertext field, leaving the target untouched', async () => {
+      const existing = await seedItem(user.id, { encryptedData: 'original-data' });
 
-      const importData = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'all-valid-1' }),
-          sampleVaultItem({ encryptedName: 'all-valid-2' }),
-        ],
-      });
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: { updates: [updateRow(String(existing._id), { nameTag: '' })] },
+        });
+
+      expect(res.status).toBe(400);
+      const stored = await rawItems(user.id);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.encryptedData).toBe('original-data');
+    });
+
+    it('imports every row when all of them carry complete encryption fields', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
 
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
+        .send({ format: 'json', operations: { inserts: [insertRow(1), insertRow(2)] } });
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(2);
-      expect(res.body.data.skippedCount).toBe(0);
+      // The response reports exactly the two counts and nothing else.
+      expect(res.body.data).toEqual({ insertedCount: 2, updatedCount: 0 });
       expect(res.body.message).not.toMatch(/skipped/i);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(2);
     });
   });
 
-  // ── Non-JSON Import Formats ──────────────────────────────────────
+  // ── Source Formats ───────────────────────────────────────────────
 
-  describe('POST /api/v1/tools/import - non-JSON formats', () => {
-    it('should import items in bitwarden format', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
+  describe('POST /api/v1/tools/import - source formats', () => {
+    // The per-format tests (bitwarden / lastpass / keepass / csv, one `it` each)
+    // differed only in the string they put in `format` and are folded into the
+    // loop below, which now covers ALL eight values instead of four. The two
+    // "invalid JSON in bitwarden format" / "bitwarden without items array" tests
+    // went with the `data` envelope: there is no server-side parse step left for
+    // a format to fail at.
+    it('accepts every source format as already-encrypted operations and records it in the audit log', async () => {
+      // Import is zero-knowledge: parsing + encryption happen client-side, so
+      // every format arrives as the same structured `operations` payload.
+      // `format` is audit-only metadata and every value is handled identically.
+      const formats = [
+        'json',
+        'bitwarden',
+        'lastpass',
+        'keepass',
+        'chrome',
+        'firefox',
+        'onepassword',
+        'csv',
+      ] as const;
 
-      const importData = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'bitwarden-item-1' }),
-          sampleVaultItem({ encryptedName: 'bitwarden-item-2' }),
-        ],
-      });
-
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'bitwarden', data: importData });
-
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(2);
-    });
-
-    it('should import items in lastpass format', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const importData = JSON.stringify({
-        items: [sampleVaultItem({ encryptedName: 'lastpass-item-1' })],
-      });
-
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'lastpass', data: importData });
-
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(1);
-    });
-
-    it('should import items in keepass format', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const importData = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'keepass-item-1' }),
-          sampleVaultItem({ encryptedName: 'keepass-item-2' }),
-          sampleVaultItem({ encryptedName: 'keepass-item-3' }),
-        ],
-      });
-
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'keepass', data: importData });
-
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(3);
-    });
-
-    it('accepts each source format as already-encrypted items and records it in the audit log', async () => {
-      // Import is zero-knowledge: parsing + encryption happen client-side, so every
-      // format arrives as the same native `{ items: [...] }` envelope. `format` is
-      // audit-only metadata and every value is handled identically.
-      for (const format of ['chrome', 'firefox', 'onepassword', 'lastpass'] as const) {
+      for (const [index, format] of formats.entries()) {
         const { csrfToken, csrfCookie } = await getCsrf(agent);
-        const importData = JSON.stringify({
-          items: [sampleVaultItem({ encryptedName: `enc-${format}` })],
-        });
 
         const res = await agent
           .post('/api/v1/tools/import')
           .set('Authorization', authHeader(user.accessToken))
           .set('x-csrf-token', csrfToken)
           .set('Cookie', csrfCookie)
-          .send({ format, data: importData });
+          .send({ format, operations: { inserts: [insertRow(index)] } });
 
         expect(res.status, format).toBe(201);
-        expect(res.body.data.importedCount).toBe(1);
-
-        const auditEntry = await AuditLog.findOne({ userId: user.id, action: 'import' }).sort({
-          createdAt: -1,
-        });
-        expect(auditEntry).not.toBeNull();
-        expect((auditEntry!.metadata as Record<string, unknown>).format).toBe(format);
+        expect(res.body.data, format).toEqual({ insertedCount: 1, updatedCount: 0 });
       }
+
+      // One audit entry per request, each stamped with its own format and the
+      // default conflict strategy. Read as a set rather than by `createdAt` sort
+      // order, which is not deterministic within a millisecond.
+      const entries = await AuditLog.find({ userId: user.id, action: 'import' }).lean();
+      const metadata = entries.map((entry) => entry.metadata as Record<string, unknown>);
+      expect(metadata.map((meta) => meta.format).sort()).toEqual([...formats].sort());
+      expect(
+        metadata.every(
+          (meta) =>
+            meta.conflictStrategy === 'skip' && meta.insertedCount === 1 && meta.updatedCount === 0,
+        ),
+      ).toBe(true);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(formats.length);
     });
 
     it('rejects a raw plaintext CSV payload (the server never parses plaintext)', async () => {
@@ -552,27 +638,10 @@ describe('Tools routes', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
 
-    it('rejects a JSON payload whose items carry plaintext instead of ciphertext', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-      // Items with no encryption fields — a zero-knowledge server drops them all.
-      const importData = JSON.stringify({
-        items: [{ itemType: 'login', name: 'plain', username: 'alice', password: 's3cret' }],
-      });
-
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'bitwarden', data: importData });
-
-      expect(res.status).toBe(400);
-      expect(res.body.message).toContain('No valid items');
-    });
-
-    it('should reject invalid JSON in bitwarden format', async () => {
+    it('rejects insert rows carrying plaintext instead of ciphertext', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
       const res = await agent
@@ -580,13 +649,19 @@ describe('Tools routes', () => {
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'bitwarden', data: 'not-json{{' });
+        .send({
+          format: 'bitwarden',
+          operations: {
+            inserts: [{ itemType: 'login', name: 'plain', username: 'alice', password: 's3cret' }],
+          },
+        });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
 
-    it('should reject bitwarden format without items array', async () => {
+    it('rejects a format the enum does not know', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
       const res = await agent
@@ -594,31 +669,11 @@ describe('Tools routes', () => {
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'bitwarden', data: JSON.stringify({ folders: [] }) });
+        .send({ format: 'dashlane', operations: { inserts: [insertRow(1)] } });
 
       expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-    });
-
-    it('imports a csv-format payload of already-encrypted items via the single server path', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      // The server no longer parses CSV; a `csv` format simply carries encrypted
-      // items in the native `{ items: [...] }` envelope like every other format.
-      const importData = JSON.stringify({
-        items: [sampleVaultItem({ encryptedName: 'csv-fallback-item' })],
-      });
-
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'csv', data: importData });
-
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(1);
+      expect(res.body.message).toContain('format');
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
   });
 
@@ -782,7 +837,7 @@ describe('Tools routes', () => {
         action: 'export',
       });
 
-      expect(auditEntry).toBeDefined();
+      expect(auditEntry).not.toBeNull();
       const meta = auditEntry!.metadata as Record<string, unknown>;
       expect(typeof meta.itemCount).toBe('number');
       expect(typeof meta.folderCount).toBe('number');
@@ -1018,181 +1073,187 @@ describe('Tools routes', () => {
     it('should reject import exceeding the maximum item count with the count-cap error', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      // Build MAX_IMPORT_ITEMS + 1 items that are VALID (non-empty encrypted
-      // fields), so the ONLY guard that can reject them is the MAX_IMPORT_ITEMS
-      // request-size cap — not the "no valid items" filter (which would fire on
-      // the old empty-`{}` payload regardless of whether the count cap exists).
-      // itemType is omitted (defaults to 'login') to keep each row minimal so
-      // the serialized `data` blob stays under MAX_IMPORT_DATA_LENGTH (1 MB).
-      const minimalItem = {
+      // Build MAX_IMPORT_ITEMS + 1 rows that are otherwise VALID, so the ONLY
+      // guard that can reject them is the combined count bound — a malformed row
+      // would 400 regardless of whether that bound exists. Each row is kept as
+      // small as the schema allows so the body still clears the global 2 MB JSON
+      // parser and reaches Zod.
+      const minimalRow = {
+        itemType: 'login',
         encryptedData: 'a',
         dataIv: 'a',
         dataTag: 'a',
         encryptedName: 'a',
         nameIv: 'a',
         nameTag: 'a',
+        searchHash: searchHashFor(1),
       };
-      const items = Array.from({ length: MAX_IMPORT_ITEMS + 1 }, () => minimalItem);
-      const importData = JSON.stringify({ items });
-      // Sanity: the payload must reach the controller, not be rejected by the
-      // schema's data-length cap for the wrong reason.
-      expect(importData.length).toBeLessThanOrEqual(MAX_IMPORT_DATA_LENGTH);
+      const body = {
+        format: 'json',
+        operations: { inserts: Array.from({ length: MAX_IMPORT_ITEMS + 1 }, () => minimalRow) },
+      };
+      // Sanity: the payload must reach the schema, not be rejected by the body
+      // parser for the wrong reason.
+      expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(2 * 1024 * 1024);
 
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
+        .send(body);
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
-      // Assert the SPECIFIC guard fired. Removing the MAX_IMPORT_ITEMS block
-      // would let the per-user cap reject instead, with a DIFFERENT message —
-      // so this message match is what turns the mutation red.
-      expect(JSON.stringify(res.body)).toMatch(/maximum allowed item count/i);
+      // Assert the SPECIFIC guard fired. Removing the count refinement would let
+      // the per-user cap reject instead, with a DIFFERENT message — so this
+      // message match is what turns the mutation red.
+      expect(JSON.stringify(res.body)).toMatch(/operations must contain between 1 and/i);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('should reject an import that carries no operations at all', async () => {
+      // The other end of the same bound: a request with nothing to do is a
+      // caller defect, not a no-op success.
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ format: 'json', operations: { inserts: [], updates: [] } });
+
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toMatch(/operations must contain between 1 and/i);
+      expect(await AuditLog.countDocuments({ userId: user.id, action: 'import' })).toBe(0);
     });
   });
 
-  // ── Import Deduplication ────────────────────────────────────────
+  // ── Update Targets and Folder Ownership ─────────────────────────
+  // The deduplication tests that used to sit here — the `- deduplication`
+  // describe (skip / keep_both / overwrite outcomes) and the "export then
+  // import" round trip — are gone with the behavior they covered. The server no
+  // longer matches an incoming row against the vault by `searchHash` or
+  // `encryptedName`: it cannot, because the identity of a login is its site and
+  // username, both of which live inside the ciphertext. Resolution happens on
+  // the client, which sends the decisions it made as explicit inserts and
+  // updates. What replaces those tests is validation of the targets the client
+  // names — an update must resolve to a LIVE item the caller owns, or the whole
+  // request is refused.
 
-  describe('POST /api/v1/tools/import - deduplication', () => {
-    it('should skip duplicates when conflictStrategy is skip', async () => {
+  describe('POST /api/v1/tools/import - update targets and folder ownership', () => {
+    it('rejects an update naming another user’s item and writes nothing', async () => {
+      const other = await createTestUser();
+      const foreign = await seedItem(other.id, { encryptedData: 'foreign-data' });
+
       const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const items = [
-        sampleVaultItem({ encryptedName: 'dedup-1', searchHash: 'a'.repeat(64) }),
-        sampleVaultItem({ encryptedName: 'dedup-2', searchHash: 'b'.repeat(64) }),
-      ];
-
-      // First import
-      const importData1 = JSON.stringify({ items });
-      await agent
+      const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData1 });
-
-      // Second import with skip strategy (default)
-      const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf2)
-        .set('Cookie', cookie2)
-        .send({ format: 'json', data: importData1, conflictStrategy: 'skip' });
-
-      expect(res.status).toBe(201);
-      expect(res.body.data.duplicateCount).toBe(2);
-      expect(res.body.data.importedCount).toBe(0);
-    });
-
-    it('should import all when conflictStrategy is keep_both', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const items = [sampleVaultItem({ encryptedName: 'keep-1', searchHash: 'c'.repeat(64) })];
-      const importData = JSON.stringify({ items });
-
-      // First import
-      await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
-
-      // Second import with keep_both
-      const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf2)
-        .set('Cookie', cookie2)
-        .send({ format: 'json', data: importData, conflictStrategy: 'keep_both' });
-
-      expect(res.status).toBe(201);
-      expect(res.body.data.importedCount).toBe(1);
-    });
-
-    it('should overwrite existing when conflictStrategy is overwrite', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const items = [sampleVaultItem({ encryptedName: 'overwrite-1', searchHash: 'd'.repeat(64) })];
-      const importData = JSON.stringify({ items });
-
-      // First import
-      await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
-
-      // Second import with overwrite and updated data
-      const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-      const updatedItems = [
-        sampleVaultItem({ encryptedName: 'overwrite-1-updated', searchHash: 'd'.repeat(64) }),
-      ];
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf2)
-        .set('Cookie', cookie2)
         .send({
           format: 'json',
-          data: JSON.stringify({ items: updatedItems }),
-          conflictStrategy: 'overwrite',
+          operations: {
+            inserts: [insertRow(1)],
+            updates: [updateRow(String(foreign._id))],
+          },
+        });
+
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toMatch(/update target/i);
+
+      // The foreign row is untouched AND the accompanying insert never landed:
+      // validation precedes every write, so the request is all-or-nothing.
+      const foreignStored = await rawItems(other.id);
+      expect(foreignStored).toHaveLength(1);
+      expect(foreignStored[0]!.encryptedData).toBe('foreign-data');
+      expect(await rawItems(user.id)).toHaveLength(0);
+    });
+
+    it('rejects an update naming an id that does not exist', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: { updates: [updateRow('0123456789abcdef01234567')] },
+        });
+
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toMatch(/update target/i);
+      expect(await rawItems(user.id)).toHaveLength(0);
+    });
+
+    it('rejects an update naming a trashed item and leaves it in the trash unchanged', async () => {
+      const trashed = await seedItem(user.id, {
+        encryptedData: 'trashed-data',
+        deletedAt: new Date(),
+      });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ format: 'json', operations: { updates: [updateRow(String(trashed._id))] } });
+
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toMatch(/update target/i);
+
+      const stored = await rawItems(user.id);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.encryptedData).toBe('trashed-data');
+      expect(stored[0]!.deletedAt).toBeInstanceOf(Date);
+    });
+
+    it('strips a folderId the caller does not own from an insert but still imports the row', async () => {
+      const other = await createTestUser();
+      const foreignFolder = await seedFolder(other.id);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: { inserts: [insertRow(1, { folderId: String(foreignFolder._id) })] },
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.data.overwrittenCount).toBe(1);
-      expect(res.body.data.importedCount).toBe(1);
+      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+
+      // The row lands at the vault root rather than failing the import.
+      const stored = await rawItems(user.id);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.folderId).toBeUndefined();
     });
-  });
 
-  // ── Export then Import Deduplication ─────────────────────────────
+    it('keeps a folderId the caller does own', async () => {
+      const folder = await seedFolder(user.id);
 
-  describe('Export then Import deduplication', () => {
-    it('should skip duplicates when re-importing an export with default skip strategy', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      // Create items with searchHash via import
-      const items = [
-        sampleVaultItem({ encryptedName: 'export-test-1', searchHash: 'e'.repeat(64) }),
-        sampleVaultItem({ encryptedName: 'export-test-2', searchHash: 'f'.repeat(64) }),
-      ];
-      await agent
+      const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: JSON.stringify({ items }) });
+        .send({
+          format: 'json',
+          operations: { inserts: [insertRow(1, { folderId: String(folder._id) })] },
+        });
 
-      // Export the vault
-      const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-      const exportRes = await agent
-        .post('/api/v1/tools/export')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf2)
-        .set('Cookie', cookie2)
-        .send({ format: 'json', authHash: user.rawPassword });
-
-      expect(exportRes.status).toBe(200);
-      const exportedData = exportRes.body.data;
-
-      // Re-import the exported data (format=json, default conflictStrategy=skip)
-      const { csrfToken: csrf3, csrfCookie: cookie3 } = await getCsrf(agent);
-      const reimportRes = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf3)
-        .set('Cookie', cookie3)
-        .send({ format: 'json', data: JSON.stringify(exportedData) });
-
-      expect(reimportRes.status).toBe(201);
-      // Items with matching searchHash should be skipped
-      expect(reimportRes.body.data.duplicateCount).toBeGreaterThanOrEqual(2);
+      expect(res.status).toBe(201);
+      const stored = await rawItems(user.id);
+      expect(String(stored[0]!.folderId)).toBe(String(folder._id));
     });
   });
 
@@ -1214,13 +1275,16 @@ describe('Tools routes', () => {
     it('should return 401 for import without token', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
+      // The body is fully schema-valid, so a 401 here can only come from the
+      // auth guard — never from validation rejecting a malformed payload first.
       const res = await agent
         .post('/api/v1/tools/import')
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: '{}' });
+        .send({ format: 'json', operations: { inserts: [insertRow(1)] } });
 
       expect(res.status).toBe(401);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
   });
 
@@ -1230,49 +1294,50 @@ describe('Tools routes', () => {
     it('drops __proto__ pollution AND non-allowlisted schema fields on the insert path, leaving Object.prototype clean', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      // Two threats in one row on the fresh-INSERT path (no existing match):
-      //   1. `__proto__` (built into the raw JSON string so it survives as an
-      //      own property through JSON.parse) carrying isAdmin/role — the
+      // Two threats in one insert row:
+      //   1. `__proto__` (built into the raw JSON body so it survives as an own
+      //      property through JSON.parse) carrying isAdmin/role — the
       //      prototype-pollution vector.
       //   2. Top-level `deletedAt` + `sourceRefId`: REAL VaultItem schema paths
-      //      that the controller's EXPLICIT field-by-field construction never
-      //      copies. A regression that replaced that construction with a naive
+      //      that the controller's fixed `ALLOWED_ITEM_FIELDS` projection never
+      //      copies. A regression that replaced that projection with a naive
       //      `{ userId, ...item }` spread WOULD persist both (Mongoose casts
       //      deletedAt to a Date and stores sourceRefId), so asserting they are
-      //      absent turns that mutation red — the earlier tests asserted only
-      //      keys that no implementation could ever persist.
-      const base = sampleVaultItem({
+      //      absent turns that mutation red — asserting only keys no
+      //      implementation could ever persist would prove nothing.
+      const base = insertRow(1, {
         encryptedName: 'proto-insert-test',
         deletedAt: new Date('2020-01-01T00:00:00.000Z').toISOString(),
         sourceRefId: '0123456789abcdef01234567',
       });
-      const itemJson =
+      const rowJson =
         JSON.stringify(base).slice(0, -1) + ',"__proto__":{"isAdmin":true,"role":"superuser"}}';
-      const importData = `{"items":[${itemJson}]}`;
+      const rawBody = `{"format":"json","operations":{"inserts":[${rowJson}]}}`;
 
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: importData });
+        .set('Content-Type', 'application/json')
+        .send(rawBody);
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.importedCount).toBe(1);
+      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
 
       // Object.prototype must be untouched (prototype-pollution guard).
       expect(({} as Record<string, unknown>)['isAdmin']).toBeUndefined();
       expect(({} as Record<string, unknown>)['role']).toBeUndefined();
 
-      // The persisted row carries only the explicitly-constructed fields:
-      // neither the pollution keys nor the smuggled schema paths made it in.
-      const items = await VaultItem.find({ userId: user.id }).lean();
-      const saved = items.find(
-        (i) => (i as Record<string, unknown>).encryptedName === 'proto-insert-test',
-      );
-      expect(saved).not.toBeUndefined();
-      const savedRecord = saved as Record<string, unknown>;
+      // The persisted row carries only the allowlisted fields: neither the
+      // pollution keys nor the smuggled schema paths made it in.
+      const saved = await VaultItem.findOne({
+        userId: user.id,
+        encryptedName: 'proto-insert-test',
+      }).lean();
+      expect(saved).not.toBeNull();
+      const savedRecord = saved as unknown as Record<string, unknown>;
       expect(savedRecord['isAdmin']).toBeUndefined();
       expect(savedRecord['role']).toBeUndefined();
       // deletedAt was NOT written (item is a live, non-trashed row)…
@@ -1282,142 +1347,211 @@ describe('Tools routes', () => {
     });
   });
 
-  // ── Overwrite Validation: Mongoose validators must run on overwrite path ─
+  // ── Update path: bounds and the narrow write allowlist ──────────────
+  // An import update names the `_id` it rewrites, so these tests target a real
+  // pre-created item instead of relying on the server to find a match by name.
+  // An update writes CONTENT only: `ALLOWED_UPDATE_FIELDS` is deliberately
+  // narrower than the insert allowlist so an import can never silently
+  // reorganize or retype a vault the user has already curated.
 
-  describe('POST /api/v1/tools/import - overwrite validator enforcement', () => {
-    it('should reject overwrite with encryptedData exceeding the 500k maxlength', async () => {
+  describe('POST /api/v1/tools/import - update field enforcement', () => {
+    it('should reject an update with encryptedData exceeding the 500k ceiling', async () => {
+      const existing = await seedItem(user.id, {
+        encryptedName: 'update-validator',
+        encryptedData: 'original-data',
+        searchHash: searchHashFor(1),
+      });
+
       const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      // Seed an existing item that the overwrite path will target
-      const initial = [
-        sampleVaultItem({
-          encryptedName: 'overwrite-validator',
-          searchHash: '1'.repeat(64),
-        }),
-      ];
-      const seedRes = await agent
+      const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: JSON.stringify({ items: initial }) });
-      expect(seedRes.status).toBe(201);
-
-      // Build an overwrite payload that bumps encryptedData well past the
-      // 500_000 character schema limit. The total payload is under the 1MB
-      // import body cap so it reaches the controller's overwrite branch.
-      const oversized = sampleVaultItem({
-        encryptedName: 'overwrite-validator',
-        searchHash: '1'.repeat(64),
-        encryptedData: 'A'.repeat(600_000),
-      });
-
-      const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf2)
-        .set('Cookie', cookie2)
         .send({
           format: 'json',
           conflictStrategy: 'overwrite',
-          data: JSON.stringify({ items: [oversized] }),
+          operations: {
+            updates: [
+              updateRow(String(existing._id), {
+                encryptedData: 'A'.repeat(MAX_ENCRYPTED_DATA_LENGTH + 1),
+              }),
+            ],
+          },
         });
 
       expect(res.status).toBe(400);
 
-      // Existing item must be preserved unchanged — the failed validator
-      // must abort the write, not silently succeed with truncation.
-      const persisted = await VaultItem.findOne({
-        userId: user.id,
-        searchHash: '1'.repeat(64),
-      }).lean();
+      // The existing item must be preserved unchanged — the rejection must abort
+      // the write, not silently succeed with truncation.
+      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
       expect(persisted).not.toBeNull();
-      expect(persisted!.encryptedData).toBe(initial[0]!['encryptedData']);
+      expect(persisted!.encryptedData).toBe('original-data');
+      expect(persisted!.encryptedName).toBe('update-validator');
     });
 
-    it('should not persist disallowed fields (e.g. userId) on overwrite', async () => {
-      const { csrfToken, csrfCookie } = await getCsrf(agent);
+    it('should not let an update rewrite userId, tags, favorite or itemType', async () => {
+      const folder = await seedFolder(user.id);
+      const existing = await seedItem(user.id, {
+        itemType: 'note',
+        encryptedData: 'original-data',
+        tags: ['keep-me'],
+        favorite: true,
+        folderId: folder._id,
+      });
+      const spoofedUserId = '0123456789abcdef01234567';
 
-      const initial = [
-        sampleVaultItem({
-          encryptedName: 'overwrite-allowlist',
-          searchHash: '2'.repeat(64),
-        }),
-      ];
-      await agent
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data: JSON.stringify({ items: initial }) });
-
-      // Submit an overwrite with a spoofed userId; the allowlist must drop it.
-      const spoofedUserId = '0123456789abcdef01234567';
-      const spoofed = {
-        ...sampleVaultItem({
-          encryptedName: 'overwrite-allowlist',
-          searchHash: '2'.repeat(64),
-        }),
-        userId: spoofedUserId,
-      };
-
-      const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-      const res = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf2)
-        .set('Cookie', cookie2)
         .send({
           format: 'json',
           conflictStrategy: 'overwrite',
-          data: JSON.stringify({ items: [spoofed] }),
+          operations: {
+            updates: [
+              updateRow(String(existing._id), {
+                userId: spoofedUserId,
+                itemType: 'login',
+                tags: ['injected'],
+                favorite: false,
+                folderId: null,
+              }),
+            ],
+          },
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+
+      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      expect(persisted).not.toBeNull();
+      // The ciphertext WAS rewritten…
+      expect(persisted!.encryptedData).toBe('updated-encrypted-data');
+      // …but nothing outside the narrow update allowlist was.
+      expect(persisted!.userId.toString()).toBe(user.id);
+      expect(persisted!.userId.toString()).not.toBe(spoofedUserId);
+      expect(persisted!.itemType).toBe('note');
+      expect(persisted!.tags).toEqual(['keep-me']);
+      expect(persisted!.favorite).toBe(true);
+      expect(String(persisted!.folderId)).toBe(String(folder._id));
+    });
+
+    it('should reject a passwordHistory with more than the allowed number of entries', async () => {
+      const existing = await seedItem(user.id, { encryptedData: 'original-data' });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: {
+            updates: [
+              updateRow(String(existing._id), {
+                passwordHistory: Array.from({ length: PASSWORD_HISTORY_MAX + 1 }, () =>
+                  historyEntry(),
+                ),
+              }),
+            ],
+          },
+        });
+
+      expect(res.status).toBe(400);
+      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      expect(persisted).not.toBeNull();
+      expect(persisted!.encryptedData).toBe('original-data');
+      expect(persisted!.passwordHistory).toBeUndefined();
+    });
+
+    it('should reject an over-length passwordHistory entry', async () => {
+      const existing = await seedItem(user.id, { encryptedData: 'original-data' });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: {
+            updates: [
+              updateRow(String(existing._id), {
+                passwordHistory: [historyEntry({ encryptedPassword: 'x'.repeat(5_001) })],
+              }),
+            ],
+          },
+        });
+
+      expect(res.status).toBe(400);
+      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      expect(persisted).not.toBeNull();
+      expect(persisted!.encryptedData).toBe('original-data');
+      expect(persisted!.passwordHistory).toBeUndefined();
+    });
+
+    it('carries a bounded passwordHistory onto the updated item', async () => {
+      const existing = await seedItem(user.id, { encryptedData: 'original-data' });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: {
+            updates: [updateRow(String(existing._id), { passwordHistory: [historyEntry()] })],
+          },
         });
 
       expect(res.status).toBe(201);
 
-      const persisted = await VaultItem.findOne({
-        searchHash: '2'.repeat(64),
-      }).lean();
+      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
       expect(persisted).not.toBeNull();
-      expect(persisted!.userId.toString()).toBe(user.id);
-      expect(persisted!.userId.toString()).not.toBe(spoofedUserId);
+      expect(persisted!.passwordHistory).toHaveLength(1);
+      expect(persisted!.passwordHistory![0]!.encryptedPassword).toBe(
+        'previous-password-ciphertext',
+      );
     });
   });
 
   // ── Import field-length atomicity ───────────────────────────────────
-  // The shared importSchema only caps the whole `data` blob (1MB); per-item
-  // encrypted-field lengths are enforced by the VaultItem model. Without an
-  // up-front controller check, an over-length field trips a Mongoose validator
-  // only after the conflict loop has already overwritten earlier items — a
-  // partial, unaudited import. The controller now validates field lengths
-  // before any DB write so a bad item rejects the whole batch cleanly.
+  // Two layers agree on the per-field ceilings: the wire schema bounds each row
+  // (which is what rejects here) and `assertImportFieldLengths` re-checks both
+  // arrays in the controller before any DB work, so the guarantee survives if
+  // those wire bounds are ever loosened. What matters behaviorally is that ONE
+  // bad row takes the whole request down with nothing persisted and no audit
+  // entry — never a partial, half-applied import.
   describe('POST /api/v1/tools/import - field-length atomicity', () => {
     it('rejects the whole import (400) when one item has over-length encryptedData, inserting nothing and writing no audit log', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
-
-      const data = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'valid-1' }),
-          sampleVaultItem({ encryptedName: 'valid-2' }),
-          sampleVaultItem({
-            encryptedName: 'oversized-insert',
-            encryptedData: 'a'.repeat(500_001), // > MAX_ENCRYPTED_DATA_LENGTH (500_000)
-          }),
-          sampleVaultItem({ encryptedName: 'valid-3' }),
-        ],
-      });
 
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data });
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [
+              insertRow(1),
+              insertRow(2),
+              insertRow(3, { encryptedData: 'a'.repeat(MAX_ENCRYPTED_DATA_LENGTH + 1) }),
+              insertRow(4),
+            ],
+          },
+        });
 
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('encryptedData');
-      expect(res.body.message).toContain('exceeds the maximum length');
 
       // Nothing persisted — import is all-or-nothing.
       const count = await VaultItem.countDocuments({ userId: user.id });
@@ -1431,108 +1565,69 @@ describe('Tools routes', () => {
     it('rejects an over-length dataIv (400) before any write', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      const data = JSON.stringify({
-        items: [
-          sampleVaultItem({ encryptedName: 'valid-iv' }),
-          sampleVaultItem({ encryptedName: 'bad-iv', dataIv: 'x'.repeat(100) }), // > 24
-        ],
-      });
-
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
         .set('x-csrf-token', csrfToken)
         .set('Cookie', csrfCookie)
-        .send({ format: 'json', data });
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [insertRow(1), insertRow(2, { dataIv: 'x'.repeat(100) })], // > 24
+          },
+        });
 
       expect(res.status).toBe(400);
       expect(res.body.message).toContain('dataIv');
-      expect(res.body.message).toContain('exceeds the maximum length');
 
       const count = await VaultItem.countDocuments({ userId: user.id });
       expect(count).toBe(0);
     });
 
-    it('does not persist an earlier overwrite when a later item is over-length (overwrite path stays atomic)', async () => {
-      const targetHash = '3'.repeat(64);
-      const otherHash = '4'.repeat(64);
+    it('does not persist an earlier update when a later insert is over-length (mixed requests stay atomic)', async () => {
+      // Seed an item the request will update in place.
+      const existing = await seedItem(user.id, {
+        encryptedName: 'update-target',
+        searchHash: searchHashFor(3),
+        encryptedData: 'original-data',
+      });
 
-      // Seed an existing item that the overwrite path will target.
-      const { csrfToken: seedCsrf, csrfCookie: seedCookie } = await getCsrf(agent);
-      const seedRes = await agent
-        .post('/api/v1/tools/import')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', seedCsrf)
-        .set('Cookie', seedCookie)
-        .send({
-          format: 'json',
-          data: JSON.stringify({
-            items: [
-              sampleVaultItem({
-                encryptedName: 'overwrite-target',
-                searchHash: targetHash,
-                encryptedData: 'original-data',
-              }),
-            ],
-          }),
-        });
-      expect(seedRes.status).toBe(201);
-
-      // Overwrite batch: the FIRST item matches the seeded item by searchHash
-      // (so it is overwritten first); the SECOND is over-length. Without the
-      // up-front length check, the first overwrite persists before the throw —
-      // a partial import. With it, the whole batch rejects before any write.
-      const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
+      // The updates run AFTER the inserts inside the executor, but the length
+      // check runs before either — so an over-length insert must take the whole
+      // request down without the update ever being applied.
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
       const res = await agent
         .post('/api/v1/tools/import')
         .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf2)
-        .set('Cookie', cookie2)
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
         .send({
           format: 'json',
           conflictStrategy: 'overwrite',
-          data: JSON.stringify({
-            items: [
-              sampleVaultItem({
-                encryptedName: 'overwrite-target',
-                searchHash: targetHash,
-                encryptedData: 'updated-data',
-              }),
-              sampleVaultItem({
-                encryptedName: 'oversized-insert',
-                searchHash: otherHash,
-                encryptedData: 'a'.repeat(500_001),
-              }),
-            ],
-          }),
+          operations: {
+            inserts: [insertRow(4, { encryptedData: 'a'.repeat(MAX_ENCRYPTED_DATA_LENGTH + 1) })],
+            updates: [updateRow(String(existing._id))],
+          },
         });
 
       expect(res.status).toBe(400);
 
-      // The pre-existing item must be UNCHANGED — the earlier overwrite must
-      // not have been applied (red before the fix, green after).
-      const persisted = await VaultItem.findOne({
-        userId: user.id,
-        searchHash: targetHash,
-      }).lean();
+      // The pre-existing item must be UNCHANGED — the update must not have been
+      // applied ahead of the rejection.
+      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
       expect(persisted).not.toBeNull();
       expect(persisted!.encryptedData).toBe('original-data');
+      expect(persisted!.encryptedName).toBe('update-target');
 
-      // The over-length item must not have been inserted.
+      // The over-length row must not have been inserted, so only the seeded item
+      // remains and no `import` audit entry was written.
       const inserted = await VaultItem.findOne({
         userId: user.id,
-        searchHash: otherHash,
+        searchHash: searchHashFor(4),
       }).lean();
       expect(inserted).toBeNull();
-
-      // Only the originally-seeded item remains.
-      const count = await VaultItem.countDocuments({ userId: user.id });
-      expect(count).toBe(1);
-
-      // The seed import wrote one `import` audit log; the failed overwrite
-      // import must NOT have written a second one.
-      const auditCount = await AuditLog.countDocuments({ userId: user.id, action: 'import' });
-      expect(auditCount).toBe(1);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
+      expect(await AuditLog.countDocuments({ userId: user.id, action: 'import' })).toBe(0);
     });
   });
 });

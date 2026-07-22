@@ -854,15 +854,19 @@ describe('SettingsPage — error paths and branches', () => {
     expect(screen.getByPlaceholderText('Paste exported data here...')).toBeInTheDocument();
   });
 
-  it('reports duplicates handled alongside imported and skipped counts', async () => {
+  it('collapses byte-identical rows in one file and reports the full accounting', async () => {
+    // Two rows carrying the same ciphertext decrypt to the same content, so they
+    // are the same item listed twice: one is imported and the other is reported
+    // rather than silently duplicated. Every row is accounted for, and the
+    // counts sum to the number of rows the file held.
     mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { importedCount: 2, skippedCount: 1, duplicateCount: 3 } },
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
     });
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
-      target: { value: JSON.stringify({ items: [nativeItem] }) },
+      target: { value: JSON.stringify({ items: [nativeItem, { ...nativeItem }] }) },
     });
     fireEvent.change(screen.getByDisplayValue('Skip duplicates'), {
       target: { value: 'overwrite' },
@@ -873,10 +877,11 @@ describe('SettingsPage — error paths and branches', () => {
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith({
-        title: 'Imported 2 items, 3 duplicates handled, 1 skipped',
-        type: 'warning',
+        title: 'Imported 1 items, 1 duplicate rows in file (2 rows)',
+        type: 'success',
       });
     });
+    // The strategy is audit metadata now; it rides along unchanged.
     expect(mockImportVaultApi).toHaveBeenCalledWith(
       expect.objectContaining({ conflictStrategy: 'overwrite' }),
     );
@@ -886,7 +891,7 @@ describe('SettingsPage — error paths and branches', () => {
 
   it('parses a CSV via column mapping, encrypts client-side, and sends encrypted items (never plaintext or a mapping)', async () => {
     mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { importedCount: 1, skippedCount: 0 } },
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
     });
     await renderSettings();
 
@@ -910,20 +915,26 @@ describe('SettingsPage — error paths and branches', () => {
     await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
     const payload = mockImportVaultApi.mock.calls[0]?.[0] as {
       format: string;
-      data: string;
+      operations: { inserts: Record<string, string>[]; updates: unknown[] };
       conflictStrategy: string;
       csvMapping?: unknown;
+      data?: unknown;
     };
     expect(payload.format).toBe('csv');
     // The mapping is a client-side concern now; it is NOT sent to the server.
     expect(payload.csvMapping).toBeUndefined();
-    const sent = JSON.parse(payload.data) as { items: Record<string, string>[] };
-    expect(sent.items).toHaveLength(1);
+    // The retired `data` envelope is gone: operations are explicit.
+    expect(payload.data).toBeUndefined();
+    expect(payload.operations.inserts).toHaveLength(1);
+    expect(payload.operations.updates).toEqual([]);
     // Client-side encryption ran (mocked encryptData → `enc:<plain>`): the wire
     // payload carries ciphertext fields + a search hash, not raw columns.
-    expect(sent.items[0]?.encryptedData).toMatch(/^enc:/);
-    expect(sent.items[0]?.encryptedName).toMatch(/^enc:/);
-    expect(sent.items[0]?.searchHash).toMatch(/^sh:/);
+    expect(payload.operations.inserts[0]?.encryptedData).toMatch(/^enc:/);
+    expect(payload.operations.inserts[0]?.encryptedName).toMatch(/^enc:/);
+    expect(payload.operations.inserts[0]?.searchHash).toMatch(/^sh:/);
+    // The zero-knowledge property itself is asserted in settings-import-flow,
+    // where the crypto stub does not embed its input in its output — here the
+    // `enc:<plain>` stub would make such a check meaningless.
   });
 
   it('parses quoted CSV fields containing commas and escaped quotes as single cells', async () => {
@@ -941,23 +952,35 @@ describe('SettingsPage — error paths and branches', () => {
     expect(screen.getByText('Preview (1 of 1 rows)')).toBeInTheDocument();
   });
 
-  // An item that fails the shared schema is dropped by buildEncryptedImportItems.
+  // An item that fails the shared schema is dropped at the validation step.
   // Reporting only a count ("1 could not be converted") leaves the user unable to
   // tell WHICH entry was lost or why, and re-running the import cannot reveal it,
   // so the per-item reason must reach the toast.
+  //
+  // Over-long free-text/login fields (username, password, notes, URLs, custom
+  // fields) are now CLAMPED rather than dropped (fidelity-clamp), so they no
+  // longer trigger this path. A scalar, structured field with its own tight
+  // bound — a card `number` (max 30), read from a fixed source column — is left
+  // to the parser and still fails validation, which is the case exercised here.
   it('tells the user which item was skipped and why, not just how many', async () => {
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
-    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
-    // A URL past the shared `uri` cap (2048) fails validation for the whole item.
-    const longUrl = `https://example.com/${'a'.repeat(2100)}`;
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), {
+      target: { value: 'bitwarden' },
+    });
+    // A card number far past the shared `number` cap (30) fails validation for
+    // the whole item — that field is not clamped by import (see fidelity-clamp).
+    const overlong = JSON.stringify({
+      items: [{ type: 3, name: 'Overlong', card: { number: '4'.repeat(60) } }],
+    });
     fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
-      target: { value: `Name,URL\nOverlong,${longUrl}` },
+      target: { value: overlong },
     });
 
-    await waitFor(() => screen.getByText('Map CSV Columns'));
-    fireEvent.click(screen.getByRole('button', { name: 'Import', exact: true }));
+    await act(async () => {
+      fireEvent.click(screen.getByText('Import'));
+    });
 
     await waitFor(() =>
       expect(mockToast).toHaveBeenCalledWith(
@@ -970,7 +993,39 @@ describe('SettingsPage — error paths and branches', () => {
       .map(([arg]) => arg as { title: string; description?: string })
       .find((arg) => /could not be converted/i.test(arg.title));
     expect(call?.description).toMatch(/Overlong/);
-    expect(call?.description).toMatch(/uri/i);
+    expect(call?.description).toMatch(/number/i);
+  });
+
+  // The mirror of the case above: an over-long free-text field (here a URL well
+  // past the 2048 cap) is CLAMPED and the item still imports, rather than being
+  // dropped wholesale — the fidelity-clamp guarantee at the SettingsPage level.
+  it('imports an item with an over-long URL instead of dropping it (fidelity clamp)', async () => {
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
+    const longUrl = `https://example.com/${'a'.repeat(2100)}`;
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: `Name,URL\nOverlong,${longUrl}` },
+    });
+
+    await waitFor(() => screen.getByText('Map CSV Columns'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import', exact: true }));
+    });
+
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    // One encrypted item was sent (not skipped), and the success toast reports it.
+    const payload = mockImportVaultApi.mock.calls[0]?.[0] as {
+      operations: { inserts: unknown[] };
+    };
+    expect(payload.operations.inserts).toHaveLength(1);
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Imported 1 items', type: 'success' }),
+    );
   });
 
   // The preview shows 3 sample rows out of the file's true total. That total is

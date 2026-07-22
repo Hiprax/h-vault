@@ -222,39 +222,56 @@ describe('Auth middleware edge cases', () => {
 
 // ═══════════════════════════════════════════════════════════════════════
 // import — format coverage (toolsController)
+//
+// `format` is audit metadata: the browser parses the source file and sends
+// already-encrypted rows, so every source format travels the same code path and
+// the server acts on the label only when it writes the audit entry. The former
+// "invalid JSON" / "no items array" cases died with the `data` envelope the
+// server used to parse.
 // ═══════════════════════════════════════════════════════════════════════
 
 describe('import — format coverage', () => {
-  it('imports with bitwarden format (JSON-based)', async () => {
+  it('imports rows sent under a non-native format label and records it in the audit log', async () => {
     const user = await createTestUser();
     const { token: csrf, cookie } = await getCsrf();
-
-    const importData = JSON.stringify({
-      items: [
-        {
-          itemType: 'login',
-          encryptedData: 'enc-bw-1',
-          dataIv: 'iv-bw-1',
-          dataTag: 'tag-bw-1',
-          encryptedName: 'name-bw-1',
-          nameIv: 'niv-bw-1',
-          nameTag: 'ntag-bw-1',
-        },
-      ],
-    });
 
     const res = await request(app)
       .post('/api/v1/tools/import')
       .set('Authorization', authHeader(user.accessToken))
       .set('x-csrf-token', csrf)
       .set('Cookie', cookie)
-      .send({ format: 'bitwarden', data: importData });
+      .send({
+        format: 'bitwarden',
+        operations: {
+          inserts: [
+            {
+              itemType: 'login',
+              encryptedData: 'enc-bw-1',
+              dataIv: 'iv-bw-1',
+              dataTag: 'tag-bw-1',
+              encryptedName: 'name-bw-1',
+              nameIv: 'niv-bw-1',
+              nameTag: 'ntag-bw-1',
+              searchHash: 'a'.repeat(64),
+            },
+          ],
+        },
+      });
 
     expect(res.status).toBe(201);
-    expect(res.body.data.importedCount).toBe(1);
+    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+
+    const log = await AuditLog.findOne({ userId: user.id, action: 'import' }).lean();
+    expect(log).not.toBeNull();
+    expect(log!.metadata).toMatchObject({
+      format: 'bitwarden',
+      conflictStrategy: 'skip',
+      insertedCount: 1,
+      updatedCount: 0,
+    });
   });
 
-  it('rejects bitwarden format with invalid JSON', async () => {
+  it('rejects an unknown format label', async () => {
     const user = await createTestUser();
     const { token: csrf, cookie } = await getCsrf();
 
@@ -263,25 +280,27 @@ describe('import — format coverage', () => {
       .set('Authorization', authHeader(user.accessToken))
       .set('x-csrf-token', csrf)
       .set('Cookie', cookie)
-      .send({ format: 'bitwarden', data: 'not-json' });
+      .send({
+        format: 'protonpass',
+        operations: {
+          inserts: [
+            {
+              itemType: 'login',
+              encryptedData: 'enc-1',
+              dataIv: 'iv-1',
+              dataTag: 'tag-1',
+              encryptedName: 'name-1',
+              nameIv: 'niv-1',
+              nameTag: 'ntag-1',
+              searchHash: 'a'.repeat(64),
+            },
+          ],
+        },
+      });
 
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-  });
-
-  it('rejects bitwarden format without items array', async () => {
-    const user = await createTestUser();
-    const { token: csrf, cookie } = await getCsrf();
-
-    const res = await request(app)
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrf)
-      .set('Cookie', cookie)
-      .send({ format: 'lastpass', data: JSON.stringify({ data: 'no items' }) });
-
-    expect(res.status).toBe(400);
-    expect(res.body.success).toBe(false);
+    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
   });
 });
 
@@ -1272,30 +1291,32 @@ describe('Import folder ownership validation', () => {
     const user = await createTestUser();
     const { token: csrf, cookie } = await getCsrf();
 
-    const importData = JSON.stringify({
-      items: [
-        {
-          itemType: 'login',
-          encryptedData: 'enc-data',
-          dataIv: 'div',
-          dataTag: 'dtag',
-          encryptedName: 'enc-name',
-          nameIv: 'niv',
-          nameTag: 'ntag',
-          folderId: new mongoose.Types.ObjectId().toString(), // non-existent folder
-        },
-      ],
-    });
-
     const res = await request(app)
       .post('/api/v1/tools/import')
       .set('Authorization', authHeader(user.accessToken))
       .set('x-csrf-token', csrf)
       .set('Cookie', cookie)
-      .send({ format: 'json', data: importData });
+      .send({
+        format: 'json',
+        operations: {
+          inserts: [
+            {
+              itemType: 'login',
+              encryptedData: 'enc-data',
+              dataIv: 'div',
+              dataTag: 'dtag',
+              encryptedName: 'enc-name',
+              nameIv: 'niv',
+              nameTag: 'ntag',
+              searchHash: 'a'.repeat(64),
+              folderId: new mongoose.Types.ObjectId().toString(), // non-existent folder
+            },
+          ],
+        },
+      });
 
     expect(res.status).toBe(201);
-    expect(res.body.data.importedCount).toBe(1);
+    expect(res.body.data.insertedCount).toBe(1);
 
     // Verify the item was created without folderId
     const items = await VaultItem.find({ userId: user.id }).lean();

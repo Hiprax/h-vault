@@ -1,6 +1,6 @@
 /**
  * Tests for security fixes:
- * - Task 2.11: Import deduplication with encryptedName fallback after vault key rotation
+ * - Import operations: the server executes what it is handed and matches nothing
  * - Task 2.12: Folder parentId remapping during keep_both restore
  * - Task 3.1: Purpose-specific JWT signing keys (derivePurposeKey)
  * - Task 3.2: Reduced TOTP validation window (1 instead of 3)
@@ -18,6 +18,8 @@ import { CryptoManager } from '@hiprax/crypto';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { Folder } from '../src/models/Folder.js';
+import { VaultItem } from '../src/models/VaultItem.js';
+import { AuditLog } from '../src/models/AuditLog.js';
 import { derivePurposeKey } from '../src/utils/token.js';
 import { findMatchingBackupCodeIndex } from '../src/controllers/authController.js';
 import {
@@ -25,6 +27,7 @@ import {
   authHeader,
   sampleVaultItem,
   sampleFolder,
+  seedItem,
   deriveTestPurposeKey,
   generateStateHash,
   getCsrf as getCsrfBase,
@@ -42,143 +45,195 @@ async function getCsrf(
 }
 
 // =====================================================================
-// Task 2.11: Import deduplication with encryptedName fallback
+// Import operations: the server executes, it never matches
 // =====================================================================
+// Conflict resolution lives on the CLIENT — the match key for a login is its
+// site and username, both inside the encrypted blob — so the server applies
+// exactly the `inserts` and `updates` it is handed. These tests pin that down
+// from both sides: it must not invent a match of its own, and it must refuse
+// an update that names a row the caller does not own.
 
-describe('Task 2.11: Import deduplication after vault key rotation', () => {
+describe('Import operations: server-side execution without matching', () => {
   let user: TestUser;
   let agent: request.SuperTest<request.Test>;
+
+  const SEARCH_HASH = 'a'.repeat(64);
+
+  /** POSTs a structured import body with auth + a fresh CSRF pair. */
+  async function postImport(body: Record<string, unknown>): Promise<request.Response> {
+    const { csrfToken, csrfCookie } = await getCsrf(agent);
+    return agent
+      .post('/api/v1/tools/import')
+      .set('Authorization', authHeader(user.accessToken))
+      .set('x-csrf-token', csrfToken)
+      .set('Cookie', csrfCookie)
+      .send(body);
+  }
 
   beforeEach(async () => {
     agent = request(app) as unknown as request.SuperTest<request.Test>;
     user = await createTestUser();
   });
 
-  it('should detect duplicates by encryptedName when searchHash differs (post-rotation)', async () => {
-    const { csrfToken, csrfCookie } = await getCsrf(agent);
+  it('inserts a second row even when an existing item carries the same name and hash', async () => {
+    // The defect this contract replaces: the server used to collapse rows that
+    // shared a searchHash / encryptedName, so ten accounts on one site became
+    // one. An insert is now unconditional.
+    await seedItem(user.id, { encryptedName: 'same-name', searchHash: SEARCH_HASH });
 
-    // Create an existing item with searchHash-A (valid 64-char hex)
-    const items = [
-      sampleVaultItem({ encryptedName: 'same-encrypted-name', searchHash: 'a'.repeat(64) }),
-    ];
-    await agent
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrfToken)
-      .set('Cookie', csrfCookie)
-      .send({ format: 'json', data: JSON.stringify({ items }) });
-
-    // Import same item with different searchHash (simulating post-rotation) but same encryptedName
-    const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-    const rotatedItems = [
-      sampleVaultItem({ encryptedName: 'same-encrypted-name', searchHash: 'b'.repeat(64) }),
-    ];
-    const res = await agent
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrf2)
-      .set('Cookie', cookie2)
-      .send({
-        format: 'json',
-        data: JSON.stringify({ items: rotatedItems }),
-        conflictStrategy: 'skip',
-      });
+    const res = await postImport({
+      format: 'json',
+      conflictStrategy: 'skip',
+      operations: {
+        inserts: [sampleVaultItem({ encryptedName: 'same-name', searchHash: SEARCH_HASH })],
+      },
+    });
 
     expect(res.status).toBe(201);
-    expect(res.body.data.duplicateCount).toBe(1);
-    expect(res.body.data.importedCount).toBe(0);
+    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(2);
   });
 
-  it('should overwrite by encryptedName when searchHash differs', async () => {
-    const { csrfToken, csrfCookie } = await getCsrf(agent);
+  it('treats conflictStrategy as audit metadata rather than an instruction', async () => {
+    const existing = await seedItem(user.id, {
+      encryptedName: 'overwrite-target',
+      searchHash: SEARCH_HASH,
+    });
 
-    const items = [
-      sampleVaultItem({ encryptedName: 'overwrite-target', searchHash: 'c'.repeat(64) }),
-    ];
-    await agent
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrfToken)
-      .set('Cookie', csrfCookie)
-      .send({ format: 'json', data: JSON.stringify({ items }) });
-
-    // Overwrite with different searchHash but same encryptedName
-    const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-    const updatedItems = [
-      sampleVaultItem({
-        encryptedName: 'overwrite-target',
-        searchHash: 'd'.repeat(64),
-        encryptedData: 'updated-data',
-      }),
-    ];
-    const res = await agent
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrf2)
-      .set('Cookie', cookie2)
-      .send({
-        format: 'json',
-        data: JSON.stringify({ items: updatedItems }),
-        conflictStrategy: 'overwrite',
-      });
+    const res = await postImport({
+      format: 'bitwarden',
+      conflictStrategy: 'overwrite',
+      operations: {
+        inserts: [
+          sampleVaultItem({
+            encryptedName: 'overwrite-target',
+            searchHash: SEARCH_HASH,
+            encryptedData: 'incoming-data',
+          }),
+        ],
+      },
+    });
 
     expect(res.status).toBe(201);
-    expect(res.body.data.overwrittenCount).toBe(1);
+    // 'overwrite' overwrote nothing: the existing row is untouched and the
+    // incoming one was added beside it.
+    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    const untouched = await VaultItem.findById(String(existing._id)).lean();
+    expect(untouched).not.toBeNull();
+    expect(untouched!.encryptedData).toBe(sampleVaultItem().encryptedData);
+    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(2);
+
+    // It is still recorded, so an operator can see which strategy the client ran.
+    const log = await AuditLog.findOne({ userId: user.id, action: 'import' }).lean();
+    expect(log).not.toBeNull();
+    expect(log!.metadata).toMatchObject({
+      format: 'bitwarden',
+      conflictStrategy: 'overwrite',
+      insertedCount: 1,
+      updatedCount: 0,
+    });
   });
 
-  it('should still match by searchHash when both hash and name match', async () => {
-    const { csrfToken, csrfCookie } = await getCsrf(agent);
+  it('applies an update to the id it names and leaves the vault organization alone', async () => {
+    const existing = await seedItem(user.id, {
+      encryptedName: 'original-name',
+      encryptedData: 'original-data',
+      searchHash: SEARCH_HASH,
+      tags: ['keep-me'],
+      favorite: true,
+    });
 
-    const hash = 'e'.repeat(64);
-    const items = [sampleVaultItem({ encryptedName: 'hash-match', searchHash: hash })];
-    await agent
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrfToken)
-      .set('Cookie', csrfCookie)
-      .send({ format: 'json', data: JSON.stringify({ items }) });
-
-    const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-    const res = await agent
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrf2)
-      .set('Cookie', cookie2)
-      .send({ format: 'json', data: JSON.stringify({ items }), conflictStrategy: 'skip' });
+    const res = await postImport({
+      format: 'json',
+      operations: {
+        updates: [
+          {
+            id: String(existing._id),
+            encryptedName: 'rewritten-name',
+            nameIv: 'new-name-iv',
+            nameTag: 'new-name-tag',
+            encryptedData: 'rewritten-data',
+            dataIv: 'new-data-iv',
+            dataTag: 'new-data-tag',
+            searchHash: 'b'.repeat(64),
+            // An import updates CONTENT only. These must not reach the row.
+            tags: ['injected'],
+            favorite: false,
+            itemType: 'note',
+          },
+        ],
+      },
+    });
 
     expect(res.status).toBe(201);
-    expect(res.body.data.duplicateCount).toBe(1);
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+
+    const persisted = await VaultItem.findById(String(existing._id)).lean();
+    expect(persisted).not.toBeNull();
+    expect(persisted!.encryptedName).toBe('rewritten-name');
+    expect(persisted!.encryptedData).toBe('rewritten-data');
+    expect(persisted!.searchHash).toBe('b'.repeat(64));
+    expect(persisted!.tags).toEqual(['keep-me']);
+    expect(persisted!.favorite).toBe(true);
+    expect(persisted!.itemType).toBe('login');
+    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
   });
 
-  it('should import unique items when neither hash nor name matches', async () => {
-    const { csrfToken, csrfCookie } = await getCsrf(agent);
+  it("rejects an update naming another account's item and writes nothing", async () => {
+    const victim = await createTestUser();
+    const victimItem = await seedItem(victim.id, { encryptedName: 'victim-secret' });
 
-    const items = [sampleVaultItem({ encryptedName: 'existing-item', searchHash: 'f'.repeat(64) })];
-    await agent
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrfToken)
-      .set('Cookie', csrfCookie)
-      .send({ format: 'json', data: JSON.stringify({ items }) });
+    const res = await postImport({
+      format: 'json',
+      operations: {
+        inserts: [sampleVaultItem({ searchHash: SEARCH_HASH })],
+        updates: [
+          {
+            ...sampleVaultItem({ encryptedName: 'stolen' }),
+            id: String(victimItem._id),
+            searchHash: SEARCH_HASH,
+          },
+        ],
+      },
+    });
 
-    const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
-    const newItems = [
-      sampleVaultItem({ encryptedName: 'completely-new-item', searchHash: '0'.repeat(64) }),
-    ];
-    const res = await agent
-      .post('/api/v1/tools/import')
-      .set('Authorization', authHeader(user.accessToken))
-      .set('x-csrf-token', csrf2)
-      .set('Cookie', cookie2)
-      .send({
-        format: 'json',
-        data: JSON.stringify({ items: newItems }),
-        conflictStrategy: 'skip',
-      });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/do not belong to you/i);
 
-    expect(res.status).toBe(201);
-    expect(res.body.data.importedCount).toBe(1);
-    expect(res.body.data.duplicateCount).toBe(0);
+    const untouched = await VaultItem.findById(String(victimItem._id)).lean();
+    expect(untouched).not.toBeNull();
+    expect(untouched!.encryptedName).toBe('victim-secret');
+    expect(String(untouched!.userId)).toBe(victim.id);
+    // The rejection is atomic: the insert that rode along was not applied.
+    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+  });
+
+  it('rejects an update whose target is in the trash instead of resurrecting it', async () => {
+    const trashed = await seedItem(user.id, {
+      encryptedName: 'trashed-item',
+      deletedAt: new Date(),
+    });
+
+    const res = await postImport({
+      format: 'json',
+      operations: {
+        updates: [
+          {
+            ...sampleVaultItem({ encryptedName: 'revived' }),
+            id: String(trashed._id),
+            searchHash: SEARCH_HASH,
+          },
+        ],
+      },
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/trash/i);
+
+    const persisted = await VaultItem.findById(String(trashed._id)).lean();
+    expect(persisted).not.toBeNull();
+    expect(persisted!.encryptedName).toBe('trashed-item');
+    expect(persisted!.deletedAt).toBeInstanceOf(Date);
   });
 });
 

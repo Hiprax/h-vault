@@ -1,0 +1,327 @@
+/**
+ * Import identity — the key that decides whether an incoming item and an item
+ * already in the vault are "the same item".
+ *
+ * Identity is computed CLIENT-SIDE, in memory, from DECRYPTED content. It is
+ * never transmitted and never stored: the match key for a login is its site and
+ * its username, both of which live inside the encrypted blob, so the server
+ * physically cannot compute it. Matching on the item NAME — which is what the
+ * server used to do — collapses ten different accounts on one site into one
+ * item, because the name is a display label a user may edit or a parser may
+ * derive, not an identity.
+ *
+ * Two shapes of key exist:
+ *
+ *   `login\0<host>\0<username>` — a login with BOTH a resolvable host AND a
+ *     non-empty username. Accounts on one site are told apart by username, so
+ *     ten `accounts.google.com` logins stay ten items, while an `overwrite`
+ *     import can still update a changed password for the same account.
+ *
+ *   `<itemType>\0<sha256hex>` — everything else: the exact-content hash of
+ *     `canonicalJson({ name, data })`.
+ *
+ * A weak logical key always falls back to the strict one. "Same site, no
+ * username" would merge every account-less entry on that site, so a login
+ * missing either half is matched on exact content instead. Unrelated items can
+ * then never be merged, and the worst case is an extra insert — never lost data.
+ *
+ * The item type is part of every key, so matching can never cross item types.
+ *
+ * NUL is the field separator: a host cannot contain one, so `host="a b",
+ * username="c"` cannot collide with `host="a", username="b c"`.
+ *
+ * The module is deliberately pure — no account key material, no store, no
+ * network, no server import — so it is exhaustively testable and safe to call
+ * from anywhere in the import pipeline.
+ */
+
+import { normalizeUri, vaultItemDataSchemas } from '@hvault/shared';
+import type { ItemType } from '@hvault/shared';
+
+/** Field separator. Cannot occur in a normalized host, so keys are unambiguous. */
+const SEP = '\u0000';
+
+const textEncoder = new TextEncoder();
+
+export interface ItemIdentityInput {
+  itemType: ItemType;
+  /** Decrypted display name. */
+  name: string;
+  /** Decrypted item data — raw from a parser or already schema-transformed. */
+  data: Record<string, unknown>;
+}
+
+/**
+ * Deterministic JSON serialization: object keys sorted, every string
+ * NFC-normalized, array order preserved.
+ *
+ * Determinism across devices, runs and browsers is what makes re-importing the
+ * same file a no-op, so nothing here may depend on property insertion order or
+ * on a Unicode composition form. Keys that canonicalize to `undefined` are
+ * dropped, exactly as `JSON.stringify` would drop them.
+ *
+ * Precondition: the value is JSON-representable — strings, numbers, booleans,
+ * `null`, arrays and plain objects. That holds for every caller, because item
+ * data is either `JSON.parse`d from decrypted ciphertext or built by an import
+ * parser. A `Date`/`Map`/`Set` would canonicalize to `{}` and a `bigint` would
+ * make `JSON.stringify` throw, so do not feed one in.
+ */
+export function canonicalJson(value: unknown): string {
+  const canonical = canonicalize(value);
+  // `JSON.stringify` returns `undefined` (not a string) for a top-level
+  // `undefined`; keep the signature honest rather than leaking that out.
+  return canonical === undefined ? 'null' : JSON.stringify(canonical);
+}
+
+/**
+ * Reduce a URI to the host it identifies, or `''` when it has none.
+ *
+ * Steps, in this exact order: the shared `normalizeUri` (so a bare domain
+ * becomes `https://…`, the same transform `uriEntrySchema` applies), then
+ * `new URL(...).hostname`, NFC, lowercase, strip ONE leading `www.`, strip a
+ * trailing `.`.
+ *
+ * A `mailto:` address, a malformed value, or anything that throws returns `''`,
+ * which demotes the item to exact-content matching rather than merging it with
+ * something unrelated. A URI naming a PATTERN rather than a site never reaches
+ * here — {@link siteUri} withholds it (see there for why).
+ *
+ * Stripping `www.` is deliberate: `www.amazon.com` and `amazon.com` are the
+ * same site and two password managers commonly disagree about the prefix.
+ */
+export function normalizeHost(rawUri: string): string {
+  const trimmed = rawUri.trim();
+  if (!trimmed) return '';
+
+  const normalized = normalizeUri(trimmed);
+  // `new URL` does not reject these two classes — it silently REWRITES them,
+  // which is worse, because the result looks like a perfectly ordinary host.
+  // For a special scheme a backslash terminates the authority, so
+  // `https://foo\bar.com` parses as host `foo`; and ASCII tab/CR/LF are
+  // stripped before parsing, so `https://ac<TAB>counts.example.com` splices
+  // into `accounts.example.com`. Either way the host is a fragment of, or a
+  // splice of, something the user never wrote — and two unrelated logins can
+  // land on one of them, which is exactly the false merge a logical key must
+  // never produce. A real authority contains none of these characters, so
+  // refuse rather than match on a value the parser rewrote.
+  if (AUTHORITY_REWRITING_CHARS.test(authorityOf(normalized))) return '';
+
+  let host: string;
+  try {
+    host = new URL(normalized).hostname;
+  } catch {
+    return '';
+  }
+
+  host = host.normalize('NFC').toLowerCase();
+  if (host.startsWith('www.')) host = host.slice(4);
+  if (host.endsWith('.')) host = host.slice(0, -1);
+  return host;
+}
+
+/**
+ * Reduce a username to its comparable form: NFC, trimmed, lowercased.
+ *
+ * Lowercasing is deliberate — email-style usernames are case-insensitive in
+ * practice, and a case-only difference almost always means the same account
+ * exported twice. `toLowerCase` (not `toLocaleLowerCase`) keeps the result
+ * independent of the device locale.
+ *
+ * A non-string value yields `''`, which demotes the item to exact-content
+ * matching.
+ */
+export function normalizeUsername(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.normalize('NFC').trim().toLowerCase();
+}
+
+/**
+ * Compute the identity key for one item.
+ *
+ * The data is run through `vaultItemDataSchemas[itemType]` HERE, and the parsed
+ * OUTPUT is what gets hashed. This is load-bearing, not a convenience: an item
+ * already in the vault was stored through that same schema, so its `uris[].uri`
+ * has been through `normalizeUri` and its optional fields have been defaulted
+ * and stripped. Hashing incoming data before validation would make a source row
+ * carrying `amazon.com` hash differently from the stored `https://amazon.com`
+ * for the very same account, and re-importing a file would silently duplicate
+ * every item. Deriving the parse internally also means callers need not care
+ * whether they hold pre- or post-validation data, and an item typed into the UI
+ * form hashes identically to the same item arriving from an import.
+ *
+ * When validation fails the raw object is hashed instead, so an item is still
+ * given a stable key rather than being dropped.
+ *
+ * Known limitation, accepted: the host comes from the FIRST URI only. If one
+ * export lists `login.example.com` first and another lists `example.com` first
+ * for the same account, the keys differ and the item is inserted rather than
+ * matched — a false SPLIT (a duplicate), never a false merge, so it cannot lose
+ * data. Widening the key to any-host would merge two accounts that legitimately
+ * share a secondary domain.
+ */
+export async function computeItemIdentity(input: ItemIdentityInput): Promise<string> {
+  const { itemType, name } = input;
+  const data = schemaValidated(itemType, input.data);
+
+  const logical = logicalLoginKey(itemType, data);
+  if (logical !== undefined) return logical;
+
+  // Non-logical items (and logins missing a discriminating half) hash to their
+  // exact content; this branch never computes the hash for a logical login.
+  return contentKeyFrom(itemType, name, data);
+}
+
+/**
+ * The exact-content key for an item: `<itemType>\0<sha256hex>` of the canonical
+ * JSON of its schema-validated `{ name, data }`. This is the SAME key
+ * `computeItemIdentity` returns for a non-logical item, exposed on its own so a
+ * caller can decide whether two items that share a LOGICAL key (e.g. a login's
+ * host+username) also have identical content — which is what the resolver needs
+ * to tell an `overwrite` that must write from one that is already a no-op, and
+ * to collapse only truly byte-identical intra-file duplicates.
+ */
+export async function computeContentKey(input: ItemIdentityInput): Promise<string> {
+  const data = schemaValidated(input.itemType, input.data);
+  return contentKeyFrom(input.itemType, input.name, data);
+}
+
+/**
+ * Compute BOTH the identity key and the exact-content key in a single pass,
+ * validating the data only once. For a logical login the two differ (a
+ * host+username identity vs a content hash); for everything else they are
+ * identical. The resolver computes both keys for every item, so this avoids a
+ * redundant second schema parse per item.
+ */
+export async function computeItemKeys(
+  input: ItemIdentityInput,
+): Promise<{ identityKey: string; contentKey: string }> {
+  const { itemType, name } = input;
+  const data = schemaValidated(itemType, input.data);
+  const contentKey = await contentKeyFrom(itemType, name, data);
+  const logical = logicalLoginKey(itemType, data);
+  return { identityKey: logical ?? contentKey, contentKey };
+}
+
+/**
+ * The first URI of a login IF it names a concrete site, else `''`.
+ *
+ * Tolerates both the stored shape (`{ uri, match }`) and a bare string, so
+ * pre-validation parser output works too. A bare string carries no match type
+ * and is therefore treated as a plain URI, which is what every parser produces
+ * (`toUriEntry` always stamps `match: 'domain'`).
+ *
+ * A `match: 'regex'` entry is deliberately withheld. `uriEntrySchema` stores a
+ * regex VERBATIM and exempts it from the http/https/mailto check, so it is the
+ * one value in a schema-valid login that is a PATTERN rather than an address —
+ * and a pattern names no single site. Feeding one to `normalizeHost` does not
+ * fail loudly: `https://accounts\.google\.com/.*` parses to the host
+ * `accounts`, so a Google and an Okta login sharing a username would collapse
+ * onto one identity key and `overwrite` would replace one with the other. A
+ * pattern therefore demotes the item to exact-content matching, exactly as a
+ * missing host does.
+ *
+ * Shared with the vault list's subtitle (`lib/vaultDisplay.ts`) on purpose: the
+ * label a user reads to tell two rows apart must be derived from the SAME URI
+ * that decides the item's logical identity, or the list would distinguish rows
+ * on one host while the importer matched them on another.
+ */
+export function siteUri(data: Record<string, unknown>): string {
+  const uris = data.uris;
+  if (!Array.isArray(uris)) return '';
+  const first: unknown = uris[0];
+  if (typeof first === 'string') return first;
+  if (!isRecord(first) || typeof first.uri !== 'string') return '';
+  if (first.match === 'regex') return '';
+  return first.uri;
+}
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+/**
+ * The logical login key `login\0<host>\0<username>`, or `undefined` when the
+ * item is not a login or is missing a discriminating half. A key with only one
+ * half would merge every account-less entry on a site, so it is not used.
+ */
+function logicalLoginKey(itemType: ItemType, data: Record<string, unknown>): string | undefined {
+  if (itemType !== 'login') return undefined;
+  const host = normalizeHost(siteUri(data));
+  const username = normalizeUsername(data.username);
+  if (host && username) return `login${SEP}${host}${SEP}${username}`;
+  return undefined;
+}
+
+async function contentKeyFrom(
+  itemType: ItemType,
+  name: string,
+  data: Record<string, unknown>,
+): Promise<string> {
+  return `${itemType}${SEP}${await sha256Hex(canonicalJson({ name, data }))}`;
+}
+
+function schemaValidated(
+  itemType: ItemType,
+  data: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = vaultItemDataSchemas[itemType].safeParse(data);
+  if (!result.success) return data;
+  return isRecord(result.data) ? result.data : data;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (typeof value === 'string') return value.normalize('NFC');
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!isRecord(value)) return value;
+
+  const entries = Object.entries(value)
+    .map(([key, entryValue]) => [key.normalize('NFC'), entryValue] as const)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+
+  // A null-prototype accumulator, so a `__proto__` key is stored as DATA. On a
+  // plain object literal `out['__proto__'] = …` hits the inherited accessor,
+  // sets the prototype and creates no own property, and the field vanishes from
+  // the serialization — two items differing only there would hash identically.
+  // `JSON.parse` does produce an own `__proto__` property, so decrypted data
+  // that failed schema validation can carry one.
+  const out = Object.create(null) as Record<string, unknown>;
+  for (const [key, entryValue] of entries) {
+    const canonical = canonicalize(entryValue);
+    if (canonical !== undefined) out[key] = canonical;
+  }
+  return out;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Characters the URL parser rewrites the authority around instead of rejecting:
+ * a backslash (an authority terminator for a special scheme) and the ASCII
+ * tab/CR/LF it strips before parsing. See {@link normalizeHost}.
+ */
+const AUTHORITY_REWRITING_CHARS = /[\\\t\n\r]/;
+
+/**
+ * The authority of an already-normalized URI — everything between `//` and the
+ * first `/`, `?` or `#`, or the whole remainder when it has none.
+ *
+ * Scoped to the authority on purpose: a backslash in a PATH is harmless (the
+ * host is already decided by then), and demoting such a URI would cost a
+ * legitimate match for nothing. A schemeless value has no `//` after
+ * `normalizeUri` only when it carried an opaque scheme like `mailto:`, which
+ * yields an empty hostname and is demoted by the emptiness check anyway.
+ */
+function authorityOf(normalized: string): string {
+  const separator = normalized.indexOf('//');
+  const rest = separator >= 0 ? normalized.slice(separator + 2) : normalized;
+  return rest.split(/[/?#]/, 1)[0] ?? '';
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  // `cryptoService`'s constructor already fails fast when SubtleCrypto is
+  // missing, so a second guard here would be unreachable.
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', textEncoder.encode(input));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}

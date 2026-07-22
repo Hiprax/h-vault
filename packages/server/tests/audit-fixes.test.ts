@@ -26,6 +26,7 @@ import { heavyOpLimiter } from '../src/middleware/rateLimiter.js';
 import { permanentDelete } from '../src/controllers/vaultController.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { User } from '../src/models/User.js';
+import { VaultItem } from '../src/models/VaultItem.js';
 import { createTestUser, authHeader, sampleVaultItem, getCsrf } from './helpers.js';
 import type { TestUser, CsrfPair } from './helpers.js';
 
@@ -226,45 +227,49 @@ describe('Task 2.8: Import validates itemType', () => {
     csrf = await getCsrf(agent);
   });
 
-  it('should skip items with invalid itemType during JSON import', async () => {
-    const importData = JSON.stringify({
-      items: [
-        {
-          itemType: 'INVALID_TYPE',
-          encryptedData: 'data',
-          dataIv: 'iv',
-          dataTag: 'tag',
-          encryptedName: 'name',
-          nameIv: 'niv',
-          nameTag: 'ntag',
-        },
-        {
-          itemType: 'login',
-          encryptedData: 'data2',
-          dataIv: 'iv2',
-          dataTag: 'tag2',
-          encryptedName: 'name2',
-          nameIv: 'niv2',
-          nameTag: 'ntag2',
-        },
-      ],
-    });
-
+  it('should reject the whole import when a row carries an invalid itemType', async () => {
     const res = await withCsrf(
-      agent.post(`${API}/tools/import`).send({ format: 'json', data: importData }),
+      agent.post(`${API}/tools/import`).send({
+        format: 'json',
+        operations: {
+          inserts: [
+            {
+              itemType: 'INVALID_TYPE',
+              encryptedData: 'data',
+              dataIv: 'iv',
+              dataTag: 'tag',
+              encryptedName: 'name',
+              nameIv: 'niv',
+              nameTag: 'ntag',
+              searchHash: 'a'.repeat(64),
+            },
+            {
+              itemType: 'login',
+              encryptedData: 'data2',
+              dataIv: 'iv2',
+              dataTag: 'tag2',
+              encryptedName: 'name2',
+              nameIv: 'niv2',
+              nameTag: 'ntag2',
+              searchHash: 'b'.repeat(64),
+            },
+          ],
+        },
+      }),
       csrf,
       user.accessToken,
     );
 
-    expect(res.status).toBe(201);
-    expect(res.body.success).toBe(true);
-    // Only the valid 'login' item should be imported; invalid type is filtered out
-    expect(res.body.data.importedCount).toBe(1);
+    // `itemType` is a z.enum, so an unknown type is a 400 for the request — the
+    // valid row beside it is not written either.
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
   });
 
   it('should accept all valid item types during import', async () => {
     const validTypes = ['login', 'secret', 'note', 'card', 'identity'];
-    const items = validTypes.map((type) => ({
+    const inserts = validTypes.map((type, index) => ({
       itemType: type,
       encryptedData: `data-${type}`,
       dataIv: `iv-${type}`,
@@ -272,18 +277,20 @@ describe('Task 2.8: Import validates itemType', () => {
       encryptedName: `name-${type}`,
       nameIv: `niv-${type}`,
       nameTag: `ntag-${type}`,
+      searchHash: index.toString(16).padStart(64, '0'),
     }));
 
-    const importData = JSON.stringify({ items });
-
     const res = await withCsrf(
-      agent.post(`${API}/tools/import`).send({ format: 'json', data: importData }),
+      agent.post(`${API}/tools/import`).send({ format: 'json', operations: { inserts } }),
       csrf,
       user.accessToken,
     );
 
     expect(res.status).toBe(201);
-    expect(res.body.data.importedCount).toBe(5);
+    expect(res.body.data).toEqual({ insertedCount: 5, updatedCount: 0 });
+
+    const stored = await VaultItem.find({ userId: user.id }).lean();
+    expect(stored.map((item) => item.itemType).sort()).toEqual([...validTypes].sort());
   });
 });
 

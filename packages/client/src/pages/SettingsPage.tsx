@@ -51,23 +51,34 @@ import {
   importVaultApi,
 } from '../services/api/userApi';
 import {
-  MAX_IMPORT_DATA_LENGTH,
+  ITEM_TYPES,
   MAX_IMPORT_FILE_SIZE_BYTES,
   MAX_ITEMS_PER_USER,
+  MAX_TAG_LENGTH,
+  MAX_TAGS_PER_ITEM,
+  PASSWORD_HISTORY_MAX,
 } from '@hvault/shared';
-import type { IUserProfile } from '@hvault/shared';
+import type { IPasswordHistoryEntry, ItemType, IUserProfile } from '@hvault/shared';
 import { clearSettingsCache } from '../hooks/useUserSettings';
-import { useVaultStore } from '../stores/vaultStore';
+import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
+import { passwordDidChange } from '../services/crypto/passwordHistory';
 import { parseCsv } from '../services/import/csv';
 import {
   IMPORT_FORMATS,
   ImportParseError,
-  buildEncryptedImportItems,
-  chunkBySize,
+  MAX_IMPORT_WARNINGS,
+  buildImportOperations,
+  chunkImportOperations,
   detectCsvFormat,
   parseImportData,
+  resolveImport,
+  validateImportItems,
 } from '../services/import';
-import type { ImportSourceFormat } from '../services/import';
+import type {
+  ImportSourceFormat,
+  NativeCiphertext,
+  ResolvableImportItem,
+} from '../services/import';
 
 // ---------------------------------------------------------------------------
 // CSV helpers
@@ -94,16 +105,129 @@ function parseCSV(text: string): { headers: string[]; rows: string[][] } {
   return { headers: rows[0] ?? [], rows: rows.slice(1) };
 }
 
+// ---------------------------------------------------------------------------
+// Native (H-Vault export) import helpers
+// ---------------------------------------------------------------------------
+
+const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
+/** Mirrors the `encryptedPassword` maxlength on the VaultItem model. */
+const MAX_HISTORY_PASSWORD_LENGTH = 5_000;
+
+interface NativeExtraction {
+  /** Rows that decrypted cleanly, ready for conflict resolution. */
+  items: ResolvableImportItem[];
+  /** How many rows in the file could not be used. */
+  filtered: number;
+  /** Bounded, human-readable reasons for those rows. */
+  reasons: string[];
+  /** Every row the file contained, so the outcome counts can sum to it. */
+  total: number;
+}
+
+/** True for a plain object — a hand-corrupted export may hold `null` or a scalar. */
+function isRow(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The six ciphertext fields, or `undefined` when the row is missing any. */
+function readNativeCiphertext(row: Record<string, unknown>): NativeCiphertext | undefined {
+  const fields = ['encryptedData', 'dataIv', 'dataTag', 'encryptedName', 'nameIv', 'nameTag'];
+  for (const field of fields) {
+    const value = row[field];
+    if (typeof value !== 'string' || value.length === 0) return undefined;
+  }
+  return {
+    encryptedData: row.encryptedData as string,
+    dataIv: row.dataIv as string,
+    dataTag: row.dataTag as string,
+    encryptedName: row.encryptedName as string,
+    nameIv: row.nameIv as string,
+    nameTag: row.nameTag as string,
+  };
+}
+
 /**
- * Validate and unwrap a native H-Vault export for (batched) re-import. Items are
- * already encrypted; we confirm each decrypts with the current vault key and keep
- * the encrypted rows verbatim. Undecryptable rows (e.g. a different vault key) are
- * counted and dropped.
+ * Parse a decrypted native payload the way `vaultStore.decryptItem` does, so a
+ * row hashes the same whether it arrives from an import or is read out of the
+ * vault. A payload that parses to an object is returned as-is: unlike the store
+ * this does not stamp `_validationError`, because identity re-validates the data
+ * itself and an item whose stored data is already broken is excluded from the
+ * match index on the store's side either way.
  */
-async function extractNativeItems(
-  raw: string,
-  vaultKey: CryptoKey,
-): Promise<{ items: Record<string, unknown>[]; filtered: number }> {
+function parseNativeData(dataJson: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(dataJson);
+    if (isRow(parsed)) return parsed;
+    return { _raw: parsed };
+  } catch {
+    return { _raw: dataJson };
+  }
+}
+
+/** Tags as the wire schema requires them: trimmed, non-empty, bounded. */
+function sanitizeNativeTags(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return (value as unknown[])
+    .filter((tag): tag is string => typeof tag === 'string')
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length >= 1 && tag.length <= MAX_TAG_LENGTH)
+    .slice(0, MAX_TAGS_PER_ITEM);
+}
+
+/**
+ * Password history as the wire schema requires it: bounded entries with a
+ * normalized timestamp.
+ *
+ * Carrying it is the point — re-importing a native export must not erase the
+ * previous passwords of an item it restores. A malformed ENTRY is dropped rather
+ * than failing the row (a rejected entry would 400 the whole batch), and
+ * `changedAt` is re-serialized through `Date` so an export written with an
+ * unusual-but-parseable timestamp still satisfies the schema.
+ */
+function sanitizeNativePasswordHistory(value: unknown): IPasswordHistoryEntry[] {
+  if (!Array.isArray(value)) return [];
+  const entries: IPasswordHistoryEntry[] = [];
+  for (const raw of value as unknown[]) {
+    if (!isRow(raw)) continue;
+    const { encryptedPassword, iv, tag, changedAt } = raw;
+    if (
+      typeof encryptedPassword !== 'string' ||
+      encryptedPassword.length === 0 ||
+      encryptedPassword.length > MAX_HISTORY_PASSWORD_LENGTH ||
+      typeof iv !== 'string' ||
+      iv.length === 0 ||
+      iv.length > 24 ||
+      typeof tag !== 'string' ||
+      tag.length === 0 ||
+      tag.length > 32 ||
+      typeof changedAt !== 'string'
+    ) {
+      continue;
+    }
+    const changedAtMs = Date.parse(changedAt);
+    if (Number.isNaN(changedAtMs)) continue;
+    entries.push({
+      encryptedPassword,
+      iv,
+      tag,
+      changedAt: new Date(changedAtMs).toISOString(),
+    });
+    if (entries.length === PASSWORD_HISTORY_MAX) break;
+  }
+  return entries;
+}
+
+/**
+ * Unwrap a native H-Vault export into rows the resolver can work with.
+ *
+ * These rows are ALREADY encrypted under the current vault key, so they take the
+ * same road as every other source but skip two of its steps: their content was
+ * validated when it was first stored (no clamping, no re-validation), and the
+ * ciphertext this decrypts is what gets re-sent — the decryption here exists
+ * only to prove readability and to give the resolver an identity to match on.
+ * A row that cannot be decrypted is counted and dropped, as before.
+ */
+async function extractNativeItems(raw: string, vaultKey: CryptoKey): Promise<NativeExtraction> {
   let parsed: { items?: unknown };
   try {
     parsed = JSON.parse(raw) as { items?: unknown };
@@ -113,28 +237,77 @@ async function extractNativeItems(
   if (!Array.isArray(parsed.items)) {
     throw new ImportParseError('Invalid H-Vault export: expected an object with an "items" array.');
   }
-  const items: Record<string, unknown>[] = [];
+
+  const rows = parsed.items as Record<string, unknown>[];
+  const items: ResolvableImportItem[] = [];
+  const reasons: string[] = [];
   let filtered = 0;
-  for (const item of parsed.items as Record<string, unknown>[]) {
-    const enc = item.encryptedData as string | undefined;
-    const iv = item.dataIv as string | undefined;
-    const tag = item.dataTag as string | undefined;
-    const encName = item.encryptedName as string | undefined;
-    const nameIv = item.nameIv as string | undefined;
-    const nameTag = item.nameTag as string | undefined;
-    if (!enc || !iv || !tag || !encName || !nameIv || !nameTag) {
-      filtered++;
+
+  const drop = (index: number, why: string): void => {
+    filtered++;
+    if (reasons.length < MAX_IMPORT_WARNINGS) reasons.push(`Item ${String(index + 1)}: ${why}`);
+  };
+
+  for (const [index, row] of rows.entries()) {
+    if (!isRow(row)) {
+      drop(index, 'not an item object.');
       continue;
     }
-    try {
-      await cryptoService.decryptData(enc, iv, tag, vaultKey);
-      await cryptoService.decryptData(encName, nameIv, nameTag, vaultKey);
-      items.push(item);
-    } catch {
-      filtered++;
+    const cipher = readNativeCiphertext(row);
+    if (!cipher) {
+      drop(index, 'missing encryption fields.');
+      continue;
     }
+    const itemType = row.itemType;
+    if (typeof itemType !== 'string' || !(ITEM_TYPES as readonly string[]).includes(itemType)) {
+      drop(index, 'unrecognized item type.');
+      continue;
+    }
+
+    let dataJson: string;
+    let name: string;
+    try {
+      dataJson = await cryptoService.decryptData(
+        cipher.encryptedData,
+        cipher.dataIv,
+        cipher.dataTag,
+        vaultKey,
+      );
+      name = await cryptoService.decryptData(
+        cipher.encryptedName,
+        cipher.nameIv,
+        cipher.nameTag,
+        vaultKey,
+      );
+    } catch {
+      drop(index, 'could not be decrypted with the current vault key.');
+      continue;
+    }
+
+    const folderId = row.folderId;
+    const passwordHistory = sanitizeNativePasswordHistory(row.passwordHistory);
+    items.push({
+      itemType: itemType as ItemType,
+      name,
+      data: parseNativeData(dataJson),
+      tags: sanitizeNativeTags(row.tags),
+      favorite: row.favorite === true,
+      cipher,
+      // A folder id from another account is stripped server-side; a malformed
+      // one would fail the whole batch's schema, so it never leaves here.
+      ...(typeof folderId === 'string' && OBJECT_ID_RE.test(folderId) ? { folderId } : {}),
+      ...(passwordHistory.length > 0 ? { passwordHistory } : {}),
+    });
   }
-  return { items, filtered };
+
+  return { items, filtered, reasons, total: rows.length };
+}
+
+/** What an `overwrite` import is about to change, shown before anything is sent. */
+interface ImportConfirmSummary {
+  updateCount: number;
+  insertCount: number;
+  passwordChanges: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +401,44 @@ export default function SettingsPage() {
   );
   const [conflictStrategy, setConflictStrategy] = useState<'skip' | 'overwrite' | 'keep_both'>(
     'skip',
+  );
+
+  // Overwrite confirmation. An import may MODIFY existing items, so nothing is
+  // sent until the user confirms a summary of what will change. The dialog is
+  // driven by a promise the import flow awaits: the resolver has already decided
+  // the outcome, and the answer decides only whether it is executed.
+  const [importConfirm, setImportConfirm] = useState<ImportConfirmSummary | null>(null);
+  const importConfirmResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+
+  const requestImportConfirmation = useCallback(
+    (summary: ImportConfirmSummary): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        importConfirmResolverRef.current = resolve;
+        setImportConfirm(summary);
+      }),
+    [],
+  );
+
+  const answerImportConfirmation = useCallback((confirmed: boolean) => {
+    setImportConfirm(null);
+    const resolve = importConfirmResolverRef.current;
+    importConfirmResolverRef.current = null;
+    resolve?.(confirmed);
+  }, []);
+
+  // Settle a pending confirmation if this page goes away while it is open — an
+  // auto-lock unmounts it through ProtectedRoute. Left unanswered, the awaiting
+  // import would hang forever holding the resolution and report no outcome at
+  // all, which is exactly the silent disappearance the accounting exists to
+  // prevent. The state setter is skipped here (nothing left to render); the
+  // toast still reaches the user because the toast provider outlives the route.
+  useEffect(
+    () => () => {
+      const resolve = importConfirmResolverRef.current;
+      importConfirmResolverRef.current = null;
+      resolve?.(false);
+    },
+    [],
   );
 
   const importFileRef = useRef<HTMLInputElement>(null);
@@ -621,11 +832,15 @@ export default function SettingsPage() {
 
   // Import.
   //
-  // Zero-knowledge pipeline: for any external source the browser parses the file,
-  // converts each entry to a vault item, validates + encrypts it with the vault
-  // key, and sends already-encrypted native items in size-bounded batches. The
-  // native H-Vault (`json`) format is already encrypted, so it is only validated
-  // for decryptability and re-sent. Plaintext never leaves the browser.
+  // Zero-knowledge pipeline, resolved CLIENT-SIDE (PLAN §1.8): the browser parses
+  // the file, validates each entry, loads the WHOLE vault, and resolves conflicts
+  // once over the whole set — the match key for a login is its site and username,
+  // both of which live inside the encrypted blob, so the server physically cannot
+  // compute it. Only then is anything encrypted, batched (transport only) and
+  // sent as explicit `inserts`/`updates`. Plaintext never leaves the browser.
+  //
+  // Every incoming row ends in exactly one reported outcome, and the reported
+  // counts sum to the number of rows the file contained.
   const handleImport = useCallback(async () => {
     if (!importData.trim()) return;
 
@@ -651,30 +866,43 @@ export default function SettingsPage() {
     setImporting(true);
     setImportProgress(null);
     try {
-      let sendItems: unknown[];
-      let clientSkipped = 0;
-      // Why individual items were dropped during parse/encrypt. These are computed
-      // by buildEncryptedImportItems and MUST be surfaced: a bare "7 skipped" gives
-      // the user no way to tell which entries were lost or why (an over-long field
-      // fails the whole item), and re-running the import cannot reveal it either.
-      let skipReasons: string[] = [];
+      // 1 ── Parse the source into resolvable rows. Why individual rows were
+      // dropped MUST be surfaced: a bare "7 skipped" gives the user no way to
+      // tell which entries were lost or why, and re-running cannot reveal it.
+      let incoming: ResolvableImportItem[];
+      let totalRows: number;
+      let skippedInvalid = 0;
+      const skipReasons: string[] = [];
 
       if (importFormat === 'json') {
         const native = await extractNativeItems(importData, vaultKey);
-        sendItems = native.items;
-        clientSkipped = native.filtered;
-        if (sendItems.length === 0) {
+        incoming = native.items;
+        totalRows = native.total;
+        skippedInvalid = native.filtered;
+        skipReasons.push(...native.reasons);
+        if (incoming.length === 0) {
+          // Name the per-row reasons rather than guessing at one cause: rows are
+          // dropped for missing ciphertext fields and unrecognized item types as
+          // well as for failing to decrypt under the current vault key.
           toast({
             title:
               native.filtered > 0
-                ? `All ${String(native.filtered)} items failed decryption and were rejected. They may be encrypted with a different vault key.`
+                ? `All ${String(native.filtered)} items were rejected and nothing was imported.`
                 : 'No items found to import.',
+            ...(native.reasons.length > 0 ? { description: native.reasons.join('\n') } : {}),
             type: 'error',
           });
           return;
         }
       } else {
-        const { items: parsed } = parseImportData(importFormat, importData, csvMapping);
+        const { items: parsed, warnings: parseWarnings } = parseImportData(
+          importFormat,
+          importData,
+          csvMapping,
+        );
+        // No parser emits these today, but the channel must not be a dead end:
+        // anything a parser has to say about a row belongs in the report.
+        skipReasons.push(...parseWarnings.slice(0, MAX_IMPORT_WARNINGS));
         if (parsed.length === 0) {
           toast({ title: 'No items found in the file to import.', type: 'error' });
           return;
@@ -686,76 +914,191 @@ export default function SettingsPage() {
           });
           return;
         }
-        const built = await buildEncryptedImportItems(parsed, vaultKey);
-        sendItems = built.items;
-        clientSkipped = built.skipped;
-        skipReasons = built.warnings;
-        if (sendItems.length === 0) {
+        totalRows = parsed.length;
+        // Validate BEFORE resolving: an item whose data cannot be validated has
+        // no meaningful identity, and reporting it as a "duplicate" would hide
+        // the real reason it never reached the vault.
+        const validated = validateImportItems(parsed);
+        incoming = validated.items;
+        skippedInvalid = validated.skipped;
+        skipReasons.push(...validated.warnings);
+        if (incoming.length === 0) {
           toast({
-            title: `No valid items to import; ${String(built.skipped)} could not be converted.`,
-            ...(built.warnings.length > 0 ? { description: built.warnings.join('\n') } : {}),
+            title: `No valid items to import; ${String(validated.skipped)} could not be converted.`,
+            ...(validated.warnings.length > 0
+              ? { description: validated.warnings.join('\n') }
+              : {}),
             type: 'error',
           });
           return;
         }
       }
 
-      // Split into requests each safely under the server's per-request data cap.
-      const batches = chunkBySize(sendItems, Math.floor(MAX_IMPORT_DATA_LENGTH * 0.9));
-      let imported = 0;
-      let serverSkipped = 0;
-      let duplicates = 0;
+      // 2 ── Resolution must run against a COMPLETE item set. `fetchItems`
+      // streams pages and appends progressively, so reading `state.items` before
+      // it settles would resolve against a partial vault and insert duplicates
+      // of items it simply had not loaded yet. A failure here is fatal to the
+      // import for the same reason: guessing is worse than not importing.
+      const itemsFetch = useVaultStore.getState().fetchItems();
+      const fetchGeneration = getItemsFetchGeneration();
+      try {
+        await itemsFetch;
+      } catch {
+        toast({
+          title: 'Could not load your vault to check for duplicates. Nothing was imported.',
+          type: 'error',
+        });
+        return;
+      }
+
+      // Awaiting is necessary but NOT sufficient: a fetch superseded mid-stream
+      // — by an auto-lock (`clearStore()` empties `items` and bumps the
+      // generation) or by a newer fetch — RESOLVES rather than rejecting. Going
+      // ahead would resolve against an empty list, classify the whole file as
+      // new, and duplicate a vault the user still has. Nothing downstream would
+      // catch it: the server is a pure executor now.
+      if (
+        getItemsFetchGeneration() !== fetchGeneration ||
+        useAuthStore.getState().vaultKey !== vaultKey
+      ) {
+        toast({
+          title: 'Your vault was locked or reloaded while the import was preparing.',
+          description: 'Nothing was imported. Unlock the vault and run the import again.',
+          type: 'error',
+        });
+        return;
+      }
+
+      // The same hazard offline: `fetchItems` falls back to the IndexedDB cache,
+      // which is cleared on lock/login/logout and may be empty or stale. It is
+      // not a vault to resolve against.
+      if (!navigator.onLine) {
+        toast({
+          title: 'You appear to be offline, so your vault list could not be verified.',
+          description: 'Nothing was imported. Reconnect and run the import again.',
+          type: 'error',
+        });
+        return;
+      }
+
+      // 3 ── Resolve ONCE over the whole set, against the whole vault.
+      const resolution = await resolveImport({
+        existing: useVaultStore.getState().items,
+        incoming,
+        strategy: conflictStrategy,
+      });
+
+      // 4 ── No update is sent without explicit confirmation.
+      if (resolution.updates.length > 0) {
+        const passwordChanges = resolution.updates.filter(
+          ({ incoming: row, existing: match }) =>
+            match.itemType === 'login' && passwordDidChange(match.data.password, row.data.password),
+        ).length;
+        const confirmed = await requestImportConfirmation({
+          updateCount: resolution.updates.length,
+          insertCount: resolution.inserts.length,
+          passwordChanges,
+        });
+        if (!confirmed) {
+          toast({ title: 'Import cancelled. Nothing was changed.', type: 'info' });
+          return;
+        }
+        // The confirmation has no time limit, so re-check the vault before acting
+        // on an answer that may be minutes old. A lock normally unmounts this page
+        // (which answers the prompt for the user), but nothing downstream would
+        // notice a key that changed under us — the captured one still encrypts.
+        if (useAuthStore.getState().vaultKey !== vaultKey) {
+          toast({
+            title: 'Your vault was locked while the import was waiting to be confirmed.',
+            description: 'Nothing was imported. Unlock the vault and run the import again.',
+            type: 'error',
+          });
+          return;
+        }
+      }
+
+      // 5 ── Encrypt only what will actually be sent.
+      const operations = await buildImportOperations({
+        inserts: resolution.inserts,
+        updates: resolution.updates,
+        vaultKey,
+      });
+      skippedInvalid += operations.failedCount;
+      skipReasons.push(...operations.failureReasons);
+
+      // 6 ── Batch (transport only) and send sequentially.
+      const batches = chunkImportOperations(operations.inserts, operations.updates);
+      let inserted = 0;
+      let updated = 0;
       let sentBatches = 0;
 
       try {
-        for (let i = 0; i < batches.length; i++) {
-          setImportProgress({ current: i + 1, total: batches.length });
+        for (const [index, batch] of batches.entries()) {
+          setImportProgress({ current: index + 1, total: batches.length });
           const res = await importVaultApi({
             format: importFormat,
-            data: JSON.stringify({ items: batches[i] }),
             conflictStrategy,
+            operations: batch,
           });
           const body = res.data;
           if (!body.success) throw new Error('Failed to import vault data');
-          const r = body.data as {
-            importedCount: number;
-            skippedCount: number;
-            duplicateCount?: number;
-            overwrittenCount?: number;
-          };
-          imported += r.importedCount;
-          serverSkipped += r.skippedCount;
-          duplicates += r.duplicateCount ?? 0;
+          inserted += body.data.insertedCount;
+          updated += body.data.updatedCount;
           sentBatches++;
         }
       } catch (batchErr) {
         // A later batch failed; earlier batches are already committed. Report the
-        // partial result honestly and refresh so imported rows appear.
+        // partial result honestly and refresh so committed rows appear. Under
+        // `skip`/`overwrite` re-running is safe: it re-resolves against the
+        // now-updated vault and performs only the work that remains. Under
+        // `keep_both` it is NOT — that strategy never matches anything (see
+        // `services/import/resolve.ts`), so a re-run would insert the committed
+        // rows a second time. Say so rather than advising a duplicate.
         const msg = getApiErrorMessage(batchErr, 'Failed to import some items');
+        const retryAdvice =
+          conflictStrategy === 'keep_both'
+            ? 'Nothing else was changed. Re-running with "keep both" would add the rows that already landed a second time — re-run with "skip" to import only what is left.'
+            : 'Nothing else was changed. Running the import again is safe.';
         toast({
-          title: sentBatches > 0 ? `Imported ${String(imported)} items, then stopped: ${msg}` : msg,
+          title:
+            sentBatches > 0
+              ? `Imported ${String(inserted)} and updated ${String(updated)} items, then stopped: ${msg}`
+              : msg,
+          ...(sentBatches > 0 ? { description: retryAdvice } : {}),
           type: 'error',
         });
-        if (imported > 0) void useVaultStore.getState().fetchItems();
+        if (inserted > 0 || updated > 0) void useVaultStore.getState().fetchItems();
         return;
       }
 
-      const parts = [`Imported ${String(imported)} items`];
-      if (duplicates > 0) {
-        parts.push(
-          `${String(duplicates)} duplicates ${conflictStrategy === 'skip' ? 'skipped' : 'handled'}`,
-        );
+      // 7 ── Full accounting: these counts sum to `totalRows`.
+      const insertedPart = `Imported ${String(inserted)} items`;
+      const parts = [insertedPart];
+      if (updated > 0) parts.push(`${String(updated)} updated`);
+      if (resolution.unchanged.length > 0) {
+        parts.push(`${String(resolution.unchanged.length)} already up to date`);
       }
-      const totalSkipped = clientSkipped + serverSkipped;
-      if (totalSkipped > 0) parts.push(`${String(totalSkipped)} skipped`);
+      if (resolution.duplicateSkipped.length > 0) {
+        parts.push(`${String(resolution.duplicateSkipped.length)} duplicates skipped`);
+      }
+      if (resolution.duplicateInFile.length > 0) {
+        parts.push(`${String(resolution.duplicateInFile.length)} duplicate rows in file`);
+      }
+      if (skippedInvalid > 0) parts.push(`${String(skippedInvalid)} skipped`);
+
+      // When anything did NOT become a new item, name the row total too, so the
+      // outcome counts are visibly complete rather than merely summing by luck.
+      // A single-part message can only mean every row was inserted.
+      const title =
+        parts.length === 1 ? insertedPart : `${parts.join(', ')} (${String(totalRows)} rows)`;
 
       toast({
-        title: parts.join(', '),
+        title,
         // Name the entries that were dropped and why, rather than only counting them.
         ...(skipReasons.length > 0 ? { description: skipReasons.join('\n') } : {}),
-        type: totalSkipped > 0 ? 'warning' : 'success',
+        type: skippedInvalid > 0 ? 'warning' : 'success',
       });
-      void useVaultStore.getState().fetchItems();
+      if (inserted > 0 || updated > 0) void useVaultStore.getState().fetchItems();
       setShowImport(false);
       setImportData('');
     } catch (err) {
@@ -768,7 +1111,7 @@ export default function SettingsPage() {
       setImporting(false);
       setImportProgress(null);
     }
-  }, [importData, importFormat, csvMapping, conflictStrategy, toast]);
+  }, [importData, importFormat, csvMapping, conflictStrategy, requestImportConfirmation, toast]);
 
   // Vault key rotation — two-phase approach for atomicity
   const handleRotateVaultKey = useCallback(async () => {
@@ -2019,6 +2362,60 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Overwrite confirmation — nothing is sent until this is answered.
+          Rendered OUTSIDE the import panel on purpose: closing the panel would
+          otherwise unmount the prompt with no answer, stranding the awaiting
+          import with no outcome reported. */}
+      <Dialog
+        open={importConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open) answerImportConfirmation(false);
+        }}
+      >
+        <DialogContent className="max-w-md" onClose={() => answerImportConfirmation(false)}>
+          <DialogHeader>
+            <DialogTitle>Confirm import changes</DialogTitle>
+            <DialogDescription>
+              This import will modify {importConfirm?.updateCount ?? 0} existing item
+              {importConfirm?.updateCount === 1 ? '' : 's'} in place.
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="list-disc space-y-1 pl-5 text-sm text-[hsl(var(--foreground))]">
+            <li>
+              {importConfirm?.passwordChanges ?? 0} password
+              {importConfirm?.passwordChanges === 1 ? '' : 's'} will change. The previous password
+              is kept in each item&apos;s password history.
+            </li>
+            <li>
+              Each matched item&apos;s <strong>name is replaced</strong> by the name in the imported
+              file, so an item you renamed reverts to the source name.
+            </li>
+            <li>
+              A matched item&apos;s content is replaced wholesale. Anything the imported file does
+              not carry — a TOTP secret, notes, custom fields — is <strong>lost</strong>, and only
+              the password is recoverable from history.
+            </li>
+            <li>{importConfirm?.insertCount ?? 0} new items will be added.</li>
+          </ul>
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={() => answerImportConfirmation(false)}
+              className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
+            >
+              Cancel Import
+            </button>
+            <button
+              type="button"
+              onClick={() => answerImportConfirmation(true)}
+              className="rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90"
+            >
+              Apply Changes
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Account */}
       <Card>

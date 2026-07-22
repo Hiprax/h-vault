@@ -8,6 +8,7 @@
 
 import { create } from 'zustand';
 import { cryptoService } from '../services/crypto/cryptoService.js';
+import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
 import { offlineCache } from '../services/offlineCache.js';
 import { logger } from '../lib/logger.js';
 import { useAuthStore } from './authStore.js';
@@ -204,6 +205,7 @@ let fetchFoldersInFlight: Promise<void> | null = null;
 //     appending. The Set is cleared when the fetch settles.
 let fetchItemsGeneration = 0;
 let fetchTrashGeneration = 0;
+
 // fetchFolders has no delete-race (folders aren't streamed page-by-page), but
 // it still needs a generation counter so a slow fetch (online or offline) that
 // resolves AFTER a lock/logout cannot write decrypted folders back into the
@@ -221,6 +223,24 @@ let fetchFoldersGeneration = 0;
 // This mirrors the fetch-path generation guards. The server-side write already
 // happened — only the local write is suppressed.
 let mutationGeneration = 0;
+/**
+ * The current `fetchItems` generation.
+ *
+ * A caller that needs the COMPLETE item set — import conflict resolution is the
+ * one that does — cannot rely on awaiting `fetchItems()` alone: a run that is
+ * superseded mid-stream (by `clearStore()` on lock/logout, or by a newer fetch)
+ * RESOLVES rather than rejecting, and `clearStore()` has already emptied
+ * `items`. Resolving an import against that empty list would classify the whole
+ * file as new and duplicate a vault the user still owns.
+ *
+ * So read this immediately after calling `fetchItems()` and compare it again
+ * after the await: an unchanged value means the run you awaited is the one that
+ * finished, and `items` is that run's complete result.
+ */
+export function getItemsFetchGeneration(): number {
+  return fetchItemsGeneration;
+}
+
 const inFlightDeletedItemIds = new Set<string>();
 const inFlightDeletedTrashIds = new Set<string>();
 
@@ -901,7 +921,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
   ): Promise<void> => {
     const vaultKey = getVaultKey();
     const myGeneration = mutationGeneration;
-    const MAX_PASSWORD_HISTORY = 10;
 
     const encryptedName = await cryptoService.encryptData(name, vaultKey);
     const encryptedData = await cryptoService.encryptData(JSON.stringify(data), vaultKey);
@@ -909,38 +928,19 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     assertEncryptedSizes(encryptedName, encryptedData);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
-    // Build password history for login items when password changes
-    let passwordHistoryPayload:
-      { encryptedPassword: string; iv: string; tag: string; changedAt: string }[] | undefined;
-
+    // Build password history for login items when the password changes. The
+    // detection + payload construction is shared with the import flow via
+    // buildPasswordHistoryPayload so the two paths cannot diverge.
     const existingItem = get().items.find((item) => item.id === id);
-    const existingPassword = existingItem?.data.password;
-    if (
-      existingItem?.itemType === 'login' &&
-      typeof existingPassword === 'string' &&
-      existingPassword.length > 0 &&
-      typeof data.password === 'string' &&
-      existingPassword !== data.password
-    ) {
-      const encrypted = await cryptoService.encryptData(existingPassword, vaultKey);
-
-      const existingHistory = (existingItem._raw.passwordHistory ?? []).map((entry) => ({
-        encryptedPassword: entry.encryptedPassword,
-        iv: entry.iv,
-        tag: entry.tag,
-        changedAt: entry.changedAt,
-      }));
-
-      passwordHistoryPayload = [
-        {
-          encryptedPassword: encrypted.encrypted,
-          iv: encrypted.iv,
-          tag: encrypted.tag,
-          changedAt: new Date().toISOString(),
-        },
-        ...existingHistory,
-      ].slice(0, MAX_PASSWORD_HISTORY);
-    }
+    const passwordHistoryPayload =
+      existingItem?.itemType === 'login'
+        ? await buildPasswordHistoryPayload({
+            existingRawHistory: existingItem._raw.passwordHistory,
+            oldPassword: existingItem.data.password,
+            newPassword: data.password,
+            vaultKey,
+          })
+        : undefined;
 
     const response = await updateItemApi(id, {
       encryptedName: encryptedName.encrypted,

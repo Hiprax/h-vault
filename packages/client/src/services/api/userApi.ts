@@ -116,15 +116,23 @@ export function exportVaultApi(
   return api.post('/tools/export', data);
 }
 
-export function importVaultApi(data: ImportInput): Promise<
-  AxiosResponse<
-    ApiResponse<{
-      importedCount: number;
-      skippedCount: number;
-      duplicateCount: number;
-      overwrittenCount: number;
-    }>
-  >
-> {
+/**
+ * Execute one batch of resolved import operations.
+ *
+ * The server is a validated EXECUTOR, not a matcher: conflict resolution ran
+ * client-side (the match key lives inside the encrypted blob, so the server
+ * cannot compute it), and this request carries explicit `inserts` and `updates`
+ * with each update naming the `_id` it targets. The response therefore reports
+ * only what the server itself did — `insertedCount` / `updatedCount`; every
+ * other outcome (duplicates skipped, intra-file duplicates, unconvertible rows)
+ * is known only to the client and is accounted for there.
+ *
+ * A large import is split into several of these requests by
+ * `chunkImportOperations`; batching is transport only and cannot change the
+ * outcome.
+ */
+export function importVaultApi(
+  data: ImportInput,
+): Promise<AxiosResponse<ApiResponse<{ insertedCount: number; updatedCount: number }>>> {
   return api.post('/tools/import', data);
 }

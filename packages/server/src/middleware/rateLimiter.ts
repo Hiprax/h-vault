@@ -580,13 +580,27 @@ export const heavyOpLimiter =
  * data growth stays independently bounded by MAX_ITEMS_PER_USER.
  */
 const importStore = createStore(FIFTEEN_MINUTES_MS);
+
+/**
+ * Requests one authenticated user may spend on `/tools/import` per window.
+ *
+ * Exported so the budget can be checked against the worst-case batch count a
+ * single migration implies rather than restated from memory — see
+ * `tests/import-cap-concurrency.test.ts`, which derives that count from the real
+ * shared constants and fails if the two drift apart.
+ */
+export const IMPORT_RATE_LIMIT_MAX = 60;
+
+/** Window the {@link IMPORT_RATE_LIMIT_MAX} budget is spent over. */
+export const IMPORT_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
+
 export const importLimiter =
   noopIfNonProduction() ??
   withClientKeyGuard(
     'importLimiter',
     rateLimit({
-      windowMs: FIFTEEN_MINUTES_MS,
-      limit: 60,
+      windowMs: IMPORT_RATE_LIMIT_WINDOW_MS,
+      limit: IMPORT_RATE_LIMIT_MAX,
       standardHeaders: true,
       legacyHeaders: false,
       validate: { singleCount: false },
