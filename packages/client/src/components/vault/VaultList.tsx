@@ -301,7 +301,10 @@ const VaultListItem = memo(function VaultListItem({
 
       {/* Name, then the type badge and the distinguishing subtitle sharing one line */}
       <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="truncate text-sm font-medium text-[hsl(var(--card-foreground))]">
+        <span
+          data-testid="vault-item-name"
+          className="truncate text-sm font-medium text-[hsl(var(--card-foreground))]"
+        >
           {item.name || 'Unnamed item'}
         </span>
         <div className="flex min-w-0 items-center gap-2">

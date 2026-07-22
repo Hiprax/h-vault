@@ -16,6 +16,9 @@
  *   • a failure part-way through rolls the ALREADY-INSERTED rows back — the
  *     discriminator that proves the transaction, not the fallback, ran
  *   • the cap re-check performed INSIDE the transaction aborts the whole request
+ *   • (Phase 10) the per-user cap survives OVERLAPPING imports on this topology
+ *     too — the standalone half of that guarantee is in
+ *     `import-cap-concurrency.test.ts`
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -164,5 +167,126 @@ describe('Import operations — transaction (replica-set) branch', () => {
 
     expect([first.status, second.status]).toEqual([201, 201]);
     expect(await VaultItem.countDocuments({ userId: user.id })).toBe(2);
+  });
+
+  // ── Phase 10 — the cap under overlapping imports ─────────────────────
+  //
+  // A transaction does NOT bound concurrency: two sessions can each read a count
+  // of N, each insert, and each commit, because a count is not a document the
+  // other session write-conflicts with. So even here the cap is held by the
+  // per-user JobLock, and the in-transaction re-check only narrows the window
+  // against OTHER endpoints. These two tests pin that on the topology production
+  // actually runs (`docker-compose.yml` pins the `rs0` replica set), which the
+  // standalone harness can never reach.
+
+  /**
+   * Shrinks the user's effective headroom to `headroom` NET-NEW rows by calling
+   * THROUGH to the real count and adding a fixed offset — so the value the
+   * executor sees still tracks what has actually been written. A flat
+   * `mockResolvedValue` would pin it to a constant and the cap could then never
+   * notice rows a racing request had just committed, which is the very
+   * interaction under test.
+   *
+   * Deliberately a local copy of the one in `import-cap-concurrency.test.ts`
+   * rather than a shared export: that file drives the STANDALONE connection and
+   * this one a replica set, and the two must stay independently readable. Keep
+   * them in step if either changes.
+   */
+  function pinHeadroom(headroom: number): void {
+    const realCountDocuments = VaultItem.countDocuments.bind(VaultItem) as unknown as (
+      filter?: Record<string, unknown>,
+      options?: Record<string, unknown>,
+    ) => Promise<number>;
+    const offset = MAX_ITEMS_PER_USER - headroom;
+
+    vi.spyOn(VaultItem, 'countDocuments').mockImplementation(((
+      filter?: Record<string, unknown>,
+      options?: Record<string, unknown>,
+    ) => realCountDocuments(filter, options).then((count) => count + offset)) as never);
+  }
+
+  it('409s an overlapping import while the first one holds an OPEN transaction', async () => {
+    user = await createTestUser();
+    pinHeadroom(4);
+
+    // Park the first import inside `insertMany` — which on this topology means
+    // inside `session.withTransaction`, with the transaction still open and its
+    // rows invisible to everyone else. The second request must be refused by the
+    // lock rather than wedging behind the transaction or reading a stale count.
+    let announceArrival!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      announceArrival = resolve;
+    });
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+
+    const realInsertMany = VaultItem.insertMany.bind(VaultItem) as unknown as (
+      docs: unknown[],
+      options?: Record<string, unknown>,
+    ) => Promise<unknown[]>;
+    let firstWrite = true;
+    vi.spyOn(VaultItem, 'insertMany').mockImplementation((async (
+      docs: unknown[],
+      options?: Record<string, unknown>,
+    ) => {
+      if (firstWrite) {
+        firstWrite = false;
+        announceArrival();
+        await gate;
+      }
+      return realInsertMany(docs, options);
+    }) as never);
+
+    const first = postOperations({ inserts: [insertRow(1), insertRow(2), insertRow(3)] });
+    await parked;
+
+    const second = await postOperations({ inserts: [insertRow(4), insertRow(5), insertRow(6)] });
+    expect(second.status).toBe(409);
+    expect(JSON.stringify(second.body)).toMatch(/import is already in progress/i);
+
+    openGate();
+    expect((await first).status).toBe(201);
+
+    const stored = await VaultItem.find({ userId: user.id }).lean();
+    expect(stored).toHaveLength(3);
+  });
+
+  it('never leaves the vault above the cap when several imports are fired at once', async () => {
+    user = await createTestUser();
+    const HEADROOM = 4;
+    const ROWS_PER_REQUEST = 3;
+    const REQUESTS = 4;
+    pinHeadroom(HEADROOM);
+
+    const responses = await Promise.all(
+      Array.from({ length: REQUESTS }, (_, requestIndex) =>
+        postOperations({
+          inserts: Array.from({ length: ROWS_PER_REQUEST }, (_, rowIndex) =>
+            insertRow(requestIndex * ROWS_PER_REQUEST + rowIndex),
+          ),
+        }),
+      ),
+    );
+
+    // 201 (it ran), 409 (the lock refused it) and 400 (the cap refused it) are
+    // the only legal outcomes. A transient transaction abort surfacing as a 500
+    // would be a real defect, not a benign loss of the race.
+    for (const res of responses) {
+      expect([201, 400, 409]).toContain(res.status);
+    }
+
+    const accepted = responses.filter((res) => res.status === 201);
+    expect(accepted.length).toBeGreaterThanOrEqual(1);
+
+    const reported = accepted.reduce(
+      (total, res) => total + (res.body.data.insertedCount as number),
+      0,
+    );
+    const stored = await VaultItem.find({ userId: user.id }).lean();
+
+    expect(stored.length).toBeLessThanOrEqual(HEADROOM);
+    expect(stored).toHaveLength(reported);
   });
 });

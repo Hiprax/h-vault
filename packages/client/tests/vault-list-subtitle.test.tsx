@@ -379,6 +379,22 @@ describe('VaultList subtitles — non-virtualized branch', () => {
     );
   });
 
+  it('labels the name and the subtitle as separate elements', () => {
+    // Two rows on one host share a name, so any assertion about "the host" has
+    // to be able to say WHICH element it means. `vault-item-name` is that hook:
+    // without it a host-scoped query matches both the name and — for a login
+    // with no username — the subtitle, and the two become indistinguishable.
+    seedItems([makeLogin('a', 'accounts.google.com (alice)', 'alice@example.com')]);
+    renderList();
+
+    const row = screen.getByRole('listitem');
+    expect(within(row).getByTestId('vault-item-name')).toHaveTextContent(
+      'accounts.google.com (alice)',
+    );
+    expect(within(row).getByTestId('vault-item-name')).not.toHaveTextContent('alice@example.com');
+    expect(within(row).getByTestId('vault-item-subtitle')).toHaveTextContent('alice@example.com');
+  });
+
   it('exposes the full value through `title`, so a truncated subtitle stays readable', () => {
     const long = `${'user-with-a-very-long-address'.repeat(3)}@example.com`;
     seedItems([makeLogin('a', 'Long', long, 'https://example.com')]);
