@@ -188,6 +188,26 @@ export async function computeItemKeys(
   return { identityKey: logical ?? contentKey, contentKey };
 }
 
+/**
+ * The first URI of a login, as a raw string, or `''` when it has none.
+ *
+ * Tolerates both the stored shape (`{ uri, match }`) and a bare string, so
+ * pre-validation parser output works too.
+ *
+ * Shared with the vault list's subtitle (`lib/vaultDisplay.ts`) on purpose: the
+ * label a user reads to tell two rows apart must be derived from the SAME URI
+ * that decides the item's logical identity, or the list would distinguish rows
+ * on one host while the importer matched them on another.
+ */
+export function firstUri(data: Record<string, unknown>): string {
+  const uris = data.uris;
+  if (!Array.isArray(uris)) return '';
+  const first: unknown = uris[0];
+  if (typeof first === 'string') return first;
+  if (isRecord(first) && typeof first.uri === 'string') return first.uri;
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
@@ -220,19 +240,6 @@ function schemaValidated(
   const result = vaultItemDataSchemas[itemType].safeParse(data);
   if (!result.success) return data;
   return isRecord(result.data) ? result.data : data;
-}
-
-/**
- * The first URI of a login, as a raw string. Tolerates both the stored shape
- * (`{ uri, match }`) and a bare string, so pre-validation parser output works.
- */
-function firstUri(data: Record<string, unknown>): string {
-  const uris = data.uris;
-  if (!Array.isArray(uris)) return '';
-  const first: unknown = uris[0];
-  if (typeof first === 'string') return first;
-  if (isRecord(first) && typeof first.uri === 'string') return first.uri;
-  return '';
 }
 
 function canonicalize(value: unknown): unknown {

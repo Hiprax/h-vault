@@ -77,6 +77,28 @@ test.describe('Vault import — external formats (zero-knowledge, end-to-end)', 
     await goToVault(page);
     await expect(page.getByText('accounts.google.com')).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText('github.com')).toBeVisible();
+
+    // Each row carries the username as its distinguishing subtitle, which is
+    // what keeps several accounts on one site tellable apart. Asserted without
+    // pinning the row order: the vault's default sort is `dateModified`, so two
+    // items imported in one batch can land either way round.
+    const subtitles = page.getByTestId('vault-item-subtitle');
+    await expect(subtitles).toHaveCount(2);
+    await expect(subtitles.filter({ hasText: 'alice@example.com' })).toHaveCount(1);
+    await expect(subtitles.filter({ hasText: 'octocat' })).toHaveCount(1);
+
+    // `VaultList`'s ITEM_HEIGHT is a hand-maintained constant that react-window
+    // uses as a FIXED row height — it cannot measure. jsdom does no layout, so a
+    // real browser is the only place the constant can be checked against the row
+    // it describes; let it drift and the virtualized branch (>50 items) spaces
+    // its rows wrongly. Measure the row card itself, not its list wrapper.
+    const rowBox = await page
+      .getByRole('listitem')
+      .first()
+      .getByRole('button')
+      .first()
+      .boundingBox();
+    expect(rowBox?.height).toBe(78);
   });
 
   test('imports a Bitwarden JSON export (login + secure note) and shows them decrypted', async ({

@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { itemMatchesSearch } from '../../lib/vaultSearch';
+import { getItemSubtitle } from '../../lib/vaultDisplay';
 import { VAULT_SEARCH_RESULTS_ID } from './SearchBar';
 import {
   useVaultStore,
@@ -39,7 +40,29 @@ import type { ItemType } from '@hvault/shared';
 // Constants
 // ---------------------------------------------------------------------------
 
-const ITEM_HEIGHT = 72;
+/**
+ * The rendered height of ONE `VaultListItem`, in pixels. `react-window` needs a
+ * fixed row height and cannot measure, so this constant and the row's CSS must
+ * be kept in step by hand — the arithmetic, from `VaultListItem`'s classes:
+ *
+ *   border (`border`, 1px x 2)                              2
+ * + vertical padding (`p-4`, 16px x 2)                      32
+ * + name line (`text-sm`, line-height 1.25rem)              20
+ * + column gap (`gap-1`, 0.25rem)                           4
+ * + badge line (`text-xs` 1rem + `py-0.5` 2px x 2)          20
+ *                                                        = 78
+ *
+ * The subtitle shares the badge line (`text-xs`, 16px, shorter than the badge)
+ * on purpose, so adding it cost no height. The correction from 72 came out of
+ * that audit: the row has rendered at 78px since well before the subtitle, so
+ * the virtualized branch was leaving a 2px gap where the plain `space-y-2` one
+ * leaves 8px. Change the row's padding, gaps or text sizes and this number must
+ * change with them, or the two branches drift apart again — `e2e/import-export.spec.ts`
+ * measures a real row against it, because jsdom does no layout.
+ */
+const ITEM_HEIGHT = 78;
+/** Vertical gap between rows, matching the non-virtualized branch's `space-y-2`. */
+const ROW_GAP = 8;
 const VIRTUALIZATION_THRESHOLD = 50;
 
 const ICON_MAP: Record<ItemType, typeof Key> = {
@@ -73,11 +96,30 @@ const SORT_OPTIONS: { value: SortBy; label: string }[] = [
   { value: 'type', label: 'Type' },
 ];
 
+/**
+ * Sort the rows by the chosen key, then break every tie on name, then subtitle,
+ * then id.
+ *
+ * The tiebreaker is not cosmetic. With a single comparison key the comparator
+ * returned 0 for ten imported logins that share a name, so their order fell back
+ * to `Array.prototype.sort`'s stability — i.e. fetch order, which is arbitrary
+ * to the user, differs between a paged fetch and an offline-cache read, and
+ * makes sorting by Name useless for precisely the case a bulk import creates.
+ * Chaining down to `id` makes the order total, so it is identical on every
+ * re-render, re-fetch and device.
+ *
+ * The chain is applied BEFORE the descending flip, so `desc` is the exact
+ * reverse of `asc` rather than a differently-tied ordering.
+ */
 function sortItems(
   items: DecryptedVaultItem[],
   sortBy: SortBy,
   sortOrder: SortOrder,
 ): DecryptedVaultItem[] {
+  // Derive each subtitle once rather than on every one of the O(n log n)
+  // comparisons — a login without a username parses a URL to find its host.
+  const subtitles = new Map(items.map((item) => [item.id, getItemSubtitle(item)]));
+
   const sorted = [...items].sort((a, b) => {
     let cmp = 0;
     switch (sortBy) {
@@ -94,6 +136,13 @@ function sortItems(
         cmp = a.itemType.localeCompare(b.itemType);
         break;
     }
+    if (cmp === 0) cmp = a.name.localeCompare(b.name);
+    if (cmp === 0) {
+      cmp = (subtitles.get(a.id) ?? '').localeCompare(subtitles.get(b.id) ?? '');
+    }
+    // Ids are opaque hex, so compare them by code unit: locale rules would add
+    // nothing and only make the final order depend on the device.
+    if (cmp === 0) cmp = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     return sortOrder === 'asc' ? cmp : -cmp;
   });
   return sorted;
@@ -187,6 +236,9 @@ const VaultListItem = memo(function VaultListItem({
 }: VaultListItemProps) {
   const navigate = useNavigate();
   const Icon = ICON_MAP[item.itemType];
+  // The distinguishing second label — a username, host, masked card tail or
+  // person's name. Never a secret; see `getItemSubtitle`.
+  const subtitle = getItemSubtitle(item);
   const lastModified = new Date(item.updatedAt).toLocaleDateString(undefined, {
     month: 'short',
     day: 'numeric',
@@ -247,19 +299,30 @@ const VaultListItem = memo(function VaultListItem({
         <Icon className="h-5 w-5" />
       </div>
 
-      {/* Name + type */}
+      {/* Name, then the type badge and the distinguishing subtitle sharing one line */}
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="truncate text-sm font-medium text-[hsl(var(--card-foreground))]">
           {item.name || 'Unnamed item'}
         </span>
-        <span
-          className={cn(
-            'inline-flex w-fit rounded-full px-2 py-0.5 text-xs font-medium',
-            TYPE_BADGE_COLORS[item.itemType],
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            className={cn(
+              'inline-flex shrink-0 rounded-full px-2 py-0.5 text-xs font-medium',
+              TYPE_BADGE_COLORS[item.itemType],
+            )}
+          >
+            {TYPE_LABELS[item.itemType]}
+          </span>
+          {subtitle && (
+            <span
+              data-testid="vault-item-subtitle"
+              title={subtitle}
+              className="truncate text-xs text-[hsl(var(--muted-foreground))]"
+            >
+              {subtitle}
+            </span>
           )}
-        >
-          {TYPE_LABELS[item.itemType]}
-        </span>
+        </div>
       </div>
 
       {/* Favorite star */}
@@ -298,7 +361,7 @@ function VirtualizedRow(props: RowComponentProps<RowData>) {
   if (!item) return null;
 
   return (
-    <div style={{ ...style, paddingBottom: 8 }} {...ariaAttributes}>
+    <div style={{ ...style, paddingBottom: ROW_GAP }} {...ariaAttributes}>
       <VaultListItem
         item={item}
         isSelected={selectedItems.has(item.id)}
@@ -772,7 +835,7 @@ export function VaultList({ onCreateNew }: VaultListProps) {
           style={{ height: 'calc(100vh - 220px)', minHeight: 300, maxHeight: 800 }}
           rowComponent={VirtualizedRow}
           rowCount={filteredItems.length}
-          rowHeight={ITEM_HEIGHT + 8}
+          rowHeight={ITEM_HEIGHT + ROW_GAP}
           rowProps={rowData}
           overscanCount={5}
           role="list"
