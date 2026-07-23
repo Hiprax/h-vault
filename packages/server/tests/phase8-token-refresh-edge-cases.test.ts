@@ -13,8 +13,11 @@ import { User } from '../src/models/User.js';
 import { hashToken } from '../src/utils/token.js';
 import { createTestUser, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser, CsrfPair } from './helpers.js';
+import { config } from '../src/config/index.js';
+import { resolveRefreshLifetime } from '../src/controllers/authController.js';
 
 const API = '/api/v1';
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function withCsrf(
   req: request.Test,
@@ -44,6 +47,22 @@ function extractRefreshToken(setCookieHeaders: string | string[] | undefined): s
   const value = refreshCookie.split(';')[0]!.replace('refreshToken=', '');
   // Ignore cookie-clear directives (empty or expired)
   return value || null;
+}
+
+/**
+ * Extracts the `Max-Age` (seconds) of the refreshToken Set-Cookie directive, so
+ * a test can assert the cookie's lifetime tracks the persisted row's expiry.
+ */
+function extractRefreshMaxAge(setCookieHeaders: string | string[] | undefined): number | null {
+  const cookies = Array.isArray(setCookieHeaders)
+    ? setCookieHeaders
+    : setCookieHeaders
+      ? [setCookieHeaders]
+      : [];
+  const refreshCookie = cookies.find((c: string) => c.startsWith('refreshToken='));
+  if (!refreshCookie) return null;
+  const match = /max-age=(\d+)/i.exec(refreshCookie);
+  return match ? Number(match[1]) : null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,5 +386,169 @@ describe('Token refresh — missing and invalid tokens', () => {
     );
 
     expect(res.status).toBe(401);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Absolute family deadline (Phase 13) — NON-transactional / standalone branch.
+// The transactional twin lives in branches-auth-user.test.ts (replica set).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Token refresh — absolute family deadline (standalone)', () => {
+  let user: TestUser;
+
+  beforeEach(async () => {
+    user = await createTestUser();
+  });
+
+  async function refreshOnce(rawToken: string): Promise<request.Response> {
+    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const csrf = await getCsrfBase(agent, `refreshToken=${rawToken}`);
+    return withCsrf(agent.post(`${API}/auth/refresh`), csrf, undefined, `refreshToken=${rawToken}`);
+  }
+
+  it('a row WITHOUT absoluteExpiresAt slides to now + REFRESH_TOKEN_DAYS on rotation', async () => {
+    // Shorten the seeded row's window; the seeded row carries no absolute
+    // deadline, so rotation must slide the replacement out to the full standard
+    // horizon regardless of the old row's remaining time.
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { expiresAt: new Date(Date.now() + DAY_MS) } },
+    );
+
+    const before = Date.now();
+    const res = await refreshOnce(user.refreshToken);
+    expect(res.status).toBe(200);
+
+    const newRaw = extractRefreshToken(res.headers['set-cookie']);
+    expect(newRaw).not.toBeNull();
+    const newRow = await RefreshToken.findOne({ tokenHash: hashToken(newRaw!) }).lean();
+    expect(newRow).not.toBeNull();
+
+    // Slid forward to ~now + REFRESH_TOKEN_DAYS (well past the 1-day window it
+    // replaced), and it inherits no absolute deadline.
+    expect(newRow!.absoluteExpiresAt).toBeUndefined();
+    const expectedMs = before + config.REFRESH_TOKEN_DAYS * DAY_MS;
+    expect(newRow!.expiresAt.getTime()).toBeGreaterThan(before + 2 * DAY_MS);
+    expect(Math.abs(newRow!.expiresAt.getTime() - expectedMs)).toBeLessThan(5000);
+
+    // Cookie Max-Age tracks the row's expiry within a second.
+    const maxAge = extractRefreshMaxAge(res.headers['set-cookie']);
+    expect(maxAge).not.toBeNull();
+    const rowSeconds = Math.round((newRow!.expiresAt.getTime() - before) / 1000);
+    expect(Math.abs(maxAge! - rowSeconds)).toBeLessThanOrEqual(2);
+  });
+
+  it('a row WITH absoluteExpiresAt carries the deadline forward unchanged and never extends it', async () => {
+    // Simulate a remembered family mid-life: an absolute deadline 5 days out,
+    // deliberately SHORTER than the 7-day standard slide so "copy forward" and
+    // "slide" produce observably different results.
+    const absolute = new Date(Date.now() + 5 * DAY_MS);
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { absoluteExpiresAt: absolute, expiresAt: absolute } },
+    );
+
+    const before = Date.now();
+    const res = await refreshOnce(user.refreshToken);
+    expect(res.status).toBe(200);
+
+    const newRaw = extractRefreshToken(res.headers['set-cookie']);
+    const newRow = await RefreshToken.findOne({ tokenHash: hashToken(newRaw!) }).lean();
+    expect(newRow).not.toBeNull();
+
+    // Deadline carried forward unchanged (not re-minted), and expiresAt pinned to
+    // it — NOT slid to now + 7 days.
+    expect(newRow!.absoluteExpiresAt).toBeInstanceOf(Date);
+    expect(Math.abs(newRow!.absoluteExpiresAt!.getTime() - absolute.getTime())).toBeLessThan(1000);
+    expect(Math.abs(newRow!.expiresAt.getTime() - absolute.getTime())).toBeLessThan(1000);
+    // Proves it was NOT extended: a slide would have pushed it to ~7 days.
+    expect(newRow!.expiresAt.getTime()).toBeLessThan(before + 6 * DAY_MS);
+
+    // Cookie Max-Age reflects the remaining ~5 days, not 7.
+    const maxAge = extractRefreshMaxAge(res.headers['set-cookie']);
+    expect(maxAge).not.toBeNull();
+    expect(maxAge!).toBeLessThan(6 * 24 * 60 * 60);
+    expect(maxAge!).toBeGreaterThan(4 * 24 * 60 * 60);
+  });
+
+  it('rejects a remembered family once past its absolute deadline (no rotation past it)', async () => {
+    // A remembered family whose absolute deadline has elapsed: its last row's
+    // expiresAt equals that deadline, so the atomic claim cannot match and the
+    // request is rejected as expired — the family never rotates past the bound.
+    const past = new Date(Date.now() - 1000);
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { absoluteExpiresAt: past, expiresAt: past } },
+    );
+
+    const res = await refreshOnce(user.refreshToken);
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_EXPIRED');
+
+    // No replacement row was minted for this expired family.
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("helpers.ts's seeded row (no absolute deadline) still refreshes", async () => {
+    // Guards backward compatibility: the standard seeded session behaves exactly
+    // as before this phase.
+    const res = await refreshOnce(user.refreshToken);
+    expect(res.status).toBe(200);
+    expect(res.body.data.accessToken).toBeTruthy();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveRefreshLifetime — the shared lifetime helper, unit-tested directly so
+// every branch (slide / mint-remember / carry-forward / past-deadline clamp) is
+// covered from ONE place, including the remember branch that no route wires yet.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('resolveRefreshLifetime (unit)', () => {
+  it('slides to now + REFRESH_TOKEN_DAYS with no absolute deadline for a standard issuance', () => {
+    const before = Date.now();
+    const lifetime = resolveRefreshLifetime({});
+    const after = Date.now();
+
+    const expected = config.REFRESH_TOKEN_DAYS * DAY_MS;
+    expect(lifetime.absoluteExpiresAt).toBeUndefined();
+    expect(lifetime.maxAgeMs).toBe(expected);
+    expect(lifetime.expiresAt.getTime()).toBeGreaterThanOrEqual(before + expected);
+    expect(lifetime.expiresAt.getTime()).toBeLessThanOrEqual(after + expected);
+  });
+
+  it('mints a fresh REFRESH_TOKEN_REMEMBER_DAYS deadline for a remembered issuance', () => {
+    const before = Date.now();
+    const lifetime = resolveRefreshLifetime({ remember: true });
+    const after = Date.now();
+
+    const expected = config.REFRESH_TOKEN_REMEMBER_DAYS * DAY_MS;
+    expect(lifetime.maxAgeMs).toBe(expected);
+    expect(lifetime.absoluteExpiresAt).toBeInstanceOf(Date);
+    // expiresAt is pinned to the new absolute deadline (same instant).
+    expect(lifetime.absoluteExpiresAt!.getTime()).toBe(lifetime.expiresAt.getTime());
+    expect(lifetime.expiresAt.getTime()).toBeGreaterThanOrEqual(before + expected);
+    expect(lifetime.expiresAt.getTime()).toBeLessThanOrEqual(after + expected);
+  });
+
+  it('carries an existing absolute deadline forward unchanged and never extends it', () => {
+    const existing = new Date(Date.now() + 3 * DAY_MS);
+    const lifetime = resolveRefreshLifetime({ absoluteExpiresAt: existing });
+
+    // Same instant preserved; expiresAt pinned to it; no now + arithmetic.
+    expect(lifetime.absoluteExpiresAt).toBe(existing);
+    expect(lifetime.expiresAt.getTime()).toBe(existing.getTime());
+    expect(lifetime.maxAgeMs).toBeGreaterThan(0);
+    expect(lifetime.maxAgeMs).toBeLessThanOrEqual(3 * DAY_MS);
+  });
+
+  it('clamps maxAgeMs to zero for an already-elapsed absolute deadline', () => {
+    const past = new Date(Date.now() - 5000);
+    const lifetime = resolveRefreshLifetime({ absoluteExpiresAt: past });
+
+    expect(lifetime.expiresAt.getTime()).toBe(past.getTime());
+    expect(lifetime.maxAgeMs).toBe(0);
   });
 });

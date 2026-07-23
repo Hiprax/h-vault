@@ -34,7 +34,6 @@ import {
 import { clearCsrfCookie } from '../middleware/csrf.js';
 import {
   ERROR_CODES,
-  REFRESH_TOKEN_EXPIRY_DAYS,
   LOCKOUT_DURATION_MINUTES,
   MAX_LOGIN_ATTEMPTS,
   maskEmail,
@@ -49,7 +48,7 @@ import type {
 
 const logger = createLogger({ moduleName: 'auth' });
 
-const REFRESH_MAX_AGE_MS = REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const LOCKOUT_DURATION_MS = LOCKOUT_DURATION_MINUTES * 60 * 1000;
 const MAX_FAILED_ATTEMPTS = MAX_LOGIN_ATTEMPTS;
 
@@ -159,14 +158,64 @@ interface AuthenticatedRequest extends Request {
   };
 }
 
-function setRefreshCookie(res: Response, token: string): void {
+function setRefreshCookie(res: Response, token: string, maxAgeMs: number): void {
   res.cookie(REFRESH_COOKIE_NAME, token, {
     httpOnly: true,
     secure: isProduction,
     sameSite: isProduction ? 'strict' : 'lax',
     path: '/api/v1',
-    maxAge: REFRESH_MAX_AGE_MS,
+    maxAge: maxAgeMs,
   });
+}
+
+interface RefreshLifetime {
+  expiresAt: Date;
+  absoluteExpiresAt?: Date;
+  maxAgeMs: number;
+}
+
+/**
+ * Single source of truth for a refresh token's lifetime, so the cookie's
+ * `maxAge`, the persisted row's `expiresAt`, and the family's absolute deadline
+ * are always computed from ONE `Date.now()` and can never drift apart.
+ *
+ * Three cases, in priority order:
+ *  - **Rotation of a remembered family** (`absoluteExpiresAt` present): carry the
+ *    deadline forward UNCHANGED. `expiresAt` is pinned to it and `maxAge` is the
+ *    remaining time, so an active user's "30 days" is truly absolute — rotation
+ *    never extends it (§1.2 principle 5 / §1.7).
+ *  - **Fresh remembered login** (`remember: true`, no deadline yet): mint a new
+ *    30-day (`REFRESH_TOKEN_REMEMBER_DAYS`) absolute deadline.
+ *  - **Everything else** (standard login, or rotation of a row with no deadline):
+ *    slide to `now + REFRESH_TOKEN_DAYS`, no `absoluteExpiresAt` — byte-for-byte
+ *    today's behaviour (§1.2 principle 6).
+ */
+export function resolveRefreshLifetime(opts: {
+  remember?: boolean;
+  absoluteExpiresAt?: Date | undefined;
+}): RefreshLifetime {
+  const now = Date.now();
+  const existing = opts.absoluteExpiresAt;
+  if (existing) {
+    return {
+      expiresAt: new Date(existing),
+      absoluteExpiresAt: existing,
+      maxAgeMs: Math.max(0, existing.getTime() - now),
+    };
+  }
+  if (opts.remember) {
+    const rememberMs = config.REFRESH_TOKEN_REMEMBER_DAYS * DAY_MS;
+    return {
+      expiresAt: new Date(now + rememberMs),
+      absoluteExpiresAt: new Date(now + rememberMs),
+      maxAgeMs: rememberMs,
+    };
+  }
+  const standardMs = config.REFRESH_TOKEN_DAYS * DAY_MS;
+  return {
+    expiresAt: new Date(now + standardMs),
+    maxAgeMs: standardMs,
+  };
 }
 
 function clearRefreshCookie(res: Response): void {
@@ -492,15 +541,17 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   const refreshTokenHash = hashToken(refreshTokenRaw);
   const familyId = crypto.randomUUID();
 
+  const lifetime = resolveRefreshLifetime({});
   await RefreshToken.create({
     userId: user._id,
     tokenHash: refreshTokenHash,
     familyId,
     deviceInfo: sanitizeDeviceInfo(deviceInfo, req),
-    expiresAt: new Date(Date.now() + REFRESH_MAX_AGE_MS),
+    expiresAt: lifetime.expiresAt,
+    ...(lifetime.absoluteExpiresAt ? { absoluteExpiresAt: lifetime.absoluteExpiresAt } : {}),
   });
 
-  setRefreshCookie(res, refreshTokenRaw);
+  setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
   clearCsrfCookie(res);
 
   await createAuditLog(user._id.toString(), 'login', undefined, ip, userAgent);
@@ -754,15 +805,17 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   const refreshTokenHash = hashToken(refreshTokenRaw);
   const familyId = crypto.randomUUID();
 
+  const lifetime = resolveRefreshLifetime({});
   await RefreshToken.create({
     userId: user._id,
     tokenHash: refreshTokenHash,
     familyId,
     deviceInfo: sanitizeDeviceInfo(deviceInfo, req),
-    expiresAt: new Date(Date.now() + REFRESH_MAX_AGE_MS),
+    expiresAt: lifetime.expiresAt,
+    ...(lifetime.absoluteExpiresAt ? { absoluteExpiresAt: lifetime.absoluteExpiresAt } : {}),
   });
 
-  setRefreshCookie(res, refreshTokenRaw);
+  setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
   clearCsrfCookie(res);
 
   await createAuditLog(user._id.toString(), 'login', { twoFactor: true }, ip, userAgent);
@@ -807,6 +860,10 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
     userId: mongoose.Types.ObjectId;
     familyId: string;
     deviceInfo: { userAgent: string; ip: string; fingerprint: string };
+    // The cookie is set once, after both branches. Carry the rotated lifetime's
+    // max-age here so it is derived from the SAME computation that pinned the
+    // new row's expiresAt — the cookie and the row can never disagree.
+    maxAgeMs: number;
   }
   let claimed: ClaimedTokenMeta | null = null;
 
@@ -830,6 +887,12 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
           return;
         }
 
+        // Rotation carries any absolute family deadline forward unchanged; a row
+        // without one slides to now + REFRESH_TOKEN_DAYS (today's behaviour).
+        const lifetime = resolveRefreshLifetime({
+          absoluteExpiresAt: storedToken.absoluteExpiresAt,
+        });
+
         await RefreshToken.create(
           [
             {
@@ -837,7 +900,10 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
               tokenHash: newRefreshTokenHash,
               familyId: storedToken.familyId,
               deviceInfo: storedToken.deviceInfo,
-              expiresAt: new Date(Date.now() + REFRESH_MAX_AGE_MS),
+              expiresAt: lifetime.expiresAt,
+              ...(lifetime.absoluteExpiresAt
+                ? { absoluteExpiresAt: lifetime.absoluteExpiresAt }
+                : {}),
             },
           ],
           { session },
@@ -847,6 +913,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
           userId: storedToken.userId,
           familyId: storedToken.familyId,
           deviceInfo: storedToken.deviceInfo,
+          maxAgeMs: lifetime.maxAgeMs,
         };
       });
     } finally {
@@ -865,18 +932,25 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
     );
 
     if (storedToken) {
+      // Rotation carries any absolute family deadline forward unchanged; a row
+      // without one slides to now + REFRESH_TOKEN_DAYS (today's behaviour).
+      const lifetime = resolveRefreshLifetime({
+        absoluteExpiresAt: storedToken.absoluteExpiresAt,
+      });
       try {
         await RefreshToken.create({
           userId: storedToken.userId,
           tokenHash: newRefreshTokenHash,
           familyId: storedToken.familyId,
           deviceInfo: storedToken.deviceInfo,
-          expiresAt: new Date(Date.now() + REFRESH_MAX_AGE_MS),
+          expiresAt: lifetime.expiresAt,
+          ...(lifetime.absoluteExpiresAt ? { absoluteExpiresAt: lifetime.absoluteExpiresAt } : {}),
         });
         claimed = {
           userId: storedToken.userId,
           familyId: storedToken.familyId,
           deviceInfo: storedToken.deviceInfo,
+          maxAgeMs: lifetime.maxAgeMs,
         };
       } catch (createErr: unknown) {
         // New token creation failed after claim; log loudly. The user must
@@ -936,7 +1010,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
 
   const accessToken = generateAccessToken(user._id.toString());
 
-  setRefreshCookie(res, newRefreshTokenRaw);
+  setRefreshCookie(res, newRefreshTokenRaw, claimedMeta.maxAgeMs);
   clearCsrfCookie(res);
 
   res.status(200).json({
