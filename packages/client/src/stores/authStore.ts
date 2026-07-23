@@ -33,6 +33,35 @@ import { getDeviceFingerprint } from '../utils/deviceFingerprint.js';
  */
 const LOCK_LOGOUT_TIMEOUT_MS = 5000;
 
+/**
+ * localStorage key for the cold-start "remember me" hint. It is a bare marker
+ * ('1') and holds NO session or key material — only a signal that this browser
+ * has an opted-in remembered session worth attempting a silent cold-start
+ * resume for (see `services/auth/sessionResume.ts`). It is written at the two
+ * points a login can complete (the non-2FA branch of `login` and `verify2fa`),
+ * cleared on any non-remembered login, and removed on `logout` but NOT on
+ * `lock` (a lock is not a logout).
+ */
+const REMEMBER_HINT_KEY = '__hv_remember';
+
+/**
+ * Persist or clear the remember-me cold-start hint. Best-effort: localStorage
+ * can be unavailable (private browsing, storage disabled), and the hint is only
+ * an optimization for silent resume, so a failure is swallowed rather than
+ * allowed to break login/logout.
+ */
+function writeRememberHint(remember: boolean): void {
+  try {
+    if (remember) {
+      localStorage.setItem(REMEMBER_HINT_KEY, '1');
+    } else {
+      localStorage.removeItem(REMEMBER_HINT_KEY);
+    }
+  } catch {
+    // localStorage may be unavailable in some contexts (e.g. private browsing).
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -68,12 +97,17 @@ interface AuthState {
   tempToken: string | null;
   _2faTimeoutId: ReturnType<typeof setTimeout> | null;
 
+  // Transient "remember me" flag, stashed across the 2FA step so verify2fa can
+  // honor the choice made at the login screen. NEVER persisted (excluded from
+  // `partialize`) — it is a per-attempt UI intent, not session state.
+  _rememberMe: boolean;
+
   // Loading guard (prevents concurrent login/2FA attempts)
   isLoading: boolean;
 
   // Actions
   register: (email: string, masterPassword: string) => Promise<{ emailSent: boolean }>;
-  login: (email: string, masterPassword: string) => Promise<void>;
+  login: (email: string, masterPassword: string, rememberMe?: boolean) => Promise<void>;
   verify2fa: (code: string) => Promise<void>;
   unlock: (masterPassword: string, preDerivedMek?: CryptoKey) => Promise<void>;
   lock: () => Promise<void>;
@@ -158,6 +192,7 @@ export const useAuthStore = create<AuthState>()(
       twoFactorRequired: false,
       tempToken: null,
       _2faTimeoutId: null,
+      _rememberMe: false,
       isLoading: false,
 
       // -------------------------------------------------------------------
@@ -202,7 +237,7 @@ export const useAuthStore = create<AuthState>()(
       // -------------------------------------------------------------------
       // Login
       // -------------------------------------------------------------------
-      login: async (email: string, masterPassword: string): Promise<void> => {
+      login: async (email: string, masterPassword: string, rememberMe = false): Promise<void> => {
         // Prevent concurrent login attempts to avoid MEK state corruption
         if (get().isLoading) return;
         set({ isLoading: true });
@@ -220,6 +255,7 @@ export const useAuthStore = create<AuthState>()(
           const response = await loginApi({
             email,
             authHash,
+            rememberMe,
             deviceInfo: {
               userAgent: navigator.userAgent,
               fingerprint,
@@ -242,6 +278,10 @@ export const useAuthStore = create<AuthState>()(
               tempToken: loginData.tempToken,
               mek: masterEncryptionKey,
               user: { userId: '', email },
+              // Stash the choice so verify2fa can write the cold-start hint at
+              // the ACTUAL completion point (a 2FA login only finishes there).
+              // Not persisted — see `partialize`.
+              _rememberMe: rememberMe,
               isLoading: false,
             });
 
@@ -297,8 +337,14 @@ export const useAuthStore = create<AuthState>()(
             kdfIterations: loginData.kdfIterations,
             twoFactorRequired: false,
             tempToken: null,
+            _rememberMe: false,
             isLoading: false,
           });
+
+          // A non-2FA login completes HERE, so write (or actively clear) the
+          // cold-start hint now. A non-remembered login removes any stale hint
+          // left by a prior remembered session on this browser.
+          writeRememberHint(rememberMe);
 
           // Ownership transferred to store state; prevent cleanup below
           masterEncryptionKey = null;
@@ -321,7 +367,7 @@ export const useAuthStore = create<AuthState>()(
         set({ isLoading: true });
 
         try {
-          const { tempToken, mek, user, _2faTimeoutId } = get();
+          const { tempToken, mek, user, _2faTimeoutId, _rememberMe } = get();
           if (!tempToken) {
             throw new Error('No pending 2FA session');
           }
@@ -377,8 +423,14 @@ export const useAuthStore = create<AuthState>()(
             twoFactorRequired: false,
             tempToken: null,
             _2faTimeoutId: null,
+            _rememberMe: false,
             isLoading: false,
           });
+
+          // A 2FA login only completes HERE (login() returned early). Write (or
+          // clear) the cold-start hint using the choice stashed at the login
+          // screen, so a remembered 2FA session resumes just like a non-2FA one.
+          writeRememberHint(_rememberMe);
         } catch (error) {
           // Decide whether the same temp token can be retried:
           //   Retryable     → a wrong-but-correctable 2FA code or a transient
@@ -560,8 +612,14 @@ export const useAuthStore = create<AuthState>()(
           twoFactorRequired: false,
           tempToken: null,
           _2faTimeoutId: null,
+          _rememberMe: false,
           isLoading: false,
         });
+
+        // Remove the cold-start remember hint: a full logout ends the remembered
+        // session, so the next boot must land on the login screen. lock() must
+        // NOT do this — a lock keeps the session and its remembered status.
+        writeRememberHint(false);
 
         // Wipe any sensitive value still on the OS clipboard (same rationale as
         // lock(): the copy component's pending auto-clear timer is cancelled on

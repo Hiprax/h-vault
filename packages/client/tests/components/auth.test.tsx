@@ -188,7 +188,80 @@ describe('LoginPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
     await waitFor(() => {
-      expect(mockLogin).toHaveBeenCalledWith('user@example.com', 'myMasterPassword123');
+      // Third argument is the (default-unchecked) remember-me flag.
+      expect(mockLogin).toHaveBeenCalledWith('user@example.com', 'myMasterPassword123', false);
+    });
+  });
+
+  it('renders an accessible, keyboard-reachable "Remember me on this device" checkbox', () => {
+    renderWithRouter(<LoginPage />);
+
+    const checkbox = screen.getByLabelText('Remember me on this device');
+    expect(checkbox).toBeInTheDocument();
+    expect(checkbox).toHaveAttribute('type', 'checkbox');
+    // A native checkbox input is focusable/toggleable by keyboard by default
+    // (not removed from the tab order).
+    expect(checkbox).not.toHaveAttribute('tabindex', '-1');
+    // Defaults to unchecked (opt-in).
+    expect(checkbox).not.toBeChecked();
+  });
+
+  it('shows a hint that never suggests the master password is remembered', () => {
+    renderWithRouter(<LoginPage />);
+
+    const hint = screen.getByText(/only use this on a device you trust/i);
+    expect(hint).toBeInTheDocument();
+    // The hint must reassure the master password is STILL required and never
+    // stored — it must not promise the master password is remembered.
+    expect(hint).toHaveTextContent(/master password/i);
+    expect(hint).toHaveTextContent(/never stored/i);
+    expect(hint.textContent ?? '').not.toMatch(/remember (your |the )?master password/i);
+
+    // The hint is wired as the checkbox's accessible description so a screen
+    // reader announces it when the control receives focus.
+    const checkbox = screen.getByLabelText('Remember me on this device');
+    expect(checkbox).toHaveAttribute('aria-describedby', hint.id);
+  });
+
+  it('passes rememberMe = true to login when the box is checked', async () => {
+    mockLogin.mockResolvedValue(undefined);
+
+    renderWithRouter(<LoginPage />);
+
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'user@example.com' },
+    });
+    fireEvent.change(screen.getByLabelText('Master Password'), {
+      target: { value: 'myMasterPassword123' },
+    });
+
+    const checkbox = screen.getByLabelText('Remember me on this device');
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
+
+    await waitFor(() => {
+      expect(mockLogin).toHaveBeenCalledWith('user@example.com', 'myMasterPassword123', true);
+    });
+  });
+
+  it('passes rememberMe = false to login when the box is left unchecked', async () => {
+    mockLogin.mockResolvedValue(undefined);
+
+    renderWithRouter(<LoginPage />);
+
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: 'user@example.com' },
+    });
+    fireEvent.change(screen.getByLabelText('Master Password'), {
+      target: { value: 'myMasterPassword123' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
+
+    await waitFor(() => {
+      expect(mockLogin).toHaveBeenCalledWith('user@example.com', 'myMasterPassword123', false);
     });
   });
 

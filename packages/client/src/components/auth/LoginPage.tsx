@@ -24,6 +24,7 @@ const loginFormSchema = z.object({
     .pipe(z.email('Enter a valid email address'))
     .refine(hasValidEmailTld, 'Enter a valid email address'),
   masterPassword: z.string().min(1, 'Master password is required'),
+  rememberMe: z.boolean(),
 });
 
 type LoginFormValues = z.infer<typeof loginFormSchema>;
@@ -65,6 +66,7 @@ export function LoginPage() {
     defaultValues: {
       email: '',
       masterPassword: '',
+      rememberMe: false,
     },
   });
 
@@ -72,7 +74,7 @@ export function LoginPage() {
     setIsSubmitting(true);
     setApiError(null);
     try {
-      await login(values.email, values.masterPassword);
+      await login(values.email, values.masterPassword, values.rememberMe);
       // If 2FA is required the store sets twoFactorRequired=true and we stay
       // on this page to collect the code. Otherwise navigate to the vault.
       const currentState = useAuthStore.getState();
@@ -372,6 +374,29 @@ export function LoginPage() {
                   {loginForm.formState.errors.masterPassword.message}
                 </p>
               )}
+            </div>
+
+            {/* Remember me on this device (opt-in) */}
+            <div className="space-y-1">
+              <label htmlFor="login-remember" className="flex items-center gap-2">
+                <input
+                  id="login-remember"
+                  type="checkbox"
+                  aria-describedby="login-remember-hint"
+                  className="h-4 w-4 rounded border-[hsl(var(--input))] text-[hsl(var(--primary))] focus:ring-[hsl(var(--ring))]"
+                  {...loginForm.register('rememberMe')}
+                />
+                <span className="text-sm text-[hsl(var(--foreground))]">
+                  Remember me on this device
+                </span>
+              </label>
+              <p
+                id="login-remember-hint"
+                className="pl-6 text-xs text-[hsl(var(--muted-foreground))]"
+              >
+                Only use this on a device you trust. You&apos;ll still enter your master password
+                every time &mdash; it is never stored.
+              </p>
             </div>
           </CardContent>
 

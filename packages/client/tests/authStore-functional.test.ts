@@ -6,7 +6,7 @@
  * and mock call sequences.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia -- jsdom does not implement it but the uiStore module
@@ -162,6 +162,7 @@ const authInitialState = {
   twoFactorRequired: false,
   tempToken: null,
   _2faTimeoutId: null,
+  _rememberMe: false,
   isLoading: false,
 };
 
@@ -343,10 +344,12 @@ describe('authStore.login', () => {
     // Auth key should be cleared after getting the hash
     expect(cryptoService.clearKey).toHaveBeenCalledWith(mockAuthKey);
 
-    // loginApi called with correct payload (fingerprint is a 16-char hex hash)
+    // loginApi called with correct payload (fingerprint is a 16-char hex hash).
+    // rememberMe defaults to false and is always sent explicitly.
     expect(loginApi).toHaveBeenCalledWith({
       email: 'user@example.com',
       authHash: 'mock-auth-hash',
+      rememberMe: false,
       deviceInfo: {
         userAgent: navigator.userAgent,
         fingerprint: expect.stringMatching(/^[0-9a-f]{16}$/) as string,
@@ -1207,5 +1210,191 @@ describe('logout clears the encrypted Vault Health snapshot (lock does not)', ()
       'Failed to clear health results during logout',
       expect.any(Error),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Remember-me cold-start hint (localStorage['__hv_remember']).
+//
+// The hint is a bare marker written at BOTH points a login can complete — the
+// non-2FA branch of login() and verify2fa() — cleared by any non-remembered
+// login, removed on logout, and preserved across lock(). It never carries
+// session or key material.
+// ---------------------------------------------------------------------------
+
+describe('remember-me cold-start hint (__hv_remember)', () => {
+  const REMEMBER_KEY = '__hv_remember';
+  const nonTwoFaResponse = {
+    data: {
+      success: true,
+      data: {
+        accessToken: buildMockJwt('remember-user'),
+        encryptedVaultKey: 'enc-vk',
+        vaultKeyIv: 'vk-iv',
+        vaultKeyTag: 'vk-tag',
+        kdfIterations: 600_000,
+        kdfAlgorithm: 'PBKDF2-SHA256',
+      },
+    },
+  };
+  const twoFaRequiredResponse = {
+    data: {
+      success: true,
+      data: { twoFactorRequired: true, tempToken: 'temp-token-remember' },
+    },
+  };
+  const twoFaSuccessResponse = {
+    data: {
+      success: true,
+      data: {
+        accessToken: buildMockJwt('remember-2fa-user'),
+        encryptedVaultKey: 'enc-vk-2fa',
+        vaultKeyIv: 'vk-iv-2fa',
+        vaultKeyTag: 'vk-tag-2fa',
+        kdfIterations: 600_000,
+        kdfAlgorithm: 'PBKDF2-SHA256',
+      },
+    },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useAuthStore.setState({ ...authInitialState });
+    localStorage.removeItem(REMEMBER_KEY);
+    vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
+      masterEncryptionKey: mockMek,
+      authKey: mockAuthKey,
+    });
+    vi.mocked(cryptoService.importVaultKey).mockResolvedValue(mockVaultKeyCK);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+    vi.mocked(logoutApi).mockResolvedValue(undefined as never);
+    vi.mocked(lockApi).mockResolvedValue({ data: { success: true } } as never);
+  });
+
+  afterEach(() => {
+    localStorage.removeItem(REMEMBER_KEY);
+  });
+
+  it('writes the hint when a non-2FA login is remembered', async () => {
+    vi.mocked(loginApi).mockResolvedValue(nonTwoFaResponse as never);
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!', true);
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(localStorage.getItem(REMEMBER_KEY)).toBe('1');
+  });
+
+  it('clears a stale hint when a non-2FA login is NOT remembered', async () => {
+    localStorage.setItem(REMEMBER_KEY, '1');
+    vi.mocked(loginApi).mockResolvedValue(nonTwoFaResponse as never);
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!', false);
+
+    expect(localStorage.getItem(REMEMBER_KEY)).toBeNull();
+  });
+
+  it('defaults to a non-remembered login when rememberMe is omitted', async () => {
+    localStorage.setItem(REMEMBER_KEY, '1');
+    vi.mocked(loginApi).mockResolvedValue(nonTwoFaResponse as never);
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    expect(loginApi).toHaveBeenCalledWith(expect.objectContaining({ rememberMe: false }) as never);
+    expect(localStorage.getItem(REMEMBER_KEY)).toBeNull();
+  });
+
+  it('stashes rememberMe across the 2FA step and writes the hint only in verify2fa', async () => {
+    vi.mocked(loginApi).mockResolvedValue(twoFaRequiredResponse as never);
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!', true);
+
+    // Stashed transiently, but the hint is NOT written yet — a 2FA login has
+    // not completed at this point.
+    expect(useAuthStore.getState()._rememberMe).toBe(true);
+    expect(localStorage.getItem(REMEMBER_KEY)).toBeNull();
+
+    vi.mocked(login2faApi).mockResolvedValue(twoFaSuccessResponse as never);
+    await useAuthStore.getState().verify2fa('123456');
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(localStorage.getItem(REMEMBER_KEY)).toBe('1');
+    // The transient flag is reset once consumed.
+    expect(useAuthStore.getState()._rememberMe).toBe(false);
+  });
+
+  it('clears a stale hint through verify2fa when a 2FA login is NOT remembered', async () => {
+    localStorage.setItem(REMEMBER_KEY, '1');
+    vi.mocked(loginApi).mockResolvedValue(twoFaRequiredResponse as never);
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!', false);
+    expect(useAuthStore.getState()._rememberMe).toBe(false);
+
+    vi.mocked(login2faApi).mockResolvedValue(twoFaSuccessResponse as never);
+    await useAuthStore.getState().verify2fa('123456');
+
+    expect(localStorage.getItem(REMEMBER_KEY)).toBeNull();
+  });
+
+  it('removes the hint on logout', async () => {
+    localStorage.setItem(REMEMBER_KEY, '1');
+    useAuthStore.setState({
+      isAuthenticated: true,
+      isLocked: false,
+      user: { userId: 'user-123', email: 'user@example.com' },
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect(localStorage.getItem(REMEMBER_KEY)).toBeNull();
+  });
+
+  it('preserves the hint across lock() (a lock is not a logout)', async () => {
+    localStorage.setItem(REMEMBER_KEY, '1');
+    useAuthStore.setState({
+      isAuthenticated: true,
+      isLocked: false,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().lock();
+
+    expect(useAuthStore.getState().isLocked).toBe(true);
+    expect(localStorage.getItem(REMEMBER_KEY)).toBe('1');
+  });
+
+  it('does not persist the transient _rememberMe flag', async () => {
+    vi.mocked(loginApi).mockResolvedValue(twoFaRequiredResponse as never);
+    await useAuthStore.getState().login('user@example.com', 'Master123!', true);
+
+    // Allow any queued persist write to flush before inspecting it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const persisted = (await import('../src/stores/encryptedStorage.js')).encryptedStorage;
+    const setItemMock = vi.mocked(persisted.setItem);
+    // The persist middleware writes on set(), so at least one write must have
+    // happened during login — the assertion below is not vacuous.
+    expect(setItemMock).toHaveBeenCalled();
+    // Whatever the persist middleware wrote, it must never include _rememberMe.
+    const persistedPayloads = setItemMock.mock.calls.map((call) => String(call[1])).join('');
+    expect(persistedPayloads).not.toContain('_rememberMe');
+    expect(persistedPayloads).not.toContain('rememberMe');
+  });
+
+  it('swallows a localStorage failure when writing the hint', async () => {
+    vi.mocked(loginApi).mockResolvedValue(nonTwoFaResponse as never);
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError');
+    });
+
+    // The login must still succeed even though persisting the hint threw.
+    await expect(
+      useAuthStore.getState().login('user@example.com', 'Master123!', true),
+    ).resolves.toBeUndefined();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+
+    setItemSpy.mockRestore();
   });
 });
