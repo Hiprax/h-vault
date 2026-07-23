@@ -221,6 +221,15 @@ export interface IUserProfile {
   email: string;
   emailVerified: boolean;
   twoFactorEnabled: boolean;
+  // Wrapped-vault-key material. These are opaque ciphertext (AES-256-GCM under
+  // the MEK), never secrets, and `GET /user/profile` returns them at runtime
+  // because they are not `select: false` on the User model. They are required
+  // here so a cold-start "remember me" resume can seed `encryptedVaultKeyData`
+  // and drive the Unlock screen without a fresh login (see
+  // `services/auth/sessionResume.ts`).
+  encryptedVaultKey: string;
+  vaultKeyIv: string;
+  vaultKeyTag: string;
   kdfIterations: number;
   kdfAlgorithm: 'PBKDF2-SHA256';
   encryptionVersion: number;

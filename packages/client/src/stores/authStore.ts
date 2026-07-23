@@ -42,7 +42,7 @@ const LOCK_LOGOUT_TIMEOUT_MS = 5000;
  * cleared on any non-remembered login, and removed on `logout` but NOT on
  * `lock` (a lock is not a logout).
  */
-const REMEMBER_HINT_KEY = '__hv_remember';
+export const REMEMBER_HINT_KEY = '__hv_remember';
 
 /**
  * Persist or clear the remember-me cold-start hint. Best-effort: localStorage
