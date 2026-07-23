@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type zxcvbnType from 'zxcvbn';
 import { AlertTriangle, FileUp, Loader2, Lock, X } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { downloadBlob } from '../../lib/download';
 import { getZxcvbn } from '../../lib/lazyZxcvbn';
 import { logger } from '../../lib/logger';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/Card';
@@ -54,16 +55,6 @@ const inputClass =
 
 function formatMb(bytes: number): string {
   return `${String(Math.floor(bytes / (1024 * 1024)))} MB`;
-}
-
-/** Trigger a client-side download of `blob` under `filename` (Blob + anchor). */
-function triggerDownload(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 export function FileEncryptPanel() {
@@ -130,7 +121,7 @@ export function FileEncryptPanel() {
       // it before any bytes are read, so an oversized file never reaches crypto.
       const limit = maxBytes ?? (await getFileEncryptionMaxBytes());
       const { blob, filename } = await encryptFile(file, password, { maxSizeBytes: limit });
-      triggerDownload(blob, filename);
+      downloadBlob(blob, filename);
       toast({
         title: 'File encrypted',
         description: `Downloaded ${filename}. Keep your password safe — it cannot be recovered.`,

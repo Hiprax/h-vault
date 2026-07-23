@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { FileDown, Loader2, Unlock, X } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/Card';
 import { useToast } from '../ui/Toast';
+import { downloadBlob } from '../../lib/download';
 import { FILE_ENCRYPTION_FILE_EXTENSION } from '@hvault/shared';
 import { getFileEncryptionMaxBytes } from '../../services/api/configApi';
 import {
@@ -30,16 +31,6 @@ const inputClass =
 
 function formatMb(bytes: number): string {
   return `${String(Math.floor(bytes / (1024 * 1024)))} MB`;
-}
-
-/** Trigger a client-side download of `blob` under `filename` (Blob + anchor). */
-function triggerDownload(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 export function FileDecryptPanel() {
@@ -82,7 +73,7 @@ export function FileDecryptPanel() {
       // it can't OOM the tab any more than a huge plaintext can on encrypt.
       const limit = maxBytes ?? (await getFileEncryptionMaxBytes());
       const { blob, filename } = await decryptFile(file, password, { maxSizeBytes: limit });
-      triggerDownload(blob, filename);
+      downloadBlob(blob, filename);
       toast({ title: 'File decrypted', description: `Downloaded ${filename}.`, type: 'success' });
       resetForm();
     } catch (err) {

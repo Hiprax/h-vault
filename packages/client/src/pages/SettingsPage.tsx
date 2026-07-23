@@ -25,6 +25,7 @@ import QRCode from 'qrcode';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../lib/lazyZxcvbn';
 import { cn, getApiErrorMessage } from '../lib/utils';
+import { downloadText } from '../lib/download';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
 import {
   Dialog,
@@ -732,15 +733,11 @@ export default function SettingsPage() {
       const res = await exportVaultApi({ format: 'json', authHash });
       const exportResult = res.data;
       if (!exportResult.success) throw new Error('Failed to export vault');
-      const blob = new Blob([JSON.stringify(exportResult.data, null, 2)], {
-        type: 'application/json',
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `hvault-export-${new Date().toISOString().split('T')[0]}.enc`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadText(
+        JSON.stringify(exportResult.data, null, 2),
+        `hvault-export-${new Date().toISOString().split('T')[0]}.enc`,
+        'application/json',
+      );
       setExportPassword('');
       toast({ title: 'Vault exported', type: 'success' });
     } catch {
