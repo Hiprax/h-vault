@@ -12,7 +12,8 @@ export interface IDeviceInfo {
 
 /**
  * Shared, embedded device-info sub-schema (`{ _id: false }`) for any model
- * that records the device a credential was issued to — used by `RefreshToken`.
+ * that records the device a credential was issued to — used by `RefreshToken`
+ * and `TrustedDevice`.
  * The length caps mirror the boundary
  * truncation performed by `getRequestContext` (userAgent 512, ip 45) plus the
  * device fingerprint (128); they are defense-in-depth against a writer that
