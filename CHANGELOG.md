@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-23
+
 ### Added
 
 - New environment variable `HIBP_CACHE_MAX_BYTES` (default 67108864 = 64 MiB, minimum 1 MiB) that bounds the in-memory breach-range cache by measured bytes per worker process, in addition to the existing 10,000-entry cap. A real HIBP range is ~36 KB, so the byte budget is now the binding memory bound; the entry count is a secondary guard.
@@ -207,7 +209,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Hiprax/h-vault/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Hiprax/h-vault/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Hiprax/h-vault/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Hiprax/h-vault/compare/v0.1.2...v0.2.0
