@@ -52,7 +52,12 @@ describe('README documentation sync', () => {
     expect(heavyOpsRow).toMatch(/empty trash/i);
   });
 
-  it('the export docs advertise JSON only (CSV is import-only)', () => {
-    expect(readme).not.toContain('JSON or CSV');
+  it('documents the portable plaintext export formats (Bitwarden JSON/CSV, Chrome/Edge CSV)', () => {
+    // CSV used to be import-only, so the docs previously advertised "JSON only". The
+    // "Leave H-Vault" portable export now produces plaintext Bitwarden JSON, Bitwarden CSV
+    // and Chrome/Edge CSV, so the README must document those formats and the dedicated page.
+    expect(readme).toContain('/settings/export-data');
+    expect(readme).toContain('Bitwarden CSV');
+    expect(readme).toContain('Chrome/Edge CSV');
   });
 });

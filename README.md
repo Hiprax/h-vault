@@ -72,16 +72,17 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 
 ### Security
 
-|                               |                                                                                                                                                                                                             |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Two-factor authentication** | TOTP with bcrypt-hashed backup codes, regeneration, replay protection, and brute-force throttling on the 2FA step itself — a temp token can't be used for unlimited guessing.                               |
-| **Session management**        | Refresh-token rotation with reuse detection and family revocation. Access tokens are invalidated the instant a password changes. A locked-out, unverified or pending-deletion account cannot mint new ones. |
-| **No enumeration oracles**    | Registration, login, lockout, password reset and verification-resend are all built so that response body _and_ response time are identical whether or not the account exists.                               |
-| **Account lockout**           | 30 minutes after 10 failed attempts, with progressive delays and an unlock email — and evaluated _after_ the password check, so it never reveals that an account exists.                                    |
-| **CSRF + rate limiting**      | HMAC-SHA256 double-submit tokens with constant-time verification, and [fourteen rate-limit tiers](#rate-limiting) backed by MongoDB, keyed per IP, email, user or session, with IPv6 `/64` aggregation.     |
-| **Breach detection**          | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                    |
-| **Audit log**                 | A searchable security log covering **41 distinct operations**, with TTL-based retention.                                                                                                                    |
-| **Account deletion**          | GDPR-complete, password-confirmed, and cascaded atomically across every collection.                                                                                                                         |
+|                                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Two-factor authentication**     | TOTP with bcrypt-hashed backup codes, regeneration, replay protection, and brute-force throttling on the 2FA step itself — a temp token can't be used for unlimited guessing.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **Session management**            | Refresh-token rotation with reuse detection and family revocation. Access tokens are invalidated the instant a password changes. A locked-out, unverified or pending-deletion account cannot mint new ones. `MAX_SESSIONS` (50) is an enforced per-device cap: a new sign-in evicts your oldest _live_ session, never a reuse-detection record.                                                                                                                                                                                                                                  |
+| **Remember me / trusted devices** | Opt-in per login. A remembered session lasts 30 days across a browser restart, and on a 2FA account the device may skip the _2FA step_ — never the master password, which is still typed on every unlock. Trust is a server-side record (only a SHA-256 of an opaque token, revocable centrally), checked strictly _after_ the password succeeds, rotated on use, and dropped on password change/reset, 2FA enable/disable, backup-code regeneration, "log out everywhere", stolen-token reuse detection, and account deletion. Manage or revoke devices from the Sessions page. |
+| **No enumeration oracles**        | Registration, login, lockout, password reset and verification-resend are all built so that response body _and_ response time are identical whether or not the account exists.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **Account lockout**               | 30 minutes after 10 failed attempts, with progressive delays and an unlock email — and evaluated _after_ the password check, so it never reveals that an account exists.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **CSRF + rate limiting**          | HMAC-SHA256 double-submit tokens with constant-time verification, and [fourteen rate-limit tiers](#rate-limiting) backed by MongoDB, keyed per IP, email, user or session, with IPv6 `/64` aggregation.                                                                                                                                                                                                                                                                                                                                                                          |
+| **Breach detection**              | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Audit log**                     | A searchable security log covering **41 distinct operations**, with TTL-based retention.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Account deletion**              | GDPR-complete, password-confirmed, and cascaded atomically across every collection.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 ### Data
 
@@ -107,7 +108,21 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   ever reaches the server in the clear. Source folders/groups are
   carried over as tags — and tags, as always, are stored in plaintext so the server can index
   them, so your source folder names are visible to it. Export is encrypted JSON and requires
-  re-entering your master password. (CSV is import-only.)
+  re-entering your master password.
+- **Portable plaintext export ("Leave H-Vault").** A separate `/settings/export-data` page exports
+  your whole vault to another password manager as an **unencrypted plaintext file** — Bitwarden JSON,
+  Bitwarden CSV, or Chrome/Edge CSV. It is deliberately kept apart from the encrypted `.enc` export
+  and the backup system — its own route, entry-point card and confirmation dialog — so "leave the
+  app" can never be mistaken for "back up my vault". You re-enter your master password (verified
+  server-side before any plaintext is produced), accept an explicit unencrypted-data warning, and the
+  file is generated **entirely in the browser** and never uploaded. Anything that cannot be decoded,
+  or that the chosen format cannot represent, is reported as skipped/omitted rather than silently
+  dropped. Each format carries what it can: **Bitwarden JSON** is the most complete (logins, secure
+  notes, cards, identities, folders, TOTP, custom fields and password history); **Bitwarden CSV**
+  keeps only logins and notes (cards, identities and secrets are omitted); and **Chrome/Edge CSV** is
+  logins-only, dropping even a login's TOTP, custom fields and folder. Folder paths re-import as tags,
+  as they do for import. CSV values are quoted per RFC 4180 but **never altered** — see
+  [SECURITY.md](SECURITY.md).
 - **File encryption tool.** A standalone, entirely client-side tool: pick any file, set a
   password, download a self-contained `.enc` container — Argon2id envelope encryption, the
   filename and MIME type sealed _inside_, and an integrity hash re-verified on decrypt. It is
@@ -675,21 +690,21 @@ authoritative.
 <details open>
 <summary><b>Authentication</b> — <code>/api/v1/auth</code></summary>
 
-| Method | Endpoint                    | Auth | Description                                         |
-| ------ | --------------------------- | ---- | --------------------------------------------------- |
-| POST   | `/auth/register`            | No   | Create an account with an encrypted vault key       |
-| POST   | `/auth/login`               | No   | Authenticate; may return a 2FA temp token           |
-| POST   | `/auth/login/2fa`           | No   | Complete 2FA with a TOTP or backup code             |
-| POST   | `/auth/refresh`             | No   | Rotate the access token (httpOnly refresh cookie)   |
-| POST   | `/auth/lock`                | Yes  | Lock the vault (records a `vault_lock` audit event) |
-| POST   | `/auth/logout`              | Yes  | Revoke this session                                 |
-| POST   | `/auth/logout-all`          | Yes  | Revoke every other session                          |
-| POST   | `/auth/verify-unlock`       | Yes  | Server-side verification of an unlock attempt       |
-| POST   | `/auth/verify-email`        | No   | Verify an email with a token                        |
-| POST   | `/auth/forgot-password`     | No   | Request a password-reset email                      |
-| POST   | `/auth/reset-password`      | No   | Reset the password with a token                     |
-| POST   | `/auth/unlock-account`      | No   | Unlock a locked-out account with a token            |
-| POST   | `/auth/resend-verification` | No   | Resend the verification email                       |
+| Method | Endpoint                    | Auth | Description                                                       |
+| ------ | --------------------------- | ---- | ----------------------------------------------------------------- |
+| POST   | `/auth/register`            | No   | Create an account with an encrypted vault key                     |
+| POST   | `/auth/login`               | No   | Authenticate (optional `rememberMe`); may return a 2FA temp token |
+| POST   | `/auth/login/2fa`           | No   | Complete 2FA with a TOTP or backup code                           |
+| POST   | `/auth/refresh`             | No   | Rotate the access token (httpOnly refresh cookie)                 |
+| POST   | `/auth/lock`                | Yes  | Lock the vault (records a `vault_lock` audit event)               |
+| POST   | `/auth/logout`              | Yes  | Revoke this session                                               |
+| POST   | `/auth/logout-all`          | Yes  | Revoke every other session                                        |
+| POST   | `/auth/verify-unlock`       | Yes  | Server-side verification of an unlock attempt                     |
+| POST   | `/auth/verify-email`        | No   | Verify an email with a token                                      |
+| POST   | `/auth/forgot-password`     | No   | Request a password-reset email                                    |
+| POST   | `/auth/reset-password`      | No   | Reset the password with a token                                   |
+| POST   | `/auth/unlock-account`      | No   | Unlock a locked-out account with a token                          |
+| POST   | `/auth/resend-verification` | No   | Resend the verification email                                     |
 
 </details>
 
@@ -740,6 +755,9 @@ authoritative.
 | POST   | `/user/2fa/regenerate-backup-codes` | Replace every backup code (password required)       |
 | GET    | `/user/sessions`                    | List active sessions                                |
 | DELETE | `/user/sessions/:id`                | Revoke a session                                    |
+| GET    | `/user/trusted-devices`             | List devices allowed to skip the 2FA step           |
+| DELETE | `/user/trusted-devices/:id`         | Revoke one trusted device (forces 2FA next login)   |
+| DELETE | `/user/trusted-devices`             | Revoke every trusted device                         |
 | GET    | `/user/audit-log`                   | Audit log (paginated, filterable)                   |
 | DELETE | `/user`                             | Delete the account and all its data                 |
 
@@ -827,7 +845,7 @@ buy an attacker a fresh bucket.
 | Password verify | 5 / user    | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password |
 | Breach check    | 30 / user   | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                   |
 | Breach batch    | 300 / user  | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                   |
-| General auth    | 60 / user   | 1 min  | profile, sessions, audit log, folder list, lock, logout, logout-all                                                                                      |
+| General auth    | 60 / user   | 1 min  | profile, sessions, trusted devices, audit log, folder list, lock, logout, logout-all                                                                     |
 | Heavy Ops       | 10 / IP     | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                             |
 | Import          | 60 / user   | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                   |
 | CSRF            | 30 / IP     | 15 min | the CSRF token endpoint                                                                                                                                  |
