@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import crypto from 'node:crypto';
 import request from 'supertest';
 import app from '../src/app.js';
+import { RefreshToken } from '../src/models/RefreshToken.js';
+import { hashToken } from '../src/utils/token.js';
+import { MAX_SESSIONS } from '@hvault/shared';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
 
@@ -549,6 +553,201 @@ describe('User routes', () => {
 
       const remaining = afterList.body.data.filter((s: { _id: string }) => s._id === sessionId);
       expect(remaining.length).toBe(0);
+    });
+  });
+
+  // ── MAX_SESSIONS cap (real eviction over live rows only) ─────────
+
+  describe('MAX_SESSIONS enforcement at login', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+
+    /**
+     * Extracts the raw refreshToken value from a Set-Cookie header, ignoring
+     * cookie-clear directives.
+     */
+    function extractRefresh(setCookie: string | string[] | undefined): string | null {
+      const arr = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
+      const cookie = arr.find((c) => c.startsWith('refreshToken='));
+      if (!cookie) return null;
+      const value = cookie.split(';')[0]!.replace('refreshToken=', '');
+      return value || null;
+    }
+
+    /** Performs a real password login for the current `user` on a fresh agent. */
+    async function loginOnce(): Promise<request.Response> {
+      const a = request(app) as unknown as request.SuperTest<request.Test>;
+      const { token, cookie } = await getCsrfBase(a);
+      return a
+        .post('/api/v1/auth/login')
+        .set('x-csrf-token', token)
+        .set('Cookie', cookie)
+        .send({ email: user.email, authHash: user.rawPassword });
+    }
+
+    /** Posts /auth/refresh carrying `rawToken` as the refresh cookie. */
+    async function refreshWith(rawToken: string): Promise<request.Response> {
+      const a = request(app) as unknown as request.SuperTest<request.Test>;
+      const csrf = await getCsrfBase(a, `refreshToken=${rawToken}`);
+      return a
+        .post('/api/v1/auth/refresh')
+        .set('x-csrf-token', csrf.token)
+        .set('Cookie', `${csrf.cookie}; refreshToken=${rawToken}`);
+    }
+
+    /** Seeds `count` LIVE refresh rows with strictly increasing createdAt. */
+    async function seedLive(count: number, prefix: string): Promise<string[]> {
+      const base = Date.now() - 60 * 60 * 1000;
+      const docs = Array.from({ length: count }, (_, i) => ({
+        userId: user.id,
+        tokenHash: crypto.createHash('sha256').update(`${prefix}-${i}`).digest('hex'),
+        familyId: `${prefix}-fam-${i}`,
+        deviceInfo: { userAgent: `agent-${i}`, ip: '127.0.0.1', fingerprint: `fp-${i}` },
+        expiresAt: new Date(Date.now() + 7 * DAY),
+        // Explicit createdAt makes "oldest" unambiguous; timestamps:false keeps it.
+        createdAt: new Date(base + i * 1000),
+      }));
+      await RefreshToken.insertMany(docs, { timestamps: false });
+      return docs.map((d) => d.tokenHash);
+    }
+
+    it('evicts exactly the oldest LIVE session when a login exceeds the cap', async () => {
+      // createTestUser seeds one live row; start this user from a clean slate.
+      await RefreshToken.deleteMany({ userId: user.id });
+
+      const hashes = await seedLive(MAX_SESSIONS, 'live-seed');
+      const oldestHash = hashes[0]!;
+      const secondOldestHash = hashes[1]!;
+
+      expect(await RefreshToken.countDocuments({ userId: user.id, usedAt: null })).toBe(
+        MAX_SESSIONS,
+      );
+
+      // A real login mints the (MAX_SESSIONS + 1)-th live row, forcing eviction.
+      const res = await loginOnce();
+      expect(res.status).toBe(200);
+
+      // The cap holds over LIVE rows, and exactly one row was removed.
+      expect(await RefreshToken.countDocuments({ userId: user.id, usedAt: null })).toBe(
+        MAX_SESSIONS,
+      );
+      // The single oldest live row is the evicted one; the next-oldest survives.
+      expect(await RefreshToken.findOne({ tokenHash: oldestHash })).toBeNull();
+      expect(await RefreshToken.findOne({ tokenHash: secondOldestHash })).not.toBeNull();
+
+      // The freshly minted session is never a candidate for eviction.
+      const newRaw = extractRefresh(res.headers['set-cookie']);
+      expect(newRaw).not.toBeNull();
+      expect(await RefreshToken.findOne({ tokenHash: hashToken(newRaw!) })).not.toBeNull();
+    });
+
+    it('never evicts a live session or a tombstone under heavy rotation', async () => {
+      await RefreshToken.deleteMany({ userId: user.id });
+
+      // One live session on another device that must survive.
+      const keepHash = crypto.createHash('sha256').update('keep-me-live').digest('hex');
+      await RefreshToken.create({
+        userId: user.id,
+        tokenHash: keepHash,
+        familyId: 'keep-fam',
+        deviceInfo: { userAgent: 'other-device', ip: '10.0.0.9', fingerprint: 'other-fp' },
+        expiresAt: new Date(Date.now() + 7 * DAY),
+      });
+
+      // Hundreds of consumed rotation tombstones (usedAt set) — far more than
+      // MAX_SESSIONS. The cap must neither count nor delete these.
+      const tombstoneCount = MAX_SESSIONS * 3;
+      const base = Date.now() - 24 * 60 * 60 * 1000;
+      const tombstones = Array.from({ length: tombstoneCount }, (_, i) => ({
+        userId: user.id,
+        tokenHash: crypto.createHash('sha256').update(`tomb-${i}`).digest('hex'),
+        familyId: 'keep-fam',
+        deviceInfo: { userAgent: 'other-device', ip: '10.0.0.9', fingerprint: 'other-fp' },
+        expiresAt: new Date(Date.now() + 7 * DAY),
+        usedAt: new Date(base + i * 1000),
+        createdAt: new Date(base + i * 1000),
+      }));
+      await RefreshToken.insertMany(tombstones, { timestamps: false });
+
+      // Only ONE live row exists despite hundreds of total rows.
+      expect(await RefreshToken.countDocuments({ userId: user.id, usedAt: null })).toBe(1);
+      expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(1 + tombstoneCount);
+
+      const res = await loginOnce();
+      expect(res.status).toBe(200);
+
+      // No eviction: the pre-existing live session and every tombstone remain.
+      expect(await RefreshToken.findOne({ tokenHash: keepHash })).not.toBeNull();
+      expect(await RefreshToken.countDocuments({ userId: user.id, usedAt: { $ne: null } })).toBe(
+        tombstoneCount,
+      );
+      expect(await RefreshToken.countDocuments({ userId: user.id, usedAt: null })).toBe(2);
+    });
+
+    it('reuse detection survives eviction (a tombstone is never evicted)', async () => {
+      const rt0 = user.refreshToken;
+      const rt0Doc = await RefreshToken.findOne({ tokenHash: hashToken(rt0) }).lean();
+      expect(rt0Doc).not.toBeNull();
+      const familyId = rt0Doc!.familyId;
+
+      // Rotate RT0 → RT1: RT0 becomes a consumed tombstone; RT1 is live.
+      const rotate = await refreshWith(rt0);
+      expect(rotate.status).toBe(200);
+      const rt1 = extractRefresh(rotate.headers['set-cookie']);
+      expect(rt1).not.toBeNull();
+
+      const rt0AfterRotate = await RefreshToken.findOne({ tokenHash: hashToken(rt0) }).lean();
+      expect(rt0AfterRotate).not.toBeNull();
+      expect(rt0AfterRotate!.usedAt).toBeInstanceOf(Date);
+
+      // Seed MAX_SESSIONS extra live rows (old createdAt) so the next login's
+      // eviction must delete several oldest LIVE rows — but never the tombstone.
+      await seedLive(MAX_SESSIONS, 'reuse-seed');
+      expect(await RefreshToken.countDocuments({ userId: user.id, usedAt: null })).toBe(
+        MAX_SESSIONS + 1,
+      );
+
+      const login = await loginOnce();
+      expect(login.status).toBe(200);
+      // Eviction ran and pinned the live count to the cap.
+      expect(await RefreshToken.countDocuments({ userId: user.id, usedAt: null })).toBe(
+        MAX_SESSIONS,
+      );
+
+      // The RT0 tombstone survived eviction (usedAt rows are excluded).
+      const rt0Survived = await RefreshToken.findOne({ tokenHash: hashToken(rt0) }).lean();
+      expect(rt0Survived).not.toBeNull();
+      expect(rt0Survived!.usedAt).toBeInstanceOf(Date);
+
+      // Replaying the consumed RT0 still trips reuse detection and revokes the
+      // whole family — proving eviction never downgraded it to TOKEN_INVALID.
+      const replay = await refreshWith(rt0);
+      expect(replay.status).toBe(401);
+      expect(replay.body.message).toBe('TOKEN_REUSE_DETECTED');
+      expect(await RefreshToken.countDocuments({ userId: user.id, familyId })).toBe(0);
+    });
+
+    it('listSessions counts only live rows so its count agrees with the cap', async () => {
+      await RefreshToken.deleteMany({ userId: user.id });
+
+      // Two live sessions plus many consumed tombstones.
+      await seedLive(2, 'list-live');
+      const tombstones = Array.from({ length: 20 }, (_, i) => ({
+        userId: user.id,
+        tokenHash: crypto.createHash('sha256').update(`list-tomb-${i}`).digest('hex'),
+        familyId: `list-tomb-fam-${i}`,
+        deviceInfo: { userAgent: `agent-${i}`, ip: '127.0.0.1', fingerprint: `fp-${i}` },
+        expiresAt: new Date(Date.now() + 7 * DAY),
+        usedAt: new Date(),
+      }));
+      await RefreshToken.insertMany(tombstones, { timestamps: false });
+
+      const res = await agent
+        .get('/api/v1/user/sessions')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      // Only the two live sessions are listed; tombstones are excluded.
+      expect(res.body.data.length).toBe(2);
     });
   });
 

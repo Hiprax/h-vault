@@ -36,6 +36,7 @@ import {
   ERROR_CODES,
   LOCKOUT_DURATION_MINUTES,
   MAX_LOGIN_ATTEMPTS,
+  MAX_SESSIONS,
   maskEmail,
 } from '@hvault/shared';
 import type {
@@ -224,6 +225,47 @@ function clearRefreshCookie(res: Response): void {
     secure: isProduction,
     sameSite: isProduction ? 'strict' : 'lax',
     path: '/api/v1',
+  });
+}
+
+/**
+ * Enforces `MAX_SESSIONS` as a real per-user cap over LIVE refresh rows only,
+ * evicting the oldest unused ones so a new login never exceeds the limit.
+ *
+ * **Only `usedAt: null` rows are counted or deleted.** A `RefreshToken` row is
+ * not a session (§1.4): once rotated, the old row is left in place with `usedAt`
+ * set as a reuse-detection tombstone, and reuse detection depends on finding it.
+ * With `JWT_ACCESS_EXPIRY = '5m'` an active session mints ~288 rows/day, so a
+ * user crosses 50 rows in hours — counting all rows would delete tombstones
+ * (silently downgrading a future stolen-cookie replay from `TOKEN_REUSE_DETECTED`
+ * to `TOKEN_INVALID`, so the family is never revoked) and delete other devices'
+ * live-but-rotated rows (logging them out). Both are avoided by the filter.
+ *
+ * Called AFTER the new row is created at login and 2FA-login, so the freshly
+ * minted session is the newest by `createdAt` and can never be the one evicted;
+ * the oldest `excess` live rows are removed instead. Not called from `refresh`:
+ * rotation replaces a row rather than adding a session, so the live count there
+ * is unchanged. The `usedAt: null` re-filter on the delete also skips any row a
+ * concurrent rotation consumed between the read and the delete.
+ */
+async function enforceSessionCap(userId: mongoose.Types.ObjectId): Promise<void> {
+  const liveCount = await RefreshToken.countDocuments({ userId, usedAt: null });
+  if (liveCount <= MAX_SESSIONS) return;
+
+  const excess = liveCount - MAX_SESSIONS;
+  // `excess >= 1` and there are `liveCount` matching rows, so `find` returns
+  // exactly `excess` ids — the oldest live sessions. The `usedAt: null` re-filter
+  // on the delete also skips any row a concurrent rotation consumed in between.
+  const oldest = await RefreshToken.find({ userId, usedAt: null })
+    .sort({ createdAt: 1 })
+    .limit(excess)
+    .select('_id')
+    .lean();
+
+  await RefreshToken.deleteMany({
+    userId,
+    usedAt: null,
+    _id: { $in: oldest.map((row) => row._id) },
   });
 }
 
@@ -550,6 +592,7 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     expiresAt: lifetime.expiresAt,
     ...(lifetime.absoluteExpiresAt ? { absoluteExpiresAt: lifetime.absoluteExpiresAt } : {}),
   });
+  await enforceSessionCap(user._id);
 
   setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
   clearCsrfCookie(res);
@@ -814,6 +857,8 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     expiresAt: lifetime.expiresAt,
     ...(lifetime.absoluteExpiresAt ? { absoluteExpiresAt: lifetime.absoluteExpiresAt } : {}),
   });
+
+  await enforceSessionCap(user._id);
 
   setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
   clearCsrfCookie(res);

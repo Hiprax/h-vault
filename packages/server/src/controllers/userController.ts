@@ -617,7 +617,12 @@ export const regenerateBackupCodes = catchAsync(
 export const listSessions = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
 
-  const tokens = await RefreshToken.find({ userId })
+  // Only LIVE sessions (`usedAt: null`) are listed. A rotated row is left in
+  // place with `usedAt` set as a reuse-detection tombstone (§1.4), not a
+  // session — including them would inflate the count far past MAX_SESSIONS
+  // (an active session mints hundreds of rows/day) and disagree with the cap
+  // that `enforceSessionCap` enforces over exactly this same filtered set.
+  const tokens = await RefreshToken.find({ userId, usedAt: null })
     .sort({ createdAt: -1 })
     .limit(MAX_SESSIONS)
     .lean();

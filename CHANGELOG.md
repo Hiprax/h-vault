@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ### Changed
 
+- The `MAX_SESSIONS` limit (50) is now enforced as a real per-device cap: signing in on a new device evicts your oldest active session once you exceed the limit, instead of the limit only bounding the sessions list. Only live sessions are counted and evicted — the short-lived internal rotation records that back stolen-token detection are never touched — so this never logs another device out spuriously and never weakens reuse detection. The Sessions list now shows only live sessions, so its count matches the enforced cap.
 - The in-memory breach-range (HIBP) cache is now bounded by a measured byte budget (`HIBP_CACHE_MAX_BYTES`) as well as by entry count, keeping worker memory within its budget even when cached ranges are unusually large. The PM2 `max_memory_restart` ceiling was raised to 768 MiB to fit one worker holding a full cache plus its ordinary heap (the ceiling is per worker, not aggregate across workers).
 - The breach-corpus seeder is now part of the compiled server output, so it can run inside the production Docker image (which ships no `npm` and no `tsx`) with `docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js`. Local usage is unchanged: `npm run seed-breaches -w packages/server` still works and takes the same flags.
 
