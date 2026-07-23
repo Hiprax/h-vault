@@ -72,9 +72,24 @@ describe('Server Config Validation', () => {
       expect(config.JWT_ACCESS_EXPIRY).toBe('5m');
     });
 
-    it('JWT_REFRESH_EXPIRY defaults to 7d', async () => {
-      const { config } = await loadConfigWithEnv({ JWT_REFRESH_EXPIRY: undefined });
-      expect(config.JWT_REFRESH_EXPIRY).toBe('7d');
+    it('REFRESH_TOKEN_DAYS defaults to 7 (reproduces the historical horizon)', async () => {
+      const { config } = await loadConfigWithEnv({ REFRESH_TOKEN_DAYS: undefined });
+      expect(config.REFRESH_TOKEN_DAYS).toBe(7);
+    });
+
+    it('REFRESH_TOKEN_REMEMBER_DAYS defaults to 30', async () => {
+      const { config } = await loadConfigWithEnv({ REFRESH_TOKEN_REMEMBER_DAYS: undefined });
+      expect(config.REFRESH_TOKEN_REMEMBER_DAYS).toBe(30);
+    });
+
+    it('TRUSTED_DEVICE_DAYS defaults to 30', async () => {
+      const { config } = await loadConfigWithEnv({ TRUSTED_DEVICE_DAYS: undefined });
+      expect(config.TRUSTED_DEVICE_DAYS).toBe(30);
+    });
+
+    it('the removed JWT_REFRESH_EXPIRY is no longer surfaced on config', async () => {
+      const { config } = await loadConfigWithEnv({ JWT_REFRESH_EXPIRY: '30d' });
+      expect((config as Record<string, unknown>).JWT_REFRESH_EXPIRY).toBeUndefined();
     });
 
     it('BCRYPT_ROUNDS defaults to 12', async () => {
@@ -974,6 +989,130 @@ describe('Server Config Validation', () => {
       });
       expect(config.MONGO_MIN_POOL_SIZE).toBe(2);
       expect(config.MONGO_MAX_POOL_SIZE).toBe(10);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Session lifetimes (integer day counts) + cross-field ordering refines
+  // ---------------------------------------------------------------------------
+
+  describe('Session lifetime day counts', () => {
+    it('coerces provided values', async () => {
+      const { config } = await loadConfigWithEnv({
+        REFRESH_TOKEN_DAYS: '14',
+        REFRESH_TOKEN_REMEMBER_DAYS: '60',
+        TRUSTED_DEVICE_DAYS: '90',
+      });
+      expect(config.REFRESH_TOKEN_DAYS).toBe(14);
+      expect(config.REFRESH_TOKEN_REMEMBER_DAYS).toBe(60);
+      expect(config.TRUSTED_DEVICE_DAYS).toBe(90);
+    });
+
+    it('the defaults (7/30/30) satisfy both ordering refines', async () => {
+      const { config } = await loadConfigWithEnv({
+        REFRESH_TOKEN_DAYS: undefined,
+        REFRESH_TOKEN_REMEMBER_DAYS: undefined,
+        TRUSTED_DEVICE_DAYS: undefined,
+      });
+      expect(config.REFRESH_TOKEN_DAYS).toBe(7);
+      expect(config.REFRESH_TOKEN_REMEMBER_DAYS).toBe(30);
+      expect(config.TRUSTED_DEVICE_DAYS).toBe(30);
+    });
+
+    it('rejects REFRESH_TOKEN_DAYS below 1', async () => {
+      await expect(loadConfigWithEnv({ REFRESH_TOKEN_DAYS: '0' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('rejects REFRESH_TOKEN_DAYS above 90', async () => {
+      await expect(loadConfigWithEnv({ REFRESH_TOKEN_DAYS: '91' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('rejects a non-integer REFRESH_TOKEN_DAYS', async () => {
+      await expect(loadConfigWithEnv({ REFRESH_TOKEN_DAYS: '7.5' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('rejects REFRESH_TOKEN_REMEMBER_DAYS above 365', async () => {
+      await expect(
+        loadConfigWithEnv({ REFRESH_TOKEN_REMEMBER_DAYS: '366', TRUSTED_DEVICE_DAYS: '366' }),
+      ).rejects.toThrow(/Invalid environment configuration/);
+    });
+
+    it('rejects TRUSTED_DEVICE_DAYS above 365', async () => {
+      await expect(loadConfigWithEnv({ TRUSTED_DEVICE_DAYS: '366' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('rejects REFRESH_TOKEN_REMEMBER_DAYS below 1', async () => {
+      await expect(loadConfigWithEnv({ REFRESH_TOKEN_REMEMBER_DAYS: '0' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('rejects a non-integer REFRESH_TOKEN_REMEMBER_DAYS', async () => {
+      // 10.5 >= REFRESH_TOKEN_DAYS default 7 and <= TRUSTED_DEVICE_DAYS default 30,
+      // so both refines pass and only the .int() check fires.
+      await expect(loadConfigWithEnv({ REFRESH_TOKEN_REMEMBER_DAYS: '10.5' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('rejects TRUSTED_DEVICE_DAYS below 1', async () => {
+      await expect(loadConfigWithEnv({ TRUSTED_DEVICE_DAYS: '0' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('rejects a non-integer TRUSTED_DEVICE_DAYS', async () => {
+      // 30.5 >= REFRESH_TOKEN_REMEMBER_DAYS default 30, so the refine passes and
+      // only the .int() check fires.
+      await expect(loadConfigWithEnv({ TRUSTED_DEVICE_DAYS: '30.5' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('rejects REFRESH_TOKEN_REMEMBER_DAYS < REFRESH_TOKEN_DAYS (refine)', async () => {
+      await expect(
+        loadConfigWithEnv({
+          REFRESH_TOKEN_DAYS: '10',
+          REFRESH_TOKEN_REMEMBER_DAYS: '7',
+          TRUSTED_DEVICE_DAYS: '30',
+        }),
+      ).rejects.toThrow(/REFRESH_TOKEN_REMEMBER_DAYS cannot be less than REFRESH_TOKEN_DAYS/);
+    });
+
+    it('accepts REFRESH_TOKEN_REMEMBER_DAYS === REFRESH_TOKEN_DAYS (boundary)', async () => {
+      const { config } = await loadConfigWithEnv({
+        REFRESH_TOKEN_DAYS: '7',
+        REFRESH_TOKEN_REMEMBER_DAYS: '7',
+        TRUSTED_DEVICE_DAYS: '7',
+      });
+      expect(config.REFRESH_TOKEN_REMEMBER_DAYS).toBe(7);
+    });
+
+    it('rejects TRUSTED_DEVICE_DAYS < REFRESH_TOKEN_REMEMBER_DAYS (refine)', async () => {
+      await expect(
+        loadConfigWithEnv({
+          REFRESH_TOKEN_DAYS: '7',
+          REFRESH_TOKEN_REMEMBER_DAYS: '30',
+          TRUSTED_DEVICE_DAYS: '10',
+        }),
+      ).rejects.toThrow(/TRUSTED_DEVICE_DAYS cannot be less than REFRESH_TOKEN_REMEMBER_DAYS/);
+    });
+
+    it('accepts TRUSTED_DEVICE_DAYS === REFRESH_TOKEN_REMEMBER_DAYS (boundary)', async () => {
+      const { config } = await loadConfigWithEnv({
+        REFRESH_TOKEN_DAYS: '5',
+        REFRESH_TOKEN_REMEMBER_DAYS: '10',
+        TRUSTED_DEVICE_DAYS: '10',
+      });
+      expect(config.TRUSTED_DEVICE_DAYS).toBe(10);
     });
   });
 

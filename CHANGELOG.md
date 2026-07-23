@@ -12,11 +12,16 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - New environment variable `HIBP_CACHE_MAX_BYTES` (default 67108864 = 64 MiB, minimum 1 MiB) that bounds the in-memory breach-range cache by measured bytes per worker process, in addition to the existing 10,000-entry cap. A real HIBP range is ~36 KB, so the byte budget is now the binding memory bound; the entry count is a secondary guard.
 - New `export_plaintext` audit action recorded when a vault export is produced for a portable plaintext format (audit log now covers 38 distinct operations). `POST /api/v1/tools/export` accepts an optional `portableFormat` field (`bitwarden-json`, `bitwarden-csv`, or `chrome-csv`) used solely as audit metadata; the export response body is unchanged.
 - New "Leave H-Vault" plaintext-export page at `/settings/export-data`, reached from a distinct entry-point card in Settings. It exports your whole vault to another password manager as an **unencrypted plaintext file** (Bitwarden JSON, Bitwarden CSV, or Chrome/Edge CSV): pick a format, re-enter your master password, confirm an explicit unencrypted-data warning, and download. The file is generated entirely in the browser and never uploaded; the master password is verified by the server before any plaintext is produced; and items that cannot be decoded, or that the chosen format cannot represent, are reported as skipped/omitted rather than silently dropped. It is a deliberately separate surface from the encrypted `.enc` export/backup and shares no control with it.
+- New environment variables `REFRESH_TOKEN_DAYS` (default 7), `REFRESH_TOKEN_REMEMBER_DAYS` (default 30) and `TRUSTED_DEVICE_DAYS` (default 30), in whole days, that configure the standard session lifetime, the opt-in "remember me" session lifetime, and how long a device may skip the 2FA step. The defaults reproduce the previous fixed 7-day session behavior exactly. The server refuses to boot unless `REFRESH_TOKEN_REMEMBER_DAYS` ≥ `REFRESH_TOKEN_DAYS` and `TRUSTED_DEVICE_DAYS` ≥ `REFRESH_TOKEN_REMEMBER_DAYS`.
 
 ### Changed
 
 - The in-memory breach-range (HIBP) cache is now bounded by a measured byte budget (`HIBP_CACHE_MAX_BYTES`) as well as by entry count, keeping worker memory within its budget even when cached ranges are unusually large. The PM2 `max_memory_restart` ceiling was raised to 768 MiB to fit one worker holding a full cache plus its ordinary heap (the ceiling is per worker, not aggregate across workers).
 - The breach-corpus seeder is now part of the compiled server output, so it can run inside the production Docker image (which ships no `npm` and no `tsx`) with `docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js`. Local usage is unchanged: `npm run seed-breaches -w packages/server` still works and takes the same flags.
+
+### Removed
+
+- Removed the `JWT_REFRESH_EXPIRY` environment variable. It was validated and documented but read by no code path — the refresh-token lifetime was always the hardcoded 7 days regardless of what it was set to — so an operator who set, say, `JWT_REFRESH_EXPIRY=30d` silently still got 7 days. Configure the session lifetime with the new `REFRESH_TOKEN_DAYS` instead.
 
 ### Fixed
 

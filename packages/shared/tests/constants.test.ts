@@ -11,6 +11,8 @@ import {
   SALT_BYTES,
   BCRYPT_ROUNDS,
   REFRESH_TOKEN_EXPIRY_DAYS,
+  MAX_SESSIONS,
+  MAX_TRUSTED_DEVICES,
   AUTO_LOCK_TIMEOUT_MINUTES,
   CLIPBOARD_CLEAR_SECONDS,
   TRASH_AUTO_PURGE_DAYS,
@@ -92,6 +94,14 @@ describe('Security constants', () => {
 describe('Auth & session constants', () => {
   it('REFRESH_TOKEN_EXPIRY_DAYS is 7', () => {
     expect(REFRESH_TOKEN_EXPIRY_DAYS).toBe(7);
+  });
+
+  it('MAX_SESSIONS is 50', () => {
+    expect(MAX_SESSIONS).toBe(50);
+  });
+
+  it('MAX_TRUSTED_DEVICES is 10', () => {
+    expect(MAX_TRUSTED_DEVICES).toBe(10);
   });
 
   it('AUTO_LOCK_TIMEOUT_MINUTES is 15', () => {

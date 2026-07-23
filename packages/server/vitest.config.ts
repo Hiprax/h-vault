@@ -66,7 +66,6 @@ export default defineConfig({
       JWT_ACCESS_SECRET: 'test-access-secret-for-testing-only-32chars!',
       JWT_REFRESH_SECRET: 'test-refresh-secret-for-testing-only-32chars!',
       JWT_ACCESS_EXPIRY: '15m',
-      JWT_REFRESH_EXPIRY: '7d',
       CORS_ORIGIN: 'http://localhost:5173',
       APP_URL: 'http://localhost:5000',
       APP_NAME: 'H-Vault',

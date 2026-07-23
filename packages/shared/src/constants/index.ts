@@ -31,6 +31,7 @@ export const AUDIT_LOG_MAX_LIMIT = 100;
 export const MAX_FOLDER_NESTING_DEPTH = 50;
 export const MAX_IMPORT_ITEMS = 10_000;
 export const MAX_SESSIONS = 50;
+export const MAX_TRUSTED_DEVICES = 10;
 export const AUTH_TAG_BYTES = 16;
 export const MAX_BACKUP_EMAILS = 10;
 export const MAX_ITEMS_PER_USER = 10_000;

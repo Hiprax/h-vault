@@ -58,7 +58,19 @@ const envSchema = z
       .min(32)
       .default('dev-refresh-secret-change-me-in-production-32chars'),
     JWT_ACCESS_EXPIRY: z.string().min(1).default('5m'),
-    JWT_REFRESH_EXPIRY: z.string().min(1).default('7d'),
+
+    // Session lifetimes, as integer day counts (no duration-string parser exists
+    // in this codebase, so days are used directly). REFRESH_TOKEN_DAYS reproduces
+    // the former hardcoded 7-day refresh horizon exactly, so standard sessions are
+    // unchanged. REFRESH_TOKEN_REMEMBER_DAYS is the horizon for an opt-in
+    // "remember me" session, and TRUSTED_DEVICE_DAYS is how long a recognised
+    // device may skip the 2FA step. The two cross-field refines below enforce
+    // REMEMBER >= DAYS and TRUSTED >= REMEMBER, rejecting a nonsensical config
+    // (remember-me shorter than a normal session, or a 2FA-skip window outliving
+    // the session it serves) at boot rather than applying it silently.
+    REFRESH_TOKEN_DAYS: z.coerce.number().int().min(1).max(90).default(7),
+    REFRESH_TOKEN_REMEMBER_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    TRUSTED_DEVICE_DAYS: z.coerce.number().int().min(1).max(365).default(30),
 
     // CORS
     CORS_ORIGIN: z
@@ -226,6 +238,16 @@ const envSchema = z
     // and only fails at MongoDB connect time, masked behind the retry loop.
     message: 'MONGO_MIN_POOL_SIZE cannot be greater than MONGO_MAX_POOL_SIZE',
     path: ['MONGO_MIN_POOL_SIZE'],
+  })
+  .refine((data) => data.REFRESH_TOKEN_REMEMBER_DAYS >= data.REFRESH_TOKEN_DAYS, {
+    // "Remember me" must never shorten a session relative to a normal login.
+    message: 'REFRESH_TOKEN_REMEMBER_DAYS cannot be less than REFRESH_TOKEN_DAYS',
+    path: ['REFRESH_TOKEN_REMEMBER_DAYS'],
+  })
+  .refine((data) => data.TRUSTED_DEVICE_DAYS >= data.REFRESH_TOKEN_REMEMBER_DAYS, {
+    // The 2FA-skip window must not outlive the remembered session it exists to serve.
+    message: 'TRUSTED_DEVICE_DAYS cannot be less than REFRESH_TOKEN_REMEMBER_DAYS',
+    path: ['TRUSTED_DEVICE_DAYS'],
   });
 
 type EnvConfig = z.infer<typeof envSchema>;
