@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - The client production build no longer fails intermittently on Windows from an upstream Rolldown native teardown crash (exit code `0xC0000005`) that fires after the bundle and service worker are already written. `npm run build` now retries `vite build` exactly once, and only on that specific native-crash exit code; ordinary build errors still fail immediately, so a green build always means a genuinely complete one.
 - The empty-cache boot log and the operations docs no longer tell operators to run `npm run seed-breaches` from inside the production app container, where `npm` does not exist; they now point at the compiled `node packages/server/dist/cli/seedBreaches.js` command that actually runs there.
+- The local CI pipeline (`npm run ci`) no longer emits a Node `DEP0190` deprecation warning on Windows. Its npm-gate runner now pre-joins arguments into the shell command string — byte-for-byte the command line Node builds internally — instead of passing an args array alongside `shell: true`; the executed command is unchanged.
 
 ### Security
 
