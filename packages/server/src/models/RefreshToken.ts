@@ -1,12 +1,8 @@
 import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import { deviceInfoSchema, type IDeviceInfo } from './deviceInfo.js';
 
-// ----- Sub-interface -----
-
-export interface IDeviceInfo {
-  userAgent: string;
-  ip: string;
-  fingerprint: string;
-}
+// Re-exported from its original module so existing importers keep working.
+export type { IDeviceInfo };
 
 // ----- Main Interface -----
 
@@ -23,17 +19,6 @@ export interface IRefreshToken {
 }
 
 export type RefreshTokenDocument = HydratedDocument<IRefreshToken>;
-
-// ----- Sub-Schema -----
-
-const deviceInfoSchema = new Schema<IDeviceInfo>(
-  {
-    userAgent: { type: String, default: '', maxlength: 512 },
-    ip: { type: String, default: '', maxlength: 45 },
-    fingerprint: { type: String, default: '', maxlength: 128 },
-  },
-  { _id: false },
-);
 
 // ----- Main Schema -----
 
