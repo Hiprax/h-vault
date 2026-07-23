@@ -117,6 +117,16 @@ describe('Server Config Validation', () => {
       expect(config.BREACH_CACHE_TTL_DAYS).toBe(7);
     });
 
+    it('HIBP_CACHE_MAX_BYTES defaults to 64 MiB', async () => {
+      const { config } = await loadConfigWithEnv({ HIBP_CACHE_MAX_BYTES: undefined });
+      expect(config.HIBP_CACHE_MAX_BYTES).toBe(67_108_864);
+    });
+
+    it('HIBP_CACHE_MAX_BYTES coerces a provided value', async () => {
+      const { config } = await loadConfigWithEnv({ HIBP_CACHE_MAX_BYTES: '2097152' });
+      expect(config.HIBP_CACHE_MAX_BYTES).toBe(2_097_152);
+    });
+
     it('BREACH_SEED_AUTO defaults to false', async () => {
       const { config } = await loadConfigWithEnv({ BREACH_SEED_AUTO: undefined });
       expect(config.BREACH_SEED_AUTO).toBe(false);
@@ -653,6 +663,12 @@ describe('Server Config Validation', () => {
 
     it('AUDIT_LOG_RETENTION_DAYS above 3650 is rejected', async () => {
       await expect(loadConfigWithEnv({ AUDIT_LOG_RETENTION_DAYS: '4000' })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+
+    it('HIBP_CACHE_MAX_BYTES below the 1 MiB floor is rejected', async () => {
+      await expect(loadConfigWithEnv({ HIBP_CACHE_MAX_BYTES: '1048575' })).rejects.toThrow(
         /Invalid environment configuration/,
       );
     });

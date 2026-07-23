@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- New environment variable `HIBP_CACHE_MAX_BYTES` (default 67108864 = 64 MiB, minimum 1 MiB) that bounds the in-memory breach-range cache by measured bytes per worker process, in addition to the existing 10,000-entry cap. A real HIBP range is ~36 KB, so the byte budget is now the binding memory bound; the entry count is a secondary guard.
+
+### Changed
+
+- The in-memory breach-range (HIBP) cache is now bounded by a measured byte budget (`HIBP_CACHE_MAX_BYTES`) as well as by entry count, keeping worker memory within its budget even when cached ranges are unusually large. The PM2 `max_memory_restart` ceiling was raised to 768 MiB to fit one worker holding a full cache plus its ordinary heap (the ceiling is per worker, not aggregate across workers).
+
 ## [0.4.0] - 2026-07-22
 
 ### Added

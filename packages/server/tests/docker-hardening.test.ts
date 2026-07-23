@@ -86,9 +86,24 @@ const dockerfile = readFileSync(path.join(repoRoot, 'docker', 'Dockerfile'), 'ut
 const mongoDockerfile = readFileSync(path.join(repoRoot, 'docker', 'mongo.Dockerfile'), 'utf-8');
 const nginxConf = readFileSync(path.join(repoRoot, 'docker', 'nginx', 'internal.conf'), 'utf-8');
 const envExample = readFileSync(path.join(repoRoot, '.env.example'), 'utf-8');
+const ecosystemConfig = readFileSync(path.join(repoRoot, 'ecosystem.config.cjs'), 'utf-8');
 const rootPackageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf-8')) as {
   version: string;
 };
+
+/** The config default for HIBP_CACHE_MAX_BYTES — one worker's full L1 cache. */
+const HIBP_CACHE_MAX_BYTES_DEFAULT = 67_108_864; // 64 MiB
+const MIB = 1024 * 1024;
+
+/** Parse a PM2 `max_memory_restart` string (e.g. '768M', '1G') to bytes. */
+function parseMemoryToBytes(value: string): number {
+  const match = /^(\d+(?:\.\d+)?)\s*([KMG])?B?$/i.exec(value.trim());
+  if (!match) throw new Error(`unparseable memory value: ${value}`);
+  const magnitude = Number(match[1]);
+  const unit = (match[2] ?? '').toUpperCase();
+  const scale = unit === 'G' ? 1024 ** 3 : unit === 'M' ? 1024 ** 2 : unit === 'K' ? 1024 : 1;
+  return magnitude * scale;
+}
 
 const app = compose.services['hvault-app'];
 const db = compose.services['hvault-db'];
@@ -950,6 +965,28 @@ describe('Docker deployment', () => {
         dockerfile.indexOf('FROM build-client AS web-root'),
       );
       expect(appStage).toMatch(/rm -rf \/usr\/local\/lib\/node_modules\/npm/);
+    });
+  });
+
+  describe('PM2 process manager (ecosystem.config.cjs)', () => {
+    it('sizes max_memory_restart for one worker holding a full L1 HIBP cache', () => {
+      // max_memory_restart is enforced PER worker, not aggregated across `instances`.
+      // The threshold therefore has to fit ONE worker's fully-populated 64 MiB HIBP L1
+      // cache plus its ordinary Node/V8 heap — comfortably, not on the edge — so the
+      // bound is (HIBP_CACHE_MAX_BYTES default + 256 MiB of heap headroom). Sizing it as
+      // `HIBP_CACHE_MAX_BYTES × instances` would be the wrong model and is what this
+      // guards against.
+      const match = /max_memory_restart:\s*'([^']+)'/.exec(ecosystemConfig);
+      expect(match).not.toBeNull();
+      const restartBytes = parseMemoryToBytes(match![1]!);
+      expect(restartBytes).toBeGreaterThanOrEqual(HIBP_CACHE_MAX_BYTES_DEFAULT + 256 * MIB);
+    });
+
+    it('documents the per-worker (not aggregate) sizing rationale', () => {
+      // The number is only safe while the comment explaining WHY it is per-worker
+      // survives; a future editor who reads it as aggregate would wrongly shrink it.
+      expect(ecosystemConfig).toMatch(/PER PM2 worker/);
+      expect(ecosystemConfig).not.toMatch(/max_memory_restart:\s*'512M'/);
     });
   });
 

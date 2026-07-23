@@ -66,6 +66,9 @@ import {
   pruneHibpCache,
   resetCacheAccessCount,
   setHibpCacheEntry,
+  getHibpCacheBytes,
+  getHibpCacheMaxBytes,
+  __setHibpCacheMaxBytes,
 } from '../src/controllers/toolsController.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { VaultItem } from '../src/models/VaultItem.js';
@@ -319,7 +322,8 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
 
       setHibpCacheEntry('fresh', { data: 'new', expires: future() });
 
-      // Hard cap holds — this is what bounds steady-state memory at ~250 MB.
+      // Hard cap holds — the entry count alone bounds worst-case memory at ~360 MB
+      // (~36 KB/range × 10,000); the byte budget is the tighter, binding bound.
       expect(hibpCache.size).toBe(HIBP_CACHE_MAX_ENTRIES);
       expect(hibpCache.has('k0')).toBe(false);
       expect(hibpCache.get('k1')?.data).toBe('d1');
@@ -344,6 +348,92 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
 
       expect(hibpCache.has('expired')).toBe(false);
       expect(hibpCache.get('live')?.data).toBe('fresh');
+    });
+
+    // ── Byte budget (HIBP_CACHE_MAX_BYTES) eviction branches ────────────
+    describe('byte budget: HIBP_CACHE_MAX_BYTES', () => {
+      const originalMaxBytes = getHibpCacheMaxBytes();
+
+      afterEach(() => {
+        __setHibpCacheMaxBytes(originalMaxBytes);
+      });
+
+      it('evicts down to the byte budget, harvesting an EXPIRED entry first', () => {
+        __setHibpCacheMaxBytes(4096);
+        const now = Date.now();
+        setHibpCacheEntry('live1', { data: 'a'.repeat(1024), expires: now + 60_000 });
+        setHibpCacheEntry('expired', { data: 'b'.repeat(1024), expires: now - 1 });
+        setHibpCacheEntry('live2', { data: 'c'.repeat(1024), expires: now + 60_000 });
+        expect(getHibpCacheBytes()).toBe(3072);
+        // A 2 KB insert pushes the total to 5 KB > 4 KB — the expired entry is
+        // dropped first, leaving both live entries and the newcomer intact.
+        setHibpCacheEntry('live3', { data: 'd'.repeat(2048), expires: now + 60_000 });
+        expect(hibpCache.has('expired')).toBe(false);
+        expect(hibpCache.has('live1')).toBe(true);
+        expect(hibpCache.has('live2')).toBe(true);
+        expect(hibpCache.has('live3')).toBe(true);
+        expect(getHibpCacheBytes()).toBeLessThanOrEqual(4096);
+      });
+
+      it('falls back to oldest-insertion byte eviction when nothing is expired', () => {
+        __setHibpCacheMaxBytes(3072);
+        const future = Date.now() + 60_000;
+        setHibpCacheEntry('oldest', { data: 'a'.repeat(1024), expires: future });
+        setHibpCacheEntry('middle', { data: 'b'.repeat(1024), expires: future });
+        setHibpCacheEntry('newest', { data: 'c'.repeat(1024), expires: future });
+        expect(getHibpCacheBytes()).toBe(3072);
+        setHibpCacheEntry('newer', { data: 'd'.repeat(1024), expires: future });
+        expect(hibpCache.has('oldest')).toBe(false);
+        expect(hibpCache.has('newer')).toBe(true);
+        expect(getHibpCacheBytes()).toBeLessThanOrEqual(3072);
+      });
+
+      it('an update-in-place that grows past the budget evicts an older entry', () => {
+        __setHibpCacheMaxBytes(3072);
+        const future = Date.now() + 60_000;
+        setHibpCacheEntry('a', { data: 'a'.repeat(1024), expires: future });
+        setHibpCacheEntry('b', { data: 'b'.repeat(1024), expires: future });
+        setHibpCacheEntry('c', { data: 'c'.repeat(1024), expires: future });
+        // Grow 'c' in place to 2 KB → total 4 KB > 3 KB. Re-setting an existing key
+        // does not change its insertion order, so 'a' is the oldest and is dropped.
+        setHibpCacheEntry('c', { data: 'C'.repeat(2048), expires: future });
+        expect(hibpCache.get('c')?.data).toBe('C'.repeat(2048));
+        expect(hibpCache.has('a')).toBe(false);
+        expect(getHibpCacheBytes()).toBeLessThanOrEqual(3072);
+      });
+
+      it('keeps a lone entry larger than the whole budget', () => {
+        __setHibpCacheMaxBytes(512);
+        setHibpCacheEntry('solo', { data: 'x'.repeat(4096), expires: Date.now() + 60_000 });
+        expect(hibpCache.size).toBe(1);
+        expect(getHibpCacheBytes()).toBe(4096);
+      });
+
+      it('clamps the total to zero when a direct-set entry desyncs the counter (prune)', () => {
+        // A test/legacy entry inserted directly with an inflated `bytes` value that the
+        // running total never accrued. When prune reaps it, the subtraction would drive
+        // the total negative — the clamp keeps it at zero rather than disabling the
+        // byte budget until it recovers.
+        resetCacheAccessCount(); // total = 0
+        hibpCache.set('ghost', { data: 'g', expires: Date.now() - 1, bytes: 5000 });
+        for (let i = 0; i < 100; i++) pruneHibpCache();
+        expect(hibpCache.has('ghost')).toBe(false);
+        expect(getHibpCacheBytes()).toBe(0);
+      });
+
+      it('clamps the total to zero when eviction subtracts more than was tracked', () => {
+        resetCacheAccessCount(); // total = 0
+        // A direct-set entry carrying an inflated byte count the total never accrued.
+        hibpCache.set('ghost', { data: 'g', expires: Date.now() + 60_000, bytes: 5000 });
+        __setHibpCacheMaxBytes(1);
+        // Inserting a real entry pushes size to 2 and the (tiny) real total over the
+        // 1-byte budget, forcing eviction of the oldest — 'ghost' — whose inflated
+        // 5000 bytes would drive the total negative; the clamp holds it at zero.
+        setHibpCacheEntry('real', { data: 'rr', expires: Date.now() + 60_000 });
+        expect(hibpCache.has('ghost')).toBe(false);
+        expect(hibpCache.has('real')).toBe(true);
+        expect(getHibpCacheBytes()).toBe(0);
+      });
     });
   });
 

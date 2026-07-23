@@ -175,6 +175,14 @@ const envSchema = z
       (v) => (v === '' ? undefined : v),
       z.string().optional(),
     ),
+    // In-memory (L1) HIBP range cache memory ceiling, in BYTES, per worker process.
+    // The L1 cache is a per-process Map of padding-stripped range text; a real HIBP
+    // range is ~36 KB, so the default 64 MiB bounds it at ~1,800 ranges per worker.
+    // This byte budget is the BINDING bound; HIBP_CACHE_MAX_ENTRIES (10,000) is only
+    // a secondary guard against a pathological run of tiny ranges. `max_memory_restart`
+    // is enforced PER PM2 worker, not aggregate, so the relevant comparison is one
+    // worker's full cache (64 MiB) plus its ordinary heap against the threshold.
+    HIBP_CACHE_MAX_BYTES: z.coerce.number().int().min(1_048_576).default(67_108_864),
 
     // Feature flags
     ENABLE_SWAGGER: z

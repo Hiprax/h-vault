@@ -478,6 +478,24 @@ describe('TOTP window consistency', () => {
     return totp.generate({ timestamp: Date.now() + offsetMs });
   }
 
+  /**
+   * Wait until we are comfortably clear of a 30s TOTP step boundary before an
+   * adjacent-step (`window: 1`) ACCEPTANCE check. A code generated at `now - 30s`
+   * is exactly one step behind, but if the request happens to cross a step boundary
+   * between code generation and server-side validation the server's clock advances a
+   * step and the same code lands two steps away — outside window 1 — flaking the
+   * assertion. Waiting for the boundary to tick over first leaves ~30s of margin, far
+   * more than any request needs. Only waits when within 2s of the next step; a no-op
+   * otherwise, so it costs nothing in the common case. Has no effect on the reject
+   * tests (a two-step-away code stays outside window 1 regardless of a boundary cross).
+   */
+  async function awaitStableTotpWindow(): Promise<void> {
+    const msToNextStep = 30_000 - (Date.now() % 30_000);
+    if (msToNextStep < 2_000) {
+      await new Promise((resolve) => setTimeout(resolve, msToNextStep + 50));
+    }
+  }
+
   function tempTokenFor(userId: string): string {
     return jwt.sign({ userId, purpose: '2fa_temp' }, deriveTestPurposeKey('2fa_temp'), {
       expiresIn: '5m',
@@ -488,6 +506,7 @@ describe('TOTP window consistency', () => {
     const { user, secret } = await enable2faUser();
     const { token: csrf, cookie } = await getCsrf();
 
+    await awaitStableTotpWindow();
     const res = await request(app)
       .post('/api/v1/auth/login/2fa')
       .set('x-csrf-token', csrf)
@@ -526,6 +545,7 @@ describe('TOTP window consistency', () => {
     const secret = Secret.fromBase32(setupRes.body.data.secret as string);
 
     const { token: csrf2, cookie: cookie2 } = await getCsrf();
+    await awaitStableTotpWindow();
     const res = await request(app)
       .post('/api/v1/user/2fa/verify')
       .set('Authorization', authHeader(user.accessToken))
