@@ -181,6 +181,16 @@ describe('authApi wire contract', () => {
     expectCall(mockPost, 'POST', '/auth/login', payload);
   });
 
+  it('POSTs login carrying rememberMe when supplied', async () => {
+    const payload: authApi.LoginPayload = {
+      email: 'user@example.com',
+      authHash: 'auth-hash',
+      rememberMe: true,
+    };
+    await authApi.loginApi(payload);
+    expectCall(mockPost, 'POST', '/auth/login', payload);
+  });
+
   it('POSTs the 2FA step to /auth/login/2fa (not /auth/2fa)', async () => {
     const payload = { tempToken: 'temp', code: '123456' };
     await authApi.login2faApi(payload);

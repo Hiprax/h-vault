@@ -122,6 +122,9 @@ export const AUDIT_ACTIONS = [
   'settings_update',
   'email_verified',
   'registration',
+  'trusted_device_grant',
+  'trusted_device_revoke',
+  'trusted_device_rejected',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

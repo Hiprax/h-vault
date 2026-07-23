@@ -7,9 +7,10 @@ import { TOTP, Secret } from 'otpauth';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createLogger } from '@hiprax/logger';
 import { config, isProduction, isTest, twoFactorEncryptionKey } from '../config/index.js';
-import { REFRESH_COOKIE_NAME } from '../constants/index.js';
+import { REFRESH_COOKIE_NAME, TRUSTED_DEVICE_COOKIE_NAME } from '../constants/index.js';
 import { User } from '../models/User.js';
 import { RefreshToken } from '../models/RefreshToken.js';
+import { TrustedDevice } from '../models/TrustedDevice.js';
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -37,6 +38,7 @@ import {
   LOCKOUT_DURATION_MINUTES,
   MAX_LOGIN_ATTEMPTS,
   MAX_SESSIONS,
+  MAX_TRUSTED_DEVICES,
   maskEmail,
 } from '@hvault/shared';
 import type {
@@ -125,6 +127,10 @@ interface JwtTempPayload {
   userId: string;
   purpose: string;
   deviceHash?: string;
+  // Carried from the login step so the 2FA step honours "remember me" without
+  // trusting a client-supplied field. Optional so a temp token minted before
+  // this field existed (or by a non-remembered login) is read as false.
+  rememberMe?: boolean;
 }
 
 interface JwtUnlockPayload {
@@ -229,6 +235,23 @@ function clearRefreshCookie(res: Response): void {
 }
 
 /**
+ * Sets the trusted-device cookie. Scoped to `path: '/api/v1/auth'` — narrower
+ * than the refresh cookie's `/api/v1` — so the browser only sends this token to
+ * the auth endpoints that consume it (least privilege). The raw token is written
+ * ONLY here; it is never returned in a response body, logged, or stored (only its
+ * SHA-256 is persisted). `maxAge` mirrors the record's absolute expiry.
+ */
+function setTrustedDeviceCookie(res: Response, token: string, maxAgeMs: number): void {
+  res.cookie(TRUSTED_DEVICE_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'strict' : 'lax',
+    path: '/api/v1/auth',
+    maxAge: maxAgeMs,
+  });
+}
+
+/**
  * Enforces `MAX_SESSIONS` as a real per-user cap over LIVE refresh rows only,
  * evicting the oldest unused ones so a new login never exceeds the limit.
  *
@@ -267,6 +290,63 @@ async function enforceSessionCap(userId: mongoose.Types.ObjectId): Promise<void>
     usedAt: null,
     _id: { $in: oldest.map((row) => row._id) },
   });
+}
+
+/**
+ * Enforces `MAX_TRUSTED_DEVICES` as a per-user cap, evicting the oldest records
+ * beyond the limit. Called AFTER the fresh record is created, so the just-minted
+ * device is the newest by `createdAt` and can never be the one evicted; only a
+ * user's oldest trust grants are dropped. Silently bounds per-user growth so a
+ * user who checks "remember me" on many devices cannot accumulate them without
+ * limit (each is also TTL-reaped at its own `expiresAt`).
+ */
+async function enforceTrustedDeviceCap(userId: mongoose.Types.ObjectId): Promise<void> {
+  const count = await TrustedDevice.countDocuments({ userId });
+  if (count <= MAX_TRUSTED_DEVICES) return;
+
+  const excess = count - MAX_TRUSTED_DEVICES;
+  const oldest = await TrustedDevice.find({ userId })
+    .sort({ createdAt: 1 })
+    .limit(excess)
+    .select('_id')
+    .lean();
+
+  await TrustedDevice.deleteMany({
+    userId,
+    _id: { $in: oldest.map((row) => row._id) },
+  });
+}
+
+/**
+ * Mints a trusted-device record for a 2FA account that logged in with
+ * "remember me", so the device may skip the 2FA step until the grant expires.
+ *
+ * A fresh 32-byte random token is generated; only its SHA-256 (`hashToken`) is
+ * persisted, and the RAW token is written solely into the `Set-Cookie` header by
+ * `setTrustedDeviceCookie` — never returned in a response body, logged, or
+ * stored. The absolute expiry is `now + TRUSTED_DEVICE_DAYS`; the TTL index on
+ * the model evicts the record the instant it passes. Returns nothing — the
+ * caller audits `trusted_device_grant` separately with request context.
+ */
+async function grantTrustedDevice(
+  res: Response,
+  userId: mongoose.Types.ObjectId,
+  deviceInfo: { userAgent: string; ip: string; fingerprint: string },
+): Promise<void> {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashToken(rawToken);
+  const maxAgeMs = config.TRUSTED_DEVICE_DAYS * DAY_MS;
+  const expiresAt = new Date(Date.now() + maxAgeMs);
+
+  await TrustedDevice.create({
+    userId,
+    tokenHash,
+    deviceInfo,
+    expiresAt,
+  });
+  await enforceTrustedDeviceCap(userId);
+
+  setTrustedDeviceCookie(res, rawToken, maxAgeMs);
 }
 
 // ─── Register ────────────────────────────────────────────────────────────────
@@ -380,7 +460,7 @@ export const register = catchAsync(async (req: Request, res: Response): Promise<
 
 export const login = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const body = req.body as LoginInput;
-  const { email, authHash, deviceInfo } = body;
+  const { email, authHash, deviceInfo, rememberMe } = body;
   const { ip, userAgent } = getRequestContext(req);
 
   const user = await User.findOne({ email }).select('+authHash +twoFactorSecret +backupCodes');
@@ -562,6 +642,9 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
         userId: user._id.toString(),
         purpose: '2fa_temp',
         deviceHash: generateDeviceHash(req),
+        // Carry "remember me" into the SIGNED token so the 2FA step honours it
+        // from the verified payload, never from a forgeable request body.
+        rememberMe,
       } satisfies JwtTempPayload,
       derivePurposeKey(config.JWT_REFRESH_SECRET, '2fa_temp'),
       { algorithm: 'HS256', expiresIn: '5m' },
@@ -583,7 +666,10 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   const refreshTokenHash = hashToken(refreshTokenRaw);
   const familyId = crypto.randomUUID();
 
-  const lifetime = resolveRefreshLifetime({});
+  // A non-2FA account with "remember me" extends the refresh horizon only —
+  // there is no second factor to skip, so no trusted-device record is minted
+  // (§1.7). An unchecked box slides to today's standard REFRESH_TOKEN_DAYS.
+  const lifetime = resolveRefreshLifetime({ remember: rememberMe });
   await RefreshToken.create({
     userId: user._id,
     tokenHash: refreshTokenHash,
@@ -634,6 +720,11 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   if (typeof payload.purpose !== 'string' || payload.purpose !== '2fa_temp') {
     throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
+
+  // "Remember me" is read ONLY from the verified token, never from the request
+  // body (login2faSchema carries no such field), so a tampered body cannot
+  // upgrade a standard login to a remembered/trusted one.
+  const remember = payload.rememberMe === true;
 
   // Verify the requesting device matches the one that initiated the 2FA flow.
   // This prevents a stolen temp token from being used on a different device.
@@ -848,12 +939,16 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   const refreshTokenHash = hashToken(refreshTokenRaw);
   const familyId = crypto.randomUUID();
 
-  const lifetime = resolveRefreshLifetime({});
+  // Honour "remember me" from the verified temp token: a remembered 2FA login
+  // gets the same 30-day (REFRESH_TOKEN_REMEMBER_DAYS) absolute-deadline session
+  // as a remembered non-2FA login. An unchecked box slides to REFRESH_TOKEN_DAYS.
+  const sanitizedDeviceInfo = sanitizeDeviceInfo(deviceInfo, req);
+  const lifetime = resolveRefreshLifetime({ remember });
   await RefreshToken.create({
     userId: user._id,
     tokenHash: refreshTokenHash,
     familyId,
-    deviceInfo: sanitizeDeviceInfo(deviceInfo, req),
+    deviceInfo: sanitizedDeviceInfo,
     expiresAt: lifetime.expiresAt,
     ...(lifetime.absoluteExpiresAt ? { absoluteExpiresAt: lifetime.absoluteExpiresAt } : {}),
   });
@@ -862,6 +957,14 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
 
   setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
   clearCsrfCookie(res);
+
+  // Grant a trusted device so this device may skip the 2FA step until the grant
+  // expires. Minted only on a remembered login; the raw token lives solely in the
+  // Set-Cookie header. Done before the response is written so the cookie ships.
+  if (remember) {
+    await grantTrustedDevice(res, user._id, sanitizedDeviceInfo);
+    await createAuditLog(user._id.toString(), 'trusted_device_grant', undefined, ip, userAgent);
+  }
 
   await createAuditLog(user._id.toString(), 'login', { twoFactor: true }, ip, userAgent);
 

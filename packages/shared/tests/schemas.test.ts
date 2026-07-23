@@ -279,6 +279,38 @@ describe('loginSchema', () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it('defaults rememberMe to false when absent', () => {
+    const result = loginSchema.safeParse({
+      email: 'test@example.com',
+      authHash: 'hash',
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.rememberMe).toBe(false);
+    }
+  });
+
+  it('accepts rememberMe: true', () => {
+    const result = loginSchema.safeParse({
+      email: 'test@example.com',
+      authHash: 'hash',
+      rememberMe: true,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.rememberMe).toBe(true);
+    }
+  });
+
+  it('rejects a non-boolean rememberMe', () => {
+    const result = loginSchema.safeParse({
+      email: 'test@example.com',
+      authHash: 'hash',
+      rememberMe: 'yes',
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe('login2faSchema', () => {

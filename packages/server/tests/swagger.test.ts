@@ -116,6 +116,17 @@ describe('API Documentation', () => {
       expect(changePasswordProps?.newAuthHash?.maxLength).toBe(100);
     });
 
+    it('documents the optional rememberMe login flag (boolean, default false)', () => {
+      const schemas = swaggerSpec.components.schemas as Record<
+        string,
+        { properties?: Record<string, { type?: string; default?: unknown }> }
+      >;
+      const rememberMe = schemas.LoginRequest?.properties?.rememberMe;
+      expect(rememberMe).toBeDefined();
+      expect(rememberMe?.type).toBe('boolean');
+      expect(rememberMe?.default).toBe(false);
+    });
+
     it('should have encryptedVaultKey maxLength matching Zod schema (200)', () => {
       const schemas = swaggerSpec.components.schemas as Record<
         string,

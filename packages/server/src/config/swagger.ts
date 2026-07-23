@@ -139,6 +139,12 @@ export const swaggerSpec: JsonObject = {
         properties: {
           email: { type: 'string', format: 'email', maxLength: 254 },
           authHash: { type: 'string', minLength: 1, maxLength: 100 },
+          rememberMe: {
+            type: 'boolean',
+            default: false,
+            description:
+              'Opt-in "remember me on this device". Extends the refresh-token horizon to the remember lifetime and, for a 2FA account, lets this device skip the 2FA step on later logins until the trust grant expires. Carried into the signed 2FA temp token, so it cannot be tampered with at the 2FA step. The master password is still always required to decrypt the vault.',
+          },
           deviceInfo: { $ref: '#/components/schemas/DeviceInfo' },
         },
       },
@@ -962,7 +968,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Complete 2FA verification',
         description:
-          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min.',
+          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body), a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires.',
         requestBody: {
           required: true,
           content: {
@@ -973,7 +979,15 @@ export const swaggerSpec: JsonObject = {
         },
         responses: {
           200: {
-            description: '2FA verification successful',
+            description:
+              '2FA verification successful. Sets a httpOnly refresh-token cookie, and — only when the login opted into "remember me" — a httpOnly `trustedDevice` cookie (scoped to `/api/v1/auth`) whose raw value is never returned in the response body.',
+            headers: {
+              'Set-Cookie': {
+                description:
+                  'Sets `refreshToken` (httpOnly, path `/api/v1`) and, for a remembered login, `trustedDevice` (httpOnly, path `/api/v1/auth`). Only the SHA-256 of the trusted-device token is stored server-side.',
+                schema: { type: 'string' },
+              },
+            },
             content: {
               'application/json': {
                 schema: { $ref: '#/components/schemas/LoginSuccessResponse' },

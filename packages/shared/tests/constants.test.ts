@@ -271,12 +271,18 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 38 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 41 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("38 distinct operations"). If a new audit action is added, bump both
+    // ("41 distinct operations"). If a new audit action is added, bump both
     // this assertion and the README number together.
-    expect(AUDIT_ACTIONS.length).toBe(38);
+    expect(AUDIT_ACTIONS.length).toBe(41);
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
+  });
+
+  it('includes the trusted-device audit actions', () => {
+    expect(AUDIT_ACTIONS).toContain('trusted_device_grant');
+    expect(AUDIT_ACTIONS).toContain('trusted_device_revoke');
+    expect(AUDIT_ACTIONS).toContain('trusted_device_rejected');
   });
 
   it('includes the export_plaintext action for browser-side portable exports', () => {

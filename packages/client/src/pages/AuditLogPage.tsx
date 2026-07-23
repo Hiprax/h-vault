@@ -55,6 +55,9 @@ const ACTION_LABELS: Record<string, string> = {
   backup_failed: 'Backup Failed',
   backup_restored: 'Backup Restored',
   backup_password_changed: 'Backup Password Changed',
+  trusted_device_grant: 'Trusted Device Added',
+  trusted_device_revoke: 'Trusted Device Revoked',
+  trusted_device_rejected: 'Trusted Device Rejected',
 };
 
 // ---------------------------------------------------------------------------

@@ -2,10 +2,14 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import mongoose from 'mongoose';
+import { MAX_TRUSTED_DEVICES } from '@hvault/shared';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
+import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { AuditLog } from '../src/models/AuditLog.js';
+import { hashToken } from '../src/utils/token.js';
 import {
   createTestUser,
   generateExpiredToken,
@@ -1046,6 +1050,252 @@ describe('Auth API', () => {
       expect(typeof res.body.data.tempToken).toBe('string');
       // Should NOT have accessToken yet
       expect(res.body.data.accessToken).toBeUndefined();
+    });
+  });
+
+  // ── Remember me / trusted device (Phase 16) ─────────────────────────
+
+  describe('Remember me / trusted device', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    function getSetCookies(res: request.Response): string[] {
+      return (res.headers['set-cookie'] as string[] | undefined) ?? [];
+    }
+    function findCookie(res: request.Response, name: string): string | undefined {
+      return getSetCookies(res).find((c) => c.startsWith(`${name}=`));
+    }
+    function cookieValue(cookie: string): string {
+      return cookie.split(';')[0]!.split('=').slice(1).join('=');
+    }
+    function cookieMaxAgeSeconds(cookie: string): number {
+      const m = /Max-Age=(\d+)/i.exec(cookie);
+      return m ? Number(m[1]) : NaN;
+    }
+
+    async function enable2fa(userId: string): Promise<string> {
+      const { CryptoManager } = await import('@hiprax/crypto');
+      const { Secret } = await import('otpauth');
+      const cm = new CryptoManager();
+      const secret = new Secret().base32;
+      const encryptedSecret = cm.encryptTextSync(
+        secret,
+        process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345',
+      );
+      await User.findByIdAndUpdate(userId, {
+        $set: { twoFactorEnabled: true, twoFactorSecret: encryptedSecret },
+      });
+      return secret;
+    }
+
+    async function totpFor(secret: string): Promise<string> {
+      const { TOTP, Secret } = await import('otpauth');
+      return new TOTP({
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: Secret.fromBase32(secret),
+      }).generate();
+    }
+
+    it('non-2FA remembered login gets a ~30-day cookie and an absolute-deadline row', async () => {
+      const testUser = await createTestUser();
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login`).send({
+          email: testUser.email,
+          authHash: testUser.rawPassword,
+          rememberMe: true,
+        }),
+        csrf,
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.accessToken).toBeDefined();
+
+      const refreshCookie = findCookie(res, 'refreshToken');
+      expect(refreshCookie).toBeDefined();
+      // ~30 days, comfortably above the 7-day standard horizon.
+      expect(cookieMaxAgeSeconds(refreshCookie!)).toBeGreaterThan(20 * 24 * 60 * 60);
+
+      const row = await RefreshToken.findOne({ tokenHash: hashToken(cookieValue(refreshCookie!)) });
+      expect(row).not.toBeNull();
+      expect(row!.absoluteExpiresAt).toBeDefined();
+      expect(row!.absoluteExpiresAt!.getTime() - Date.now()).toBeGreaterThan(25 * DAY_MS);
+    });
+
+    it('a non-remembered login keeps the standard ~7-day session with no absolute deadline', async () => {
+      const testUser = await createTestUser();
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login`).send({
+          email: testUser.email,
+          authHash: testUser.rawPassword,
+        }),
+        csrf,
+      );
+
+      expect(res.status).toBe(200);
+      const refreshCookie = findCookie(res, 'refreshToken');
+      expect(cookieMaxAgeSeconds(refreshCookie!)).toBeLessThan(10 * 24 * 60 * 60);
+
+      const row = await RefreshToken.findOne({ tokenHash: hashToken(cookieValue(refreshCookie!)) });
+      expect(row).not.toBeNull();
+      expect(row!.absoluteExpiresAt).toBeUndefined();
+    });
+
+    it('carries rememberMe into the signed 2FA temp token', async () => {
+      const testUser = await createTestUser();
+      await enable2fa(testUser.id);
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login`).send({
+          email: testUser.email,
+          authHash: testUser.rawPassword,
+          rememberMe: true,
+        }),
+        csrf,
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.twoFactorRequired).toBe(true);
+      const decoded = jwt.decode(res.body.data.tempToken as string) as {
+        rememberMe?: boolean;
+      } | null;
+      expect(decoded?.rememberMe).toBe(true);
+    });
+
+    it('grants a trusted device on 2FA success with remember; the raw token lives only in the cookie', async () => {
+      const testUser = await createTestUser();
+      const secret = await enable2fa(testUser.id);
+      const userObjId = new mongoose.Types.ObjectId(testUser.id);
+
+      const tempToken = jwt.sign(
+        { userId: testUser.id, purpose: '2fa_temp', rememberMe: true },
+        deriveTestPurposeKey('2fa_temp'),
+        { expiresIn: '5m' },
+      );
+      const code = await totpFor(secret);
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login/2fa`).send({ tempToken, code }),
+        csrf,
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.accessToken).toBeDefined();
+
+      // Trusted-device cookie present, scoped to the auth path.
+      const tdCookie = findCookie(res, 'trustedDevice');
+      expect(tdCookie).toBeDefined();
+      expect(tdCookie).toMatch(/Path=\/api\/v1\/auth/i);
+      const rawTd = cookieValue(tdCookie!);
+      expect(rawTd.length).toBeGreaterThan(0);
+
+      // The record stores only the SHA-256 of the cookie token.
+      const record = await TrustedDevice.findOne({ userId: userObjId });
+      expect(record).not.toBeNull();
+      expect(record!.tokenHash).toBe(hashToken(rawTd));
+      expect(record!.expiresAt.getTime() - Date.now()).toBeGreaterThan(25 * DAY_MS);
+
+      // The raw token never appears in the response body or a persisted field.
+      expect(JSON.stringify(res.body)).not.toContain(rawTd);
+      expect(record!.tokenHash).not.toBe(rawTd);
+
+      // Remembered → ~30-day refresh session, and the grant is audited.
+      const refreshCookie = findCookie(res, 'refreshToken');
+      expect(cookieMaxAgeSeconds(refreshCookie!)).toBeGreaterThan(20 * 24 * 60 * 60);
+      const grant = await AuditLog.findOne({ userId: testUser.id, action: 'trusted_device_grant' });
+      expect(grant).not.toBeNull();
+    });
+
+    it('a 2FA login without remember mints no trusted device and keeps a standard session', async () => {
+      const testUser = await createTestUser();
+      const secret = await enable2fa(testUser.id);
+      const userObjId = new mongoose.Types.ObjectId(testUser.id);
+
+      const tempToken = jwt.sign(
+        { userId: testUser.id, purpose: '2fa_temp' },
+        deriveTestPurposeKey('2fa_temp'),
+        { expiresIn: '5m' },
+      );
+      const code = await totpFor(secret);
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login/2fa`).send({ tempToken, code }),
+        csrf,
+      );
+
+      expect(res.status).toBe(200);
+      expect(findCookie(res, 'trustedDevice')).toBeUndefined();
+      expect(await TrustedDevice.countDocuments({ userId: userObjId })).toBe(0);
+      expect(
+        await AuditLog.findOne({ userId: testUser.id, action: 'trusted_device_grant' }),
+      ).toBeNull();
+
+      const refreshCookie = findCookie(res, 'refreshToken');
+      expect(cookieMaxAgeSeconds(refreshCookie!)).toBeLessThan(10 * 24 * 60 * 60);
+    });
+
+    it('reads rememberMe only from the signed token, ignoring a tampered request body', async () => {
+      const testUser = await createTestUser();
+      const secret = await enable2fa(testUser.id);
+      const userObjId = new mongoose.Types.ObjectId(testUser.id);
+
+      // Token says NOT remembered; the attacker adds rememberMe:true to the body.
+      const tempToken = jwt.sign(
+        { userId: testUser.id, purpose: '2fa_temp', rememberMe: false },
+        deriveTestPurposeKey('2fa_temp'),
+        { expiresIn: '5m' },
+      );
+      const code = await totpFor(secret);
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login/2fa`).send({ tempToken, code, rememberMe: true }),
+        csrf,
+      );
+
+      expect(res.status).toBe(200);
+      expect(findCookie(res, 'trustedDevice')).toBeUndefined();
+      expect(await TrustedDevice.countDocuments({ userId: userObjId })).toBe(0);
+    });
+
+    it('enforces MAX_TRUSTED_DEVICES, evicting the oldest record', async () => {
+      const testUser = await createTestUser();
+      const secret = await enable2fa(testUser.id);
+      const userObjId = new mongoose.Types.ObjectId(testUser.id);
+
+      // Seed the cap-worth of trusted devices with staggered createdAt (oldest
+      // first), inserting through the raw collection so the timestamps plugin
+      // cannot overwrite our deterministic createdAt values.
+      const now = Date.now();
+      const seeds = Array.from({ length: MAX_TRUSTED_DEVICES }, (_, i) => ({
+        userId: userObjId,
+        tokenHash: hashToken(`seed-${String(i)}`),
+        deviceInfo: { userAgent: '', ip: '', fingerprint: '' },
+        expiresAt: new Date(now + 30 * DAY_MS),
+        createdAt: new Date(now - (MAX_TRUSTED_DEVICES - i) * 60_000),
+        updatedAt: new Date(now),
+      }));
+      await TrustedDevice.collection.insertMany(seeds);
+
+      const tempToken = jwt.sign(
+        { userId: testUser.id, purpose: '2fa_temp', rememberMe: true },
+        deriveTestPurposeKey('2fa_temp'),
+        { expiresIn: '5m' },
+      );
+      const code = await totpFor(secret);
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login/2fa`).send({ tempToken, code }),
+        csrf,
+      );
+
+      expect(res.status).toBe(200);
+      // The count stays at the cap; the oldest seed is gone; the new device survives.
+      expect(await TrustedDevice.countDocuments({ userId: userObjId })).toBe(MAX_TRUSTED_DEVICES);
+      expect(await TrustedDevice.findOne({ tokenHash: hashToken('seed-0') })).toBeNull();
+      const rawTd = cookieValue(findCookie(res, 'trustedDevice')!);
+      expect(await TrustedDevice.findOne({ tokenHash: hashToken(rawTd) })).not.toBeNull();
     });
   });
 
