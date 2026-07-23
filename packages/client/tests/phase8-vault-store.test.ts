@@ -105,12 +105,15 @@ import { useAuthStore } from '../src/stores/authStore';
 import {
   useVaultStore,
   reportDecryptionFailures,
+  decryptExportResponse,
   EncryptedFieldTooLargeError,
   DECRYPTION_FAILURE_THRESHOLD,
   DECRYPTION_CONCURRENCY,
   mapWithConcurrency,
 } from '../src/stores/vaultStore';
 import { cryptoService } from '../src/services/crypto/cryptoService';
+import { logger } from '../src/lib/logger';
+import { isUndecodableData } from '../src/lib/vaultData';
 import { offlineCache } from '../src/services/offlineCache';
 import {
   listItemsApi,
@@ -1360,5 +1363,88 @@ describe('T22 — generation guards on offline decryption & cache writes', () =>
       expect(useVaultStore.getState().items).toEqual([]);
       expect(vi.mocked(offlineCache.cacheItems)).not.toHaveBeenCalled();
     });
+  });
+});
+
+// =========================================================================
+// decryptExportResponse — the plaintext-export decryption bridge (Phase 10)
+// =========================================================================
+
+describe('decryptExportResponse', () => {
+  const vaultKey = {} as CryptoKey;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('decrypts items and folders from the authoritative export response', async () => {
+    vi.mocked(cryptoService.decryptData)
+      // item: name then data
+      .mockResolvedValueOnce('My Login')
+      .mockResolvedValueOnce(
+        JSON.stringify({ username: 'alice', password: 'pw', uris: [], customFields: [] }),
+      )
+      // folder: name
+      .mockResolvedValueOnce('Work');
+
+    const response = {
+      items: [makeRawItemResponse()],
+      folders: [makeRawFolderResponse()],
+      metadata: { exportDate: '2024-01-01T00:00:00Z', version: '0.4.0', itemCount: 1 },
+    };
+
+    const { items, folders } = await decryptExportResponse(
+      response as unknown as import('@hvault/shared').ExportResponse,
+      vaultKey,
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.name).toBe('My Login');
+    expect(isUndecodableData(items[0]!.data)).toBe(false);
+    expect(folders).toHaveLength(1);
+    expect(folders[0]!.name).toBe('Work');
+  });
+
+  it('turns an item that cannot be decrypted into an undecodable placeholder (never dropping it)', async () => {
+    // The single decryptData call (item name) rejects, so decryptItem throws.
+    vi.mocked(cryptoService.decryptData).mockRejectedValueOnce(new Error('GCM tag mismatch'));
+
+    const raw = makeRawItemResponse({ _id: 'aabbccddeeff001122334455' });
+    const response = {
+      items: [raw],
+      folders: [],
+      metadata: { exportDate: '2024-01-01T00:00:00Z', version: '0.4.0', itemCount: 1 },
+    };
+
+    const { items } = await decryptExportResponse(
+      response as unknown as import('@hvault/shared').ExportResponse,
+      vaultKey,
+    );
+
+    // Reported (present), not silently dropped — and flagged undecodable so
+    // toPortableItems reports it in `skipped`.
+    expect(items).toHaveLength(1);
+    expect(items[0]!.id).toBe('aabbccddeeff001122334455');
+    expect(items[0]!.name).toBe('');
+    expect(isUndecodableData(items[0]!.data)).toBe(true);
+  });
+
+  it('drops an undecryptable folder from the path set and logs it', async () => {
+    vi.mocked(cryptoService.decryptData).mockRejectedValueOnce(new Error('folder cipher invalid'));
+
+    const response = {
+      items: [],
+      folders: [makeRawFolderResponse()],
+      metadata: { exportDate: '2024-01-01T00:00:00Z', version: '0.4.0', itemCount: 0 },
+    };
+
+    const { items, folders } = await decryptExportResponse(
+      response as unknown as import('@hvault/shared').ExportResponse,
+      vaultKey,
+    );
+
+    expect(items).toHaveLength(0);
+    expect(folders).toHaveLength(0);
+    expect(vi.mocked(logger.warn)).toHaveBeenCalled();
   });
 });

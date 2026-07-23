@@ -35,7 +35,12 @@ import {
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_ENCRYPTED_DATA_LENGTH,
 } from '@hvault/shared';
-import type { IVaultItemResponse, IFolderResponse, UpdateVaultItemInput } from '@hvault/shared';
+import type {
+  IVaultItemResponse,
+  IFolderResponse,
+  UpdateVaultItemInput,
+  ExportResponse,
+} from '@hvault/shared';
 import type { ItemType } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
@@ -495,6 +500,87 @@ async function decryptFolder(raw: IFolderResponse, vaultKey: CryptoKey): Promise
     updatedAt: raw.updatedAt,
     _raw: raw,
   };
+}
+
+/**
+ * Build an undecodable PLACEHOLDER for a ciphertext row that could not be
+ * decrypted at all (wrong/rotated vault key, corrupt blob, or a malformed
+ * response shape that made {@link decryptItem} throw).
+ *
+ * The placeholder carries `_raw` inside `data`, so {@link isUndecodableData}
+ * recognizes it and `toPortableItems` reports it in its `skipped` list instead
+ * of exporting it. `name` is intentionally empty — it is exactly what could not
+ * be recovered. No plaintext is fabricated; the original ciphertext response row
+ * is preserved on `_raw`.
+ */
+function toUndecodableItem(raw: IVaultItemResponse): DecryptedVaultItem {
+  return {
+    id: raw._id,
+    itemType: raw.itemType,
+    folderId: raw.folderId,
+    tags: raw.tags,
+    favorite: raw.favorite,
+    name: '',
+    data: { _raw: null },
+    searchHash: raw.searchHash,
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
+    deletedAt: raw.deletedAt,
+    _raw: raw,
+  };
+}
+
+/**
+ * Decrypt the authoritative ciphertext set returned by `POST /tools/export`
+ * (the response is opaque ciphertext — see {@link ExportResponse}) into the same
+ * `DecryptedVaultItem` / `DecryptedFolder` shapes the store holds. This is the
+ * decryption BRIDGE the portable plaintext export (Phase 10 `ExportDataPage`)
+ * consumes: `decryptItem`/`decryptFolder` are module-private, and the plaintext
+ * export must decrypt the server's complete set (not whatever the store happens
+ * to have loaded) to guarantee completeness.
+ *
+ * The plaintext export must be COMPLETE or LOUD about what it could not include
+ * (PLAN §1.2 principle 8) — the user is often about to delete their account — so
+ * one corrupt row never aborts the whole export:
+ *
+ * - An item whose ciphertext cannot be decrypted becomes an undecodable
+ *   PLACEHOLDER via {@link toUndecodableItem}, flowing into `toPortableItems`'s
+ *   `skipped` report rather than throwing.
+ * - A folder that cannot be decrypted is dropped from the result (items in it
+ *   then resolve to an empty folder path, matching the tree builder's tolerance
+ *   of a dangling parent); the failure is logged, never surfaced as plaintext.
+ *
+ * This function performs NO state, storage, or cache writes — the returned
+ * plaintext is handed straight back to the caller, which owns its lifetime.
+ */
+export async function decryptExportResponse(
+  response: ExportResponse,
+  vaultKey: CryptoKey,
+): Promise<{ items: DecryptedVaultItem[]; folders: DecryptedFolder[] }> {
+  const itemResults = await mapWithConcurrency(response.items, DECRYPTION_CONCURRENCY, (raw) =>
+    decryptItem(raw, vaultKey),
+  );
+  const items = itemResults.map((result, index) =>
+    result.status === 'fulfilled'
+      ? result.value
+      : // index is in-bounds: mapWithConcurrency preserves length and order.
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        toUndecodableItem(response.items[index]!),
+  );
+
+  const folderResults = await mapWithConcurrency(response.folders, DECRYPTION_CONCURRENCY, (raw) =>
+    decryptFolder(raw, vaultKey),
+  );
+  const folders: DecryptedFolder[] = [];
+  for (const result of folderResults) {
+    if (result.status === 'fulfilled') {
+      folders.push(result.value);
+    } else {
+      logger.warn('Skipping undecryptable folder during portable export', result.reason);
+    }
+  }
+
+  return { items, folders };
 }
 
 // ---------------------------------------------------------------------------

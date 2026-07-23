@@ -17,6 +17,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const BackupSettingsPage = lazy(() => import('./pages/BackupSettingsPage'));
 const SessionsPage = lazy(() => import('./pages/SessionsPage'));
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
+const ExportDataPage = lazy(() => import('./pages/ExportDataPage'));
 const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
 const GeneratorPage = lazy(() => import('./pages/GeneratorPage'));
 const FileEncryptionPage = lazy(() => import('./pages/FileEncryptionPage'));
@@ -68,6 +69,7 @@ export function App() {
                   <Route path="/settings/backup" element={<BackupSettingsPage />} />
                   <Route path="/settings/sessions" element={<SessionsPage />} />
                   <Route path="/settings/audit" element={<AuditLogPage />} />
+                  <Route path="/settings/export-data" element={<ExportDataPage />} />
                 </Route>
               </Route>
 

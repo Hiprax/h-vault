@@ -135,6 +135,42 @@ packages/server`, or inside the production image (which has no `npm`) with
   encrypted at rest across a lock — exactly as safe as the wrapped vault key already
   persisted for unlock — and are erased on logout.
 
+### Portable plaintext export ("Leave H-Vault")
+
+The `/settings/export-data` page exports your whole vault to another password manager
+(Bitwarden JSON/CSV, Chrome/Edge CSV). Unlike every other export in the app, the file it
+produces is **unencrypted plaintext** — it deliberately contains every password, TOTP
+secret, card number and note in the clear, because that is what a competing manager needs
+to import. That makes it the single most dangerous artifact H-Vault can create, and the
+threat model reflects that:
+
+- **It is a physically separate surface from the encrypted `.enc` export and the backup
+  system.** It has its own route, its own entry-point card, and its own confirmation
+  dialog, and shares no control or code path with them. The separation is itself a safety
+  control: it prevents a user from reaching for "back up my vault" and instead handing out
+  every password in cleartext.
+- **The plaintext never leaves the browser.** The server is still asked only for the
+  encrypted vault (the same `POST /tools/export` ciphertext response); the client decrypts,
+  serializes and downloads locally. No plaintext is transmitted, and none is written to any
+  store, `localStorage`, `sessionStorage`, or the console.
+- **Master-password re-verification gates the export.** The server bcrypt-verifies your
+  master password (via the export endpoint's auth hash) before any plaintext is produced,
+  and the download only happens after you accept an explicit unencrypted-data warning.
+  Cancelling produces no file.
+- **Completeness is reported, not assumed.** The client decrypts the server's authoritative
+  complete item set; any item it cannot decrypt, or that the chosen format cannot represent,
+  is reported as skipped/omitted rather than silently dropped — a silently short export is
+  indistinguishable from a complete one, and a user doing this is often about to delete
+  their account.
+- **CSV values are quoted per RFC 4180 but never altered.** H-Vault does **not** apply the
+  common "formula-injection" mitigation of prefixing cells that begin with `=`, `+`, `-` or
+  `@`: that would corrupt passwords which legitimately start with those characters, and RFC
+  4180 quoting does not stop a spreadsheet from evaluating formulas anyway. For a password
+  manager, fidelity wins. The mitigation is instead operational: the page warns you **not to
+  open the file in a spreadsheet**, and to **securely delete it** as soon as you have
+  imported it elsewhere. Treat the file exactly as you would a sheet of every password you
+  own.
+
 ## Security practices in this repository
 
 - Every push runs `npm run ci` locally through the `pre-push` hook: dependency audit,

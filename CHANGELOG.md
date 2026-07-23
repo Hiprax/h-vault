@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - New environment variable `HIBP_CACHE_MAX_BYTES` (default 67108864 = 64 MiB, minimum 1 MiB) that bounds the in-memory breach-range cache by measured bytes per worker process, in addition to the existing 10,000-entry cap. A real HIBP range is ~36 KB, so the byte budget is now the binding memory bound; the entry count is a secondary guard.
 - New `export_plaintext` audit action recorded when a vault export is produced for a portable plaintext format (audit log now covers 38 distinct operations). `POST /api/v1/tools/export` accepts an optional `portableFormat` field (`bitwarden-json`, `bitwarden-csv`, or `chrome-csv`) used solely as audit metadata; the export response body is unchanged.
+- New "Leave H-Vault" plaintext-export page at `/settings/export-data`, reached from a distinct entry-point card in Settings. It exports your whole vault to another password manager as an **unencrypted plaintext file** (Bitwarden JSON, Bitwarden CSV, or Chrome/Edge CSV): pick a format, re-enter your master password, confirm an explicit unencrypted-data warning, and download. The file is generated entirely in the browser and never uploaded; the master password is verified by the server before any plaintext is produced; and items that cannot be decoded, or that the chosen format cannot represent, are reported as skipped/omitted rather than silently dropped. It is a deliberately separate surface from the encrypted `.enc` export/backup and shares no control with it.
 
 ### Changed
 
@@ -20,6 +21,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Fixed
 
 - The empty-cache boot log and the operations docs no longer tell operators to run `npm run seed-breaches` from inside the production app container, where `npm` does not exist; they now point at the compiled `node packages/server/dist/cli/seedBreaches.js` command that actually runs there.
+
+### Security
+
+- The portable plaintext export is confined to its own page and code path, physically separate from the encrypted `.enc` export/backup, so a user can never confuse "back up my vault" with "hand out every password in the clear"; the separation is itself a safety control. The exported file is unencrypted plaintext — every password, TOTP secret, card number and note — generated only in the browser, gated behind master-password re-verification and an explicit confirmation dialog, and never written to any store, `localStorage`, `sessionStorage`, or the console. CSV values are quoted per RFC 4180 but deliberately never altered (no formula-injection mutation, which would corrupt legitimate passwords and does not reliably stop spreadsheet formula execution anyway); the page instead warns not to open the file in a spreadsheet and to delete it after importing elsewhere.
 
 ## [0.4.0] - 2026-07-22
 

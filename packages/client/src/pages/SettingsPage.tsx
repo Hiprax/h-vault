@@ -20,6 +20,7 @@ import {
   CheckCircle,
   XCircle,
   AlertTriangle,
+  LogOut,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type zxcvbnType from 'zxcvbn';
@@ -2357,6 +2358,43 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Leave H-Vault — a DELIBERATELY separate entry point from the encrypted
+          export/import above. It links to a standalone page that produces an
+          UNENCRYPTED plaintext file for migrating to another password manager.
+          It shares no control, dialog, or code path with the encrypted `.enc`
+          export; the separation is itself a safety control, so a user can never
+          confuse "back up my vault" with "hand out every password in the clear". */}
+      <Card className="border-amber-500/40">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
+            <LogOut className="h-5 w-5" /> Leave H-Vault
+          </CardTitle>
+          <CardDescription>
+            Export your vault as an <strong>unencrypted</strong> plaintext file for another password
+            manager (Bitwarden, Chrome). This is not a backup.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Link
+            to="/settings/export-data"
+            className="flex items-center justify-between rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 transition-colors hover:bg-amber-500/10"
+          >
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+              <div>
+                <p className="text-sm font-medium text-[hsl(var(--foreground))]">
+                  Export to another manager
+                </p>
+                <p className="text-xs text-[hsl(var(--muted-foreground))]">
+                  Produces a plaintext file with every password, TOTP secret and card number.
+                </p>
+              </div>
+            </div>
+            <ChevronRight className="h-4 w-4 shrink-0 text-[hsl(var(--muted-foreground))]" />
+          </Link>
         </CardContent>
       </Card>
 
