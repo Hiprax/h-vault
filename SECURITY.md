@@ -123,8 +123,10 @@ size on the wire) and follow no redirects.
   encrypting public data adds no confidentiality. Crucially there is **no per-user linkage
   and no stored record of which suffix matched**, so the cache cannot reveal whose
   password, or which password, produced a lookup, and the zero-knowledge model is
-  preserved. An operator may optionally pre-seed the full corpus (`npm run seed-breaches`)
-  for offline / zero-third-party-dependency operation. The cache is **fail-safe**: a miss
+  preserved. An operator may optionally pre-seed the full corpus for offline /
+  zero-third-party-dependency operation — locally with `npm run seed-breaches -w
+packages/server`, or inside the production image (which has no `npm`) with
+  `docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js`. The cache is **fail-safe**: a miss
   falls through to HIBP, and an upstream failure with no cached fallback surfaces as an
   error, never as a "not breached" result.
 - **On-device saved results.** The breach findings and weak-password scores shown on the

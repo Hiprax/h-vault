@@ -1,6 +1,6 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
- * Opt-in full-corpus breach seed.
+ * Opt-in full-corpus breach seed (compiled entry point).
  *
  * Imports the HIBP Pwned Passwords corpus into the `pwned_range_cache`
  * collection so password-breach lookups can be answered entirely from the local
@@ -8,72 +8,40 @@
  * ~1,048,576 range requests, tens of GB transferred, ~15-25 GB on disk after
  * WiredTiger compression. It is idempotent and resumable — safe to re-run.
  *
- * Usage:
- *   npm run seed-breaches -w packages/server
- *   npm run seed-breaches -w packages/server -- --concurrency=24
- *   npm run seed-breaches -w packages/server -- --from=00000 --to=00FFF   (a slice)
- *   npm run seed-breaches -w packages/server -- --force                   (refetch all)
- *   npm run seed-breaches -w packages/server -- --stale-days=30           (refresh entries older than 30d)
+ * Lives under `src/` (not `scripts/`) so `tsc` compiles it to
+ * `dist/cli/seedBreaches.js`, letting it run in the production image with only
+ * production dependencies — that image has no `npm` and no `tsx`.
+ *
+ * Usage (all forms accept the same flags):
+ *   --concurrency=24            max concurrent outbound HIBP fetches
+ *   --from=00000 --to=00FFF     seed only a slice of the prefix space
+ *   --force                     refetch every prefix, even cached ones
+ *   --stale-days=30             refresh entries older than 30 days
+ *
+ *   Compiled (production image / any node runtime, from the repo root or container workdir):
+ *     node packages/server/dist/cli/seedBreaches.js [flags]
+ *
+ *   Inside the production Docker stack (the app image has no npm or tsx):
+ *     docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js [flags]
+ *
+ *   Local development (dev deps present) — the `seed-breaches` package script:
+ *     tsx src/cli/seedBreaches.ts [flags]
  *
  * Requires MONGODB_URI (or a root .env).
  */
 
 import mongoose from 'mongoose';
-import { config } from '../src/config/index.js';
-import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
+import { config } from '../config/index.js';
+import { PwnedRangeCache } from '../models/PwnedRangeCache.js';
 import {
   seedBreachCorpus,
   toPrefixHex,
   TOTAL_PREFIXES,
   type SeedSignal,
-} from '../src/utils/breachSeed.js';
-import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
-import { BREACH_SEED_LOCK_NAME, BREACH_SEED_LOCK_TTL_MS } from '../src/jobs/breachSeed.js';
-
-interface CliArgs {
-  force: boolean;
-  concurrency: number | undefined;
-  from: number | undefined;
-  to: number | undefined;
-  staleDays: number | undefined;
-}
-
-function parseArgs(argv: readonly string[]): CliArgs {
-  const args: CliArgs = {
-    force: false,
-    concurrency: undefined,
-    from: undefined,
-    to: undefined,
-    staleDays: undefined,
-  };
-  for (const raw of argv) {
-    if (raw === '--force') {
-      args.force = true;
-      continue;
-    }
-    const eq = raw.indexOf('=');
-    if (!raw.startsWith('--') || eq === -1) continue;
-    const key = raw.slice(2, eq);
-    const value = raw.slice(eq + 1);
-    switch (key) {
-      case 'concurrency':
-        args.concurrency = Number.parseInt(value, 10);
-        break;
-      case 'from':
-        args.from = Number.parseInt(value, 16);
-        break;
-      case 'to':
-        args.to = Number.parseInt(value, 16);
-        break;
-      case 'stale-days':
-        args.staleDays = Number.parseInt(value, 10);
-        break;
-      default:
-        break;
-    }
-  }
-  return args;
-}
+} from '../utils/breachSeed.js';
+import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
+import { BREACH_SEED_LOCK_NAME, BREACH_SEED_LOCK_TTL_MS } from '../jobs/breachSeed.js';
+import { parseArgs } from './seedBreachesArgs.js';
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));

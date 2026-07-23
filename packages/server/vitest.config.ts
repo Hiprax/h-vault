@@ -46,6 +46,11 @@ export default defineConfig({
         // already extracted into `utils/gracefulShutdown.ts` (covered) — what
         // remains here is the wiring that only a real boot can exercise.
         'src/server.ts',
+        // Process entry point: connects to Mongo, acquires the breach-seed job
+        // lock, traps SIGINT/SIGTERM and runs the corpus import as a side effect
+        // of import — the same class as `src/server.ts`. Its testable logic (arg
+        // parsing) lives in `cli/seedBreachesArgs.ts`, which stays MEASURED.
+        'src/cli/seedBreaches.ts',
       ],
       thresholds: {
         lines: 90,

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Changed
 
 - The in-memory breach-range (HIBP) cache is now bounded by a measured byte budget (`HIBP_CACHE_MAX_BYTES`) as well as by entry count, keeping worker memory within its budget even when cached ranges are unusually large. The PM2 `max_memory_restart` ceiling was raised to 768 MiB to fit one worker holding a full cache plus its ordinary heap (the ceiling is per worker, not aggregate across workers).
+- The breach-corpus seeder is now part of the compiled server output, so it can run inside the production Docker image (which ships no `npm` and no `tsx`) with `docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js`. Local usage is unchanged: `npm run seed-breaches -w packages/server` still works and takes the same flags.
+
+### Fixed
+
+- The empty-cache boot log and the operations docs no longer tell operators to run `npm run seed-breaches` from inside the production app container, where `npm` does not exist; they now point at the compiled `node packages/server/dist/cli/seedBreaches.js` command that actually runs there.
 
 ## [0.4.0] - 2026-07-22
 

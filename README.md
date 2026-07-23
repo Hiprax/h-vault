@@ -626,6 +626,22 @@ start** rather than run misconfigured.
 
 </details>
 
+> **Seeding the breach corpus (optional, for offline breach checks).** Password-breach
+> lookups fall back to on-demand Have I Been Pwned queries until you pre-seed the full
+> Pwned Passwords corpus into the local `pwned_range_cache`. The seed is heavy (tens of GB
+> transferred, ~15–25 GB on disk after compression), idempotent and resumable. Run it
+> locally with `npm run seed-breaches -w packages/server` (add `-- --concurrency=24`,
+> `-- --from=00000 --to=00FFF` for a slice, `-- --force`, or `-- --stale-days=30`). Inside
+> the production Docker stack the app image ships **no `npm` and no `tsx`**, so run the
+> compiled entry point instead:
+>
+> ```bash
+> docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js
+> ```
+>
+> A scheduled refresh of missing/stale ranges is available through `BREACH_SEED_REFRESH_CRON`
+> and `BREACH_SEED_AUTO` (see the table above).
+
 <details>
 <summary><b>Docker Compose variables</b> — read by Compose, not by the app</summary>
 
