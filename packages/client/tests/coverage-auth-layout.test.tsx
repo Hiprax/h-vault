@@ -230,7 +230,15 @@ describe('UnlockScreen — client-side unlock rate limiting', () => {
 
     renderRouted(<UnlockScreen />);
 
+    // Bracket the instant the 5th failure's applyLockout computes `until`
+    // (Date.now() + 2000). `before` is captured just before that final submit
+    // and `after` just after the cooldown renders, so asserting `until` against
+    // these captured bounds — rather than a fresh Date.now() at assertion time —
+    // is robust to however long the async flow takes under load (the old
+    // `until > Date.now()` left only a 2s budget that a slow CI run can blow).
+    let before = 0;
     for (let i = 1; i <= 5; i++) {
+      if (i === 5) before = Date.now();
       await submitPassword('wrong');
       await waitFor(() => {
         expect(mockUnlock).toHaveBeenCalledTimes(i);
@@ -242,12 +250,14 @@ describe('UnlockScreen — client-side unlock rate limiting', () => {
       expect(screen.getByRole('alert')).toHaveTextContent(/Too many failed attempts.*2s/s);
     });
     expect(screen.getByRole('button', { name: /Locked \(2s\)/ })).toBeDisabled();
+    const after = Date.now();
 
     // Persisted to localStorage (not sessionStorage) so a new tab cannot bypass it.
     expect(localStorage.getItem(ATTEMPTS_KEY)).toBe('5');
+    // 2s lockout: `until` = T + 2000 for some T in [before, after].
     const until = Number(localStorage.getItem(LOCKOUT_KEY));
-    expect(until).toBeGreaterThan(Date.now());
-    expect(until).toBeLessThanOrEqual(Date.now() + 2000);
+    expect(until).toBeGreaterThanOrEqual(before + 2000);
+    expect(until).toBeLessThanOrEqual(after + 2000);
   });
 
   it('refuses to submit — and hits no endpoint — while a lockout is active', async () => {

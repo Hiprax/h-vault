@@ -96,6 +96,11 @@
       "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::f22100b9725347f7:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/user-controlled-bypass::packages/server/src/controllers/authController.ts::741054baf28e0c5e:1",
+      "rule": "js/user-controlled-bypass",
+      "file": "packages/server/src/controllers/authController.ts"
     }
   ]
 }

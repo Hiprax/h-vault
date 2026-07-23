@@ -110,21 +110,29 @@ describe('unlock rate limiting — client-side lockout (real component)', () => 
       </MemoryRouter>,
     );
 
+    // Bracket the instant the component computes `until` (Date.now() + 2000
+    // inside applyLockout, which runs asynchronously after the click). Asserting
+    // against these captured bounds — rather than a fresh Date.now() read at
+    // assertion time — makes the check robust to however long the async unlock
+    // flow and re-render take under load, instead of silently budgeting a fixed
+    // slack that a slow CI run can blow (a real wall-clock-timing flake).
+    const before = Date.now();
     submitFailedUnlock();
 
     // The submit button reflects the real cooldown and is disabled.
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /locked \(2s\)/i })).toBeInTheDocument();
     });
+    const after = Date.now();
 
     expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBe('5');
     expect(screen.getByRole('button', { name: /locked \(2s\)/i })).toBeDisabled();
     expect(localStorage.getItem('__hv_unlock_lockout_until')).not.toBeNull();
 
+    // 2s lockout: `until` = T + 2000 for some T in [before, after].
     const until = Number(localStorage.getItem('__hv_unlock_lockout_until'));
-    expect(until).toBeGreaterThan(Date.now());
-    // 2s lockout — allow a little scheduling slack.
-    expect(until).toBeLessThanOrEqual(Date.now() + 2000 + 200);
+    expect(until).toBeGreaterThanOrEqual(before + 2000);
+    expect(until).toBeLessThanOrEqual(after + 2000);
   });
 
   it('caps the cooldown at 600s for a high failure count', async () => {
@@ -137,15 +145,26 @@ describe('unlock rate limiting — client-side lockout (real component)', () => 
       </MemoryRouter>,
     );
 
+    // Bracket the instant the component computes `until` (Date.now() + 600_000
+    // inside applyLockout). Asserting against these captured bounds — not a
+    // fresh Date.now() at assertion time — is what keeps this deterministic:
+    // the previous `until > Date.now() + 599_000` left only ~1s of budget for
+    // the async unlock flow + re-render, which a loaded CI run exceeded, turning
+    // a correct cap into a spurious failure.
+    const before = Date.now();
     submitFailedUnlock();
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /locked \(600s\)/i })).toBeInTheDocument();
     });
+    const after = Date.now();
 
+    // Capped at exactly 600s: `until` = T + 600_000 for some T in [before, after].
+    // A larger cooldown (e.g. the uncapped 1024s) would exceed after+600_000; a
+    // smaller one would fall below before+600_000.
     const until = Number(localStorage.getItem('__hv_unlock_lockout_until'));
-    expect(until).toBeGreaterThan(Date.now() + 599_000);
-    expect(until).toBeLessThanOrEqual(Date.now() + 600_000 + 200);
+    expect(until).toBeGreaterThanOrEqual(before + 600_000);
+    expect(until).toBeLessThanOrEqual(after + 600_000);
   });
 
   it('does not lock out below the threshold (shows attempts-remaining instead)', async () => {
