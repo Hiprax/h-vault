@@ -67,8 +67,20 @@ import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
+import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { BackupLog } from '../src/models/BackupLog.js';
+import { hashToken } from '../src/utils/token.js';
+
+/** Seed one trusted-device record for a user. */
+async function seedTrustedDevice(userId: string): Promise<void> {
+  await TrustedDevice.create({
+    userId: new mongoose.Types.ObjectId(userId),
+    tokenHash: hashToken(crypto.randomBytes(32).toString('hex')),
+    deviceInfo: { userAgent: 'seed-agent', ip: '127.0.0.1', fingerprint: 'seed-fp' },
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
+}
 import { config } from '../src/config/index.js';
 import { cascadeDeleteUser, supportsTransactions } from '../src/utils/cascadeDelete.js';
 import { startBackupScheduler } from '../src/jobs/backupScheduler.js';
@@ -547,6 +559,8 @@ describe('cascadeDeleteUser — transactional branch (replica set)', () => {
     });
     await BackupLog.create({ userId: target.id, status: 'success', sentTo: [target.email] });
 
+    await seedTrustedDevice(target.id);
+
     await VaultItem.create({ ...sampleVaultItem(), userId: bystander.id });
     await Folder.create({ ...sampleFolder(), userId: bystander.id });
     await AuditLog.create({
@@ -555,6 +569,7 @@ describe('cascadeDeleteUser — transactional branch (replica set)', () => {
       ipAddress: '127.0.0.1',
       userAgent: 'test',
     });
+    await seedTrustedDevice(bystander.id);
 
     const startSessionSpy = vi.spyOn(mongoose, 'startSession');
 
@@ -573,6 +588,7 @@ describe('cascadeDeleteUser — transactional branch (replica set)', () => {
     expect(await VaultItem.countDocuments({ userId: target.id })).toBe(0);
     expect(await Folder.countDocuments({ userId: target.id })).toBe(0);
     expect(await RefreshToken.countDocuments({ userId: target.id })).toBe(0);
+    expect(await TrustedDevice.countDocuments({ userId: target.id })).toBe(0);
     expect(await AuditLog.countDocuments({ userId: target.id })).toBe(0);
     expect(await BackupLog.countDocuments({ userId: target.id })).toBe(0);
 
@@ -587,6 +603,7 @@ describe('cascadeDeleteUser — transactional branch (replica set)', () => {
     expect(await VaultItem.countDocuments({ userId: bystander.id })).toBe(1);
     expect(await Folder.countDocuments({ userId: bystander.id })).toBe(1);
     expect(await RefreshToken.countDocuments({ userId: bystander.id })).toBe(1);
+    expect(await TrustedDevice.countDocuments({ userId: bystander.id })).toBe(1);
     expect(await AuditLog.countDocuments({ userId: bystander.id })).toBe(1);
   });
 

@@ -6,9 +6,11 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import crypto from 'node:crypto';
+import mongoose from 'mongoose';
 import request from 'supertest';
 import app from '../src/app.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
+import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { User } from '../src/models/User.js';
 import { hashToken } from '../src/utils/token.js';
 import { createTestUser, getCsrf as getCsrfBase } from './helpers.js';
@@ -200,6 +202,42 @@ describe('Token refresh — reuse detection revokes entire family', () => {
     // And specifically neither the reused RT1 nor the rotated RT2 survives.
     expect(await RefreshToken.countDocuments({ tokenHash: hashToken(user.refreshToken) })).toBe(0);
     expect(await RefreshToken.countDocuments({ tokenHash: hashToken(rt2!) })).toBe(0);
+  });
+
+  it('reuse detection also revokes the user trusted devices', async () => {
+    // Seed a trusted device for this user before the reuse event.
+    await TrustedDevice.create({
+      userId: new mongoose.Types.ObjectId(user.id),
+      tokenHash: hashToken(crypto.randomBytes(32).toString('hex')),
+      deviceInfo: { userAgent: 'seed-agent', ip: '127.0.0.1', fingerprint: 'seed-fp' },
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+    expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(1);
+
+    // Rotate RT1 → RT2, then replay RT1 to trip reuse detection.
+    const agent1 = request(app) as unknown as request.SuperTest<request.Test>;
+    const csrf1 = await getCsrfBase(agent1, `refreshToken=${user.refreshToken}`);
+    const rotateRes = await withCsrf(
+      agent1.post(`${API}/auth/refresh`),
+      csrf1,
+      undefined,
+      `refreshToken=${user.refreshToken}`,
+    );
+    expect(rotateRes.status).toBe(200);
+
+    const agent2 = request(app) as unknown as request.SuperTest<request.Test>;
+    const csrf2 = await getCsrfBase(agent2, `refreshToken=${user.refreshToken}`);
+    const reuseRes = await withCsrf(
+      agent2.post(`${API}/auth/refresh`),
+      csrf2,
+      undefined,
+      `refreshToken=${user.refreshToken}`,
+    );
+    expect(reuseRes.status).toBe(401);
+
+    // A replayed (stolen) cookie is the strongest compromise signal — the trust
+    // that lets a device skip 2FA must be revoked along with the token family.
+    expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
   });
 });
 

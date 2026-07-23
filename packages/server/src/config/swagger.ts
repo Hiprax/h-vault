@@ -522,6 +522,25 @@ export const swaggerSpec: JsonObject = {
           current: { type: 'boolean' },
         },
       },
+      TrustedDeviceInfo: {
+        type: 'object',
+        description:
+          'A device allowed to skip the 2FA step at login. The server-only SHA-256 token hash is never included.',
+        properties: {
+          _id: { type: 'string' },
+          deviceInfo: {
+            type: 'object',
+            properties: {
+              userAgent: { type: 'string' },
+              ip: { type: 'string' },
+              fingerprint: { type: 'string' },
+            },
+          },
+          createdAt: { type: 'string', format: 'date-time' },
+          lastUsedAt: { type: 'string', format: 'date-time' },
+          expiresAt: { type: 'string', format: 'date-time' },
+        },
+      },
       AuditLogEntry: {
         type: 'object',
         properties: {
@@ -2003,6 +2022,75 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: {
             description: 'Session revoked',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/SuccessResponse' },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+        },
+      },
+    },
+    '/user/trusted-devices': {
+      get: {
+        tags: ['User'],
+        summary: 'List trusted devices',
+        description:
+          'Returns the devices allowed to skip the 2FA step at login for the authenticated user. The server-only token hash is never returned.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: {
+            description: 'Trusted devices',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/TrustedDeviceInfo' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+      delete: {
+        tags: ['User'],
+        summary: 'Revoke all trusted devices',
+        description:
+          'Revokes every trusted device for the authenticated user. Each device must complete 2FA again on its next login.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        responses: {
+          200: {
+            description: 'All trusted devices revoked',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/SuccessResponse' },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
+    '/user/trusted-devices/{id}': {
+      delete: {
+        tags: ['User'],
+        summary: 'Revoke trusted device',
+        description:
+          'Revokes a specific trusted device by its id. The device must complete 2FA again on its next login.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'Trusted device revoked',
             content: {
               'application/json': {
                 schema: { $ref: '#/components/schemas/SuccessResponse' },

@@ -270,6 +270,20 @@ export interface ISessionInfo {
   current: boolean;
 }
 
+// Trusted device info (a device allowed to skip the 2FA step at login).
+// The server-only `tokenHash` is never included.
+export interface ITrustedDeviceInfo {
+  _id: string;
+  deviceInfo: {
+    userAgent: string;
+    ip: string;
+    fingerprint: string;
+  };
+  createdAt: string;
+  lastUsedAt?: string;
+  expiresAt: string;
+}
+
 // Audit log entry
 export interface IAuditLogEntry {
   _id: string;

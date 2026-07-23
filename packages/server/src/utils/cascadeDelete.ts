@@ -7,6 +7,7 @@ import { RefreshToken } from '../models/RefreshToken.js';
 import { AuditLog } from '../models/AuditLog.js';
 import { BackupLog } from '../models/BackupLog.js';
 import { createAuditLog } from '../services/auditService.js';
+import { revokeTrustedDevices } from './trustedDevices.js';
 
 const logger = createLogger({ moduleName: 'cascade-delete' });
 
@@ -75,6 +76,7 @@ export async function cascadeDeleteTransactional(
       await VaultItem.deleteMany({ userId }, { session });
       await Folder.deleteMany({ userId }, { session });
       await RefreshToken.deleteMany({ userId }, { session });
+      await revokeTrustedDevices(userId, session);
       await BackupLog.deleteMany({ userId }, { session });
 
       // Create the system-scoped audit log (userId: null) inside the same
@@ -134,6 +136,7 @@ async function cascadeDeleteSequential(
     await VaultItem.deleteMany({ userId });
     await Folder.deleteMany({ userId });
     await RefreshToken.deleteMany({ userId });
+    await revokeTrustedDevices(userId);
     await BackupLog.deleteMany({ userId });
 
     await createAuditLog(

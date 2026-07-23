@@ -11,6 +11,7 @@ import { REFRESH_COOKIE_NAME, TRUSTED_DEVICE_COOKIE_NAME } from '../constants/in
 import { User } from '../models/User.js';
 import { RefreshToken } from '../models/RefreshToken.js';
 import { TrustedDevice } from '../models/TrustedDevice.js';
+import { revokeTrustedDevices } from '../utils/trustedDevices.js';
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -1221,6 +1222,11 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
         userId: existingToken.userId,
         familyId: existingToken.familyId,
       });
+      // Reuse detection is the strongest compromise signal in the system: the
+      // cookie has been replayed after rotation, so the device is presumed
+      // stolen. Revoke the user's trusted devices too — otherwise a stolen-cookie
+      // attacker's next login on that device would skip 2FA (§1.5 site 7).
+      await revokeTrustedDevices(existingToken.userId);
       clearRefreshCookie(res);
       throw httpErrors.unauthorized(ERROR_CODES.TOKEN_REUSE_DETECTED);
     }
@@ -1315,6 +1321,12 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
   }
 
   const result = await RefreshToken.deleteMany(filter);
+
+  // "Log out everywhere" is an explicit user request to drop every other
+  // session, so the second-factor trust granted to those devices must drop with
+  // them (§1.5 site 6). Unlike per-session logout, this revokes ALL trusted
+  // devices — a returning device then has to complete 2FA again.
+  await revokeTrustedDevices(userId);
 
   clearCsrfCookie(res);
 
@@ -1504,6 +1516,11 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   // issue. For strong guarantees on replica sets, a transaction would be
   // preferable, but sequential-delete-first is safe under any failure mode.
   await RefreshToken.deleteMany({ userId: user._id });
+
+  // A password reset invalidates every existing session; the second-factor trust
+  // that let devices skip 2FA must drop with them (§1.5 site 1), or a device
+  // trusted under the old password would still bypass 2FA after the reset.
+  await revokeTrustedDevices(user._id);
 
   user.authHash = hashedAuth;
   user.encryptedVaultKey = newEncryptedVaultKey;

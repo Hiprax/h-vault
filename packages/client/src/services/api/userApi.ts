@@ -10,6 +10,7 @@ import type {
   PaginatedResponse,
   IUserProfile,
   ISessionInfo,
+  ITrustedDeviceInfo,
   IAuditLogEntry,
   TwoFactorSetupResponse,
   UpdateSettingsInput,
@@ -90,6 +91,22 @@ export function listSessionsApi(): Promise<AxiosResponse<ApiResponse<ISessionInf
 
 export function revokeSessionApi(id: string): Promise<AxiosResponse<ApiResponse<null>>> {
   return api.delete(`/user/sessions/${id}`);
+}
+
+// ---------------------------------------------------------------------------
+// Trusted Devices
+// ---------------------------------------------------------------------------
+
+export function listTrustedDevicesApi(): Promise<AxiosResponse<ApiResponse<ITrustedDeviceInfo[]>>> {
+  return api.get('/user/trusted-devices');
+}
+
+export function revokeTrustedDeviceApi(id: string): Promise<AxiosResponse<ApiResponse<null>>> {
+  return api.delete(`/user/trusted-devices/${id}`);
+}
+
+export function revokeAllTrustedDevicesApi(): Promise<AxiosResponse<ApiResponse<null>>> {
+  return api.delete('/user/trusted-devices');
 }
 
 // ---------------------------------------------------------------------------

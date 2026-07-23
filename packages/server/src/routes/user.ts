@@ -27,6 +27,9 @@ import {
   regenerateBackupCodes,
   listSessions,
   revokeSession,
+  getTrustedDevices,
+  revokeTrustedDevice,
+  revokeAllTrustedDevices,
   getAuditLog,
   deleteAccount,
 } from '../controllers/userController.js';
@@ -63,6 +66,12 @@ router.post(
 
 router.get('/sessions', generalAuthLimiter, listSessions);
 router.delete('/sessions/:id', validateObjectId(), revokeSession);
+
+// ── Trusted Devices ──────────────────────────────────────────────────
+
+router.get('/trusted-devices', generalAuthLimiter, getTrustedDevices);
+router.delete('/trusted-devices', revokeAllTrustedDevices);
+router.delete('/trusted-devices/:id', validateObjectId(), revokeTrustedDevice);
 
 // ── Audit Log ────────────────────────────────────────────────────────
 

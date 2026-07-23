@@ -1,12 +1,56 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import crypto from 'node:crypto';
+import mongoose from 'mongoose';
 import request from 'supertest';
+import { TOTP, Secret } from 'otpauth';
+import { CryptoManager } from '@hiprax/crypto';
 import app from '../src/app.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
+import { TrustedDevice } from '../src/models/TrustedDevice.js';
+import { User } from '../src/models/User.js';
 import { hashToken } from '../src/utils/token.js';
-import { MAX_SESSIONS } from '@hvault/shared';
+import { MAX_SESSIONS, MAX_TRUSTED_DEVICES } from '@hvault/shared';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
+
+const SESSION_SECRET = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
+
+/** Enable 2FA directly in the DB and return the base32 TOTP secret. */
+async function enable2faDirect(userId: string): Promise<string> {
+  const secretObj = new Secret();
+  const secret = secretObj.base32;
+  const encryptedSecret = new CryptoManager().encryptTextSync(secret, SESSION_SECRET);
+  await User.findByIdAndUpdate(userId, {
+    $set: {
+      twoFactorEnabled: true,
+      twoFactorSecret: encryptedSecret,
+      backupCodes: ['hashed-code-1'],
+    },
+  });
+  return secret;
+}
+
+/** A fresh valid TOTP code for the given base32 secret. */
+function totpCode(secret: string): string {
+  return new TOTP({
+    algorithm: 'SHA1',
+    digits: 6,
+    period: 30,
+    secret: Secret.fromBase32(secret),
+  }).generate();
+}
+
+/** Seed one trusted-device record for a user and return its raw token. */
+async function seedTrustedDevice(userId: string): Promise<string> {
+  const raw = crypto.randomBytes(32).toString('hex');
+  await TrustedDevice.create({
+    userId: new mongoose.Types.ObjectId(userId),
+    tokenHash: hashToken(raw),
+    deviceInfo: { userAgent: 'seed-agent', ip: '127.0.0.1', fingerprint: 'seed-fp' },
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
+  return raw;
+}
 
 // Re-export with { csrfToken, csrfCookie } naming used throughout this file
 async function getCsrf(
@@ -1770,6 +1814,245 @@ describe('User routes', () => {
       expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(0);
       expect(await AuditLog.countDocuments({ userId: user.id })).toBe(0);
       expect(await BackupLog.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('erases the account trusted devices (sequential cascade path)', async () => {
+      await seedTrustedDevice(user.id);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(1);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .delete('/api/v1/user')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ password: user.rawPassword });
+
+      expect(res.status).toBe(200);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
+    });
+  });
+
+  // ── Phase 18: trusted-device revocation triggers ─────────────────────
+
+  describe('Trusted-device revocation on auth-footing changes', () => {
+    it('change-password revokes the account trusted devices', async () => {
+      await seedTrustedDevice(user.id);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(1);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .put('/api/v1/user/change-password')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          currentAuthHash: user.rawPassword,
+          newAuthHash: 'brand-new-auth-hash',
+          newEncryptedVaultKey: 'new-encrypted-vault-key',
+          newVaultKeyIv: 'new-vault-key-iv',
+          newVaultKeyTag: 'new-vault-key-tag',
+        });
+
+      expect(res.status).toBe(200);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('enabling 2FA revokes any pre-existing trusted devices', async () => {
+      await seedTrustedDevice(user.id);
+
+      const { csrfToken: c1, csrfCookie: k1 } = await getCsrf(agent);
+      const setupRes = await agent
+        .post('/api/v1/user/2fa/setup')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', c1)
+        .set('Cookie', k1)
+        .send({ password: user.rawPassword });
+      expect(setupRes.status).toBe(200);
+      const secret = setupRes.body.data.secret as string;
+
+      const { csrfToken: c2, csrfCookie: k2 } = await getCsrf(agent);
+      const verifyRes = await agent
+        .post('/api/v1/user/2fa/verify')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', c2)
+        .set('Cookie', k2)
+        .send({ code: totpCode(secret), secret });
+
+      expect(verifyRes.status).toBe(200);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('disabling 2FA revokes the account trusted devices', async () => {
+      const secret = await enable2faDirect(user.id);
+      await seedTrustedDevice(user.id);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .delete('/api/v1/user/2fa')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ code: totpCode(secret), password: user.rawPassword });
+
+      expect(res.status).toBe(200);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('regenerating backup codes revokes the account trusted devices', async () => {
+      const secret = await enable2faDirect(user.id);
+      await seedTrustedDevice(user.id);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/user/2fa/regenerate-backup-codes')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ password: user.rawPassword, code: totpCode(secret) });
+
+      expect(res.status).toBe(200);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('logout-all revokes the account trusted devices', async () => {
+      await seedTrustedDevice(user.id);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/auth/logout-all')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    it('ordinary logout does NOT revoke trusted devices (explicit non-trigger)', async () => {
+      await seedTrustedDevice(user.id);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post('/api/v1/auth/logout')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({});
+
+      expect(res.status).toBe(200);
+      // Logging out one session on a trusted device must not force 2FA on that
+      // device's next login — the whole point of the feature.
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(1);
+    });
+  });
+
+  // ── Phase 18: trusted-device listing & revoke endpoints ──────────────
+
+  describe('GET /api/v1/user/trusted-devices', () => {
+    it('lists the caller trusted devices and never exposes the token hash', async () => {
+      await seedTrustedDevice(user.id);
+      await seedTrustedDevice(user.id);
+
+      const res = await agent
+        .get('/api/v1/user/trusted-devices')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBe(2);
+      for (const device of res.body.data) {
+        expect(device._id).toBeDefined();
+        expect(device.deviceInfo).toBeDefined();
+        expect(device.createdAt).toBeDefined();
+        expect(device.expiresAt).toBeDefined();
+        expect(device.tokenHash).toBeUndefined();
+      }
+    });
+
+    it('caps the returned list at MAX_TRUSTED_DEVICES', async () => {
+      for (let i = 0; i < MAX_TRUSTED_DEVICES + 3; i++) {
+        await seedTrustedDevice(user.id);
+      }
+
+      const res = await agent
+        .get('/api/v1/user/trusted-devices')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.length).toBe(MAX_TRUSTED_DEVICES);
+    });
+
+    it('returns 401 without a token', async () => {
+      const res = await agent.get('/api/v1/user/trusted-devices');
+      expect(res.status).toBe(401);
+    });
+  });
+
+  describe('DELETE /api/v1/user/trusted-devices/:id', () => {
+    it('revokes a single trusted device owned by the caller and audits it', async () => {
+      const { AuditLog } = await import('../src/models/AuditLog.js');
+      await seedTrustedDevice(user.id);
+      const record = await TrustedDevice.findOne({ userId: user.id });
+      const id = String(record!._id);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .delete(`/api/v1/user/trusted-devices/${id}`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie);
+
+      expect(res.status).toBe(200);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
+
+      const audit = await AuditLog.findOne({ userId: user.id, action: 'trusted_device_revoke' });
+      expect(audit).not.toBeNull();
+    });
+
+    it("cannot revoke another user's trusted device (404, scoped by owner)", async () => {
+      const other = await createTestUser();
+      await seedTrustedDevice(other.id);
+      const otherRecord = await TrustedDevice.findOne({ userId: other.id });
+      const otherId = String(otherRecord!._id);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .delete(`/api/v1/user/trusted-devices/${otherId}`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie);
+
+      expect(res.status).toBe(404);
+      // The other user's device is untouched.
+      expect(await TrustedDevice.countDocuments({ userId: other.id })).toBe(1);
+    });
+  });
+
+  describe('DELETE /api/v1/user/trusted-devices', () => {
+    it('revokes all of the caller trusted devices and audits it', async () => {
+      const { AuditLog } = await import('../src/models/AuditLog.js');
+      const other = await createTestUser();
+      for (let i = 0; i < 3; i++) await seedTrustedDevice(user.id);
+      await seedTrustedDevice(other.id);
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .delete('/api/v1/user/trusted-devices')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie);
+
+      expect(res.status).toBe(200);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
+      // Another user's trusted device is not affected.
+      expect(await TrustedDevice.countDocuments({ userId: other.id })).toBe(1);
+
+      const audit = await AuditLog.findOne({ userId: user.id, action: 'trusted_device_revoke' });
+      expect(audit).not.toBeNull();
+      expect((audit!.metadata as Record<string, unknown>).count).toBe(3);
     });
   });
 });

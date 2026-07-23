@@ -83,6 +83,9 @@ const SERVER_ROUTES = new Set<string>([
   'POST /user/2fa/regenerate-backup-codes',
   'GET /user/sessions',
   'DELETE /user/sessions/:id',
+  'GET /user/trusted-devices',
+  'DELETE /user/trusted-devices',
+  'DELETE /user/trusted-devices/:id',
   'GET /user/audit-log',
   'DELETE /user',
   // routes/vault.ts
@@ -323,6 +326,19 @@ describe('userApi wire contract', () => {
     expectCall(mockDelete, 'DELETE', `/user/sessions/${ID}`);
   });
 
+  it('lists and revokes trusted devices, scoping the single revoke to its id', async () => {
+    await userApi.listTrustedDevicesApi();
+    expectCall(mockGet, 'GET', '/user/trusted-devices');
+
+    mockDelete.mockClear();
+    await userApi.revokeTrustedDeviceApi(ID);
+    expectCall(mockDelete, 'DELETE', `/user/trusted-devices/${ID}`);
+
+    mockDelete.mockClear();
+    await userApi.revokeAllTrustedDevicesApi();
+    expectCall(mockDelete, 'DELETE', '/user/trusted-devices');
+  });
+
   it('passes audit-log pagination through as query params, not a body', async () => {
     await userApi.getAuditLogApi({ page: 2, limit: 20, action: 'login' });
     expectCall(mockGet, 'GET', '/user/audit-log', {
@@ -556,6 +572,9 @@ describe('API surface', () => {
       'regenerateBackupCodesApi',
       'listSessionsApi',
       'revokeSessionApi',
+      'listTrustedDevicesApi',
+      'revokeTrustedDeviceApi',
+      'revokeAllTrustedDevicesApi',
       'getAuditLogApi',
       'checkBreachApi',
       'checkBreachBatchApi',
