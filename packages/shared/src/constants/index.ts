@@ -95,6 +95,7 @@ export const AUDIT_ACTIONS = [
   'item_delete',
   'item_restore',
   'export',
+  'export_plaintext',
   'import',
   'session_revoke',
   'vault_lock',

@@ -508,7 +508,7 @@ export const checkPasswordBreachBatch = catchAsync(
 
 export const exportVault = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
-  const { authHash } = req.body as ExportInput;
+  const { authHash, portableFormat } = req.body as ExportInput;
 
   // Re-authentication is mandatory for vault export
   const user = await User.findById(userId).select('+authHash');
@@ -584,11 +584,20 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
     );
   }
 
+  // `portableFormat` is AUDIT METADATA ONLY (validated by exportSchema): its
+  // sole effect is to record a distinct `export_plaintext` action for a
+  // browser-side plaintext export. The response body above is already fully
+  // built and is byte-identical whether or not it is present — nothing below
+  // branches on the value beyond the audit action and its metadata.
   const exportCtx = getRequestContext(req);
   await createAuditLog(
     userId,
-    'export',
-    { itemCount: items.length, folderCount: folders.length },
+    portableFormat ? 'export_plaintext' : 'export',
+    {
+      itemCount: items.length,
+      folderCount: folders.length,
+      ...(portableFormat ? { portableFormat } : {}),
+    },
     exportCtx.ip,
     exportCtx.userAgent,
   );

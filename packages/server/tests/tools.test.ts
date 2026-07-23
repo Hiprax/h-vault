@@ -1008,6 +1008,73 @@ describe('Tools routes', () => {
       expect(meta.folderCount).toBe(1);
     });
 
+    it('records export_plaintext instead of export when portableFormat is present', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      await agent
+        .post('/api/v1/tools/export')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ authHash: user.rawPassword, portableFormat: 'chrome-csv' })
+        .expect(200);
+
+      // The audit action switches on the mere presence of portableFormat, and
+      // the chosen format is recorded as metadata.
+      const plaintextEntry = await AuditLog.findOne({
+        userId: user.id,
+        action: 'export_plaintext',
+      });
+      expect(plaintextEntry).not.toBeNull();
+      expect((plaintextEntry!.metadata as Record<string, unknown>).portableFormat).toBe(
+        'chrome-csv',
+      );
+
+      // The plain 'export' action must NOT be written for a portable export.
+      const plainEntry = await AuditLog.findOne({ userId: user.id, action: 'export' });
+      expect(plainEntry).toBeNull();
+    });
+
+    it('returns a byte-identical body whether or not portableFormat is sent', async () => {
+      await VaultItem.create({
+        userId: user.id,
+        ...sampleVaultItem({ encryptedName: 'portable-body-item' }),
+      });
+      await Folder.create({
+        userId: user.id,
+        ...sampleFolder({ encryptedName: 'portable-body-folder' }),
+      });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const post = (body: Record<string, unknown>) =>
+        agent
+          .post('/api/v1/tools/export')
+          .set('Authorization', authHeader(user.accessToken))
+          .set('x-csrf-token', csrfToken)
+          .set('Cookie', csrfCookie)
+          .send(body)
+          .expect(200);
+
+      const plainRes = await post({ authHash: user.rawPassword });
+      const portableRes = await post({
+        authHash: user.rawPassword,
+        portableFormat: 'bitwarden-json',
+      });
+
+      // The only per-call difference is metadata.exportDate (a timestamp);
+      // normalize it away and the two bodies must be structurally identical,
+      // proving the server does not branch on portableFormat when building the
+      // response.
+      const normalize = (body: unknown): unknown => {
+        const clone = JSON.parse(JSON.stringify(body)) as {
+          data: { metadata: Record<string, unknown> };
+        };
+        delete clone.data.metadata.exportDate;
+        return clone;
+      };
+      expect(normalize(portableRes.body)).toEqual(normalize(plainRes.body));
+    });
+
     it('should isolate export data between users', async () => {
       const user2 = await createTestUser();
 

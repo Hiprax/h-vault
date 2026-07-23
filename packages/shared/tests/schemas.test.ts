@@ -2748,6 +2748,27 @@ describe('exportSchema', () => {
       false,
     );
   });
+
+  it('omits portableFormat by default (it is optional audit metadata)', () => {
+    const result = exportSchema.parse({ authHash: 'test-hash' });
+    expect(result.portableFormat).toBeUndefined();
+  });
+
+  it.each(['bitwarden-json', 'bitwarden-csv', 'chrome-csv'] as const)(
+    'accepts portableFormat %s',
+    (portableFormat) => {
+      const result = exportSchema.parse({ authHash: 'test-hash', portableFormat });
+      expect(result.portableFormat).toBe(portableFormat);
+      // Audit metadata only: it must never change the resolved format contract.
+      expect(result.format).toBe('json');
+    },
+  );
+
+  it('rejects an unknown portableFormat', () => {
+    expect(
+      exportSchema.safeParse({ authHash: 'test-hash', portableFormat: 'keepass-csv' }).success,
+    ).toBe(false);
+  });
 });
 
 const minimalImportInsert = {

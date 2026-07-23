@@ -2136,6 +2136,27 @@ export const swaggerSpec: JsonObject = {
         summary: 'Export vault',
         description: 'Exports all vault items as JSON. Rate limited: 3 req/IP per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['authHash'],
+                properties: {
+                  format: { type: 'string', enum: ['json'], default: 'json' },
+                  authHash: { type: 'string', minLength: 1, maxLength: 100 },
+                  portableFormat: {
+                    type: 'string',
+                    enum: ['bitwarden-json', 'bitwarden-csv', 'chrome-csv'],
+                    description:
+                      'Audit metadata only. Records which portable plaintext format the browser produced from this response. The server does not branch on it; the response body is identical whether or not it is sent.',
+                  },
+                },
+              },
+            },
+          },
+        },
         responses: {
           200: {
             description: 'Export data (JSON)',

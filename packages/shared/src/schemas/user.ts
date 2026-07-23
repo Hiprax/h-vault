@@ -189,6 +189,14 @@ export const exportSchema = z.object({
   // request contract honest (CSV is an import-only format — see importSchema).
   format: z.literal('json').default('json'),
   authHash: z.string().min(1).max(100),
+  // AUDIT METADATA ONLY. When the client is producing a portable plaintext
+  // export (Bitwarden JSON/CSV or Chrome CSV, generated entirely in the
+  // browser from this endpoint's ciphertext response), it names the target
+  // format here so the server can record a distinct `export_plaintext` audit
+  // action. The server MUST NOT branch on the value — it mirrors how
+  // `format`/`conflictStrategy` are audit-only on import — and the response
+  // body is byte-identical whether or not this field is present.
+  portableFormat: z.enum(['bitwarden-json', 'bitwarden-csv', 'chrome-csv']).optional(),
 });
 
 // ---------------------------------------------------------------------------

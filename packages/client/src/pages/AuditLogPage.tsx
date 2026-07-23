@@ -45,6 +45,7 @@ const ACTION_LABELS: Record<string, string> = {
   item_update: 'Item Updated',
   item_delete: 'Item Deleted',
   export: 'Vault Exported',
+  export_plaintext: 'Plaintext Export',
   import: 'Vault Imported',
   session_revoke: 'Session Revoked',
   vault_lock: 'Vault Locked',

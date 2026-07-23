@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Added
 
 - New environment variable `HIBP_CACHE_MAX_BYTES` (default 67108864 = 64 MiB, minimum 1 MiB) that bounds the in-memory breach-range cache by measured bytes per worker process, in addition to the existing 10,000-entry cap. A real HIBP range is ~36 KB, so the byte budget is now the binding memory bound; the entry count is a secondary guard.
+- New `export_plaintext` audit action recorded when a vault export is produced for a portable plaintext format (audit log now covers 38 distinct operations). `POST /api/v1/tools/export` accepts an optional `portableFormat` field (`bitwarden-json`, `bitwarden-csv`, or `chrome-csv`) used solely as audit metadata; the export response body is unchanged.
 
 ### Changed
 

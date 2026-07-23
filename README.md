@@ -80,7 +80,7 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 | **Account lockout**           | 30 minutes after 10 failed attempts, with progressive delays and an unlock email — and evaluated _after_ the password check, so it never reveals that an account exists.                                    |
 | **CSRF + rate limiting**      | HMAC-SHA256 double-submit tokens with constant-time verification, and [fourteen rate-limit tiers](#rate-limiting) backed by MongoDB, keyed per IP, email, user or session, with IPv6 `/64` aggregation.     |
 | **Breach detection**          | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                    |
-| **Audit log**                 | A searchable security log covering **37 distinct operations**, with TTL-based retention.                                                                                                                    |
+| **Audit log**                 | A searchable security log covering **38 distinct operations**, with TTL-based retention.                                                                                                                    |
 | **Account deletion**          | GDPR-complete, password-confirmed, and cascaded atomically across every collection.                                                                                                                         |
 
 ### Data
