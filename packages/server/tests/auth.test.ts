@@ -1297,6 +1297,259 @@ describe('Auth API', () => {
       const rawTd = cookieValue(findCookie(res, 'trustedDevice')!);
       expect(await TrustedDevice.findOne({ tokenHash: hashToken(rawTd) })).not.toBeNull();
     });
+
+    // ── 2FA skip on a recognized device (Phase 17) ────────────────────
+    describe('2FA skip on a recognized device', () => {
+      /** Seeds a trusted-device record whose raw cookie token is `raw`. */
+      async function seedTrustedDevice(
+        userId: string,
+        raw: string,
+        expiresAt: Date = new Date(Date.now() + 30 * DAY_MS),
+      ): Promise<void> {
+        await TrustedDevice.create({
+          userId: new mongoose.Types.ObjectId(userId),
+          tokenHash: hashToken(raw),
+          deviceInfo: { userAgent: '', ip: '', fingerprint: '' },
+          expiresAt,
+        });
+      }
+
+      /** Logs in at the password step, optionally presenting a trustedDevice cookie. */
+      function loginWith(
+        testUser: { email: string; rawPassword: string },
+        opts: { rememberMe?: boolean; trustedRaw?: string; authHash?: string } = {},
+      ): Promise<request.Response> {
+        const body: Record<string, unknown> = {
+          email: testUser.email,
+          authHash: opts.authHash ?? testUser.rawPassword,
+        };
+        if (opts.rememberMe !== undefined) body['rememberMe'] = opts.rememberMe;
+        return withCsrf(
+          agent.post(`${API}/auth/login`).send(body),
+          csrf,
+          undefined,
+          opts.trustedRaw ? `trustedDevice=${opts.trustedRaw}` : undefined,
+        );
+      }
+
+      it('skips 2FA on a valid cookie: rotates the trust token and logs in directly', async () => {
+        const testUser = await createTestUser();
+        await enable2fa(testUser.id);
+        const userObjId = new mongoose.Types.ObjectId(testUser.id);
+        const raw = 'trusted-happy-path-token';
+        await seedTrustedDevice(testUser.id, raw);
+
+        const res = await loginWith(testUser, { rememberMe: true, trustedRaw: raw });
+
+        expect(res.status).toBe(200);
+        // A direct login — NOT a 2FA challenge — with vault key material returned.
+        expect(res.body.data.twoFactorRequired).toBeUndefined();
+        expect(res.body.data.accessToken).toBeDefined();
+        expect(res.body.data.encryptedVaultKey).toBeDefined();
+
+        // The presented record was consumed; exactly one (rotated) record remains.
+        expect(await TrustedDevice.findOne({ tokenHash: hashToken(raw) })).toBeNull();
+        expect(await TrustedDevice.countDocuments({ userId: userObjId })).toBe(1);
+
+        // A fresh trusted-device cookie was issued (rotated value, not the old one).
+        const tdCookie = findCookie(res, 'trustedDevice');
+        expect(tdCookie).toBeDefined();
+        expect(tdCookie).toMatch(/Path=\/api\/v1\/auth/i);
+        const newRaw = cookieValue(tdCookie!);
+        expect(newRaw).not.toBe(raw);
+        expect(await TrustedDevice.findOne({ tokenHash: hashToken(newRaw) })).not.toBeNull();
+
+        // Audited as a password-only login that skipped the second factor.
+        const loginAudit = await AuditLog.findOne({ userId: testUser.id, action: 'login' });
+        expect(loginAudit).not.toBeNull();
+        expect(loginAudit!.metadata).toMatchObject({ twoFactor: false, trustedDevice: true });
+        // A skip is not a fresh grant, so no grant/rejection audit is written.
+        expect(
+          await AuditLog.findOne({ userId: testUser.id, action: 'trusted_device_grant' }),
+        ).toBeNull();
+        expect(
+          await AuditLog.findOne({ userId: testUser.id, action: 'trusted_device_rejected' }),
+        ).toBeNull();
+
+        // Remembered → ~30-day session.
+        expect(cookieMaxAgeSeconds(findCookie(res, 'refreshToken')!)).toBeGreaterThan(
+          20 * 24 * 60 * 60,
+        );
+      });
+
+      it('rejects a replayed (already-consumed) token and falls through to 2FA', async () => {
+        const testUser = await createTestUser();
+        await enable2fa(testUser.id);
+        const userObjId = new mongoose.Types.ObjectId(testUser.id);
+        const raw = 'trusted-replay-token';
+        await seedTrustedDevice(testUser.id, raw);
+
+        // First use consumes the record.
+        const first = await loginWith(testUser, { rememberMe: true, trustedRaw: raw });
+        expect(first.status).toBe(200);
+        expect(first.body.data.twoFactorRequired).toBeUndefined();
+
+        // Replay the SAME (now-consumed) cookie from a FRESH agent. A fresh jar is
+        // required: the first login rotated the trust token and the original agent
+        // would re-send that new cookie instead of the old one we want to replay.
+        const replayAgent = request.agent(app);
+        const replayCsrf = await getCsrf(replayAgent);
+        const replay = await withCsrf(
+          replayAgent.post(`${API}/auth/login`).send({
+            email: testUser.email,
+            authHash: testUser.rawPassword,
+            rememberMe: true,
+          }),
+          replayCsrf,
+          undefined,
+          `trustedDevice=${raw}`,
+        );
+        expect(replay.status).toBe(200);
+        expect(replay.body.data.twoFactorRequired).toBe(true);
+        expect(replay.body.data.tempToken).toBeDefined();
+
+        // The stale cookie is cleared (empty value, expiry in the past) and the
+        // rejection is audited.
+        const cleared = findCookie(replay, 'trustedDevice');
+        expect(cleared).toBeDefined();
+        expect(cookieValue(cleared!)).toBe('');
+        expect(cleared).toMatch(/Expires=Thu, 01 Jan 1970/i);
+        expect(
+          await AuditLog.findOne({ userId: testUser.id, action: 'trusted_device_rejected' }),
+        ).not.toBeNull();
+        // The replay never re-created a record from the rotated first login.
+        expect(await TrustedDevice.countDocuments({ userId: userObjId })).toBe(1);
+      });
+
+      it('rejects an expired record without deleting it and falls through to 2FA', async () => {
+        const testUser = await createTestUser();
+        await enable2fa(testUser.id);
+        const userObjId = new mongoose.Types.ObjectId(testUser.id);
+        const raw = 'trusted-expired-token';
+        // Already past its absolute expiry (TTL reaper has not run in-memory yet).
+        await seedTrustedDevice(testUser.id, raw, new Date(Date.now() - 60_000));
+
+        const res = await loginWith(testUser, { rememberMe: true, trustedRaw: raw });
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.twoFactorRequired).toBe(true);
+        // The expired record is NOT consumed by the `$gt: now` filter — TTL owns it.
+        expect(await TrustedDevice.findOne({ tokenHash: hashToken(raw) })).not.toBeNull();
+        expect(await TrustedDevice.countDocuments({ userId: userObjId })).toBe(1);
+        expect(
+          await AuditLog.findOne({ userId: testUser.id, action: 'trusted_device_rejected' }),
+        ).not.toBeNull();
+      });
+
+      it("ignores another user's cookie: does not consume it and falls through to 2FA", async () => {
+        const owner = await createTestUser();
+        const raw = 'trusted-cross-user-token';
+        await seedTrustedDevice(owner.id, raw);
+        const ownerObjId = new mongoose.Types.ObjectId(owner.id);
+
+        const attacker = await createTestUser();
+        await enable2fa(attacker.id);
+
+        const res = await loginWith(attacker, { rememberMe: true, trustedRaw: raw });
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.twoFactorRequired).toBe(true);
+        // The owner's record is untouched (userId-scoped delete never matched it).
+        expect(await TrustedDevice.countDocuments({ userId: ownerObjId })).toBe(1);
+        expect(await TrustedDevice.findOne({ tokenHash: hashToken(raw) })).not.toBeNull();
+        // The attacker gets a rejection audit; the owner does not.
+        expect(
+          await AuditLog.findOne({ userId: attacker.id, action: 'trusted_device_rejected' }),
+        ).not.toBeNull();
+        expect(
+          await AuditLog.findOne({ userId: owner.id, action: 'trusted_device_rejected' }),
+        ).toBeNull();
+      });
+
+      it('a wrong password with a valid cookie returns 401 and never consumes the record', async () => {
+        const testUser = await createTestUser();
+        await enable2fa(testUser.id);
+        const userObjId = new mongoose.Types.ObjectId(testUser.id);
+        const raw = 'trusted-wrong-password-token';
+        await seedTrustedDevice(testUser.id, raw);
+
+        const res = await loginWith(testUser, {
+          rememberMe: true,
+          trustedRaw: raw,
+          authHash: 'definitely-the-wrong-password',
+        });
+
+        expect(res.status).toBe(401);
+        // The lookup runs strictly AFTER the bcrypt compare, so it is never reached.
+        expect(await TrustedDevice.findOne({ tokenHash: hashToken(raw) })).not.toBeNull();
+        expect(await TrustedDevice.countDocuments({ userId: userObjId })).toBe(1);
+        expect(findCookie(res, 'trustedDevice')).toBeUndefined();
+        expect(
+          await AuditLog.findOne({ userId: testUser.id, action: 'trusted_device_rejected' }),
+        ).toBeNull();
+      });
+
+      it('a normal 2FA login with no cookie writes no rejection audit and sets no cookie', async () => {
+        const testUser = await createTestUser();
+        await enable2fa(testUser.id);
+
+        const res = await loginWith(testUser, { rememberMe: true });
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.twoFactorRequired).toBe(true);
+        // No cookie present → no lookup, no clear, no audit.
+        expect(findCookie(res, 'trustedDevice')).toBeUndefined();
+        expect(
+          await AuditLog.findOne({ userId: testUser.id, action: 'trusted_device_rejected' }),
+        ).toBeNull();
+      });
+
+      it('rememberMe:false on a trusted device yields a standard-length session', async () => {
+        const testUser = await createTestUser();
+        await enable2fa(testUser.id);
+        const raw = 'trusted-no-remember-token';
+        await seedTrustedDevice(testUser.id, raw);
+
+        const res = await loginWith(testUser, { rememberMe: false, trustedRaw: raw });
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.twoFactorRequired).toBeUndefined();
+        // Standard ~7-day session, NOT a silent 30-day one.
+        const refreshCookie = findCookie(res, 'refreshToken');
+        expect(cookieMaxAgeSeconds(refreshCookie!)).toBeLessThan(10 * 24 * 60 * 60);
+        const row = await RefreshToken.findOne({
+          tokenHash: hashToken(cookieValue(refreshCookie!)),
+        });
+        expect(row).not.toBeNull();
+        expect(row!.absoluteExpiresAt).toBeUndefined();
+      });
+
+      it('rotation carries the original deadline forward and never extends it', async () => {
+        const testUser = await createTestUser();
+        await enable2fa(testUser.id);
+        const userObjId = new mongoose.Types.ObjectId(testUser.id);
+        const raw = 'trusted-deadline-token';
+        // A short 10-day grant, distinct from the 30-day default.
+        const originalExpiry = new Date(Date.now() + 10 * DAY_MS);
+        await seedTrustedDevice(testUser.id, raw, originalExpiry);
+
+        const res = await loginWith(testUser, { rememberMe: true, trustedRaw: raw });
+
+        expect(res.status).toBe(200);
+        // The rotated record keeps the original ~10-day deadline (not ~30).
+        const rotated = await TrustedDevice.findOne({ userId: userObjId });
+        expect(rotated).not.toBeNull();
+        expect(Math.abs(rotated!.expiresAt.getTime() - originalExpiry.getTime())).toBeLessThan(
+          2000,
+        );
+        expect(rotated!.expiresAt.getTime() - Date.now()).toBeLessThan(11 * DAY_MS);
+
+        // The rotated cookie's Max-Age reflects the remaining ~10 days, not 30.
+        const tdCookie = findCookie(res, 'trustedDevice');
+        expect(cookieMaxAgeSeconds(tdCookie!)).toBeLessThan(11 * 24 * 60 * 60);
+        expect(cookieMaxAgeSeconds(tdCookie!)).toBeGreaterThan(8 * 24 * 60 * 60);
+      });
+    });
   });
 
   // ── Unlock Account ──────────────────────────────────────────────────

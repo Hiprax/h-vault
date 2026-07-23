@@ -19,6 +19,9 @@ import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
+import { TrustedDevice } from '../src/models/TrustedDevice.js';
+import { AuditLog } from '../src/models/AuditLog.js';
+import { hashToken } from '../src/utils/token.js';
 import {
   createTestUser,
   authHeader,
@@ -346,6 +349,66 @@ describe('Phase 6 — 2FA Negative Paths', () => {
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
       expect(res.body.message).toMatch(/no pending 2FA setup/i);
+    });
+  });
+
+  // ── Trusted-device 2FA skip: fail-closed on a bogus cookie ───────────
+  //
+  // The password step consumes a `trustedDevice` cookie ONLY after the bcrypt
+  // compare succeeds. An unknown/garbage cookie must never throw — it falls
+  // through to the ordinary 2FA challenge, clearing the stale cookie and
+  // auditing the rejection exactly once.
+
+  describe('trusted-device cookie on the password step (Phase 17)', () => {
+    it('falls through to the normal 2FA challenge on a garbage cookie without throwing', async () => {
+      const { user } = await create2faUser([]);
+
+      const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post(`${API}/auth/login`)
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', `${csrfCookie}; trustedDevice=this-token-was-never-issued`)
+        .send({ email: user.email, authHash: user.rawPassword, rememberMe: true });
+
+      // No 500 — a valid password with an unknown cookie yields the 2FA prompt.
+      expect(res.status).toBe(200);
+      expect(res.body.data.twoFactorRequired).toBe(true);
+      expect(res.body.data.tempToken).toBeDefined();
+
+      // No record ever existed for that token; the rejection is audited once.
+      expect(
+        await TrustedDevice.findOne({ tokenHash: hashToken('this-token-was-never-issued') }),
+      ).toBeNull();
+      expect(
+        await AuditLog.countDocuments({ userId: user.id, action: 'trusted_device_rejected' }),
+      ).toBe(1);
+
+      // The stale cookie is cleared (empty value, past expiry) on the auth path.
+      const setCookies = (res.headers['set-cookie'] as string[] | undefined) ?? [];
+      const cleared = setCookies.find((c) => c.startsWith('trustedDevice='));
+      expect(cleared).toBeDefined();
+      expect(cleared).toMatch(/Expires=Thu, 01 Jan 1970/i);
+      expect(cleared).toMatch(/Path=\/api\/v1\/auth/i);
+    });
+
+    it('does no trusted-device work at all when no cookie is present', async () => {
+      const { user } = await create2faUser([]);
+
+      const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post(`${API}/auth/login`)
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ email: user.email, authHash: user.rawPassword, rememberMe: true });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.twoFactorRequired).toBe(true);
+
+      const setCookies = (res.headers['set-cookie'] as string[] | undefined) ?? [];
+      expect(setCookies.some((c) => c.startsWith('trustedDevice='))).toBe(false);
+      expect(
+        await AuditLog.countDocuments({ userId: user.id, action: 'trusted_device_rejected' }),
+      ).toBe(0);
     });
   });
 });

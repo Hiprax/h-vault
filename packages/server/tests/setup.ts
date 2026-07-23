@@ -14,6 +14,34 @@ import { applyMongoKernelCompat } from './mongoKernelCompat.js';
 process.setMaxListeners(0);
 
 /**
+ * Force `NODE_ENV=test` for the whole suite, before any application module is
+ * evaluated.
+ *
+ * `vitest.config.ts` already pins `test.env.NODE_ENV = 'test'`, and that value
+ * DOES win over the developer's root `.env` for every ordinary key. `NODE_ENV`
+ * is the one exception: Vite resolves it from the loaded `.env` file as part of
+ * mode handling (the "injected env (N) from ../../.env" line at startup), and
+ * that resolution lands on `process.env.NODE_ENV` late enough to clobber the
+ * pinned value. A developer who runs `npm test` with a root `.env` copied from
+ * `.env.example` (which ships `NODE_ENV=development`) therefore boots the whole
+ * server suite with `isTest === false`.
+ *
+ * That is not cosmetic: `authController` gates its progressive login/2FA delay
+ * on `!isTest`, so with the flag wrong the delay actually sleeps (up to 5s per
+ * failed attempt). The multi-attempt lockout tests fire ~28s of real sleeps and
+ * blow their 30s timeouts, turning several auth suites red for a reason wholly
+ * unrelated to the code under test.
+ *
+ * Setting it here is reliable because setup files run AFTER Vite's `.env`
+ * injection but BEFORE any test file imports `config/index.js` (this file's own
+ * imports never reach it), so `isTest = config.NODE_ENV === 'test'` is evaluated
+ * once, correctly, and cached for the worker. It is a plain assignment, not
+ * `vi.stubEnv`, because the config module reads `process.env` a single time at
+ * load — a per-test stub would be reset and could not influence that read.
+ */
+process.env.NODE_ENV = 'test';
+
+/**
  * SERVER-121912 — let mongod actually start on Linux kernels >= 6.19 (Ubuntu 26.04).
  *
  * MongoDB 8.0 moved TCMalloc to per-CPU caches, and that TCMalloc drives them with

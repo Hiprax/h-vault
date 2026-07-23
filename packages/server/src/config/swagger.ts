@@ -927,7 +927,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Login with credentials',
         description:
-          'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step. Rate limited: 10 req/IP + 20 req/email per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
+          'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step — UNLESS the request carries a valid `trustedDevice` cookie for this account, in which case the 2FA step is skipped and the login completes directly (the cookie is checked strictly after the password comparison, so a wrong password never consumes it). A recognized trusted-device cookie is consumed and rotated, carrying its original expiry forward; an unknown/expired/foreign cookie is cleared and the login falls back to the normal 2FA prompt. Rate limited: 10 req/IP + 20 req/email per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
         requestBody: {
           required: true,
           content: {

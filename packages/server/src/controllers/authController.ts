@@ -252,6 +252,22 @@ function setTrustedDeviceCookie(res: Response, token: string, maxAgeMs: number):
 }
 
 /**
+ * Clears the trusted-device cookie. The attributes (minus `maxAge`) MUST match
+ * `setTrustedDeviceCookie` exactly — same `path` and `sameSite`/`secure` — or the
+ * browser treats it as a different cookie and never removes it. Called when a
+ * presented trusted-device cookie is unrecognised/expired/foreign, so a stale
+ * token is not sent again on the next login.
+ */
+function clearTrustedDeviceCookie(res: Response): void {
+  res.clearCookie(TRUSTED_DEVICE_COOKIE_NAME, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'strict' : 'lax',
+    path: '/api/v1/auth',
+  });
+}
+
+/**
  * Enforces `MAX_SESSIONS` as a real per-user cap over LIVE refresh rows only,
  * evicting the oldest unused ones so a new login never exceeds the limit.
  *
@@ -635,8 +651,112 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     );
   }
 
+  // Completes an authenticated (non-2FA-challenge) login: issues the access +
+  // refresh tokens, persists the refresh row honouring the request's `rememberMe`
+  // via `resolveRefreshLifetime`, enforces the session cap, sets the refresh
+  // cookie, clears CSRF, audits `login`, and writes the success body. Shared by
+  // the ordinary non-2FA path AND the trusted-device 2FA-skip path so the two can
+  // never drift (§1.2 principle 10); only the audit metadata differs. Both call
+  // it with the SAME `rememberMe` from the request, so an unchecked box never
+  // silently produces a 30-day session on either path.
+  const finishLogin = async (auditMetadata?: Record<string, unknown>): Promise<void> => {
+    const accessToken = generateAccessToken(user._id.toString());
+    const refreshTokenRaw = generateRefreshToken();
+    const refreshTokenHash = hashToken(refreshTokenRaw);
+    const familyId = crypto.randomUUID();
+
+    const lifetime = resolveRefreshLifetime({ remember: rememberMe });
+    await RefreshToken.create({
+      userId: user._id,
+      tokenHash: refreshTokenHash,
+      familyId,
+      deviceInfo: sanitizeDeviceInfo(deviceInfo, req),
+      expiresAt: lifetime.expiresAt,
+      ...(lifetime.absoluteExpiresAt ? { absoluteExpiresAt: lifetime.absoluteExpiresAt } : {}),
+    });
+    await enforceSessionCap(user._id);
+
+    setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
+    clearCsrfCookie(res);
+
+    await createAuditLog(user._id.toString(), 'login', auditMetadata, ip, userAgent);
+
+    logger.info('User logged in', { userId: user._id.toString(), email: maskEmail(email) });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        accessToken,
+        encryptedVaultKey: user.encryptedVaultKey,
+        vaultKeyIv: user.vaultKeyIv,
+        vaultKeyTag: user.vaultKeyTag,
+        kdfIterations: user.kdfIterations,
+        kdfAlgorithm: user.kdfAlgorithm,
+      },
+    });
+  };
+
   // 2FA flow
   if (user.twoFactorEnabled) {
+    // Trusted-device 2FA skip. Runs ONLY when the browser actually presents a
+    // `trustedDevice` cookie: a normal 2FA login (no cookie) performs NO lookup,
+    // NO cookie clear, and writes NO audit, so it can never flood the audit log
+    // (365-day TTL) with a spurious `trusted_device_rejected` row — nor emit a
+    // pointless `Set-Cookie` — on every ordinary 2FA login. The check sits here,
+    // strictly AFTER the bcrypt compare and lockout evaluation above, so a cookie
+    // can never become an authentication bypass or an account-enumeration oracle.
+    const trustedCookie = req.cookies[TRUSTED_DEVICE_COOKIE_NAME] as string | undefined;
+    if (trustedCookie) {
+      // Consume the record atomically: `findOneAndDelete` recognises and burns
+      // the token in one step, so a replayed (already-consumed) cookie simply
+      // finds nothing. The filter is scoped to THIS user AND to an unexpired
+      // grant, so another user's cookie or a lapsed one never matches — and,
+      // because of the `userId` scope, another user's record is never deleted.
+      const record = await TrustedDevice.findOneAndDelete({
+        tokenHash: hashToken(trustedCookie),
+        userId: user._id,
+        expiresAt: { $gt: new Date() },
+      });
+
+      if (record) {
+        // Recognised device: rotate the trust token — a stolen cookie stops
+        // working the moment the legitimate user returns — while carrying the
+        // ORIGINAL `expiresAt` forward UNCHANGED, so rotation never extends the
+        // trust window (§1.7). The replacement neither grows nor shrinks the
+        // per-user count, so no `MAX_TRUSTED_DEVICES` enforcement is needed here.
+        const rawToken = crypto.randomBytes(32).toString('hex');
+        await TrustedDevice.create({
+          userId: user._id,
+          tokenHash: hashToken(rawToken),
+          deviceInfo: sanitizeDeviceInfo(deviceInfo, req),
+          expiresAt: record.expiresAt,
+          lastUsedAt: new Date(),
+        });
+        setTrustedDeviceCookie(res, rawToken, Math.max(0, record.expiresAt.getTime() - Date.now()));
+
+        // Complete the login as the non-2FA path, honouring the REQUEST's own
+        // `rememberMe` (NOT a hardcoded true): a user who unchecked the box on a
+        // trusted device must get a standard-length session, not a silent 30-day
+        // one. Audited as a password-only login that skipped the second factor.
+        await finishLogin({ twoFactor: false, trustedDevice: true });
+        return;
+      }
+
+      // Cookie present but unrecognised / expired / another user's: fail closed
+      // to the normal 2FA prompt. Clear the stale cookie and audit the rejection.
+      // Deliberately does NOT revoke the user's OTHER trusted devices (§1.7): a
+      // lost-rotation race costs exactly one extra 2FA prompt and nothing more,
+      // so global revocation on a benign race would be user-hostile for no gain.
+      clearTrustedDeviceCookie(res);
+      await createAuditLog(
+        user._id.toString(),
+        'trusted_device_rejected',
+        undefined,
+        ip,
+        userAgent,
+      );
+    }
+
     const tempToken = jwt.sign(
       {
         userId: user._id.toString(),
@@ -660,44 +780,10 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     return;
   }
 
-  // Issue tokens
-  const accessToken = generateAccessToken(user._id.toString());
-  const refreshTokenRaw = generateRefreshToken();
-  const refreshTokenHash = hashToken(refreshTokenRaw);
-  const familyId = crypto.randomUUID();
-
   // A non-2FA account with "remember me" extends the refresh horizon only —
   // there is no second factor to skip, so no trusted-device record is minted
   // (§1.7). An unchecked box slides to today's standard REFRESH_TOKEN_DAYS.
-  const lifetime = resolveRefreshLifetime({ remember: rememberMe });
-  await RefreshToken.create({
-    userId: user._id,
-    tokenHash: refreshTokenHash,
-    familyId,
-    deviceInfo: sanitizeDeviceInfo(deviceInfo, req),
-    expiresAt: lifetime.expiresAt,
-    ...(lifetime.absoluteExpiresAt ? { absoluteExpiresAt: lifetime.absoluteExpiresAt } : {}),
-  });
-  await enforceSessionCap(user._id);
-
-  setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
-  clearCsrfCookie(res);
-
-  await createAuditLog(user._id.toString(), 'login', undefined, ip, userAgent);
-
-  logger.info('User logged in', { userId: user._id.toString(), email: maskEmail(email) });
-
-  res.status(200).json({
-    success: true,
-    data: {
-      accessToken,
-      encryptedVaultKey: user.encryptedVaultKey,
-      vaultKeyIv: user.vaultKeyIv,
-      vaultKeyTag: user.vaultKeyTag,
-      kdfIterations: user.kdfIterations,
-      kdfAlgorithm: user.kdfAlgorithm,
-    },
-  });
+  await finishLogin();
 });
 
 // ─── Login 2FA ───────────────────────────────────────────────────────────────
