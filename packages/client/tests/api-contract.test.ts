@@ -83,6 +83,9 @@ const SERVER_ROUTES = new Set<string>([
   'POST /user/2fa/regenerate-backup-codes',
   'GET /user/sessions',
   'DELETE /user/sessions/:id',
+  'GET /user/trusted-devices',
+  'DELETE /user/trusted-devices',
+  'DELETE /user/trusted-devices/:id',
   'GET /user/audit-log',
   'DELETE /user',
   // routes/vault.ts
@@ -176,6 +179,16 @@ describe('authApi wire contract', () => {
       email: 'user@example.com',
       authHash: 'auth-hash',
       deviceInfo: { userAgent: 'ua', fingerprint: 'fp' },
+    };
+    await authApi.loginApi(payload);
+    expectCall(mockPost, 'POST', '/auth/login', payload);
+  });
+
+  it('POSTs login carrying rememberMe when supplied', async () => {
+    const payload: authApi.LoginPayload = {
+      email: 'user@example.com',
+      authHash: 'auth-hash',
+      rememberMe: true,
     };
     await authApi.loginApi(payload);
     expectCall(mockPost, 'POST', '/auth/login', payload);
@@ -311,6 +324,19 @@ describe('userApi wire contract', () => {
     mockGet.mockClear();
     await userApi.revokeSessionApi(ID);
     expectCall(mockDelete, 'DELETE', `/user/sessions/${ID}`);
+  });
+
+  it('lists and revokes trusted devices, scoping the single revoke to its id', async () => {
+    await userApi.listTrustedDevicesApi();
+    expectCall(mockGet, 'GET', '/user/trusted-devices');
+
+    mockDelete.mockClear();
+    await userApi.revokeTrustedDeviceApi(ID);
+    expectCall(mockDelete, 'DELETE', `/user/trusted-devices/${ID}`);
+
+    mockDelete.mockClear();
+    await userApi.revokeAllTrustedDevicesApi();
+    expectCall(mockDelete, 'DELETE', '/user/trusted-devices');
   });
 
   it('passes audit-log pagination through as query params, not a body', async () => {
@@ -546,6 +572,9 @@ describe('API surface', () => {
       'regenerateBackupCodesApi',
       'listSessionsApi',
       'revokeSessionApi',
+      'listTrustedDevicesApi',
+      'revokeTrustedDeviceApi',
+      'revokeAllTrustedDevicesApi',
       'getAuditLogApi',
       'checkBreachApi',
       'checkBreachBatchApi',

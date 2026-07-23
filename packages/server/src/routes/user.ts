@@ -27,6 +27,9 @@ import {
   regenerateBackupCodes,
   listSessions,
   revokeSession,
+  getTrustedDevices,
+  revokeTrustedDevice,
+  revokeAllTrustedDevices,
   getAuditLog,
   deleteAccount,
 } from '../controllers/userController.js';
@@ -62,7 +65,18 @@ router.post(
 // ── Sessions ─────────────────────────────────────────────────────────
 
 router.get('/sessions', generalAuthLimiter, listSessions);
-router.delete('/sessions/:id', validateObjectId(), revokeSession);
+router.delete('/sessions/:id', generalAuthLimiter, validateObjectId(), revokeSession);
+
+// ── Trusted Devices ──────────────────────────────────────────────────
+// Every state-changing route here writes an audit-log row, so each carries
+// generalAuthLimiter (per-user, no-op outside production) to keep an
+// authenticated — or session-hijacked — caller from flooding the audit log or
+// churning revocation, matching the GET listing and the /lock,/logout,/logout-all
+// retrofit on the auth router.
+
+router.get('/trusted-devices', generalAuthLimiter, getTrustedDevices);
+router.delete('/trusted-devices', generalAuthLimiter, revokeAllTrustedDevices);
+router.delete('/trusted-devices/:id', generalAuthLimiter, validateObjectId(), revokeTrustedDevice);
 
 // ── Audit Log ────────────────────────────────────────────────────────
 

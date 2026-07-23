@@ -46,6 +46,11 @@ export default defineConfig({
         // already extracted into `utils/gracefulShutdown.ts` (covered) — what
         // remains here is the wiring that only a real boot can exercise.
         'src/server.ts',
+        // Process entry point: connects to Mongo, acquires the breach-seed job
+        // lock, traps SIGINT/SIGTERM and runs the corpus import as a side effect
+        // of import — the same class as `src/server.ts`. Its testable logic (arg
+        // parsing) lives in `cli/seedBreachesArgs.ts`, which stays MEASURED.
+        'src/cli/seedBreaches.ts',
       ],
       thresholds: {
         lines: 90,
@@ -61,7 +66,6 @@ export default defineConfig({
       JWT_ACCESS_SECRET: 'test-access-secret-for-testing-only-32chars!',
       JWT_REFRESH_SECRET: 'test-refresh-secret-for-testing-only-32chars!',
       JWT_ACCESS_EXPIRY: '15m',
-      JWT_REFRESH_EXPIRY: '7d',
       CORS_ORIGIN: 'http://localhost:5173',
       APP_URL: 'http://localhost:5000',
       APP_NAME: 'H-Vault',

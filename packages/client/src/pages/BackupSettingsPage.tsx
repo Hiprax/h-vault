@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { cn, getApiErrorMessage } from '../lib/utils';
+import { downloadText } from '../lib/download';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
 import { useToast } from '../components/ui/Toast';
 import { getProfileApi } from '../services/api/userApi';
@@ -312,13 +313,11 @@ export default function BackupSettingsPage() {
       const signedJson = JSON.stringify(backupObj);
 
       // Download the signed backup file
-      const blob = new Blob([signedJson], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `hvault-backup-${new Date().toISOString().split('T')[0]}.enc`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadText(
+        signedJson,
+        `hvault-backup-${new Date().toISOString().split('T')[0]}.enc`,
+        'application/json',
+      );
 
       toast({ title: 'Backup downloaded with integrity signature', type: 'success' });
       setShowDownloadPassword(false);

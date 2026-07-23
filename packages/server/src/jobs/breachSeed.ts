@@ -18,7 +18,8 @@ export const BREACH_SEED_LOCK_TTL_MS = 24 * 60 * 60 * 1000;
  *
  * NEVER downloads the corpus on boot. It only:
  *  1. logs a hint when the cache is empty (lookups will fall back to on-demand
- *     HIBP fetches until an operator runs `npm run seed-breaches`), and
+ *     HIBP fetches until an operator runs the compiled seeder
+ *     `node dist/cli/seedBreaches.js`), and
  *  2. optionally schedules a refresh cron when `BREACH_SEED_REFRESH_CRON` is set.
  *     The scheduled job fetches missing/stale ranges only when `BREACH_SEED_AUTO`
  *     is true — otherwise it logs that auto-seed is disabled and does nothing.
@@ -33,7 +34,8 @@ export async function initBreachRangeCache(): Promise<ScheduledTask | null> {
       logger.warn(
         'Breach range cache is empty; password-breach lookups fall back to on-demand HIBP fetches. ' +
           'To pre-seed the full corpus for offline/zero-dependency operation (tens of GB, several hours), run ' +
-          '`npm run seed-breaches -w packages/server`.',
+          '`node packages/server/dist/cli/seedBreaches.js` (in the Docker stack: ' +
+          '`docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js`).',
       );
     } else {
       logger.info(`Breach range cache holds ${String(count)} cached prefix range(s).`);

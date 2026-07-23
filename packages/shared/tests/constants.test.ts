@@ -11,6 +11,8 @@ import {
   SALT_BYTES,
   BCRYPT_ROUNDS,
   REFRESH_TOKEN_EXPIRY_DAYS,
+  MAX_SESSIONS,
+  MAX_TRUSTED_DEVICES,
   AUTO_LOCK_TIMEOUT_MINUTES,
   CLIPBOARD_CLEAR_SECONDS,
   TRASH_AUTO_PURGE_DAYS,
@@ -92,6 +94,14 @@ describe('Security constants', () => {
 describe('Auth & session constants', () => {
   it('REFRESH_TOKEN_EXPIRY_DAYS is 7', () => {
     expect(REFRESH_TOKEN_EXPIRY_DAYS).toBe(7);
+  });
+
+  it('MAX_SESSIONS is 50', () => {
+    expect(MAX_SESSIONS).toBe(50);
+  });
+
+  it('MAX_TRUSTED_DEVICES is 10', () => {
+    expect(MAX_TRUSTED_DEVICES).toBe(10);
   });
 
   it('AUTO_LOCK_TIMEOUT_MINUTES is 15', () => {
@@ -261,12 +271,22 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 37 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 41 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("tracking 37 distinct operations"). If a new audit action is added,
-    // bump both this assertion and the README number together.
-    expect(AUDIT_ACTIONS.length).toBe(37);
+    // ("41 distinct operations"). If a new audit action is added, bump both
+    // this assertion and the README number together.
+    expect(AUDIT_ACTIONS.length).toBe(41);
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
+  });
+
+  it('includes the trusted-device audit actions', () => {
+    expect(AUDIT_ACTIONS).toContain('trusted_device_grant');
+    expect(AUDIT_ACTIONS).toContain('trusted_device_revoke');
+    expect(AUDIT_ACTIONS).toContain('trusted_device_rejected');
+  });
+
+  it('includes the export_plaintext action for browser-side portable exports', () => {
+    expect(AUDIT_ACTIONS).toContain('export_plaintext');
   });
 });
 

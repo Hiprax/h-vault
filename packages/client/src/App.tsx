@@ -1,4 +1,4 @@
-import { Suspense, lazy } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 import { PublicOnlyRoute } from './components/layout/PublicOnlyRoute';
@@ -7,6 +7,7 @@ import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { ToastProvider } from './components/ui/Toast';
 import { ReloadPrompt } from './components/layout/ReloadPrompt';
 import { useFavicon } from './hooks/useFavicon';
+import { resumeSession, shouldAttemptResume } from './services/auth/sessionResume';
 
 // Lazy-loaded page components
 const LoginPage = lazy(() => import('./pages/LoginPage'));
@@ -17,6 +18,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const BackupSettingsPage = lazy(() => import('./pages/BackupSettingsPage'));
 const SessionsPage = lazy(() => import('./pages/SessionsPage'));
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
+const ExportDataPage = lazy(() => import('./pages/ExportDataPage'));
 const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
 const GeneratorPage = lazy(() => import('./pages/GeneratorPage'));
 const FileEncryptionPage = lazy(() => import('./pages/FileEncryptionPage'));
@@ -41,6 +43,35 @@ export function App() {
   // Keep the browser-tab favicon in sync with the vault state (green/open when
   // unlocked, red/closed when locked or logged out).
   useFavicon();
+
+  // Cold-start "remember me" resume. When a remembered-session hint is present
+  // (and the store is not already authenticated), silently re-establish the
+  // authenticated-but-locked session so a returning user lands on the Unlock
+  // screen instead of the login screen after a browser restart. Rendering is
+  // gated until the attempt settles so that neither ProtectedRoute nor
+  // PublicOnlyRoute can redirect a resuming user first. When there is nothing
+  // to resume, the initializer settles synchronously and no loading state is
+  // shown (so ordinary loads are unaffected).
+  const [resumeSettled, setResumeSettled] = useState(() => !shouldAttemptResume());
+
+  useEffect(() => {
+    if (resumeSettled) return;
+    let active = true;
+    void resumeSession().finally(() => {
+      if (active) setResumeSettled(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [resumeSettled]);
+
+  if (!resumeSettled) {
+    return (
+      <ErrorBoundary>
+        <LoadingSpinner />
+      </ErrorBoundary>
+    );
+  }
 
   return (
     <ErrorBoundary>
@@ -68,6 +99,7 @@ export function App() {
                   <Route path="/settings/backup" element={<BackupSettingsPage />} />
                   <Route path="/settings/sessions" element={<SessionsPage />} />
                   <Route path="/settings/audit" element={<AuditLogPage />} />
+                  <Route path="/settings/export-data" element={<ExportDataPage />} />
                 </Route>
               </Route>
 

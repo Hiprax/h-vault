@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import mongoose from 'mongoose';
 import { runMigrations, type MigrationDefinition } from '../src/utils/migrations.js';
 import { Migration } from '../src/models/Migration.js';
+import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { JobLock } from '../src/models/JobLock.js';
 // Importing the production index registry both exercises it and registers every
 // listed model on the shared Mongoose instance.
@@ -40,6 +41,17 @@ describe('Database migrations', () => {
       // is exactly the kind of model the previous list silently omitted.
       const migrationIndexes = Migration.schema.indexes();
       expect(migrationIndexes.length).toBeGreaterThan(0);
+    });
+
+    it('includes the TrustedDevice model so its unique tokenHash and TTL indexes are built in production', () => {
+      const listed = new Set(indexedModels.map((m) => m.name));
+      expect(listed.has('TrustedDevice')).toBe(true);
+
+      // TrustedDevice declares a unique `tokenHash` index plus a TTL index on
+      // `expiresAt`; both are correctness (not perf) constraints that production
+      // — with `autoIndex` disabled — only gets from the create-indexes pass.
+      const trustedDeviceIndexes = TrustedDevice.schema.indexes();
+      expect(trustedDeviceIndexes.length).toBeGreaterThan(0);
     });
   });
 

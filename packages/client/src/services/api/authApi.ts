@@ -33,6 +33,11 @@ export interface RegisterPayload {
 export interface LoginPayload {
   email: string;
   authHash: string;
+  // Hand-mirrored from the shared `loginSchema` (`rememberMe: z.boolean().default(false)`).
+  // Optional on the wire because the server defaults an absent field to false;
+  // the UI always sends it explicitly. Carried into the signed 2FA temp token
+  // server-side, so it can never be injected at the 2FA step.
+  rememberMe?: boolean;
   deviceInfo?: {
     userAgent: string;
     fingerprint: string;

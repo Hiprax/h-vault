@@ -139,6 +139,12 @@ export const swaggerSpec: JsonObject = {
         properties: {
           email: { type: 'string', format: 'email', maxLength: 254 },
           authHash: { type: 'string', minLength: 1, maxLength: 100 },
+          rememberMe: {
+            type: 'boolean',
+            default: false,
+            description:
+              'Opt-in "remember me on this device". Extends the refresh-token horizon to the remember lifetime and, for a 2FA account, lets this device skip the 2FA step on later logins until the trust grant expires. Carried into the signed 2FA temp token, so it cannot be tampered with at the 2FA step. The master password is still always required to decrypt the vault.',
+          },
           deviceInfo: { $ref: '#/components/schemas/DeviceInfo' },
         },
       },
@@ -514,6 +520,25 @@ export const swaggerSpec: JsonObject = {
           createdAt: { type: 'string', format: 'date-time' },
           expiresAt: { type: 'string', format: 'date-time' },
           current: { type: 'boolean' },
+        },
+      },
+      TrustedDeviceInfo: {
+        type: 'object',
+        description:
+          'A device allowed to skip the 2FA step at login. The server-only SHA-256 token hash is never included.',
+        properties: {
+          _id: { type: 'string' },
+          deviceInfo: {
+            type: 'object',
+            properties: {
+              userAgent: { type: 'string' },
+              ip: { type: 'string' },
+              fingerprint: { type: 'string' },
+            },
+          },
+          createdAt: { type: 'string', format: 'date-time' },
+          lastUsedAt: { type: 'string', format: 'date-time' },
+          expiresAt: { type: 'string', format: 'date-time' },
         },
       },
       AuditLogEntry: {
@@ -921,7 +946,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Login with credentials',
         description:
-          'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step. Rate limited: 10 req/IP + 20 req/email per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
+          'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step — UNLESS the request carries a valid `trustedDevice` cookie for this account, in which case the 2FA step is skipped and the login completes directly (the cookie is checked strictly after the password comparison, so a wrong password never consumes it). A recognized trusted-device cookie is consumed and rotated, carrying its original expiry forward; an unknown/expired/foreign cookie is cleared and the login falls back to the normal 2FA prompt. Rate limited: 10 req/IP + 20 req/email per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
         requestBody: {
           required: true,
           content: {
@@ -962,7 +987,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Complete 2FA verification',
         description:
-          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min.',
+          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body), a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires.',
         requestBody: {
           required: true,
           content: {
@@ -973,7 +998,15 @@ export const swaggerSpec: JsonObject = {
         },
         responses: {
           200: {
-            description: '2FA verification successful',
+            description:
+              '2FA verification successful. Sets a httpOnly refresh-token cookie, and — only when the login opted into "remember me" — a httpOnly `trustedDevice` cookie (scoped to `/api/v1/auth`) whose raw value is never returned in the response body.',
+            headers: {
+              'Set-Cookie': {
+                description:
+                  'Sets `refreshToken` (httpOnly, path `/api/v1`) and, for a remembered login, `trustedDevice` (httpOnly, path `/api/v1/auth`). Only the SHA-256 of the trusted-device token is stored server-side.',
+                schema: { type: 'string' },
+              },
+            },
             content: {
               'application/json': {
                 schema: { $ref: '#/components/schemas/LoginSuccessResponse' },
@@ -2000,6 +2033,75 @@ export const swaggerSpec: JsonObject = {
         },
       },
     },
+    '/user/trusted-devices': {
+      get: {
+        tags: ['User'],
+        summary: 'List trusted devices',
+        description:
+          'Returns the devices allowed to skip the 2FA step at login for the authenticated user. The server-only token hash is never returned.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: {
+            description: 'Trusted devices',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/TrustedDeviceInfo' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+      delete: {
+        tags: ['User'],
+        summary: 'Revoke all trusted devices',
+        description:
+          'Revokes every trusted device for the authenticated user. Each device must complete 2FA again on its next login.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        responses: {
+          200: {
+            description: 'All trusted devices revoked',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/SuccessResponse' },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
+    '/user/trusted-devices/{id}': {
+      delete: {
+        tags: ['User'],
+        summary: 'Revoke trusted device',
+        description:
+          'Revokes a specific trusted device by its id. The device must complete 2FA again on its next login.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'Trusted device revoked',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/SuccessResponse' },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+        },
+      },
+    },
     '/user/audit-log': {
       get: {
         tags: ['User'],
@@ -2136,6 +2238,27 @@ export const swaggerSpec: JsonObject = {
         summary: 'Export vault',
         description: 'Exports all vault items as JSON. Rate limited: 3 req/IP per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['authHash'],
+                properties: {
+                  format: { type: 'string', enum: ['json'], default: 'json' },
+                  authHash: { type: 'string', minLength: 1, maxLength: 100 },
+                  portableFormat: {
+                    type: 'string',
+                    enum: ['bitwarden-json', 'bitwarden-csv', 'chrome-csv'],
+                    description:
+                      'Audit metadata only. Records which portable plaintext format the browser produced from this response. The server does not branch on it; the response body is identical whether or not it is sent.',
+                  },
+                },
+              },
+            },
+          },
+        },
         responses: {
           200: {
             description: 'Export data (JSON)',

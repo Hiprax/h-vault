@@ -38,7 +38,7 @@ async function startServer(): Promise<void> {
     const backupSchedulerTask = isPrimaryWorker ? startBackupScheduler() : null;
     // Boot-time breach-cache init: logs a hint if empty and optionally schedules
     // the refresh cron. NEVER downloads the corpus on boot (that is the opt-in
-    // `npm run seed-breaches` command). Primary worker only.
+    // `node dist/cli/seedBreaches.js` command). Primary worker only.
     const breachSeedTask = isPrimaryWorker ? await initBreachRangeCache() : null;
     if (!isPrimaryWorker) {
       logger.info(

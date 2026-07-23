@@ -11,6 +11,7 @@ import {
   importLimiter,
   passwordVerifyLimiter,
   healthLimiter,
+  generalAuthLimiter,
 } from '../src/middleware/rateLimiter.js';
 import { createTestUser, authHeader, sampleVaultItem, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
@@ -645,6 +646,27 @@ describe('Rate limiter route wiring (structural)', () => {
     ['passwordVerifyLimiter on POST /backup/restore', 'post', '/restore', passwordVerifyLimiter],
     ['tokenVerifyLimiter on POST /user/2fa/verify', 'post', '/2fa/verify', tokenVerifyLimiter],
     ['passwordVerifyLimiter on DELETE /user/2fa', 'delete', '/2fa', passwordVerifyLimiter],
+    // Audit-writing DELETE endpoints must carry generalAuthLimiter, matching
+    // their GET siblings — a missing one here is the exact regression a
+    // security review flagged.
+    [
+      'generalAuthLimiter on DELETE /user/sessions/:id',
+      'delete',
+      '/sessions/:id',
+      generalAuthLimiter,
+    ],
+    [
+      'generalAuthLimiter on DELETE /user/trusted-devices',
+      'delete',
+      '/trusted-devices',
+      generalAuthLimiter,
+    ],
+    [
+      'generalAuthLimiter on DELETE /user/trusted-devices/:id',
+      'delete',
+      '/trusted-devices/:id',
+      generalAuthLimiter,
+    ],
     ['healthLimiter on GET /health', 'get', '/health', healthLimiter],
     ['healthLimiter on GET /config', 'get', '/config', healthLimiter],
   ];

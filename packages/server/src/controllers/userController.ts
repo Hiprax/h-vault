@@ -7,15 +7,17 @@ import bcrypt from 'bcryptjs';
 import { TOTP, Secret } from 'otpauth';
 import { User } from '../models/User.js';
 import { RefreshToken } from '../models/RefreshToken.js';
+import { TrustedDevice } from '../models/TrustedDevice.js';
 import { AuditLog } from '../models/AuditLog.js';
 import { hashToken } from '../utils/token.js';
 import { createAuditLog } from '../services/auditService.js';
 import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
+import { revokeTrustedDevices } from '../utils/trustedDevices.js';
 import { getRequestContext, getUserId } from '../utils/controllerHelpers.js';
 import { cryptoManager } from '../utils/cryptoManager.js';
 import { config, isProduction, twoFactorEncryptionKey } from '../config/index.js';
 import { REFRESH_COOKIE_NAME } from '../constants/index.js';
-import { APP_NAME, BACKUP_CODES_COUNT, MAX_SESSIONS } from '@hvault/shared';
+import { APP_NAME, BACKUP_CODES_COUNT, MAX_SESSIONS, MAX_TRUSTED_DEVICES } from '@hvault/shared';
 import type {
   UpdateSettingsInput,
   ChangePasswordInput,
@@ -174,6 +176,11 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     try {
       await session.withTransaction(async () => {
         await RefreshToken.deleteMany({ userId }, { session });
+        // Changing the master password invalidates every session; the trusted
+        // devices granted under the old password must lose their 2FA-skip too
+        // (§1.5 site 2). Runs in the same transaction so it commits atomically
+        // with the password update.
+        await revokeTrustedDevices(userId, session);
         await User.updateOne(
           { _id: userId },
           {
@@ -197,6 +204,9 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     // their existing password. The reverse order would leave stale tokens valid
     // for a user whose password has changed.
     await RefreshToken.deleteMany({ userId });
+    // Same revocation as the transactional branch (§1.5 site 2): drop trusted
+    // devices so none skips 2FA under the new password.
+    await revokeTrustedDevices(userId);
     user.authHash = newHash;
     user.encryptedVaultKey = body.newEncryptedVaultKey;
     user.vaultKeyIv = body.newVaultKeyIv;
@@ -385,6 +395,13 @@ export const verify2fa = catchAsync(async (req: Request, res: Response): Promise
     throw httpErrors.conflict('Two-factor authentication is already enabled');
   }
 
+  // Enabling 2FA changes the second-factor regime, so any pre-existing trust must
+  // be re-established under the new factor rather than carried over (§1.5 site 4).
+  // In practice a just-enabled account holds no trusted devices (they are minted
+  // only at a 2FA login), so this is defence-in-depth against a future path that
+  // could leave a stale record behind.
+  await revokeTrustedDevices(userId);
+
   const enable2faCtx = getRequestContext(req);
   await createAuditLog(userId, '2fa_enable', undefined, enable2faCtx.ip, enable2faCtx.userAgent);
 
@@ -471,6 +488,12 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
     filter.tokenHash = { $ne: hashToken(currentToken) };
   }
   await RefreshToken.deleteMany(filter);
+
+  // Disabling 2FA removes the second factor entirely, so every trusted-device
+  // record — which exists solely to skip that factor — is now meaningless and
+  // must be revoked (§1.5 site 3). Revoke ALL of them (not "all but current"):
+  // a trusted device is a login-time construct, not the current session.
+  await revokeTrustedDevices(userId);
 
   const disable2faCtx = getRequestContext(req);
   await createAuditLog(userId, '2fa_disable', undefined, disable2faCtx.ip, disable2faCtx.userAgent);
@@ -595,6 +618,11 @@ export const regenerateBackupCodes = catchAsync(
       }
     }
 
+    // Regenerating backup codes replaces second-factor recovery material, so the
+    // old trust in that factor must drop (§1.5 site 5) — a device trusted before
+    // the rotation should re-prove the second factor.
+    await revokeTrustedDevices(userId);
+
     const regenCtx = getRequestContext(req);
     await createAuditLog(
       userId,
@@ -617,7 +645,12 @@ export const regenerateBackupCodes = catchAsync(
 export const listSessions = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
 
-  const tokens = await RefreshToken.find({ userId })
+  // Only LIVE sessions (`usedAt: null`) are listed. A rotated row is left in
+  // place with `usedAt` set as a reuse-detection tombstone (§1.4), not a
+  // session — including them would inflate the count far past MAX_SESSIONS
+  // (an active session mints hundreds of rows/day) and disagree with the cap
+  // that `enforceSessionCap` enforces over exactly this same filtered set.
+  const tokens = await RefreshToken.find({ userId, usedAt: null })
     .sort({ createdAt: -1 })
     .limit(MAX_SESSIONS)
     .lean();
@@ -666,6 +699,100 @@ export const revokeSession = catchAsync(async (req: Request, res: Response): Pro
     message: 'Session revoked',
   });
 });
+
+// ── Trusted Devices ──────────────────────────────────────────────────
+
+/**
+ * GET /user/trusted-devices
+ *
+ * Lists the caller's trusted-device records (the devices allowed to skip the
+ * 2FA step at login). Each record is explicitly projected so the server-only
+ * `tokenHash` — the SHA-256 a stolen cookie would have to match — is NEVER
+ * returned. `.lean()` bypasses the schema's `toJSON` strip, so the projection
+ * here is the guard.
+ */
+export const getTrustedDevices = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+
+  const records = await TrustedDevice.find({ userId })
+    .sort({ createdAt: -1 })
+    .limit(MAX_TRUSTED_DEVICES)
+    .lean();
+
+  const devices = records.map((d) => ({
+    _id: String(d._id),
+    deviceInfo: d.deviceInfo,
+    createdAt: d.createdAt,
+    lastUsedAt: d.lastUsedAt,
+    expiresAt: d.expiresAt,
+  }));
+
+  res.status(200).json({
+    success: true,
+    data: devices,
+  });
+});
+
+/**
+ * DELETE /user/trusted-devices/:id
+ *
+ * Revokes a single trusted device by id, scoped to the caller — another user's
+ * id matches nothing and 404s. The device must complete 2FA again on its next
+ * login.
+ */
+export const revokeTrustedDevice = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const userId = getUserId(req);
+    const { id } = req.params as { id: string };
+
+    const record = await TrustedDevice.findOneAndDelete({ _id: id, userId });
+
+    if (!record) {
+      throw httpErrors.notFound('Trusted device not found');
+    }
+
+    const ctx = getRequestContext(req);
+    await createAuditLog(
+      userId,
+      'trusted_device_revoke',
+      { trustedDeviceId: id },
+      ctx.ip,
+      ctx.userAgent,
+    );
+
+    logger.info('Trusted device revoked', { userId, trustedDeviceId: id });
+
+    res.status(200).json({
+      success: true,
+      message: 'Trusted device revoked',
+    });
+  },
+);
+
+/**
+ * DELETE /user/trusted-devices
+ *
+ * Revokes ALL of the caller's trusted devices via the shared
+ * `revokeTrustedDevices` helper — the ninth §1.5 revocation site. Every
+ * previously-trusted device then has to complete 2FA again.
+ */
+export const revokeAllTrustedDevices = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const userId = getUserId(req);
+
+    const count = await revokeTrustedDevices(userId);
+
+    const ctx = getRequestContext(req);
+    await createAuditLog(userId, 'trusted_device_revoke', { count }, ctx.ip, ctx.userAgent);
+
+    logger.info('All trusted devices revoked', { userId, count });
+
+    res.status(200).json({
+      success: true,
+      message: 'All trusted devices revoked',
+    });
+  },
+);
 
 export const getAuditLog = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);

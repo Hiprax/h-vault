@@ -5,18 +5,32 @@
  * after reset (refresh tokens + passwordChangedAt), timing equalization.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import crypto from 'node:crypto';
+import mongoose from 'mongoose';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
+import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { AuditLog } from '../src/models/AuditLog.js';
+import { hashToken } from '../src/utils/token.js';
 import {
   createTestUser,
   generateStateHash,
   deriveTestPurposeKey,
   getCsrf as getCsrfBase,
 } from './helpers.js';
+
+/** Seed one trusted-device record for a user. */
+async function seedTrustedDevice(userId: string): Promise<void> {
+  await TrustedDevice.create({
+    userId: new mongoose.Types.ObjectId(userId),
+    tokenHash: hashToken(crypto.randomBytes(32).toString('hex')),
+    deviceInfo: { userAgent: 'seed-agent', ip: '127.0.0.1', fingerprint: 'seed-fp' },
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
+}
 
 async function getCsrf(
   agent: request.SuperTest<request.Test>,
@@ -164,6 +178,34 @@ describe('Password Reset Flow', () => {
 
       const tokensAfter = await RefreshToken.countDocuments({ userId: user.id });
       expect(tokensAfter).toBe(0);
+    });
+
+    it('should revoke the user trusted devices after a successful reset', async () => {
+      const user = await createTestUser();
+      const dbUser = await User.findById(user.id).select('+authHash');
+      await seedTrustedDevice(user.id);
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(1);
+
+      const resetToken = jwt.sign(
+        {
+          userId: user.id,
+          purpose: 'password_reset',
+          stateHash: generateStateHash(dbUser!.authHash),
+        },
+        deriveTestPurposeKey('password_reset'),
+        { algorithm: 'HS256', expiresIn: '1h' },
+      );
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post(`${API}/auth/reset-password`)
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ token: resetToken, email: user.email, ...resetPayload() });
+
+      expect(res.status).toBe(200);
+      // A device trusted under the old password must re-prove 2FA after a reset.
+      expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
     });
 
     it('should update passwordChangedAt so old JWTs become invalid', async () => {

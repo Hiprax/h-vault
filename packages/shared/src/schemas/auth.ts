@@ -40,6 +40,13 @@ export const registerSchema = z.object({
 export const loginSchema = z.object({
   email: emailSchema,
   authHash: z.string().min(1).max(100),
+  // Opt-in "remember me on this device". It extends the refresh-token horizon to
+  // REFRESH_TOKEN_REMEMBER_DAYS and, for a 2FA account, lets the device skip the
+  // 2FA step on future logins. It is carried into the SIGNED 2FA temp token so the
+  // 2FA step reads it from the verified token rather than a client-supplied field
+  // (login2faSchema deliberately has no rememberMe). Defaults to false, so an
+  // absent field reproduces today's standard-session behaviour exactly.
+  rememberMe: z.boolean().default(false),
   deviceInfo: z
     .object({
       userAgent: z.string().max(512).default(''),

@@ -70,6 +70,7 @@ import {
 import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
 import { hashToken } from '../src/utils/token.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
+import { config } from '../src/config/index.js';
 import {
   createTestUser,
   authHeader,
@@ -729,6 +730,86 @@ describe('transactional (replica-set) auth branches', () => {
     const rows = await RefreshToken.find({ userId: user.id });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.tokenHash).toBe(hashToken(user.refreshToken));
+  });
+
+  it('transactional rotation of a standard row slides and carries no absolute deadline', async () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const user = await createTestUser({ emailVerified: true });
+    // Shorten the seeded (deadline-free) row so a slide to the standard horizon
+    // is observable.
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { expiresAt: new Date(Date.now() + DAY_MS) } },
+    );
+
+    const before = Date.now();
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+    expect(res.status).toBe(200);
+
+    const rows = await RefreshToken.find({ userId: user.id });
+    const fresh = rows.find((r) => r.tokenHash !== hashToken(user.refreshToken));
+    expect(fresh).toBeDefined();
+    expect(fresh!.absoluteExpiresAt).toBeUndefined();
+    expect(fresh!.expiresAt.getTime()).toBeGreaterThan(before + 2 * DAY_MS);
+    const expectedMs = before + config.REFRESH_TOKEN_DAYS * DAY_MS;
+    expect(Math.abs(fresh!.expiresAt.getTime() - expectedMs)).toBeLessThan(5000);
+  });
+
+  it('transactional rotation of a remembered row carries the absolute deadline forward unchanged', async () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const user = await createTestUser({ emailVerified: true });
+    // Remembered family mid-life: deadline 5 days out (shorter than the 7-day
+    // slide), so "copy forward" and "slide" differ observably.
+    const absolute = new Date(Date.now() + 5 * DAY_MS);
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { absoluteExpiresAt: absolute, expiresAt: absolute } },
+    );
+
+    const before = Date.now();
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+    expect(res.status).toBe(200);
+
+    const rows = await RefreshToken.find({ userId: user.id });
+    const fresh = rows.find((r) => r.tokenHash !== hashToken(user.refreshToken));
+    expect(fresh).toBeDefined();
+    expect(fresh!.absoluteExpiresAt).toBeInstanceOf(Date);
+    expect(Math.abs(fresh!.absoluteExpiresAt!.getTime() - absolute.getTime())).toBeLessThan(1000);
+    expect(Math.abs(fresh!.expiresAt.getTime() - absolute.getTime())).toBeLessThan(1000);
+    // Not extended: a slide would have pushed expiresAt to ~7 days.
+    expect(fresh!.expiresAt.getTime()).toBeLessThan(before + 6 * DAY_MS);
+  });
+
+  it('transactional path rejects a remembered family past its absolute deadline', async () => {
+    const user = await createTestUser({ emailVerified: true });
+    const past = new Date(Date.now() - 1000);
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { absoluteExpiresAt: past, expiresAt: past } },
+    );
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_EXPIRED');
+
+    // No replacement minted; the expired row was removed.
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(0);
   });
 
   it('commits the password change and the session revocation together', async () => {

@@ -47,18 +47,52 @@ const logger = createLogger({ moduleName: 'tools-controller' });
 interface HibpCacheEntry {
   data: string;
   expires: number;
+  /**
+   * Measured UTF-8 byte length of {@link data}, stamped by {@link setHibpCacheEntry}
+   * so eviction can subtract an entry's contribution from the running total without
+   * re-measuring. Optional because callers construct entries without it (and some
+   * tests populate the Map directly via `hibpCache.set`); a missing value counts as 0.
+   */
+  bytes?: number;
 }
 
 const HIBP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /**
- * Hard ceiling on the number of cached HIBP responses. With ~25 KB per
- * entry, a 10,000-entry cap bounds steady-state memory at ~250 MB worst
- * case — well below the 512 MB Docker limit and far short of the
- * theoretical 16^5 (~1 M) unique 5-char prefixes that could otherwise
- * accumulate.
+ * Secondary ceiling on the NUMBER of cached HIBP responses. The BINDING bound is now
+ * {@link HIBP_CACHE_MAX_BYTES} (see below): a real range is ~800 rows × ~44 B ≈ 36 KB,
+ * so an entry-count cap alone bounds worst-case memory at ~360 MB — uncomfortably close
+ * to the ~560 MB V8 heap ceiling under the app's `mem_limit: 1g` (raised from the earlier
+ * 512 MB). The entry cap is retained only so a pathological run of tiny ranges cannot grow
+ * the Map without bound while staying under the byte budget. The theoretical key space is
+ * 16^5 (~1 M) unique 5-char prefixes.
  */
 export const HIBP_CACHE_MAX_ENTRIES = 10_000;
+
+/**
+ * BINDING memory ceiling for the L1 cache, in bytes (from config, default 64 MiB).
+ * Measured ~36 KB/range ⇒ 64 MiB ≈ 1,800 ranges per worker process. `max_memory_restart`
+ * is enforced PER PM2 worker, not aggregate across `instances`, so the sizing is one
+ * worker's full cache plus its ordinary heap against the threshold — NOT
+ * `HIBP_CACHE_MAX_BYTES × instances`. Held in a module-level binding (rather than read
+ * from `config` on every insert) so a test seam can shrink it cheaply; see
+ * {@link __setHibpCacheMaxBytes}.
+ */
+let hibpCacheMaxBytes = config.HIBP_CACHE_MAX_BYTES;
+
+/** Current L1 cache budget in bytes (test/introspection accessor). */
+export function getHibpCacheMaxBytes(): number {
+  return hibpCacheMaxBytes;
+}
+
+/**
+ * Test seam: override the L1 byte budget so byte-eviction and the single-oversized-entry
+ * path can be exercised without allocating tens of MiB of strings. Never called in
+ * production. Restore with the value from {@link getHibpCacheMaxBytes} captured beforehand.
+ */
+export function __setHibpCacheMaxBytes(bytes: number): void {
+  hibpCacheMaxBytes = bytes;
+}
 
 /**
  * Maximum number of concurrent outbound HIBP lookups a single batch request may
@@ -71,51 +105,96 @@ export const HIBP_FANOUT_CONCURRENCY = 8;
 
 export const hibpCache = new Map<string, HibpCacheEntry>();
 
+/**
+ * Running total of the measured UTF-8 bytes of every entry currently held in
+ * {@link hibpCache}. Maintained incrementally by {@link setHibpCacheEntry} and
+ * {@link pruneHibpCache} so eviction never has to walk the whole Map to size it.
+ * Reads (`hibpCache.set`) and clears (`hibpCache.clear`) that bypass this module —
+ * a few tests do — desync it; {@link setHibpCacheEntry} self-heals it to 0 whenever
+ * it observes an empty Map, and {@link resetCacheAccessCount} zeroes it outright.
+ */
+let hibpCacheBytes = 0;
+
+/** Measured byte total of the L1 cache (test/introspection accessor). */
+export function getHibpCacheBytes(): number {
+  return hibpCacheBytes;
+}
+
 // Periodic cache pruning — every 100 accesses, evict expired entries.
 let cacheAccessCount = 0;
+/** Test seam: reset the per-process cache bookkeeping (access counter AND byte total). */
 export function resetCacheAccessCount(): void {
   cacheAccessCount = 0;
+  hibpCacheBytes = 0;
 }
 export function pruneHibpCache(): void {
   if (++cacheAccessCount % 100 !== 0) return;
   const now = Date.now();
   for (const [key, value] of hibpCache) {
-    if (value.expires < now) hibpCache.delete(key);
+    if (value.expires < now) {
+      hibpCache.delete(key);
+      hibpCacheBytes -= value.bytes ?? 0;
+    }
   }
+  if (hibpCacheBytes < 0) hibpCacheBytes = 0;
 }
 
 /**
- * Inserts a HIBP response into the cache, enforcing the hard
- * {@link HIBP_CACHE_MAX_ENTRIES} cap. Evicts an expired entry first when
- * available; otherwise drops the oldest insertion-ordered entry (LRU).
+ * Evict entries — an EXPIRED one first, otherwise the OLDEST-inserted (Map iteration
+ * is insertion-ordered) — until the cache is within BOTH the entry-count cap and the
+ * byte budget. Never evicts below a single entry: if one entry alone exceeds the byte
+ * budget it is kept, leaving the cache over budget by exactly that entry (documented
+ * behaviour — the alternative is to refuse to cache a legitimately large range).
  */
-export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
-  if (hibpCache.has(key)) {
-    hibpCache.set(key, entry);
-    return;
-  }
-
-  if (hibpCache.size >= HIBP_CACHE_MAX_ENTRIES) {
-    // Prefer evicting an already-expired entry to free a real slot.
+function evictHibpToWithinLimits(): void {
+  while (
+    hibpCache.size > 1 &&
+    (hibpCache.size > HIBP_CACHE_MAX_ENTRIES || hibpCacheBytes > hibpCacheMaxBytes)
+  ) {
     const now = Date.now();
-    let evicted = false;
+    let victimKey: string | undefined;
     for (const [existingKey, existingEntry] of hibpCache) {
       if (existingEntry.expires < now) {
-        hibpCache.delete(existingKey);
-        evicted = true;
+        victimKey = existingKey;
         break;
       }
     }
     // No expired entry to harvest — fall back to oldest-insertion eviction.
-    if (!evicted) {
-      const oldestKey = hibpCache.keys().next().value;
-      if (oldestKey !== undefined) {
-        hibpCache.delete(oldestKey);
-      }
-    }
+    victimKey ??= hibpCache.keys().next().value;
+    if (victimKey === undefined) break;
+    const victim = hibpCache.get(victimKey);
+    hibpCache.delete(victimKey);
+    hibpCacheBytes -= victim?.bytes ?? 0;
+  }
+  if (hibpCacheBytes < 0) hibpCacheBytes = 0;
+}
+
+/**
+ * Inserts a HIBP response into the cache, keeping the byte total accurate and enforcing
+ * BOTH the {@link HIBP_CACHE_MAX_BYTES} budget and the {@link HIBP_CACHE_MAX_ENTRIES}
+ * cap. An update-in-place adjusts the total by the delta (never double-counts); a fresh
+ * insert then evicts (expired-first, else oldest) until within both limits.
+ */
+export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
+  // Self-heal the running total after any external `hibpCache.clear()` that bypassed
+  // this module: an empty Map holds zero bytes.
+  if (hibpCache.size === 0) hibpCacheBytes = 0;
+
+  const bytes = Buffer.byteLength(entry.data, 'utf8');
+  const stored: HibpCacheEntry = { data: entry.data, expires: entry.expires, bytes };
+
+  const existing = hibpCache.get(key);
+  if (existing) {
+    // Replace in place: no new slot, so adjust the total by the size delta only.
+    hibpCacheBytes += bytes - (existing.bytes ?? 0);
+    hibpCache.set(key, stored);
+    evictHibpToWithinLimits();
+    return;
   }
 
-  hibpCache.set(key, entry);
+  hibpCache.set(key, stored);
+  hibpCacheBytes += bytes;
+  evictHibpToWithinLimits();
 }
 
 // ── Layered range lookup (L1 in-memory → L2 MongoDB → L3 HIBP) ───────
@@ -429,7 +508,7 @@ export const checkPasswordBreachBatch = catchAsync(
 
 export const exportVault = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
-  const { authHash } = req.body as ExportInput;
+  const { authHash, portableFormat } = req.body as ExportInput;
 
   // Re-authentication is mandatory for vault export
   const user = await User.findById(userId).select('+authHash');
@@ -505,11 +584,20 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
     );
   }
 
+  // `portableFormat` is AUDIT METADATA ONLY (validated by exportSchema): its
+  // sole effect is to record a distinct `export_plaintext` action for a
+  // browser-side plaintext export. The response body above is already fully
+  // built and is byte-identical whether or not it is present — nothing below
+  // branches on the value beyond the audit action and its metadata.
   const exportCtx = getRequestContext(req);
   await createAuditLog(
     userId,
-    'export',
-    { itemCount: items.length, folderCount: folders.length },
+    portableFormat ? 'export_plaintext' : 'export',
+    {
+      itemCount: items.length,
+      folderCount: folders.length,
+      ...(portableFormat ? { portableFormat } : {}),
+    },
     exportCtx.ip,
     exportCtx.userAgent,
   );

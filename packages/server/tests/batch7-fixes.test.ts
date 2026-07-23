@@ -16,6 +16,9 @@ import {
   pruneHibpCache,
   resetCacheAccessCount,
   setHibpCacheEntry,
+  getHibpCacheBytes,
+  getHibpCacheMaxBytes,
+  __setHibpCacheMaxBytes,
 } from '../src/controllers/toolsController.js';
 import { MAX_IMPORT_ITEMS } from '@hvault/shared';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
@@ -333,5 +336,104 @@ describe('Task 2.2: HIBP cache LRU bound', () => {
     // None of the other keys should have been evicted.
     expect(hibpCache.has('k-0')).toBe(true);
     expect(hibpCache.has(`k-${String(HIBP_CACHE_MAX_ENTRIES - 1)}`)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 1.1 (0.5.0): HIBP cache BYTE budget (HIBP_CACHE_MAX_BYTES)
+// ---------------------------------------------------------------------------
+describe('Task 1.1: HIBP cache byte budget', () => {
+  const originalMaxBytes = getHibpCacheMaxBytes();
+
+  beforeEach(() => {
+    hibpCache.clear();
+    resetCacheAccessCount();
+  });
+
+  afterEach(() => {
+    hibpCache.clear();
+    resetCacheAccessCount();
+    __setHibpCacheMaxBytes(originalMaxBytes);
+  });
+
+  it('exposes a positive default byte budget from config', () => {
+    // The default is 64 MiB; the exact number lives in config, but it must be a
+    // meaningful multi-MiB ceiling, not zero or unset.
+    expect(getHibpCacheMaxBytes()).toBeGreaterThanOrEqual(1_048_576);
+  });
+
+  it('tracks the byte total as measured UTF-8 bytes, not entry count', () => {
+    const future = Date.now() + 60_000;
+    setHibpCacheEntry('AAAAA', { data: 'hello', expires: future });
+    expect(getHibpCacheBytes()).toBe(Buffer.byteLength('hello', 'utf8'));
+    // A multi-byte character is counted by bytes, not code units (€ is 3 UTF-8 bytes).
+    setHibpCacheEntry('BBBBB', { data: '€', expires: future });
+    expect(getHibpCacheBytes()).toBe(5 + Buffer.byteLength('€', 'utf8'));
+  });
+
+  it('adjusts the total by the DELTA on update-in-place (never double-counts)', () => {
+    const future = Date.now() + 60_000;
+    setHibpCacheEntry('AAAAA', { data: 'short', expires: future });
+    expect(getHibpCacheBytes()).toBe(5);
+    setHibpCacheEntry('AAAAA', { data: 'a much longer value', expires: future });
+    expect(hibpCache.size).toBe(1);
+    expect(getHibpCacheBytes()).toBe(Buffer.byteLength('a much longer value', 'utf8'));
+  });
+
+  it('evicts by byte budget so the total stays at or below HIBP_CACHE_MAX_BYTES', () => {
+    // Shrink the budget so a handful of ~36 KB ranges crosses it cheaply. All
+    // inserts share one backing string, so this allocates ~36 KB, not ~100 MB.
+    __setHibpCacheMaxBytes(100 * 1024); // 100 KiB
+    const range = 'x'.repeat(36 * 1024); // a realistic ~36 KB range
+    const future = Date.now() + 60_000;
+    for (let i = 0; i < 3_000; i++) {
+      setHibpCacheEntry(`k${String(i)}`, { data: range, expires: future });
+    }
+    expect(getHibpCacheBytes()).toBeLessThanOrEqual(100 * 1024);
+    // Byte pressure — not the 10,000 entry cap — is what bounded the Map here.
+    expect(hibpCache.size).toBeLessThan(3_000);
+    expect(hibpCache.size).toBeLessThanOrEqual(HIBP_CACHE_MAX_ENTRIES);
+  });
+
+  it('keeps a single entry that alone exceeds the budget (over by exactly it)', () => {
+    __setHibpCacheMaxBytes(1024); // 1 KiB budget
+    const big = 'y'.repeat(4096); // 4 KiB — larger than the whole budget
+    setHibpCacheEntry('BIG', { data: big, expires: Date.now() + 60_000 });
+    // Never evicts below one entry: it is stored, leaving the total over budget.
+    expect(hibpCache.size).toBe(1);
+    expect(hibpCache.get('BIG')?.data).toBe(big);
+    expect(getHibpCacheBytes()).toBe(4096);
+    expect(getHibpCacheBytes()).toBeGreaterThan(getHibpCacheMaxBytes());
+  });
+
+  it('keeps the byte total consistent after pruneHibpCache reaps expired entries', () => {
+    setHibpCacheEntry('EXPIRED', { data: 'z'.repeat(1000), expires: Date.now() - 1 });
+    setHibpCacheEntry('LIVE', { data: 'z'.repeat(500), expires: Date.now() + 60_000 });
+    expect(getHibpCacheBytes()).toBe(1500);
+    // The 100th access triggers the sweep, which must subtract the expired bytes.
+    for (let i = 0; i < 100; i++) pruneHibpCache();
+    expect(hibpCache.has('EXPIRED')).toBe(false);
+    expect(getHibpCacheBytes()).toBe(500);
+  });
+
+  it('resetCacheAccessCount zeroes the byte total', () => {
+    setHibpCacheEntry('AAAAA', { data: 'data', expires: Date.now() + 60_000 });
+    expect(getHibpCacheBytes()).toBeGreaterThan(0);
+    resetCacheAccessCount();
+    expect(getHibpCacheBytes()).toBe(0);
+  });
+
+  it('self-heals the byte total to zero after an external hibpCache.clear()', () => {
+    setHibpCacheEntry('AAAAA', { data: 'x'.repeat(1000), expires: Date.now() + 60_000 });
+    // A direct clear bypasses this module and desyncs the running total...
+    hibpCache.clear();
+    // ...but the next insert observes the empty Map and resets it, so the total
+    // reflects only the new entry rather than 1000 + 2.
+    setHibpCacheEntry('BBBBB', { data: 'yy', expires: Date.now() + 60_000 });
+    expect(getHibpCacheBytes()).toBe(2);
+  });
+
+  it('keeps HIBP_CACHE_MAX_ENTRIES at 10,000 as the secondary guard', () => {
+    expect(HIBP_CACHE_MAX_ENTRIES).toBe(10_000);
   });
 });

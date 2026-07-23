@@ -1,12 +1,8 @@
 import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import { deviceInfoSchema, type IDeviceInfo } from './deviceInfo.js';
 
-// ----- Sub-interface -----
-
-export interface IDeviceInfo {
-  userAgent: string;
-  ip: string;
-  fingerprint: string;
-}
+// Re-exported from its original module so existing importers keep working.
+export type { IDeviceInfo };
 
 // ----- Main Interface -----
 
@@ -17,23 +13,20 @@ export interface IRefreshToken {
   familyId: string;
   deviceInfo: IDeviceInfo;
   expiresAt: Date;
+  /**
+   * Absolute family deadline for an opt-in "remember me" session. When set, the
+   * session may rotate but never past this instant: every rotation copies it
+   * forward unchanged and pins `expiresAt` to it. Rows WITHOUT this field keep
+   * the original sliding behaviour — each rotation resets `expiresAt` to
+   * `now + REFRESH_TOKEN_DAYS`. Optional so pre-existing rows need no migration.
+   */
+  absoluteExpiresAt?: Date | undefined;
   usedAt?: Date | undefined;
   createdAt: Date;
   updatedAt: Date;
 }
 
 export type RefreshTokenDocument = HydratedDocument<IRefreshToken>;
-
-// ----- Sub-Schema -----
-
-const deviceInfoSchema = new Schema<IDeviceInfo>(
-  {
-    userAgent: { type: String, default: '', maxlength: 512 },
-    ip: { type: String, default: '', maxlength: 45 },
-    fingerprint: { type: String, default: '', maxlength: 128 },
-  },
-  { _id: false },
-);
 
 // ----- Main Schema -----
 
@@ -48,6 +41,7 @@ const refreshTokenSchema = new Schema<IRefreshToken>(
     familyId: { type: String, required: true },
     deviceInfo: { type: deviceInfoSchema, required: true },
     expiresAt: { type: Date, required: true },
+    absoluteExpiresAt: { type: Date, default: undefined },
     usedAt: { type: Date, default: undefined },
   },
   {
