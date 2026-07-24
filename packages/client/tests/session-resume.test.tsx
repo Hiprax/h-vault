@@ -63,8 +63,11 @@ vi.mock('../src/hooks/useUserSettings', () => ({
   clearSettingsCache: vi.fn(),
 }));
 
-vi.mock('../src/hooks/useClipboardGuard', () => ({
-  clearClipboardIfDirty: vi.fn(),
+// App now mounts useClipboardGuard (above the lock boundary), so the guard's
+// service imports must all be stubbed here, not just the one authStore uses.
+vi.mock('../src/services/clipboard/clipboardService', () => ({
+  eraseCopiedSecretNow: vi.fn(),
+  flushDueErase: vi.fn(),
 }));
 
 vi.mock('../src/services/api/client', () => ({

@@ -31,8 +31,7 @@ import { cryptoService } from '../../services/crypto/cryptoService';
 import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
 import { useUserSettings } from '../../hooks/useUserSettings';
-import { useClipboardCountdown } from '../../hooks/useClipboardCountdown';
-import { markClipboardDirty, scheduleClipboardClear } from '../../hooks/useClipboardGuard';
+import { copySecretToClipboard } from '../../services/clipboard/clipboardService';
 import type { ItemType } from '@hvault/shared';
 import type {
   ILoginData,
@@ -77,7 +76,6 @@ interface CopyFieldProps {
 function CopyField({ label, value, masked = false, mono = false, isLink = false }: CopyFieldProps) {
   const { toast } = useToast();
   const { clipboardClearTimeout } = useUserSettings();
-  const { startCountdown } = useClipboardCountdown();
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -85,25 +83,19 @@ function CopyField({ label, value, masked = false, mono = false, isLink = false 
 
   const handleCopy = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(value);
-      markClipboardDirty();
+      // The guard owns the write, the one app-wide erase deadline and the
+      // countdown notice. Copying another field re-arms that single deadline
+      // instead of leaving an older field's timer to erase this value early, and
+      // the erase still happens if this component unmounts first.
+      await copySecretToClipboard(value, clearTimeoutMs);
       setCopied(true);
       toast({ title: `${label} copied`, type: 'success', duration: 2000 });
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       timeoutRef.current = setTimeout(() => setCopied(false), 2000);
-
-      // Show countdown toast
-      startCountdown(clipboardClearTimeout);
-
-      // Auto-clear the clipboard using the user's configured timeout. The single
-      // app-wide scheduler owns the timer, so copying another field re-arms this
-      // one deadline instead of leaving an older field's timer to wipe this value
-      // early — and the clear still happens if this component unmounts first.
-      scheduleClipboardClear(clearTimeoutMs);
     } catch {
       toast({ title: 'Failed to copy', type: 'error' });
     }
-  }, [value, label, toast, clearTimeoutMs, clipboardClearTimeout, startCountdown]);
+  }, [value, label, toast, clearTimeoutMs]);
 
   useEffect(() => {
     return () => {
@@ -187,7 +179,6 @@ function TotpDisplay({ secret }: { secret: string }) {
   const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
   const { clipboardClearTimeout } = useUserSettings();
-  const { startCountdown } = useClipboardCountdown();
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clearTimeoutMs = clipboardClearTimeout * 1000;
 
@@ -243,21 +234,16 @@ function TotpDisplay({ secret }: { secret: string }) {
   const handleCopy = useCallback(async () => {
     if (code === '------' || error) return;
     try {
-      await navigator.clipboard.writeText(code);
-      markClipboardDirty();
+      // One shared deadline, owned by the most recent copy (see CopyField above).
+      await copySecretToClipboard(code, clearTimeoutMs);
       setCopied(true);
       toast({ title: 'TOTP code copied', type: 'success', duration: 2000 });
       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
       copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
-
-      // Show countdown toast and arm the app-wide clipboard auto-clear (see
-      // CopyField above — one shared deadline, owned by the most recent copy).
-      startCountdown(clipboardClearTimeout);
-      scheduleClipboardClear(clearTimeoutMs);
     } catch {
       toast({ title: 'Failed to copy', type: 'error' });
     }
-  }, [code, error, toast, clearTimeoutMs, clipboardClearTimeout, startCountdown]);
+  }, [code, error, toast, clearTimeoutMs]);
 
   useEffect(() => {
     return () => {

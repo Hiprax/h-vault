@@ -7,6 +7,7 @@ import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { ToastProvider } from './components/ui/Toast';
 import { ReloadPrompt } from './components/layout/ReloadPrompt';
 import { useFavicon } from './hooks/useFavicon';
+import { useClipboardGuard } from './hooks/useClipboardGuard';
 import { resumeSession, shouldAttemptResume } from './services/auth/sessionResume';
 
 // Lazy-loaded page components
@@ -43,6 +44,13 @@ export function App() {
   // Keep the browser-tab favicon in sync with the vault state (green/open when
   // unlocked, red/closed when locked or logged out).
   useFavicon();
+
+  // Retry a clipboard erase the browser refused, and erase on terminal unload.
+  // Mounted HERE rather than in AppLayout on purpose: ProtectedRoute replaces
+  // AppLayout with the unlock screen the moment the vault locks, and an auto-lock
+  // in a hidden tab is exactly the case where the erase was refused and still owed.
+  // A guard below that boundary would lose its listeners at the worst moment.
+  useClipboardGuard();
 
   // Cold-start "remember me" resume. When a remembered-session hint is present
   // (and the store is not already authenticated), silently re-establish the

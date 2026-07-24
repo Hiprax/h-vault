@@ -53,6 +53,8 @@ import {
   importVaultApi,
 } from '../services/api/userApi';
 import {
+  CLIPBOARD_CLEAR_MAX_SECONDS,
+  CLIPBOARD_CLEAR_MIN_SECONDS,
   ITEM_TYPES,
   MAX_IMPORT_FILE_SIZE_BYTES,
   MAX_ITEMS_PER_USER,
@@ -62,6 +64,7 @@ import {
 } from '@hvault/shared';
 import type { IPasswordHistoryEntry, ItemType, IUserProfile } from '@hvault/shared';
 import { clearSettingsCache } from '../hooks/useUserSettings';
+import { copySecretToClipboard } from '../services/clipboard/clipboardService';
 import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
 import { passwordDidChange } from '../services/crypto/passwordHistory';
 import { parseCsv } from '../services/import/csv';
@@ -1648,14 +1651,18 @@ export default function SettingsPage() {
                     <code
                       className="cursor-pointer select-all font-mono text-sm font-medium tracking-widest text-[hsl(var(--foreground))]"
                       onClick={() => {
-                        void navigator.clipboard
-                          .writeText(tfaSecret)
-                          .then(() => {
+                        // A raw TOTP seed is secret material, so it goes through
+                        // the clipboard guard like any vault field: auto-erased on
+                        // the configured deadline and erased on lock/logout. A
+                        // direct navigator.clipboard write would escape both.
+                        void copySecretToClipboard(tfaSecret, clipboardClearTimeout * 1000).then(
+                          () => {
                             toast({ title: 'Secret copied', type: 'success', duration: 2000 });
-                          })
-                          .catch(() => {
-                            /* ignore */
-                          });
+                          },
+                          () => {
+                            toast({ title: 'Failed to copy', type: 'error' });
+                          },
+                        );
                       }}
                       title="Click to copy"
                     >
@@ -1828,18 +1835,26 @@ export default function SettingsPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    void navigator.clipboard
-                      .writeText(backupCodes.join('\n'))
-                      .then(() => {
+                    // Backup codes are account-recovery secrets: same guard, so
+                    // they are auto-erased and cleared on lock/logout. Going
+                    // through the guard also gives this copy its own deadline, so
+                    // an earlier vault copy's pending erase can no longer take
+                    // the codes off the clipboard ahead of time.
+                    void copySecretToClipboard(
+                      backupCodes.join('\n'),
+                      clipboardClearTimeout * 1000,
+                    ).then(
+                      () => {
                         toast({
                           title: 'Backup codes copied to clipboard',
                           type: 'success',
                           duration: 2000,
                         });
-                      })
-                      .catch(() => {
-                        /* ignore */
-                      });
+                      },
+                      () => {
+                        toast({ title: 'Failed to copy backup codes', type: 'error' });
+                      },
+                    );
                   }}
                   className="rounded-md border border-[hsl(var(--border))] px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
                 >
@@ -1924,8 +1939,8 @@ export default function SettingsPage() {
             </div>
             <input
               type="number"
-              min={5}
-              max={300}
+              min={CLIPBOARD_CLEAR_MIN_SECONDS}
+              max={CLIPBOARD_CLEAR_MAX_SECONDS}
               value={clipboardClearTimeout}
               onChange={(e) => setClipboardClearTimeout(Number(e.target.value))}
               className={cn(inputClass, 'w-20')}

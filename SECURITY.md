@@ -221,6 +221,43 @@ threat model reflects that:
   imported it elsewhere. Treat the file exactly as you would a sheet of every password you
   own.
 
+### The OS clipboard
+
+Copying a secret puts it on the operating-system clipboard, which is shared with every
+application on the machine and, on some systems, with clipboard-history tools and with other
+devices via clipboard sync. H-Vault reduces the exposure window but cannot eliminate it.
+
+- Every copy of secret material goes through one guard, which erases the clipboard after
+  the `clipboardClearTimeout` setting (5 to 300 seconds, default 30) and on vault lock,
+  logout, or the tab being closed for good.
+- **Backgrounding the window deliberately does not erase it.** Switching tabs, minimising,
+  or being covered by another window is how you get to the application you are pasting
+  into, so the deadline, not the visibility change, decides when the secret goes.
+- **The browser decides whether a page may erase the clipboard at all, and the answer
+  differs by engine.** Chromium rejects a clipboard write from an unfocused document, so if
+  the deadline passes while H-Vault is in the background the erase physically cannot happen
+  at that moment. Firefox and Safari are stricter: they require a user gesture for _every_
+  clipboard write, which means a purely timer-driven erase can never succeed on those
+  engines, foreground or background.
+  H-Vault does not abandon a refused erase. It retries on the next moment the engine will
+  accept one: returning to the window, and — the trigger that also works on Firefox and
+  Safari — your next click or keypress in H-Vault. In practice that means the erase lands
+  the next time you interact with the app. Until then the secret is still on the clipboard.
+  Locking or logging out _yourself_ (a real click, or `Ctrl`+`L`) erases it immediately on
+  every engine, because that write happens inside your own keypress. An **idle auto-lock** is
+  timer-driven, so on Firefox and Safari its erase is retried at your next interaction like
+  any other.
+- **The erase is unconditional and cannot verify what it is erasing.** Confirming that the
+  clipboard still holds H-Vault's secret would require clipboard _read_ access, which would
+  mean the page could read anything you had copied from any other application. The guard
+  writes an empty string blind instead, which needs write access only. The consequence is
+  that a pending erase can clear something you copied elsewhere in the meantime.
+- Clipboard state is per browser tab. A lock or logout in one tab does not erase a secret a
+  different tab copied, because only the focused tab can write to the clipboard and a tab
+  that never copied anything cannot know what the clipboard holds.
+- The clipboard is outside the encryption boundary entirely. Nothing H-Vault does protects
+  a secret you have pasted somewhere and left there.
+
 ## Security practices in this repository
 
 - Every push runs `npm run ci` locally through the `pre-push` hook: dependency audit,

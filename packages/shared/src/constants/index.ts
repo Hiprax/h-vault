@@ -14,6 +14,13 @@ export const BCRYPT_ROUNDS = 12;
 export const REFRESH_TOKEN_EXPIRY_DAYS = 7;
 export const AUTO_LOCK_TIMEOUT_MINUTES = 15;
 export const CLIPBOARD_CLEAR_SECONDS = 30;
+// Bounds for the user-configurable `clipboardClearTimeout` setting. Exported so
+// the wire schema (`updateSettingsSchema`) and the client-side erase scheduler
+// clamp against the SAME numbers: the scheduler arms a real timer from whatever
+// the profile response carries, so a malformed or hostile value (0, NaN,
+// Infinity) would otherwise erase a freshly copied secret immediately.
+export const CLIPBOARD_CLEAR_MIN_SECONDS = 5;
+export const CLIPBOARD_CLEAR_MAX_SECONDS = 300;
 export const TRASH_AUTO_PURGE_DAYS = 30;
 export const MAX_LOGIN_ATTEMPTS = 10;
 export const LOGIN_RATE_LIMIT_WINDOW_MINUTES = 15;

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { PasswordGenerator } from '../../src/components/vault/PasswordGenerator';
 import { buildCharset, AMBIGUOUS } from '../../src/utils/passwordEntropy';
+import { __resetClipboardGuardForTests } from '../../src/services/clipboard/clipboardService';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -20,13 +21,6 @@ vi.mock('../../src/hooks/useUserSettings', () => ({
     autoLockTimeout: 15,
     clipboardClearTimeout: 30,
     theme: 'system',
-  }),
-}));
-
-vi.mock('../../src/hooks/useClipboardCountdown', () => ({
-  useClipboardCountdown: () => ({
-    startCountdown: vi.fn(),
-    stopCountdown: vi.fn(),
   }),
 }));
 
@@ -79,9 +73,13 @@ describe('PasswordGenerator', () => {
     vi.clearAllMocks();
     mockWriteText.mockResolvedValue(undefined);
     mockReadText.mockResolvedValue('');
+    // This file drives the REAL module-singleton clipboard guard, so pending state
+    // (generation, deadline, timer) must not leak between cases.
+    __resetClipboardGuardForTests();
   });
 
   afterEach(() => {
+    __resetClipboardGuardForTests();
     vi.useRealTimers();
   });
 
@@ -195,6 +193,34 @@ describe('PasswordGenerator', () => {
   // -------------------------------------------------------------------------
 
   describe('Password generation', () => {
+    // The first password arrives on a debounced 50ms timer, so `password` is ''
+    // for a beat after mount. Clicking Copy in that window used to write an EMPTY
+    // string to the clipboard and report "Password copied to clipboard" anyway,
+    // which also armed a clipboard erase deadline for a secret that was never
+    // there. Surfaced by the real-browser clipboard spec.
+    it('cannot copy before the first password has been generated', async () => {
+      // Deliberately NOT renderAndWait(): that advances past the debounce, which
+      // is the window under test here.
+      vi.useFakeTimers();
+      await act(async () => {
+        render(<PasswordGenerator />);
+      });
+
+      const copyButton = screen.getByRole('button', { name: 'Copy password' });
+      expect(copyButton).toBeDisabled();
+
+      await act(async () => {
+        fireEvent.click(copyButton);
+      });
+      expect(mockWriteText).not.toHaveBeenCalled();
+
+      // Once the debounced generation lands the control becomes usable.
+      await act(async () => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(screen.getByRole('button', { name: 'Copy password' })).toBeEnabled();
+    });
+
     it('generates a password of the default length (20)', async () => {
       await renderAndWait();
 
@@ -763,10 +789,10 @@ describe('PasswordGenerator', () => {
   // L16: Timer cleanup on unmount.
   //
   // The component's OWN timers (copied-badge, regenerate) are cancelled on
-  // unmount. The clipboard auto-clear deliberately is NOT: it belongs to the
-  // shared module-level scheduler in useClipboardGuard, so the copied password
-  // is still wiped after the user navigates away from the generator. Vault lock
-  // and logout wipe it immediately instead (clearClipboardIfDirty).
+  // unmount. The clipboard erase deadline deliberately is NOT: it belongs to the
+  // shared clipboard guard, so the copied password is still erased after the user
+  // navigates away from the generator. Vault lock and logout erase it immediately
+  // instead (eraseCopiedSecretNow).
   // -------------------------------------------------------------------------
   describe('timer cleanup on unmount', () => {
     it('cancels its own timers when the component unmounts', async () => {

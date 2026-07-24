@@ -89,13 +89,7 @@ vi.mock('../src/stores/encryptedStorage', () => ({
 }));
 
 vi.mock('../src/hooks/useAutoLock', () => ({ useAutoLock: vi.fn() }));
-vi.mock('../src/hooks/useClipboardGuard', () => ({
-  useClipboardGuard: vi.fn(),
-  markClipboardDirty: vi.fn(),
-  markClipboardClean: vi.fn(),
-  clearClipboardIfDirty: vi.fn(),
-  scheduleClipboardClear: vi.fn(),
-}));
+vi.mock('../src/hooks/useClipboardCountdown', () => ({ useClipboardCountdown: vi.fn() }));
 vi.mock('../src/hooks/useKeyboardShortcuts', () => ({ useKeyboardShortcuts: vi.fn() }));
 vi.mock('../src/hooks/useConnectionStatus', () => ({
   useConnectionStatus: () => ({ isOnline: true }),

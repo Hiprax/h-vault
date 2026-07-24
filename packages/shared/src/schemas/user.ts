@@ -13,6 +13,8 @@ import {
   PASSWORD_HISTORY_MAX,
   ITEM_TYPES,
   HIBP_BATCH_MAX_PREFIXES,
+  CLIPBOARD_CLEAR_MIN_SECONDS,
+  CLIPBOARD_CLEAR_MAX_SECONDS,
 } from '../constants/index.js';
 import { objectIdSchema } from './common.js';
 
@@ -39,7 +41,12 @@ export const passwordGenOptionsSchema = z
 
 export const updateSettingsSchema = z.object({
   autoLockTimeout: z.number().int().min(1).max(1440).optional(),
-  clipboardClearTimeout: z.number().int().min(5).max(300).optional(),
+  clipboardClearTimeout: z
+    .number()
+    .int()
+    .min(CLIPBOARD_CLEAR_MIN_SECONDS)
+    .max(CLIPBOARD_CLEAR_MAX_SECONDS)
+    .optional(),
   defaultPasswordLength: z.number().int().min(8).max(128).optional(),
   defaultPasswordOptions: passwordGenOptionsSchema.optional(),
   theme: z.enum(THEMES).optional(),

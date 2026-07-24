@@ -1,55 +1,118 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useToast } from '../components/ui/Toast';
+import {
+  getClipboardGuardState,
+  subscribeClipboardGuard,
+  type ClipboardGuardState,
+} from '../services/clipboard/clipboardService';
+
+/** How long the "waiting for this tab" notice stays up. */
+const OVERDUE_TOAST_MS = 8_000;
 
 /**
- * Provides a `startCountdown` function that shows a persistent countdown
- * toast while the clipboard auto-clear timer is running.
+ * Shows a single app-wide toast that counts down to the clipboard erase, driven
+ * entirely by the clipboard guard's own state.
  *
- * The toast updates every second with "Clipboard will clear in Xs" and
- * auto-dismisses when the clipboard is cleared.
+ * Mount once, in the app layout. The guard ITSELF lives higher up, in `App`, so
+ * its retry listeners survive the lock screen; the two are coupled only through
+ * `subscribeClipboardGuard`. This hook used to be mounted per copy control and
+ * driven imperatively with `startCountdown(seconds)`, which meant the toast was a
+ * second, independent claim about when the clipboard would be cleared: copying
+ * two fields left two countdowns running, and neither one was cancelled when the
+ * clipboard was actually erased, so the UI kept promising a deadline for a
+ * clipboard that was already empty. Deriving it from the guard means the number
+ * on screen is the real deadline or there is no toast at all.
  */
-export function useClipboardCountdown() {
+export function useClipboardCountdown(): void {
   const { toast, dismiss, update } = useToast();
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const toastIdRef = useRef<string | null>(null);
 
-  const stopCountdown = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
+  // `toast`, `dismiss` and `update` are stable for the lifetime of the provider,
+  // so this subscribes once.
+  useEffect(() => {
+    let toastId: string | null = null;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    let mode: 'idle' | 'countdown' | 'overdue' = 'idle';
+    /** Deadline the visible countdown belongs to, so a re-copy re-renders it. */
+    let shownDeadline: number | null = null;
+
+    function stopInterval(): void {
+      if (interval !== null) {
+        clearInterval(interval);
+        interval = null;
+      }
     }
-    if (toastIdRef.current) {
-      dismiss(toastIdRef.current);
-      toastIdRef.current = null;
+
+    function clearToast(): void {
+      if (toastId !== null) {
+        dismiss(toastId);
+        toastId = null;
+      }
     }
-  }, [dismiss]);
 
-  const startCountdown = useCallback(
-    (durationSeconds: number) => {
-      // Clear any existing countdown
-      stopCountdown();
+    function secondsUntil(deadline: number): number {
+      return Math.max(0, Math.ceil((deadline - Date.now()) / 1_000));
+    }
 
-      let remaining = durationSeconds;
-      const id = toast({
-        title: `Clipboard will clear in ${remaining}s`,
+    function apply(state: ClipboardGuardState): void {
+      // Nothing on the clipboard: the erase is confirmed, so the notice goes away.
+      if (!state.pending) {
+        stopInterval();
+        clearToast();
+        mode = 'idle';
+        shownDeadline = null;
+        return;
+      }
+
+      // The browser refused the erase (an unfocused document cannot write). Say
+      // so instead of counting down to a deadline that has already passed.
+      if (state.overdue) {
+        if (mode === 'overdue') return;
+        stopInterval();
+        clearToast();
+        // Deliberately not "will be cleared when you return": on Firefox and Safari
+        // every clipboard write needs a user gesture, so the guard cannot promise a
+        // moment. It retries on the next interaction, which this wording matches.
+        toastId = toast({
+          title: 'Clipboard not cleared yet — it will be cleared on your next action here',
+          type: 'info',
+          duration: OVERDUE_TOAST_MS,
+        });
+        mode = 'overdue';
+        shownDeadline = null;
+        return;
+      }
+
+      const deadline = state.deadlineAt;
+      if (deadline === null) return;
+      if (mode === 'countdown' && shownDeadline === deadline) return;
+
+      stopInterval();
+      clearToast();
+      const total = secondsUntil(deadline);
+      toastId = toast({
+        title: `Clipboard will clear in ${total}s`,
         type: 'info',
-        duration: (durationSeconds + 1) * 1000,
+        duration: total * 1_000 + 1_000,
       });
-      toastIdRef.current = id;
-
-      intervalRef.current = setInterval(() => {
-        remaining -= 1;
+      shownDeadline = deadline;
+      mode = 'countdown';
+      interval = setInterval(() => {
+        const remaining = secondsUntil(deadline);
         if (remaining <= 0) {
-          stopCountdown();
+          stopInterval();
           return;
         }
-        update(id, { title: `Clipboard will clear in ${remaining}s` });
-      }, 1000);
-    },
-    [toast, update, stopCountdown],
-  );
+        if (toastId !== null) update(toastId, { title: `Clipboard will clear in ${remaining}s` });
+      }, 1_000);
+    }
 
-  useEffect(() => () => stopCountdown(), [stopCountdown]);
+    apply(getClipboardGuardState());
+    const unsubscribe = subscribeClipboardGuard(apply);
 
-  return { startCountdown, stopCountdown };
+    return () => {
+      unsubscribe();
+      stopInterval();
+      clearToast();
+    };
+  }, [toast, dismiss, update]);
 }

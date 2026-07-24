@@ -139,7 +139,10 @@ import {
   logoutApi,
 } from '../src/services/api/authApi.js';
 import { offlineCache } from '../src/services/offlineCache.js';
-import { markClipboardDirty, markClipboardClean } from '../src/hooks/useClipboardGuard.js';
+import {
+  copySecretToClipboard,
+  __resetClipboardGuardForTests,
+} from '../src/services/clipboard/clipboardService.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -981,7 +984,7 @@ describe('T24 — clipboard is wiped on lock / logout', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useAuthStore.setState({ ...authInitialState });
-    markClipboardClean();
+    __resetClipboardGuardForTests();
     writeText.mockClear();
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
@@ -991,7 +994,8 @@ describe('T24 — clipboard is wiped on lock / logout', () => {
   });
 
   it('lock() clears the clipboard when sensitive data was copied', async () => {
-    markClipboardDirty();
+    await copySecretToClipboard('s3cret', 30_000);
+    writeText.mockClear();
     useAuthStore.setState({
       isAuthenticated: true,
       isLocked: false,
@@ -1020,7 +1024,8 @@ describe('T24 — clipboard is wiped on lock / logout', () => {
   });
 
   it('logout() clears the clipboard when sensitive data was copied', async () => {
-    markClipboardDirty();
+    await copySecretToClipboard('s3cret', 30_000);
+    writeText.mockClear();
     useAuthStore.setState({
       isAuthenticated: true,
       isLocked: false,
@@ -1031,6 +1036,40 @@ describe('T24 — clipboard is wiped on lock / logout', () => {
     await useAuthStore.getState().logout();
 
     expect(writeText).toHaveBeenCalledWith('');
+  });
+
+  // Ordering, not just occurrence: logout must erase BEFORE the network call, the
+  // way lock() secures local state first. Asserting only that the erase happened
+  // somewhere during logout() passes identically with the old post-await ordering,
+  // which left the secret on the clipboard for the whole 5s logout timeout on a
+  // stalled connection.
+  it('logout() erases the clipboard BEFORE awaiting the logout API', async () => {
+    await copySecretToClipboard('s3cret', 30_000);
+    writeText.mockClear();
+
+    let releaseLogoutApi: (() => void) | null = null;
+    vi.mocked(logoutApi).mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseLogoutApi = resolve;
+      }) as never,
+    );
+
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      isLocked: false,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    const logoutPromise = useAuthStore.getState().logout();
+    // The request is still in flight, and the clipboard is already erased.
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith('');
+    expect(logoutApi).toHaveBeenCalled();
+
+    releaseLogoutApi?.();
+    await logoutPromise;
   });
 });
 
@@ -1046,7 +1085,7 @@ describe('Phase 5.2 — lock/logout secure state before the network call', () =>
   beforeEach(() => {
     vi.clearAllMocks();
     useAuthStore.setState({ ...authInitialState });
-    markClipboardClean();
+    __resetClipboardGuardForTests();
     writeText.mockClear();
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
@@ -1061,7 +1100,8 @@ describe('Phase 5.2 — lock/logout secure state before the network call', () =>
   it('lock() secures local state even when lockApi never resolves', async () => {
     // A stalled network call: lockApi hangs forever.
     vi.mocked(lockApi).mockReturnValue(new Promise<never>(() => {}) as never);
-    markClipboardDirty();
+    await copySecretToClipboard('s3cret', 30_000);
+    writeText.mockClear();
 
     useAuthStore.setState({
       accessToken: 'access-token',

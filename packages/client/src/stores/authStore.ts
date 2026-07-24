@@ -16,7 +16,7 @@ import { clearCsrfToken } from '../services/api/client.js';
 import { offlineCache } from '../services/offlineCache.js';
 import { clearHealthResults } from '../services/health/healthResultsStore.js';
 import { clearSettingsCache } from '../hooks/useUserSettings.js';
-import { clearClipboardIfDirty } from '../hooks/useClipboardGuard.js';
+import { eraseCopiedSecretNow } from '../services/clipboard/clipboardService.js';
 import { logger } from '../lib/logger.js';
 import { useVaultStore } from './vaultStore.js';
 import { isAxiosError } from 'axios';
@@ -541,12 +541,13 @@ export const useAuthStore = create<AuthState>()(
         // readers from seeing zeroed-but-non-null keys (which would cause
         // silent decryption failures).
         set({ vaultKey: null, mek: null, isLocked: true });
-        // Wipe any sensitive value still on the OS clipboard. The per-component
-        // auto-clear timer is cancelled (without clearing) when ProtectedRoute
-        // unmounts the copy component on lock, and useClipboardGuard only fires
-        // on hidden/pagehide — so without this the secret would linger behind
-        // the still-visible lock screen.
-        clearClipboardIfDirty();
+        // Erase any secret still on the OS clipboard. The guard's own events
+        // (focus / visible / terminal pagehide) never fire when the lock screen
+        // replaces the layout in a still-visible tab, so without this the secret
+        // would sit there behind the lock screen until its deadline. If the
+        // browser refuses the write the guard keeps it pending and retries, so a
+        // lock can no longer silently abandon the erase.
+        eraseCopiedSecretNow();
         // Clear decrypted vault data from the vault store
         useVaultStore.getState().clearStore();
 
@@ -584,6 +585,14 @@ export const useAuthStore = create<AuthState>()(
         // A bounded per-call timeout keeps a stalled/black-holed connection
         // from blocking local state teardown indefinitely (the failure is
         // caught and the teardown proceeds regardless).
+        // Erase the clipboard BEFORE the network call, matching lock()'s
+        // secure-local-state-first ordering. Waiting until after the await left a
+        // copied secret on the OS clipboard for up to LOCK_LOGOUT_TIMEOUT_MS on a
+        // stalled connection. This is a synchronous kick-off, so it does not delay
+        // the request, and it runs inside the click that triggered logout, which is
+        // the activation Firefox and Safari require for a clipboard write.
+        eraseCopiedSecretNow();
+
         if (accessToken) {
           try {
             await logoutApi(LOCK_LOGOUT_TIMEOUT_MS);
@@ -620,11 +629,6 @@ export const useAuthStore = create<AuthState>()(
         // session, so the next boot must land on the login screen. lock() must
         // NOT do this — a lock keeps the session and its remembered status.
         writeRememberHint(false);
-
-        // Wipe any sensitive value still on the OS clipboard (same rationale as
-        // lock(): the copy component's pending auto-clear timer is cancelled on
-        // unmount and the visibility-based guard never fires on logout).
-        clearClipboardIfDirty();
 
         // Clear decrypted vault data from the vault store
         useVaultStore.getState().clearStore();

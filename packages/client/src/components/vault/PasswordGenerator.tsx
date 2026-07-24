@@ -14,8 +14,7 @@ import {
 } from '../../utils/passwordEntropy';
 import { useToast } from '../ui/Toast';
 import { useUserSettings } from '../../hooks/useUserSettings';
-import { useClipboardCountdown } from '../../hooks/useClipboardCountdown';
-import { markClipboardDirty, scheduleClipboardClear } from '../../hooks/useClipboardGuard';
+import { copySecretToClipboard } from '../../services/clipboard/clipboardService';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -129,7 +128,6 @@ interface PasswordGeneratorProps {
 export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProps) {
   const { toast } = useToast();
   const { clipboardClearTimeout } = useUserSettings();
-  const { startCountdown } = useClipboardCountdown();
   const [mode, setMode] = useState<'password' | 'passphrase'>('password');
   const [length, setLength] = useState(20);
   const [uppercase, setUppercase] = useState(true);
@@ -212,50 +210,46 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
   }, [regenerate]);
 
   const handleCopy = useCallback(async () => {
+    // `password` is empty until the debounced first generation lands, so a click
+    // in that window used to put an EMPTY string on the clipboard and report
+    // "copied" anyway. The button is disabled in that state; this is the guard
+    // behind it.
+    if (!password) return;
     try {
-      await navigator.clipboard.writeText(password);
-      markClipboardDirty();
+      // The guard owns the write, the single app-wide erase deadline and the
+      // countdown notice: a later copy anywhere in the app re-arms that one
+      // deadline rather than letting this timer erase the newer value early.
+      await copySecretToClipboard(password, clipboardClearTimeout * 1000);
       setCopied(true);
       toast({ title: 'Password copied to clipboard', type: 'success', duration: 2000 });
       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
       copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
-
-      // Show countdown toast
-      startCountdown(clipboardClearTimeout);
-
-      // Auto-clear the clipboard using the user's configured timeout, via the
-      // single app-wide scheduler: a later copy anywhere in the app re-arms the
-      // one deadline rather than letting this timer wipe that newer value early.
-      scheduleClipboardClear(clipboardClearTimeout * 1000);
     } catch {
       toast({ title: 'Failed to copy', type: 'error' });
     }
-  }, [password, toast, clipboardClearTimeout, startCountdown]);
+  }, [password, toast, clipboardClearTimeout]);
 
   // Copying a password out of the history list puts a secret on the OS clipboard
   // exactly like the main copy button does, so it must go through the same guard:
-  // without markClipboardDirty() neither the auto-clear nor lock/logout's
-  // clearClipboardIfDirty() would ever wipe it.
+  // a direct navigator.clipboard write would be erased by neither the deadline
+  // nor lock/logout.
   const handleCopyHistory = useCallback(
     (pw: string) => {
-      void navigator.clipboard
-        .writeText(pw)
-        .then(() => {
-          markClipboardDirty();
+      void copySecretToClipboard(pw, clipboardClearTimeout * 1000).then(
+        () => {
           toast({ title: 'Copied', type: 'success', duration: 1500 });
-          startCountdown(clipboardClearTimeout);
-          scheduleClipboardClear(clipboardClearTimeout * 1000);
-        })
-        .catch(() => {
+        },
+        () => {
           toast({ title: 'Failed to copy', type: 'error' });
-        });
+        },
+      );
     },
-    [toast, clipboardClearTimeout, startCountdown],
+    [toast, clipboardClearTimeout],
   );
 
-  // Cleanup on unmount. The clipboard auto-clear is deliberately NOT cancelled
-  // here — it belongs to the shared scheduler so the copied password is still
-  // wiped after navigating away. Lock/logout wipe it immediately instead.
+  // Cleanup on unmount. The clipboard erase deadline is deliberately NOT
+  // cancelled here — it belongs to the shared guard so the copied password is
+  // still erased after navigating away. Lock/logout erase it immediately instead.
   useEffect(() => {
     return () => {
       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
@@ -312,7 +306,8 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
         <button
           type="button"
           onClick={() => void handleCopy()}
-          className="shrink-0 rounded p-1 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] transition-colors"
+          disabled={!password}
+          className="shrink-0 rounded p-1 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           aria-label="Copy password"
         >
           {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}

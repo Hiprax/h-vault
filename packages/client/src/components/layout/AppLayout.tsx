@@ -23,7 +23,7 @@ import { useVaultStore } from '../../stores/vaultStore';
 import { useToast } from '../ui/Toast';
 import { cn } from '../../lib/utils';
 import { useAutoLock } from '../../hooks/useAutoLock';
-import { useClipboardGuard } from '../../hooks/useClipboardGuard';
+import { useClipboardCountdown } from '../../hooks/useClipboardCountdown';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { OnboardingGuide } from './OnboardingGuide';
 import { isStorageDegraded } from '../../stores/encryptedStorage';
@@ -95,8 +95,9 @@ export function AppLayout() {
   // Lock the vault after a period of inactivity
   useAutoLock();
 
-  // Clear clipboard on page hide / unload if sensitive data was copied
-  useClipboardGuard();
+  // The one app-wide clipboard countdown notice, derived from the guard's state.
+  // The guard ITSELF is mounted in App, above the lock boundary — see its docblock.
+  useClipboardCountdown();
 
   // Global keyboard shortcut: Ctrl+L to lock vault
   const globalShortcuts = useMemo(

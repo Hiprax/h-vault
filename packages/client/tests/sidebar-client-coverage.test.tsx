@@ -146,12 +146,7 @@ vi.mock('../src/hooks/useKeyboardShortcuts', () => ({
   useKeyboardShortcuts: vi.fn(),
 }));
 
-vi.mock('../src/hooks/useClipboardCountdown', () => ({
-  useClipboardCountdown: vi.fn().mockReturnValue({
-    startCountdown: vi.fn(),
-    stopCountdown: vi.fn(),
-  }),
-}));
+vi.mock('../src/hooks/useClipboardCountdown', () => ({ useClipboardCountdown: vi.fn() }));
 
 vi.mock('../src/components/ui/Toast', () => ({
   useToast: vi.fn().mockReturnValue({

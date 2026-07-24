@@ -1,119 +1,70 @@
 import { useEffect } from 'react';
+import { eraseCopiedSecretNow, flushDueErase } from '../services/clipboard/clipboardService';
 
 /**
- * Module-level flag indicating whether sensitive data is currently on the
- * clipboard.  Shared across all component instances so that any copy
- * operation in the app marks the clipboard as "dirty".
- */
-let clipboardDirty = false;
-
-/**
- * The single pending auto-clear timer for the whole app.
+ * Wires the browser events that let the clipboard guard finish work the platform
+ * would not let it do earlier.
  *
- * Every copy control (CopyField, TotpDisplay, PasswordGenerator) schedules its
- * clear through {@link scheduleClipboardClear}, so only the MOST RECENT copy's
- * deadline is ever armed. When each control owned its own timer, copying field
- * A (clear at t+30s) and then field B (clear at t+40s) left A's timer running:
- * it fired at t+30s and wiped B's freshly-copied value ten seconds early.
- */
-let clearTimer: ReturnType<typeof setTimeout> | null = null;
-
-function cancelScheduledClear(): void {
-  if (clearTimer !== null) {
-    clearTimeout(clearTimer);
-    clearTimer = null;
-  }
-}
-
-/** Mark clipboard as containing sensitive data. */
-export function markClipboardDirty(): void {
-  clipboardDirty = true;
-}
-
-/** Mark clipboard as safe (after explicit clear or on clear success). */
-export function markClipboardClean(): void {
-  clipboardDirty = false;
-}
-
-/**
- * Arm the app-wide clipboard auto-clear for `ms` from now, cancelling any clear
- * a previous copy had scheduled. The latest copy always owns the deadline.
+ * **Mount once, at the app root** (`App`), NOT inside `AppLayout`. `ProtectedRoute`
+ * swaps `AppLayout` for the unlock screen the instant the vault locks, so a guard
+ * mounted below that boundary loses its listeners at exactly the moment an
+ * overdue erase is most likely to exist: an auto-lock in a hidden tab both refuses
+ * the erase (an unfocused document cannot write) and unmounts the layout.
  *
- * Deliberately module-level rather than per-component: the timer must outlive
- * the control that armed it, so navigating away from a vault item still wipes
- * the value that item put on the clipboard. Lock and logout cancel it via
- * {@link clearClipboardIfDirty}, which wipes immediately instead.
- */
-export function scheduleClipboardClear(ms: number): void {
-  cancelScheduledClear();
-  clearTimer = setTimeout(() => {
-    clearTimer = null;
-    clearClipboardIfDirty();
-  }, ms);
-}
-
-/**
- * Wipe the system clipboard if it currently holds sensitive data ("dirty").
+ * The guard deliberately does NOT erase the clipboard when the page is hidden.
+ * Hiding the tab is how the user goes to paste; erasing there is what made a
+ * copied password vanish before it could be used. See
+ * `services/clipboard/clipboardService.ts` for the full rationale.
  *
- * Exported so non-event-driven flows — notably vault lock and logout — can
- * clear the clipboard on demand. `useClipboardGuard` only reacts to
- * `visibilitychange`→hidden / `pagehide`, neither of which fires when the
- * lock screen is shown in the still-visible tab (and the layout that mounts
- * the guard is unmounted on lock anyway). Without an imperative wipe, a secret
- * copied just before locking would linger on the OS clipboard behind the lock
- * screen — the copy component's pending auto-clear timer is cancelled on
- * unmount without clearing.
+ * Retry triggers, in order of how reliably each one is accepted by browsers:
  *
- * Also cancels any pending {@link scheduleClipboardClear} timer: the clipboard
- * is being wiped now, so a later fire could only clobber a value the user
- * copied afterwards.
- *
- * No-op when the clipboard is already clean, so it is safe to call
- * unconditionally on every lock/logout.
- */
-export function clearClipboardIfDirty(): void {
-  cancelScheduledClear();
-  if (!clipboardDirty) return;
-  clipboardDirty = false;
-  try {
-    // Blind-clear: only requires clipboard-write permission (no read).
-    // `.catch` swallows a rejected write; the surrounding `try` guards the rare
-    // non-secure-context case where `navigator.clipboard` is absent (the DOM
-    // type claims it is always present), which throws on property access.
-    void navigator.clipboard.writeText('').catch(() => {
-      // Clipboard API may be unavailable in certain contexts (e.g. background tab)
-    });
-  } catch {
-    // navigator.clipboard is undefined — nothing to clear
-  }
-}
-
-/**
- * Registers global event listeners that attempt to clear the system clipboard
- * when the page becomes hidden or is being unloaded.  This covers scenarios
- * that `setTimeout`-based auto-clear cannot handle — e.g. user closing the
- * tab before the timer fires.
- *
- * Mount this hook once in the app layout.  Multiple mounts are safe — the
- * listeners are idempotent and each instance cleans up after itself.
+ * - **A user gesture** (`pointerdown`, `keydown`). The only trigger Firefox and
+ *   Safari will accept, because they require transient user activation for every
+ *   clipboard write; a timer-driven or focus-driven erase can never succeed there.
+ *   Both events are low-frequency and `flushDueErase()` returns immediately when
+ *   nothing is due, so this is cheap.
+ * - **`focus` and `visibilitychange` -> visible.** Enough for Chromium, which gates
+ *   writes on document focus rather than on activation. Also the backstop for a
+ *   deadline whose timer was throttled while the tab was hidden.
+ * - **On mount.** Covers the remount after an unlock, where the document is
+ *   already focused and visible so no event would otherwise fire.
+ * - **`pagehide` with `persisted === false`.** The document is being discarded, so
+ *   no timer will ever fire again; erase best-effort. When `persisted` is true the
+ *   page is entering the back/forward cache and may be restored with its timers
+ *   intact, so erasing there would be the same premature wipe in a new costume.
  */
 export function useClipboardGuard(): void {
   useEffect(() => {
     function handleVisibilityChange(): void {
-      if (document.visibilityState === 'hidden') {
-        clearClipboardIfDirty();
+      if (document.visibilityState === 'visible') {
+        flushDueErase();
       }
     }
 
-    function handlePageHide(): void {
-      clearClipboardIfDirty();
+    function handleRetryTrigger(): void {
+      flushDueErase();
     }
 
+    function handlePageHide(event: PageTransitionEvent): void {
+      if (event.persisted) return;
+      eraseCopiedSecretNow();
+    }
+
+    // An erase may already be overdue before any event arrives: the deadline can
+    // have lapsed while this hook was unmounted behind the lock screen.
+    flushDueErase();
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('pointerdown', handleRetryTrigger, { passive: true });
+    document.addEventListener('keydown', handleRetryTrigger, { passive: true });
+    window.addEventListener('focus', handleRetryTrigger);
     window.addEventListener('pagehide', handlePageHide);
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('pointerdown', handleRetryTrigger);
+      document.removeEventListener('keydown', handleRetryTrigger);
+      window.removeEventListener('focus', handleRetryTrigger);
       window.removeEventListener('pagehide', handlePageHide);
     };
   }, []);

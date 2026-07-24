@@ -139,8 +139,11 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   live regions, and correct ARIA roles on virtualized lists (`react-window` above 50 items).
 - **Keyboard-first** — `Ctrl`+`L` lock, `Ctrl`+`N` new item, `Ctrl`+`K` search, `Ctrl`+`↑`/`↓`
   reorder folders (`Cmd` on macOS).
-- **Auto-lock and clipboard hygiene** — configurable idle lock, and a single shared timer that
-  wipes copied secrets from the OS clipboard on a deadline, on tab-hide, and on lock.
+- **Auto-lock and clipboard hygiene** — configurable idle lock, and a single shared deadline that
+  erases copied secrets from the OS clipboard, on that deadline and on lock. Switching tabs or
+  minimising deliberately does **not** erase it: that is how you go somewhere to paste. If the
+  browser refuses the erase while the window is in the background, it is retried the moment the
+  window can write again rather than being abandoned.
 - **Degrades honestly** — one corrupt item never breaks the list. It is flagged, a banner offers
   a re-sync, and the item stays deletable instead of crashing the page.
 
@@ -913,6 +916,7 @@ h-vault/
 │       │   ├── stores/          #   Zustand: auth, vault, ui + the encrypted storage adapter
 │       │   ├── services/
 │       │   │   ├── api/         #   Axios client (CSRF, refresh, retry interceptors)
+│       │   │   ├── clipboard/   #   clipboardService (copy + erase-deadline state machine)
 │       │   │   └── crypto/      #   cryptoService (vault) + fileCryptoService (isolated by design)
 │       │   ├── utils/           #   passwordEntropy, deviceFingerprint, favicon
 │       │   ├── constants/       #   the 2048-word passphrase list

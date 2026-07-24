@@ -125,6 +125,11 @@ import { useAutoLock } from '../src/hooks/useAutoLock';
 import { useKeyboardShortcuts } from '../src/hooks/useKeyboardShortcuts';
 import { useClipboardCountdown } from '../src/hooks/useClipboardCountdown';
 import {
+  copySecretToClipboard,
+  flushDueErase,
+  __resetClipboardGuardForTests,
+} from '../src/services/clipboard/clipboardService';
+import {
   useUserSettings,
   clearSettingsCache,
   onSettingsInvalidated,
@@ -894,15 +899,27 @@ describe('useKeyboardShortcuts', () => {
 // ===========================================================================
 // 3. useClipboardCountdown
 // ===========================================================================
+//
+// The countdown is derived state: it subscribes to the clipboard guard rather
+// than being started imperatively by each copy control. That is the fix for two
+// defects. Copying two fields used to leave two independent countdowns running,
+// and neither was cancelled when the clipboard was actually erased, so the UI
+// kept promising a deadline for a clipboard that was already empty. These tests
+// drive the REAL service so the number on screen is pinned to the real deadline.
 
 describe('useClipboardCountdown', () => {
   let mockToast: ReturnType<typeof vi.fn>;
   let mockDismiss: ReturnType<typeof vi.fn>;
   let mockUpdate: ReturnType<typeof vi.fn>;
+  let toastCounter = 0;
+  const writeText = vi.fn<(text: string) => Promise<void>>();
+
+  const NOT_FOCUSED = new DOMException('Document is not focused.', 'NotAllowedError');
 
   beforeEach(() => {
     vi.useFakeTimers();
-    mockToast = vi.fn().mockReturnValue('toast-1');
+    toastCounter = 0;
+    mockToast = vi.fn().mockImplementation(() => `toast-${++toastCounter}`);
     mockDismiss = vi.fn();
     mockUpdate = vi.fn();
     vi.mocked(useToast).mockReturnValue({
@@ -910,155 +927,173 @@ describe('useClipboardCountdown', () => {
       dismiss: mockDismiss,
       update: mockUpdate,
     });
+    writeText.mockReset();
+    writeText.mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      writable: true,
+      configurable: true,
+    });
+    __resetClipboardGuardForTests();
   });
 
   afterEach(() => {
+    __resetClipboardGuardForTests();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
-  // NOTE: a "should return startCountdown and stopCountdown functions" test was
-  // removed here. It asserted only `typeof === 'function'` for both returns and
-  // exercised no behavior — and it is fully subsumed by the behavioral tests
-  // below, which CALL both functions (startCountdown at every it(), stopCountdown
-  // in "stopCountdown should clear interval and dismiss toast"): if either were
-  // not a function those tests would throw. The smoke test added runtime and no
-  // signal.
+  it('shows nothing until a secret is copied', () => {
+    renderHook(() => useClipboardCountdown());
 
-  it('startCountdown should call toast with initial message', () => {
-    const { result } = renderHook(() => useClipboardCountdown());
+    expect(mockToast).not.toHaveBeenCalled();
+  });
 
-    act(() => {
-      result.current.startCountdown(10);
+  it('opens one countdown toast when a secret is copied', async () => {
+    renderHook(() => useClipboardCountdown());
+
+    await act(async () => {
+      await copySecretToClipboard('s3cret', 30_000);
     });
 
     expect(mockToast).toHaveBeenCalledTimes(1);
-    expect(mockToast).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: 'Clipboard will clear in 10s',
-        type: 'info',
-      }),
-    );
+    expect(mockToast).toHaveBeenCalledWith({
+      title: 'Clipboard will clear in 30s',
+      type: 'info',
+      duration: 31_000,
+    });
   });
 
-  it('startCountdown should update toast each second', () => {
-    const { result } = renderHook(() => useClipboardCountdown());
-
-    act(() => {
-      result.current.startCountdown(5);
+  it('updates the countdown every second', async () => {
+    renderHook(() => useClipboardCountdown());
+    await act(async () => {
+      await copySecretToClipboard('s3cret', 5_000);
     });
 
-    // After 1 second: remaining = 4
-    act(() => {
-      vi.advanceTimersByTime(1000);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
     });
-    expect(mockUpdate).toHaveBeenCalledWith('toast-1', { title: 'Clipboard will clear in 4s' });
+    expect(mockUpdate).toHaveBeenLastCalledWith('toast-1', {
+      title: 'Clipboard will clear in 4s',
+    });
 
-    // After 2 seconds: remaining = 3
-    act(() => {
-      vi.advanceTimersByTime(1000);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
     });
-    expect(mockUpdate).toHaveBeenCalledWith('toast-1', { title: 'Clipboard will clear in 3s' });
-
-    // After 3 seconds: remaining = 2
-    act(() => {
-      vi.advanceTimersByTime(1000);
+    expect(mockUpdate).toHaveBeenLastCalledWith('toast-1', {
+      title: 'Clipboard will clear in 3s',
     });
-    expect(mockUpdate).toHaveBeenCalledWith('toast-1', { title: 'Clipboard will clear in 2s' });
   });
 
-  it('startCountdown should stop when remaining reaches 0', () => {
-    const { result } = renderHook(() => useClipboardCountdown());
-
-    act(() => {
-      result.current.startCountdown(3);
+  it('dismisses the countdown when the erase is confirmed', async () => {
+    renderHook(() => useClipboardCountdown());
+    await act(async () => {
+      await copySecretToClipboard('s3cret', 5_000);
     });
 
-    // Advance 1s: remaining = 2 -> update
-    act(() => {
-      vi.advanceTimersByTime(1000);
-    });
-    expect(mockUpdate).toHaveBeenCalledWith('toast-1', { title: 'Clipboard will clear in 2s' });
-
-    // Advance 1s: remaining = 1 -> update
-    act(() => {
-      vi.advanceTimersByTime(1000);
-    });
-    expect(mockUpdate).toHaveBeenCalledWith('toast-1', { title: 'Clipboard will clear in 1s' });
-
-    // Advance 1s: remaining = 0 -> stopCountdown is called (dismiss)
-    act(() => {
-      vi.advanceTimersByTime(1000);
-    });
-    expect(mockDismiss).toHaveBeenCalledWith('toast-1');
-
-    // No more updates should occur
-    const updateCallCount = mockUpdate.mock.calls.length;
-    act(() => {
-      vi.advanceTimersByTime(3000);
-    });
-    expect(mockUpdate).toHaveBeenCalledTimes(updateCallCount);
-  });
-
-  it('stopCountdown should clear interval and dismiss toast', () => {
-    const { result } = renderHook(() => useClipboardCountdown());
-
-    act(() => {
-      result.current.startCountdown(10);
-    });
-
-    act(() => {
-      vi.advanceTimersByTime(2000);
-    });
-
-    act(() => {
-      result.current.stopCountdown();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
     });
 
     expect(mockDismiss).toHaveBeenCalledWith('toast-1');
-
-    // No more updates after stop
-    const updateCallCount = mockUpdate.mock.calls.length;
-    act(() => {
-      vi.advanceTimersByTime(5000);
-    });
-    expect(mockUpdate).toHaveBeenCalledTimes(updateCallCount);
   });
 
-  it('starting a new countdown should clear the previous one', () => {
-    mockToast.mockReturnValueOnce('toast-1').mockReturnValueOnce('toast-2');
-
-    const { result } = renderHook(() => useClipboardCountdown());
-
-    // Start first countdown
-    act(() => {
-      result.current.startCountdown(10);
+  it('never counts down past zero', async () => {
+    renderHook(() => useClipboardCountdown());
+    await act(async () => {
+      await copySecretToClipboard('s3cret', 5_000);
     });
 
-    act(() => {
-      vi.advanceTimersByTime(2000);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
     });
 
-    // Start second countdown - should dismiss the first toast
-    act(() => {
-      result.current.startCountdown(5);
+    const titles = mockUpdate.mock.calls.map((call) => (call[1] as { title: string }).title);
+    expect(titles).not.toContain('Clipboard will clear in 0s');
+  });
+
+  it('a second copy replaces the countdown with the new deadline', async () => {
+    renderHook(() => useClipboardCountdown());
+    await act(async () => {
+      await copySecretToClipboard('A', 30_000);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
     });
 
-    // The first toast should have been dismissed
+    await act(async () => {
+      await copySecretToClipboard('B', 30_000);
+    });
+
+    // The stale countdown is torn down rather than left running alongside.
     expect(mockDismiss).toHaveBeenCalledWith('toast-1');
-    // A new toast was created
     expect(mockToast).toHaveBeenCalledTimes(2);
-    expect(mockToast).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        title: 'Clipboard will clear in 5s',
-      }),
-    );
-
-    // Now updates should reference 'toast-2'
-    act(() => {
-      vi.advanceTimersByTime(1000);
+    expect(mockToast).toHaveBeenLastCalledWith({
+      title: 'Clipboard will clear in 30s',
+      type: 'info',
+      duration: 31_000,
     });
-    expect(mockUpdate).toHaveBeenCalledWith('toast-2', { title: 'Clipboard will clear in 4s' });
+  });
+
+  it('replaces the countdown with a notice when the browser refuses the erase', async () => {
+    renderHook(() => useClipboardCountdown());
+    await act(async () => {
+      await copySecretToClipboard('s3cret', 5_000);
+    });
+    writeText.mockRejectedValueOnce(NOT_FOCUSED);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(mockDismiss).toHaveBeenCalledWith('toast-1');
+    expect(mockToast).toHaveBeenLastCalledWith({
+      title: 'Clipboard not cleared yet — it will be cleared on your next action here',
+      type: 'info',
+      duration: 8_000,
+    });
+  });
+
+  it('does not stack notices while the erase stays refused', async () => {
+    renderHook(() => useClipboardCountdown());
+    await act(async () => {
+      await copySecretToClipboard('s3cret', 5_000);
+    });
+    writeText.mockRejectedValue(NOT_FOCUSED);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    const afterFirstRefusal = mockToast.mock.calls.length;
+
+    // Drive the retry DIRECTLY rather than dispatching `focus`: useClipboardGuard is
+    // not mounted here, so a focus event would reach no listener and the assertion
+    // would hold whether or not the overdue guard works.
+    await act(async () => {
+      flushDueErase();
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    // The retry was genuinely attempted and refused again...
+    expect(writeText.mock.calls.filter((call) => call[0] === '').length).toBeGreaterThan(1);
+    // ...and it did not stack a second notice.
+    expect(mockToast).toHaveBeenCalledTimes(afterFirstRefusal);
+  });
+
+  it('stops ticking and dismisses its toast on unmount', async () => {
+    const { unmount } = renderHook(() => useClipboardCountdown());
+    await act(async () => {
+      await copySecretToClipboard('s3cret', 30_000);
+    });
+    mockUpdate.mockClear();
+
+    unmount();
+
+    expect(mockDismiss).toHaveBeenCalledWith('toast-1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 });
 

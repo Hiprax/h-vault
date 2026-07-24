@@ -188,7 +188,8 @@ const REFRESH_LOCK_WAIT_MS = 10_000;
  *
  * The DOM lib types `navigator.locks` as always present, so availability is
  * probed with `'locks' in navigator` inside a `try` around the `navigator`
- * access — the same idiom `useClipboardGuard` uses for `navigator.clipboard`.
+ * access — the same idiom `getClipboardApi()` in
+ * `services/clipboard/clipboardService.ts` uses for `navigator.clipboard`.
  * An optional chain or a `typeof … === 'undefined'` check would be reported as
  * an unnecessary condition by the type-aware lint rules.
  */
