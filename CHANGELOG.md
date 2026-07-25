@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-26
+
 ### Added
 
 - **A login can now store the 2FA recovery codes for the account it unlocks.** Every login item has an optional list of backup codes, kept inside the same encrypted blob as its password, so the server never sees them. Each code is masked until you reveal it, has its own copy button, and has its own delete button for the moment you burn one; deleting from the item saves immediately and offers an Undo, and the section warns you when three or fewer are left. Pasting a provider's block works however the provider gave it to you: a JSON array, comma-separated, space-separated, one code per line, or a single code. The format is detected for you and reported ("Detected: one per line, 10 codes found"), and you can pin a specific format to have the paste checked strictly against it. A paste that is not accepted says exactly what is wrong, where, and what to do about it — a stray trailing comma, an item that still has a space in it, a missing closing quote or bracket — pointing at the offending character on the line it is on. Duplicates, and anything over the 50-code limit, are reported rather than silently dropped, and the codes never appear in the vault list. Codes can also be downloaded from an item as a plain text file, behind a confirmation that says the file is not encrypted.
@@ -245,7 +247,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Hiprax/h-vault/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/Hiprax/h-vault/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Hiprax/h-vault/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Hiprax/h-vault/compare/v0.3.0...v0.4.0
