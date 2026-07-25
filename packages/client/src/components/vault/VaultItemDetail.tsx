@@ -30,6 +30,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { cryptoService } from '../../services/crypto/cryptoService';
 import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
+import { BackupCodesSection } from './BackupCodesSection';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { copySecretToClipboard } from '../../services/clipboard/clipboardService';
 import type { ItemType } from '@hvault/shared';
@@ -391,7 +392,17 @@ function PasswordHistorySection({ entries }: PasswordHistoryProps) {
 // Type-specific detail views
 // ---------------------------------------------------------------------------
 
-function LoginDetail({ data }: { data: ILoginData }) {
+function LoginDetail({
+  data,
+  itemId,
+  itemName,
+  canEdit,
+}: {
+  data: ILoginData;
+  itemId: string;
+  itemName: string;
+  canEdit: boolean;
+}) {
   return (
     <div className="space-y-3">
       <CopyField label="Username" value={data.username} mono />
@@ -400,6 +411,7 @@ function LoginDetail({ data }: { data: ILoginData }) {
         <CopyField key={idx} label={`URI ${idx + 1}`} value={uri.uri} isLink />
       ))}
       {data.totp && <TotpDisplay secret={data.totp} />}
+      <BackupCodesSection itemId={itemId} itemName={itemName} data={data} canEdit={canEdit} />
       {data.notes && <CopyField label="Notes" value={data.notes} />}
       {data.customFields.map((field, idx) =>
         field.type === 'boolean' ? (
@@ -954,7 +966,14 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
           <UndecodableNotice />
         ) : (
           <>
-            {item.itemType === 'login' && <LoginDetail data={data as unknown as ILoginData} />}
+            {item.itemType === 'login' && (
+              <LoginDetail
+                data={data as unknown as ILoginData}
+                itemId={item.id}
+                itemName={item.name}
+                canEdit={!isTrashed}
+              />
+            )}
             {item.itemType === 'secret' && <SecretDetail data={data as unknown as ISecretData} />}
             {item.itemType === 'note' && <NoteDetail data={data as unknown as INoteData} />}
             {item.itemType === 'card' && <CardDetail data={data as unknown as ICardData} />}

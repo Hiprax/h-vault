@@ -118,12 +118,28 @@ export interface PortableItem {
   uris?: string[] | undefined;
   /** A TOTP, always emitted as an `otpauth://` URI (see {@link toOtpauthUri}). */
   totp?: string | undefined;
+  /**
+   * A login's 2FA recovery codes.
+   *
+   * On `PortableItem` and NOT on `PortableLogin`, because the login sub-object is
+   * a closed shape that a serializer test asserts with an exact `toEqual`.
+   */
+  backupCodes?: string[] | undefined;
   card?: PortableCard | undefined;
   identity?: PortableIdentity | undefined;
   secret?: PortableSecret | undefined;
   customFields?: PortableCustomField[] | undefined;
   passwordHistory?: PortablePasswordHistoryEntry[] | undefined;
 }
+
+/**
+ * The `fields` entry name a login's 2FA recovery codes ride in.
+ *
+ * Neither Bitwarden format has a recovery-codes field, so the codes travel as a
+ * custom field rather than being dropped. Defined once, here with the portable
+ * model, so the JSON and CSV serializers can never name the same thing differently.
+ */
+export const BACKUP_CODES_FIELD_NAME = 'Backup Codes';
 
 /** An input item that could not be represented, reported rather than dropped. */
 export interface SkippedItem {
@@ -235,6 +251,11 @@ function fillLogin(record: PortableItem, data: ILoginData): void {
   }
   if (data.totp !== undefined && data.totp.trim().length > 0) {
     record.totp = toOtpauthUri(data.totp, record.name);
+  }
+  // A copy, not the store's array (as with `tags` below), so a serializer can never
+  // mutate decrypted state that is still live in the vault store.
+  if (data.backupCodes !== undefined && data.backupCodes.length > 0) {
+    record.backupCodes = [...data.backupCodes];
   }
   if (data.notes !== undefined) {
     record.notes = data.notes;

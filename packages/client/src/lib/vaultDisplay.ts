@@ -50,8 +50,8 @@ export interface SubtitleItem {
  *
  * Two rules are load-bearing:
  *
- * 1. **No secret ever appears here.** A password, CVV, SSN, TOTP seed or secret
- *    value is never part of a subtitle — the list is the one vault surface that
+ * 1. **No secret ever appears here.** A password, backup code, CVV, SSN, TOTP seed
+ *    or secret value is never part of a subtitle — the list is the one vault surface that
  *    renders many items at once, in front of whoever can see the screen, with
  *    no reveal control to opt into.
  * 2. **An undecodable item gets no subtitle.** When decrypted data fails schema

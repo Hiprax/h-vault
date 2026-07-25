@@ -290,11 +290,12 @@ describe('getItemSubtitle', () => {
     expect(getItemSubtitle({ itemType: 'login', data })).toBe('');
   });
 
-  it('NEVER exposes a login password, TOTP seed or custom-field value', () => {
+  it('NEVER exposes a login password, TOTP seed, backup code or custom-field value', () => {
     const data = {
       username: '',
       password: 'SuperSecret1!',
       totp: 'JBSWY3DPEHPK3PXP',
+      backupCodes: ['aaaa-bbbb', 'cccc-dddd'],
       notes: 'recovery code 12345',
       uris: [{ uri: 'https://github.com', match: 'domain' }],
       customFields: [{ name: 'PIN', value: '9182', type: 'hidden' }],
@@ -303,6 +304,8 @@ describe('getItemSubtitle', () => {
     expect(subtitle).toBe('github.com');
     expect(subtitle).not.toContain('SuperSecret1!');
     expect(subtitle).not.toContain('JBSWY3DPEHPK3PXP');
+    expect(subtitle).not.toContain('aaaa-bbbb');
+    expect(subtitle).not.toContain('cccc-dddd');
     expect(subtitle).not.toContain('12345');
     expect(subtitle).not.toContain('9182');
   });

@@ -43,6 +43,9 @@ import {
   MAX_NOTE_CONTENT_LENGTH,
   MAX_RESTORE_DATA_LENGTH,
   MAX_IMPORT_DATA_LENGTH,
+  MAX_LOGIN_BACKUP_CODES,
+  MAX_LOGIN_BACKUP_CODE_LENGTH,
+  MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH,
   MAX_FILE_ENCRYPTION_SIZE_MB,
   FILE_ENCRYPTION_FILE_EXTENSION,
 } from '../src/constants/index.js';
@@ -180,6 +183,40 @@ describe('Schema limit constants', () => {
 
   it('MAX_IMPORT_DATA_LENGTH is 1,048,576 (1 MB)', () => {
     expect(MAX_IMPORT_DATA_LENGTH).toBe(1_048_576);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Login backup-code constants
+// ---------------------------------------------------------------------------
+describe('Login backup-code constants', () => {
+  it('MAX_LOGIN_BACKUP_CODES is 50', () => {
+    expect(MAX_LOGIN_BACKUP_CODES).toBe(50);
+  });
+
+  it('MAX_LOGIN_BACKUP_CODE_LENGTH is 128', () => {
+    expect(MAX_LOGIN_BACKUP_CODE_LENGTH).toBe(128);
+  });
+
+  it('MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH is 20,000', () => {
+    expect(MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH).toBe(20_000);
+  });
+
+  it('is independent of the account-level BACKUP_CODES_COUNT', () => {
+    // Two unrelated features. BACKUP_CODES_COUNT is how many codes H-Vault mints
+    // for its OWN account 2FA; MAX_LOGIN_BACKUP_CODES is how many a login item may
+    // store for a third-party account.
+    expect(BACKUP_CODES_COUNT).toBe(8);
+    expect(MAX_LOGIN_BACKUP_CODES).not.toBe(BACKUP_CODES_COUNT);
+  });
+
+  it('bounds one paste well above the largest legitimate one', () => {
+    // Six characters per code covers array quoting plus a separator, so this is the
+    // worst legitimate paste; the ceiling must clear it with room to spare rather
+    // than being a magic number.
+    expect(MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH).toBeGreaterThan(
+      MAX_LOGIN_BACKUP_CODES * (MAX_LOGIN_BACKUP_CODE_LENGTH + 6),
+    );
   });
 });
 

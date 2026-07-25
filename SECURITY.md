@@ -190,9 +190,9 @@ packages/server`, or inside the production image (which has no `npm`) with
 The `/settings/export-data` page exports your whole vault to another password manager
 (Bitwarden JSON/CSV, Chrome/Edge CSV). Unlike every other export in the app, the file it
 produces is **unencrypted plaintext** — it deliberately contains every password, TOTP
-secret, card number and note in the clear, because that is what a competing manager needs
-to import. That makes it the single most dangerous artifact H-Vault can create, and the
-threat model reflects that:
+secret, backup code, card number and note in the clear, because that is what a competing
+manager needs to import. That makes it the single most dangerous artifact H-Vault can
+create, and the threat model reflects that:
 
 - **It is a physically separate surface from the encrypted `.enc` export and the backup
   system.** It has its own route, its own entry-point card, and its own confirmation
@@ -220,6 +220,16 @@ threat model reflects that:
   open the file in a spreadsheet**, and to **securely delete it** as soon as you have
   imported it elsewhere. Treat the file exactly as you would a sheet of every password you
   own.
+
+### Downloading a login's backup codes
+
+A login's 2FA recovery codes can be downloaded from the item as a plain `.txt` file. It is the
+one other place H-Vault writes secret material to disk in the clear, and it carries the same
+caveat as the plaintext export in miniature: the file is not encrypted, it is generated
+entirely in the browser and never uploaded, it is offered only from the saved item (never from
+an unsaved form, so a cancelled edit cannot leave codes on disk with nothing in the vault),
+and it takes a separate confirmation that states the file is unencrypted before anything is
+written. Delete it once you have stored the codes wherever you intended them to go.
 
 ### The OS clipboard
 

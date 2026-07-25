@@ -87,6 +87,16 @@ import {
   formatBytes,
   generateId,
   normalizeUri,
+  MAX_LOGIN_BACKUP_CODES,
+  MAX_LOGIN_BACKUP_CODE_LENGTH,
+  MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH,
+  BACKUP_CODES_FORMATS,
+  BACKUP_CODES_INPUT_FORMATS,
+  BACKUP_CODES_ERROR_CODES,
+  parseBackupCodes,
+  mergeBackupCodes,
+  isValidBackupCode,
+  formatBackupCodes,
 } from '../src/index.js';
 
 describe('barrel exports (src/index.ts)', () => {
@@ -197,5 +207,22 @@ describe('barrel exports (src/index.ts)', () => {
     expect(typeof formatBytes).toBe('function');
     expect(typeof generateId).toBe('function');
     expect(typeof normalizeUri).toBe('function');
+  });
+
+  it('exports the backup-code parser and its bounds', () => {
+    // The package publishes only the "." subpath, so a util file that the barrel
+    // does not re-export is unreachable from the client no matter what it exports.
+    // This case is what proves the re-export is in place.
+    expect(typeof parseBackupCodes).toBe('function');
+    expect(typeof mergeBackupCodes).toBe('function');
+    expect(typeof isValidBackupCode).toBe('function');
+    expect(typeof formatBackupCodes).toBe('function');
+    expect(BACKUP_CODES_FORMATS).toEqual(['array', 'comma', 'space', 'newline', 'single']);
+    expect(BACKUP_CODES_INPUT_FORMATS).toContain('auto');
+    expect(BACKUP_CODES_ERROR_CODES).toContain('CODE_CONTAINS_WHITESPACE');
+    expect(MAX_LOGIN_BACKUP_CODES).toBe(50);
+    expect(MAX_LOGIN_BACKUP_CODE_LENGTH).toBe(128);
+    expect(MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH).toBe(20_000);
+    expect(parseBackupCodes('a1 b2').ok).toBe(true);
   });
 });

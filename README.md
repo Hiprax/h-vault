@@ -62,7 +62,7 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 
 |                        |                                                                                                                                                                                                     |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Five item types**    | Logins, secrets, notes, cards (with Luhn validation and an optional billing address) and identities — with search, folders, tags, favorites and a trash.                                            |
+| **Five item types**    | Logins (with optional 2FA recovery codes), secrets, notes, cards (with Luhn validation and an optional billing address) and identities — with search, folders, tags, favorites and a trash.         |
 | **Client-side crypto** | AES-256-GCM under a vault key the server never sees. Item and folder names are ciphertext too — so search runs entirely in the browser, over data only you can decrypt.                             |
 | **Password generator** | Character-set and passphrase modes (2048-word EFF-based list, exactly 11 bits per word). Strength is reported as **exact entropy**, not a heuristic score — see [below](#honest-strength-metering). |
 | **Vault health**       | Finds weak, reused, old (90+ days) and breached passwords, and logins with no TOTP configured.                                                                                                      |
@@ -94,7 +94,8 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   matched by provenance, so re-running the same backup doesn't accumulate duplicates. Any
   folder cycle a malicious file plants is detected and broken.
 - **Import / export.** Import from Bitwarden, LastPass, KeePass, Chrome/Edge, Firefox, 1Password
-  and generic CSV, with skip / overwrite / keep-both conflict strategies. Duplicates are decided
+  and generic CSV (whose column mapping includes a 2FA recovery-codes target), with
+  skip / overwrite / keep-both conflict strategies. Duplicates are decided
   by an item's **content**, not its name: a login is identified by its site and username, so ten
   accounts on one site stay ten items and re-importing the same file changes nothing. `skip` (the
   default) never modifies anything; `overwrite` updates a matched item in place — replacing its
@@ -118,9 +119,11 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   file is generated **entirely in the browser** and never uploaded. Anything that cannot be decoded,
   or that the chosen format cannot represent, is reported as skipped/omitted rather than silently
   dropped. Each format carries what it can: **Bitwarden JSON** is the most complete (logins, secure
-  notes, cards, identities, folders, TOTP, custom fields and password history); **Bitwarden CSV**
-  keeps only logins and notes (cards, identities and secrets are omitted); and **Chrome/Edge CSV** is
-  logins-only, dropping even a login's TOTP, custom fields and folder. Folder paths re-import as tags,
+  notes, cards, identities, folders, TOTP, custom fields and password history, with a login's 2FA
+  recovery codes carried as a hidden custom field); **Bitwarden CSV** keeps only logins and notes
+  (cards, identities and secrets are omitted, and recovery codes arrive as text in the notes); and
+  **Chrome/Edge CSV** is logins-only, dropping even a login's TOTP, recovery codes, custom fields
+  and folder. Folder paths re-import as tags,
   as they do for import. CSV values are quoted per RFC 4180 but **never altered** — see
   [SECURITY.md](SECURITY.md).
 - **File encryption tool.** A standalone, entirely client-side tool: pick any file, set a

@@ -14,3 +14,4 @@ export * from './constants/index.js';
 
 // Utils
 export * from './utils/index.js';
+export * from './utils/backupCodes.js';

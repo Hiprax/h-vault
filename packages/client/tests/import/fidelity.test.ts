@@ -200,3 +200,74 @@ describe('import fidelity clamp — cards, identities and notes', () => {
     assertRoundTrips('note', item.data);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Backup codes
+//
+// Recovery codes sit on the PASSWORD side of the "may this be copied into notes"
+// line, not the custom-field side: `notes` is written verbatim into the Chrome CSV
+// `note` column, so folding an over-cap code in would leak it into the very export
+// whose loss note promises the codes are absent.
+// ---------------------------------------------------------------------------
+
+describe('backup codes on import', () => {
+  it('keeps the codes, de-duplicated and in order', () => {
+    const item = buildLogin({
+      username: 'u',
+      password: 'p',
+      backupCodes: ['aaaa-1111', 'bbbb-2222', 'aaaa-1111'],
+    });
+    expect(item.data.backupCodes).toEqual(['aaaa-1111', 'bbbb-2222']);
+    assertRoundTrips('login', item.data);
+  });
+
+  it('trims each code and drops blank and nullish entries', () => {
+    const item = buildLogin({
+      username: 'u',
+      password: 'p',
+      backupCodes: ['  aaaa-1111  ', '', '   ', null, undefined, 'bbbb-2222'],
+    });
+    expect(item.data.backupCodes).toEqual(['aaaa-1111', 'bbbb-2222']);
+  });
+
+  it('omits the key entirely when there are no codes', () => {
+    const item = buildLogin({ username: 'u', password: 'p' });
+    expect('backupCodes' in item.data).toBe(false);
+    assertRoundTrips('login', item.data);
+  });
+
+  it('clamps an over-long code to the schema bound rather than sinking the item', () => {
+    const item = buildLogin({ username: 'u', password: 'p', backupCodes: ['c'.repeat(400)] });
+    expect((item.data.backupCodes as string[])[0]).toHaveLength(128);
+    assertRoundTrips('login', item.data);
+  });
+
+  it('keeps 50 codes, counts the rest, and never writes their values into notes', () => {
+    const many = Array.from({ length: 60 }, (_, i) => `code-${i}`);
+    const item = buildLogin({ username: 'u', password: 'p', backupCodes: many });
+    expect(item.data.backupCodes).toHaveLength(50);
+    const notes = String(item.data.notes ?? '');
+    expect(notes).toContain('10 additional backup code(s) not imported.');
+    // A COUNT, never the values.
+    expect(notes).not.toContain('code-55');
+    assertRoundTrips('login', item.data);
+  });
+
+  it('survives encryption at the maximum on every bound', async () => {
+    // The guard against a permanently read-only item: the largest login the importer
+    // can build must still validate and seal.
+    const item = buildLogin({
+      username: 'u'.repeat(500),
+      password: 'p'.repeat(10_000),
+      backupCodes: Array.from({ length: 50 }, () => 'c'.repeat(128)),
+    });
+    assertRoundTrips('login', item.data);
+    const { inserts, failedCount: skipped } = await buildImportOperations({
+      inserts: [item],
+      updates: [],
+      vaultKey,
+    });
+    expect(skipped).toBe(0);
+    expect(inserts).toHaveLength(1);
+  });
+});

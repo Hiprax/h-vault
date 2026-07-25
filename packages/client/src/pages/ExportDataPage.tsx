@@ -6,7 +6,7 @@
  * (`/settings/export-data`), its own entry-point card in Settings, and its own
  * warnings, and it shares NO control, dialog, or code path with the encrypted
  * `.enc` export. The reason is a safety one: this feature intentionally produces
- * UNENCRYPTED plaintext — every password, TOTP secret, card number and note — so
+ * UNENCRYPTED plaintext — every password, TOTP secret, backup code, card number and
  * a user can migrate to another password manager. Mixing it into the everyday
  * backup/restore UI would invite someone to pick the wrong option and hand out
  * their entire vault in the clear. The whole page is the warning surface.
@@ -237,7 +237,8 @@ export default function ExportDataPage() {
         </p>
         <ul className="list-disc space-y-1 pl-5">
           <li>
-            It contains <strong>every password, TOTP secret, card number, and note</strong> in your
+            It contains{' '}
+            <strong>every password, TOTP secret, backup code, card number, and note</strong> in your
             vault, readable by anyone who opens the file.
           </li>
           <li>
@@ -389,7 +390,7 @@ export default function ExportDataPage() {
               You are about to download <strong>{confirm?.exportCount ?? 0}</strong> item
               {confirm?.exportCount === 1 ? '' : 's'} as <strong>{confirm?.label ?? ''}</strong>.
               The file is <strong>unencrypted plaintext</strong> containing every password, TOTP
-              secret and card number.
+              secret, backup code and card number.
             </DialogDescription>
           </DialogHeader>
           <ul className="list-disc space-y-1 pl-5 text-sm text-[hsl(var(--foreground))]">

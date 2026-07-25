@@ -43,6 +43,7 @@ import type {
   PortableCustomField,
   PortablePasswordHistoryEntry,
 } from '../portableItem.js';
+import { BACKUP_CODES_FIELD_NAME } from '../portableItem.js';
 
 /** Numeric item-type codes, exactly as Bitwarden's importer expects. */
 function typeCode(type: ItemType): number {
@@ -184,6 +185,24 @@ function mapFields(customFields?: PortableCustomField[]): BitwardenField[] | und
   }));
 }
 
+/**
+ * A login's recovery codes as a HIDDEN custom field.
+ *
+ * The round trip is asymmetric by design: re-importing returns them as a hidden
+ * custom field, not as `backupCodes`, because hoisting on a name match would
+ * misfire on a user's own similarly-named field.
+ */
+function backupCodesField(p: PortableItem): BitwardenField | undefined {
+  if (p.type !== 'login' || p.backupCodes === undefined || p.backupCodes.length === 0) {
+    return undefined;
+  }
+  return {
+    name: BACKUP_CODES_FIELD_NAME,
+    value: p.backupCodes.join('\n'),
+    type: FIELD_TYPE_CODE.hidden,
+  };
+}
+
 function mapPasswordHistory(
   history?: PortablePasswordHistoryEntry[],
 ): BitwardenPasswordHistoryEntry[] | undefined {
@@ -312,8 +331,15 @@ export function toBitwardenJson(portable: readonly PortableItem[]): {
       }
     }
 
-    const fields = mapFields(p.customFields);
-    if (fields) item.fields = fields;
+    // Recovery codes go FIRST. `clampCustomFields` on the way back in summarises
+    // anything past the 100-field cap into notes, and of everything competing for
+    // those slots the recovery codes are what must not be demoted to prose.
+    const codesField = backupCodesField(p);
+    const fields = [
+      ...(codesField === undefined ? [] : [codesField]),
+      ...(mapFields(p.customFields) ?? []),
+    ];
+    if (fields.length > 0) item.fields = fields;
     const passwordHistory = mapPasswordHistory(p.passwordHistory);
     if (passwordHistory) item.passwordHistory = passwordHistory;
 

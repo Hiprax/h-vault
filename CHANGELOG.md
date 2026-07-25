@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **A login can now store the 2FA recovery codes for the account it unlocks.** Every login item has an optional list of backup codes, kept inside the same encrypted blob as its password, so the server never sees them. Each code is masked until you reveal it, has its own copy button, and has its own delete button for the moment you burn one; deleting from the item saves immediately and offers an Undo, and the section warns you when three or fewer are left. Pasting a provider's block works however the provider gave it to you: a JSON array, comma-separated, space-separated, one code per line, or a single code. The format is detected for you and reported ("Detected: one per line, 10 codes found"), and you can pin a specific format to have the paste checked strictly against it. A paste that is not accepted says exactly what is wrong, where, and what to do about it — a stray trailing comma, an item that still has a space in it, a missing closing quote or bracket — pointing at the offending character on the line it is on. Duplicates, and anything over the 50-code limit, are reported rather than silently dropped, and the codes never appear in the vault list. Codes can also be downloaded from an item as a plain text file, behind a confirmation that says the file is not encrypted.
+- Importing a generic CSV can now map a column of recovery codes onto the new field; the cell is read with the same format detection the item form uses, and a cell that is not a list of codes contributes nothing rather than storing junk. No other import format carries a recovery-codes column, so nothing is guessed.
+- The portable plaintext export now carries a login's recovery codes wherever the target format has room for them: **Bitwarden JSON** as a hidden custom field, and **Bitwarden CSV** inside the `fields` column (which the importer folds into the item's notes). **Chrome/Edge CSV** has no column for them and drops them, which each format's "what this loses" note now states. Encrypted backups, restores and vault-key rotation carry the codes through untouched, as they do every other field. As with every other field, an `overwrite` import replaces a matched item's content wholesale, so recovery codes the imported file does not carry are lost; the confirmation prompt now says so before anything is sent.
+
+### Fixed
+
+- A generic-CSV column whose header mentioned both two-factor authentication and recovery codes, such as `2FA recovery codes`, was automatically mapped to the TOTP Secret field. The codes then landed in the login's TOTP field, where they were truncated at 500 characters and displayed as though they were an authenticator seed. Such a column now maps to the new backup-codes field instead, and a column that merely mentions backups (`Backup email`) is left alone. Every mapping remains overridable in the column-mapping step.
+
 ## [0.5.1] - 2026-07-25
 
 ### Changed

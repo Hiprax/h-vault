@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { VaultItemForm } from '../src/components/vault/VaultItemForm';
+import { VaultItemForm, sanitizeBackupCodes } from '../src/components/vault/VaultItemForm';
 import { EncryptedFieldTooLargeError, type DecryptedVaultItem } from '../src/stores/vaultStore';
 
 // ---------------------------------------------------------------------------
@@ -827,5 +827,157 @@ describe('VaultItemForm — update and error handling', () => {
     await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
     expect(mockCreateItem.mock.calls[0]![0]).toBe('login');
     expect(createdData().username).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Backup codes — payload level
+// ---------------------------------------------------------------------------
+
+describe('VaultItemForm — login backup codes', () => {
+  const CODES = ['AAAA-1111', 'BBBB-2222', 'CCCC-3333'];
+
+  function loginItem(data: Record<string, unknown>): DecryptedVaultItem {
+    return asItem({
+      id: 'item-1',
+      itemType: 'login',
+      name: 'GitHub',
+      tags: [],
+      favorite: false,
+      data: { username: 'octocat', password: 'p', uris: [], customFields: [], ...data },
+      _raw: {},
+    });
+  }
+
+  function openSection() {
+    fireEvent.click(screen.getByRole('button', { name: '+ Add backup codes' }));
+  }
+
+  it('sends the pasted codes on the login payload', async () => {
+    renderForm();
+    typeIn('Item name', 'GitHub');
+    openSection();
+    typeIn('Paste your backup codes', 'AAAA-1111\nBBBB-2222');
+    fireEvent.click(screen.getByRole('button', { name: 'Add codes' }));
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect(createdData().backupCodes).toEqual(['AAAA-1111', 'BBBB-2222']);
+  });
+
+  it('omits the key entirely when the section was never opened', async () => {
+    renderForm();
+    typeIn('Item name', 'GitHub');
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    // Absent, not `[]` and not `undefined`: an untouched login's ciphertext stays
+    // byte-identical to what it was before this field existed.
+    expect('backupCodes' in createdData()).toBe(false);
+  });
+
+  it('omits the key entirely when every code was deleted before saving', async () => {
+    renderForm();
+    typeIn('Item name', 'GitHub');
+    openSection();
+    typeIn('Paste your backup codes', 'AAAA-1111 BBBB-2222');
+    fireEvent.click(screen.getByRole('button', { name: 'Add codes' }));
+    fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    fireEvent.click(screen.getByLabelText('Remove backup code 1'));
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect('backupCodes' in createdData()).toBe(false);
+  });
+
+  it('keeps the stored codes on an update that never touches the section', async () => {
+    // The highest-value case here. zodResolver hands `onSubmit` the PARSED values, so
+    // if the form schema did not declare `backupCodes` this update would silently
+    // destroy every stored code.
+    renderForm({ item: loginItem({ backupCodes: CODES }) });
+    submit('Update');
+
+    await waitFor(() => expect(mockUpdateItem).toHaveBeenCalledTimes(1));
+    const data = mockUpdateItem.mock.calls[0]![2] as Record<string, unknown>;
+    expect(data.backupCodes).toEqual(CODES);
+  });
+
+  it('opens the section already expanded when the login being edited has codes', () => {
+    renderForm({ item: loginItem({ backupCodes: CODES }) });
+    expect(screen.getByRole('list', { name: 'Backup codes' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '+ Add backup codes' })).toBeNull();
+  });
+
+  it('keeps the section collapsed when the login being edited has none', () => {
+    renderForm({ item: loginItem({}) });
+    expect(screen.getByRole('button', { name: '+ Add backup codes' })).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Backup codes' })).toBeNull();
+  });
+
+  it('drops the codes from the payload when the section is removed', async () => {
+    // Collapsing alone would hide codes that would still be saved.
+    renderForm({ item: loginItem({ backupCodes: CODES }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    submit('Update');
+
+    await waitFor(() => expect(mockUpdateItem).toHaveBeenCalledTimes(1));
+    const data = mockUpdateItem.mock.calls[0]![2] as Record<string, unknown>;
+    expect('backupCodes' in data).toBe(false);
+  });
+
+  it('returns focus to the add link after the empty section is removed', () => {
+    renderForm();
+    openSection();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '+ Add backup codes' }));
+  });
+
+  it('offers no backup-codes section for a non-login type', () => {
+    renderForm();
+    const tablist = screen.getByRole('tablist', { name: 'Item type' });
+    fireEvent.click(within(tablist).getByRole('tab', { name: 'Secret' }));
+    expect(screen.queryByRole('button', { name: '+ Add backup codes' })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeBackupCodes — the last line of defence
+//
+// Unreachable through the editor by design (it refuses anything out of bounds), so
+// its bounds are driven directly. A stored value the shared schema rejects would
+// make the detail view replace the WHOLE item with the "could not be decoded"
+// notice, costing the user UI access to a working account's password.
+// ---------------------------------------------------------------------------
+
+describe('sanitizeBackupCodes', () => {
+  it('passes valid codes through untouched', () => {
+    expect(sanitizeBackupCodes(['AAAA-1111', 'BBBB-2222'])).toEqual(['AAAA-1111', 'BBBB-2222']);
+  });
+
+  it('drops empty entries', () => {
+    expect(sanitizeBackupCodes(['AAAA-1111', ''])).toEqual(['AAAA-1111']);
+  });
+
+  it('drops a code longer than the schema allows', () => {
+    expect(sanitizeBackupCodes(['AAAA-1111', 'a'.repeat(129)])).toEqual(['AAAA-1111']);
+  });
+
+  it('keeps a code at exactly the length limit', () => {
+    expect(sanitizeBackupCodes(['a'.repeat(128)])).toHaveLength(1);
+  });
+
+  it('caps the list at the schema maximum', () => {
+    expect(sanitizeBackupCodes(Array.from({ length: 60 }, (_, i) => `c${i}`))).toHaveLength(50);
+  });
+
+  it('drops non-string entries', () => {
+    expect(sanitizeBackupCodes(['AAAA-1111', 42, null, undefined, {}])).toEqual(['AAAA-1111']);
+  });
+
+  it('returns an empty list for anything that is not an array', () => {
+    expect(sanitizeBackupCodes(undefined)).toEqual([]);
+    expect(sanitizeBackupCodes('AAAA-1111')).toEqual([]);
   });
 });

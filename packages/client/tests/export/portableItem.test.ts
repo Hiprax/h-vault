@@ -406,3 +406,40 @@ describe('toPortableItems — password history', () => {
     expect(portable[0]?.passwordHistory).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Backup codes
+//
+// A login's recovery codes must survive the flattening step or the plaintext
+// export loses them with nothing to report: `omittedCount` counts whole ITEMS, so
+// a dropped field is invisible in the numeric summary.
+// ---------------------------------------------------------------------------
+
+describe('toPortableItems — login backup codes', () => {
+  const base = { username: 'alice', password: 's3cret', uris: [], customFields: [] };
+
+  it('carries the codes on the record and NOT on the login sub-object', async () => {
+    // `login` is a closed shape asserted elsewhere with an exact toEqual, so the
+    // field belongs on the record.
+    const item = mkItem('login', { ...base, backupCodes: ['aaaa-1111', 'bbbb-2222'] });
+    const { portable } = await run([item]);
+    expect(portable[0]?.backupCodes).toEqual(['aaaa-1111', 'bbbb-2222']);
+    expect(portable[0]?.login).toEqual({ username: 'alice', password: 's3cret' });
+  });
+
+  it('leaves the field absent for a login with no codes', async () => {
+    const { portable } = await run([mkItem('login', base)]);
+    expect(portable[0]?.backupCodes).toBeUndefined();
+  });
+
+  it('leaves the field absent for an empty list rather than emitting []', async () => {
+    const { portable } = await run([mkItem('login', { ...base, backupCodes: [] })]);
+    expect(portable[0]?.backupCodes).toBeUndefined();
+  });
+
+  it('emits a copy, never the decrypted array the store still holds', async () => {
+    const codes = ['aaaa-1111'];
+    const { portable } = await run([mkItem('login', { ...base, backupCodes: codes })]);
+    expect(portable[0]?.backupCodes).not.toBe(codes);
+  });
+});

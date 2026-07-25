@@ -132,3 +132,73 @@ describe('Generic CSV with column mapping', () => {
     expect(items[0]?.tags).toEqual(['Finance']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Generic CSV: the 2FA recovery-codes target
+// ---------------------------------------------------------------------------
+
+describe('generic CSV backup-codes mapping', () => {
+  it('splits a mapped cell into individual codes', () => {
+    const csv = 'Site,User,Secret,Recovery\nGitHub,alice,pw,"aaaa-1111 bbbb-2222 cccc-3333"';
+    const { items } = parseImportData('csv', csv, {
+      Site: 'name',
+      User: 'username',
+      Secret: 'password',
+      Recovery: 'backupCodes',
+    });
+    expect(items[0]?.data.backupCodes).toEqual(['aaaa-1111', 'bbbb-2222', 'cccc-3333']);
+  });
+
+  it('reads a comma-separated cell', () => {
+    const csv = 'Site,Recovery\nGitHub,"aaaa-1111, bbbb-2222"';
+    const { items } = parseImportData('csv', csv, { Site: 'name', Recovery: 'backupCodes' });
+    expect(items[0]?.data.backupCodes).toEqual(['aaaa-1111', 'bbbb-2222']);
+  });
+
+  it('reads a multi-line quoted cell', () => {
+    const csv = 'Site,Recovery\nGitHub,"aaaa-1111\nbbbb-2222"';
+    const { items } = parseImportData('csv', csv, { Site: 'name', Recovery: 'backupCodes' });
+    expect(items[0]?.data.backupCodes).toEqual(['aaaa-1111', 'bbbb-2222']);
+  });
+
+  it('stores nothing at all when the cell is not a code list', () => {
+    // Better to leave a security-critical list empty than to fill it with junk.
+    const csv = 'Site,Recovery\nGitHub,"stored on paper; ask Bob!"';
+    const { items } = parseImportData('csv', csv, { Site: 'name', Recovery: 'backupCodes' });
+    expect(items).toHaveLength(1);
+    expect('backupCodes' in (items[0]?.data ?? {})).toBe(false);
+  });
+
+  it('reports an unreadable cell in the notes rather than dropping it in silence', () => {
+    // An import that says it succeeded while quietly discarding every recovery code
+    // is the worst outcome; `omittedCount` counts whole items and can never say it.
+    const csv = 'Site,Recovery\nGitHub,"stored on paper; ask Bob!"';
+    const { items } = parseImportData('csv', csv, { Site: 'name', Recovery: 'backupCodes' });
+    const notes = String(items[0]?.data.notes ?? '');
+    expect(notes).toContain('could not be read as a list of codes');
+    // The note names no cell content, so it is safe everywhere notes travel.
+    expect(notes).not.toContain('ask Bob');
+  });
+
+  it('says nothing extra when the cell parsed cleanly', () => {
+    const csv = 'Site,Recovery\nGitHub,"aaaa-1111 bbbb-2222"';
+    const { items } = parseImportData('csv', csv, { Site: 'name', Recovery: 'backupCodes' });
+    expect('notes' in (items[0]?.data ?? {})).toBe(false);
+  });
+
+  it('cannot tell bare prose from codes, which is why the form previews the count', () => {
+    // A known and documented limit of any character-class rule: every word here is a
+    // structurally valid code. The import UI's mapping preview and the item form's
+    // "N codes found" count are what surface this, not the parser.
+    const csv = 'Site,Recovery\nGitHub,"ask Bob"';
+    const { items } = parseImportData('csv', csv, { Site: 'name', Recovery: 'backupCodes' });
+    expect(items[0]?.data.backupCodes).toEqual(['ask', 'Bob']);
+  });
+
+  it('ignores the column when it is not mapped', () => {
+    const csv = 'Site,Recovery\nGitHub,aaaa-1111';
+    const { items } = parseImportData('csv', csv, { Site: 'name' });
+    expect(items).toHaveLength(1);
+    expect('backupCodes' in (items[0]?.data ?? {})).toBe(false);
+  });
+});

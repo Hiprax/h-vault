@@ -62,21 +62,21 @@ const FORMAT_META: Record<PortableExportFormat, Omit<PortableExportFormatMeta, '
     extension: 'json',
     mimeType: 'application/json',
     lossNote:
-      'Carries every item type. Folder paths re-import as tags, and some Bitwarden imports drop password history.',
+      'Carries every item type. Folder paths re-import as tags, a login’s backup codes travel as a hidden custom field, and some Bitwarden imports drop password history.',
   },
   'bitwarden-csv': {
     label: 'Bitwarden (.csv)',
     extension: 'csv',
     mimeType: 'text/csv',
     lossNote:
-      'Logins and secure notes only — cards, identities and secrets are omitted. Folder paths re-import as tags.',
+      'Logins and secure notes only — cards, identities and secrets are omitted. Folder paths re-import as tags, and backup codes arrive as text in the notes.',
   },
   'chrome-csv': {
     label: 'Chrome / Edge (.csv)',
     extension: 'csv',
     mimeType: 'text/csv',
     lossNote:
-      'Logins only — every other item type is omitted, and each login loses its TOTP secret, custom fields and folder.',
+      'Logins only — every other item type is omitted, and each login loses its TOTP secret, backup codes, custom fields and folder.',
   },
 };
 

@@ -76,6 +76,16 @@ describe('PORTABLE_EXPORT_FORMATS — registry shape', () => {
     }
   });
 
+  it('every loss note says what happens to a login backup codes', () => {
+    // The loss note is the ONLY channel for a dropped or transformed FIELD:
+    // `omittedCount` counts whole items, so a Chrome CSV that silently loses every
+    // recovery code reports the same numbers as one that carries them. A
+    // non-empty-string assertion alone would let a future edit delete the warning.
+    for (const meta of PORTABLE_EXPORT_FORMATS) {
+      expect(meta.lossNote, `lossNote for ${meta.value}`).toMatch(/backup codes/i);
+    }
+  });
+
   it('maps each format to the expected extension and MIME type', () => {
     const byValue = new Map(PORTABLE_EXPORT_FORMATS.map((f) => [f.value, f]));
     expect(byValue.get('bitwarden-json')).toMatchObject({

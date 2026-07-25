@@ -208,3 +208,30 @@ describe('toChromeCsv — omitted (non-login) types', () => {
     expect(parseImportData('chrome', content).items).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Backup codes are dropped, and must not leak through the note column
+// ---------------------------------------------------------------------------
+
+describe('toChromeCsv — login backup codes', () => {
+  it('drops the codes entirely and keeps the five-column shape', () => {
+    const login: PortableItem = {
+      type: 'login',
+      name: 'GitHub',
+      folderPath: '',
+      favorite: false,
+      notes: 'just a note',
+      tags: [],
+      login: { username: 'alice', password: 's3cret' },
+      uris: ['https://github.com'],
+      backupCodes: ['aaaa-1111', 'bbbb-2222'],
+    };
+    const { content } = toChromeCsv([login]);
+    expect(content.split('\r\n')[0]).toBe(CHROME_CSV_HEADER.join(','));
+    // Folding them into `note` would smuggle recovery secrets into the very file
+    // whose loss note promises they are absent.
+    expect(content).not.toContain('aaaa-1111');
+    expect(content).not.toContain('bbbb-2222');
+    expect(content).not.toContain('Backup Codes');
+  });
+});

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { parseImportData } from '../../src/services/import';
 import type { ParsedImportItem } from '../../src/services/import';
 import { toBitwardenJson } from '../../src/services/export/formats/bitwardenJson';
+import { BACKUP_CODES_FIELD_NAME } from '../../src/services/export/portableItem';
 import type { PortableItem } from '../../src/services/export/portableItem';
 
 /**
@@ -331,5 +332,72 @@ describe('toBitwardenJson — optional-field edges', () => {
     // Both items point at the same folder id.
     expect(doc.items[0]?.folderId).toBe(doc.items[1]?.folderId);
     expect(doc.items[0]?.folderId).toBe(doc.folders[0]?.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Backup codes ride in the fields array
+// ---------------------------------------------------------------------------
+
+describe('toBitwardenJson — login backup codes', () => {
+  function loginRecord(extra: Partial<PortableItem> = {}): PortableItem {
+    return {
+      type: 'login',
+      name: 'GitHub',
+      folderPath: '',
+      favorite: false,
+      notes: '',
+      tags: [],
+      login: { username: 'alice', password: 's3cret' },
+      ...extra,
+    };
+  }
+
+  function itemsOf(content: string): Record<string, unknown>[] {
+    return (JSON.parse(content) as { items: Record<string, unknown>[] }).items;
+  }
+
+  it('emits the codes as one hidden field, newline-joined', () => {
+    const { content } = toBitwardenJson([loginRecord({ backupCodes: ['aaaa-1111', 'bbbb-2222'] })]);
+    const fields = itemsOf(content)[0]?.fields as { name: string; value: string; type: number }[];
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toEqual({
+      name: BACKUP_CODES_FIELD_NAME,
+      value: 'aaaa-1111\nbbbb-2222',
+      type: 1,
+    });
+  });
+
+  it('puts the codes FIRST, ahead of the item own custom fields', () => {
+    // On the way back in, anything past the 100-field cap is summarised into notes.
+    // Of everything competing for those slots, the recovery codes must not be the
+    // ones demoted to prose.
+    const { content } = toBitwardenJson([
+      loginRecord({
+        backupCodes: ['aaaa-1111'],
+        customFields: [{ name: 'PIN', value: '1234', type: 'hidden' }],
+      }),
+    ]);
+    const fields = itemsOf(content)[0]?.fields as { name: string }[];
+    expect(fields.map((f) => f.name)).toEqual([BACKUP_CODES_FIELD_NAME, 'PIN']);
+  });
+
+  it('emits no fields array at all for a login with neither codes nor custom fields', () => {
+    const { content } = toBitwardenJson([loginRecord()]);
+    expect(itemsOf(content)[0]?.fields).toBeUndefined();
+  });
+
+  it('never emits a codes field for a non-login record', () => {
+    const note: PortableItem = {
+      type: 'note',
+      name: 'Note',
+      folderPath: '',
+      favorite: false,
+      notes: 'text',
+      tags: [],
+      backupCodes: ['aaaa-1111'],
+    };
+    const { content } = toBitwardenJson([note]);
+    expect(itemsOf(content)[0]?.fields).toBeUndefined();
   });
 });

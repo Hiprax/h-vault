@@ -1,4 +1,6 @@
 import {
+  MAX_LOGIN_BACKUP_CODES,
+  MAX_LOGIN_BACKUP_CODE_LENGTH,
   MAX_NOTE_CONTENT_LENGTH,
   MAX_TAG_LENGTH,
   MAX_TAGS_PER_ITEM,
@@ -24,7 +26,15 @@ const MAX_URIS_PER_ITEM = 100;
  * fails `vaultItemDataSchemas` and is discarded WHOLESALE — password included —
  * at the validation step. Clamp to these bounds instead and preserve the
  * overflow in the item's notes, so a single long field can never sink the item.
- * A `password` is the one exception: it is clamped but NEVER copied into notes.
+ * A `password` is the one exception: it is clamped but NEVER copied into notes,
+ * and a login's `backupCodes` join it there for the same reason (see
+ * {@link clampBackupCodes}).
+ *
+ * The literals below are literals only because the schema fields they mirror are;
+ * `backupCodes` has NAMED bounds, so `clampBackupCodes` imports
+ * `MAX_LOGIN_BACKUP_CODES`/`MAX_LOGIN_BACKUP_CODE_LENGTH` from the shared package
+ * rather than re-stating them here, which is strictly better and the direction to
+ * move the rest in.
  */
 const MAX_USERNAME_LENGTH = 500; // loginDataSchema.username
 const MAX_PASSWORD_LENGTH = 10_000; // loginDataSchema.password
@@ -181,6 +191,46 @@ export function clampCustomFields(raw: readonly unknown[]): {
 }
 
 /**
+ * Clamp a login's 2FA recovery codes to the bounds `loginDataSchema` will accept
+ * on read-back: trim each, drop the empties, de-duplicate while preserving order,
+ * clamp each to {@link MAX_LOGIN_BACKUP_CODE_LENGTH} and keep at most
+ * {@link MAX_LOGIN_BACKUP_CODES}.
+ *
+ * Anything dropped is reported as a COUNT and never as a value, which is the one
+ * place this differs from {@link clampCustomFields}. Recovery codes sit on the
+ * `password` side of the line drawn at the top of this file: notes are written
+ * verbatim into the Chrome CSV `note` column, so folding the values in would leak
+ * them into the very export whose loss note promises they are absent.
+ *
+ * Exported so both arms are unit-tested directly.
+ */
+export function clampBackupCodes(raw: readonly (string | undefined | null)[]): {
+  codes: string[];
+  overflow: string[];
+} {
+  const codes: string[] = [];
+  const overflow: string[] = [];
+  const seen = new Set<string>();
+  let notImported = 0;
+
+  for (const entry of raw) {
+    const value = (entry ?? '').trim().slice(0, MAX_LOGIN_BACKUP_CODE_LENGTH);
+    if (!value || seen.has(value)) continue;
+    if (codes.length >= MAX_LOGIN_BACKUP_CODES) {
+      notImported += 1;
+      continue;
+    }
+    seen.add(value);
+    codes.push(value);
+  }
+
+  if (notImported > 0) {
+    overflow.push(`${String(notImported)} additional backup code(s) not imported.`);
+  }
+  return { codes, overflow };
+}
+
+/**
  * Assemble the final notes for an item from its base notes plus any preserved
  * overflow, clamping the result to {@link MAX_NOTE_CONTENT_LENGTH} LAST — notes
  * are the sink for every other field's overflow, so if the accumulated text
@@ -203,6 +253,8 @@ export interface LoginInput {
   password?: string;
   urls?: (string | undefined | null)[];
   totp?: string;
+  /** 2FA recovery codes, already split into individual codes by the parser. */
+  backupCodes?: (string | undefined | null)[];
   notes?: string;
   // `value` is deliberately `unknown`: a source export may put a number (or null)
   // in a custom field, and {@link toFieldValue} coerces it rather than letting it
@@ -254,9 +306,13 @@ export function buildLogin(input: LoginInput): ParsedImportItem {
   );
   overflow.push(...fieldOverflow);
 
+  const { codes: backupCodes, overflow: codeOverflow } = clampBackupCodes(input.backupCodes ?? []);
+  overflow.push(...codeOverflow);
+
   const data: Record<string, unknown> = { username, password, uris };
   const totp = (input.totp ?? '').trim().slice(0, MAX_TOTP_LENGTH);
   if (totp) data.totp = totp;
+  if (backupCodes.length > 0) data.backupCodes = backupCodes;
   if (customFields.length > 0) data.customFields = customFields;
 
   const notes = assembleNotes(input.notes ?? '', overflow);

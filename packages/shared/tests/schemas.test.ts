@@ -1012,6 +1012,31 @@ describe('loginDataSchema', () => {
     }
   });
 
+  it('leaves backupCodes absent rather than defaulting it to an empty array', () => {
+    // Deliberately `.optional()` with no `.default([])`, unlike uris/customFields:
+    // a default is what makes the detail view dereference an absent array on an
+    // invalid payload, it would inject `backupCodes: []` into every existing
+    // login's parsed data, and it turns a correct runtime guard into a
+    // lint-flagged redundant condition.
+    expect(loginDataSchema.parse({})).not.toHaveProperty('backupCodes');
+  });
+
+  it('preserves backup-code order and case exactly', () => {
+    const backupCodes = ['ABCd-1234', 'abcd-1234', 'zzz'];
+    expect(loginDataSchema.parse({ backupCodes }).backupCodes).toEqual(backupCodes);
+  });
+
+  it('accepts stored backup codes that the input parser would reject', () => {
+    // The STORED schema is intentionally permissive. It runs on every decrypt, and
+    // a failure degrades the whole item to the undecodable notice, taking UI access
+    // to the password with it. Every value here is rejected at INPUT time by
+    // parseBackupCodes; none of them may sink a stored item.
+    const result = loginDataSchema.safeParse({
+      backupCodes: ['has a space', '', 'has,comma', '["quoted"]', '---'],
+    });
+    expect(result.success).toBe(true);
+  });
+
   it('accepts URIs with http, https, and mailto protocols', () => {
     const validUris = ['https://example.com', 'http://localhost:3000', 'mailto:user@example.com'];
     for (const uri of validUris) {
@@ -1561,12 +1586,24 @@ describe('decrypted data schema max-length constraints', () => {
       expect(loginDataSchema.safeParse({ notes: 'a'.repeat(50_001) }).success).toBe(false);
     });
 
+    it('accepts a backup code of exactly 128 chars and rejects 129', () => {
+      expect(loginDataSchema.safeParse({ backupCodes: ['a'.repeat(128)] }).success).toBe(true);
+      expect(loginDataSchema.safeParse({ backupCodes: ['a'.repeat(129)] }).success).toBe(false);
+    });
+
+    it('accepts exactly 50 backup codes and rejects 51', () => {
+      const fifty = Array.from({ length: 50 }, (_, i) => `code${i}`);
+      expect(loginDataSchema.safeParse({ backupCodes: fifty }).success).toBe(true);
+      expect(loginDataSchema.safeParse({ backupCodes: [...fifty, 'extra'] }).success).toBe(false);
+    });
+
     it('accepts values at the limit', () => {
       const result = loginDataSchema.safeParse({
         username: 'a'.repeat(500),
         password: 'a'.repeat(10_000),
         totp: 'a'.repeat(500),
         notes: 'a'.repeat(50_000),
+        backupCodes: Array.from({ length: 50 }, () => 'a'.repeat(128)),
       });
       expect(result.success).toBe(true);
     });

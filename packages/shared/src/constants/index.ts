@@ -48,6 +48,26 @@ export const MAX_ENCRYPTED_NAME_LENGTH = 1_000;
 export const MAX_ENCRYPTED_DATA_LENGTH = 500_000;
 export const MAX_NOTE_CONTENT_LENGTH = 50_000;
 export const MAX_RESTORE_DATA_LENGTH = 26_214_400;
+
+// Bounds for a LOGIN ITEM's `backupCodes`: the 2FA recovery codes issued by the
+// THIRD-PARTY account that login belongs to. Unrelated to BACKUP_CODES_COUNT
+// above, which is how many codes H-Vault mints for its OWN account-level 2FA.
+//
+// 50 codes: real sets are far smaller (Google issues 10, GitHub 16, Microsoft a
+// single recovery key), so 50 covers several regenerated batches kept side by
+// side and is never the binding limit, while still refusing a pasted document.
+// 128 chars: errs generous on purpose. A cap that is too small rejects a real
+// code, which costs the user their account recovery; a cap that is too large
+// costs only bytes. 128 clears every shape in the wild — a 25-char Microsoft
+// recovery key, a 40-char 1Password Secret Key, the 88-char base64 of a 64-byte
+// key — with room to spare.
+export const MAX_LOGIN_BACKUP_CODES = 50;
+export const MAX_LOGIN_BACKUP_CODE_LENGTH = 128;
+// Ceiling on the RAW text the backup-code parser will tokenize. The worst
+// legitimate paste is MAX_LOGIN_BACKUP_CODES * (MAX_LOGIN_BACKUP_CODE_LENGTH + 6)
+// once array quoting is counted, so this leaves roughly 3x headroom; past it the
+// parser rejects in constant time instead of scanning a whole pasted page.
+export const MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH = 20_000;
 // Per-request byte budget the CLIENT batches an import against. It is a client
 // convention, not a server bound: the structured `operations` body is bounded
 // server-side by the global 2 MB body parser and by MAX_IMPORT_ITEMS.

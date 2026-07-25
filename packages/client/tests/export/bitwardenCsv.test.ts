@@ -199,3 +199,50 @@ describe('toBitwardenCsv — omitted types', () => {
     expect(parseImportData('bitwarden', content).items).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Backup codes ride in the fields cell
+// ---------------------------------------------------------------------------
+
+describe('toBitwardenCsv — login backup codes', () => {
+  function loginRecord(extra: Partial<PortableItem> = {}): PortableItem {
+    return {
+      type: 'login',
+      name: 'GitHub',
+      folderPath: '',
+      favorite: false,
+      notes: '',
+      tags: [],
+      login: { username: 'alice', password: 's3cret' },
+      ...extra,
+    };
+  }
+
+  it('joins the codes with a comma and space, not a newline', () => {
+    // The blob already uses a newline BETWEEN fields, so a multi-line value would
+    // make the cell ambiguous for any consumer that splits on it.
+    const { content } = toBitwardenCsv([loginRecord({ backupCodes: ['aaaa-1111', 'bbbb-2222'] })]);
+    expect(content).toContain('Backup Codes: aaaa-1111, bbbb-2222');
+  });
+
+  it('puts the codes ahead of the item own custom fields in the cell', () => {
+    const { content } = toBitwardenCsv([
+      loginRecord({
+        backupCodes: ['aaaa-1111'],
+        customFields: [{ name: 'PIN', value: '1234', type: 'hidden' }],
+      }),
+    ]);
+    expect(content.indexOf('Backup Codes:')).toBeLessThan(content.indexOf('PIN:'));
+  });
+
+  it('leaves the column count and header untouched', () => {
+    const { content } = toBitwardenCsv([loginRecord({ backupCodes: ['aaaa-1111'] })]);
+    // RFC 4180 line endings, so split on CRLF as the header test above does.
+    expect(content.split('\r\n')[0]).toBe(BITWARDEN_CSV_HEADER.join(','));
+  });
+
+  it('writes an empty fields cell for a login with neither codes nor custom fields', () => {
+    const { content } = toBitwardenCsv([loginRecord()]);
+    expect(content).not.toContain('Backup Codes');
+  });
+});

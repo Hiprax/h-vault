@@ -63,6 +63,12 @@ function parseBitwardenJson(text: string): ParsedImportItem[] {
         const uris = Array.isArray(login.uris)
           ? (login.uris as ({ uri?: string } | undefined)[]).map((u) => str(u?.uri)).filter(Boolean)
           : [];
+        // A `fields` entry named "Backup Codes" (which this repo's own Bitwarden
+        // export emits) is deliberately NOT hoisted back into `backupCodes`. The
+        // costs are asymmetric: a wrong hoist would run a user's own free-text
+        // field through a code parser and litter a security-critical list with
+        // junk, whereas a missed hoist leaves the data fully visible as a hidden
+        // custom field. Promoting it is the user's explicit call, not a guess.
         items.push(
           buildLogin({
             name,

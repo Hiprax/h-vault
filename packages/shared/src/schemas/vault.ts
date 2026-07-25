@@ -11,6 +11,8 @@ import {
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_ENCRYPTED_DATA_LENGTH,
   MAX_NOTE_CONTENT_LENGTH,
+  MAX_LOGIN_BACKUP_CODES,
+  MAX_LOGIN_BACKUP_CODE_LENGTH,
 } from '../constants/index.js';
 import type { ItemType } from '../constants/index.js';
 import { normalizeUri } from '../utils/index.js';
@@ -268,6 +270,34 @@ export const loginDataSchema = z
     password: z.string().max(10_000).optional().default(''),
     uris: z.array(uriEntrySchema).max(100).optional().default([]),
     totp: z.string().max(500).optional(),
+    // 2FA recovery codes for the THIRD-PARTY account this login belongs to — not
+    // this vault's own account-level codes (see BACKUP_CODES_COUNT).
+    //
+    // Deliberately PERMISSIVE: length caps only. No charset rule, no `.min(1)`,
+    // no `.transform()` and no `.catch()`. This schema runs on every DECRYPT
+    // (`vaultStore.decryptItem`), and a failure there stamps `_validationError`
+    // on the item, which `isUndecodableData` degrades to the read-only "could not
+    // be fully decoded" notice — so one odd code would cost the user UI access to
+    // the item's PASSWORD. Format strictness therefore lives at INPUT time, in
+    // `parseBackupCodes` (utils/backupCodes.ts), the same split that already
+    // strips blank custom-field names in `VaultItemForm`.
+    //
+    // `.transform()` is banned because it is the exact mechanism of the old
+    // `uris` bug: a transform that GROWS the value after the length check stored
+    // an over-cap value that then failed on decrypt (see `clampUri`). `.catch()`
+    // is banned because it is the opposite of fail-soft: `_validationError`
+    // preserves the ciphertext, whereas a `.catch([])` would show a normal,
+    // editable login whose next save destroys the codes for good.
+    //
+    // `.optional()` with NO `.default([])`, unlike `uris`/`customFields`: a
+    // default is what makes the type views dereference an absent array and throw
+    // (see the UndecodableNotice docblock), it would inject `backupCodes: []` into
+    // every existing login's parsed data, and it turns a correct defensive guard
+    // into a lint-flagged redundant condition.
+    backupCodes: z
+      .array(z.string().max(MAX_LOGIN_BACKUP_CODE_LENGTH))
+      .max(MAX_LOGIN_BACKUP_CODES)
+      .optional(),
     notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
     customFields: z.array(customFieldSchema).max(100).optional().default([]),
   })

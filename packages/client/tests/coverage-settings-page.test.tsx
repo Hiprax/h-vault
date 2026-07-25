@@ -889,6 +889,38 @@ describe('SettingsPage — error paths and branches', () => {
     expect(screen.queryByPlaceholderText('Paste exported data here...')).not.toBeInTheDocument();
   });
 
+  it('auto-maps a 2FA recovery-codes column to backup codes, not to the TOTP secret', async () => {
+    // Regression: the auto-map chain is if/else-if and the TOTP branch matches "2fa",
+    // so this header used to land in `totp`, where the codes were truncated at 500
+    // characters and rendered as though they were an authenticator seed.
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: 'Title,2FA recovery codes\nGithub,"aaaa-1111 bbbb-2222"' },
+    });
+
+    await waitFor(() => screen.getByText('Map CSV Columns'));
+    expect(screen.getByDisplayValue('2FA Recovery Codes')).toBeInTheDocument();
+    expect(screen.queryByDisplayValue('TOTP Secret')).toBeNull();
+  });
+
+  it('leaves a backup-email column alone rather than reading it as recovery codes', async () => {
+    // The guard requires BOTH a backup/recovery word AND "code", so it cannot steal a
+    // column that merely mentions backups.
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), { target: { value: 'csv' } });
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: 'Title,Backup email\nGithub,me@example.com' },
+    });
+
+    await waitFor(() => screen.getByText('Map CSV Columns'));
+    expect(screen.queryByDisplayValue('2FA Recovery Codes')).toBeNull();
+  });
+
   it('parses a CSV via column mapping, encrypts client-side, and sends encrypted items (never plaintext or a mapping)', async () => {
     mockImportVaultApi.mockResolvedValue({
       data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },

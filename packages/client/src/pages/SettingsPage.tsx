@@ -97,6 +97,10 @@ const HVAULT_FIELDS = [
   { value: 'url', label: 'URL' },
   { value: 'notes', label: 'Notes' },
   { value: 'totp', label: 'TOTP Secret' },
+  // Named "2FA Recovery Codes", not "Backup Codes": this same page already uses
+  // that phrase for the ACCOUNT's own 2FA recovery codes, which are a different
+  // thing entirely (server-side, bcrypt-hashed, for signing in to H-Vault).
+  { value: 'backupCodes', label: '2FA Recovery Codes' },
   { value: 'folder', label: 'Folder' },
 ];
 
@@ -482,7 +486,14 @@ export default function SettingsPage() {
       const mapping: Record<string, string> = {};
       for (const header of headers) {
         const lower = header.toLowerCase();
-        if (lower.includes('name') || lower.includes('title')) mapping[header] = 'name';
+        // FIRST in the chain, and it has to be: the TOTP branch below matches "2fa",
+        // so a column headed "2FA recovery codes" used to auto-map to the TOTP
+        // secret, where the codes were truncated at 500 characters and rendered as
+        // though they were an authenticator seed. Requiring BOTH a backup/recovery
+        // word AND "code" keeps it from stealing "Backup email" or a bare "Code".
+        if ((lower.includes('backup') || lower.includes('recovery')) && lower.includes('code'))
+          mapping[header] = 'backupCodes';
+        else if (lower.includes('name') || lower.includes('title')) mapping[header] = 'name';
         else if (lower.includes('user') || lower.includes('login')) mapping[header] = 'username';
         else if (lower.includes('pass')) mapping[header] = 'password';
         else if (lower.includes('url') || lower.includes('uri') || lower.includes('website'))
@@ -2404,7 +2415,8 @@ export default function SettingsPage() {
                   Export to another manager
                 </p>
                 <p className="text-xs text-[hsl(var(--muted-foreground))]">
-                  Produces a plaintext file with every password, TOTP secret and card number.
+                  Produces a plaintext file with every password, TOTP secret, backup code and card
+                  number.
                 </p>
               </div>
             </div>
@@ -2443,8 +2455,8 @@ export default function SettingsPage() {
             </li>
             <li>
               A matched item&apos;s content is replaced wholesale. Anything the imported file does
-              not carry — a TOTP secret, notes, custom fields — is <strong>lost</strong>, and only
-              the password is recoverable from history.
+              not carry — a TOTP secret, backup codes, notes, custom fields — is{' '}
+              <strong>lost</strong>, and only the password is recoverable from history.
             </li>
             <li>{importConfirm?.insertCount ?? 0} new items will be added.</li>
           </ul>

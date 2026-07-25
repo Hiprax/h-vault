@@ -22,6 +22,7 @@
 
 import { toCsv } from '../csvWriter.js';
 import type { PortableItem, PortableCustomField } from '../portableItem.js';
+import { BACKUP_CODES_FIELD_NAME } from '../portableItem.js';
 
 /**
  * The Bitwarden individual-vault CSV header, exact and ordered. Exported so a
@@ -45,10 +46,21 @@ export const BITWARDEN_CSV_HEADER = [
  * Render custom fields into Bitwarden's `fields` cell: one `name: value` line
  * per field. The importer folds this blob into the item's notes, so the exact
  * layout is not load-bearing — only that no field is silently dropped.
+ *
+ * A login's recovery codes ride in the same cell, FIRST (the JSON serializer
+ * explains why), joined with `, ` and not with newlines: the blob already uses a
+ * newline to separate one field from the next, so a multi-line value would make
+ * the cell ambiguous for any consumer that splits on it, real Bitwarden included.
+ * A code can never contain whitespace or a comma, so `, ` is unambiguous and the
+ * cell round-trips through the parser's comma format.
  */
-function fieldsBlob(customFields?: PortableCustomField[]): string {
-  if (!customFields || customFields.length === 0) return '';
-  return customFields.map((f) => `${f.name}: ${f.value}`).join('\n');
+function fieldsBlob(customFields?: PortableCustomField[], backupCodes?: string[]): string {
+  const lines: string[] = [];
+  if (backupCodes && backupCodes.length > 0) {
+    lines.push(`${BACKUP_CODES_FIELD_NAME}: ${backupCodes.join(', ')}`);
+  }
+  for (const f of customFields ?? []) lines.push(`${f.name}: ${f.value}`);
+  return lines.join('\n');
 }
 
 /**
@@ -72,7 +84,7 @@ export function toBitwardenCsv(portable: readonly PortableItem[]): {
         'login',
         p.name,
         p.notes,
-        fieldsBlob(p.customFields),
+        fieldsBlob(p.customFields, p.backupCodes),
         '0',
         (p.uris ?? []).join(','),
         p.login?.username ?? '',

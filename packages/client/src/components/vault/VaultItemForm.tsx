@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useForm, useFieldArray, type SubmitHandler } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -12,7 +12,14 @@ import {
 } from '../../stores/vaultStore';
 import { useToast } from '../ui/Toast';
 import { PasswordGenerator } from './PasswordGenerator';
-import { MAX_TAGS_PER_ITEM, normalizeUri } from '@hvault/shared';
+import { BackupCodesEditor } from './BackupCodesEditor';
+import { inputClass } from './formStyles';
+import {
+  MAX_LOGIN_BACKUP_CODES,
+  MAX_LOGIN_BACKUP_CODE_LENGTH,
+  MAX_TAGS_PER_ITEM,
+  normalizeUri,
+} from '@hvault/shared';
 import type { ItemType } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
@@ -60,6 +67,12 @@ const loginSchema = z.object({
   password: z.string().optional().default(''),
   uris: z.array(uriEntrySchema).optional().default([]),
   totp: z.string().optional().default(''),
+  // Declaring this is not optional: zodResolver returns the PARSED values, so a
+  // field the form schema does not know is stripped before `buildDataPayload` ever
+  // sees it, and editing a login would silently destroy its stored codes. Kept
+  // lenient (no bounds) like every other field here; `parseBackupCodes` gates what
+  // can enter the array, and `sanitizeBackupCodes` bounds what leaves it.
+  backupCodes: z.array(z.string()).optional().default([]),
   notes: z.string().optional().default(''),
   customFields: z.array(customFieldSchema).optional().default([]),
 });
@@ -217,6 +230,7 @@ function getDefaultValues(itemType: ItemType, item?: DecryptedVaultItem): Record
         password: data.password ?? '',
         uris: data.uris ?? [{ uri: '', match: 'domain' as const }],
         totp: data.totp ?? '',
+        backupCodes: Array.isArray(data.backupCodes) ? data.backupCodes : [],
         notes: data.notes ?? '',
         customFields: data.customFields ?? [],
       };
@@ -308,21 +322,51 @@ function stripEmptyCustomFields(fields: unknown): unknown {
   });
 }
 
+/**
+ * Bound a login's backup codes to what the shared schema will accept on read-back.
+ *
+ * The editor already refuses anything out of bounds, so nothing here is reachable
+ * through the UI, and that is exactly the point: it is the last line of defence
+ * against the one failure this feature must never cause. A stored `backupCodes`
+ * value the shared schema rejects makes `vaultStore.decryptItem` stamp
+ * `_validationError`, and the detail view then replaces the WHOLE item with the
+ * "could not be fully decoded" notice — costing the user UI access to the password
+ * of a working account. `stripEmptyCustomFields` above exists for the same reason.
+ *
+ * Exported so its bounds are unit-tested directly rather than only through the UI
+ * paths that cannot reach them.
+ */
+export function sanitizeBackupCodes(codes: unknown): string[] {
+  if (!Array.isArray(codes)) return [];
+  return (codes as unknown[])
+    .filter(
+      (code): code is string =>
+        typeof code === 'string' && code.length > 0 && code.length <= MAX_LOGIN_BACKUP_CODE_LENGTH,
+    )
+    .slice(0, MAX_LOGIN_BACKUP_CODES);
+}
+
 function buildDataPayload(
   itemType: ItemType,
   values: Record<string, unknown>,
 ): Record<string, unknown> {
   switch (itemType) {
-    case 'login':
+    case 'login': {
+      const backupCodes = sanitizeBackupCodes(values.backupCodes);
       return {
         name: values.name,
         username: values.username,
         password: values.password,
         uris: values.uris,
         totp: emptyToUndefined(values.totp),
+        // Omit the key entirely rather than persisting an empty array, the same way
+        // `billingAddress` is omitted below: an untouched login's payload stays
+        // byte-identical to what it was before this field existed.
+        ...(backupCodes.length > 0 ? { backupCodes } : {}),
         notes: emptyToUndefined(values.notes),
         customFields: stripEmptyCustomFields(values.customFields),
       };
+    }
     case 'secret': {
       const date = (values.expiryDate as string) || '';
       const time = (values.expiryTime as string) || '';
@@ -477,6 +521,26 @@ export function VaultItemForm({
       billing?.country
     );
   });
+  // Optional-section toggle, following showBillingAddress: collapsed for the great
+  // majority of logins that have no recovery codes, but already open when editing
+  // one that does, so it is never hidden from someone who needs it.
+  const [showBackupCodes, setShowBackupCodes] = useState(() => {
+    if (item?.itemType !== 'login') return false;
+    const codes = item.data.backupCodes;
+    return Array.isArray(codes) && codes.length > 0;
+  });
+  const addBackupCodesRef = useRef<HTMLButtonElement>(null);
+  /** Set when the section is dismissed, so focus can follow it to the reveal link. */
+  const restoreAddBackupCodesFocus = useRef(false);
+
+  // The reveal link is not mounted while the section is open, so its ref is still
+  // null at the moment Remove is pressed; focusing has to wait for the re-render.
+  // Without this, dismissing the section drops focus to the top of the form.
+  useEffect(() => {
+    if (showBackupCodes || !restoreAddBackupCodesFocus.current) return;
+    restoreAddBackupCodesFocus.current = false;
+    addBackupCodesRef.current?.focus();
+  }, [showBackupCodes]);
 
   const isEditing = item != null;
 
@@ -521,6 +585,10 @@ export function VaultItemForm({
 
   const noteContent = watch('content') as string | undefined;
   const watchedCardNumber = watch('number') as string | undefined;
+  // A static path, so no cast gymnastics are needed on setValue. react-hook-form
+  // returns the STORED array, so the reference is stable while the contents are —
+  // which is what lets the list re-mask only on a real change.
+  const backupCodes = (watch('backupCodes') ?? []) as string[];
   const cardLuhnWarning = useMemo(() => {
     if (itemType !== 'card' || !watchedCardNumber) return null;
     const digits = watchedCardNumber.replace(/\s/g, '');
@@ -591,9 +659,6 @@ export function VaultItemForm({
     },
     [itemType, isEditing, item, folderId, tags, favorite, createItem, updateItem, onSaved, toast],
   );
-
-  const inputClass =
-    'w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-2 text-sm text-[hsl(var(--foreground))] placeholder:text-[hsl(var(--muted-foreground))] focus:outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]';
 
   return (
     <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} className="space-y-6">
@@ -764,6 +829,32 @@ export function VaultItemForm({
               autoComplete="off"
             />
           </FormField>
+
+          {/* Backup codes: the 2FA recovery codes for the account this login
+              unlocks. Sits with TOTP because they are the same concept, and in the
+              same order the detail view shows them. */}
+          {!showBackupCodes ? (
+            <button
+              type="button"
+              ref={addBackupCodesRef}
+              onClick={() => setShowBackupCodes(true)}
+              className="text-sm text-[hsl(var(--primary))] hover:underline"
+            >
+              + Add backup codes
+            </button>
+          ) : (
+            <BackupCodesEditor
+              codes={backupCodes}
+              onChangeCodes={(next) => setValue('backupCodes', next)}
+              onRemoveSection={() => {
+                restoreAddBackupCodesFocus.current = true;
+                setShowBackupCodes(false);
+                // Clearing the value matters: collapsing alone would hide codes that
+                // would still be saved. Same trap the billing section avoids.
+                setValue('backupCodes', []);
+              }}
+            />
+          )}
 
           <FormField label="Notes" name="notes">
             <textarea

@@ -808,3 +808,275 @@ describe('VaultItemDetail / action bar', () => {
     expect(mockDeleteItem).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Backup codes section
+//
+// The whole point of putting a delete here rather than only in the edit form is
+// that this is where a code is USED, so the write has to persist immediately —
+// which brings an optimistic update, a rollback and an Undo with it.
+// ---------------------------------------------------------------------------
+
+describe('VaultItemDetail — backup codes', () => {
+  const CODES = ['AAAA-1111', 'BBBB-2222', 'CCCC-3333'];
+
+  function loginWithCodes(codes: string[] = CODES) {
+    return makeItem({
+      data: {
+        username: 'user@example.com',
+        password: 'secret123',
+        uris: [],
+        totp: '',
+        notes: '',
+        customFields: [],
+        backupCodes: codes,
+      },
+    });
+  }
+
+  function writtenClipboard(): unknown {
+    return (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+  }
+
+  function updateCall(index: number) {
+    const call = mockUpdateItem.mock.calls[index];
+    expect(call).toBeDefined();
+    return call!;
+  }
+
+  function updatedData(index: number): Record<string, unknown> {
+    return updateCall(index)[2] as Record<string, unknown>;
+  }
+
+  it('renders a masked row per code with positional controls', () => {
+    renderDetail(loginWithCodes());
+    expect(screen.getByRole('list', { name: 'Backup codes' })).toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    expect(screen.getByLabelText('Copy backup code 3')).toBeInTheDocument();
+    expect(screen.queryByText('AAAA-1111')).toBeNull();
+  });
+
+  it('renders no section for a login with no codes', () => {
+    renderDetail(makeItem());
+    expect(screen.queryByRole('heading', { name: 'Backup codes' })).toBeNull();
+  });
+
+  it('renders no section for an undecodable login', () => {
+    // LoginDetail only renders inside the `isUndecodableData` false branch, so the
+    // section can never mount for a placeholder payload and `updateItem` can never
+    // be reached for one. That gate is what makes a defensive re-check inside the
+    // section structurally unreachable.
+    renderDetail(makeItem({ data: { _validationError: true, backupCodes: ['AAAA-1111'] } }));
+    expect(screen.getByRole('alert').textContent).toContain('could not be fully decoded');
+    expect(screen.queryByRole('list', { name: 'Backup codes' })).toBeNull();
+  });
+
+  it('copies one code through the clipboard guard', async () => {
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Copy backup code 2'));
+    });
+    expect(writtenClipboard()).toBe('BBBB-2222');
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Backup code 2 copied', type: 'success' }),
+    );
+  });
+
+  it('copies every code newline-joined', async () => {
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Copy all backup codes'));
+    });
+    expect(writtenClipboard()).toBe(CODES.join('\n'));
+  });
+
+  it('removes one code and re-encrypts the item without it', async () => {
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    });
+    expect(mockUpdateItem).toHaveBeenCalledTimes(1);
+    const call = updateCall(0);
+    expect(call[0]).toBe('item-1');
+    expect(call[1]).toBe('Test Item');
+    expect(updatedData(0).backupCodes).toEqual(['AAAA-1111', 'CCCC-3333']);
+    // No `options` argument, so folder, tags and favorite are left untouched.
+    expect(call).toHaveLength(3);
+    // The rest of the payload has to survive: the whole blob is replaced.
+    expect(updatedData(0).password).toBe('secret123');
+  });
+
+  it('drops the key entirely when the last code is removed', async () => {
+    renderDetail(loginWithCodes(['AAAA-1111']));
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 1'));
+    });
+    expect('backupCodes' in updatedData(0)).toBe(false);
+  });
+
+  it('announces the removal without ever echoing the code', async () => {
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    });
+    expect(screen.getByText(/Backup code 2 removed/).textContent).toContain('2 remaining');
+    expect(document.body.textContent).not.toContain('BBBB-2222');
+  });
+
+  it('rolls the row back and offers a dismiss when the save fails', async () => {
+    mockUpdateItem.mockRejectedValueOnce(new Error('network down'));
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    });
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to remove backup code', type: 'error' }),
+    );
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument();
+  });
+
+  it('keeps focus on a row when a failed delete rolls the list back', async () => {
+    // The rollback is a SECOND codes transition, after the post-delete focus move
+    // has already been consumed. With content-keyed rows React unmounted the
+    // focused button here and focus fell to <body>.
+    mockUpdateItem.mockRejectedValueOnce(new Error('network down'));
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    });
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(screen.getByLabelText('Remove backup code 2'));
+  });
+
+  it('hands focus back to the restored row after a successful Undo', async () => {
+    // The strip unmounts with the Undo button the user just pressed, so something
+    // has to catch focus.
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    });
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(screen.getByLabelText('Remove backup code 2'));
+  });
+
+  it('does not let an unrelated store refresh revert the list mid-delete', async () => {
+    // The online-event refetch redecrypts every item and hands down a new array
+    // identity even when nothing changed. Landing mid-write, that used to clear the
+    // optimistic view and flash the removed code back into the list.
+    let release: (() => void) | undefined;
+    mockUpdateItem.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const item = loginWithCodes();
+    const { rerender } = renderDetail(item);
+    fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+
+    // Same content, brand-new array identity — exactly what a redecrypt produces.
+    const refreshed = {
+      ...item,
+      data: { ...item.data, backupCodes: [...(item.data.backupCodes as string[])] },
+    };
+    rerender(
+      <MemoryRouter initialEntries={['/vault/item-1']}>
+        <Routes>
+          <Route
+            path="/vault/item-1"
+            element={
+              <VaultItemDetail item={refreshed as never} onEdit={onEdit} isTrashed={false} />
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+
+    await act(async () => {
+      release?.();
+    });
+  });
+
+  it('clears the failure strip on dismiss', async () => {
+    mockUpdateItem.mockRejectedValueOnce(new Error('network down'));
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByRole('button', { name: 'Dismiss' })).toBeNull();
+  });
+
+  it('puts a removed code back at its original position with Undo', async () => {
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    });
+    expect(mockUpdateItem).toHaveBeenCalledTimes(2);
+    // Back where it was, not appended.
+    expect(updatedData(1).backupCodes).toEqual(CODES);
+  });
+
+  it('reports a failed Undo without claiming the code was restored', async () => {
+    renderDetail(loginWithCodes());
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+    });
+    mockUpdateItem.mockRejectedValueOnce(new Error('still down'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    });
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to restore backup code' }),
+    );
+    expect(screen.getByText(/Could not restore backup code 2/)).toBeInTheDocument();
+  });
+
+  it('marks the remaining deletes inert while a save is in flight and ignores clicks', async () => {
+    let release: (() => void) | undefined;
+    mockUpdateItem.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    renderDetail(loginWithCodes());
+    fireEvent.click(screen.getByLabelText('Remove backup code 2'));
+
+    expect(screen.getByLabelText('Remove backup code 1')).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByText(/Removing backup code 2/)).toBeInTheDocument();
+    // A second optimistic delete racing the first would make the rollback ambiguous.
+    fireEvent.click(screen.getByLabelText('Remove backup code 1'));
+    // Clicking Undo mid-save is inert too.
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    expect(mockUpdateItem).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release?.();
+    });
+  });
+
+  it('keeps focus inside the section when the last code is removed', async () => {
+    renderDetail(loginWithCodes(['AAAA-1111']));
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Remove backup code 1'));
+    });
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Backup codes' }));
+  });
+
+  it('offers copy but no delete for a trashed login', () => {
+    renderDetail(loginWithCodes(), true);
+    expect(screen.getByLabelText('Copy backup code 1')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Remove backup code 1')).toBeNull();
+  });
+});

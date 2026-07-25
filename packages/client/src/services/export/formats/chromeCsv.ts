@@ -21,6 +21,12 @@
  * user who needs those must choose Bitwarden JSON. Only the login's own free-text
  * `notes` maps to the `note` column.
  *
+ * A login's 2FA recovery codes are lost here for the same reason and are NOT
+ * folded into the `note` column: notes travel verbatim into that cell, so folding
+ * would smuggle recovery secrets into the very file whose loss note promises they
+ * are absent. The loss note names them; that is the only honest channel, because
+ * `omittedCount` counts whole ITEMS and can never report a dropped field.
+ *
  * Values are written through {@link toCsv}, which quotes per RFC 4180 and NEVER
  * mutates a value (PLAN §1.7: the deliberate no formula-injection mitigation —
  * fidelity beats a mitigation that only half works).
