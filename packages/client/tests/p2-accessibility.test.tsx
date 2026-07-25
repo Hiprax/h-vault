@@ -263,7 +263,7 @@ describe('15 — VaultList accessibility', () => {
       useToast: () => ({ toast: vi.fn(), dismiss: vi.fn(), update: vi.fn() }),
     }));
 
-    vi.doMock('react-router-dom', () => ({
+    vi.doMock('react-router', () => ({
       useNavigate: () => vi.fn(),
     }));
 
@@ -279,7 +279,7 @@ describe('15 — VaultList accessibility', () => {
 
     vi.doUnmock('../src/stores/vaultStore');
     vi.doUnmock('../src/components/ui/Toast');
-    vi.doUnmock('react-router-dom');
+    vi.doUnmock('react-router');
   });
 });
 

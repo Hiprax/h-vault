@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams, Navigate, useNavigate } from 'react-router-dom';
+import { useParams, Navigate, useNavigate } from 'react-router';
 import { Loader2 } from 'lucide-react';
 import { VaultItemDetail } from '../components/vault/VaultItemDetail';
 import { VaultItemForm } from '../components/vault/VaultItemForm';

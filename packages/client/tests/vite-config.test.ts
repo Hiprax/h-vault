@@ -99,13 +99,36 @@ describe('manualChunks (T30 — vendor splitting)', () => {
   it('groups the React runtime + router into vendor-react', () => {
     expect(manualChunks('/repo/node_modules/react/index.js')).toBe('vendor-react');
     expect(manualChunks('/repo/node_modules/react-dom/client.js')).toBe('vendor-react');
-    expect(manualChunks('/repo/node_modules/react-router-dom/dist/index.js')).toBe('vendor-react');
+    expect(manualChunks('/repo/node_modules/react-router/dist/index.js')).toBe('vendor-react');
     expect(manualChunks('/repo/node_modules/scheduler/index.js')).toBe('vendor-react');
   });
 
   it('matches Windows (backslash) module paths too', () => {
     expect(manualChunks('C:\\repo\\node_modules\\react-dom\\client.js')).toBe('vendor-react');
+    expect(manualChunks('C:\\repo\\node_modules\\react-router\\dist\\production\\index.js')).toBe(
+      'vendor-react',
+    );
     expect(manualChunks('C:\\repo\\node_modules\\zod\\index.js')).toBe('vendor-core');
+  });
+
+  // Every alternative in the vendor-react group is a PREFIX of some other real
+  // package name (`react` of `react-router`, `react-router` of the now-removed
+  // `react-router-dom`), so the trailing path separator is what keeps the match
+  // anchored to a whole package directory. Without it, dropping the
+  // `react-router-dom` alternative during the v8 migration would have been
+  // indistinguishable from silently widening `react-router` to match any
+  // `react-router-*` package.
+  it('anchors each vendor-react alternative to a whole package directory', () => {
+    // Not the router, despite sharing its prefix.
+    expect(manualChunks('/repo/node_modules/react-router-dom/dist/index.js')).toBeUndefined();
+    expect(manualChunks('/repo/node_modules/react-routerx/index.js')).toBeUndefined();
+    // A lazy-only React ecosystem package must keep its own dynamic chunk.
+    // (`react-markdown` makes the same point and is already asserted above.)
+    expect(manualChunks('/repo/node_modules/react-window/dist/index.js')).toBeUndefined();
+    // The router's own transitive dependency is not hoisted into an eager chunk.
+    // This is not idle: CLAUDE.md records "a blanket node_modules catch-all must
+    // never be added", and this is the assertion that would catch one.
+    expect(manualChunks('/repo/node_modules/cookie-es/dist/index.mjs')).toBeUndefined();
   });
 
   it('groups always-eager data/form vendors into vendor-core', () => {

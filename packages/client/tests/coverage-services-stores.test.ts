@@ -627,21 +627,21 @@ vi.mock('../src/components/layout/ReloadPrompt', () => ({
   ReloadPrompt: () => createElement('div', { 'data-testid': 'reload-prompt' }),
 }));
 vi.mock('../src/components/layout/ProtectedRoute', async () => {
-  const { Outlet } = await import('react-router-dom');
+  const { Outlet } = await import('react-router');
   return {
     ProtectedRoute: () =>
       createElement('div', { 'data-testid': 'protected' }, createElement(Outlet)),
   };
 });
 vi.mock('../src/components/layout/PublicOnlyRoute', async () => {
-  const { Outlet } = await import('react-router-dom');
+  const { Outlet } = await import('react-router');
   return {
     PublicOnlyRoute: () =>
       createElement('div', { 'data-testid': 'public-only' }, createElement(Outlet)),
   };
 });
 vi.mock('../src/components/layout/AppLayout', async () => {
-  const { Outlet } = await import('react-router-dom');
+  const { Outlet } = await import('react-router');
   return {
     AppLayout: () => createElement('div', { 'data-testid': 'app-layout' }, createElement(Outlet)),
   };

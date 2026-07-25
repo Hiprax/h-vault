@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { UnlockScreen } from '../src/components/auth/UnlockScreen';
 import { useAuthStore } from '../src/stores/authStore';
 import { api } from '../src/services/api/client';
@@ -13,8 +13,8 @@ import { cryptoService } from '../src/services/crypto/cryptoService';
 // regression in the backoff (removing lockout, changing the base or the cap)
 // turns these tests red.
 
-vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+vi.mock('react-router', async () => {
+  const actual = await vi.importActual<typeof import('react-router')>('react-router');
   return {
     ...actual,
     useNavigate: () => vi.fn(),

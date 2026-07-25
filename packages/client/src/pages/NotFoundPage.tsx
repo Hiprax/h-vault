@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { ShieldOff } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
 

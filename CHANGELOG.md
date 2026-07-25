@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Changed
+
+- The frontend router dependency moved from `react-router-dom` 7 to `react-router` 8. React Router v8 removes the `react-router-dom` package outright and serves the same exports from `react-router`, so this is a package rename: every import was repointed, and no route, redirect, navigation, or URL-parameter behavior changed. Self-hosters who build from source will see `react-router-dom` disappear and `react-router` appear in `packages/client/package.json`; there is no configuration or migration step. Requires Node 22.22+ and React 19.2.7+, both already required by this project.
+
 ### Fixed
 
 - **A copied password is no longer erased from the clipboard when you switch tabs or minimise the window.** The clipboard was wiped on every transition to a hidden page, which is exactly the action you take to go and paste, so copying a password and switching to another tab or application frequently produced an empty paste well before the configured clipboard timeout. Whether it happened varied with things that look identical from the outside (whether another window fully covered the browser, and whether the browser had already processed the focus change), which is why it appeared intermittent. Only the configured deadline, a vault lock, a logout, or closing the tab for good now erase a copied secret.
@@ -25,6 +29,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - Vault lock and logout now verify that the clipboard erase actually happened rather than assuming it did, and retry it when the browser refused the write. Previously a lock or logout performed while the window was in the background left the copied secret on the OS clipboard with nothing left that would ever remove it.
 - Logout now erases the clipboard before contacting the server instead of after, matching lock. On a stalled connection the copied secret used to stay on the clipboard for up to the five-second logout timeout.
 - `SECURITY.md` documents the OS clipboard as an explicit part of the threat model: what the erase deadline covers, which engines will and will not let a page erase the clipboard and when, why the erase cannot verify what it is erasing without taking clipboard-read access, and why clipboard state is per tab.
+- Resolved GHSA-qwww-vcr4-c8h2 (high severity, CVSS 7.1) by upgrading the router to `react-router` 8.3.0, the first release outside the advisory's vulnerable `>=7.12.0 <8.3.0` range. The flaw is a CSRF bypass that lets an action run before the 400 response in React Router's RSC mode; H-Vault does not use the unstable RSC APIs, so it was not exploitable here, and no H-Vault deployment needed emergency action. It is fixed rather than suppressed because the dependency audit and container image scan both fail closed on it, and because `react-router-dom` had no patched release on any version line — the only remedy is the v8 package. Operators who pin or vendor dependencies should refresh their lockfile.
 
 ## [0.5.0] - 2026-07-23
 

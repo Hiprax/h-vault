@@ -342,7 +342,7 @@ vi.mock('../src/components/layout/ReloadPrompt', () => ({
   ReloadPrompt: () => createElement('div', { 'data-testid': 'reload-prompt' }),
 }));
 vi.mock('../src/components/layout/AppLayout', async () => {
-  const { Outlet } = await import('react-router-dom');
+  const { Outlet } = await import('react-router');
   return {
     AppLayout: () => createElement('div', { 'data-testid': 'app-layout' }, createElement(Outlet)),
   };

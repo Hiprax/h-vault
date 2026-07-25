@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
-import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import { Navigate, Outlet, useLocation } from 'react-router';
 import { useAuthStore } from '../../stores/authStore';
 import { refreshTokenApi } from '../../services/api/authApi';
 import { UnlockScreen } from '../auth/UnlockScreen';

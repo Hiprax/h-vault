@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router';
 import { CheckCircle, XCircle, ArrowLeft, Loader2 } from 'lucide-react';
 import { unlockAccountApi } from '../services/api/authApi';
 import { getApiErrorMessage } from '../lib/utils';

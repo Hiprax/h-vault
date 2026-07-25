@@ -273,7 +273,7 @@ the stored passwords the vault-health check grades.
 - React 19 · Vite 8 (Rolldown)
 - TypeScript 6 (strict)
 - Zustand 5 (auth · vault · ui)
-- React Router 7, lazy-loaded
+- React Router 8, lazy-loaded
 - Tailwind CSS 4 · shadcn/ui-inspired
 - React Hook Form + Zod
 - **Web Crypto API** — PBKDF2, AES-256-GCM, HMAC

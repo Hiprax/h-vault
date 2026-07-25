@@ -82,7 +82,15 @@ export function manualChunks(id: string): string | undefined {
   }
 
   // React runtime + router: always eager, grouped together.
-  if (/\/node_modules\/(react|react-dom|react-router|react-router-dom|scheduler)\//.test(path)) {
+  //
+  // `react-router` is the only router package to match: v8 removed
+  // `react-router-dom` entirely and folded its exports back into `react-router`,
+  // so listing the old name here would be a dead alternative. Note the
+  // alternation order is load-bearing in the other direction — `react`,
+  // `react-dom` and `react-router` are all prefixes of longer package names, and
+  // each alternative is anchored by the trailing `\/`, so `react-router-x` can
+  // never match `react-router`.
+  if (/\/node_modules\/(react|react-dom|react-router|scheduler)\//.test(path)) {
     return 'vendor-react';
   }
 
