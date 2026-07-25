@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-25
+
 ### Changed
 
 - The frontend router dependency moved from `react-router-dom` 7 to `react-router` 8. React Router v8 removes the `react-router-dom` package outright and serves the same exports from `react-router`, so this is a package rename: every import was repointed, and no route, redirect, navigation, or URL-parameter behavior changed. Self-hosters who build from source will see `react-router-dom` disappear and `react-router` appear in `packages/client/package.json`; there is no configuration or migration step. Requires Node 22.22+ and React 19.2.7+, both already required by this project.
@@ -233,7 +235,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Hiprax/h-vault/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Hiprax/h-vault/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Hiprax/h-vault/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Hiprax/h-vault/compare/v0.2.0...v0.3.0
