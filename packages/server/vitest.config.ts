@@ -82,8 +82,6 @@ export default defineConfig({
       // opaque 500s that have nothing to do with the change under test. Pinning it
       // to the same value keeps the resolved key identical either way.
       TWO_FACTOR_ENCRYPTION_KEY: 'TestSessionSecret4Testing!!12345',
-      RATE_LIMIT_WINDOW_MS: '900000',
-      RATE_LIMIT_MAX: '1000',
       BACKUP_MAX_SIZE_MB: '25',
       BACKUP_RETENTION_DAYS: '30',
       EXPORT_MAX_SIZE_MB: '25',

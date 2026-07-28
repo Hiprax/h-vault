@@ -18,6 +18,7 @@ import { clearHealthResults } from '../services/health/healthResultsStore.js';
 import { clearSettingsCache } from '../hooks/useUserSettings.js';
 import { eraseCopiedSecretNow } from '../services/clipboard/clipboardService.js';
 import { logger } from '../lib/logger.js';
+import { decodeJwtPayload } from '../lib/accessToken.js';
 import { useVaultStore } from './vaultStore.js';
 import { isAxiosError } from 'axios';
 import type { SuccessfulLoginResponse } from '@hvault/shared';
@@ -153,21 +154,13 @@ async function processLoginResponse(
  * the server has already verified it). Returns the `sub` claim.
  */
 function parseAccessTokenUserId(accessToken: string): string {
-  const parts = accessToken.split('.');
-  const payload = parts[1];
-  if (!payload) {
+  const parsed = decodeJwtPayload(accessToken);
+  if (!parsed) {
     logger.error('Token parse failed: invalid token format');
     throw new Error('Authentication error');
   }
-  const decoded = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
-  const parsed: unknown = JSON.parse(decoded);
-  if (
-    typeof parsed === 'object' &&
-    parsed !== null &&
-    'sub' in parsed &&
-    typeof (parsed as Record<string, unknown>).sub === 'string'
-  ) {
-    return (parsed as Record<string, unknown>).sub as string;
+  if (typeof parsed.sub === 'string') {
+    return parsed.sub;
   }
   logger.error('Token parse failed: missing or invalid sub claim');
   throw new Error('Authentication error');

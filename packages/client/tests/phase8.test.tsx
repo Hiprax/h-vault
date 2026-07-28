@@ -145,9 +145,14 @@ vi.mock('../src/services/api/client', () => ({
     put: vi.fn(),
     delete: vi.fn(),
     post: vi.fn().mockResolvedValue({
-      data: { data: { accessToken: 'mock-access-token' } },
+      data: { success: true, data: null },
     }),
   },
+  // Refreshing the access token is now ONE exported helper rather than a POST
+  // each caller hand-rolls, so it is mocked as that unit; `api.post` above is
+  // only the authenticated /auth/verify-unlock probe.
+  performTokenRefresh: vi.fn().mockResolvedValue('mock-access-token'),
+  clearCsrfToken: vi.fn(),
   // Matches the real fallback: with no Web Locks API (jsdom) the refresh runs
   // directly. Cross-tab serialization is covered by `refresh-multitab.test.ts`.
   withRefreshLock: <T,>(run: () => Promise<T>): Promise<T> => run(),

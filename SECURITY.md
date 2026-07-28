@@ -63,7 +63,13 @@ security posture, not a disclaimer.
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
 - **Credential stuffing and online guessing.** Rate limiting, account lockout with
   progressive delays, and 2FA — with the lockout and 2FA paths deliberately built so they
-  do not leak whether an account exists.
+  do not leak whether an account exists. The credential budget is kept separate from the
+  budgets for token refresh and vault unlock, so that ordinary use of the app can never spend
+  the allowance you need in order to sign in. A caller-supplied value (a header, a cookie, a
+  rotating token) appears in a rate-limit key only where an IP-keyed tier bounds the same route
+  regardless — the per-account tier keys on the submitted email for that reason, and the
+  refresh tier, which has no such companion, keys on the address alone. Getting either wrong
+  turns a limiter into a lockout of the legitimate user, an open door for the attacker, or both.
 - **Backup theft.** Emailed and downloaded backups are encrypted under a _separate_
   backup password and carry an HMAC-SHA256 integrity signature that is verified on restore.
 - **Tampered backup files.** Restore validates the signature, rejects dangling and
@@ -253,6 +259,37 @@ entirely in the browser and never uploaded, it is offered only from the saved it
 an unsaved form, so a cancelled edit cannot leave codes on disk with nothing in the vault),
 and it takes a separate confirmation that states the file is unencrypted before anything is
 written. Delete it once you have stored the codes wherever you intended them to go.
+
+### Auto-lock
+
+The vault locks after `autoLockTimeout` minutes without interaction (1 to 1440, default 15).
+Locking zeroes the vault key and the master encryption key and clears decrypted data from
+memory and from the offline cache; the session itself stays alive, so unlocking needs only the
+master password, not a full sign-in.
+
+Two properties of that timer are worth stating plainly, because the obvious implementation
+gets both wrong:
+
+- **The deadline is wall-clock, not elapsed timer time.** A `setTimeout` measures how long the
+  page has been _running_, and browsers do not run a hidden tab on schedule: they throttle its
+  timers to roughly one wake per minute after a few minutes hidden, may freeze a discarded tab
+  entirely, and stop the clock outright while the machine sleeps. A timer can therefore only
+  fire LATE — which for a lock means staying unlocked longer than you asked. H-Vault stores the
+  deadline as an absolute instant and re-checks it against the clock whenever the page could
+  have missed a wake: on becoming visible, on focus, on a bfcache restore, and on a coarse
+  interval. Returning from an hour's sleep locks immediately rather than after the remainder of
+  a stale timer.
+- **Hiding the tab does not, by itself, lock the vault.** It stops resetting the idle deadline —
+  nothing generates activity in a hidden tab — so a hidden tab still locks exactly on schedule.
+  Locking sooner _because_ the tab is hidden is a separate opt-in setting (`lockOnHidden`, with
+  its own delay in minutes), off by default. Earlier versions did this unconditionally after 30
+  seconds regardless of the configured timeout, which meant switching tabs to look something up
+  locked the vault; if you want that behaviour, turn it on and choose the delay.
+
+The lock is a client-side control over key material in one browser. It is not an
+authentication boundary: the server-side session, its refresh token and its absolute deadline
+are what actually bound access, and `POST /auth/verify-unlock` — rate-limited per user — is what
+checks the master password on unlock, so clearing browser storage cannot bypass it.
 
 ### The OS clipboard
 

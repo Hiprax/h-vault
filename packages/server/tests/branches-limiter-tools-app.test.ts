@@ -232,36 +232,30 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
   });
 
   describe('refreshLimiter: a client that sends NO User-Agent header', () => {
-    it('is still bucketed by IP and limited at 5 — it does not error out', async () => {
-      // `buildRefreshKey` reads `req.headers['user-agent'] ?? ''` before hashing
-      // it. Drop the `?? ''` and a UA-less client (a raw HTTP client, curl with
-      // an unset UA) crashes the limiter with a TypeError on `ua.length` — a 500
-      // on the refresh endpoint, i.e. no limit and no refresh.
+    it('is bucketed by IP alone and counted normally', async () => {
+      // A UA-less client (a raw HTTP client, curl with an unset UA) must be
+      // counted like any other, not error out and not escape. The user-agent no
+      // longer appears in the key at all: it is a request header, so including it
+      // let a caller mint a fresh bucket per request simply by varying it — the
+      // same defect as the rotating refresh-cookie hash it had replaced.
       const limiterApp = anonymousLimiterApp(refreshLimiter as RequestHandler);
 
       const send = (ip: string) =>
         request(limiterApp).post('/t').unset('User-Agent').set('x-forwarded-for', ip);
 
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 6; i++) {
         expect((await send('203.0.113.21')).status).toBe(200);
       }
-      const blocked = await send('203.0.113.21');
-      expect(blocked.status).toBe(429);
-      expect((blocked.body as { message: string }).message).toBe(
-        'Too many token refresh attempts, please try again later',
-      );
 
       // A second UA-less client on a different IP keeps its own budget.
       expect((await send('203.0.113.22')).status).toBe(200);
 
       const docs = await rateLimitDocs();
       expect(docs).toHaveLength(2);
-      // IP + UA-hash only (no refresh cookie was sent) — and the IP segment is
-      // the real client, not a shared bucket.
-      expect(docs[0]!.key.startsWith('refresh:203.0.113.21:')).toBe(true);
-      expect(docs[0]!.key.split(':')).toHaveLength(3);
+      // IP only — no UA-hash segment, and no refresh-cookie segment.
+      expect(docs[0]!.key).toBe('refresh:203.0.113.21');
       expect(docs[0]!.counter).toBe(6);
-      expect(docs[1]!.key.startsWith('refresh:203.0.113.22:')).toBe(true);
+      expect(docs[1]!.key).toBe('refresh:203.0.113.22');
       expect(docs[1]!.counter).toBe(1);
     });
   });

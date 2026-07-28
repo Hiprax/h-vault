@@ -14,9 +14,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
+import { AxiosError, AxiosHeaders } from 'axios';
 import React from 'react';
-import { AxiosHeaders, type AxiosResponse } from 'axios';
-import type { ApiResponse } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia for jsdom
@@ -249,22 +248,6 @@ import { VaultList } from '../src/components/vault/VaultList';
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Minimal Axios envelope for `POST /auth/refresh`. Built rather than cast so the
- * shape stays honest if the endpoint's signature changes.
- */
-function refreshOkResponse(
-  accessToken: string,
-): AxiosResponse<ApiResponse<{ accessToken: string }>> {
-  return {
-    data: { success: true, data: { accessToken } },
-    status: 200,
-    statusText: 'OK',
-    headers: new AxiosHeaders(),
-    config: { headers: new AxiosHeaders() },
-  };
-}
-
 function renderWithRouter(ui: React.ReactElement, { route = '/' } = {}) {
   return render(<MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>);
 }
@@ -361,6 +344,23 @@ describe('NotFoundPage', () => {
 // ==========================================================================
 // 2 - ProtectedRoute
 // ==========================================================================
+
+/**
+ * A genuine AxiosError carrying an HTTP status, as `isSessionGone` demands.
+ * `services/auth/sessionFailure.ts` classifies with axios' `isAxiosError`, so a
+ * plain `Error` is transient by construction and can never drive a logout.
+ */
+function axiosStatusError(status: number): AxiosError {
+  const error = new AxiosError(`Request failed with status code ${status}`);
+  error.response = {
+    status,
+    statusText: '',
+    data: {},
+    headers: new AxiosHeaders(),
+    config: { headers: new AxiosHeaders() },
+  };
+  return error;
+}
 
 describe('ProtectedRoute', () => {
   beforeEach(() => {
@@ -475,7 +475,9 @@ describe('ProtectedRoute', () => {
 
   it('shows loading state and refreshes token when authenticated without accessToken', async () => {
     const { refreshTokenApi } = await import('../src/services/api/authApi');
-    vi.mocked(refreshTokenApi).mockResolvedValueOnce(refreshOkResponse('new-token'));
+    // `refreshTokenApi` resolves to the access token itself; storing it in the
+    // auth store is `performTokenRefresh`'s job, not the caller's.
+    vi.mocked(refreshTokenApi).mockResolvedValueOnce('new-token');
 
     useAuthStore.setState({
       isAuthenticated: true,
@@ -510,9 +512,12 @@ describe('ProtectedRoute', () => {
     await screen.findByText('Protected Content');
   });
 
-  it('logs out when token refresh fails after page reload', async () => {
+  it('logs out when the server authoritatively rejects the refresh token (401)', async () => {
     const { refreshTokenApi } = await import('../src/services/api/authApi');
-    vi.mocked(refreshTokenApi).mockRejectedValueOnce(new Error('refresh failed'));
+    // Only a 401/403 proves the session is gone. `isSessionGone` runs the error
+    // through axios' own `isAxiosError`, so this must be a real AxiosError with a
+    // response status -- a bare `new Error()` is (correctly) classified transient.
+    vi.mocked(refreshTokenApi).mockRejectedValueOnce(axiosStatusError(401));
 
     useAuthStore.setState({
       isAuthenticated: true,
@@ -544,6 +549,56 @@ describe('ProtectedRoute', () => {
     // auth state and calls offlineCache.setUser during teardown) settles inside
     // act() and the navigation to /login completes before the test ends.
     await screen.findByText('Login Page');
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  // This test replaces one that asserted "any refresh failure logs out". That
+  // rule was the defect: `logout()` is not a local teardown, it POSTs
+  // /auth/logout and DELETES a refresh token that was still valid, so a dropped
+  // connection permanently destroyed a session with days left on it.
+  it('keeps the session and offers a retry when the refresh fails transiently', async () => {
+    const { refreshTokenApi } = await import('../src/services/api/authApi');
+    const offline = new AxiosError('Network Error');
+    vi.mocked(refreshTokenApi).mockRejectedValueOnce(offline);
+
+    useAuthStore.setState({
+      isAuthenticated: true,
+      isLocked: false,
+      accessToken: null,
+      user: { userId: 'u1', email: 'test@example.com' },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/vault']}>
+        <Routes>
+          <Route
+            path="/vault"
+            element={
+              <ProtectedRoute>
+                <div>Protected Content</div>
+              </ProtectedRoute>
+            }
+          />
+          <Route path="/login" element={<div>Login Page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not reach the server');
+    // No logout, no redirect: the session is untouched.
+    expect(screen.queryByText('Login Page')).not.toBeInTheDocument();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+
+    // "Try again" re-runs the refresh; on success the protected children render.
+    // Counted relative to the calls already on the shared module mock rather than
+    // absolutely, so this stays honest whatever else in the file refreshed.
+    const callsBeforeRetry = vi.mocked(refreshTokenApi).mock.calls.length;
+    vi.mocked(refreshTokenApi).mockResolvedValueOnce('new-token');
+    fireEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+    await screen.findByText('Protected Content');
+    expect(vi.mocked(refreshTokenApi).mock.calls.length).toBe(callsBeforeRetry + 1);
   });
 });
 

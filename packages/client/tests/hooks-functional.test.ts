@@ -134,6 +134,12 @@ import {
   clearSettingsCache,
   onSettingsInvalidated,
 } from '../src/hooks/useUserSettings';
+import {
+  AUTO_LOCK_TIMEOUT_MINUTES,
+  CLIPBOARD_CLEAR_SECONDS,
+  LOCK_ON_HIDDEN_DEFAULT,
+  LOCK_ON_HIDDEN_DELAY_MINUTES,
+} from '@hvault/shared';
 
 // ===========================================================================
 // 1. useAutoLock
@@ -141,7 +147,8 @@ import {
 
 describe('useAutoLock', () => {
   const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
-  const VISIBILITY_DELAY_MS = 30_000; // 30 seconds
+  /** The delay the OLD unconditional hidden lock used, kept only to prove it is gone. */
+  const OLD_HIDDEN_DELAY_MS = 30_000;
   // Typed to the store's own `lock` signature so setState() accepts it.
   let mockLock: Mock<() => Promise<void>>;
 
@@ -352,84 +359,119 @@ describe('useAutoLock', () => {
     expect(mockLock).toHaveBeenCalledTimes(1);
   });
 
-  it('should start 30s delayed lock on visibility hidden', () => {
+  /**
+   * This test used to assert the bug. Hiding the tab armed a lock of
+   * `Math.min(30_000, autoLockTimeout / 2)` — a flat 30 SECONDS for any timeout
+   * above a minute — so switching tabs to look something up locked the vault,
+   * whatever the user had configured. Hidden-tab locking is now opt-in
+   * (`lockOnHidden`, default off) and carries its own delay; the idle deadline
+   * alone governs otherwise, and it keeps running while hidden because nothing
+   * generates activity events there.
+   */
+  it('does NOT lock a briefly hidden tab (the accelerated hidden lock is opt-in)', () => {
     useAuthStore.setState({ isAuthenticated: true, isLocked: false, lock: mockLock });
 
     renderHook(() => useAutoLock());
 
-    // Simulate tab going hidden
     act(() => {
       Object.defineProperty(document, 'hidden', { value: true, configurable: true });
       document.dispatchEvent(new Event('visibilitychange'));
     });
 
-    // Should NOT lock immediately
     expect(mockLock).not.toHaveBeenCalled();
 
-    // Should NOT lock at 29 seconds
-    vi.advanceTimersByTime(VISIBILITY_DELAY_MS - 1000);
+    // Four times the old hardcoded delay, and still nothing.
+    act(() => {
+      vi.advanceTimersByTime(OLD_HIDDEN_DELAY_MS * 4);
+    });
     expect(mockLock).not.toHaveBeenCalled();
 
-    // Should lock at 30 seconds
-    vi.advanceTimersByTime(1000);
+    // The idle deadline is untouched by hiding, so it still fires on schedule.
+    act(() => {
+      vi.advanceTimersByTime(DEFAULT_TIMEOUT_MS);
+    });
     expect(mockLock).toHaveBeenCalledTimes(1);
 
     // Restore
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
   });
 
-  it('should cancel visibility lock timer when tab becomes visible', () => {
+  /**
+   * These two tests used to assert `mockLock` was never called after hiding the
+   * tab, in a world where hiding ARMED a 30-second lock. With hidden-tab locking
+   * now opt-in and OFF by default, nothing arms a hidden lock at all — so those
+   * assertions could no longer fail: they passed with `handleVisibilityChange`
+   * deleted outright, which is the "assertion that cannot fail" anti-pattern.
+   *
+   * Retargeted at what the default path actually promises: hiding and revealing
+   * must neither lock early NOR disturb the idle deadline, and the positive edge
+   * is asserted so a timer really is still armed. The opt-in path's own behaviour
+   * (including that a tab hidden past the delay locks on RETURN) is covered in
+   * `coverage-auth-crypto.test.ts`, which can vary the setting.
+   */
+  it('hiding and revealing the tab does not lock, and does not reset the idle deadline', () => {
     useAuthStore.setState({ isAuthenticated: true, isLocked: false, lock: mockLock });
 
     renderHook(() => useAutoLock());
 
-    // Tab goes hidden
+    act(() => {
+      vi.advanceTimersByTime(10 * 60 * 1000);
+    });
+
+    // Hide and reveal, well past the old 30-second hidden delay.
     act(() => {
       Object.defineProperty(document, 'hidden', { value: true, configurable: true });
       document.dispatchEvent(new Event('visibilitychange'));
     });
-
-    // Advance partway through the 30s delay
-    vi.advanceTimersByTime(15_000);
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
     expect(mockLock).not.toHaveBeenCalled();
 
-    // Tab becomes visible again - should cancel the visibility timer
     act(() => {
       Object.defineProperty(document, 'hidden', { value: false, configurable: true });
       document.dispatchEvent(new Event('visibilitychange'));
     });
-
-    // Advance past the original 30s - should NOT lock
-    vi.advanceTimersByTime(20_000);
     expect(mockLock).not.toHaveBeenCalled();
 
-    // Restore
-    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    // The idle deadline was NOT reset by either transition: 11 minutes have now
+    // passed with no activity, so the remaining 4 must still lock on schedule.
+    // This is the positive edge that makes the negatives above meaningful.
+    act(() => {
+      vi.advanceTimersByTime(4 * 60 * 1000);
+    });
+    expect(mockLock).toHaveBeenCalledTimes(1);
   });
 
-  it('should cancel visibility lock timer on user activity', () => {
+  it('activity while the tab is hidden pushes the idle deadline out', () => {
     useAuthStore.setState({ isAuthenticated: true, isLocked: false, lock: mockLock });
 
     renderHook(() => useAutoLock());
 
-    // Tab goes hidden
     act(() => {
       Object.defineProperty(document, 'hidden', { value: true, configurable: true });
       document.dispatchEvent(new Event('visibilitychange'));
     });
 
-    vi.advanceTimersByTime(10_000);
-
-    // User interacts (e.g., mousemove) - should cancel visibility timer
+    act(() => {
+      vi.advanceTimersByTime(14 * 60 * 1000);
+    });
     act(() => {
       document.dispatchEvent(new Event('mousemove'));
     });
 
-    // Advance past the 30s visibility delay - should NOT lock from visibility timer
-    vi.advanceTimersByTime(25_000);
+    // Past the ORIGINAL 15-minute deadline, short of the refreshed one.
+    act(() => {
+      vi.advanceTimersByTime(14 * 60 * 1000);
+    });
     expect(mockLock).not.toHaveBeenCalled();
 
-    // Restore
+    // And it does still fire once the refreshed deadline arrives.
+    act(() => {
+      vi.advanceTimersByTime(2 * 60 * 1000);
+    });
+    expect(mockLock).toHaveBeenCalledTimes(1);
+
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
   });
 
@@ -1105,11 +1147,34 @@ describe('useClipboardCountdown', () => {
 // ===========================================================================
 
 describe('useUserSettings', () => {
+  // Every default is the SHARED constant, not a literal restated here — the hook
+  // sources them from `@hvault/shared` precisely so the client fallback and the
+  // server model default cannot drift, and asserting against a hand-copied number
+  // would defeat that.
   const DEFAULT_SETTINGS = {
-    autoLockTimeout: 15,
-    clipboardClearTimeout: 30,
+    autoLockTimeout: AUTO_LOCK_TIMEOUT_MINUTES,
+    lockOnHidden: LOCK_ON_HIDDEN_DEFAULT,
+    lockOnHiddenDelay: LOCK_ON_HIDDEN_DELAY_MINUTES,
+    clipboardClearTimeout: CLIPBOARD_CLEAR_SECONDS,
     theme: 'system',
   };
+
+  /**
+   * A profile response as the server actually sends one.
+   *
+   * `getProfile` normalises settings through `withSettingsDefaults` before
+   * responding, so every field `IUserSettings` declares is present even for an
+   * account created before it existed — a lean read returns raw BSON and does not
+   * apply Mongoose defaults, which is why that normalisation exists. Fixtures here
+   * mirror that, rather than omitting fields the API never omits.
+   */
+  function withNewDefaults(settings: Record<string, unknown>) {
+    return {
+      lockOnHidden: LOCK_ON_HIDDEN_DEFAULT,
+      lockOnHiddenDelay: LOCK_ON_HIDDEN_DELAY_MINUTES,
+      ...settings,
+    };
+  }
 
   beforeEach(() => {
     // Always clear the module-level cache between tests
@@ -1141,6 +1206,70 @@ describe('useUserSettings', () => {
     expect(result.current).toEqual(DEFAULT_SETTINGS);
   });
 
+  it('passes a stored lockOnHidden through unchanged', async () => {
+    vi.mocked(getProfileApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          settings: withNewDefaults({
+            autoLockTimeout: 15,
+            clipboardClearTimeout: 30,
+            theme: 'system',
+            lockOnHidden: true,
+            lockOnHiddenDelay: 3,
+          }),
+        },
+      },
+    } as never);
+
+    useAuthStore.setState({ isAuthenticated: true, isLocked: false });
+
+    const { result } = renderHook(() => useUserSettings());
+
+    await waitFor(() => {
+      expect(result.current.lockOnHidden).toBe(true);
+    });
+    expect(result.current.lockOnHiddenDelay).toBe(3);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -5],
+    ['above the maximum', 100_000],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ])('falls back to the default for a %s minutes value', async (_label, bad) => {
+    // These arm REAL timers. The wire is validated on write, so this should never
+    // fire — but the failure mode of a bad value is SILENT, not loud: `NaN`
+    // compares false against every deadline test, so an auto-lock the user
+    // configured would simply never happen, and `0` would lock on the next tick.
+    vi.mocked(getProfileApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          settings: withNewDefaults({
+            autoLockTimeout: bad,
+            lockOnHiddenDelay: bad,
+            clipboardClearTimeout: 30,
+            theme: 'system',
+          }),
+        },
+      },
+    } as never);
+
+    useAuthStore.setState({ isAuthenticated: true, isLocked: false });
+
+    const { result } = renderHook(() => useUserSettings());
+
+    await waitFor(() => {
+      expect(getProfileApi).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(result.current.autoLockTimeout).toBe(AUTO_LOCK_TIMEOUT_MINUTES);
+    });
+    expect(result.current.lockOnHiddenDelay).toBe(LOCK_ON_HIDDEN_DELAY_MINUTES);
+  });
+
   it('should fetch settings when authenticated and not locked', async () => {
     const customSettings = {
       autoLockTimeout: 30,
@@ -1151,7 +1280,7 @@ describe('useUserSettings', () => {
       data: {
         success: true,
         data: {
-          settings: customSettings,
+          settings: withNewDefaults(customSettings),
         },
       },
     } as never);
@@ -1161,7 +1290,7 @@ describe('useUserSettings', () => {
     const { result } = renderHook(() => useUserSettings());
 
     await waitFor(() => {
-      expect(result.current).toEqual(customSettings);
+      expect(result.current).toEqual(withNewDefaults(customSettings));
     });
 
     expect(getProfileApi).toHaveBeenCalledTimes(1);
@@ -1193,7 +1322,7 @@ describe('useUserSettings', () => {
       data: {
         success: true,
         data: {
-          settings: customSettings,
+          settings: withNewDefaults(customSettings),
         },
       },
     } as never);
@@ -1204,7 +1333,7 @@ describe('useUserSettings', () => {
     const { result: result1 } = renderHook(() => useUserSettings());
 
     await waitFor(() => {
-      expect(result1.current).toEqual(customSettings);
+      expect(result1.current).toEqual(withNewDefaults(customSettings));
     });
 
     expect(getProfileApi).toHaveBeenCalledTimes(1);
@@ -1212,7 +1341,7 @@ describe('useUserSettings', () => {
     // Second render - should use cached settings without fetching again
     const { result: result2 } = renderHook(() => useUserSettings());
 
-    expect(result2.current).toEqual(customSettings);
+    expect(result2.current).toEqual(withNewDefaults(customSettings));
     // Should still be 1 call total (no new fetch)
     expect(getProfileApi).toHaveBeenCalledTimes(1);
   });
@@ -1237,7 +1366,7 @@ describe('useUserSettings', () => {
     vi.mocked(getProfileApi).mockResolvedValueOnce({
       data: {
         success: true,
-        data: { settings: firstSettings },
+        data: { settings: withNewDefaults(firstSettings) },
       },
     } as never);
 
@@ -1246,7 +1375,7 @@ describe('useUserSettings', () => {
     const { result } = renderHook(() => useUserSettings());
 
     await waitFor(() => {
-      expect(result.current).toEqual(firstSettings);
+      expect(result.current).toEqual(withNewDefaults(firstSettings));
     });
 
     expect(getProfileApi).toHaveBeenCalledTimes(1);
@@ -1254,7 +1383,7 @@ describe('useUserSettings', () => {
     vi.mocked(getProfileApi).mockResolvedValueOnce({
       data: {
         success: true,
-        data: { settings: secondSettings },
+        data: { settings: withNewDefaults(secondSettings) },
       },
     } as never);
 
@@ -1265,7 +1394,7 @@ describe('useUserSettings', () => {
     });
 
     await waitFor(() => {
-      expect(result.current).toEqual(secondSettings);
+      expect(result.current).toEqual(withNewDefaults(secondSettings));
     });
 
     expect(getProfileApi).toHaveBeenCalledTimes(2);
@@ -1274,14 +1403,14 @@ describe('useUserSettings', () => {
   it('does not re-fetch on same-tab invalidation once logged out', async () => {
     const settings = { autoLockTimeout: 10, clipboardClearTimeout: 45, theme: 'light' };
     vi.mocked(getProfileApi).mockResolvedValueOnce({
-      data: { success: true, data: { settings } },
+      data: { success: true, data: { settings: withNewDefaults(settings) } },
     } as never);
 
     useAuthStore.setState({ isAuthenticated: true, isLocked: false });
 
     const { result } = renderHook(() => useUserSettings());
     await waitFor(() => {
-      expect(result.current).toEqual(settings);
+      expect(result.current).toEqual(withNewDefaults(settings));
     });
     expect(getProfileApi).toHaveBeenCalledTimes(1);
 
@@ -1398,13 +1527,15 @@ describe('useUserSettings', () => {
     expect(getProfileApi).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      resolveProfile({ data: { success: true, data: { settings: customSettings } } });
+      resolveProfile({
+        data: { success: true, data: { settings: withNewDefaults(customSettings) } },
+      });
       await deferred;
     });
 
     // Both consumers receive the fetched settings off the single request.
-    expect(result.current.a).toEqual(customSettings);
-    expect(result.current.b).toEqual(customSettings);
+    expect(result.current.a).toEqual(withNewDefaults(customSettings));
+    expect(result.current.b).toEqual(withNewDefaults(customSettings));
     expect(getProfileApi).toHaveBeenCalledTimes(1);
   });
 
@@ -1413,7 +1544,7 @@ describe('useUserSettings', () => {
     const second = { autoLockTimeout: 5, clipboardClearTimeout: 10, theme: 'dark' };
 
     vi.mocked(getProfileApi).mockResolvedValueOnce({
-      data: { success: true, data: { settings: first } },
+      data: { success: true, data: { settings: withNewDefaults(first) } },
     } as never);
 
     useAuthStore.setState({
@@ -1424,12 +1555,12 @@ describe('useUserSettings', () => {
 
     const { result } = renderHook(() => useUserSettings());
     await waitFor(() => {
-      expect(result.current).toEqual(first);
+      expect(result.current).toEqual(withNewDefaults(first));
     });
     const callsAfterInit = vi.mocked(getProfileApi).mock.calls.length;
 
     vi.mocked(getProfileApi).mockResolvedValueOnce({
-      data: { success: true, data: { settings: second } },
+      data: { success: true, data: { settings: withNewDefaults(second) } },
     } as never);
 
     await act(async () => {
@@ -1443,7 +1574,7 @@ describe('useUserSettings', () => {
     });
 
     await waitFor(() => {
-      expect(result.current).toEqual(second);
+      expect(result.current).toEqual(withNewDefaults(second));
     });
     // The invalidation drops the in-flight pointer so exactly one re-fetch runs.
     expect(vi.mocked(getProfileApi).mock.calls.length).toBe(callsAfterInit + 1);

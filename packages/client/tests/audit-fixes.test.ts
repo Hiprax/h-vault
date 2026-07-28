@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AxiosHeaders, type AxiosResponse } from 'axios';
+import { AxiosError, AxiosHeaders, type AxiosResponse } from 'axios';
 import type { ApiResponse } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
@@ -521,6 +521,27 @@ describe('API client: skip 401 refresh when logged out', () => {
   const mockSetAccessToken = vi.fn();
   const mockLogoutFn = vi.fn().mockResolvedValue(undefined);
 
+  /**
+   * A genuine `AxiosError` carrying `response.status`.
+   *
+   * Load-bearing, not ceremony: whether a failed refresh destroys the session is
+   * decided by `isSessionGone` (services/auth/sessionFailure.ts), which routes
+   * through axios's `isAxiosError`. A bare `new Error('Refresh failed')` is
+   * therefore classified as TRANSIENT however the test meant it — so a refusal
+   * the test wants treated as authoritative has to be built as the real thing.
+   */
+  function axiosStatusError(status: number): AxiosError {
+    const error = new AxiosError(`Request failed with status code ${status}`);
+    error.response = {
+      status,
+      statusText: '',
+      data: {},
+      headers: new AxiosHeaders(),
+      config: { headers: new AxiosHeaders() },
+    };
+    return error;
+  }
+
   beforeEach(() => {
     vi.resetModules();
     localStorage.clear();
@@ -590,8 +611,9 @@ describe('API client: skip 401 refresh when logged out', () => {
 
     const { api } = await import('../src/services/api/client');
 
-    // Mock api.post so the refresh call rejects immediately instead of hanging
-    const postSpy = vi.spyOn(api, 'post').mockRejectedValue(new Error('Refresh failed'));
+    // The refresh must fail as a genuine 401 — that is what makes it an
+    // AUTHORITATIVE refusal, and the only kind that may end the session.
+    const postSpy = vi.spyOn(api, 'post').mockRejectedValue(axiosStatusError(401));
 
     const interceptors = (
       api.interceptors.response as unknown as {
@@ -618,8 +640,62 @@ describe('API client: skip 401 refresh when logged out', () => {
     await expect(responseInterceptor(mockError)).rejects.toBeDefined();
     // The refresh was actually attempted against the refresh endpoint.
     expect(postSpy).toHaveBeenCalledWith('/auth/refresh');
-    // A failed refresh is an unrecoverable session → exactly one logout.
+    // The server authoritatively rejected the refresh token → exactly one logout.
     expect(mockLogoutFn).toHaveBeenCalledTimes(1);
+
+    postSpy.mockRestore();
+  });
+
+  // The mirror of the case above, and the defect that motivated splitting the
+  // classification out: the interceptor used to log out on ANY refresh failure.
+  // Because `authStore.lock()` deliberately keeps `accessToken` set, that logout
+  // is not a local teardown — it POSTs /auth/logout and DELETES a refresh-token
+  // row that still had days left. So a momentary 503 (or a rate limit, or a
+  // dropped connection) permanently destroyed a perfectly valid session and
+  // stranded the user on the login form. Anything short of a 401/403 must now
+  // propagate to the caller with the session intact.
+  it.each([
+    ['a 5xx', () => axiosStatusError(503)],
+    ['a rate limit', () => axiosStatusError(429)],
+    ['a network error with no response', () => new AxiosError('Network Error')],
+  ])('does not log out when the refresh fails with %s', async (_label, makeError) => {
+    vi.resetModules();
+    mockGetState.mockReturnValue({
+      accessToken: 'valid-token',
+      setAccessToken: mockSetAccessToken,
+      logout: mockLogoutFn,
+    });
+
+    vi.doMock('../src/stores/authStore', () => ({
+      useAuthStore: { getState: mockGetState },
+    }));
+
+    const { api } = await import('../src/services/api/client');
+    const postSpy = vi.spyOn(api, 'post').mockRejectedValue(makeError());
+
+    const interceptors = (
+      api.interceptors.response as unknown as {
+        handlers: { rejected: (error: unknown) => Promise<unknown> }[];
+      }
+    ).handlers;
+    const responseInterceptor = interceptors[0]!.rejected;
+
+    await expect(
+      responseInterceptor({
+        response: { status: 401 },
+        config: {
+          url: '/vault/items',
+          method: 'get',
+          headers: {} as Record<string, string>,
+          _retry: false,
+          _csrfRetry: true,
+        },
+      }),
+    ).rejects.toBeDefined();
+
+    expect(postSpy).toHaveBeenCalledWith('/auth/refresh');
+    // The session survives: no /auth/logout, no destroyed refresh-token row.
+    expect(mockLogoutFn).not.toHaveBeenCalled();
 
     postSpy.mockRestore();
   });

@@ -129,9 +129,15 @@ const envSchema = z
       .transform((url) => url.replace(/\/+$/, '')),
     APP_NAME: z.string().min(1).default('H-Vault'),
 
-    // Rate Limiting
-    RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(900_000),
-    RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(100),
+    // Rate limiting has no env knobs, deliberately. `RATE_LIMIT_WINDOW_MS` and
+    // `RATE_LIMIT_MAX` used to be declared here, defaulted, documented in
+    // `.env.example` and asserted by the config tests — and read by absolutely
+    // nothing: every limiter in `middleware/rateLimiter.ts` carries its own
+    // window and ceiling, each sized against the specific traffic it bounds.
+    // Config an operator can set and that silently does nothing is worse than no
+    // config, so they were removed rather than left inert. The per-tier numbers
+    // that ARE tunable live in `@hvault/shared` (`LOGIN_RATE_LIMIT_*`); do not
+    // reintroduce a global pair here.
 
     // Security
     BCRYPT_ROUNDS: z.coerce.number().int().min(4).max(31).default(12),

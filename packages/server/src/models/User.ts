@@ -4,6 +4,8 @@ import {
   KDF_ALGORITHM,
   ENCRYPTION_VERSION,
   AUTO_LOCK_TIMEOUT_MINUTES,
+  LOCK_ON_HIDDEN_DEFAULT,
+  LOCK_ON_HIDDEN_DELAY_MINUTES,
   CLIPBOARD_CLEAR_SECONDS,
   DEFAULT_PASSWORD_LENGTH,
   MAX_BACKUP_EMAILS,
@@ -41,6 +43,8 @@ export interface IBackupSettingsDoc {
 
 export interface IUserSettings {
   autoLockTimeout: number;
+  lockOnHidden: boolean;
+  lockOnHiddenDelay: number;
   clipboardClearTimeout: number;
   defaultPasswordLength: number;
   defaultPasswordOptions: IPasswordGenOptions;
@@ -161,6 +165,8 @@ const backupSettingsSchema = new Schema<IBackupSettingsDoc>(
 const userSettingsSchema = new Schema<IUserSettings>(
   {
     autoLockTimeout: { type: Number, default: AUTO_LOCK_TIMEOUT_MINUTES },
+    lockOnHidden: { type: Boolean, default: LOCK_ON_HIDDEN_DEFAULT },
+    lockOnHiddenDelay: { type: Number, default: LOCK_ON_HIDDEN_DELAY_MINUTES },
     clipboardClearTimeout: { type: Number, default: CLIPBOARD_CLEAR_SECONDS },
     defaultPasswordLength: { type: Number, default: DEFAULT_PASSWORD_LENGTH },
     defaultPasswordOptions: {

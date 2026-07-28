@@ -12,6 +12,7 @@ import {
   passwordVerifyLimiter,
   healthLimiter,
   generalAuthLimiter,
+  unlockLimiter,
 } from '../src/middleware/rateLimiter.js';
 import { createTestUser, authHeader, sampleVaultItem, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
@@ -378,9 +379,9 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
     });
   });
 
-  // ── 3.5 — POST /auth/refresh has authLimiter ────────────────────
+  // ── 3.5 — POST /auth/refresh has refreshLimiter ─────────────────
 
-  describe('3.5 — POST /api/v1/auth/refresh (authLimiter)', () => {
+  describe('3.5 — POST /api/v1/auth/refresh (refreshLimiter)', () => {
     it('should accept refresh requests through rate limiter middleware', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
 
@@ -614,7 +615,6 @@ describe('Rate limiter route wiring (structural)', () => {
   const wirings: [string, string, string, unknown][] = [
     ['authLimiter on POST /auth/login', 'post', '/login', authLimiter],
     ['accountLimiter on POST /auth/login', 'post', '/login', accountLimiter],
-    ['authLimiter on POST /auth/refresh', 'post', '/refresh', authLimiter],
     ['refreshLimiter on POST /auth/refresh', 'post', '/refresh', refreshLimiter],
     ['authLimiter on POST /auth/login/2fa', 'post', '/login/2fa', authLimiter],
     ['tokenVerifyLimiter on POST /auth/login/2fa', 'post', '/login/2fa', tokenVerifyLimiter],
@@ -669,9 +669,47 @@ describe('Rate limiter route wiring (structural)', () => {
     ],
     ['healthLimiter on GET /health', 'get', '/health', healthLimiter],
     ['healthLimiter on GET /config', 'get', '/config', healthLimiter],
+    ['generalAuthLimiter on PUT /user/settings', 'put', '/settings', generalAuthLimiter],
+    ['generalAuthLimiter on GET /backup/history', 'get', '/history', generalAuthLimiter],
   ];
 
   it.each(wirings)('%s', (_label, method, path, limiter) => {
     expect(isLimiterMounted(method, path, limiter)).toBe(true);
+  });
+
+  /**
+   * The ABSENCE half of the wiring contract, which is just as load-bearing as the
+   * presence half and is the part that was missing.
+   *
+   * `authLimiter` counts CREDENTIAL ATTEMPTS and keys on one flat `auth:<ip>`
+   * bucket shared by every route it is mounted on. Mounting it on the endpoints
+   * the APPLICATION drives — `/refresh` (whenever the 5-minute access token
+   * lapses) and `/verify-unlock` (on every vault unlock) — meant ordinary use of
+   * the app drained the login budget: an open tab spent ~3 slots per window
+   * refreshing, each unlock spent 2 more, and the user's next `POST /auth/login`
+   * was rejected with 429 on its FIRST attempt.
+   *
+   * The old table asserted only that `authLimiter` WAS on `/refresh`, so it
+   * pinned the defect rather than catching it. Both endpoints now carry their own
+   * correctly-keyed limiter (asserted above), and must carry no share of this one.
+   * `tests/auth-limiter-isolation.test.ts` proves the same property behaviourally,
+   * through the real production-configured limiters.
+   */
+  const mustNotCarryAuthLimiter: [string, string, string][] = [
+    ['POST /auth/refresh', 'post', '/refresh'],
+    ['POST /auth/verify-unlock', 'post', '/verify-unlock'],
+  ];
+
+  it.each(mustNotCarryAuthLimiter)(
+    '%s does NOT share the credential-attempt budget',
+    (_label, method, path) => {
+      expect(isLimiterMounted(method, path, authLimiter)).toBe(false);
+    },
+  );
+
+  it('unlockLimiter is mounted on POST /auth/verify-unlock', () => {
+    // The control for the assertion above: `/verify-unlock` is not unbounded, it
+    // is bounded by the per-user limiter that suits it.
+    expect(isLimiterMounted('post', '/verify-unlock', unlockLimiter)).toBe(true);
   });
 });

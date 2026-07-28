@@ -1,10 +1,36 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
+import { AxiosError, AxiosHeaders } from 'axios';
 import { UnlockScreen } from '../src/components/auth/UnlockScreen';
 import { useAuthStore } from '../src/stores/authStore';
-import { api } from '../src/services/api/client';
+import { api, performTokenRefresh } from '../src/services/api/client';
 import { cryptoService } from '../src/services/crypto/cryptoService';
+
+/**
+ * Build a real `AxiosError` carrying `status`, so the component's failure
+ * classification (`isSessionGone` / `describeTransientFailure`) runs against the
+ * same shape it sees in production. A bare `new Error()` is NOT interchangeable
+ * here: `isAxiosError` returns false for it, so every classifier would report
+ * "not transient, not session-gone" and the test would pass through the default
+ * branch regardless of what the code does.
+ */
+function axiosStatusError(status: number, headers: Record<string, string> = {}): AxiosError {
+  const err = new AxiosError('Request failed with status code ' + String(status));
+  err.response = {
+    status,
+    statusText: '',
+    data: {},
+    headers: new AxiosHeaders(headers),
+    config: { headers: new AxiosHeaders() },
+  };
+  return err;
+}
+
+/** An Axios error with no `response` at all — the offline / DNS-failure shape. */
+function axiosNetworkError(): AxiosError {
+  return new AxiosError('Network Error');
+}
 
 // The client-side lockout (getLockoutDuration / applyLockout / persisted state)
 // is module-scoped inside UnlockScreen and cannot be imported. It is exercised
@@ -35,9 +61,13 @@ vi.mock('../src/services/api/client', () => ({
     put: vi.fn(),
     delete: vi.fn(),
   },
-  // Matches the real fallback: with no Web Locks API (jsdom) the refresh runs
-  // directly. Cross-tab serialization is covered by `refresh-multitab.test.ts`.
+  // `performTokenRefresh` is the ONE refresh path; the unlock screen calls it
+  // directly instead of hand-rolling a locked POST. Cross-tab serialization,
+  // envelope validation and CSRF invalidation are its concern and are covered by
+  // `refresh-multitab.test.ts`.
+  performTokenRefresh: vi.fn(),
   withRefreshLock: <T,>(run: () => Promise<T>): Promise<T> => run(),
+  clearCsrfToken: vi.fn(),
 }));
 
 vi.mock('../src/services/crypto/cryptoService', () => ({
@@ -73,8 +103,11 @@ describe('unlock rate limiting — client-side lockout (real component)', () => 
       } as unknown as AuthState;
       return selector ? selector(state) : state;
     });
+    // No access token in the store, so `isAccessTokenUsable` is false and the
+    // unlock flow takes the refresh branch — the case these tests exercise.
     vi.mocked(useAuthStore.getState).mockReturnValue({
       setAccessToken: mockSetAccessToken,
+      accessToken: null,
     } as unknown as ReturnType<typeof useAuthStore.getState>);
     vi.mocked(useAuthStore.setState).mockImplementation(() => {});
     vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
@@ -88,14 +121,14 @@ describe('unlock rate limiting — client-side lockout (real component)', () => 
   });
 
   /**
-   * Submit one failed unlock: /auth/refresh succeeds so verify-unlock is
-   * reached, then /auth/verify-unlock rejects (wrong master password). This is
-   * the branch that increments the failure counter and calls applyLockout.
+   * Submit one failed unlock: the token refresh succeeds so verify-unlock is
+   * reached, then verify-unlock rejects with a genuine 401 (wrong master
+   * password). This is the ONLY branch that increments the failure counter and
+   * calls applyLockout — a 429 or a network error deliberately does not.
    */
   function submitFailedUnlock() {
-    vi.mocked(api.post)
-      .mockResolvedValueOnce({ data: { data: { accessToken: 'tok' } } })
-      .mockRejectedValueOnce(new Error('Incorrect master password'));
+    vi.mocked(performTokenRefresh).mockResolvedValueOnce('tok');
+    vi.mocked(api.post).mockRejectedValueOnce(axiosStatusError(401));
     fireEvent.change(screen.getByLabelText('Master Password'), {
       target: { value: 'wrong-password' },
     });
@@ -216,15 +249,17 @@ describe('unlock rate limiting — server-side API ordering', () => {
       return selector ? selector(state) : state;
     });
 
+    // No access token in the store, so `isAccessTokenUsable` is false and the
+    // unlock flow takes the refresh branch — the case these tests exercise.
     vi.mocked(useAuthStore.getState).mockReturnValue({
       setAccessToken: mockSetAccessToken,
+      accessToken: null,
     } as unknown as ReturnType<typeof useAuthStore.getState>);
 
     vi.mocked(useAuthStore.setState).mockImplementation(() => {});
 
-    vi.mocked(api.post).mockResolvedValue({
-      data: { data: { accessToken: 'new-token-123' } },
-    });
+    vi.mocked(performTokenRefresh).mockResolvedValue('new-token-123');
+    vi.mocked(api.post).mockResolvedValue({ data: { success: true } });
 
     vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
       masterEncryptionKey: fakeMek,
@@ -273,9 +308,8 @@ describe('unlock rate limiting — server-side API ordering', () => {
 
   it('skips the local decrypt when verify-unlock returns 429', async () => {
     mockUnlock.mockResolvedValue(undefined);
-    vi.mocked(api.post)
-      .mockResolvedValueOnce({ data: { data: { accessToken: 'tok' } } })
-      .mockRejectedValueOnce(new Error('Too Many Requests'));
+    vi.mocked(performTokenRefresh).mockResolvedValueOnce('tok');
+    vi.mocked(api.post).mockRejectedValueOnce(axiosStatusError(429));
 
     render(
       <MemoryRouter>
@@ -297,5 +331,349 @@ describe('unlock rate limiting — server-side API ordering', () => {
     });
 
     expect(mockUnlock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The failures that are NOT the user's fault.
+ *
+ * Every one of these used to be indistinguishable from a wrong master password —
+ * or worse, from a dead session. A 429 raised the local backoff on top of the
+ * server's, so the user was locked out twice over for the same event; and any
+ * refresh failure at all called `logout()`, which (because `lock()` keeps the
+ * access token) reaches `POST /auth/logout` and DELETES a refresh token that was
+ * still perfectly valid. A momentary rate limit permanently ended the session and
+ * dumped the user on a login page with no explanation.
+ */
+describe('unlock — transient failures must not cost the user their session', () => {
+  const fakeMek = { __cryptoKey: 'mek' } as unknown as CryptoKey;
+  const fakeAuthKey = new ArrayBuffer(32);
+  const mockUnlock = vi.fn();
+  const mockLogout = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      const state = {
+        user: { userId: 'user-1', email: 'vault@example.com' },
+        unlock: mockUnlock,
+        logout: mockLogout,
+      } as unknown as AuthState;
+      return selector ? selector(state) : state;
+    });
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      setAccessToken: vi.fn(),
+      accessToken: null,
+    } as unknown as ReturnType<typeof useAuthStore.getState>);
+    vi.mocked(useAuthStore.setState).mockImplementation(() => {});
+    vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
+      masterEncryptionKey: fakeMek,
+      authKey: fakeAuthKey,
+    });
+    vi.mocked(cryptoService.getAuthHash).mockReturnValue('mock-auth-hash');
+    vi.mocked(cryptoService.clearKey).mockReturnValue();
+    vi.mocked(cryptoService.clearCryptoKey).mockResolvedValue();
+    mockUnlock.mockResolvedValue(undefined);
+  });
+
+  function submit(password = 'whatever') {
+    fireEvent.change(screen.getByLabelText('Master Password'), { target: { value: password } });
+    fireEvent.click(screen.getByRole('button', { name: /unlock vault/i }));
+  }
+
+  it('a 429 from verify-unlock reports the wait and does NOT count as a failed attempt', async () => {
+    vi.mocked(performTokenRefresh).mockResolvedValueOnce('tok');
+    vi.mocked(api.post).mockRejectedValueOnce(axiosStatusError(429, { 'retry-after': '45' }));
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(screen.getByText(/try again in 45 seconds/i)).toBeInTheDocument();
+    });
+
+    // The local backoff counter is untouched: the server already told us to wait,
+    // and stacking a second cooldown on top of it punishes the user twice.
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+    expect(localStorage.getItem('__hv_unlock_lockout_until')).toBeNull();
+    expect(mockLogout).not.toHaveBeenCalled();
+    expect(mockUnlock).not.toHaveBeenCalled();
+  });
+
+  it('a 429 with no Retry-After still explains itself', async () => {
+    vi.mocked(performTokenRefresh).mockResolvedValueOnce('tok');
+    vi.mocked(api.post).mockRejectedValueOnce(axiosStatusError(429));
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(screen.getByText(/too many attempts/i)).toBeInTheDocument();
+    });
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+  });
+
+  it('a rate-limited REFRESH keeps the user on the unlock screen and the session alive', async () => {
+    vi.mocked(performTokenRefresh).mockRejectedValueOnce(axiosStatusError(429));
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(screen.getByText(/too many attempts/i)).toBeInTheDocument();
+    });
+
+    // The critical assertion: no logout. `logout()` here would revoke a valid
+    // refresh token server-side, so a transient 429 would cost the whole session.
+    expect(mockLogout).not.toHaveBeenCalled();
+    // Still on the unlock screen, ready to retry.
+    expect(screen.getByRole('button', { name: /unlock vault/i })).toBeInTheDocument();
+    // And it did not burn an attempt either.
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+  });
+
+  it('an offline REFRESH keeps the session alive', async () => {
+    vi.mocked(performTokenRefresh).mockRejectedValueOnce(axiosNetworkError());
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(screen.getByText(/could not reach the server/i)).toBeInTheDocument();
+    });
+    expect(mockLogout).not.toHaveBeenCalled();
+  });
+
+  it('a 500 from the REFRESH keeps the session alive', async () => {
+    vi.mocked(performTokenRefresh).mockRejectedValueOnce(axiosStatusError(503));
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(screen.getByText(/temporarily unavailable/i)).toBeInTheDocument();
+    });
+    expect(mockLogout).not.toHaveBeenCalled();
+  });
+
+  it('a 401 from the REFRESH does end the session — that one really is gone', async () => {
+    vi.mocked(performTokenRefresh).mockRejectedValueOnce(axiosStatusError(401));
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(mockLogout).toHaveBeenCalled();
+    });
+    // Not counted as a wrong password: the password was never checked.
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+  });
+
+  it('does not refresh at all when the access token is still usable', async () => {
+    // A JWT whose `exp` is comfortably in the future. `lock()` keeps the access
+    // token, so after a short auto-lock this is the NORMAL case — and refreshing
+    // anyway cost a rate-limit slot, rotated the refresh cookie and invalidated
+    // the CSRF token on every single unlock.
+    const exp = Math.floor(Date.now() / 1000) + 600;
+    const payload = btoa(JSON.stringify({ sub: 'user-1', exp })).replace(/=+$/, '');
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      setAccessToken: vi.fn(),
+      accessToken: `header.${payload}.sig`,
+    } as unknown as ReturnType<typeof useAuthStore.getState>);
+    vi.mocked(api.post).mockResolvedValue({ data: { success: true } });
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(mockUnlock).toHaveBeenCalled();
+    });
+    expect(performTokenRefresh).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The trap that skipping the refresh would otherwise open.
+   *
+   * With a locally-fresh token the client sends verify-unlock straight away, and a
+   * 401 back is ambiguous: either the master password is wrong, or the token the
+   * server sees is no longer valid (the password was changed on another device and
+   * bumped `passwordChangedAt`, the account was deleted, verification was
+   * revoked). Only `exp` is visible to the client; the rest is server state.
+   *
+   * Calling the second case a wrong password has no exit — every retry fails
+   * identically and the local backoff climbs toward ten minutes while nothing ever
+   * says "sign in again". So a 401 on the skipped-refresh path is disambiguated by
+   * doing the refresh and asking once more.
+   */
+  function usableToken() {
+    const exp = Math.floor(Date.now() / 1000) + 600;
+    const payload = btoa(JSON.stringify({ sub: 'user-1', exp })).replace(/=+$/, '');
+    return `header.${payload}.sig`;
+  }
+
+  it('a 401 on a locally-fresh token is retried after a refresh, then reported as a wrong password', async () => {
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      setAccessToken: vi.fn(),
+      accessToken: usableToken(),
+    } as unknown as ReturnType<typeof useAuthStore.getState>);
+    // Both attempts refuse; the refresh in between succeeds, so the token was
+    // never the problem — the password is genuinely wrong.
+    vi.mocked(api.post)
+      .mockRejectedValueOnce(axiosStatusError(401))
+      .mockRejectedValueOnce(axiosStatusError(401));
+    vi.mocked(performTokenRefresh).mockResolvedValueOnce('fresh');
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBe('1');
+    });
+    expect(performTokenRefresh).toHaveBeenCalledTimes(1);
+    expect(api.post).toHaveBeenCalledTimes(2);
+    expect(mockLogout).not.toHaveBeenCalled();
+  });
+
+  it('disambiguates at most ONCE, so a second wrong password costs a single slot', async () => {
+    // `unlockLimiter` is 5 per user per 5 minutes. A second opinion on every wrong
+    // password would spend two slots per visible attempt, and the server would
+    // start refusing while the UI still promised the user attempts remaining.
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      setAccessToken: vi.fn(),
+      accessToken: usableToken(),
+    } as unknown as ReturnType<typeof useAuthStore.getState>);
+    vi.mocked(performTokenRefresh).mockResolvedValue('fresh');
+    vi.mocked(api.post).mockRejectedValue(axiosStatusError(401));
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+
+    // First wrong password: verify (401) -> refresh -> verify (401) = 2 calls.
+    submit('wrong-one');
+    await waitFor(() => {
+      expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBe('1');
+    });
+    expect(api.post).toHaveBeenCalledTimes(2);
+    expect(performTokenRefresh).toHaveBeenCalledTimes(1);
+
+    // Second wrong password: the question is already settled, so ONE call.
+    submit('wrong-two');
+    await waitFor(() => {
+      expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBe('2');
+    });
+    expect(api.post).toHaveBeenCalledTimes(3);
+    expect(performTokenRefresh).toHaveBeenCalledTimes(1);
+
+    // Third, likewise — the extra cost is paid once, not per attempt.
+    submit('wrong-three');
+    await waitFor(() => {
+      expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBe('3');
+    });
+    expect(api.post).toHaveBeenCalledTimes(4);
+  });
+
+  it('a 401 on a locally-fresh token ends the session when the refresh is also rejected', async () => {
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      setAccessToken: vi.fn(),
+      accessToken: usableToken(),
+    } as unknown as ReturnType<typeof useAuthStore.getState>);
+    vi.mocked(api.post).mockRejectedValueOnce(axiosStatusError(401));
+    vi.mocked(performTokenRefresh).mockRejectedValueOnce(axiosStatusError(401));
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(mockLogout).toHaveBeenCalled();
+    });
+    // The password was never actually judged, so it must not be blamed.
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+  });
+
+  it('a 401 on a locally-fresh token keeps the session when the refresh fails transiently', async () => {
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      setAccessToken: vi.fn(),
+      accessToken: usableToken(),
+    } as unknown as ReturnType<typeof useAuthStore.getState>);
+    vi.mocked(api.post).mockRejectedValueOnce(axiosStatusError(401));
+    vi.mocked(performTokenRefresh).mockRejectedValueOnce(axiosStatusError(503));
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(screen.getByText(/temporarily unavailable/i)).toBeInTheDocument();
+    });
+    expect(mockLogout).not.toHaveBeenCalled();
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+  });
+
+  it('still refreshes when the access token is expiring within the safety margin', async () => {
+    // 30 s of life left is inside ACCESS_TOKEN_FRESHNESS_MARGIN_MS (60 s), so the
+    // token could expire mid-flight. Fails closed: refresh.
+    const exp = Math.floor(Date.now() / 1000) + 30;
+    const payload = btoa(JSON.stringify({ sub: 'user-1', exp })).replace(/=+$/, '');
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      setAccessToken: vi.fn(),
+      accessToken: `header.${payload}.sig`,
+    } as unknown as ReturnType<typeof useAuthStore.getState>);
+    vi.mocked(performTokenRefresh).mockResolvedValueOnce('fresh');
+    vi.mocked(api.post).mockResolvedValue({ data: { success: true } });
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(performTokenRefresh).toHaveBeenCalled();
+    });
   });
 });

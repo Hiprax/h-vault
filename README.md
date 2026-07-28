@@ -144,11 +144,17 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   live regions, and correct ARIA roles on virtualized lists (`react-window` above 50 items).
 - **Keyboard-first** — `Ctrl`+`L` lock, `Ctrl`+`N` new item, `Ctrl`+`K` search, `Ctrl`+`↑`/`↓`
   reorder folders (`Cmd` on macOS).
-- **Auto-lock and clipboard hygiene** — configurable idle lock, and a single shared deadline that
-  erases copied secrets from the OS clipboard, on that deadline and on lock. Switching tabs or
-  minimising deliberately does **not** erase it: that is how you go somewhere to paste. If the
-  browser refuses the erase while the window is in the background, it is retried the moment the
-  window can write again rather than being abandoned.
+- **Auto-lock on a wall-clock deadline** — the vault locks when your configured idle timeout has
+  actually elapsed, measured against the clock rather than against a timer. Browsers throttle timers
+  in background tabs and stop them entirely while a machine sleeps, so a timer alone can only fire
+  late: come back from an hour's sleep and the vault re-checks the deadline immediately instead of
+  waiting out the remainder. Locking as soon as the tab is hidden is available as a separate,
+  opt-in setting with its own delay — off by default, because the timeout you configured should be
+  the one that governs.
+- **Clipboard hygiene** — a single shared deadline erases copied secrets from the OS clipboard, on
+  that deadline and on lock. Switching tabs or minimising deliberately does **not** erase it: that is
+  how you go somewhere to paste. If the browser refuses the erase while the window is in the
+  background, it is retried the moment the window can write again rather than being abandoned.
 - **Degrades honestly** — one corrupt item never breaks the list. It is flagged, a banner offers
   a re-sync, and the item stays deletable instead of crashing the page.
 
@@ -646,8 +652,6 @@ start** rather than run misconfigured.
 | `TRUST_PROXY`                 | No       | `false`                            | `false` · `true` · `1` · a named range · a subnet list · a hop count (0–10)                                                                                               |
 | `ENABLE_SWAGGER`              | No       | `false`                            | Serves **unauthenticated** API docs in production when on. Always on in dev/test                                                                                          |
 | `METRICS_TOKEN`               | No       | —                                  | Min 16 chars. Enables `GET /api/v1/metrics`; unset, that endpoint 404s                                                                                                    |
-| `RATE_LIMIT_WINDOW_MS`        | No       | `900000`                           | Reserved — the limiters below carry their own windows                                                                                                                     |
-| `RATE_LIMIT_MAX`              | No       | `100`                              | Reserved — as above                                                                                                                                                       |
 
 </details>
 
@@ -674,7 +678,7 @@ start** rather than run misconfigured.
 | --------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
 | `HVAULT_HTTP_PORT`    | `8080`            | The one host port published, always bound to `127.0.0.1`                                 |
 | `HVAULT_STACK_NAME`   | `hvault`          | Namespaces the project, containers, networks and volumes                                 |
-| `HVAULT_VERSION`      | `0.7.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
+| `HVAULT_VERSION`      | `0.8.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
 | `HVAULT_EDGE_SUBNET`  | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                       |
 | `HVAULT_DATA_SUBNET`  | `172.31.241.0/24` | App ↔ MongoDB. Internal: no published port, no route out                                 |
 | `TRUST_PROXY_HOPS`    | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                              |
@@ -843,22 +847,36 @@ Fourteen tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-keye
 an IPv6 address to its `/64` prefix, so rotating the source address inside one allocation does not
 buy an attacker a fresh bucket.
 
-| Tier            | Limit       | Window | Applied to                                                                                                                                               |
-| --------------- | ----------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth            | 10 / IP     | 15 min | register, login, 2FA login, refresh, verify-unlock, forgot-password, resend-verification                                                                 |
-| Account         | 20 / email  | 15 min | login (stacked on top of the auth tier)                                                                                                                  |
-| Token verify    | 20 / IP     | 15 min | verify-email, reset-password, unlock-account, 2FA login, 2FA setup verification                                                                          |
-| Refresh         | 5 / session | 5 min  | token refresh — keyed by IP + user-agent + a hash of the refresh cookie                                                                                  |
-| Unlock          | 5 / user    | 5 min  | vault unlock verification                                                                                                                                |
-| Password verify | 5 / user    | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password |
-| Breach check    | 30 / user   | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                   |
-| Breach batch    | 300 / user  | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                   |
-| General auth    | 60 / user   | 1 min  | profile, sessions, trusted devices, audit log, folder list, lock, logout, logout-all                                                                     |
-| Heavy Ops       | 10 / IP     | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                             |
-| Import          | 60 / user   | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                   |
-| CSRF            | 30 / IP     | 15 min | the CSRF token endpoint                                                                                                                                  |
-| Health          | 60 / IP     | 1 min  | health and public config — counted **in memory**, per process (see below)                                                                                |
-| Metrics         | 60 / IP     | 1 min  | the metrics endpoint — counted **in memory**, per process (see below)                                                                                    |
+Two rules govern where a limiter goes, and both were learned the hard way:
+
+- **A budget for credential attempts is never shared with session maintenance.** The auth tier counts
+  what a person deliberately submits — a password, or a request for an email link. Token refresh and
+  vault unlock are what the app does on its own, continuously, and they have their own tiers. Sharing
+  one bucket meant a few ordinary lock-and-unlock cycles exhausted the login budget, and the next
+  sign-in was refused before it was even tried.
+- **A caller-supplied value may appear in a key only where an IP-keyed tier also bounds the same
+  route.** A header, a cookie or a rotating token is chosen by the client, so keying on one lets that
+  client mint a fresh bucket per request and never be counted. The per-account tier deliberately keys
+  on the submitted email — the only way to bound one account across many addresses — and that is safe
+  precisely because the auth tier bounds the IP on the same route regardless. The refresh tier has no
+  such companion, so it keys on the address alone.
+
+| Tier            | Limit      | Window | Applied to                                                                                                                                                                  |
+| --------------- | ---------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth            | 20 / IP    | 15 min | register, login, 2FA login, forgot-password, resend-verification — credential attempts only                                                                                 |
+| Account         | 20 / email | 15 min | login (stacked on top of the auth tier)                                                                                                                                     |
+| Token verify    | 20 / IP    | 15 min | verify-email, reset-password, unlock-account, 2FA login, 2FA setup verification                                                                                             |
+| Refresh         | 200 / IP   | 15 min | token refresh — keyed by IP alone (the one identity an unauthenticated caller cannot forge), so it is shared by everyone behind one egress address; sized for ~60 open tabs |
+| Unlock          | 5 / user   | 5 min  | vault unlock verification                                                                                                                                                   |
+| Password verify | 5 / user   | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password                    |
+| Breach check    | 30 / user  | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                                      |
+| Breach batch    | 300 / user | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                                      |
+| General auth    | 60 / user  | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, backup settings and history, lock, logout, logout-all                                                 |
+| Heavy Ops       | 10 / IP    | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                                                |
+| Import          | 60 / user  | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                      |
+| CSRF            | 100 / IP   | 15 min | the CSRF token endpoint — every token refresh invalidates the token in every open tab, so re-fetches are routine                                                            |
+| Health          | 60 / IP    | 1 min  | health and public config — counted **in memory**, per process (see below)                                                                                                   |
+| Metrics         | 60 / IP    | 1 min  | the metrics endpoint — counted **in memory**, per process (see below)                                                                                                       |
 
 Exceeding a limit returns **429** with a JSON body. Responses carry the IETF standard headers —
 `RateLimit-Policy`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After`

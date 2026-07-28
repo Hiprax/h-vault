@@ -13,7 +13,7 @@ import type {
   RegisterResponse,
   EmailStatusResponse,
 } from '@hvault/shared';
-import { api, withRefreshLock } from './client.js';
+import { api, performTokenRefresh } from './client.js';
 
 // ---------------------------------------------------------------------------
 // Request payload types
@@ -90,12 +90,22 @@ export function login2faApi(
   return api.post('/auth/login/2fa', data);
 }
 
-export function refreshTokenApi(): Promise<AxiosResponse<ApiResponse<{ accessToken: string }>>> {
-  // Held under the cross-tab refresh lock: this POST rotates the refresh-token
-  // cookie that every tab of the origin shares, and a sibling presenting the
-  // same pre-rotation token would trip the server's reuse detection and revoke
-  // the whole token family. Every refresh call site must take the lock.
-  return withRefreshLock(() => api.post('/auth/refresh'));
+/**
+ * Rotate the access token and return it.
+ *
+ * A thin alias for `performTokenRefresh`, which is the single implementation:
+ * it takes the cross-tab refresh lock (the refresh cookie is shared by every tab
+ * of the origin, and two tabs presenting the same pre-rotation token trip the
+ * server's reuse detection and revoke the whole family), validates the response
+ * envelope, stores the new access token, and invalidates the CSRF token that the
+ * cookie rotation just made stale.
+ *
+ * It resolves to the token rather than the Axios response because callers have no
+ * business inspecting the envelope themselves — every one that did got some part
+ * of it wrong.
+ */
+export function refreshTokenApi(): Promise<string> {
+  return performTokenRefresh();
 }
 
 /**

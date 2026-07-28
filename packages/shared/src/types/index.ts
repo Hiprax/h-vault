@@ -239,7 +239,16 @@ export interface IUserProfile {
 }
 
 export interface IUserSettings {
+  /** Idle minutes before the vault locks. */
   autoLockTimeout: number;
+  /**
+   * Opt-in: also lock once the tab has been hidden for `lockOnHiddenDelay`
+   * minutes, independently of idle time. Off by default — `autoLockTimeout`
+   * alone governs unless the user asks for more.
+   */
+  lockOnHidden: boolean;
+  /** Minutes the tab must stay hidden before locking, when `lockOnHidden` is on. */
+  lockOnHiddenDelay: number;
   clipboardClearTimeout: number;
   defaultPasswordLength: number;
   defaultPasswordOptions: PasswordGenOptions;

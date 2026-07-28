@@ -40,8 +40,12 @@ const mockGetState = vi.fn(() => ({
 
 let refreshCount = 0;
 let refreshShouldFail = false;
+let refreshReturnsBadEnvelope = false;
+let refreshFailStatus = 401;
+let refreshFailMessage = 'nope';
 let protectedHits = 0;
 let csrfProtectedHits = 0;
+let forbiddenOnMeritsHits = 0;
 /** Authorization header seen by each `/protected` call, in order. */
 let protectedAuth: (string | undefined)[] = [];
 
@@ -49,7 +53,17 @@ function ok(data: unknown, config: AxiosResponse['config']): AxiosResponse {
   return { data, status: 200, statusText: 'OK', headers: {}, config } as AxiosResponse;
 }
 
-function httpError(status: number, config: AxiosResponse['config']): Promise<never> {
+/**
+ * `message` mirrors the server's FLAT error envelope (`{ success, message,
+ * statusCode, statusText }`), which is what the client reads. It matters for 403s:
+ * the CSRF replay is now gated on the message actually naming CSRF, so a 403 the
+ * handler raised on its merits is no longer blindly re-sent.
+ */
+function httpError(
+  status: number,
+  config: AxiosResponse['config'],
+  message = 'nope',
+): Promise<never> {
   return Promise.reject(
     new AxiosError(
       `Request failed with status code ${String(status)}`,
@@ -59,7 +73,7 @@ function httpError(status: number, config: AxiosResponse['config']): Promise<nev
       {
         status,
         statusText: status === 401 ? 'Unauthorized' : 'Forbidden',
-        data: { success: false, error: { code: 'ERR', message: 'nope' } },
+        data: { success: false, message, statusCode: status },
         headers: {},
         config,
       },
@@ -76,7 +90,8 @@ const mockAdapter: AxiosAdapter = (config) => {
 
   if (url === '/auth/refresh') {
     refreshCount++;
-    if (refreshShouldFail) return httpError(401, config);
+    if (refreshShouldFail) return httpError(refreshFailStatus, config, refreshFailMessage);
+    if (refreshReturnsBadEnvelope) return Promise.resolve(ok({ success: true }, config));
     return Promise.resolve(ok({ data: { accessToken: `tok-${String(refreshCount)}` } }, config));
   }
 
@@ -94,9 +109,19 @@ const mockAdapter: AxiosAdapter = (config) => {
   if (url === '/csrf-protected') {
     csrfProtectedHits++;
     // Stale CSRF token on the first hit; the replay with a fresh token succeeds.
+    // The message is the one `middleware/csrf.ts` actually emits — that string is
+    // the only signal the flat error envelope carries, and the replay is gated on
+    // it.
     return csrfProtectedHits === 1
-      ? httpError(403, config)
+      ? httpError(403, config, 'invalid csrf token')
       : Promise.resolve(ok({ ok: true }, config));
+  }
+
+  if (url === '/forbidden-on-merits') {
+    forbiddenOnMeritsHits++;
+    // A 403 the HANDLER raised, not the CSRF middleware — e.g. `POST /auth/login`
+    // answering ACCOUNT_LOCKED.
+    return httpError(403, config, 'ACCOUNT_LOCKED');
   }
 
   return httpError(401, config);
@@ -183,8 +208,12 @@ function restoreAdapter(
 beforeEach(() => {
   refreshCount = 0;
   refreshShouldFail = false;
+  refreshReturnsBadEnvelope = false;
+  refreshFailStatus = 401;
+  refreshFailMessage = 'nope';
   protectedHits = 0;
   csrfProtectedHits = 0;
+  forbiddenOnMeritsHits = 0;
   protectedAuth = [];
   lockRequests = [];
   lastLockOptions = undefined;
@@ -353,7 +382,10 @@ describe('every refresh call site takes the lock', () => {
     // every other tab — the reuse race this phase closes would still be live.
     expect(lockRequests).toEqual([REFRESH_LOCK_NAME]);
     expect(refreshCount).toBe(1);
-    expect(res.data).toEqual({ data: { accessToken: 'tok-1' } });
+    // Resolves to the token itself — `performTokenRefresh` owns unwrapping the
+    // envelope, so no caller can get that wrong (or skip the `success` check, as
+    // two of the four call sites used to).
+    expect(res).toBe('tok-1');
   });
 
   it('propagates a refresh failure from refreshTokenApi through the lock', async () => {
@@ -421,7 +453,7 @@ describe('existing 401/403 behaviour is unchanged', () => {
     expect(lockRequests).toEqual([]);
   });
 
-  it('replays a 403 with a fresh CSRF token without taking the refresh lock', async () => {
+  it('replays a CSRF 403 with a fresh token, without taking the refresh lock', async () => {
     installLocks();
     const { api } = await loadClient();
 
@@ -431,5 +463,129 @@ describe('existing 401/403 behaviour is unchanged', () => {
     expect(csrfProtectedHits).toBe(2);
     expect(refreshCount).toBe(0);
     expect(lockRequests).toEqual([]);
+  });
+
+  /**
+   * The replay used to fire on ANY 403 of a state-changing request. That silently
+   * doubled the most expensive requests in the app: `POST /auth/login` answers 403
+   * `ACCOUNT_LOCKED`, so one visible attempt cost two bcrypt compares and two
+   * slots of BOTH the per-IP and per-email login budgets — halving the user's real
+   * allowance exactly when they could least afford it. Replaying a request the
+   * server refused on its merits cannot succeed; it only costs.
+   */
+  it('does NOT replay a 403 the handler raised on its merits', async () => {
+    installLocks();
+    const { api } = await loadClient();
+
+    await expect(api.post('/forbidden-on-merits', {})).rejects.toBeInstanceOf(AxiosError);
+
+    expect(forbiddenOnMeritsHits).toBe(1);
+    expect(refreshCount).toBe(0);
+    expect(lockRequests).toEqual([]);
+  });
+});
+
+/**
+ * The interceptor's logout rule.
+ *
+ * `logout()` is not a local teardown. The access token is still set on this path,
+ * so it reaches `POST /auth/logout` and DELETES the refresh-token row — a session
+ * with days left, gone. Firing that on ANY refresh failure meant a 429 or a
+ * dropped connection permanently ended the session and stranded the user on a
+ * login page that was itself rate-limited by the same exhausted bucket.
+ */
+describe('a transient refresh failure must not destroy the session', () => {
+  it.each([
+    ['429 rate limit', 429],
+    ['500 server error', 500],
+    ['503 unavailable', 503],
+  ])('does NOT log out on a %s', async (_label, status) => {
+    refreshShouldFail = true;
+    refreshFailStatus = status;
+    installLocks();
+    const { api } = await loadClient();
+
+    await expect(api.get('/protected')).rejects.toBeInstanceOf(AxiosError);
+
+    expect(refreshCount).toBe(1);
+    expect(mockLogout).not.toHaveBeenCalled();
+  });
+
+  it('DOES log out on a 401 — that session really is gone', async () => {
+    refreshShouldFail = true;
+    refreshFailStatus = 401;
+    installLocks();
+    const { api } = await loadClient();
+
+    await expect(api.get('/protected')).rejects.toBeInstanceOf(AxiosError);
+
+    expect(mockLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT log out when the refresh is refused for a stale CSRF token', async () => {
+    // A CSRF token is bound to `hashToken(refreshToken)` and every refresh
+    // rotates that cookie, so a stale one is expected and recoverable — the
+    // interceptor fetches a fresh token and replays. Classifying that 403 as an
+    // authoritative dead session would mean a CSRF token that could not be
+    // refreshed (endpoint briefly unreachable, or rate-limited) revoked a session
+    // nobody had questioned.
+    refreshShouldFail = true;
+    refreshFailStatus = 403;
+    refreshFailMessage = 'invalid csrf token';
+    installLocks();
+    const { api } = await loadClient();
+
+    await expect(api.get('/protected')).rejects.toBeInstanceOf(AxiosError);
+
+    expect(mockLogout).not.toHaveBeenCalled();
+  });
+
+  it('DOES log out on a 403 the server raised on its merits', async () => {
+    // The control for the case above: `/auth/refresh` answers 403 ACCOUNT_LOCKED,
+    // and that one genuinely ends the session.
+    refreshShouldFail = true;
+    refreshFailStatus = 403;
+    refreshFailMessage = 'ACCOUNT_LOCKED';
+    installLocks();
+    const { api } = await loadClient();
+
+    await expect(api.get('/protected')).rejects.toBeInstanceOf(AxiosError);
+
+    expect(mockLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers on the next request after a transient failure', async () => {
+    refreshShouldFail = true;
+    refreshFailStatus = 429;
+    installLocks();
+    const { api } = await loadClient();
+
+    await expect(api.get('/protected')).rejects.toBeInstanceOf(AxiosError);
+
+    // The single-flight state must be released, not wedged: with the session
+    // still alive, the very next request has to be able to drive a fresh refresh.
+    refreshShouldFail = false;
+    const res = await api.get('/protected');
+
+    expect(res.status).toBe(200);
+    expect(refreshCount).toBe(2);
+    expect(mockLogout).not.toHaveBeenCalled();
+  });
+});
+
+describe('performTokenRefresh owns the response envelope', () => {
+  it('rejects a 2xx that is not a success envelope instead of resolving it', async () => {
+    refreshReturnsBadEnvelope = true;
+    installLocks();
+    const { performTokenRefresh } = await loadClient();
+
+    // Two of the four old call sites read `res.data.data.accessToken` straight
+    // off the response. A malformed 2xx therefore threw a TypeError inside their
+    // catch blocks, where it was indistinguishable from an expired session — and
+    // the unlock screen responded by logging the user out for good. Validating
+    // once, here, turns that into an ordinary rejection every caller classifies
+    // as transient.
+    await expect(performTokenRefresh()).rejects.toThrow(/unexpected response/i);
+    expect(mockLogout).not.toHaveBeenCalled();
   });
 });

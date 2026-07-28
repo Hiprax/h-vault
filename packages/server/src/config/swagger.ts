@@ -447,7 +447,15 @@ export const swaggerSpec: JsonObject = {
       UserSettings: {
         type: 'object',
         properties: {
-          autoLockTimeout: { type: 'integer', description: 'Minutes (1-1440)' },
+          autoLockTimeout: { type: 'integer', description: 'Idle minutes before lock (1-1440)' },
+          lockOnHidden: {
+            type: 'boolean',
+            description: 'Also lock once the tab has been hidden for lockOnHiddenDelay minutes',
+          },
+          lockOnHiddenDelay: {
+            type: 'integer',
+            description: 'Minutes hidden before locking, when lockOnHidden is true (1-1440)',
+          },
           clipboardClearTimeout: { type: 'integer', description: 'Seconds (5-300)' },
           defaultPasswordLength: { type: 'integer', description: '8-128' },
           defaultPasswordOptions: {

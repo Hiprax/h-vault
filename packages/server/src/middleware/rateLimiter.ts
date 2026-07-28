@@ -1,17 +1,39 @@
 import { rateLimit, ipKeyGenerator, type Store } from 'express-rate-limit';
 import type { Request, Response, NextFunction } from 'express';
-import crypto from 'node:crypto';
 import { MongoRateLimitStore } from './rateLimitStore.js';
 import { httpErrors } from '@hiprax/errors';
 import { createLogger } from '@hiprax/logger';
 import { isProduction } from '../config/index.js';
-import { REFRESH_COOKIE_NAME } from '../constants/index.js';
-import { MAX_ITEMS_PER_USER, HIBP_BATCH_MAX_PREFIXES } from '@hvault/shared';
+import {
+  MAX_ITEMS_PER_USER,
+  HIBP_BATCH_MAX_PREFIXES,
+  LOGIN_RATE_LIMIT_WINDOW_MINUTES,
+  LOGIN_RATE_LIMIT_MAX_PER_IP,
+  LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
+} from '@hvault/shared';
 import { MAX_IP_ADDRESS_LENGTH } from '../utils/controllerHelpers.js';
 
 const logger = createLogger({ moduleName: 'rate-limiter' });
 
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
+
+/**
+ * Window and ceilings for the two CREDENTIAL-ATTEMPT limiters, imported from
+ * `@hvault/shared` rather than restated here so the documented constants and the
+ * enforced ones cannot drift.
+ *
+ * **Invariant — do not violate it again.** `authLimiter` counts deliberate,
+ * human-initiated credential attempts and NOTHING ELSE. Session-maintenance
+ * endpoints the application drives on its own (`/auth/refresh`,
+ * `/auth/verify-unlock`) must never be mounted behind it. They were, and because
+ * every limiter here keys on a flat `<prefix><ip>`, all seven endpoints shared one
+ * ten-request bucket: an idle open tab burned ~3 slots per window refreshing a
+ * 5-minute access token, each vault unlock burned 2 more, and the user's next
+ * `POST /auth/login` was then rejected with 429 on its FIRST attempt — locking
+ * them out of their own vault for the rest of the window. Each of those endpoints
+ * now carries its own correctly-keyed limiter instead.
+ */
+const CREDENTIAL_WINDOW_MS = LOGIN_RATE_LIMIT_WINDOW_MINUTES * 60 * 1000;
 
 /**
  * IPv6 subnet prefix length that every IP-keyed rate limiter collapses an IPv6
@@ -164,17 +186,25 @@ function prefixedKeyGenerator(prefix: string): (req: Request) => string {
 }
 
 /**
- * Auth rate limiter (login, register, etc.).
- * Allows **10 requests per 15-minute window** per IP address.
+ * Credential-attempt rate limiter.
+ *
+ * Allows {@link LOGIN_RATE_LIMIT_MAX_PER_IP} requests per
+ * {@link LOGIN_RATE_LIMIT_WINDOW_MINUTES}-minute window per IP address, across
+ * `POST /auth/register`, `/auth/login`, `/auth/login/2fa`, `/auth/forgot-password`
+ * and `/auth/resend-verification` — the endpoints where a human is deliberately
+ * presenting (or requesting) a credential.
+ *
+ * See {@link CREDENTIAL_WINDOW_MS} for the invariant that keeps session-maintenance
+ * traffic out of this bucket.
  */
-const authStore = createStore(FIFTEEN_MINUTES_MS);
+const authStore = createStore(CREDENTIAL_WINDOW_MS);
 export const authLimiter =
   noopIfNonProduction() ??
   withClientKeyGuard(
     'authLimiter',
     rateLimit({
-      windowMs: FIFTEEN_MINUTES_MS,
-      limit: 10,
+      windowMs: CREDENTIAL_WINDOW_MS,
+      limit: LOGIN_RATE_LIMIT_MAX_PER_IP,
       standardHeaders: true,
       legacyHeaders: false,
       validate: { singleCount: false },
@@ -238,16 +268,21 @@ export function skipAccountLimiter(req: Request): boolean {
 
 /**
  * Per-account login rate limiter.
- * Allows **20 login attempts per 15-minute window** per email address.
+ *
+ * Allows {@link LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT} login attempts per
+ * {@link LOGIN_RATE_LIMIT_WINDOW_MINUTES}-minute window per email address. Stacked
+ * on top of {@link authLimiter} on `POST /auth/login`, and the precise control of
+ * the two: it cannot be diluted by an attacker rotating IPs, and it cannot be
+ * exhausted for one account by traffic aimed at another.
  */
-const accountStore = createStore(FIFTEEN_MINUTES_MS);
+const accountStore = createStore(CREDENTIAL_WINDOW_MS);
 export const accountLimiter =
   noopIfNonProduction() ??
   withClientKeyGuard(
     'accountLimiter',
     rateLimit({
-      windowMs: FIFTEEN_MINUTES_MS,
-      limit: 20,
+      windowMs: CREDENTIAL_WINDOW_MS,
+      limit: LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
       standardHeaders: true,
       legacyHeaders: false,
       ...(accountStore ? { store: accountStore } : {}),
@@ -343,10 +378,21 @@ export const passwordVerifyLimiter =
 
 /**
  * CSRF token rate limiter.
- * Allows **30 requests per 15-minute window** per IP address.
+ * Allows **100 requests per 15-minute window** per IP address.
  *
- * The CSRF token endpoint is lightweight but should still be rate-limited
- * to prevent abuse (e.g., token harvesting).
+ * Sized against how often a legitimate client MUST re-fetch, which is far more
+ * often than "once in a while": a CSRF token is bound to `hashToken(refreshToken)`
+ * (`middleware/csrf.ts`), and `POST /auth/refresh` rotates that cookie and calls
+ * `clearCsrfCookie`. So every token refresh invalidates the CSRF token of EVERY
+ * tab on the origin, and each of them re-fetches on its next state-changing
+ * request. With a 5-minute access token that is a handful of refreshes per window
+ * multiplied by the number of open tabs — the old budget of 30 was reachable by a
+ * user simply working in three tabs, and exhausting it fails every subsequent
+ * write with a 403 the client cannot recover from.
+ *
+ * Raising it costs nothing: the endpoint mints a token bound to the caller's own
+ * session, so harvesting them buys an attacker nothing, and the response is a
+ * sub-kilobyte HMAC. The limiter is here to bound a flood, and 100 still does.
  */
 const csrfStore = createStore(FIFTEEN_MINUTES_MS);
 export const csrfLimiter =
@@ -355,7 +401,7 @@ export const csrfLimiter =
     'csrfLimiter',
     rateLimit({
       windowMs: FIFTEEN_MINUTES_MS,
-      limit: 30,
+      limit: 100,
       standardHeaders: true,
       legacyHeaders: false,
       validate: { singleCount: false },
@@ -493,54 +539,80 @@ export const unlockLimiter =
   );
 
 /**
- * Refresh token rate limiter.
- * Allows **5 requests per 5-minute window** per refresh-token session.
+ * Rate-limit key for `POST /auth/refresh`: the client IP, and nothing else.
  *
- * The refresh endpoint is unauthenticated (it issues new access tokens),
- * so we key by IP + user-agent hash + refresh-token hash. Including the
- * refresh-token hash isolates per-session buckets, so multiple users behind
- * the same NAT (corporate VPN, household) running the same pinned browser
- * version each get their own quota — they do not collide on a single
- * 5-req/5-min bucket and exhaust each other's refresh quota.
+ * **Nothing the CALLER controls may appear in this key.** That is the whole rule,
+ * and it has now been broken twice in this one function, in two different ways:
  *
- * If the refresh cookie is missing (legitimate first-refresh edge case where
- * the browser dropped the cookie, or an outright invalid request), we fall
- * back to the IP+UA key — the controller will reject the missing-cookie case
- * with 401 anyway, and we still want a rate limit for that path.
+ *  1. The key used to include a hash of the refresh COOKIE, to isolate per-session
+ *     buckets so several people behind one NAT would not exhaust each other's
+ *     quota. The concern is real; the implementation could not deliver it, because
+ *     `refresh` ROTATES that cookie on every success — so a healthy client
+ *     presented a different value each time and landed in a brand-new bucket with
+ *     a count of one, forever. An attacker streaming distinct garbage cookies got
+ *     the same free pass.
+ *  2. Replacing it with a hash of the USER-AGENT looked stable, and is not: the
+ *     user-agent is a request header, so `User-Agent: bot-1`, `bot-2`, … fragments
+ *     the counter exactly as the rotating cookie did. That version was only ever
+ *     safe while `authLimiter` (a flat `auth:<ip>` bucket) also sat on this route
+ *     and masked it — and removing `authLimiter` from `/refresh` is precisely what
+ *     this change does, which would have turned a latent flaw into a live one.
+ *
+ * So per-device separation is given up deliberately. On an UNAUTHENTICATED
+ * endpoint the only identity the caller cannot forge is the peer address, already
+ * normalised to its IPv6 /64 and length-clamped by {@link resolveClientKey}. The
+ * shared-egress case is answered by SIZING the budget (see
+ * {@link REFRESH_RATE_LIMIT_MAX}) rather than by a key that silently stops
+ * counting.
+ *
+ * Contrast the neighbouring limiters, which are legitimately more granular
+ * because their extra component is not caller-asserted: `unlock:`, `general:`,
+ * `pwverify:` and friends key on `req.user._id`, which comes from a signature-
+ * verified JWT behind `authenticate`.
  */
 export function buildRefreshKey(req: Request): string {
-  const ip = resolveClientKey(req) ?? '';
-  const ua = req.headers['user-agent'] ?? '';
-  // djb2 hash to differentiate devices sharing the same IP
-  let hash = 5381;
-  for (let i = 0; i < ua.length; i++) {
-    hash = ((hash << 5) + hash + ua.charCodeAt(i)) | 0;
-  }
-  const uaHash = (hash >>> 0).toString(36);
-
-  const cookies = req.cookies as Record<string, unknown> | undefined;
-  const refreshCookie = cookies?.[REFRESH_COOKIE_NAME];
-  if (typeof refreshCookie === 'string' && refreshCookie.length > 0) {
-    // SHA-256(refreshToken)[0..16] gives 64 bits of entropy — ample for
-    // bucket separation without leaking the token to any rate-limit store.
-    const refreshHash = crypto
-      .createHash('sha256')
-      .update(refreshCookie)
-      .digest('hex')
-      .slice(0, 16);
-    return `refresh:${ip}:${uaHash}:${refreshHash}`;
-  }
-  return `refresh:${ip}:${uaHash}`;
+  return `refresh:${resolveClientKey(req) ?? ''}`;
 }
 
-const refreshStore = createStore(FIVE_MINUTES_MS);
+/**
+ * Requests one IP may spend on `POST /auth/refresh` per window.
+ *
+ * Sized from the real cost of a legitimate client rather than picked round.
+ * `JWT_ACCESS_EXPIRY` defaults to 5 minutes, so one open tab needs about
+ * {@link REFRESH_RATE_LIMIT_WINDOW_MS} / 5 min ≈ 3 refreshes per window, plus one
+ * per cold-start session resume and per vault unlock that finds an expired token.
+ *
+ * Because the key is now IP-only, this budget is shared by everyone behind one
+ * address, so it has to cover a busy household or a small office rather than a
+ * single browser: 200 leaves room for roughly sixty concurrently open tabs. It
+ * still bounds a flood to about one request every four seconds from a single
+ * source — and, unlike the two previous keys, it cannot be escaped by varying a
+ * header or a cookie.
+ *
+ * Exported so a test can check the budget against that derivation instead of
+ * restating the number.
+ */
+export const REFRESH_RATE_LIMIT_MAX = 200;
+
+/** Window the {@link REFRESH_RATE_LIMIT_MAX} budget is spent over. */
+export const REFRESH_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
+
+/**
+ * Refresh token rate limiter — the ONLY limiter on `POST /auth/refresh`.
+ *
+ * It used to sit behind `authLimiter` as well, which is what let ordinary token
+ * refreshes drain the login budget; see {@link CREDENTIAL_WINDOW_MS}. The endpoint
+ * is unauthenticated by nature (it issues access tokens from the refresh cookie),
+ * so this is its only bound and it must actually bind — hence the key fix above.
+ */
+const refreshStore = createStore(REFRESH_RATE_LIMIT_WINDOW_MS);
 export const refreshLimiter =
   noopIfNonProduction() ??
   withClientKeyGuard(
     'refreshLimiter',
     rateLimit({
-      windowMs: FIVE_MINUTES_MS,
-      limit: 5,
+      windowMs: REFRESH_RATE_LIMIT_WINDOW_MS,
+      limit: REFRESH_RATE_LIMIT_MAX,
       standardHeaders: true,
       legacyHeaders: false,
       validate: { singleCount: false },

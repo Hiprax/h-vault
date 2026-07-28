@@ -38,7 +38,27 @@ import {
 
 const router = express.Router();
 
-// Public routes with auth rate limiter
+// ---------------------------------------------------------------------------
+// Rate-limiter placement invariant — read before adding a limiter to a route.
+//
+// `authLimiter` counts CREDENTIAL ATTEMPTS: a human deliberately presenting a
+// password, or asking for an email link. It is IP-keyed on a single flat
+// `auth:<ip>` bucket shared by every route it is mounted on.
+//
+// Endpoints the APPLICATION drives on its own — `/refresh` (fired whenever the
+// 5-minute access token lapses) and `/verify-unlock` (fired on every vault
+// unlock) — must therefore NEVER be mounted behind it. Both were, and the result
+// was that ordinary use of the app drained the login budget: an open tab spent
+// ~3 slots per window refreshing, each unlock spent 2 more, and the user's next
+// `POST /auth/login` was rejected with 429 on its FIRST attempt. They now carry
+// their own correctly-keyed limiters (`refreshLimiter` by IP, `unlockLimiter` by
+// userId), which are stricter for their own traffic and invisible to the
+// credential budget.
+//
+// `tests/auth-limiter-isolation.test.ts` enforces this in both directions.
+// ---------------------------------------------------------------------------
+
+// Public routes with the credential-attempt rate limiter
 router.post('/register', authLimiter, validate(registerSchema, 'body'), register);
 router.post('/login', authLimiter, accountLimiter, validate(loginSchema, 'body'), login);
 router.post(
@@ -49,8 +69,10 @@ router.post(
   login2fa,
 );
 
-// Token refresh (rate-limited to prevent abuse via unlock/refresh loops)
-router.post('/refresh', authLimiter, refreshLimiter, refresh);
+// Token refresh. Session maintenance, not a credential attempt: bounded by
+// `refreshLimiter` ALONE, keyed on the client IP — the one identity an
+// unauthenticated caller cannot forge. See the invariant above.
+router.post('/refresh', refreshLimiter, refresh);
 
 // Authenticated routes. These are state-changing (audit writes, refresh-token
 // revocation) but were previously unlimited — a valid session could spam /lock
@@ -61,10 +83,14 @@ router.post('/refresh', authLimiter, refreshLimiter, refresh);
 router.post('/lock', authenticate, generalAuthLimiter, lock);
 router.post('/logout', authenticate, generalAuthLimiter, logout);
 router.post('/logout-all', authenticate, generalAuthLimiter, logoutAll);
+// Vault unlock verification. Also session maintenance: `authenticate` runs first,
+// so `unlockLimiter` keys by userId — a stricter and more precise bound than the
+// IP-keyed credential bucket, and one an attacker cannot dilute by rotating IPs.
+// `authLimiter` is deliberately absent; mounting it here is what coupled a vault
+// unlock to the user's ability to log in.
 router.post(
   '/verify-unlock',
   authenticate,
-  authLimiter,
   unlockLimiter,
   validate(verifyUnlockSchema, 'body'),
   verifyUnlock,

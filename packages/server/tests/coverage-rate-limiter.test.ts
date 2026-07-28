@@ -49,6 +49,17 @@ vi.mock('../src/config/index.js', async (importOriginal) => {
 // attributed to a separate V8 coverage entry, and the merge then DROPS the file
 // from the package report entirely.)
 import * as limiters from '../src/middleware/rateLimiter.js';
+import { LOGIN_RATE_LIMIT_MAX_PER_IP } from '@hvault/shared';
+
+/**
+ * The credential-attempt budget, read from the SHARED constant the limiter itself
+ * imports rather than restated as a literal. `authLimiter` is a security-relevant
+ * number that lives in one place on purpose; a test asserting a hand-copied copy
+ * of it would go green against a limiter that no longer matches the documentation.
+ */
+const AUTH_LIMIT = LOGIN_RATE_LIMIT_MAX_PER_IP;
+/** One past the budget — the first request that must be refused. */
+const AUTH_OVER = AUTH_LIMIT + 1;
 import { RATE_LIMIT_COLLECTION, MongoRateLimitStore } from '../src/middleware/rateLimitStore.js';
 // The real controller and the real error middleware, so the outage test asserts
 // what a production client would actually receive rather than a stand-in.
@@ -175,7 +186,7 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
     }[] = [
       {
         name: 'authLimiter',
-        limit: 10,
+        limit: AUTH_LIMIT,
         prefix: 'auth:',
         message: 'Too many authentication attempts, please try again later',
       },
@@ -187,7 +198,7 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
       },
       {
         name: 'csrfLimiter',
-        limit: 30,
+        limit: 100,
         prefix: 'csrf:',
         message: 'Too many requests, please try again later',
       },
@@ -225,8 +236,8 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
     it('a second IP still gets its full budget after the first IP is exhausted', async () => {
       const app = createApp(limiters.authLimiter as RequestHandler);
 
-      const { statuses } = await hitFromIp(app, '203.0.113.1', 11);
-      expect(statuses[10]).toBe(429);
+      const { statuses } = await hitFromIp(app, '203.0.113.1', AUTH_OVER);
+      expect(statuses[AUTH_LIMIT]).toBe(429);
 
       const other = await request(app).get('/t').set('x-forwarded-for', '203.0.113.2');
       expect(other.status).toBe(200);
@@ -240,8 +251,8 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
       const authApp = createApp(limiters.authLimiter as RequestHandler);
       const heavyApp = createApp(limiters.heavyOpLimiter as RequestHandler);
 
-      const { statuses } = await hitFromIp(authApp, ip, 11);
-      expect(statuses[10]).toBe(429);
+      const { statuses } = await hitFromIp(authApp, ip, AUTH_OVER);
+      expect(statuses[AUTH_LIMIT]).toBe(429);
 
       // Same client, different limiter: an unprefixed (shared) key would have
       // this land on an already-exhausted counter and 429 immediately.
@@ -249,35 +260,35 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
       expect(heavy.statuses.every((status) => status === 200)).toBe(true);
 
       expect((await storedKeys()).sort()).toEqual([`auth:${ip}`, `heavy:${ip}`]);
-      expect(await counterFor(`auth:${ip}`)).toBe(11);
+      expect(await counterFor(`auth:${ip}`)).toBe(AUTH_OVER);
       expect(await counterFor(`heavy:${ip}`)).toBe(10);
     });
   });
 
   describe('IPv6 source rotation cannot bypass an IP-keyed limiter', () => {
-    it('collapses an entire /64 into ONE bucket, so 11 distinct /128s still trip authLimiter', async () => {
+    it('collapses an entire /64 into ONE bucket, so distinct /128s still trip authLimiter', async () => {
       // The documented bypass: a routed /64 hands an attacker 2^64 source
       // addresses. Keyed on the raw /128 each request lands in its own bucket and
       // the limiter never fires.
       const app = createApp(limiters.authLimiter as RequestHandler);
       const statuses: number[] = [];
-      for (let i = 0; i < 11; i++) {
+      for (let i = 0; i < AUTH_OVER; i++) {
         const res = await request(app)
           .get('/t')
           .set('x-forwarded-for', `2001:db8:1:2:aaaa:bbbb:cccc:${(i + 1).toString(16)}`);
         statuses.push(res.status);
       }
 
-      expect(statuses.slice(0, 10).every((status) => status === 200)).toBe(true);
-      expect(statuses[10]).toBe(429);
+      expect(statuses.slice(0, AUTH_LIMIT).every((status) => status === 200)).toBe(true);
+      expect(statuses[AUTH_LIMIT]).toBe(429);
       expect(await storedKeys()).toEqual(['auth:2001:db8:1:2::/64']);
-      expect(await counterFor('auth:2001:db8:1:2::/64')).toBe(11);
+      expect(await counterFor('auth:2001:db8:1:2::/64')).toBe(AUTH_OVER);
     });
 
     it('keeps a genuinely different /64 on its own budget', async () => {
       const app = createApp(limiters.authLimiter as RequestHandler);
 
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < AUTH_LIMIT; i++) {
         await request(app).get('/t').set('x-forwarded-for', '2001:db8:1:2::5');
       }
       const exhausted = await request(app).get('/t').set('x-forwarded-for', '2001:db8:1:2::9');
@@ -306,14 +317,14 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
       const prefix = 'F'.repeat(45);
 
       const statuses: number[] = [];
-      for (let i = 0; i < 11; i++) {
+      for (let i = 0; i < AUTH_OVER; i++) {
         const res = await request(app)
           .get('/t')
           .set('x-forwarded-for', `${prefix}rotating-suffix-${String(i)}`);
         statuses.push(res.status);
       }
 
-      expect(statuses[10]).toBe(429);
+      expect(statuses[AUTH_LIMIT]).toBe(429);
       expect(await storedKeys()).toEqual([`auth:${prefix}`]);
     });
   });
@@ -515,62 +526,97 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
     });
   });
 
-  describe('refreshLimiter (IP + UA + refresh-token session)', () => {
-    it('5 refreshes per session then 429 — and a second session on the same IP+UA is unaffected', async () => {
+  describe('refreshLimiter (IP only)', () => {
+    const REFRESH_LIMIT = limiters.REFRESH_RATE_LIMIT_MAX;
+
+    /**
+     * The regression this whole block exists for.
+     *
+     * The key used to include a hash of the refresh cookie, on the reasoning that
+     * per-session buckets protect users behind a shared NAT. But `refresh` ROTATES
+     * that cookie on every success, so each request arrived with a different value
+     * and opened a brand-new bucket — the limiter counted to one, forever, and
+     * bounded nothing. The same property let an attacker stream distinct garbage
+     * cookies and never be limited either. A rotating secret cannot be a
+     * rate-limit key.
+     */
+    it('counts a rotating client against ONE bucket and eventually 429s it', async () => {
       const app = createApp(limiters.refreshLimiter as RequestHandler);
       const ua = 'Mozilla/5.0 PinnedCorporateBrowser';
 
-      const sessionA = () =>
+      // Every request presents a DIFFERENT cookie, exactly as a real client does
+      // after each rotation. Under the old key this loop never tripped the limiter.
+      const send = (n: number) =>
         request(app)
           .post('/t')
           .set('x-forwarded-for', '203.0.113.100')
           .set('user-agent', ua)
-          .set('Cookie', ['refreshToken=session-a-token']);
+          .set('Cookie', [`refreshToken=rotated-token-${String(n)}`]);
 
-      for (let i = 0; i < 5; i++) {
-        expect((await sessionA()).status).toBe(200);
+      for (let i = 0; i < REFRESH_LIMIT; i++) {
+        expect((await send(i)).status).toBe(200);
       }
 
-      const blocked = await sessionA();
+      const blocked = await send(REFRESH_LIMIT);
       expect(blocked.status).toBe(429);
       expect((blocked.body as { message: string }).message).toBe(
         'Too many token refresh attempts, please try again later',
       );
 
-      // Same NAT, same pinned browser, different refresh session: must NOT share
-      // the exhausted bucket (the household / corporate-VPN case).
-      const sessionB = await request(app)
-        .post('/t')
-        .set('x-forwarded-for', '203.0.113.100')
-        .set('user-agent', ua)
-        .set('Cookie', ['refreshToken=session-b-token']);
-      expect(sessionB.status).toBe(200);
-
+      // ONE bucket for the whole rotating sequence, and the raw token never
+      // reaches the store.
       const keys = await storedKeys();
-      expect(keys).toHaveLength(2);
-      expect(keys.every((key) => key.startsWith('refresh:203.0.113.100:'))).toBe(true);
-      // The raw refresh token is never persisted into the rate-limit store.
-      expect(keys.some((key) => key.includes('session-a-token'))).toBe(false);
+      expect(keys).toEqual(['refresh:203.0.113.100']);
+      expect(keys.some((key) => key.includes('rotated-token'))).toBe(false);
+      expect(await counterFor(keys[0]!)).toBe(REFRESH_LIMIT + 1);
     });
 
-    it('a cookieless refresh still gets an IP+UA bucket and is limited at 5', async () => {
+    it('a cookieless refresh shares that same bucket — it is not an escape hatch', async () => {
       const app = createApp(limiters.refreshLimiter as RequestHandler);
 
-      const send = () =>
-        request(app)
-          .post('/t')
-          .set('x-forwarded-for', '203.0.113.101')
-          .set('user-agent', 'CookielessClient/1.0');
+      const withCookie = await request(app)
+        .post('/t')
+        .set('x-forwarded-for', '203.0.113.101')
+        .set('Cookie', ['refreshToken=whatever']);
+      expect(withCookie.status).toBe(200);
+
+      const withoutCookie = await request(app).post('/t').set('x-forwarded-for', '203.0.113.101');
+      expect(withoutCookie.status).toBe(200);
+
+      expect(await storedKeys()).toEqual(['refresh:203.0.113.101']);
+      expect(await counterFor('refresh:203.0.113.101')).toBe(2);
+    });
+
+    it('a rotated User-Agent shares the SAME bucket — the header is no escape hatch', async () => {
+      // The second form of the same bug. Keying on IP + a hash of the user-agent
+      // looks stable but is not: the user-agent is a request header, so rotating
+      // it fragments the counter exactly as the rotating cookie did. Per-device
+      // separation is given up deliberately — on an unauthenticated endpoint the
+      // peer address is the only identity a caller cannot forge.
+      const app = createApp(limiters.refreshLimiter as RequestHandler);
 
       for (let i = 0; i < 5; i++) {
-        expect((await send()).status).toBe(200);
+        await request(app)
+          .post('/t')
+          .set('x-forwarded-for', '203.0.113.102')
+          .set('user-agent', `rotating-agent-${String(i)}`);
       }
-      expect((await send()).status).toBe(429);
 
       const keys = await storedKeys();
-      expect(keys).toHaveLength(1);
-      // IP + UA hash only — no fourth (token-hash) segment.
-      expect(keys[0]!.split(':')).toHaveLength(3);
+      expect(keys).toEqual(['refresh:203.0.113.102']);
+      expect(await counterFor('refresh:203.0.113.102')).toBe(5);
+    });
+
+    it('a genuinely different IP still gets its own budget', async () => {
+      const app = createApp(limiters.refreshLimiter as RequestHandler);
+
+      await request(app).post('/t').set('x-forwarded-for', '203.0.113.103');
+      await request(app).post('/t').set('x-forwarded-for', '203.0.113.104');
+
+      expect((await storedKeys()).sort()).toEqual([
+        'refresh:203.0.113.103',
+        'refresh:203.0.113.104',
+      ]);
     });
   });
 

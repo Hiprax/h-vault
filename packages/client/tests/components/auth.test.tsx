@@ -1,11 +1,12 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { AxiosError, AxiosHeaders } from 'axios';
 import { LoginPage } from '../../src/components/auth/LoginPage';
 import { RegisterPage } from '../../src/components/auth/RegisterPage';
 import { UnlockScreen } from '../../src/components/auth/UnlockScreen';
 import { useAuthStore } from '../../src/stores/authStore';
-import { api } from '../../src/services/api/client';
+import { api, performTokenRefresh } from '../../src/services/api/client';
 import { cryptoService } from '../../src/services/crypto/cryptoService';
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,12 @@ vi.mock('../../src/services/api/client', () => ({
     put: vi.fn(),
     delete: vi.fn(),
   },
+  // Refreshing is now ONE exported helper rather than a POST each caller
+  // hand-rolls: it holds the cross-tab lock, validates the `{ success, data }`
+  // envelope and stores the token itself. It is therefore mocked as the unit it
+  // has become — `api.post` here only ever sees `/auth/verify-unlock`.
+  performTokenRefresh: vi.fn(),
+  clearCsrfToken: vi.fn(),
   // Matches the real fallback: with no Web Locks API (jsdom) the refresh runs
   // directly. Cross-tab serialization is covered by `refresh-multitab.test.ts`.
   withRefreshLock: <T,>(run: () => Promise<T>): Promise<T> => run(),
@@ -85,6 +92,28 @@ function authStateSlice(partial: Partial<AuthState>): AuthState {
 
 function renderWithRouter(ui: React.ReactElement) {
   return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
+
+/**
+ * A genuine `AxiosError` carrying an HTTP status.
+ *
+ * `services/auth/sessionFailure.isSessionGone` runs `axios.isAxiosError` first,
+ * so a bare `new Error()` is classified as TRANSIENT and deliberately does NOT
+ * end the session. Any test that expects a logout has to reject with a real 401
+ * or 403 — which is the whole point of the change: a 429, a 5xx or a dropped
+ * connection used to hit the same bare `catch` and destroy a session with days
+ * left on it.
+ */
+function axiosErrorWithStatus(status: number, message = 'Request failed'): AxiosError {
+  const error = new AxiosError(message);
+  error.response = {
+    status,
+    statusText: '',
+    data: { success: false, message, statusCode: status, statusText: '' },
+    headers: new AxiosHeaders(),
+    config: { headers: new AxiosHeaders() },
+  };
+  return error;
 }
 
 // ---------------------------------------------------------------------------
@@ -893,12 +922,20 @@ describe('UnlockScreen', () => {
 
     vi.mocked(useAuthStore.getState).mockReturnValue({
       setAccessToken: mockSetAccessToken,
+      // The screen now skips the refresh when the held token is still usable
+      // (`isAccessTokenUsable`). `null` fails that check closed, which keeps the
+      // refresh branch — what every test below is exercising — live.
+      accessToken: null,
     } as unknown as ReturnType<typeof useAuthStore.getState>);
 
     vi.mocked(useAuthStore.setState).mockImplementation(() => {});
 
+    vi.mocked(performTokenRefresh).mockResolvedValue('new-token-123');
+
+    // `api.post` is now only ever the authenticated /auth/verify-unlock probe;
+    // its body is not read.
     vi.mocked(api.post).mockResolvedValue({
-      data: { data: { accessToken: 'new-token-123' } },
+      data: { success: true, data: null },
     });
 
     vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
@@ -967,7 +1004,7 @@ describe('UnlockScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: /unlock vault/i }));
 
     await waitFor(() => {
-      expect(api.post).toHaveBeenCalledWith('/auth/refresh');
+      expect(performTokenRefresh).toHaveBeenCalledTimes(1);
     });
 
     await waitFor(() => {
@@ -989,9 +1026,17 @@ describe('UnlockScreen', () => {
     const verifyOrder = apiPostMock.mock.invocationCallOrder[verifyCallIdx] ?? Infinity;
     expect(verifyOrder).toBeLessThan(unlockCallIdx);
 
-    await waitFor(() => {
-      expect(mockSetAccessToken).toHaveBeenCalledWith('new-token-123');
-    });
+    // The refresh must come first: /auth/verify-unlock is authenticated, so a
+    // stale token would 401 and read as a wrong master password.
+    const refreshOrder = vi.mocked(performTokenRefresh).mock.invocationCallOrder[0] ?? Infinity;
+    expect(refreshOrder).toBeLessThan(verifyOrder);
+
+    // The screen no longer POSTs /auth/refresh itself, and no longer stores the
+    // token: `performTokenRefresh` owns the envelope check AND `setAccessToken`.
+    // Four hand-rolled copies of that is exactly how the envelope validation and
+    // the CSRF invalidation drifted apart between call sites.
+    expect(api.post).not.toHaveBeenCalledWith('/auth/refresh');
+    expect(mockSetAccessToken).not.toHaveBeenCalled();
 
     await waitFor(() => {
       expect(useAuthStore.setState).toHaveBeenCalledWith({
@@ -1003,12 +1048,9 @@ describe('UnlockScreen', () => {
   it('does not run local decrypt when server rejects verify-unlock', async () => {
     mockUnlock.mockResolvedValue(undefined);
 
-    // First call: /auth/refresh succeeds. Second call: /auth/verify-unlock returns 429.
-    vi.mocked(api.post)
-      .mockResolvedValueOnce({
-        data: { data: { accessToken: 'new-token-123' } },
-      })
-      .mockRejectedValueOnce(new Error('Too many unlock attempts'));
+    // The refresh succeeds (beforeEach), then /auth/verify-unlock 401s — the
+    // server's verdict that the master password is wrong.
+    vi.mocked(api.post).mockRejectedValueOnce(axiosErrorWithStatus(401, 'Invalid master password'));
 
     renderWithRouter(<UnlockScreen />);
 
@@ -1031,10 +1073,12 @@ describe('UnlockScreen', () => {
     expect(useAuthStore.setState).not.toHaveBeenCalledWith({ isLocked: false });
   });
 
-  it('logs out and navigates to /login when session refresh fails', async () => {
+  it('logs out and navigates to /login when the session refresh is rejected as gone', async () => {
     mockUnlock.mockResolvedValue(undefined);
     mockLogout.mockResolvedValue(undefined);
-    vi.mocked(api.post).mockRejectedValue(new Error('Session expired'));
+    // A 401 from /auth/refresh is the server looking at the refresh cookie and
+    // rejecting it: the session really is over.
+    vi.mocked(performTokenRefresh).mockRejectedValue(axiosErrorWithStatus(401, 'Session expired'));
 
     renderWithRouter(<UnlockScreen />);
 
@@ -1049,10 +1093,48 @@ describe('UnlockScreen', () => {
     });
 
     await waitFor(() => {
+      // The redirect now carries the reason. Without it the user lands on a bare
+      // login form with no idea why they were moved.
       expect(mockNavigate).toHaveBeenCalledWith('/login', {
         replace: true,
+        state: { sessionExpired: true },
       });
     });
+  });
+
+  it('keeps the session and reports a retryable error when the refresh is rate-limited', async () => {
+    // This is the whole point of routing the refresh failure through
+    // `isSessionGone`. `logout()` is not a local teardown — it POSTs
+    // /auth/logout and DELETES a refresh token with days left on it. The old
+    // bare `catch` did that on ANY rejection, so a momentary 429 (or a 5xx, or
+    // a dropped connection) permanently destroyed a perfectly valid session and
+    // stranded the user on the login form.
+    mockLogout.mockResolvedValue(undefined);
+    vi.mocked(performTokenRefresh).mockRejectedValue(
+      axiosErrorWithStatus(429, 'Too many requests'),
+    );
+
+    renderWithRouter(<UnlockScreen />);
+
+    fireEvent.change(screen.getByLabelText('Master Password'), {
+      target: { value: 'myMasterPassword' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /unlock vault/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/too many attempts/i);
+    });
+
+    expect(mockLogout).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
+    // Nothing was verified, so nothing may be derived or decrypted...
+    expect(cryptoService.deriveKeys).not.toHaveBeenCalled();
+    expect(mockUnlock).not.toHaveBeenCalled();
+    // ...and it is not evidence of a wrong password, so it must not burn one of
+    // the five local attempts (which would stack this client's backoff on top of
+    // the server's and lock the user out twice over).
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('displays an API error when unlock itself fails', async () => {

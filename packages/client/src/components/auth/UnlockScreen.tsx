@@ -1,11 +1,14 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Lock, Eye, EyeOff, LogOut, AlertCircle, Shield, Clock } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
-import { api, withRefreshLock } from '../../services/api/client';
+import { api, performTokenRefresh } from '../../services/api/client';
+import { isSessionGone, describeTransientFailure } from '../../services/auth/sessionFailure';
+import { isAccessTokenUsable } from '../../lib/accessToken';
+import { getApiErrorMessage } from '../../lib/utils';
 import { cryptoService } from '../../services/crypto/cryptoService';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
@@ -31,6 +34,23 @@ type UnlockFormValues = z.infer<typeof unlockSchema>;
 /* -------------------------------------------------------------------------- */
 
 const MAX_ATTEMPTS_BEFORE_LOCKOUT = 5;
+
+/**
+ * Thrown to unwind out of the unlock flow once the failure has ALREADY been
+ * reported — a transient message shown, or the session torn down. The outer catch
+ * recognises it and does nothing further: in particular it does not charge the
+ * user a failed attempt, and it does not overwrite the message just shown.
+ *
+ * A real `Error` subclass rather than a sentinel value so that anything which
+ * inspects a thrown object (a logger, an error boundary, `only-throw-error`) still
+ * sees something well-formed.
+ */
+class HandledUnlockFailure extends Error {
+  constructor() {
+    super('Unlock failure already reported');
+    this.name = 'HandledUnlockFailure';
+  }
+}
 const UNLOCK_FAILED_ATTEMPTS_KEY = '__hv_unlock_failed_attempts';
 const UNLOCK_LOCKOUT_UNTIL_KEY = '__hv_unlock_lockout_until';
 
@@ -106,6 +126,18 @@ export function UnlockScreen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
 
+  /**
+   * Whether the ambiguous-401 disambiguation below has already run.
+   *
+   * It costs an extra `verify-unlock`, and `unlockLimiter` is a per-user budget —
+   * so doing it on EVERY wrong password would spend two slots per visible attempt
+   * and the server would refuse the user while the UI still promised them
+   * attempts. Once we have refreshed and re-asked, we know the access token was
+   * never the problem, so every later 401 in this session is a credential
+   * rejection and needs no second opinion.
+   */
+  const disambiguatedRef = useRef(false);
+
   /* ---- Rate-limiting state (persisted to sessionStorage) ---- */
   const [failedAttempts, setFailedAttempts] = useState(() => readPersistedAttempts());
   const [lockoutUntil, setLockoutUntil] = useState<number | null>(() => readPersistedLockout());
@@ -148,72 +180,162 @@ export function UnlockScreen() {
     },
   });
 
+  /** The session is authoritatively over: tear down and explain why on /login. */
+  const endSession = async () => {
+    await logout();
+    // Carry the reason. Without this the user lands on a bare login form with no
+    // idea why they were moved, which is exactly how a transient failure used to
+    // present — indistinguishable from "your password is wrong".
+    void navigate('/login', { replace: true, state: { sessionExpired: true } });
+  };
+
+  /**
+   * Report a non-credential failure and unwind. Every caller `throw`s the result,
+   * so the control flow reads the same everywhere.
+   *
+   * A failure that is not evidence of a wrong master password — a rate limit, a
+   * 5xx, a dropped connection — must NOT touch `failedAttempts`. That counter
+   * drives the local exponential backoff, and inflating it with failures the user
+   * did not cause locks them out of their own vault for minutes over a momentary
+   * network blip.
+   */
+  const handled = (message: string): HandledUnlockFailure => {
+    setApiError(message);
+    form.setFocus('masterPassword');
+    return new HandledUnlockFailure();
+  };
+
+  /** Best-effort user-facing text for a failure that is not a wrong password. */
+  const describeFailure = (err: unknown): string =>
+    describeTransientFailure(err) ??
+    getApiErrorMessage(err, 'Could not reach the server. Please try again.');
+
+  /**
+   * `POST /auth/verify-unlock`.
+   *
+   * `_skipAuthRefresh` tells the Axios 401 interceptor that a 401 here means
+   * "wrong master password", not "expired access token", so it surfaces the error
+   * directly instead of firing a second `/auth/refresh` and replaying — which
+   * would consume two server-side unlock slots per visible attempt and churn the
+   * refresh token.
+   */
+  const verifyUnlock = (authHash: string) =>
+    api.post('/auth/verify-unlock', { authHash }, { _skipAuthRefresh: true });
+
+  /**
+   * Refresh, mapping every failure onto the right outcome: a genuine 401/403 ends
+   * the session, anything else is transient and keeps it.
+   */
+  const refreshOrUnwind = async (): Promise<void> => {
+    try {
+      await performTokenRefresh();
+    } catch (err) {
+      // ONLY a 401/403 means the session is genuinely gone. Every other failure —
+      // a 429, a 5xx, offline — leaves a valid session we simply could not reach,
+      // and `logout()` here is not a local teardown: it calls POST /auth/logout
+      // and deletes a refresh token with days left on it. Doing that on any error
+      // is what turned a brief rate limit into a permanently destroyed session and
+      // an unexplained trip to /login.
+      if (isSessionGone(err)) {
+        await endSession();
+        throw new HandledUnlockFailure();
+      }
+      throw handled(describeFailure(err));
+    }
+  };
+
   const handleUnlock = async (values: UnlockFormValues) => {
     /* Prevent submission while locked out */
     if (isLockedOut) return;
 
     setIsSubmitting(true);
     setApiError(null);
+
+    let masterEncryptionKey: CryptoKey | null = null;
+
     try {
       const userEmail = user?.email;
       if (!userEmail) {
-        throw new Error('Cannot unlock: user email is not available');
+        // Not a wrong password, so it must not burn an attempt.
+        throw handled('Cannot unlock: your session details are unavailable. Please sign in again.');
       }
 
-      // Step 1: Refresh the access token so the verify-unlock endpoint is
-      // reachable. /auth/verify-unlock is authenticated, and the in-memory
-      // access token is empty after a vault lock. Held under the cross-tab
-      // refresh lock like every other refresh call site — a tab unlocking while
-      // a sibling rotates the shared cookie would otherwise present the same
-      // pre-rotation token and trip the server's reuse detection.
-      try {
-        const refreshRes = await withRefreshLock(() =>
-          api.post<{ data: { accessToken: string } }>('/auth/refresh'),
-        );
-        const newToken = refreshRes.data.data.accessToken;
-        useAuthStore.getState().setAccessToken(newToken);
-      } catch {
-        // Session expired — log the user out completely
-        await logout();
-        void navigate('/login', { replace: true });
-        return;
+      // Step 1: make sure a usable access token is in hand, since
+      // /auth/verify-unlock is authenticated.
+      //
+      // Only refresh when we actually need to. `lock()` does NOT clear
+      // `accessToken` — a lock zeroes key material and keeps the session alive —
+      // so after a short auto-lock the token is usually still valid for minutes.
+      // This used to refresh unconditionally on every attempt, which cost a
+      // rate-limit slot, rotated the refresh-token cookie, invalidated the CSRF
+      // token and so forced an extra 403-and-replay, all to obtain a token no
+      // better than the one already held. `isAccessTokenUsable` fails closed, so
+      // anything unparseable or near expiry still refreshes.
+      const skippedRefresh = isAccessTokenUsable(useAuthStore.getState().accessToken);
+      if (!skippedRefresh) {
+        await refreshOrUnwind();
       }
 
       // Step 2: Run PBKDF2 once to obtain both the MEK (used to decrypt the
       // vault key locally) and the auth hash (sent to the server for rate-
       // limited verification). Caching both halves avoids a second PBKDF2
       // round for the local decrypt step.
-      const { masterEncryptionKey, authKey } = await cryptoService.deriveKeys(
-        values.masterPassword,
-        userEmail,
-      );
-      const authHash = cryptoService.getAuthHash(authKey);
-      cryptoService.clearKey(authKey);
+      const derived = await cryptoService.deriveKeys(values.masterPassword, userEmail);
+      masterEncryptionKey = derived.masterEncryptionKey;
+      const authHash = cryptoService.getAuthHash(derived.authKey);
+      cryptoService.clearKey(derived.authKey);
 
-      // Step 3: Verify the auth hash server-side BEFORE doing any local
-      // crypto with the master password. This ensures every wrong-password
-      // attempt is counted by the server-side unlockLimiter, including
-      // attempts that would otherwise fail locally and never reach the API.
+      // Step 3: Verify the auth hash server-side BEFORE doing any local crypto
+      // with the master password, so every wrong-password attempt is counted by
+      // the server-side `unlockLimiter` — including attempts that would fail
+      // locally and never reach the API.
       try {
-        // `_skipAuthRefresh` tells the Axios 401 interceptor that a 401 here
-        // means "wrong master password", not "expired access token", so it
-        // surfaces the error directly instead of firing a second /auth/refresh
-        // and replaying this request — which would otherwise consume two
-        // server-side unlockLimiter slots per visible attempt and churn the
-        // refresh token.
-        await api.post('/auth/verify-unlock', { authHash }, { _skipAuthRefresh: true });
+        await verifyUnlock(authHash);
       } catch (err) {
-        await cryptoService.clearCryptoKey(masterEncryptionKey);
-        throw err;
+        // A 429 from `unlockLimiter` is the server saying "too many tries, wait".
+        // It is not a verdict on this password and must not count as a failed
+        // attempt — that would stack the local backoff on top of the server's and
+        // lock the user out twice over. Same for a 5xx or an offline error.
+        const transient = describeTransientFailure(err);
+        if (transient !== null) throw handled(transient);
+
+        // A 401 is AMBIGUOUS when we skipped the refresh above. It means either
+        // "wrong master password" (the common case) or "this access token is no
+        // longer valid" — the password was changed on another device and bumped
+        // `passwordChangedAt`, the account was deleted, verification was revoked.
+        // The token looked fine locally because `exp` is all the client can see;
+        // only the server knows the rest.
+        //
+        // Reporting that second case as a wrong password is a trap with no exit:
+        // every retry fails identically, the local backoff climbs toward ten
+        // minutes, and nothing ever tells the user to sign in again. Disambiguate
+        // by doing the refresh we skipped and asking once more — if the refresh is
+        // rejected the session really is gone; if it succeeds and the verify still
+        // fails, the password really is wrong.
+        //
+        // ONCE per mounted lock screen, though. `unlockLimiter` is 5 per user per
+        // 5 minutes, so a second opinion on every wrong password would spend two
+        // slots per visible attempt and the server would start refusing while the
+        // UI still said "3 attempts remaining". After the first disambiguation the
+        // question is settled: the token was fine, so every later 401 here is a
+        // credential rejection and needs no extra request.
+        if (!skippedRefresh || !isSessionGone(err) || disambiguatedRef.current) throw err;
+        disambiguatedRef.current = true;
+
+        await refreshOrUnwind();
+        try {
+          await verifyUnlock(authHash);
+        } catch (retryErr) {
+          const retryTransient = describeTransientFailure(retryErr);
+          if (retryTransient !== null) throw handled(retryTransient);
+          throw retryErr;
+        }
       }
 
-      // Step 4: Decrypt the vault key locally using the cached MEK.
-      try {
-        await unlock(values.masterPassword, masterEncryptionKey);
-      } catch (err) {
-        await cryptoService.clearCryptoKey(masterEncryptionKey);
-        throw err;
-      }
+      // Step 4: Decrypt the vault key locally using the cached MEK. `unlock`
+      // takes ownership of the key on success, so it must not be zeroed after.
+      await unlock(values.masterPassword, masterEncryptionKey);
+      masterEncryptionKey = null;
 
       // Step 5: Now that the token is available, unlock the UI so children render.
       useAuthStore.setState({ isLocked: false });
@@ -223,13 +345,21 @@ export function UnlockScreen() {
       setLockoutUntil(null);
       clearPersistedRateLimitState();
     } catch (err) {
+      // Zero the derived key on every failing path, from one place, so no branch
+      // can leave master-password-derived material resident.
+      if (masterEncryptionKey) {
+        await cryptoService.clearCryptoKey(masterEncryptionKey);
+      }
+
+      // Already reported (transient, or the session was torn down): say no more,
+      // and above all do not charge the user a failed attempt for it.
+      if (err instanceof HandledUnlockFailure) return;
+
       const newAttempts = failedAttempts + 1;
       setFailedAttempts(newAttempts);
       applyLockout(newAttempts);
 
-      setApiError(
-        err instanceof Error ? err.message : 'Incorrect master password. Please try again.',
-      );
+      setApiError(getApiErrorMessage(err, 'Incorrect master password. Please try again.'));
       form.setFocus('masterPassword');
     } finally {
       setIsSubmitting(false);

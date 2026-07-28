@@ -2180,6 +2180,36 @@ describe('updateSettingsSchema', () => {
     expect(updateSettingsSchema.safeParse({ autoLockTimeout: 1441 }).success).toBe(false);
   });
 
+  it('accepts lockOnHidden with its delay', () => {
+    const result = updateSettingsSchema.safeParse({ lockOnHidden: true, lockOnHiddenDelay: 5 });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts lockOnHidden: false — turning it off must be expressible', () => {
+    // `false` is the value a truthiness bug swallows anywhere along the chain, and
+    // swallowing it would make the setting impossible to disable once enabled.
+    // Parsing it and getting it back is the assertion, not merely `success`.
+    const result = updateSettingsSchema.safeParse({ lockOnHidden: false });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.lockOnHidden).toBe(false);
+  });
+
+  it('rejects a non-boolean lockOnHidden', () => {
+    expect(updateSettingsSchema.safeParse({ lockOnHidden: 'yes' }).success).toBe(false);
+    expect(updateSettingsSchema.safeParse({ lockOnHidden: 1 }).success).toBe(false);
+  });
+
+  it('bounds lockOnHiddenDelay exactly as autoLockTimeout is bounded', () => {
+    // Both feed a real client-side timer, so both need the same clamp — an
+    // unvalidated 0 would arm a deadline that has already passed and lock the
+    // vault on the next tick.
+    expect(updateSettingsSchema.safeParse({ lockOnHiddenDelay: 0 }).success).toBe(false);
+    expect(updateSettingsSchema.safeParse({ lockOnHiddenDelay: 1 }).success).toBe(true);
+    expect(updateSettingsSchema.safeParse({ lockOnHiddenDelay: 1440 }).success).toBe(true);
+    expect(updateSettingsSchema.safeParse({ lockOnHiddenDelay: 1441 }).success).toBe(false);
+    expect(updateSettingsSchema.safeParse({ lockOnHiddenDelay: 1.5 }).success).toBe(false);
+  });
+
   it('rejects clipboardClearTimeout below 5', () => {
     expect(updateSettingsSchema.safeParse({ clipboardClearTimeout: 4 }).success).toBe(false);
   });

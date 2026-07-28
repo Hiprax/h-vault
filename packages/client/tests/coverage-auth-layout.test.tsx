@@ -60,6 +60,11 @@ vi.mock('../src/stores/vaultStore', () => ({
 
 vi.mock('../src/services/api/client', () => ({
   api: { post: vi.fn(), get: vi.fn(), put: vi.fn(), delete: vi.fn() },
+  // Refreshing is now one exported helper (it owns the cross-tab lock, the
+  // envelope validation and storing the token), so it is mocked as that unit.
+  // `api.post` here only ever sees the authenticated /auth/verify-unlock probe.
+  performTokenRefresh: vi.fn(),
+  clearCsrfToken: vi.fn(),
   withRefreshLock: <T,>(run: () => Promise<T>): Promise<T> => run(),
 }));
 
@@ -116,7 +121,7 @@ import { AppLayout } from '../src/components/layout/AppLayout';
 import { FileDecryptPanel } from '../src/components/tools/FileDecryptPanel';
 import { useAuthStore } from '../src/stores/authStore';
 import { useVaultStore } from '../src/stores/vaultStore';
-import { api } from '../src/services/api/client';
+import { api, performTokenRefresh } from '../src/services/api/client';
 import { cryptoService } from '../src/services/crypto/cryptoService';
 import { FileTooLargeError } from '../src/services/crypto/fileCryptoService';
 
@@ -189,10 +194,14 @@ describe('UnlockScreen — client-side unlock rate limiting', () => {
       unlock: mockUnlock,
       logout: mockLogout,
       setAccessToken: vi.fn(),
+      // The screen skips the refresh when the token in hand is still usable.
+      // `null` fails `isAccessTokenUsable` closed, keeping the refresh branch.
+      accessToken: null,
     };
     installStores();
 
-    vi.mocked(api.post).mockResolvedValue({ data: { data: { accessToken: 'tok' } } });
+    vi.mocked(performTokenRefresh).mockResolvedValue('tok');
+    vi.mocked(api.post).mockResolvedValue({ data: { success: true, data: null } });
     vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
       masterEncryptionKey: fakeMek,
       authKey: new ArrayBuffer(32),
@@ -276,6 +285,7 @@ describe('UnlockScreen — client-side unlock rate limiting', () => {
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent(/Too many failed attempts/);
     });
+    expect(performTokenRefresh).not.toHaveBeenCalled();
     expect(api.post).not.toHaveBeenCalled();
     expect(mockUnlock).not.toHaveBeenCalled();
   });
@@ -360,11 +370,19 @@ describe('UnlockScreen — client-side unlock rate limiting', () => {
 
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent(
-        'Cannot unlock: user email is not available',
+        'Cannot unlock: your session details are unavailable. Please sign in again.',
       );
     });
+    expect(performTokenRefresh).not.toHaveBeenCalled();
     expect(api.post).not.toHaveBeenCalled();
     expect(cryptoService.deriveKeys).not.toHaveBeenCalled();
+
+    // Reported inline rather than thrown: a missing email is not evidence of a
+    // wrong master password, so it must not burn one of the five local attempts.
+    // It used to be thrown, land in the generic catch and count — locking the
+    // user out of a vault over a defect they could do nothing about.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(mockLogout).not.toHaveBeenCalled();
   });
 });
 

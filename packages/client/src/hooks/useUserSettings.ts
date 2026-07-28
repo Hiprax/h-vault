@@ -1,18 +1,51 @@
 import { useEffect, useState } from 'react';
+import {
+  AUTO_LOCK_TIMEOUT_MINUTES,
+  AUTO_LOCK_MIN_MINUTES,
+  AUTO_LOCK_MAX_MINUTES,
+  CLIPBOARD_CLEAR_SECONDS,
+  LOCK_ON_HIDDEN_DEFAULT,
+  LOCK_ON_HIDDEN_DELAY_MINUTES,
+} from '@hvault/shared';
 import { getProfileApi } from '../services/api/userApi';
 import { useAuthStore } from '../stores/authStore';
 
 interface UserSettings {
   autoLockTimeout: number;
+  lockOnHidden: boolean;
+  lockOnHiddenDelay: number;
   clipboardClearTimeout: number;
   theme: string;
 }
 
+// Every default is the SHARED constant, never a literal repeated here. These
+// values are also the server-side model defaults, so a divergence would mean the
+// UI silently arms a different timer than the account is actually configured for
+// until the profile fetch lands — and the fallbacks used to be hardcoded `15` and
+// `30` in two client files with nothing asserting they tracked the source.
 const DEFAULT_SETTINGS: UserSettings = {
-  autoLockTimeout: 15,
-  clipboardClearTimeout: 30,
+  autoLockTimeout: AUTO_LOCK_TIMEOUT_MINUTES,
+  lockOnHidden: LOCK_ON_HIDDEN_DEFAULT,
+  lockOnHiddenDelay: LOCK_ON_HIDDEN_DELAY_MINUTES,
+  clipboardClearTimeout: CLIPBOARD_CLEAR_SECONDS,
   theme: 'system',
 };
+
+/**
+ * Keep a minutes value inside the bounds `updateSettingsSchema` enforces on the
+ * way in, falling back to `fallback` for anything outside them.
+ *
+ * The wire is validated on write, so this should never fire — but these numbers
+ * are multiplied into `setTimeout` deadlines, and the failure mode of a bad one is
+ * silent rather than loud: `NaN` compares false against every deadline test, so an
+ * auto-lock the user had configured would simply never fire. Clamping is the same
+ * defence `clipboardClearTimeout` already carries, and for the same reason.
+ */
+function clampMinutes(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  if (value < AUTO_LOCK_MIN_MINUTES || value > AUTO_LOCK_MAX_MINUTES) return fallback;
+  return value;
+}
 
 const SETTINGS_INVALIDATION_KEY = '__hv_settings_invalidated';
 
@@ -137,10 +170,23 @@ async function fetchSettings(): Promise<void> {
       const res = await getProfileApi();
       const result = res.data;
       if (result.success) {
+        const settings = result.data.settings;
+        // Clamped, not merely read. These values arm REAL timers — the auto-lock
+        // deadline and the clipboard erase — and they arrive over the wire, so a
+        // malformed or hostile one must not be armed verbatim. `clampMinutes`
+        // rejects NaN and out-of-range values by falling back to the shared
+        // default, matching the bounds `updateSettingsSchema` enforces on write.
+        // (Absent fields are already filled in server-side, in `getProfile`'s
+        // `withSettingsDefaults`, so the declared types are honest here.)
         const s: UserSettings = {
-          autoLockTimeout: result.data.settings.autoLockTimeout,
-          clipboardClearTimeout: result.data.settings.clipboardClearTimeout,
-          theme: result.data.settings.theme,
+          autoLockTimeout: clampMinutes(settings.autoLockTimeout, DEFAULT_SETTINGS.autoLockTimeout),
+          lockOnHidden: settings.lockOnHidden,
+          lockOnHiddenDelay: clampMinutes(
+            settings.lockOnHiddenDelay,
+            DEFAULT_SETTINGS.lockOnHiddenDelay,
+          ),
+          clipboardClearTimeout: settings.clipboardClearTimeout,
+          theme: settings.theme,
         };
         cachedSettings = s;
       }

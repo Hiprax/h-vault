@@ -21,6 +21,7 @@ import {
   XCircle,
   AlertTriangle,
   LogOut,
+  EyeOff,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type zxcvbnType from 'zxcvbn';
@@ -53,8 +54,14 @@ import {
   importVaultApi,
 } from '../services/api/userApi';
 import {
+  AUTO_LOCK_MAX_MINUTES,
+  AUTO_LOCK_MIN_MINUTES,
+  AUTO_LOCK_TIMEOUT_MINUTES,
   CLIPBOARD_CLEAR_MAX_SECONDS,
   CLIPBOARD_CLEAR_MIN_SECONDS,
+  CLIPBOARD_CLEAR_SECONDS,
+  LOCK_ON_HIDDEN_DEFAULT,
+  LOCK_ON_HIDDEN_DELAY_MINUTES,
   ITEM_TYPES,
   MAX_IMPORT_FILE_SIZE_BYTES,
   MAX_ITEMS_PER_USER,
@@ -359,8 +366,10 @@ export default function SettingsPage() {
 
   const [profile, setProfile] = useState<IUserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [autoLockTimeout, setAutoLockTimeout] = useState(15);
-  const [clipboardClearTimeout, setClipboardClearTimeout] = useState(30);
+  const [autoLockTimeout, setAutoLockTimeout] = useState(AUTO_LOCK_TIMEOUT_MINUTES);
+  const [lockOnHidden, setLockOnHidden] = useState(LOCK_ON_HIDDEN_DEFAULT);
+  const [lockOnHiddenDelay, setLockOnHiddenDelay] = useState(LOCK_ON_HIDDEN_DELAY_MINUTES);
+  const [clipboardClearTimeout, setClipboardClearTimeout] = useState(CLIPBOARD_CLEAR_SECONDS);
   const [savingSettings, setSavingSettings] = useState(false);
   const [zxcvbnFn, setZxcvbnFn] = useState<typeof zxcvbnType | null>(null);
 
@@ -523,6 +532,11 @@ export default function SettingsPage() {
         const p = profileResult.data;
         setProfile(p);
         setAutoLockTimeout(p.settings.autoLockTimeout);
+        // No fallbacks needed: `getProfile` normalises settings server-side
+        // (`withSettingsDefaults`), so an account created before these fields
+        // existed still receives them.
+        setLockOnHidden(p.settings.lockOnHidden);
+        setLockOnHiddenDelay(p.settings.lockOnHiddenDelay);
         setClipboardClearTimeout(p.settings.clipboardClearTimeout);
       } catch {
         toast({ title: 'Failed to load profile', type: 'error' });
@@ -537,7 +551,13 @@ export default function SettingsPage() {
   const handleSaveSettings = useCallback(async () => {
     setSavingSettings(true);
     try {
-      await updateSettingsApi({ autoLockTimeout, clipboardClearTimeout, theme });
+      await updateSettingsApi({
+        autoLockTimeout,
+        lockOnHidden,
+        lockOnHiddenDelay,
+        clipboardClearTimeout,
+        theme,
+      });
       clearSettingsCache();
       toast({ title: 'Settings saved', type: 'success' });
     } catch {
@@ -545,7 +565,7 @@ export default function SettingsPage() {
     } finally {
       setSavingSettings(false);
     }
-  }, [autoLockTimeout, clipboardClearTimeout, theme, toast]);
+  }, [autoLockTimeout, lockOnHidden, lockOnHiddenDelay, clipboardClearTimeout, theme, toast]);
 
   // Change master password
   const handleChangePassword = useCallback(async () => {
@@ -1928,19 +1948,59 @@ export default function SettingsPage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
-              <span className="text-sm text-[hsl(var(--foreground))]">
+              <label htmlFor="auto-lock-timeout" className="text-sm text-[hsl(var(--foreground))]">
                 Auto-lock timeout (minutes)
-              </span>
+              </label>
             </div>
             <input
+              id="auto-lock-timeout"
               type="number"
-              min={1}
-              max={1440}
+              min={AUTO_LOCK_MIN_MINUTES}
+              max={AUTO_LOCK_MAX_MINUTES}
               value={autoLockTimeout}
               onChange={(e) => setAutoLockTimeout(Number(e.target.value))}
               className={cn(inputClass, 'w-20')}
             />
           </div>
+
+          {/* Opt-in: also lock once the tab has been hidden for a while. Off by
+              default — the auto-lock timeout above governs on its own unless the
+              user asks for this. */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <EyeOff className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
+              <label htmlFor="lock-on-hidden" className="text-sm text-[hsl(var(--foreground))]">
+                Lock when the tab is hidden
+              </label>
+            </div>
+            <input
+              id="lock-on-hidden"
+              type="checkbox"
+              checked={lockOnHidden}
+              onChange={(e) => setLockOnHidden(e.target.checked)}
+              className="h-4 w-4 rounded border-[hsl(var(--input))] accent-[hsl(var(--primary))]"
+            />
+          </div>
+          {lockOnHidden && (
+            <div className="flex items-center justify-between pl-6">
+              <label
+                htmlFor="lock-on-hidden-delay"
+                className="text-sm text-[hsl(var(--muted-foreground))]"
+              >
+                …after this many minutes hidden
+              </label>
+              <input
+                id="lock-on-hidden-delay"
+                type="number"
+                min={AUTO_LOCK_MIN_MINUTES}
+                max={AUTO_LOCK_MAX_MINUTES}
+                value={lockOnHiddenDelay}
+                onChange={(e) => setLockOnHiddenDelay(Number(e.target.value))}
+                className={cn(inputClass, 'w-20')}
+              />
+            </div>
+          )}
+
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Clipboard className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />

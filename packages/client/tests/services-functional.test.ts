@@ -756,8 +756,19 @@ describe('API Client', () => {
 
       const responseInterceptor = interceptors[0]!.rejected;
 
+      // The replay is gated on the 403 actually being a CSRF rejection, so the
+      // mocked response must carry the server's FLAT error envelope
+      // (`{ success, message, statusCode, statusText }`) with the message
+      // `middleware/csrf.ts` emits. A body-less 403 is now (correctly) treated as
+      // a refusal on the merits and is not replayed.
       const mockError = {
-        response: { status: 403 },
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
+        response: {
+          status: 403,
+          data: { success: false, message: 'invalid csrf token', statusCode: 403 },
+        },
         config: {
           url: '/vault/items',
           method: 'post',
@@ -779,6 +790,75 @@ describe('API Client', () => {
       expect(replayedTokens.at(-1)).toBe('csrf-2');
     });
 
+    // A 403 the handler raised on its merits must NOT be replayed. The
+    // interceptor used to replay EVERY 403 of a state-changing request, and
+    // `POST /auth/login` answers 403 `ACCOUNT_LOCKED` — so a locked account was
+    // sent to the server twice for one visible attempt: two bcrypt compares, two
+    // `authLimiter` slots and two `accountLimiter` slots, halving the user's real
+    // budget exactly when they could least afford it. A replay of a request the
+    // server has already refused on its merits cannot succeed; it only costs.
+    it('does not replay a 403 that is not a CSRF rejection (ACCOUNT_LOCKED)', async () => {
+      vi.resetModules();
+      vi.doMock('../src/stores/authStore', () => ({
+        useAuthStore: { getState: mockGetState },
+      }));
+
+      const axios = (await import('axios')).default;
+      const { api } = await import('../src/services/api/client');
+
+      let csrfFetches = 0;
+      let loginHits = 0;
+      const adapter = async (config: { url?: string }) => {
+        const url = config.url ?? '';
+        const base = { status: 200, statusText: 'OK', headers: {}, config };
+        if (url.includes('csrf-token')) {
+          csrfFetches += 1;
+          return { ...base, data: { data: { csrfToken: `csrf-${String(csrfFetches)}` } } };
+        }
+        if (url.includes('/auth/login')) loginHits += 1;
+        return { ...base, data: { ok: true } };
+      };
+      axios.defaults.adapter = adapter as never;
+      api.defaults.adapter = adapter as never;
+
+      // One real login attempt, so the counters below measure the REPLAY only.
+      await api.post('/auth/login', {});
+      expect(loginHits).toBe(1);
+      const csrfFetchesBefore = csrfFetches;
+
+      const interceptors = (
+        api.interceptors.response as unknown as {
+          handlers: { rejected: (error: unknown) => Promise<unknown> }[];
+        }
+      ).handlers;
+      const responseInterceptor = interceptors[0]!.rejected;
+
+      const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
+        response: {
+          status: 403,
+          data: { success: false, message: 'ACCOUNT_LOCKED', statusCode: 403 },
+        },
+        config: {
+          url: '/auth/login',
+          method: 'post',
+          headers: {} as Record<string, string>,
+          _csrfRetry: undefined as boolean | undefined,
+        },
+      };
+
+      // The ORIGINAL error reaches the caller, unwrapped and unreplaced.
+      await expect(responseInterceptor(mockError)).rejects.toBe(mockError);
+
+      // The endpoint was hit exactly once, the CSRF cache was never invalidated
+      // or re-fetched, and the loop guard was never armed.
+      expect(loginHits).toBe(1);
+      expect(csrfFetches).toBe(csrfFetchesBefore);
+      expect(mockError.config._csrfRetry).toBeUndefined();
+    });
+
     it('should not retry 403 if _csrfRetry is already set', async () => {
       vi.resetModules();
       vi.doMock('../src/stores/authStore', () => ({
@@ -795,6 +875,9 @@ describe('API Client', () => {
       const responseInterceptor = interceptors[0]!.rejected;
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 403 },
         config: {
           url: '/vault/items',
@@ -826,6 +909,9 @@ describe('API Client', () => {
       const responseInterceptor = interceptors[0]!.rejected;
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/auth/refresh',
@@ -855,6 +941,9 @@ describe('API Client', () => {
       const responseInterceptor = interceptors[0]!.rejected;
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/auth/logout',
@@ -884,6 +973,9 @@ describe('API Client', () => {
       const responseInterceptor = interceptors[0]!.rejected;
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/vault/items',
@@ -913,6 +1005,9 @@ describe('API Client', () => {
       const responseInterceptor = interceptors[0]!.rejected;
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 500 },
         config: {
           url: '/vault/items',
@@ -941,6 +1036,9 @@ describe('API Client', () => {
       const responseInterceptor = interceptors[0]!.rejected;
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: undefined,
       };
@@ -1025,6 +1123,9 @@ describe('API Client', () => {
       const { responseInterceptor } = await setupRefreshFlow(409);
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/vault/items',
@@ -1046,6 +1147,9 @@ describe('API Client', () => {
       const { responseInterceptor } = await setupRefreshFlow(500);
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/vault/items',
@@ -1113,6 +1217,9 @@ describe('API Client', () => {
       ).handlers[0]!.rejected;
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/vault/items',

@@ -27,10 +27,10 @@
  *     retries, and this boot simply lands on the login screen.
  */
 
-import { isAxiosError } from 'axios';
 import { useAuthStore, REMEMBER_HINT_KEY } from '../../stores/authStore.js';
 import { refreshTokenApi } from '../api/authApi.js';
 import { getProfileApi } from '../api/userApi.js';
+import { isSessionGone } from './sessionFailure.js';
 
 /**
  * Whether the remember-me cold-start resume hint is present. Best-effort:
@@ -58,20 +58,6 @@ function clearRememberHint(): void {
 }
 
 /**
- * Classify a caught error as an authoritative session rejection. Only a genuine
- * 401/403 means the remembered session is gone; everything else (a network
- * error whose `response` is undefined, a 5xx, a non-Axios throw) is treated as
- * transient so the hint survives for the next boot.
- */
-function isSessionGone(error: unknown): boolean {
-  if (isAxiosError(error)) {
-    const status = error.response?.status;
-    return status === 401 || status === 403;
-  }
-  return false;
-}
-
-/**
  * Whether a cold-start resume should be attempted at all. True only when a
  * remember hint exists AND the store is not already authenticated (e.g. from a
  * synchronous same-tab rehydrate). Exported so the app root can gate its
@@ -93,16 +79,13 @@ export async function resumeSession(): Promise<boolean> {
   }
 
   try {
-    // Refresh under the cross-tab lock (refreshTokenApi wraps withRefreshLock)
-    // so a sibling tab refreshing at the same instant cannot trip reuse
-    // detection with the pre-rotation cookie.
-    const refreshResponse = await refreshTokenApi();
-    if (!refreshResponse.data.success) {
-      // A 2xx that is not a success envelope should not happen; treat it as
-      // transient and keep the hint rather than destroying a valid session.
-      return false;
-    }
-    useAuthStore.getState().setAccessToken(refreshResponse.data.data.accessToken);
+    // `refreshTokenApi` delegates to `performTokenRefresh`, which takes the
+    // cross-tab lock (so a sibling refreshing at the same instant cannot trip
+    // reuse detection with the pre-rotation cookie), validates the envelope —
+    // rejecting a 2xx that is not a success response, which lands in the catch
+    // below and is treated as transient, keeping the hint — stores the access
+    // token, and invalidates the CSRF token the cookie rotation just staled.
+    await refreshTokenApi();
 
     // The access token is now in the store, so the request interceptor will
     // attach the Bearer header for the profile fetch.

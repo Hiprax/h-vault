@@ -42,7 +42,11 @@ router.use(authenticate);
 // ── Profile & Settings ───────────────────────────────────────────────
 
 router.get('/profile', generalAuthLimiter, getProfile);
-router.put('/settings', validate(updateSettingsSchema, 'body'), updateSettings);
+// `generalAuthLimiter` (60/user/min, keyed by userId because `authenticate` runs
+// first at the router level) — a settings write is an infrequent, deliberate
+// action that also emits an audit row per changed field, so an unlimited endpoint
+// let a valid session flood the audit log.
+router.put('/settings', generalAuthLimiter, validate(updateSettingsSchema, 'body'), updateSettings);
 router.put(
   '/change-password',
   passwordVerifyLimiter,

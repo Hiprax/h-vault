@@ -7,8 +7,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
+import { AxiosError, AxiosHeaders } from 'axios';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia (needed for stores that reference it at module load)
@@ -232,82 +233,28 @@ describe('4.2 — ProtectedRoute session expiry feedback', () => {
     mockRefreshTokenApi.mockReset();
   });
 
-  it('calls logout when refresh fails with network error', async () => {
-    const state = setupAuthStore({
-      isAuthenticated: true,
-      accessToken: null,
-      isLocked: false,
-    });
+  /**
+   * A real AxiosError with a status, which is what `isSessionGone` requires:
+   * it classifies via axios' own `isAxiosError`, so a bare `new Error()` is
+   * transient by construction and must never drive a logout.
+   */
+  function axiosStatusError(status: number): AxiosError {
+    const error = new AxiosError(`Request failed with status code ${status}`);
+    error.response = {
+      status,
+      statusText: '',
+      data: {},
+      headers: new AxiosHeaders(),
+      config: { headers: new AxiosHeaders() },
+    };
+    return error;
+  }
 
-    mockRefreshTokenApi.mockRejectedValue(new Error('Network error'));
-
-    render(
+  function renderProtected() {
+    return render(
       <MemoryRouter initialEntries={['/vault']}>
         <Routes>
           <Route path="/login" element={<div data-testid="login-page">Login</div>} />
-          <Route
-            path="/vault"
-            element={
-              <ProtectedRoute>
-                <div>Protected</div>
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
-      </MemoryRouter>,
-    );
-
-    await waitFor(() => {
-      expect(state.logout).toHaveBeenCalled();
-    });
-  });
-
-  it('calls logout when refresh returns unsuccessful response', async () => {
-    const state = setupAuthStore({
-      isAuthenticated: true,
-      accessToken: null,
-      isLocked: false,
-    });
-
-    mockRefreshTokenApi.mockResolvedValue({
-      data: { success: false },
-    });
-
-    render(
-      <MemoryRouter initialEntries={['/vault']}>
-        <Routes>
-          <Route path="/login" element={<div data-testid="login-page">Login</div>} />
-          <Route
-            path="/vault"
-            element={
-              <ProtectedRoute>
-                <div>Protected</div>
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
-      </MemoryRouter>,
-    );
-
-    await waitFor(() => {
-      expect(state.logout).toHaveBeenCalled();
-    });
-  });
-
-  it('does not call logout when refresh succeeds', async () => {
-    const state = setupAuthStore({
-      isAuthenticated: true,
-      accessToken: null,
-      isLocked: false,
-    });
-
-    mockRefreshTokenApi.mockResolvedValue({
-      data: { success: true, data: { accessToken: 'new-token' } },
-    });
-
-    render(
-      <MemoryRouter initialEntries={['/vault']}>
-        <Routes>
           <Route
             path="/vault"
             element={
@@ -319,12 +266,125 @@ describe('4.2 — ProtectedRoute session expiry feedback', () => {
         </Routes>
       </MemoryRouter>,
     );
+  }
 
-    await waitFor(() => {
-      expect(state.setAccessToken).toHaveBeenCalledWith('new-token');
+  it('calls logout when the server rejects the refresh token with 401', async () => {
+    const state = setupAuthStore({
+      isAuthenticated: true,
+      accessToken: null,
+      isLocked: false,
     });
 
+    mockRefreshTokenApi.mockRejectedValue(axiosStatusError(401));
+
+    renderProtected();
+
+    await waitFor(() => {
+      expect(state.logout).toHaveBeenCalled();
+    });
+  });
+
+  it('calls logout when the refresh is rejected with 403', async () => {
+    const state = setupAuthStore({
+      isAuthenticated: true,
+      accessToken: null,
+      isLocked: false,
+    });
+
+    mockRefreshTokenApi.mockRejectedValue(axiosStatusError(403));
+
+    renderProtected();
+
+    await waitFor(() => {
+      expect(state.logout).toHaveBeenCalled();
+    });
+  });
+
+  // These two replace a test that asserted "any refresh failure logs out". That
+  // rule was itself the bug: `logout()` is not a local teardown, it POSTs
+  // /auth/logout and DELETES a refresh token that was still valid, so a momentary
+  // network blip or a rate limit permanently destroyed a live session.
+  it('does not log out on a network error and offers a retry instead', async () => {
+    const state = setupAuthStore({
+      isAuthenticated: true,
+      accessToken: null,
+      isLocked: false,
+    });
+
+    // A network failure has no `response` at all.
+    mockRefreshTokenApi.mockRejectedValue(new AxiosError('Network Error'));
+
+    renderProtected();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not reach the server');
     expect(state.logout).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('login-page')).not.toBeInTheDocument();
+
+    // The retry re-runs the refresh; on success the protected children render.
+    mockRefreshTokenApi.mockReset();
+    mockRefreshTokenApi.mockResolvedValue('new-token');
+    fireEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+    expect(await screen.findByTestId('protected-content')).toBeInTheDocument();
+    expect(mockRefreshTokenApi).toHaveBeenCalled();
+    expect(state.logout).not.toHaveBeenCalled();
+  });
+
+  it('does not log out when the refresh is rate limited (429)', async () => {
+    const state = setupAuthStore({
+      isAuthenticated: true,
+      accessToken: null,
+      isLocked: false,
+    });
+
+    mockRefreshTokenApi.mockRejectedValue(axiosStatusError(429));
+
+    renderProtected();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach the server');
+    expect(state.logout).not.toHaveBeenCalled();
+  });
+
+  // The old "refresh returns unsuccessful response" case no longer exists at this
+  // layer: the `{ success: false }` envelope check moved into
+  // `performTokenRefresh`, which REJECTS rather than resolving a bad body. What
+  // reaches ProtectedRoute is therefore a plain (non-Axios) Error, which is
+  // transient -- a malformed 2xx is not proof that the session is gone.
+  it('treats a rejected malformed refresh envelope as transient, not as a dead session', async () => {
+    const state = setupAuthStore({
+      isAuthenticated: true,
+      accessToken: null,
+      isLocked: false,
+    });
+
+    mockRefreshTokenApi.mockRejectedValue(
+      new Error('Token refresh returned an unexpected response'),
+    );
+
+    renderProtected();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach the server');
+    expect(state.logout).not.toHaveBeenCalled();
+  });
+
+  it('renders the protected children when the refresh succeeds', async () => {
+    const state = setupAuthStore({
+      isAuthenticated: true,
+      accessToken: null,
+      isLocked: false,
+    });
+
+    // `refreshTokenApi` now resolves to the token string itself, and storing it is
+    // `performTokenRefresh`'s job -- ProtectedRoute no longer calls
+    // setAccessToken, so the observable outcome is the rendered children.
+    mockRefreshTokenApi.mockResolvedValue('new-token');
+
+    renderProtected();
+
+    expect(await screen.findByTestId('protected-content')).toBeInTheDocument();
+    expect(state.logout).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('redirects unauthenticated users to /login with location state', () => {

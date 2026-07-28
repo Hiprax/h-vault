@@ -14,6 +14,10 @@ import {
   MAX_SESSIONS,
   MAX_TRUSTED_DEVICES,
   AUTO_LOCK_TIMEOUT_MINUTES,
+  AUTO_LOCK_MIN_MINUTES,
+  AUTO_LOCK_MAX_MINUTES,
+  LOCK_ON_HIDDEN_DEFAULT,
+  LOCK_ON_HIDDEN_DELAY_MINUTES,
   CLIPBOARD_CLEAR_SECONDS,
   TRASH_AUTO_PURGE_DAYS,
   MAX_LOGIN_ATTEMPTS,
@@ -344,12 +348,57 @@ describe('Rate limiting constants', () => {
     expect(LOGIN_RATE_LIMIT_WINDOW_MINUTES).toBe(15);
   });
 
-  it('LOGIN_RATE_LIMIT_MAX_PER_IP is 10', () => {
-    expect(LOGIN_RATE_LIMIT_MAX_PER_IP).toBe(10);
+  it('LOGIN_RATE_LIMIT_MAX_PER_IP is 20', () => {
+    expect(LOGIN_RATE_LIMIT_MAX_PER_IP).toBe(20);
   });
 
   it('LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT is 20', () => {
     expect(LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT).toBe(20);
+  });
+
+  it('the per-IP budget covers several complete 2FA sign-ins', () => {
+    // A 2FA sign-in costs two slots (`/auth/login` then `/auth/login/2fa`), so the
+    // ceiling has to be comfortably more than twice a plausible number of people
+    // behind one address. This is the constraint the number was chosen against —
+    // pinning only the literal above would not notice if the ratio stopped making
+    // sense.
+    const SLOTS_PER_2FA_SIGN_IN = 2;
+    expect(LOGIN_RATE_LIMIT_MAX_PER_IP / SLOTS_PER_2FA_SIGN_IN).toBeGreaterThanOrEqual(10);
+  });
+
+  it('the per-IP budget is not looser than the per-account one', () => {
+    // Per-email counting is the precise anti-guessing control and must stay at
+    // least as tight; an IP ceiling below it would make the per-account limiter
+    // unreachable and therefore dead.
+    expect(LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT).toBeLessThanOrEqual(LOGIN_RATE_LIMIT_MAX_PER_IP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-lock
+// ---------------------------------------------------------------------------
+describe('Auto-lock constants', () => {
+  it('AUTO_LOCK_MIN_MINUTES is 1 and AUTO_LOCK_MAX_MINUTES is 1440', () => {
+    expect(AUTO_LOCK_MIN_MINUTES).toBe(1);
+    expect(AUTO_LOCK_MAX_MINUTES).toBe(1440);
+  });
+
+  it('the default timeout sits inside its own bounds', () => {
+    expect(AUTO_LOCK_TIMEOUT_MINUTES).toBeGreaterThanOrEqual(AUTO_LOCK_MIN_MINUTES);
+    expect(AUTO_LOCK_TIMEOUT_MINUTES).toBeLessThanOrEqual(AUTO_LOCK_MAX_MINUTES);
+  });
+
+  it('hidden-tab locking is OFF by default', () => {
+    // Deliberate, and a behaviour change: it used to be unconditional and pinned
+    // to a flat 30 seconds, so briefly switching tabs locked the vault regardless
+    // of the timeout the user had configured. The idle timeout governs on its own
+    // now unless the user opts in.
+    expect(LOCK_ON_HIDDEN_DEFAULT).toBe(false);
+  });
+
+  it('the hidden-lock delay default sits inside the same bounds', () => {
+    expect(LOCK_ON_HIDDEN_DELAY_MINUTES).toBeGreaterThanOrEqual(AUTO_LOCK_MIN_MINUTES);
+    expect(LOCK_ON_HIDDEN_DELAY_MINUTES).toBeLessThanOrEqual(AUTO_LOCK_MAX_MINUTES);
   });
 });
 

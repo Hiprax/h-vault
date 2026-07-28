@@ -15,6 +15,7 @@ import axios, {
   type InternalAxiosRequestConfig,
 } from 'axios';
 import { useAuthStore } from '../../stores/authStore.js';
+import { isSessionGone, isCsrfRejection } from '../auth/sessionFailure.js';
 
 // Augment Axios's request config with a per-request flag that lets specific
 // requests opt out of the automatic "401 → token refresh → retry" behaviour
@@ -251,6 +252,61 @@ export async function withRefreshLock<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Rotate the access token. **The one and only way to refresh in this client.**
+ *
+ * There used to be four hand-rolled copies of this — the 401 interceptor,
+ * `authApi.refreshTokenApi`, `sessionResume` and the unlock screen — and they had
+ * quietly diverged on all three things that matter:
+ *
+ *  1. **Envelope validation.** Only `ProtectedRoute` checked `success`. The unlock
+ *     screen read `res.data.data.accessToken` straight off the response, so a 2xx
+ *     with an unexpected body threw a `TypeError` that landed in its catch and was
+ *     treated as an expired session.
+ *  2. **CSRF invalidation.** A CSRF token is an HMAC bound to
+ *     `hashToken(refreshToken)` (`middleware/csrf.ts`), and this POST rotates that
+ *     cookie — so after every refresh the cached token is dead in EVERY tab. Only
+ *     the interceptor called `clearCsrfToken()`. The others left the stale token
+ *     cached, so the caller's very next write 403'd and had to be replayed: a
+ *     guaranteed extra round-trip on every single vault unlock.
+ *  3. **Storing the result.** Each site set the access token itself, or forgot to.
+ *
+ * Doing it once removes all three. The POST is held under the cross-tab Web Lock
+ * because the refresh cookie is shared by every tab of the origin: two tabs
+ * presenting the same pre-rotation token trips the server's reuse detection, which
+ * revokes the whole family and signs the user out everywhere.
+ *
+ * Rejections propagate UNCHANGED so the caller can classify them with
+ * `isSessionGone` — this function must never decide on its own that a session is
+ * over.
+ */
+export async function performTokenRefresh(): Promise<string> {
+  const accessToken = await withRefreshLock(async () => {
+    const response = await api.post<{ success?: boolean; data?: { accessToken?: unknown } }>(
+      '/auth/refresh',
+    );
+    const body = response.data;
+    const token = body.data?.accessToken;
+    // `success === false` on a 2xx should not happen, and neither should a body
+    // without a string token. Both are rejected here rather than allowed to become
+    // a `TypeError` at a call site, where the shape of the throw decides whether
+    // the user keeps their session.
+    if (body.success === false || typeof token !== 'string' || token.length === 0) {
+      throw new Error('Token refresh returned an unexpected response');
+    }
+    return token;
+  });
+
+  useAuthStore.getState().setAccessToken(accessToken);
+  // The refresh-token cookie just rotated, so every cached CSRF token on this
+  // origin is now bound to a session identifier that no longer exists. Clearing
+  // here (which also broadcasts to sibling tabs) is what stops the caller's next
+  // state-changing request from 403-ing.
+  clearCsrfToken();
+
+  return accessToken;
+}
+
 function onRefreshSuccess(newToken: string): void {
   // Atomically swap the queue to prevent orphaned requests:
   // any request added between the swap and isRefreshing = false
@@ -275,23 +331,38 @@ api.interceptors.response.use(
       (InternalAxiosRequestConfig & { _retry?: boolean; _csrfRetry?: boolean }) | undefined;
 
     // --- CSRF 403 retry ---
-    // A 403 typically means the CSRF token is stale or invalid (e.g. session
-    // rotation, server restart, or another tab invalidated the token).
-    // We clear the cached token, fetch a fresh one from the server, and
-    // replay the original request exactly once (_csrfRetry flag prevents
-    // infinite loops if the 403 is for a different reason like permissions).
+    // A stale CSRF token (session rotation, server restart, another tab
+    // invalidating it) is recoverable: clear the cache, fetch a fresh token and
+    // replay once. `_csrfRetry` bounds it to a single replay.
+    //
+    // The replay is gated on the 403 ACTUALLY being a CSRF rejection. It used to
+    // fire on every 403 of a state-changing request, which silently doubled some
+    // of the most expensive requests in the app: `POST /auth/login` answers 403
+    // `ACCOUNT_LOCKED`, so a locked account was sent twice — two bcrypt compares,
+    // two `authLimiter` slots and two `accountLimiter` slots for one visible
+    // attempt, halving the user's real budget precisely when they could least
+    // afford it. Replaying a request the server has already refused on its merits
+    // cannot succeed; it only costs.
     const method = originalRequest?.method?.toUpperCase();
     const isStateChanging = method !== undefined && !CSRF_SAFE_METHODS.includes(method);
     if (
       error.response?.status === 403 &&
       originalRequest &&
       isStateChanging &&
-      !originalRequest._csrfRetry
+      !originalRequest._csrfRetry &&
+      isCsrfRejection(error)
     ) {
       originalRequest._csrfRetry = true;
       clearCsrfToken();
-      const freshToken = await ensureCsrfToken();
-      originalRequest.headers['x-csrf-token'] = freshToken;
+      try {
+        const freshToken = await ensureCsrfToken();
+        originalRequest.headers['x-csrf-token'] = freshToken;
+      } catch {
+        // The token fetch itself failed (offline, or the CSRF endpoint is being
+        // rate-limited). Surface the ORIGINAL 403 rather than replacing it with a
+        // second, less informative error about a request the caller never made.
+        return Promise.reject(error);
+      }
       return api(originalRequest as AxiosRequestConfig);
     }
 
@@ -353,44 +424,35 @@ api.interceptors.response.use(
     // any reason, even though the session was perfectly valid.
     let newToken: string;
     try {
-      // POST /auth/refresh uses the httpOnly refresh-token cookie
-      // (sent automatically via withCredentials: true).  The server
-      // responds with a new access token and rotates the refresh token.
-      //
-      // The POST is held under the cross-tab lock so that a sibling tab
-      // refreshing at the same instant cannot present the same (pre-rotation)
-      // cookie and trip the server's reuse detection. Only the POST is
-      // serialized — the per-tab `isRefreshing` guard and the `pendingRequests`
-      // queue keep working exactly as before, both inside and outside the lock.
-      newToken = await withRefreshLock(async () => {
-        const refreshResponse = await api.post<{ data: { accessToken: string } }>('/auth/refresh');
-        return refreshResponse.data.data.accessToken;
-      });
+      // `performTokenRefresh` owns the Web Lock, the envelope check, storing the
+      // new access token and invalidating the now-stale CSRF token. Only the POST
+      // is serialized across tabs — the per-tab `isRefreshing` guard and the
+      // `pendingRequests` queue keep working exactly as before.
+      newToken = await performTokenRefresh();
     } catch (refreshError) {
       // Flush the queue with the error so waiting requests fail immediately.
       onRefreshFailure(refreshError);
 
-      // Refresh failed — the session is unrecoverable; force logout to
-      // clear local state and redirect the user to the login page.
-      await useAuthStore.getState().logout();
+      // Log out ONLY when the server authoritatively rejected the refresh token
+      // (401/403). A 429, a 5xx or an offline blip means the session is fine and
+      // we simply could not reach it — and logging out here is not a local
+      // teardown, it calls `POST /auth/logout` and deletes a refresh token that
+      // still had days left. That turned a momentary rate limit into a permanently
+      // destroyed session. Anything transient now propagates to the caller with
+      // the session intact, so the next request retries normally.
+      if (isSessionGone(refreshError)) {
+        await useAuthStore.getState().logout();
+      }
 
       return Promise.reject(
         refreshError instanceof Error ? refreshError : new Error(String(refreshError)),
       );
     }
 
-    // Refresh succeeded. Persist the new access token in the auth store so
-    // subsequent requests (from the request interceptor) pick it up.
-    useAuthStore.getState().setAccessToken(newToken);
-
     originalRequest.headers.Authorization = `Bearer ${newToken}`;
 
     // Flush the queue — all waiting requests will now retry with newToken.
     onRefreshSuccess(newToken);
-
-    // After a token refresh the session identifier changed (new refresh token
-    // cookie), so the existing CSRF token is no longer valid.
-    clearCsrfToken();
 
     // Replay the original request with the fresh token. Its rejection
     // propagates to the caller unchanged (no logout) — matching the queued

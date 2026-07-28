@@ -264,6 +264,11 @@ const defaultProfile = {
   twoFactorEnabled: false,
   settings: {
     autoLockTimeout: 15,
+    // Mirrors the real profile response, which carries both hidden-tab lock
+    // fields. (The page still `??`-defaults them, for accounts created before
+    // they existed.)
+    lockOnHidden: false,
+    lockOnHiddenDelay: 1,
     clipboardClearTimeout: 30,
     theme: 'system' as const,
     backup: {
@@ -1129,11 +1134,81 @@ describe('SettingsPage — error paths and branches', () => {
     await waitFor(() => {
       expect(mockUpdateSettingsApi).toHaveBeenCalledWith({
         autoLockTimeout: 45,
+        // Every save sends the whole settings object, so the untouched
+        // hidden-tab fields ride along at their loaded values rather than being
+        // dropped (the server would leave them alone either way, but a payload
+        // that silently omits half the form is how one control starts clobbering
+        // another's value).
+        lockOnHidden: false,
+        lockOnHiddenDelay: 1,
         clipboardClearTimeout: 90,
         theme: 'dark',
       });
     });
     // Without this, every other consumer keeps the stale cached timeouts.
     expect(mockClearSettingsCache).toHaveBeenCalled();
+  });
+
+  // The hidden-tab lock is the one setting whose OFF state is as load-bearing as
+  // its ON state: it must be possible to turn back off. A payload built with a
+  // truthiness guard (`...(lockOnHidden && { lockOnHidden })`, or an `||`
+  // default) would send `true` fine and then silently omit the `false`, leaving
+  // the server on the old value — a setting that can be enabled and never
+  // disabled. So both directions are asserted, and the OFF payload is compared
+  // whole so an omitted key cannot pass as a falsy one.
+  it('round-trips the hidden-tab lock and its delay in both directions', async () => {
+    mockUpdateSettingsApi.mockResolvedValue({ data: { success: true } });
+    await renderSettings();
+
+    const lockOnHidden = screen.getByLabelText('Lock when the tab is hidden') as HTMLInputElement;
+    expect(lockOnHidden.checked).toBe(false);
+    // The delay only matters while the lock is on, so it stays hidden until then.
+    expect(screen.queryByLabelText(/after this many minutes hidden/)).not.toBeInTheDocument();
+
+    fireEvent.click(lockOnHidden);
+    expect(lockOnHidden.checked).toBe(true);
+
+    const delay = screen.getByLabelText(/after this many minutes hidden/) as HTMLInputElement;
+    // Seeded from the profile, not from a blank control.
+    expect(delay.value).toBe('1');
+    fireEvent.change(delay, { target: { value: '5' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Save Settings'));
+    });
+
+    await waitFor(() => {
+      expect(mockUpdateSettingsApi).toHaveBeenCalledWith({
+        autoLockTimeout: 15,
+        lockOnHidden: true,
+        lockOnHiddenDelay: 5,
+        clipboardClearTimeout: 30,
+        theme: 'dark',
+      });
+    });
+
+    // Now switch it back off and save again.
+    fireEvent.click(screen.getByLabelText('Lock when the tab is hidden'));
+    expect((screen.getByLabelText('Lock when the tab is hidden') as HTMLInputElement).checked).toBe(
+      false,
+    );
+    expect(screen.queryByLabelText(/after this many minutes hidden/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Save Settings'));
+    });
+
+    await waitFor(() => {
+      expect(mockUpdateSettingsApi).toHaveBeenCalledTimes(2);
+    });
+    expect(mockUpdateSettingsApi.mock.calls[1]![0]).toEqual({
+      autoLockTimeout: 15,
+      lockOnHidden: false,
+      // The edited delay survives the toggle, so re-enabling does not silently
+      // reset it to the default.
+      lockOnHiddenDelay: 5,
+      clipboardClearTimeout: 30,
+      theme: 'dark',
+    });
   });
 });

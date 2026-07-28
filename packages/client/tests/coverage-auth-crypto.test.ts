@@ -117,10 +117,19 @@ vi.mock('../src/lib/logger', () => ({
   },
 }));
 
-// useAutoLock reads its timeout from this hook; pin it so the auto-lock tests
-// are deterministic and issue no profile fetch.
+// useAutoLock reads its timeouts from this hook; pin them so the auto-lock tests
+// are deterministic and issue no profile fetch. Mutable so a test can turn the
+// opt-in hidden-tab lock on — it is OFF by default, which is itself the change
+// under test.
+const mockSettings = {
+  autoLockTimeout: 15,
+  lockOnHidden: false,
+  lockOnHiddenDelay: 1,
+  clipboardClearTimeout: 30,
+  theme: 'system',
+};
 vi.mock('../src/hooks/useUserSettings', () => ({
-  useUserSettings: () => ({ autoLockTimeout: 15, clipboardClearTimeout: 30, theme: 'system' }),
+  useUserSettings: () => mockSettings,
   clearSettingsCache: vi.fn(),
   onSettingsInvalidated: vi.fn(() => () => {}),
 }));
@@ -713,18 +722,41 @@ describe('api client — CSRF token lifecycle', () => {
 // useAutoLock — the tab-hidden delayed lock
 // ===========================================================================
 
-describe('useAutoLock — tab-hidden delayed lock', () => {
-  const VISIBILITY_DELAY_MS = 30_000;
+describe('useAutoLock — hidden-tab locking is opt-in', () => {
+  const MINUTE = 60_000;
   let mockLock: Mock<() => Promise<void>>;
 
   function setHidden(hidden: boolean): void {
     Object.defineProperty(document, 'hidden', { value: hidden, configurable: true });
   }
 
+  function hide(): void {
+    setHidden(true);
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  }
+
+  function reveal(): void {
+    setHidden(false);
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
-    mockLock = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    // Mirror the real action: `authStore.lock()` sets `isLocked: true`
+    // synchronously before any await. A mock that only resolves would leave the
+    // hook believing the vault is still open and let it re-fire.
+    mockLock = vi.fn<() => Promise<void>>().mockImplementation(() => {
+      useAuthStore.setState({ isLocked: true });
+      return Promise.resolve();
+    });
     useAuthStore.setState({ isAuthenticated: true, isLocked: false, lock: mockLock });
+    mockSettings.autoLockTimeout = 15;
+    mockSettings.lockOnHidden = false;
+    mockSettings.lockOnHiddenDelay = 1;
   });
 
   afterEach(() => {
@@ -733,61 +765,330 @@ describe('useAutoLock — tab-hidden delayed lock', () => {
     useAuthStore.setState({ ...authInitialState });
   });
 
-  it('restarts the 30s countdown when the tab is re-hidden (timers do not stack)', () => {
+  /**
+   * The reported bug. Hidden-tab locking used to be unconditional and hardcoded
+   * to `Math.min(30_000, autoLockTimeout / 2)` — which for every timeout above one
+   * minute is a flat 30 SECONDS. Switching tabs to look something up locked the
+   * vault, no matter that the user had asked for fifteen minutes. Worse, each
+   * surprise lock forced an unlock, and every unlock spent rate-limit budget that
+   * was shared with logging in.
+   */
+  it('does NOT lock a briefly hidden tab when the setting is off (the default)', () => {
     renderHook(() => useAutoLock());
 
-    setHidden(true);
-    act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
+    hide();
 
-    vi.advanceTimersByTime(10_000);
+    // Two minutes hidden — four times the old hardcoded delay.
+    act(() => {
+      vi.advanceTimersByTime(2 * MINUTE);
+    });
     expect(mockLock).not.toHaveBeenCalled();
 
-    // A second hidden signal (e.g. window blur → hide) must cancel and re-arm,
-    // not leave two timers racing.
-    act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
+    reveal();
+    expect(mockLock).not.toHaveBeenCalled();
+  });
 
-    // The ORIGINAL deadline (t = 30s) passes with no lock…
-    vi.advanceTimersByTime(VISIBILITY_DELAY_MS - 10_000 - 1);
+  it('still locks a hidden tab once the IDLE timeout elapses', () => {
+    renderHook(() => useAutoLock());
+
+    hide();
+
+    // Hiding is not activity, so the idle deadline keeps running while hidden.
+    act(() => {
+      vi.advanceTimersByTime(15 * MINUTE - 1000);
+    });
     expect(mockLock).not.toHaveBeenCalled();
 
-    // …and the lock fires exactly once, 30s after the SECOND signal.
-    vi.advanceTimersByTime(10_001);
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
     expect(mockLock).toHaveBeenCalledTimes(1);
   });
 
+  it('locks after the configured delay when the setting is on', () => {
+    mockSettings.lockOnHidden = true;
+    mockSettings.lockOnHiddenDelay = 2;
+    renderHook(() => useAutoLock());
+
+    hide();
+
+    act(() => {
+      vi.advanceTimersByTime(2 * MINUTE - 1000);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(mockLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('restarts the hidden countdown when the tab is re-hidden (timers do not stack)', () => {
+    mockSettings.lockOnHidden = true;
+    mockSettings.lockOnHiddenDelay = 1;
+    renderHook(() => useAutoLock());
+
+    hide();
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+
+    // Becoming visible clears the hidden deadline; hiding again restarts it.
+    reveal();
+    hide();
+
+    // The ORIGINAL deadline passes with no lock…
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+
+    // …and it fires exactly once, a full delay after the SECOND hide.
+    act(() => {
+      vi.advanceTimersByTime(31_000);
+    });
+    expect(mockLock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The hidden deadline must survive long enough to be ACTED on.
+   *
+   * `deadlineAt()` reads `hiddenSinceRef` and returns `Infinity` once it is null,
+   * so clearing that ref before evaluating asks about a deadline that no longer
+   * exists — and a tab hidden well past the configured delay comes back unlocked.
+   *
+   * This is asserted with the timers deliberately NOT advanced across the gap:
+   * `setSystemTime` moves only the wall clock, so no pending timer task can fire
+   * and "accidentally" produce the lock. That is what makes the test
+   * deterministic rather than a coin flip between two queued tasks — which is
+   * precisely the race the wall-clock model exists to remove.
+   */
+  it('locks on RETURN when the tab was hidden past the delay while timers were frozen', () => {
+    mockSettings.lockOnHidden = true;
+    mockSettings.lockOnHiddenDelay = 1;
+    mockSettings.autoLockTimeout = 60; // long, so only the hidden deadline can fire
+    renderHook(() => useAutoLock());
+
+    hide();
+    expect(mockLock).not.toHaveBeenCalled();
+
+    // Model a suspend: 30 minutes of wall clock pass with no timer allowed to run.
+    act(() => {
+      vi.setSystemTime(Date.now() + 30 * MINUTE);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+
+    // Restoring the window fires `visibilitychange` -> visible. It must lock here.
+    reveal();
+    expect(mockLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT lock on return when the hidden delay had not yet elapsed', () => {
+    // The control for the test above: the early-return path must not become a
+    // lock-on-every-return.
+    mockSettings.lockOnHidden = true;
+    mockSettings.lockOnHiddenDelay = 5;
+    mockSettings.autoLockTimeout = 60;
+    renderHook(() => useAutoLock());
+
+    hide();
+    act(() => {
+      vi.setSystemTime(Date.now() + 2 * MINUTE);
+    });
+    reveal();
+
+    expect(mockLock).not.toHaveBeenCalled();
+  });
+
+  it('retires the hidden deadline on return, so a later idle window is not cut short', () => {
+    // After returning, only the idle deadline governs. If `hiddenSince` were left
+    // set, the stale hidden deadline would keep winning `Math.min` and lock the
+    // user out mid-work.
+    mockSettings.lockOnHidden = true;
+    mockSettings.lockOnHiddenDelay = 1;
+    mockSettings.autoLockTimeout = 15;
+    renderHook(() => useAutoLock());
+
+    hide();
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    reveal();
+    expect(mockLock).not.toHaveBeenCalled();
+
+    // Two more minutes visible: past the 1-minute hidden delay measured from the
+    // original hide, but well inside the 15-minute idle window.
+    act(() => {
+      vi.advanceTimersByTime(2 * MINUTE);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+  });
+
   it('cancels the pending hidden-tab lock when the hook unmounts', () => {
+    mockSettings.lockOnHidden = true;
     const { unmount } = renderHook(() => useAutoLock());
 
-    setHidden(true);
-    act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-
+    hide();
     unmount();
 
     // The vault was already unmounted (e.g. the user navigated away); a leaked
     // timer would call lock() against a dead component.
-    vi.advanceTimersByTime(VISIBILITY_DELAY_MS * 2);
+    act(() => {
+      vi.advanceTimersByTime(10 * MINUTE);
+    });
     expect(mockLock).not.toHaveBeenCalled();
   });
 
   it('does not lock a hidden tab whose session was already locked elsewhere', () => {
+    mockSettings.lockOnHidden = true;
     renderHook(() => useAutoLock());
 
-    setHidden(true);
-    act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
+    hide();
 
     // Another tab locked the vault while this one was hidden.
     useAuthStore.setState({ isLocked: true });
 
-    vi.advanceTimersByTime(VISIBILITY_DELAY_MS);
+    act(() => {
+      vi.advanceTimersByTime(10 * MINUTE);
+    });
     expect(mockLock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The wall-clock half of the same fix, and the security-side mirror of the bug
+ * above.
+ *
+ * The old hook was a bare `setTimeout` with no `Date.now()` anywhere. A
+ * `setTimeout` measures elapsed RUNNING time: a hidden tab is throttled to about
+ * one wake per minute after five minutes, a frozen tab may not run timers at all,
+ * and a machine suspend stops the clock entirely. So a laptop that slept for eight
+ * hours woke up with the vault still unlocked and fifteen minutes left on its
+ * timer — precisely the state auto-lock exists to prevent.
+ */
+describe('useAutoLock — deadlines are wall-clock, not elapsed-timer', () => {
+  const MINUTE = 60_000;
+  let mockLock: Mock<() => Promise<void>>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Mirror the real action: `authStore.lock()` sets `isLocked: true`
+    // synchronously before any await. A mock that only resolves would leave the
+    // hook believing the vault is still open and let it re-fire.
+    mockLock = vi.fn<() => Promise<void>>().mockImplementation(() => {
+      useAuthStore.setState({ isLocked: true });
+      return Promise.resolve();
+    });
+    useAuthStore.setState({ isAuthenticated: true, isLocked: false, lock: mockLock });
+    mockSettings.autoLockTimeout = 15;
+    mockSettings.lockOnHidden = false;
+    mockSettings.lockOnHiddenDelay = 1;
+  });
+
+  afterEach(() => {
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    vi.useRealTimers();
+    useAuthStore.setState({ ...authInitialState });
+  });
+
+  it('locks the moment the tab regains focus after the deadline passed unobserved', () => {
+    renderHook(() => useAutoLock());
+
+    // Model a suspend: wall-clock time jumps past the deadline WITHOUT the
+    // pending timers being allowed to run. `advanceTimersByTime` would run them;
+    // `setSystemTime` moves only the clock, which is what a resumed machine looks
+    // like to the page.
+    act(() => {
+      vi.setSystemTime(Date.now() + 20 * MINUTE);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+
+    // On return, the wall-clock re-check catches up immediately.
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(mockLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('locks on the periodic re-check even if no event ever fires', () => {
+    renderHook(() => useAutoLock());
+
+    act(() => {
+      vi.setSystemTime(Date.now() + 20 * MINUTE);
+      // A single poll tick is enough; the check is a Date.now() comparison, not a
+      // count of elapsed timer time.
+      vi.advanceTimersByTime(20_000);
+    });
+
+    expect(mockLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('user activity pushes the deadline out', () => {
+    renderHook(() => useAutoLock());
+
+    act(() => {
+      vi.advanceTimersByTime(14 * MINUTE);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+
+    act(() => {
+      document.dispatchEvent(new Event('keydown'));
+    });
+
+    // 14 more minutes: past the ORIGINAL deadline, short of the refreshed one.
+    act(() => {
+      vi.advanceTimersByTime(14 * MINUTE);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(2 * MINUTE);
+    });
+    expect(mockLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts a scroll inside a nested container as activity', () => {
+    renderHook(() => useAutoLock());
+
+    // The app's main pane is an `overflow-y-auto` container. Scroll events do not
+    // BUBBLE from elements, so the old bubble-phase listener on `document` never
+    // saw this and reading a long note counted as idleness. The listener is now
+    // registered in the capture phase.
+    const pane = document.createElement('div');
+    document.body.appendChild(pane);
+
+    act(() => {
+      vi.advanceTimersByTime(14 * MINUTE);
+    });
+    act(() => {
+      pane.dispatchEvent(new Event('scroll', { bubbles: false }));
+    });
+    act(() => {
+      vi.advanceTimersByTime(14 * MINUTE);
+    });
+
+    expect(mockLock).not.toHaveBeenCalled();
+    pane.remove();
+  });
+
+  it('applies a shortened timeout immediately, even if it has already elapsed', () => {
+    const { rerender } = renderHook(() => useAutoLock());
+
+    act(() => {
+      vi.advanceTimersByTime(5 * MINUTE);
+    });
+    expect(mockLock).not.toHaveBeenCalled();
+
+    // The user saves a 2-minute timeout while already 5 minutes idle. The new
+    // deadline is in the past, so the vault must lock now rather than in two
+    // minutes' time.
+    mockSettings.autoLockTimeout = 2;
+    act(() => {
+      rerender();
+    });
+
+    expect(mockLock).toHaveBeenCalledTimes(1);
   });
 });
 

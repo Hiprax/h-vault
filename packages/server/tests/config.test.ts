@@ -97,14 +97,26 @@ describe('Server Config Validation', () => {
       expect(config.BCRYPT_ROUNDS).toBe(12);
     });
 
-    it('RATE_LIMIT_WINDOW_MS defaults to 900000', async () => {
-      const { config } = await loadConfigWithEnv({ RATE_LIMIT_WINDOW_MS: undefined });
-      expect(config.RATE_LIMIT_WINDOW_MS).toBe(900_000);
+    // Rate limiting is deliberately NOT env-configurable. `RATE_LIMIT_WINDOW_MS`
+    // and `RATE_LIMIT_MAX` used to be declared, defaulted and asserted here while
+    // being read by nothing — every limiter carries its own window and ceiling.
+    // These two tests replace the four that pinned the dead pair: one proves the
+    // keys are gone, the other proves a stale `.env` still carrying them does not
+    // break an operator's boot.
+    it('exposes no global rate-limit knobs (every limiter carries its own budget)', async () => {
+      const { config } = await loadConfigWithEnv({});
+      expect(Object.keys(config)).not.toContain('RATE_LIMIT_WINDOW_MS');
+      expect(Object.keys(config)).not.toContain('RATE_LIMIT_MAX');
     });
 
-    it('RATE_LIMIT_MAX defaults to 100', async () => {
-      const { config } = await loadConfigWithEnv({ RATE_LIMIT_MAX: undefined });
-      expect(config.RATE_LIMIT_MAX).toBe(100);
+    it('ignores a stale RATE_LIMIT_* pair left in an existing .env', async () => {
+      // Values that the removed schema would have REJECTED, so this fails loudly
+      // if the keys are ever reintroduced with their old bounds.
+      const { config } = await loadConfigWithEnv({
+        RATE_LIMIT_WINDOW_MS: '500',
+        RATE_LIMIT_MAX: '0',
+      });
+      expect(config.NODE_ENV).toBe('test');
     });
 
     it('BACKUP_MAX_SIZE_MB defaults to 25', async () => {
@@ -646,18 +658,6 @@ describe('Server Config Validation', () => {
       );
     });
 
-    it('RATE_LIMIT_WINDOW_MS below 1000 is rejected', async () => {
-      await expect(loadConfigWithEnv({ RATE_LIMIT_WINDOW_MS: '500' })).rejects.toThrow(
-        /Invalid environment configuration/,
-      );
-    });
-
-    it('RATE_LIMIT_MAX below 1 is rejected', async () => {
-      await expect(loadConfigWithEnv({ RATE_LIMIT_MAX: '0' })).rejects.toThrow(
-        /Invalid environment configuration/,
-      );
-    });
-
     it('BACKUP_MAX_SIZE_MB below 1 is rejected', async () => {
       await expect(loadConfigWithEnv({ BACKUP_MAX_SIZE_MB: '0' })).rejects.toThrow(
         /Invalid environment configuration/,
@@ -850,16 +850,6 @@ describe('Server Config Validation', () => {
     it('MONGO_MAX_POOL_SIZE accepts custom value', async () => {
       const { config } = await loadConfigWithEnv({ MONGO_MAX_POOL_SIZE: '50' });
       expect(config.MONGO_MAX_POOL_SIZE).toBe(50);
-    });
-
-    it('RATE_LIMIT_WINDOW_MS accepts custom value', async () => {
-      const { config } = await loadConfigWithEnv({ RATE_LIMIT_WINDOW_MS: '60000' });
-      expect(config.RATE_LIMIT_WINDOW_MS).toBe(60_000);
-    });
-
-    it('RATE_LIMIT_MAX accepts custom value', async () => {
-      const { config } = await loadConfigWithEnv({ RATE_LIMIT_MAX: '50' });
-      expect(config.RATE_LIMIT_MAX).toBe(50);
     });
 
     it('AUDIT_LOG_RETENTION_DAYS accepts custom value', async () => {

@@ -5,7 +5,7 @@ import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createLogger } from '@hiprax/logger';
 import bcrypt from 'bcryptjs';
 import { TOTP, Secret } from 'otpauth';
-import { User } from '../models/User.js';
+import { User, type IUserSettings } from '../models/User.js';
 import { RefreshToken } from '../models/RefreshToken.js';
 import { TrustedDevice } from '../models/TrustedDevice.js';
 import { AuditLog } from '../models/AuditLog.js';
@@ -17,7 +17,16 @@ import { getRequestContext, getUserId } from '../utils/controllerHelpers.js';
 import { cryptoManager } from '../utils/cryptoManager.js';
 import { config, isProduction, twoFactorEncryptionKey } from '../config/index.js';
 import { REFRESH_COOKIE_NAME } from '../constants/index.js';
-import { APP_NAME, BACKUP_CODES_COUNT, MAX_SESSIONS, MAX_TRUSTED_DEVICES } from '@hvault/shared';
+import {
+  APP_NAME,
+  BACKUP_CODES_COUNT,
+  MAX_SESSIONS,
+  MAX_TRUSTED_DEVICES,
+  AUTO_LOCK_TIMEOUT_MINUTES,
+  CLIPBOARD_CLEAR_SECONDS,
+  LOCK_ON_HIDDEN_DEFAULT,
+  LOCK_ON_HIDDEN_DELAY_MINUTES,
+} from '@hvault/shared';
 import type {
   UpdateSettingsInput,
   ChangePasswordInput,
@@ -29,6 +38,44 @@ import type {
 } from '@hvault/shared';
 
 const logger = createLogger({ moduleName: 'user-controller' });
+
+/**
+ * Fill in settings an existing account has no stored value for.
+ *
+ * Both endpoints that return settings read through `.lean()`, and a lean read
+ * returns the raw BSON document — Mongoose applies schema defaults on
+ * instantiation, not on projection, so a field added to `userSettingsSchema`
+ * after an account was created is simply ABSENT from that account's response
+ * until something writes it. No backfill migration runs, and there is nothing to
+ * trigger one.
+ *
+ * That gap is not cosmetic. `IUserSettings` declares these fields as required, so
+ * every consumer is entitled to treat them as present: the client's
+ * `useAutoLock` multiplies `lockOnHiddenDelay` into a real timer, and an absent
+ * value would produce a `NaN` deadline that compares false against everything —
+ * a lock the user had enabled would silently never fire, with no error anywhere.
+ * Normalising HERE, at the one boundary where settings leave the server, is what
+ * makes the declared type true rather than aspirational, and it keeps every
+ * client free of defensive `??` chains that a type-aware linter would (correctly)
+ * flag as unreachable.
+ *
+ * Add a field to `userSettingsSchema` and it belongs in this list.
+ */
+function withSettingsDefaults<T extends IUserSettings>(settings: T): T {
+  // The parameter type says every field is present, because that is what
+  // `IUserSettings` promises and what this function exists to MAKE true. At
+  // runtime a lean read of an older document may omit some, so the reads below
+  // deliberately go through a widened view rather than the declared type — the
+  // declared type is the postcondition here, not the precondition.
+  const raw = settings as Partial<IUserSettings>;
+  return {
+    ...settings,
+    autoLockTimeout: raw.autoLockTimeout ?? AUTO_LOCK_TIMEOUT_MINUTES,
+    lockOnHidden: raw.lockOnHidden ?? LOCK_ON_HIDDEN_DEFAULT,
+    lockOnHiddenDelay: raw.lockOnHiddenDelay ?? LOCK_ON_HIDDEN_DELAY_MINUTES,
+    clipboardClearTimeout: raw.clipboardClearTimeout ?? CLIPBOARD_CLEAR_SECONDS,
+  };
+}
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
@@ -47,7 +94,7 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
   const profile = {
     ...user,
     settings: {
-      ...user.settings,
+      ...withSettingsDefaults(user.settings),
       backup: {
         enabled: backupSettings.enabled,
         scheduleHour: backupSettings.scheduleHour,
@@ -80,6 +127,12 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
 
   if (body.autoLockTimeout !== undefined) {
     setFields['settings.autoLockTimeout'] = body.autoLockTimeout;
+  }
+  if (body.lockOnHidden !== undefined) {
+    setFields['settings.lockOnHidden'] = body.lockOnHidden;
+  }
+  if (body.lockOnHiddenDelay !== undefined) {
+    setFields['settings.lockOnHiddenDelay'] = body.lockOnHiddenDelay;
   }
   if (body.clipboardClearTimeout !== undefined) {
     setFields['settings.clipboardClearTimeout'] = body.clipboardClearTimeout;
@@ -128,7 +181,10 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
 
   res.status(200).json({
     success: true,
-    data: user.settings,
+    // Normalised for the same reason as `getProfile`: a settings write that
+    // touched only `theme` still returns the whole subdocument, which for an
+    // older account is missing every field added since it was created.
+    data: withSettingsDefaults(user.settings),
   });
 });
 

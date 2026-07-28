@@ -15,6 +15,8 @@ import {
   HIBP_BATCH_MAX_PREFIXES,
   CLIPBOARD_CLEAR_MIN_SECONDS,
   CLIPBOARD_CLEAR_MAX_SECONDS,
+  AUTO_LOCK_MIN_MINUTES,
+  AUTO_LOCK_MAX_MINUTES,
 } from '../constants/index.js';
 import { objectIdSchema } from './common.js';
 
@@ -40,7 +42,25 @@ export const passwordGenOptionsSchema = z
   });
 
 export const updateSettingsSchema = z.object({
-  autoLockTimeout: z.number().int().min(1).max(1440).optional(),
+  autoLockTimeout: z
+    .number()
+    .int()
+    .min(AUTO_LOCK_MIN_MINUTES)
+    .max(AUTO_LOCK_MAX_MINUTES)
+    .optional(),
+  // Opt-in "lock as soon as the tab is hidden", and how long to wait first.
+  // Bounded by the same constants as `autoLockTimeout` because the client arms a
+  // real timer from whatever the profile response carries — the same reason
+  // `clipboardClearTimeout` is bounded, and the reason these bounds are named
+  // constants rather than inline literals: the wire schema and the client's
+  // `useAutoLock` deadline model must clamp against identical numbers.
+  lockOnHidden: z.boolean().optional(),
+  lockOnHiddenDelay: z
+    .number()
+    .int()
+    .min(AUTO_LOCK_MIN_MINUTES)
+    .max(AUTO_LOCK_MAX_MINUTES)
+    .optional(),
   clipboardClearTimeout: z
     .number()
     .int()

@@ -21,15 +21,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mock the Axios instance so nothing touches the network or the CSRF flow.
-// `withRefreshLock` is mocked as a pass-through that records its invocation,
-// so we can prove the refresh POST is actually made inside the cross-tab lock.
+// `performTokenRefresh` is mocked too: the refresh POST, the cross-tab Web Lock
+// around it, the envelope check and the token store now all live inside THAT
+// function (services/api/client.ts), not in authApi. Its lock discipline is
+// pinned against the REAL module, with an instrumented `navigator.locks`, in
+// tests/refresh-multitab.test.ts ("refreshTokenApi (ProtectedRoute) refreshes
+// under the lock"). Re-asserting it here against a hand-written double would
+// only be testing the double.
 // ---------------------------------------------------------------------------
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
 const mockPut = vi.fn();
 const mockDelete = vi.fn();
-const refreshLockCalls: string[] = [];
+const mockPerformTokenRefresh = vi.fn<() => Promise<string>>();
 
 vi.mock('../src/services/api/client', () => ({
   api: {
@@ -38,12 +43,7 @@ vi.mock('../src/services/api/client', () => ({
     put: (...a: unknown[]) => mockPut(...a),
     delete: (...a: unknown[]) => mockDelete(...a),
   },
-  withRefreshLock: async <T>(fn: () => Promise<T>): Promise<T> => {
-    refreshLockCalls.push('enter');
-    const result = await fn();
-    refreshLockCalls.push('exit');
-    return result;
-  },
+  performTokenRefresh: (): Promise<string> => mockPerformTokenRefresh(),
   clearCsrfToken: vi.fn(),
 }));
 
@@ -151,7 +151,7 @@ beforeEach(() => {
   mockPost.mockReset().mockResolvedValue({ data: { success: true, data: null } });
   mockPut.mockReset().mockResolvedValue({ data: { success: true, data: null } });
   mockDelete.mockReset().mockResolvedValue({ data: { success: true, data: null } });
-  refreshLockCalls.length = 0;
+  mockPerformTokenRefresh.mockReset().mockResolvedValue('fresh-access-token');
 });
 
 // ===========================================================================
@@ -233,13 +233,38 @@ describe('authApi wire contract', () => {
   // The refresh cookie is shared by every tab of the origin. If two tabs POST
   // /auth/refresh with the same pre-rotation token, the server claims it once
   // and the loser trips reuse detection, revoking the whole family and logging
-  // every session out. So this call MUST run inside the cross-tab Web Lock.
-  it('runs the refresh POST inside the cross-tab refresh lock', async () => {
-    await authApi.refreshTokenApi();
+  // every session out — so that POST must run inside the cross-tab Web Lock.
+  //
+  // `refreshTokenApi` no longer owns any of that: `performTokenRefresh`
+  // (services/api/client.ts) is the single refresh implementation and holds the
+  // lock, validates the `{ success, data.accessToken }` envelope, stores the new
+  // access token and invalidates the CSRF token the cookie rotation just made
+  // stale. This function's whole remaining contract is DELEGATION — it must call
+  // that one implementation rather than assembling a POST of its own (a second,
+  // unlocked writer would defeat the serialization for every tab, which is the
+  // shape the four hand-rolled copies had) and hand the token back verbatim.
+  //
+  // The POST-under-the-lock property itself is asserted against the REAL module,
+  // with an instrumented `navigator.locks`, in tests/refresh-multitab.test.ts.
+  it('delegates the refresh to performTokenRefresh and returns the token verbatim', async () => {
+    mockPerformTokenRefresh.mockResolvedValue('rotated-token');
 
-    expectCall(mockPost, 'POST', '/auth/refresh');
-    // The POST happened strictly between lock acquisition and release.
-    expect(refreshLockCalls).toEqual(['enter', 'exit']);
+    await expect(authApi.refreshTokenApi()).resolves.toBe('rotated-token');
+
+    expect(mockPerformTokenRefresh).toHaveBeenCalledTimes(1);
+    // No hand-rolled refresh POST here — the url, the lock and the envelope all
+    // belong to performTokenRefresh.
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  // Rejections must propagate UNCHANGED. Callers classify them with
+  // `isSessionGone` (401/403 only), so an error re-wrapped or flattened here
+  // would read as transient and leave a genuinely dead session in place.
+  it('propagates a refresh rejection unchanged', async () => {
+    const failure = new Error('refresh rejected');
+    mockPerformTokenRefresh.mockRejectedValue(failure);
+
+    await expect(authApi.refreshTokenApi()).rejects.toBe(failure);
   });
 
   // logoutApi/lockApi take a per-call timeout because the shared Axios instance

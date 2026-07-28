@@ -13,6 +13,25 @@ export const SALT_BYTES = 32;
 export const BCRYPT_ROUNDS = 12;
 export const REFRESH_TOKEN_EXPIRY_DAYS = 7;
 export const AUTO_LOCK_TIMEOUT_MINUTES = 15;
+// Bounds for the user-configurable `autoLockTimeout` and `lockOnHiddenDelay`
+// settings. Exported so the wire schema (`updateSettingsSchema`) and the client's
+// `useAutoLock` deadline model read the SAME numbers instead of restating them.
+export const AUTO_LOCK_MIN_MINUTES = 1;
+export const AUTO_LOCK_MAX_MINUTES = 1440;
+
+// Defaults for the OPT-IN "lock as soon as the tab is hidden" control.
+//
+// Hidden-tab locking used to be unconditional and on a hardcoded
+// `Math.min(30_000, autoLockTimeout / 2)` — so with any realistic setting it was
+// a flat 30 seconds, and minimising the browser briefly locked the vault no
+// matter what the user had configured. It is now a setting the user turns on,
+// with a delay they choose, and it is OFF by default: `autoLockTimeout` alone
+// governs unless the user asks for more. The idle deadline keeps running while
+// the tab is hidden either way (nothing generates activity events there), so a
+// hidden tab still locks on schedule with this off.
+export const LOCK_ON_HIDDEN_DEFAULT = false;
+export const LOCK_ON_HIDDEN_DELAY_MINUTES = 1;
+
 export const CLIPBOARD_CLEAR_SECONDS = 30;
 // Bounds for the user-configurable `clipboardClearTimeout` setting. Exported so
 // the wire schema (`updateSettingsSchema`) and the client-side erase scheduler
@@ -23,8 +42,32 @@ export const CLIPBOARD_CLEAR_MIN_SECONDS = 5;
 export const CLIPBOARD_CLEAR_MAX_SECONDS = 300;
 export const TRASH_AUTO_PURGE_DAYS = 30;
 export const MAX_LOGIN_ATTEMPTS = 10;
+
+// ---------------------------------------------------------------------------
+// Credential-attempt rate limiting
+// ---------------------------------------------------------------------------
+//
+// These three are the SINGLE source of truth for the server's `authLimiter` and
+// `accountLimiter` (`middleware/rateLimiter.ts`), which import them rather than
+// restating the numbers inline.
+//
+// They bound CREDENTIAL ATTEMPTS ONLY — deliberate, human-initiated tries at a
+// password or an email link: register, login, the 2FA step, forgot-password and
+// resend-verification. Session-maintenance traffic the APP issues on its own
+// (`/auth/refresh`, `/auth/verify-unlock`) must NEVER be counted here, and is
+// not: it has its own limiters. Mounting `authLimiter` on those two was a real,
+// shipped defect — a single open tab spends ~3 refreshes per 15-minute window at
+// `JWT_ACCESS_EXPIRY=5m`, and every vault unlock spent 2 more, so ordinary use
+// drained the budget and the user's NEXT LOGIN was 429'd on its first attempt,
+// with no way back in until the window rolled over.
 export const LOGIN_RATE_LIMIT_WINDOW_MINUTES = 15;
-export const LOGIN_RATE_LIMIT_MAX_PER_IP = 10;
+// Per-IP ceiling. A 2FA sign-in costs two (`/login` then `/login/2fa`), so this
+// is ~10 complete sign-ins per window from one address — enough headroom for a
+// household or an office behind one NAT, while still far below anything useful
+// for guessing. The precise anti-brute-force controls are elsewhere and unchanged:
+// per-email counting below, `MAX_LOGIN_ATTEMPTS` account lockout, and the
+// progressive per-email delay.
+export const LOGIN_RATE_LIMIT_MAX_PER_IP = 20;
 export const LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT = 20;
 export const BACKUP_CODES_COUNT = 8;
 export const DEFAULT_PASSWORD_LENGTH = 20;

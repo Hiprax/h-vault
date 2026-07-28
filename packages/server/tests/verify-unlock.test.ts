@@ -139,7 +139,7 @@ describe('POST /api/v1/auth/verify-unlock — rate limiting', () => {
   // raising its limit to 5000, left it green. What is verified HERE, and cannot
   // be verified there, is the WIRING: the exact production `unlockLimiter`
   // binding is mounted on the real `/verify-unlock` route.
-  it('mounts the production unlockLimiter (and authLimiter) on the /verify-unlock route', () => {
+  it('mounts the production unlockLimiter — and NOT authLimiter — on /verify-unlock', () => {
     const stack = (authRouter as unknown as { stack: RouteStackLayer[] }).stack;
     const layer = stack.find(
       (l) => l.route?.path === '/verify-unlock' && l.route.methods.post === true,
@@ -150,7 +150,23 @@ describe('POST /api/v1/auth/verify-unlock — rate limiting', () => {
     // Reference equality against the imported bindings: removing unlockLimiter
     // from routes/auth.ts drops it from this list and fails the assertion.
     expect(handles).toContain(unlockLimiter);
-    expect(handles).toContain(authLimiter);
+
+    // `authLimiter` must NOT be here, and this assertion is the whole point.
+    //
+    // It used to be, and that was a shipped defect. `authLimiter` is one flat
+    // `auth:<ip>` bucket of 10 per 15 minutes shared with `/login`, `/register`
+    // and `/login/2fa`. Unlocking the vault is not a credential attempt against
+    // that budget — it is something the app does every time an idle timer fires —
+    // and each unlock spent TWO slots (this route plus the `/auth/refresh` the
+    // unlock screen issued first). A few lock/unlock cycles therefore drained the
+    // login budget, and the user's next `POST /auth/login` was rejected with 429
+    // on its FIRST attempt, locking them out of their own vault until the window
+    // rolled over.
+    //
+    // `unlockLimiter` alone is the correct control here and is strictly tighter
+    // for this traffic: 5 per 5 minutes, keyed by userId (so it cannot be diluted
+    // by IP rotation, and one user cannot exhaust another's budget).
+    expect(handles).not.toContain(authLimiter);
   });
 
   it('keeps the /verify-unlock route reachable through the mounted app', async () => {

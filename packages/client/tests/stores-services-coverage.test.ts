@@ -1311,8 +1311,19 @@ describe('API Client — comprehensive coverage', () => {
       const { api } = await importRealClient();
       const interceptor = getResponseInterceptor(api);
 
+      // The replay only fires for a genuine CSRF rejection, which the interceptor
+      // recognises from the server's FLAT error envelope
+      // (`{ success, message, statusCode, statusText }`) — `middleware/csrf.ts`
+      // emits the message `'invalid csrf token'`. A body-less 403 is a refusal on
+      // the merits and is deliberately left alone.
       const mockError = {
-        response: { status: 403 },
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
+        response: {
+          status: 403,
+          data: { success: false, message: 'invalid csrf token', statusCode: 403 },
+        },
         config: {
           url: '/vault/items',
           method: 'post',
@@ -1340,6 +1351,9 @@ describe('API Client — comprehensive coverage', () => {
       const interceptor = getResponseInterceptor(api);
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 403 },
         config: {
           url: '/vault/items',
@@ -1364,6 +1378,9 @@ describe('API Client — comprehensive coverage', () => {
       const interceptor = getResponseInterceptor(api);
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/auth/refresh',
@@ -1383,6 +1400,9 @@ describe('API Client — comprehensive coverage', () => {
       const interceptor = getResponseInterceptor(api);
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/auth/logout',
@@ -1402,6 +1422,9 @@ describe('API Client — comprehensive coverage', () => {
       const interceptor = getResponseInterceptor(api);
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: {
           url: '/vault/items',
@@ -1422,6 +1445,9 @@ describe('API Client — comprehensive coverage', () => {
 
       for (const status of [400, 404, 500, 502, 503]) {
         const mockError = {
+          // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+          // through `axios.isAxiosError`, so a plain object would be classified as neither.
+          isAxiosError: true,
           response: { status },
           config: {
             url: '/vault/items',
@@ -1441,6 +1467,9 @@ describe('API Client — comprehensive coverage', () => {
       const interceptor = getResponseInterceptor(api);
 
       const mockError = {
+        // A real Axios error carries this flag; `isCsrfRejection` / `isSessionGone` route
+        // through `axios.isAxiosError`, so a plain object would be classified as neither.
+        isAxiosError: true,
         response: { status: 401 },
         config: undefined,
       };

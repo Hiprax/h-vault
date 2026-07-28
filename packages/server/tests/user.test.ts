@@ -992,6 +992,142 @@ describe('User routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.autoLockTimeout).toBe(30);
     });
+
+    it('defaults lockOnHidden to false and its delay to 1 minute', async () => {
+      const res = await agent
+        .get('/api/v1/user/profile')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      // Hidden-tab locking is deliberately opt-in: the configured idle timeout
+      // governs on its own unless the user asks for more.
+      expect(res.body.data.settings.lockOnHidden).toBe(false);
+      expect(res.body.data.settings.lockOnHiddenDelay).toBe(1);
+    });
+
+    it('fills in settings an ACCOUNT CREATED BEFORE THE FIELD EXISTED has no value for', async () => {
+      // `getProfile` reads through `.lean()`, and a lean read returns raw BSON:
+      // Mongoose applies schema defaults on instantiation, not on projection. So a
+      // field added to `userSettingsSchema` after an account was created is simply
+      // ABSENT from that account's documents, and no backfill migration runs.
+      //
+      // That is not cosmetic. `IUserSettings` declares these as required, so the
+      // client is entitled to treat them as present — and `useAutoLock` multiplies
+      // `lockOnHiddenDelay` into a real timer, where `undefined` yields a NaN
+      // deadline that compares false against everything: a lock the user enabled
+      // would silently never fire, with no error anywhere. `withSettingsDefaults`
+      // normalises at this boundary so the declared type is true rather than
+      // aspirational.
+      await User.updateOne(
+        { _id: user.id },
+        {
+          $unset: {
+            'settings.lockOnHidden': 1,
+            'settings.lockOnHiddenDelay': 1,
+            'settings.autoLockTimeout': 1,
+            'settings.clipboardClearTimeout': 1,
+          },
+        },
+      );
+
+      // Precondition: the fields really are gone from the stored document, so this
+      // test cannot pass by accident.
+      const stored = await User.findById(user.id).lean();
+      expect(stored!.settings.lockOnHidden).toBeUndefined();
+      expect(stored!.settings.autoLockTimeout).toBeUndefined();
+
+      const res = await agent
+        .get('/api/v1/user/profile')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.settings.lockOnHidden).toBe(false);
+      expect(res.body.data.settings.lockOnHiddenDelay).toBe(1);
+      expect(res.body.data.settings.autoLockTimeout).toBe(15);
+      expect(res.body.data.settings.clipboardClearTimeout).toBe(30);
+    });
+
+    it('normalises the settings returned by an UPDATE too, not just the profile', async () => {
+      // A write that touched only `theme` still returns the whole subdocument,
+      // which for an older account is missing every field added since.
+      await User.updateOne({ _id: user.id }, { $unset: { 'settings.lockOnHidden': 1 } });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .put('/api/v1/user/settings')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ theme: 'dark' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.lockOnHidden).toBe(false);
+    });
+
+    it('round-trips lockOnHidden and lockOnHiddenDelay', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const enabled = await agent
+        .put('/api/v1/user/settings')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ lockOnHidden: true, lockOnHiddenDelay: 5 });
+
+      expect(enabled.status).toBe(200);
+      expect(enabled.body.data.lockOnHidden).toBe(true);
+      expect(enabled.body.data.lockOnHiddenDelay).toBe(5);
+
+      // Persisted, not merely echoed.
+      const profile = await agent
+        .get('/api/v1/user/profile')
+        .set('Authorization', authHeader(user.accessToken));
+      expect(profile.body.data.settings.lockOnHidden).toBe(true);
+      expect(profile.body.data.settings.lockOnHiddenDelay).toBe(5);
+    });
+
+    it('can turn lockOnHidden back OFF', async () => {
+      // `false` is exactly the value a truthiness check drops. If the controller
+      // guarded on `if (body.lockOnHidden)` instead of `!== undefined`, enabling
+      // the setting would be a one-way door — it would persist, and every attempt
+      // to disable it would silently no-op while reporting success.
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      await agent
+        .put('/api/v1/user/settings')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ lockOnHidden: true });
+
+      const disabled = await agent
+        .put('/api/v1/user/settings')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ lockOnHidden: false });
+
+      expect(disabled.status).toBe(200);
+      expect(disabled.body.data.lockOnHidden).toBe(false);
+
+      const profile = await agent
+        .get('/api/v1/user/profile')
+        .set('Authorization', authHeader(user.accessToken));
+      expect(profile.body.data.settings.lockOnHidden).toBe(false);
+    });
+
+    it('rejects an out-of-range lockOnHiddenDelay', async () => {
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .put('/api/v1/user/settings')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ lockOnHiddenDelay: 0 });
+
+      expect(res.status).toBe(400);
+    });
   });
 
   // ── Change Password Revokes Sessions ───────────────────────────────

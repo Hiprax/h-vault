@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-28
+
+### Added
+
+- **"Lock when the tab is hidden" is now a setting you control, and it is off by default.** Hiding the tab used to start a hidden 30-second countdown to lock, no matter what you had set the auto-lock timeout to — switching tabs to look something up was enough to lock the vault. Whether to lock on hiding, and how long to wait first, are now two controls next to the auto-lock timeout. With the setting off, the timeout you configured is the only thing that locks the vault; a hidden tab still locks exactly on schedule, because nothing counts as activity while it is hidden. **If you relied on the old behaviour, turn the setting on and pick a delay.**
+
+### Fixed
+
+- **You can no longer be rate-limited out of your own vault by using it normally.** Signing in, refreshing your session and unlocking the vault all drew on one shared allowance of ten requests per fifteen minutes. Refreshing happens by itself every few minutes for as long as a tab is open, and each unlock spent two more — so a handful of ordinary lock-and-unlock cycles emptied the allowance, and the next sign-in was refused with "too many attempts" on the very first try, with no way in until the window rolled over. Signing in now has its own allowance, which nothing else can spend, and it has been raised from ten to twenty requests per fifteen minutes per address so that several people behind one connection do not exhaust each other.
+- **A brief network problem no longer destroys your session.** If the vault could not renew your session — because the server was briefly unreachable, restarting, or rate-limiting — the app treated that as "your session has expired": it signed you out, revoked a session that still had days or weeks left on it, and sent you to the login page with no explanation at all. Only a genuine rejection from the server now ends a session. Anything else keeps you where you are and offers to try again.
+- **Unlocking no longer sends you to the login page when something transient goes wrong.** The unlock screen renewed your session on every attempt and treated any failure — including a rate limit or a dropped connection — as a dead session. That was the second half of the loop above: a lock, a failed unlock, a forced sign-out, and a login page that was itself rate-limited. It now renews only when the session actually needs it, tells you what went wrong, and stays put.
+- **"Too many attempts" no longer counts against you twice.** Being rate-limited or losing your connection during an unlock used to count as a wrong master password, adding a local cooldown on top of the server's — locking you out twice for one event. Only a genuinely rejected password counts now, and a rate limit tells you how long to wait.
+- **A vault that stayed open across a laptop sleeping is now locked on waking.** The idle timer measured how long the app had been running rather than how much time had passed, and a sleeping machine stops that clock: an eight-hour sleep could return with the vault still unlocked and the timer showing minutes left. The deadline is now a point in time, re-checked whenever the window comes back — so returning finds the vault locked, immediately.
+- **Scrolling now counts as activity.** Reading a long note by scrolling did not reset the idle timer, so the vault could lock in the middle of reading.
+- **Changing your master password on another device no longer looks like typing it wrong.** Unlocking with a session the server had since invalidated reported "incorrect master password", identically and forever, while the cooldown climbed toward ten minutes. It is now recognised and you are asked to sign in again.
+
+### Security
+
+- **Token refresh is now genuinely rate-limited.** Its limit was keyed partly on the refresh cookie, which changes on every successful refresh — so every request was counted as the first request of a brand-new client and the limit was never reached, by anyone. Anyone sending a stream of invalid cookies got the same free pass. It is now keyed on the client address alone, which is the one thing an unauthenticated caller cannot change at will.
+- A rejected request that the server refused on its own merits — a locked account, for instance — is no longer automatically sent a second time. Only a genuinely stale cross-site-request token triggers a retry now. The old behaviour doubled the cost of every locked-account sign-in attempt and halved the allowance it drew on.
+- The settings, backup-settings and backup-history endpoints, which previously had no rate limit at all, now carry the same per-user limit as the other authenticated endpoints.
+- `RATE_LIMIT_WINDOW_MS` and `RATE_LIMIT_MAX` have been removed. They were documented and validated but read by nothing, so an operator who tuned them changed nothing; every limit is per-tier and documented in the README. Leaving them in an existing `.env` is harmless — they are ignored.
+
 ## [0.7.0] - 2026-07-28
 
 ### Added
@@ -293,7 +316,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Hiprax/h-vault/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Hiprax/h-vault/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Hiprax/h-vault/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/Hiprax/h-vault/compare/v0.5.0...v0.5.1

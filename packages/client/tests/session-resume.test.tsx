@@ -120,8 +120,18 @@ function axiosError(status?: number): FakeAxiosError {
   return err;
 }
 
-function refreshOk(accessToken = 'access-token') {
-  return { data: { success: true, data: { accessToken } } };
+/**
+ * Make the mocked `refreshTokenApi` behave like the real one.
+ *
+ * The real implementation delegates to `performTokenRefresh`, which resolves to
+ * the access token AND stores it in the auth store itself — callers no longer
+ * unwrap an envelope or call `setAccessToken`. Mirroring that here keeps
+ * `resumeSession`'s assertion that the token ends up in the store honest;
+ * returning a bare value would make the mock lie about the contract.
+ */
+function refreshOk(accessToken = 'access-token'): Promise<string> {
+  useAuthStore.setState({ accessToken });
+  return Promise.resolve(accessToken);
 }
 
 const PROFILE = {
@@ -172,7 +182,7 @@ beforeEach(() => {
 describe('resumeSession', () => {
   it('resumes to an authenticated-but-locked session and keeps the hint on success', async () => {
     setHint();
-    mockRefreshTokenApi.mockResolvedValue(refreshOk());
+    mockRefreshTokenApi.mockImplementation(() => refreshOk());
     mockGetProfileApi.mockResolvedValue(profileOk());
 
     const result = await resumeSession();
@@ -200,7 +210,7 @@ describe('resumeSession', () => {
   });
 
   it('returns false and makes no network call when the hint is absent', async () => {
-    mockRefreshTokenApi.mockResolvedValue(refreshOk());
+    mockRefreshTokenApi.mockImplementation(() => refreshOk());
 
     const result = await resumeSession();
 
@@ -246,7 +256,7 @@ describe('resumeSession', () => {
 
   it('clears the hint and returns false on a 403 from the profile fetch', async () => {
     setHint();
-    mockRefreshTokenApi.mockResolvedValue(refreshOk());
+    mockRefreshTokenApi.mockImplementation(() => refreshOk());
     mockGetProfileApi.mockRejectedValue(axiosError(403));
 
     const result = await resumeSession();
@@ -286,9 +296,17 @@ describe('resumeSession', () => {
     expect(getHint()).toBe('1');
   });
 
-  it('KEEPS the hint when refresh resolves a non-success envelope', async () => {
+  it('KEEPS the hint when the refresh rejects an unexpected response envelope', async () => {
     setHint();
-    mockRefreshTokenApi.mockResolvedValue({ data: { success: false } });
+    // Envelope validation moved INTO `performTokenRefresh` (behind
+    // `refreshTokenApi`), which now REJECTS a 2xx that is not a success response
+    // instead of resolving one for each caller to re-check — two of the four call
+    // sites never did. From here it is simply a rejection, and a non-Axios one, so
+    // it must be treated as transient and keep the hint. The rejection itself is
+    // asserted in `refresh-multitab.test.ts`.
+    mockRefreshTokenApi.mockRejectedValue(
+      new Error('Token refresh returned an unexpected response'),
+    );
 
     const result = await resumeSession();
 
@@ -299,7 +317,7 @@ describe('resumeSession', () => {
 
   it('KEEPS the hint when the profile resolves a non-success envelope', async () => {
     setHint();
-    mockRefreshTokenApi.mockResolvedValue(refreshOk());
+    mockRefreshTokenApi.mockImplementation(() => refreshOk());
     mockGetProfileApi.mockResolvedValue({ data: { success: false } });
 
     const result = await resumeSession();
@@ -387,7 +405,7 @@ describe('App resume gating', () => {
 
   it('gates on a hint, then lands on the Unlock screen after a successful resume', async () => {
     setHint();
-    mockRefreshTokenApi.mockResolvedValue(refreshOk());
+    mockRefreshTokenApi.mockImplementation(() => refreshOk());
     mockGetProfileApi.mockResolvedValue(profileOk());
 
     await renderAppAt('/vault');
