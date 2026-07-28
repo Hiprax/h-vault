@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-28
+
 ### Added
 
 - **A card's billing address can now be filled from an address you already saved on an identity.** Most people enter their address once, on an identity, and then retype it for every card. The billing address section now offers "Use a saved address": a searchable list of every identity in your vault that has an address, each row showing the item name, the person it belongs to and the address itself, so you can tell two of them apart before choosing. Picking one fills the six billing fields and opens the section; searching matches on any of those three parts, in any order, so "ada london" finds Ada's London address. An "Undo fill" button appears next to Remove for as long as the fields still hold exactly what was copied, and withdraws itself the moment you edit any of them, so it can never discard a change you made deliberately. Delivery notes are the one part that is never carried over — they belong to a shipping address, not a payment one, and a card cannot store them — and the confirmation says so. Nothing leaves your device: the addresses come from items already decrypted in the browser, and the picker is offered only when at least one identity actually has an address to reuse.
@@ -291,7 +293,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Hiprax/h-vault/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Hiprax/h-vault/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/Hiprax/h-vault/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Hiprax/h-vault/compare/v0.4.0...v0.5.0
