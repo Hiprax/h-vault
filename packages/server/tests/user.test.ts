@@ -53,9 +53,7 @@ async function seedTrustedDevice(userId: string): Promise<string> {
 }
 
 // Re-export with { csrfToken, csrfCookie } naming used throughout this file
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -64,10 +62,10 @@ async function getCsrf(
 
 describe('User routes', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -619,7 +617,7 @@ describe('User routes', () => {
 
     /** Performs a real password login for the current `user` on a fresh agent. */
     async function loginOnce(): Promise<request.Response> {
-      const a = request(app) as unknown as request.SuperTest<request.Test>;
+      const a = request(app);
       const { token, cookie } = await getCsrfBase(a);
       return a
         .post('/api/v1/auth/login')
@@ -630,7 +628,7 @@ describe('User routes', () => {
 
     /** Posts /auth/refresh carrying `rawToken` as the refresh cookie. */
     async function refreshWith(rawToken: string): Promise<request.Response> {
-      const a = request(app) as unknown as request.SuperTest<request.Test>;
+      const a = request(app);
       const csrf = await getCsrfBase(a, `refreshToken=${rawToken}`);
       return a
         .post('/api/v1/auth/refresh')
@@ -1081,7 +1079,7 @@ describe('User routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
     });
 
     it('should create audit log when 2FA is disabled', async () => {
@@ -1129,7 +1127,7 @@ describe('User routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
     });
   });
 
@@ -1138,7 +1136,7 @@ describe('User routes', () => {
   describe('Session revocation IDOR protection', () => {
     it('should not allow user B to revoke user A session', async () => {
       const userB = await createTestUser({ email: 'userb-session@example.com' });
-      const agentB = request(app) as unknown as request.SuperTest<request.Test>;
+      const agentB = request(app);
 
       // Get user A's session ID
       const sessionsRes = await agent
@@ -1351,7 +1349,7 @@ describe('User routes', () => {
 
     it('should not allow user B to delete user A account (target is derived from the JWT, not the body)', async () => {
       const userB = await createTestUser({ email: 'userb-delete@example.com' });
-      const agentB = request(app) as unknown as request.SuperTest<request.Test>;
+      const agentB = request(app);
 
       const { csrfToken, csrfCookie } = await getCsrf(agentB);
       const { User } = await import('../src/models/User.js');
@@ -1422,7 +1420,7 @@ describe('User routes', () => {
         },
       });
 
-      const agentB = request(app) as unknown as request.SuperTest<request.Test>;
+      const agentB = request(app);
       const { csrfToken, csrfCookie } = await getCsrf(agentB);
 
       // Attempt deletion without 2FA code
@@ -1459,7 +1457,7 @@ describe('User routes', () => {
         },
       });
 
-      const agentB = request(app) as unknown as request.SuperTest<request.Test>;
+      const agentB = request(app);
       const { csrfToken, csrfCookie } = await getCsrf(agentB);
 
       const res = await agentB
@@ -1504,7 +1502,7 @@ describe('User routes', () => {
       });
       const validCode = totp.generate();
 
-      const agentB = request(app) as unknown as request.SuperTest<request.Test>;
+      const agentB = request(app);
       const { csrfToken, csrfCookie } = await getCsrf(agentB);
 
       const res = await agentB
@@ -1546,7 +1544,7 @@ describe('User routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe('change_password');
     });
 

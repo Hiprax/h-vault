@@ -193,7 +193,10 @@ describe('generateId', () => {
   });
 
   it('throws when the crypto global itself is undefined', () => {
-    const globalRef = globalThis as { crypto?: Crypto };
+    // `typeof globalThis.crypto` rather than the bare `Crypto` name: this package
+    // compiles with `lib: ["ES2022"]` (no DOM), where `@types/node` contributes
+    // `Crypto` as a VALUE (a class) and not as a global type.
+    const globalRef = globalThis as { crypto?: typeof globalThis.crypto };
     const origCrypto = globalRef.crypto;
     Object.defineProperty(globalRef, 'crypto', { value: undefined, configurable: true });
     try {

@@ -81,7 +81,7 @@ import {
   type TestUser,
 } from './helpers.js';
 
-type Agent = request.SuperTest<request.Test>;
+type Agent = request.Agent;
 
 async function post(
   agent: Agent,

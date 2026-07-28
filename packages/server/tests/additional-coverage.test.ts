@@ -79,10 +79,7 @@ const bwkSetupData = {
   bwkSalt: 'test-bwk-salt-value',
 };
 
-async function _setupBackupForUser(
-  agent: request.Agent | request.SuperTest<request.Test>,
-  token: string,
-) {
+async function _setupBackupForUser(agent: request.Agent, token: string) {
   const csrf = await getCsrf(agent as request.Agent);
   const res = await (agent as request.Agent)
     .post('/api/v1/backup/setup')
@@ -114,9 +111,9 @@ describe('Additional Coverage', () => {
 
       expect(body).toMatchObject({ success: true });
       expect(id).toBeDefined();
-      expect((body as Record<string, Record<string, unknown>>).data.itemType).toBe('card');
+      expect((body as { data: Record<string, unknown> }).data.itemType).toBe('card');
       // userId is intentionally absent from API responses (server-only field).
-      expect((body as Record<string, Record<string, unknown>>).data.userId).toBeUndefined();
+      expect((body as { data: Record<string, unknown> }).data.userId).toBeUndefined();
     });
 
     it('should create an identity item', async () => {
@@ -124,9 +121,9 @@ describe('Additional Coverage', () => {
 
       expect(body).toMatchObject({ success: true });
       expect(id).toBeDefined();
-      expect((body as Record<string, Record<string, unknown>>).data.itemType).toBe('identity');
+      expect((body as { data: Record<string, unknown> }).data.itemType).toBe('identity');
       // userId is intentionally absent from API responses (server-only field).
-      expect((body as Record<string, Record<string, unknown>>).data.userId).toBeUndefined();
+      expect((body as { data: Record<string, unknown> }).data.userId).toBeUndefined();
     });
 
     it('should create a secret item', async () => {
@@ -134,9 +131,9 @@ describe('Additional Coverage', () => {
 
       expect(body).toMatchObject({ success: true });
       expect(id).toBeDefined();
-      expect((body as Record<string, Record<string, unknown>>).data.itemType).toBe('secret');
+      expect((body as { data: Record<string, unknown> }).data.itemType).toBe('secret');
       // userId is intentionally absent from API responses (server-only field).
-      expect((body as Record<string, Record<string, unknown>>).data.userId).toBeUndefined();
+      expect((body as { data: Record<string, unknown> }).data.userId).toBeUndefined();
     });
 
     it('should create a note item', async () => {
@@ -144,9 +141,9 @@ describe('Additional Coverage', () => {
 
       expect(body).toMatchObject({ success: true });
       expect(id).toBeDefined();
-      expect((body as Record<string, Record<string, unknown>>).data.itemType).toBe('note');
+      expect((body as { data: Record<string, unknown> }).data.itemType).toBe('note');
       // userId is intentionally absent from API responses (server-only field).
-      expect((body as Record<string, Record<string, unknown>>).data.userId).toBeUndefined();
+      expect((body as { data: Record<string, unknown> }).data.userId).toBeUndefined();
     });
 
     it('should reject an invalid item type', async () => {

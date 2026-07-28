@@ -1,0 +1,21 @@
+// Type-checking for the Playwright E2E suite and the root-level test tooling.
+//
+// `e2e/` was covered by no tsconfig at all: it is outside every package's
+// `include`, so `type-check` never saw it and Playwright, like Vitest, strips
+// types without checking them. A helper whose signature drifted from its call
+// sites failed only at runtime, as an opaque timeout.
+//
+// Strictness is inherited from `tsconfig.base.json` unchanged — see
+// `packages/shared/tsconfig.test.json` for why relaxing it here would defeat the
+// purpose.
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+}

@@ -2455,7 +2455,7 @@ export default function SettingsPage() {
             </li>
             <li>
               A matched item&apos;s content is replaced wholesale. Anything the imported file does
-              not carry — a TOTP secret, backup codes, notes, custom fields — is{' '}
+              not carry — a TOTP secret, backup codes, delivery notes, notes, custom fields — is{' '}
               <strong>lost</strong>, and only the password is recoverable from history.
             </li>
             <li>{importConfirm?.insertCount ?? 0} new items will be added.</li>

@@ -34,8 +34,10 @@ describe('MEDIUM-1: trustedDevices field removed', () => {
     const user = await createTestUser();
     const dbUser = await User.findById(user.id).lean();
     expect(dbUser).toBeDefined();
-    // trustedDevices should not be present in settings
-    expect((dbUser!.settings as Record<string, unknown>)['trustedDevices']).toBeUndefined();
+    // trustedDevices should not be present in settings. IUserSettings declares no
+    // such key, so the stored document has to be read through a keyed view.
+    const settings: Record<string, unknown> = { ...dbUser!.settings };
+    expect(settings['trustedDevices']).toBeUndefined();
   });
 
   it('should return profile without trustedDevices in settings', async () => {

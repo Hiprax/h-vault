@@ -97,6 +97,12 @@ import {
   mergeBackupCodes,
   isValidBackupCode,
   formatBackupCodes,
+  MAX_ADDRESS_STREET_LENGTH,
+  MAX_ADDRESS_CITY_LENGTH,
+  MAX_ADDRESS_STATE_LENGTH,
+  MAX_ADDRESS_ZIP_LENGTH,
+  MAX_ADDRESS_COUNTRY_LENGTH,
+  MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
 } from '../src/index.js';
 
 describe('barrel exports (src/index.ts)', () => {
@@ -200,6 +206,18 @@ describe('barrel exports (src/index.ts)', () => {
     expect(MAX_IMPORT_DATA_LENGTH).toBe(1_048_576);
     expect(MAX_FILE_ENCRYPTION_SIZE_MB).toBe(100);
     expect(FILE_ENCRYPTION_FILE_EXTENSION).toBe('.enc');
+  });
+
+  it('exports the postal-address bounds', () => {
+    // The item form's lenient input schema and the import clamp both import these
+    // through the barrel; without the re-export they would fall back to duplicated
+    // literals and could admit a value the stored schema rejects.
+    expect(MAX_ADDRESS_STREET_LENGTH).toBe(500);
+    expect(MAX_ADDRESS_CITY_LENGTH).toBe(200);
+    expect(MAX_ADDRESS_STATE_LENGTH).toBe(200);
+    expect(MAX_ADDRESS_ZIP_LENGTH).toBe(20);
+    expect(MAX_ADDRESS_COUNTRY_LENGTH).toBe(100);
+    expect(MAX_ADDRESS_DELIVERY_NOTES_LENGTH).toBe(1_000);
   });
 
   it('exports utility functions', () => {

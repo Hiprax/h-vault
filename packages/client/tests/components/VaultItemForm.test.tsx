@@ -18,6 +18,10 @@ vi.mock('../../src/stores/vaultStore', () => ({
         { id: 'folder-1', name: 'Work', sortOrder: 0, createdAt: '', updatedAt: '' },
         { id: 'folder-2', name: 'Personal', sortOrder: 1, createdAt: '', updatedAt: '' },
       ],
+      // Mirrors the real store's initial value. The card form reads `items` to
+      // offer the addresses saved on identity items; an empty vault is exactly
+      // the case where no picker is rendered at all.
+      items: [],
     };
     return selector(state);
   }),
@@ -57,6 +61,10 @@ const defaultProps = {
   onSaved: vi.fn(),
   onCancel: vi.fn(),
 };
+
+// `item` is an exact-optional prop, so the fixtures below must land on the item type
+// itself, never on the `| undefined` union that indexing the props gives back.
+type FormItem = NonNullable<Parameters<typeof VaultItemForm>[0]['item']>;
 
 function renderForm(overrides: Partial<Parameters<typeof VaultItemForm>[0]> = {}) {
   return render(<VaultItemForm {...defaultProps} {...overrides} />);
@@ -146,6 +154,11 @@ describe('VaultItemForm', () => {
       expect(screen.getByPlaceholderText('Last name')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('Email address')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('Phone number')).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('Street address')).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('Apartment, suite, unit')).toBeInTheDocument();
+      expect(
+        screen.getByPlaceholderText('e.g. leave with the concierge, ring twice'),
+      ).toBeInTheDocument();
     });
 
     it('clicking "Secret" tab shows secret-specific fields', () => {
@@ -277,20 +290,26 @@ describe('VaultItemForm', () => {
 
       expect(screen.getByText('Billing Address')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('Street address')).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('Apartment, suite, unit')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('City')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('State')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('ZIP code')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('Country')).toBeInTheDocument();
     });
 
-    it('clicking "Remove" hides billing address section', () => {
-      renderForm({ defaultType: 'card' });
+    // Asserts on the CONTROLS, not on the "Billing Address" label. The collapsed
+    // state is now a labelled empty-state block rather than a bare link, so the
+    // label is present either way — and the controls are what "removed" actually
+    // means, since it is their values that decide whether an address is encrypted.
+    it('clicking "Remove" hides billing address fields', () => {
+      const { container } = renderForm({ defaultType: 'card' });
 
       fireEvent.click(screen.getByText('+ Add billing address'));
-      expect(screen.getByText('Billing Address')).toBeInTheDocument();
+      expect(container.querySelector('#field-billingStreet')).not.toBeNull();
 
       fireEvent.click(screen.getByText('Remove'));
-      expect(screen.queryByText('Billing Address')).not.toBeInTheDocument();
+      expect(container.querySelector('#field-billingStreet')).toBeNull();
+      expect(screen.queryByPlaceholderText('City')).not.toBeInTheDocument();
       expect(screen.getByText('+ Add billing address')).toBeInTheDocument();
     });
   });
@@ -353,7 +372,7 @@ describe('VaultItemForm', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
-      const errorEl = await screen.findByText('Invalid phone number (3-30 characters)');
+      const errorEl = await screen.findByText('Invalid phone number');
       expect(errorEl).toBeInTheDocument();
       expect(errorEl.getAttribute('id')).toBe('field-phone-error');
       expect(phoneInput.getAttribute('aria-describedby')).toBe('field-phone-error');
@@ -431,7 +450,7 @@ describe('VaultItemForm', () => {
     };
 
     it('does not show type tabs when editing', () => {
-      renderForm({ item: existingItem as unknown as Parameters<typeof VaultItemForm>[0]['item'] });
+      renderForm({ item: existingItem as unknown as FormItem });
 
       // The type tab buttons should not be present
       // Note: "Login" text might appear in other contexts, so check for tab container
@@ -448,20 +467,20 @@ describe('VaultItemForm', () => {
     });
 
     it('shows "Update" button instead of "Create"', () => {
-      renderForm({ item: existingItem as unknown as Parameters<typeof VaultItemForm>[0]['item'] });
+      renderForm({ item: existingItem as unknown as FormItem });
 
       expect(screen.getByRole('button', { name: 'Update' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Create' })).not.toBeInTheDocument();
     });
 
     it('shows "Edit Item" heading', () => {
-      renderForm({ item: existingItem as unknown as Parameters<typeof VaultItemForm>[0]['item'] });
+      renderForm({ item: existingItem as unknown as FormItem });
 
       expect(screen.getByText('Edit Item')).toBeInTheDocument();
     });
 
     it('populates the form with existing item data', () => {
-      renderForm({ item: existingItem as unknown as Parameters<typeof VaultItemForm>[0]['item'] });
+      renderForm({ item: existingItem as unknown as FormItem });
 
       const nameInput = screen.getByPlaceholderText('Item name') as HTMLInputElement;
       expect(nameInput.value).toBe('GitHub Account');
@@ -528,7 +547,8 @@ describe('VaultItemForm', () => {
   // 11. Secret expiry date/time split fields
   // -------------------------------------------------------------------------
   describe('secret expiry date/time split fields', () => {
-    it('splits ISO expiresAt into separate date and time when editing', () => {
+    it('renders a UTC expiresAt as the LOCAL date and time of that instant', () => {
+      const stored = '2026-12-31T23:59:00.000Z';
       const existingSecret = {
         id: 'secret-1',
         itemType: 'secret' as const,
@@ -538,7 +558,7 @@ describe('VaultItemForm', () => {
         data: {
           value: 'sk-abc123',
           description: 'Test key',
-          expiresAt: '2026-12-31T23:59:00.000Z',
+          expiresAt: stored,
           customFields: [],
         },
         createdAt: '2024-01-01T00:00:00Z',
@@ -547,16 +567,20 @@ describe('VaultItemForm', () => {
       };
 
       renderForm({
-        item: existingSecret as unknown as Parameters<typeof VaultItemForm>[0]['item'],
+        item: existingSecret as unknown as FormItem,
       });
 
       const dateInput = document.getElementById('field-expiryDate') as HTMLInputElement;
       const timeInput = document.getElementById('field-expiryTime') as HTMLInputElement;
 
       expect(dateInput).toBeInTheDocument();
-      expect(dateInput.value).toBe('2026-12-31');
       expect(timeInput).toBeInTheDocument();
-      expect(timeInput.value).toBe('23:59');
+      // Asserted as a PROPERTY, not as fixed strings: the two controls are a local-time
+      // view of one instant, so the exact strings depend on the machine's UTC offset.
+      // Reading them back as local time must reproduce the stored instant exactly —
+      // which is what the old string split, discarding the `Z`, did not do.
+      const instant = new Date(`${dateInput.value}T${timeInput.value}`);
+      expect(instant.getTime()).toBe(new Date(stored).getTime());
     });
 
     it('splits datetime-local format expiresAt into separate date and time', () => {
@@ -578,7 +602,7 @@ describe('VaultItemForm', () => {
       };
 
       renderForm({
-        item: existingSecret as unknown as Parameters<typeof VaultItemForm>[0]['item'],
+        item: existingSecret as unknown as FormItem,
       });
 
       const dateInput = document.getElementById('field-expiryDate') as HTMLInputElement;
@@ -606,7 +630,7 @@ describe('VaultItemForm', () => {
       };
 
       renderForm({
-        item: existingSecret as unknown as Parameters<typeof VaultItemForm>[0]['item'],
+        item: existingSecret as unknown as FormItem,
       });
 
       const dateInput = document.getElementById('field-expiryDate') as HTMLInputElement;

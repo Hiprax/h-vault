@@ -15,6 +15,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import React from 'react';
+import { AxiosHeaders, type AxiosResponse } from 'axios';
+import type { ApiResponse } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia for jsdom
@@ -247,6 +249,22 @@ import { VaultList } from '../src/components/vault/VaultList';
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Minimal Axios envelope for `POST /auth/refresh`. Built rather than cast so the
+ * shape stays honest if the endpoint's signature changes.
+ */
+function refreshOkResponse(
+  accessToken: string,
+): AxiosResponse<ApiResponse<{ accessToken: string }>> {
+  return {
+    data: { success: true, data: { accessToken } },
+    status: 200,
+    statusText: 'OK',
+    headers: new AxiosHeaders(),
+    config: { headers: new AxiosHeaders() },
+  };
+}
+
 function renderWithRouter(ui: React.ReactElement, { route = '/' } = {}) {
   return render(<MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>);
 }
@@ -456,12 +474,8 @@ describe('ProtectedRoute', () => {
   });
 
   it('shows loading state and refreshes token when authenticated without accessToken', async () => {
-    const { refreshTokenApi } = (await import('../src/services/api/authApi')) as {
-      refreshTokenApi: ReturnType<typeof vi.fn>;
-    };
-    refreshTokenApi.mockResolvedValueOnce({
-      data: { success: true, data: { accessToken: 'new-token' } },
-    });
+    const { refreshTokenApi } = await import('../src/services/api/authApi');
+    vi.mocked(refreshTokenApi).mockResolvedValueOnce(refreshOkResponse('new-token'));
 
     useAuthStore.setState({
       isAuthenticated: true,
@@ -497,10 +511,8 @@ describe('ProtectedRoute', () => {
   });
 
   it('logs out when token refresh fails after page reload', async () => {
-    const { refreshTokenApi } = (await import('../src/services/api/authApi')) as {
-      refreshTokenApi: ReturnType<typeof vi.fn>;
-    };
-    refreshTokenApi.mockRejectedValueOnce(new Error('refresh failed'));
+    const { refreshTokenApi } = await import('../src/services/api/authApi');
+    vi.mocked(refreshTokenApi).mockRejectedValueOnce(new Error('refresh failed'));
 
     useAuthStore.setState({
       isAuthenticated: true,
@@ -912,7 +924,6 @@ describe('FolderSidebar', () => {
           updatedAt: now,
           _raw: {
             _id: 'f1',
-            userId: 'u1',
             encryptedName: 'enc',
             nameIv: 'iv',
             nameTag: 'tag',
@@ -929,7 +940,6 @@ describe('FolderSidebar', () => {
           updatedAt: now,
           _raw: {
             _id: 'f2',
-            userId: 'u1',
             encryptedName: 'enc',
             nameIv: 'iv',
             nameTag: 'tag',

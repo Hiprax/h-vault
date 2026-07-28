@@ -8,6 +8,7 @@
  * - Task 8: Backup code constant-time comparison
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { MockInstance } from 'vitest';
 import bcrypt from 'bcryptjs';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
@@ -37,7 +38,7 @@ import type { TestUser } from './helpers.js';
 
 // Re-export with { csrfToken, csrfCookie } naming used throughout this file
 async function getCsrf(
-  agent: request.SuperTest<request.Test>,
+  agent: request.Agent,
   extraCookies?: string,
 ): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent, extraCookies);
@@ -55,7 +56,7 @@ async function getCsrf(
 
 describe('Import operations: server-side execution without matching', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   const SEARCH_HASH = 'a'.repeat(64);
 
@@ -71,7 +72,7 @@ describe('Import operations: server-side execution without matching', () => {
   }
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -243,10 +244,10 @@ describe('Import operations: server-side execution without matching', () => {
 
 describe('Task 2.12: Folder parentId remapping during keep_both restore', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -396,7 +397,7 @@ describe('Task 3.1: Purpose-specific JWT signing keys (derivePurposeKey)', () =>
   });
 
   it('should reject tokens signed with a different purpose key', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser({ emailVerified: false });
     const { csrfToken, csrfCookie } = await getCsrf(agent);
 
@@ -421,7 +422,7 @@ describe('Task 3.1: Purpose-specific JWT signing keys (derivePurposeKey)', () =>
   });
 
   it('should reject tokens signed with the base secret instead of derived key', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser({ emailVerified: false });
     const { csrfToken, csrfCookie } = await getCsrf(agent);
 
@@ -472,7 +473,7 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
 
   /** Provision a 2FA-enabled user and return its TOTP handle + a temp token. */
   const setup2faUser = async (
-    agent: request.SuperTest<request.Test>,
+    agent: request.Agent,
   ): Promise<{ totp: TOTP; tempToken: string; csrfToken: string; csrfCookie: string }> => {
     const secretObj = new Secret();
     const encryptedSecret = cm.encryptTextSync(
@@ -494,7 +495,7 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
   };
 
   it('should accept a current TOTP code (window=1 allows current time step)', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const { totp, tempToken, csrfToken, csrfCookie } = await setup2faUser(agent);
     const validCode = totp.generate();
 
@@ -510,7 +511,7 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
   });
 
   it('should accept a code from one time step in the past (±1 tolerance)', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const { totp, tempToken, csrfToken, csrfCookie } = await setup2faUser(agent);
 
     await alignToMidStep();
@@ -531,7 +532,7 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
     // This is the assertion that actually pins the window: widening the server's
     // `totp.validate({ window })` back to 2 (or 3, its pre-hardening value) would
     // make a ±2 code valid, turning this 401 into a 200.
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const { totp, tempToken, csrfToken, csrfCookie } = await setup2faUser(agent);
 
     await alignToMidStep();
@@ -557,7 +558,7 @@ describe('Task 3.3: TOTP replay protection', () => {
   (cm as unknown as { validatePassword: (_p: string) => boolean }).validatePassword = () => true;
 
   it('should store lastTotpTimestamp after successful TOTP login', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const secretObj = new Secret();
     const secret = secretObj.base32;
     const encryptedSecret = cm.encryptTextSync(
@@ -598,7 +599,7 @@ describe('Task 3.3: TOTP replay protection', () => {
   });
 
   it('should reject replayed TOTP code (same time step)', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const secretObj = new Secret();
     const secret = secretObj.base32;
     const encryptedSecret = cm.encryptTextSync(
@@ -648,7 +649,7 @@ describe('Task 3.3: TOTP replay protection', () => {
   });
 
   it('should not update lastTotpTimestamp when backup code is used', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const secretObj = new Secret();
     const secret = secretObj.base32;
     const encryptedSecret = cm.encryptTextSync(
@@ -710,7 +711,7 @@ describe('Task 3.3b: TOTP replay protection in userController', () => {
 
   describe('disable2fa replay protection', () => {
     it('should reject replayed TOTP code when disabling 2FA', async () => {
-      const agent = request(app) as unknown as request.SuperTest<request.Test>;
+      const agent = request(app);
       const secretObj = new Secret();
       const secret = secretObj.base32;
       const encryptedSecret = cm.encryptTextSync(secret, encKey);
@@ -752,7 +753,7 @@ describe('Task 3.3b: TOTP replay protection in userController', () => {
     });
 
     it('should clear lastTotpTimestamp when 2FA is disabled', async () => {
-      const agent = request(app) as unknown as request.SuperTest<request.Test>;
+      const agent = request(app);
       const secretObj = new Secret();
       const secret = secretObj.base32;
       const encryptedSecret = cm.encryptTextSync(secret, encKey);
@@ -796,7 +797,7 @@ describe('Task 3.3b: TOTP replay protection in userController', () => {
 
   describe('verify2fa replay protection', () => {
     it('should reject replayed TOTP code when verifying 2FA setup', async () => {
-      const agent = request(app) as unknown as request.SuperTest<request.Test>;
+      const agent = request(app);
       const secretObj = new Secret();
       const secret = secretObj.base32;
       const encryptedPendingSecret = cm.encryptTextSync(secret, encKey);
@@ -837,7 +838,7 @@ describe('Task 3.3b: TOTP replay protection in userController', () => {
     });
 
     it('should store lastTotpTimestamp after successful 2FA verification', async () => {
-      const agent = request(app) as unknown as request.SuperTest<request.Test>;
+      const agent = request(app);
       const secretObj = new Secret();
       const secret = secretObj.base32;
       const encryptedPendingSecret = cm.encryptTextSync(secret, encKey);
@@ -879,7 +880,7 @@ describe('Task 3.3b: TOTP replay protection in userController', () => {
 
   describe('regenerateBackupCodes replay protection', () => {
     it('should reject replayed TOTP code when regenerating backup codes', async () => {
-      const agent = request(app) as unknown as request.SuperTest<request.Test>;
+      const agent = request(app);
       const secretObj = new Secret();
       const secret = secretObj.base32;
       const encryptedSecret = cm.encryptTextSync(secret, encKey);
@@ -921,7 +922,7 @@ describe('Task 3.3b: TOTP replay protection in userController', () => {
     });
 
     it('should update lastTotpTimestamp after successful backup code regeneration', async () => {
-      const agent = request(app) as unknown as request.SuperTest<request.Test>;
+      const agent = request(app);
       const secretObj = new Secret();
       const secret = secretObj.base32;
       const encryptedSecret = cm.encryptTextSync(secret, encKey);
@@ -1031,7 +1032,7 @@ describe('TOTP replay protection for deleteAccount', () => {
   const encKey = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
 
   it('should reject replayed TOTP code on deleteAccount', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const secretObj = new Secret();
     const secret = secretObj.base32;
     const encryptedSecret = cm.encryptTextSync(secret, encKey);
@@ -1077,7 +1078,7 @@ describe('TOTP replay protection for deleteAccount', () => {
   });
 
   it('should allow deleteAccount with a fresh TOTP code', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const secretObj = new Secret();
     const secret = secretObj.base32;
     const encryptedSecret = cm.encryptTextSync(secret, encKey);
@@ -1123,7 +1124,7 @@ describe('TOTP replay protection for deleteAccount', () => {
 
 describe('Timing equalization for forgotPassword and resendVerification', () => {
   it('forgotPassword should return same structure for existing and non-existing emails', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser();
     const { csrfToken: csrfToken1, csrfCookie: csrfCookie1 } = await getCsrf(agent);
 
@@ -1150,7 +1151,7 @@ describe('Timing equalization for forgotPassword and resendVerification', () => 
   });
 
   it('resendVerification should return same structure for non-existing and verified emails', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     // Create a verified user (the early-return path for already-verified users)
     const user = await createTestUser({ emailVerified: true });
     const { csrfToken: csrfToken1, csrfCookie: csrfCookie1 } = await getCsrf(agent);
@@ -1192,7 +1193,7 @@ describe('Folder field allowlist defense-in-depth', () => {
   // strip mode + the controller's `pickAllowedFields`). The allowlist filter
   // itself is unit-tested in controller-helpers.test.ts.
   it('should not persist client-supplied server-only fields on folder create', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser();
     const { csrfToken, csrfCookie } = await getCsrf(agent);
 
@@ -1229,7 +1230,7 @@ describe('Folder field allowlist defense-in-depth', () => {
   });
 
   it('should not persist client-supplied server-only fields on folder update', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser();
     const { csrfToken: csrfToken1, csrfCookie: csrfCookie1 } = await getCsrf(agent);
 
@@ -1283,10 +1284,10 @@ describe('Folder field allowlist defense-in-depth', () => {
 
 describe('HIGH-8 / MISSING-1: passwordChangedAt invalidates existing JWTs', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -1496,7 +1497,7 @@ describe('HIGH-8 / MISSING-1: passwordChangedAt invalidates existing JWTs', () =
 // =====================================================================
 
 describe('HIGH-9: forgotPassword/resendVerification timing equalization', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   // A wall-clock threshold is worthless here: BCRYPT_ROUNDS=4 in the test env,
   // so the dummy bcrypt.compare the equalization relies on costs a few ms and
@@ -1507,11 +1508,11 @@ describe('HIGH-9: forgotPassword/resendVerification timing equalization', () => 
   // the same shape. Spy on it and assert exactly one dummy comparison per path.
   const DUMMY_PLAINTEXT = 'dummy-timing-equalization-value';
 
-  const countDummyCompareCalls = (spy: ReturnType<typeof vi.spyOn>): number =>
+  const countDummyCompareCalls = (spy: MockInstance<typeof bcrypt.compare>): number =>
     spy.mock.calls.filter((call) => call[0] === DUMMY_PLAINTEXT).length;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     vi.restoreAllMocks();
   });
 
@@ -1578,10 +1579,10 @@ describe('HIGH-9: forgotPassword/resendVerification timing equalization', () => 
 
 describe('HIGH-5: Refresh token rotation race handled correctly', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 

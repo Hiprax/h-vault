@@ -893,6 +893,7 @@ describe('VaultItemDetail', () => {
           notes: '',
           billingAddress: {
             street: '123 Main St',
+            street2: 'Suite 100',
             city: 'Springfield',
             state: 'IL',
             zip: '62701',
@@ -912,6 +913,8 @@ describe('VaultItemDetail', () => {
       expect(screen.getByText('62701')).toBeInTheDocument();
       expect(screen.getByText('Country')).toBeInTheDocument();
       expect(screen.getByText('US')).toBeInTheDocument();
+      expect(screen.getByText('Street 2')).toBeInTheDocument();
+      expect(screen.getByText('Suite 100')).toBeInTheDocument();
     });
 
     it('does not render billing address section when not present', () => {
@@ -951,12 +954,18 @@ describe('VaultItemDetail', () => {
           phone: '+15551234567',
           address: {
             street: '42 Rabbit Hole Lane',
+            street2: 'Flat 2',
             city: 'Springfield',
             state: 'WL',
             zip: '00001',
             country: 'Fantasy',
+            deliveryNotes: 'Ring twice',
           },
           notes: 'Main identity',
+          // A schema-parsed identity always carries `customFields` (the shared schema
+          // defaults it) and `IdentityDetail` now renders that list, so omitting it
+          // here would make the view dereference `undefined`.
+          customFields: [],
         },
       });
 
@@ -974,6 +983,11 @@ describe('VaultItemDetail', () => {
       expect(screen.getByText('ZIP')).toBeInTheDocument();
       expect(screen.getByText('Country')).toBeInTheDocument();
       expect(screen.getByText('Notes')).toBeInTheDocument();
+      // Exact-match queries, so 'Notes' above cannot be satisfied by 'Delivery Notes'.
+      expect(screen.getByText('Street 2')).toBeInTheDocument();
+      expect(screen.getByText('Flat 2')).toBeInTheDocument();
+      expect(screen.getByText('Delivery Notes')).toBeInTheDocument();
+      expect(screen.getByText('Ring twice')).toBeInTheDocument();
     });
 
     it('renders identity without optional fields', () => {
@@ -983,6 +997,7 @@ describe('VaultItemDetail', () => {
         data: {
           firstName: 'Bob',
           lastName: 'Builder',
+          customFields: [],
         },
       });
 
@@ -2870,6 +2885,101 @@ describe('VaultItemPage', () => {
 
     expect(screen.queryByTestId('vault-item-form')).not.toBeInTheDocument();
     expect(mockFetchItems).toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // The page-level guard against editing an UNDECODABLE item.
+  //
+  // `VaultItemDetail` already disables its Edit button, so this is the second of
+  // two independent guards. It matters because the page owns the `editing` state:
+  // the form defaults every control from `item.data`, which for such an item is
+  // only the placeholder wrapper, and one Save would encrypt that over the item's
+  // real — and only — ciphertext.
+  // -------------------------------------------------------------------------
+
+  it.each([
+    ['_validationError', { username: 'u', _validationError: true }],
+    ['_raw', { _raw: 'not-json' }],
+  ])('never mounts the edit form for a %s item', async (_label, data) => {
+    useVaultStore.setState({
+      items: [makeDecryptedItem({ id: 'broken-1', name: 'Broken Item', data })] as never[],
+      loading: false,
+      itemsLoading: false,
+      trashLoading: false,
+    });
+
+    const { default: VaultItemPage } = await import('../src/pages/VaultItemPage');
+
+    await act(async () => {
+      render(
+        <MemoryRouter initialEntries={['/vault/broken-1']}>
+          <Routes>
+            <Route path="/vault/:id" element={<VaultItemPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+
+    // The affordance is marked unavailable (`aria-disabled`, so it stays focusable and
+    // can announce why) and its handler is inert, so a click cannot even set
+    // `editing`...
+    const edit = screen.getByRole('button', { name: 'Edit' });
+    expect(edit).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(edit);
+    expect(screen.queryByTestId('vault-item-form')).not.toBeInTheDocument();
+    // ...and the detail view stays on screen with its explanation.
+    expect(screen.getByRole('alert')).toHaveTextContent('could not be fully decoded');
+  });
+
+  it('unmounts an OPEN edit form if the item degrades to a placeholder underneath it', async () => {
+    // The scenario that actually reaches the page-level guard, and the only one that
+    // does. The two cases above cannot: the disabled button keeps `editing` false, so
+    // `!isUndecodableData(item.data)` is never evaluated against a truthy placeholder
+    // and deleting that conjunct would leave them both green.
+    //
+    // Here `editing` is already true on a perfectly decodable item when a background
+    // `fetchItems()` re-decrypts it into a placeholder — a real sequence: the
+    // online-event refetch redecrypts every row, and a row whose payload no longer
+    // satisfies the schema comes back flagged. Without the guard the form stays
+    // mounted over the placeholder, every control resets to '', and Save writes an
+    // empty item over the real ciphertext.
+    useVaultStore.setState({
+      items: [makeDecryptedItem({ id: 'degrade-1', name: 'Fine For Now' })] as never[],
+      loading: false,
+      itemsLoading: false,
+      trashLoading: false,
+    });
+
+    const { default: VaultItemPage } = await import('../src/pages/VaultItemPage');
+
+    await act(async () => {
+      render(
+        <MemoryRouter initialEntries={['/vault/degrade-1']}>
+          <Routes>
+            <Route path="/vault/:id" element={<VaultItemPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+
+    fireEvent.click(screen.getByText('Edit'));
+    expect(screen.getByTestId('vault-item-form')).toBeInTheDocument();
+
+    // The item degrades while the form is open.
+    await act(async () => {
+      useVaultStore.setState({
+        items: [
+          makeDecryptedItem({
+            id: 'degrade-1',
+            name: 'Fine For Now',
+            data: { username: 'u', _validationError: true },
+          }),
+        ] as never[],
+      });
+    });
+
+    expect(screen.queryByTestId('vault-item-form')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('could not be fully decoded');
   });
 
   it('navigates to /vault from not found page', async () => {

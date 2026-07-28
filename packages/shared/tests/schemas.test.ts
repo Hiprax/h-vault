@@ -1365,7 +1365,44 @@ describe('cardDataSchema', () => {
     if (result.success) {
       expect(result.data.billingAddress?.city).toBe('New York');
       expect(result.data.billingAddress?.street).toBe('');
+      expect(result.data.billingAddress?.street2).toBe('');
     }
+  });
+
+  it('accepts a billing address whose only entry is the second street line', () => {
+    const result = cardDataSchema.safeParse({
+      billingAddress: { street2: 'Apt 4B' },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.billingAddress?.street2).toBe('Apt 4B');
+      expect(result.data.billingAddress?.street).toBe('');
+    }
+  });
+
+  // A card's billing address is a POSTAL address, not a shipping one. It is backed
+  // by the base `addressSchema`, whose unknown-key stripping is what makes "delivery notes are
+  // identity-only" an invariant rather than a UI convention: even a hand-crafted
+  // blob cannot smuggle the field onto a card, so nothing downstream (the detail
+  // view, the plaintext export, a Bitwarden file) can ever surface it there.
+  it('STRIPS deliveryNotes from a billing address (identity-only field)', () => {
+    const result = cardDataSchema.parse({
+      billingAddress: { street: '1 Main St', deliveryNotes: 'leave with the concierge' },
+    });
+    expect(result.billingAddress).not.toHaveProperty('deliveryNotes');
+    expect(result.billingAddress?.street).toBe('1 Main St');
+  });
+
+  it('does not add a deliveryNotes key to a defaulted billing address', () => {
+    const result = cardDataSchema.parse({ billingAddress: {} });
+    expect(Object.keys(result.billingAddress ?? {}).sort()).toEqual([
+      'city',
+      'country',
+      'state',
+      'street',
+      'street2',
+      'zip',
+    ]);
   });
 });
 
@@ -1384,14 +1421,52 @@ describe('identityDataSchema', () => {
       phone: '555-0100',
       address: {
         street: '123 Main St',
+        street2: 'Apt 4B',
         city: 'Springfield',
         state: 'IL',
         zip: '62701',
         country: 'US',
+        deliveryNotes: 'Leave with the concierge',
       },
       company: 'ACME',
     });
     expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.address?.street2).toBe('Apt 4B');
+      expect(result.data.address?.deliveryNotes).toBe('Leave with the concierge');
+    }
+  });
+
+  it('keeps deliveryNotes on an identity address and defaults it to an empty string', () => {
+    const result = identityDataSchema.parse({ address: { street: '1 Main St' } });
+    expect(result.address?.deliveryNotes).toBe('');
+    expect(Object.keys(result.address ?? {}).sort()).toEqual([
+      'city',
+      'country',
+      'deliveryNotes',
+      'state',
+      'street',
+      'street2',
+      'zip',
+    ]);
+  });
+
+  it('leaves an absent address absent rather than defaulting it', () => {
+    // Load-bearing for import matching: an identity with no address hashes without
+    // an `address` key on BOTH sides of a comparison, so adding fields to the
+    // address shape cannot turn a re-import into a duplicate insert.
+    expect(identityDataSchema.parse({ firstName: 'A' }).address).toBeUndefined();
+  });
+
+  it('accepts an address whose only entry is the delivery notes', () => {
+    const result = identityDataSchema.safeParse({
+      address: { deliveryNotes: 'Ring twice, then leave at the back door' },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.address?.deliveryNotes).toBe('Ring twice, then leave at the back door');
+      expect(result.data.address?.street).toBe('');
+    }
   });
 
   it('accepts empty email and phone (optional fields)', () => {
@@ -1683,11 +1758,23 @@ describe('decrypted data schema max-length constraints', () => {
     });
   });
 
+  // The base address shape, reached through a card's billing address. An identity's
+  // address extends this shape, so every bound here applies there too; the
+  // identity-only `deliveryNotes` bound is asserted separately below, because it is
+  // unreachable through this vehicle by design.
   describe('addressSchema max-length (via cardDataSchema billingAddress)', () => {
     it('rejects street exceeding 500 chars', () => {
       expect(
         cardDataSchema.safeParse({
           billingAddress: { street: 'a'.repeat(501) },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('rejects street2 exceeding 500 chars', () => {
+      expect(
+        cardDataSchema.safeParse({
+          billingAddress: { street2: 'a'.repeat(501) },
         }).success,
       ).toBe(false);
     });
@@ -1728,10 +1815,44 @@ describe('decrypted data schema max-length constraints', () => {
       const result = cardDataSchema.safeParse({
         billingAddress: {
           street: 'a'.repeat(500),
+          street2: 'a'.repeat(500),
           city: 'a'.repeat(200),
           state: 'a'.repeat(200),
           zip: 'a'.repeat(20),
           country: 'a'.repeat(100),
+        },
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('identity address deliveryNotes max-length', () => {
+    it('rejects deliveryNotes exceeding 1,000 chars', () => {
+      expect(
+        identityDataSchema.safeParse({
+          address: { deliveryNotes: 'a'.repeat(1001) },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('accepts deliveryNotes at the 1,000-char limit', () => {
+      expect(
+        identityDataSchema.safeParse({
+          address: { deliveryNotes: 'a'.repeat(1000) },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('accepts every identity address field at its limit together', () => {
+      const result = identityDataSchema.safeParse({
+        address: {
+          street: 'a'.repeat(500),
+          street2: 'a'.repeat(500),
+          city: 'a'.repeat(200),
+          state: 'a'.repeat(200),
+          zip: 'a'.repeat(20),
+          country: 'a'.repeat(100),
+          deliveryNotes: 'a'.repeat(1000),
         },
       });
       expect(result.success).toBe(true);
@@ -3017,7 +3138,7 @@ describe('importSchema operations contract', () => {
   });
 
   it('strips a stray legacy data field rather than acting on it', () => {
-    // `data` is no longer part of the contract, so it is an unknown key: `.strip()`
+    // `data` is no longer part of the contract, so it is an unknown key: strip mode
     // drops it and the request is executed from `operations` alone. What must NOT
     // happen is the retired envelope influencing the import in any way.
     const result = importSchema.safeParse({

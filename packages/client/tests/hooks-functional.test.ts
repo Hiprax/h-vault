@@ -8,7 +8,7 @@
  * 4. useUserSettings   - Fetch, cache, and reset user settings
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
 // ---------------------------------------------------------------------------
@@ -142,11 +142,12 @@ import {
 describe('useAutoLock', () => {
   const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
   const VISIBILITY_DELAY_MS = 30_000; // 30 seconds
-  let mockLock: ReturnType<typeof vi.fn>;
+  // Typed to the store's own `lock` signature so setState() accepts it.
+  let mockLock: Mock<() => Promise<void>>;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    mockLock = vi.fn().mockResolvedValue(undefined);
+    mockLock = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 
     // Reset store to a clean unauthenticated state
     useAuthStore.setState({
@@ -908,9 +909,11 @@ describe('useKeyboardShortcuts', () => {
 // drive the REAL service so the number on screen is pinned to the real deadline.
 
 describe('useClipboardCountdown', () => {
-  let mockToast: ReturnType<typeof vi.fn>;
-  let mockDismiss: ReturnType<typeof vi.fn>;
-  let mockUpdate: ReturnType<typeof vi.fn>;
+  // Typed off the real hook's contract so mockReturnValue() satisfies it.
+  type ToastApi = ReturnType<typeof useToast>;
+  let mockToast: Mock<ToastApi['toast']>;
+  let mockDismiss: Mock<ToastApi['dismiss']>;
+  let mockUpdate: Mock<ToastApi['update']>;
   let toastCounter = 0;
   const writeText = vi.fn<(text: string) => Promise<void>>();
 
@@ -919,9 +922,9 @@ describe('useClipboardCountdown', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     toastCounter = 0;
-    mockToast = vi.fn().mockImplementation(() => `toast-${++toastCounter}`);
-    mockDismiss = vi.fn();
-    mockUpdate = vi.fn();
+    mockToast = vi.fn<ToastApi['toast']>().mockImplementation(() => `toast-${++toastCounter}`);
+    mockDismiss = vi.fn<ToastApi['dismiss']>();
+    mockUpdate = vi.fn<ToastApi['update']>();
     vi.mocked(useToast).mockReturnValue({
       toast: mockToast,
       dismiss: mockDismiss,

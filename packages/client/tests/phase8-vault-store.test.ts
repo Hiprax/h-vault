@@ -572,7 +572,7 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
       .mockResolvedValueOnce({ encrypted: 'ok', iv: 'iv', tag: 'tag' });
 
     await expect(
-      useVaultStore.getState().updateItem('item-1', 'x', { username: 'u' }),
+      useVaultStore.getState().updateItem('item-1', 'login', 'x', { username: 'u' }),
     ).rejects.toThrow(EncryptedFieldTooLargeError);
 
     expect(updateItemApi).not.toHaveBeenCalled();
@@ -585,7 +585,7 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
       .mockResolvedValueOnce({ encrypted: tooLongData, iv: 'iv', tag: 'tag' });
 
     await expect(
-      useVaultStore.getState().updateItem('item-1', 'n', { content: 'x' }),
+      useVaultStore.getState().updateItem('item-1', 'note', 'n', { content: 'x' }),
     ).rejects.toThrow(/Item data is too large/);
 
     expect(updateItemApi).not.toHaveBeenCalled();
@@ -622,7 +622,7 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
       .mockResolvedValueOnce('Updated')
       .mockResolvedValueOnce(JSON.stringify({ username: 'u2' }));
 
-    await useVaultStore.getState().updateItem('item-1', 'Updated', { username: 'u2' });
+    await useVaultStore.getState().updateItem('item-1', 'login', 'Updated', { username: 'u2' });
 
     expect(updateItemApi).toHaveBeenCalledTimes(1);
   });

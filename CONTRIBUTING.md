@@ -61,7 +61,10 @@ the PR description if you use it.
 - **Tests are required** for any behavior change. Every package enforces coverage
   thresholds (90% on all four metrics for `server` and `client`; `shared` is stricter),
   and the `test` gate fails the push if a change drops below them. Test the behavior, not
-  the implementation: assertions that cannot fail are worse than no test at all.
+  the implementation: assertions that cannot fail are worse than no test at all. Test
+  files are type-checked too — `npm run type-check` covers each package's `tests/` and the
+  Playwright specs in `e2e/`, under the same strictness as the shipped source, so a
+  fixture with a wrong or missing field is a compiler error rather than a silent pass.
 - **Update the docs in the same change.** `README.md` for anything user-facing, and
   `CHANGELOG.md` for anything a user or operator could notice — add a bullet under
   `## [Unreleased]` using the Keep a Changelog categories (`Added`, `Changed`,

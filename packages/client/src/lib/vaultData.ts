@@ -22,3 +22,24 @@
 export function isUndecodableData(data: Record<string, unknown>): boolean {
   return data._validationError === true || '_raw' in data;
 }
+
+/**
+ * "Is ANY of these non-empty" — the presence predicate for a postal address, whose
+ * fields are all stored with a `''` default.
+ *
+ * A list plus `.some`, never a `||` / `??` chain. `??` is outright WRONG here: `''`
+ * is not nullish, so the chain short-circuits on the first field — the shipped
+ * `showBillingAddress` bug, where a card whose street line was empty but whose city
+ * was filled opened with the address section COLLAPSED. `prefer-nullish-coalescing`
+ * is what pushes a `||` chain in that direction, so the list form is what both the
+ * lint rule and the semantics accept. It also costs ONE branch where an n-term
+ * chain costs n, which matters on a client whose branch-coverage threshold has
+ * about a point of headroom.
+ *
+ * Defined here, next to {@link isUndecodableData}, because THREE call sites must
+ * agree on it: the item form's section toggle, the form's decision whether to emit
+ * an address at all, and the detail view's row guards.
+ */
+export function hasAnyValue(values: readonly (string | undefined)[]): boolean {
+  return values.some((value) => Boolean(value));
+}

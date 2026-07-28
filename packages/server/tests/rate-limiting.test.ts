@@ -18,7 +18,7 @@ import type { TestUser } from './helpers.js';
 
 // Re-export with { csrfToken, csrfCookie } naming used throughout this file
 async function getCsrf(
-  agent: request.SuperTest<request.Test>,
+  agent: request.Agent,
   extraCookies?: string,
 ): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent, extraCookies);
@@ -43,10 +43,10 @@ const bwkSetupData = {
 
 describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 

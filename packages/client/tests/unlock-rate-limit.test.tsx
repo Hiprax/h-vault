@@ -49,6 +49,10 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
   },
 }));
 
+// The store's own `AuthState` is module-private, so derive it: the hook is
+// called with a selector over the FULL state and nothing narrower type-checks.
+type AuthState = ReturnType<typeof useAuthStore.getState>;
+
 describe('unlock rate limiting — client-side lockout (real component)', () => {
   const fakeMek = { __cryptoKey: 'mek' } as unknown as CryptoKey;
   const fakeAuthKey = new ArrayBuffer(32);
@@ -60,16 +64,15 @@ describe('unlock rate limiting — client-side lockout (real component)', () => 
     vi.clearAllMocks();
     localStorage.clear();
 
-    vi.mocked(useAuthStore).mockImplementation(
-      (selector?: (state: Record<string, unknown>) => unknown) => {
-        const state = {
-          user: { userId: 'user-1', email: 'vault@example.com' },
-          unlock: mockUnlock,
-          logout: mockLogout,
-        };
-        return selector ? selector(state) : state;
-      },
-    );
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      // Only the three members UnlockScreen reads are stubbed.
+      const state = {
+        user: { userId: 'user-1', email: 'vault@example.com' },
+        unlock: mockUnlock,
+        logout: mockLogout,
+      } as unknown as AuthState;
+      return selector ? selector(state) : state;
+    });
     vi.mocked(useAuthStore.getState).mockReturnValue({
       setAccessToken: mockSetAccessToken,
     } as unknown as ReturnType<typeof useAuthStore.getState>);
@@ -203,16 +206,15 @@ describe('unlock rate limiting — server-side API ordering', () => {
     localStorage.removeItem('__hv_unlock_failed_attempts');
     localStorage.removeItem('__hv_unlock_lockout_until');
 
-    vi.mocked(useAuthStore).mockImplementation(
-      (selector?: (state: Record<string, unknown>) => unknown) => {
-        const state = {
-          user: { userId: 'user-1', email: 'vault@example.com' },
-          unlock: mockUnlock,
-          logout: mockLogout,
-        };
-        return selector ? selector(state) : state;
-      },
-    );
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      // Only the three members UnlockScreen reads are stubbed.
+      const state = {
+        user: { userId: 'user-1', email: 'vault@example.com' },
+        unlock: mockUnlock,
+        logout: mockLogout,
+      } as unknown as AuthState;
+      return selector ? selector(state) : state;
+    });
 
     vi.mocked(useAuthStore.getState).mockReturnValue({
       setAccessToken: mockSetAccessToken,

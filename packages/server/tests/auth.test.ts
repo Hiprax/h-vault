@@ -268,7 +268,7 @@ describe('Auth API', () => {
       expect(res.body.data.kdfAlgorithm).toBeDefined();
 
       // A refreshToken cookie should be set
-      const setCookies = res.headers['set-cookie'] as string[];
+      const setCookies = res.headers['set-cookie'] as string[] | undefined;
       const hasRefreshCookie = setCookies?.some((c: string) => c.startsWith('refreshToken='));
       expect(hasRefreshCookie).toBe(true);
     });
@@ -359,7 +359,7 @@ describe('Auth API', () => {
       expect(typeof res.body.data.accessToken).toBe('string');
 
       // A new refreshToken cookie should be set (rotation)
-      const setCookies = res.headers['set-cookie'] as string[];
+      const setCookies = res.headers['set-cookie'] as string[] | undefined;
       const hasRefreshCookie = setCookies?.some((c: string) => c.startsWith('refreshToken='));
       expect(hasRefreshCookie).toBe(true);
     });
@@ -403,7 +403,7 @@ describe('Auth API', () => {
       expect(res.body.success).toBe(true);
 
       // The refreshToken cookie should be cleared
-      const setCookies = res.headers['set-cookie'] as string[];
+      const setCookies = res.headers['set-cookie'] as string[] | undefined;
       const clearCookie = setCookies?.find((c: string) => c.startsWith('refreshToken='));
       expect(clearCookie).toBeDefined();
     });
@@ -1792,7 +1792,7 @@ describe('Auth API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(testUser.id);
+      expect(auditEntry!.userId!.toString()).toBe(testUser.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).method).toBe('email_link');
     });
@@ -1861,7 +1861,7 @@ describe('Auth API', () => {
       expect(res1.status).toBe(200);
 
       // Extract RT2 from set-cookie header
-      const setCookies1 = res1.headers['set-cookie'] as string[];
+      const setCookies1 = res1.headers['set-cookie'] as string[] | undefined;
       const rt2Cookie = setCookies1?.find((c: string) => c.startsWith('refreshToken='));
       expect(rt2Cookie).toBeDefined();
       const rt2 = rt2Cookie!.split(';')[0]!.replace('refreshToken=', '');
@@ -2528,7 +2528,7 @@ describe('Auth API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(testUser.id);
+      expect(auditEntry!.userId!.toString()).toBe(testUser.id);
     });
 
     it('should create audit log entry on failed login', async () => {
@@ -2548,7 +2548,7 @@ describe('Auth API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(testUser.id);
+      expect(auditEntry!.userId!.toString()).toBe(testUser.id);
     });
 
     it('should create audit log on successful 2FA login', async () => {
@@ -2603,7 +2603,7 @@ describe('Auth API', () => {
       // toBeDefined() passed even when no log was written. Assert the row is
       // real and correctly attributed instead.
       expect(auditEntry).not.toBeNull();
-      expect(auditEntry!.userId.toString()).toBe(testUser.id);
+      expect(auditEntry!.userId!.toString()).toBe(testUser.id);
       expect((auditEntry!.metadata as { twoFactor?: boolean } | undefined)?.twoFactor).toBe(true);
     });
   });

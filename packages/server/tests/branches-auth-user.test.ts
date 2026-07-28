@@ -583,7 +583,7 @@ describe('userController — regenerateBackupCodes guards', () => {
   it('rejects a wrong TOTP and leaves the existing backup codes untouched', async () => {
     const { user, secretObj } = await create2faUser(['abcdef0123456789']);
     const before = await User.findById(user.id).select('+backupCodes');
-    const originalCodes = [...before!.backupCodes];
+    const originalCodes = [...before!.backupCodes!];
 
     const agent = request.agent(app);
     const { token, cookie } = await getCsrf(agent);
@@ -600,7 +600,7 @@ describe('userController — regenerateBackupCodes guards', () => {
     // A rejected regeneration must not have invalidated the user's real codes.
     const after = await User.findById(user.id).select('+backupCodes');
     expect(after!.backupCodes).toEqual(originalCodes);
-    expect(await bcrypt.compare('abcdef0123456789', after!.backupCodes[0]!)).toBe(true);
+    expect(await bcrypt.compare('abcdef0123456789', after!.backupCodes![0]!)).toBe(true);
     expect(
       await AuditLog.countDocuments({ userId: user.id, action: '2fa_backup_codes_regenerated' }),
     ).toBe(0);
@@ -633,8 +633,8 @@ describe('userController — regenerateBackupCodes guards', () => {
     // the old code is gone.
     const after = await User.findById(user.id).select('+backupCodes');
     expect(after!.backupCodes).toHaveLength(BACKUP_CODES_COUNT);
-    expect(await bcrypt.compare(issued[0]!, after!.backupCodes[0]!)).toBe(true);
-    expect(await bcrypt.compare('old-code-000000', after!.backupCodes[0]!)).toBe(false);
+    expect(await bcrypt.compare(issued[0]!, after!.backupCodes![0]!)).toBe(true);
+    expect(await bcrypt.compare('old-code-000000', after!.backupCodes![0]!)).toBe(false);
   });
 });
 

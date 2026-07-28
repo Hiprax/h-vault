@@ -1096,6 +1096,10 @@ describe('VaultItemDetail - additional coverage', () => {
         email: 'jane@example.com',
         phone: '+1234567890',
         notes: '',
+        // A schema-parsed identity always carries `customFields` (the shared schema
+        // defaults it) and `IdentityDetail` now renders that list, so omitting it here
+        // would make the view dereference `undefined`.
+        customFields: [],
       },
     });
 
@@ -1121,11 +1125,14 @@ describe('VaultItemDetail - additional coverage', () => {
         lastName: 'Doe',
         address: {
           street: '123 Main St',
+          street2: '',
           city: 'Anytown',
           state: 'CA',
           zip: '90210',
           country: 'US',
+          deliveryNotes: '',
         },
+        customFields: [],
       },
     });
 

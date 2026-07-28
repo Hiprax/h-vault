@@ -26,15 +26,20 @@ import { useVaultStore } from '../../src/stores/vaultStore';
 // Helpers
 // ---------------------------------------------------------------------------
 
-function setMockStoreState(overrides: Record<string, unknown> = {}) {
+// The store type is not exported; recover it from the hook's own `getState`.
+type VaultStoreState = ReturnType<typeof useVaultStore.getState>;
+
+function setMockStoreState(overrides: Partial<VaultStoreState> = {}) {
+  // SearchBar selects only these three slices, so the rest of the store is
+  // deliberately absent from the stand-in state.
   const state = {
     setSearchQuery: mockSetSearchQuery,
     items: [],
     searchQuery: '',
     ...overrides,
-  };
-  vi.mocked(useVaultStore).mockImplementation(
-    (selector: (state: Record<string, unknown>) => unknown) => selector(state),
+  } as unknown as VaultStoreState;
+  vi.mocked(useVaultStore).mockImplementation((selector: (state: VaultStoreState) => unknown) =>
+    selector(state),
   );
 }
 

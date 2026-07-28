@@ -45,7 +45,9 @@ describe('Phase 3 — sourceRefId provenance field', () => {
       // toJSON (the hydrated create-path serialization) strips it as
       // defense-in-depth alongside __v and userId.
       const hydrated = await VaultItem.findById(created._id);
-      const json = hydrated!.toJSON() as Record<string, unknown>;
+      // The transform drops keys the document type still declares, so read the
+      // serialized shape as a bag rather than as the document type.
+      const json = hydrated!.toJSON<Record<string, unknown>>();
       expect(json['sourceRefId']).toBeUndefined();
       expect(json['userId']).toBeUndefined();
       expect(json['__v']).toBeUndefined();
@@ -66,7 +68,7 @@ describe('Phase 3 — sourceRefId provenance field', () => {
       expect(reloaded?.sourceRefId).toBe(FOREIGN_REF);
 
       const hydrated = await Folder.findById(created._id);
-      const json = hydrated!.toJSON() as Record<string, unknown>;
+      const json = hydrated!.toJSON<Record<string, unknown>>();
       expect(json['sourceRefId']).toBeUndefined();
       expect(json['userId']).toBeUndefined();
       expect(json['__v']).toBeUndefined();

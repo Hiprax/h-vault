@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import type { Mock } from 'vitest';
+import type winston from 'winston';
 import request from 'supertest';
 import { APP_VERSION } from '@hvault/shared';
 import app from '../src/app.js';
@@ -195,8 +197,14 @@ describe('API Documentation', () => {
   // ──────────────────────────────────────────────────────────────────────────
 
   describe('warnIfSwaggerEnabledInProduction', () => {
-    function makeLogger(): { warn: ReturnType<typeof vi.fn> } {
-      return { warn: vi.fn() };
+    /** Spy that the production call site can accept AND the tests can assert on. */
+    type MockLogger = Pick<winston.Logger, 'warn'> & { warn: Mock };
+
+    // winston's `warn` is a five-overload `LeveledLogMethod` returning a Logger, so
+    // no plain spy can satisfy every arm; state the shape once here instead of at
+    // each of the five call sites.
+    function makeLogger(): MockLogger {
+      return { warn: vi.fn() } as unknown as MockLogger;
     }
 
     it('should emit a warning when NODE_ENV=production and ENABLE_SWAGGER=true', () => {

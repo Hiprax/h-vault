@@ -46,6 +46,8 @@ const BW_JSON = JSON.stringify({
         email: 'alice@example.com',
         phone: '+1 555 123 4567',
         address1: '1 Main St',
+        address2: 'Apt 4B',
+        address3: 'Building C',
         city: 'Town',
         state: 'CA',
         postalCode: '90001',
@@ -102,6 +104,45 @@ describe('Bitwarden JSON', () => {
     expect(id.data.email).toBe('alice@example.com');
     expect(id.data.passport).toBe('X123');
     expect(id.data.address).toMatchObject({ street: '1 Main St', city: 'Town', zip: '90001' });
+    // address1 is the first line; address2 and address3 are joined into the SECOND line
+    // rather than all three being concatenated into `street`. That is what makes an
+    // export-then-import round trip preserve both of H-Vault's street lines, and it also
+    // removes the unbounded three-way join that could exceed the street cap on its own.
+    expect(id.data.address).toMatchObject({ street2: 'Apt 4B, Building C' });
+  });
+
+  describe('Bitwarden identity address lines', () => {
+    function parseIdentity(identity: Record<string, unknown>): Record<string, unknown> {
+      const json = JSON.stringify({ items: [{ type: 4, name: 'Id', identity }] });
+      return byType(parseImportData('bitwarden', json).items, 'identity').data;
+    }
+
+    it('maps address2 alone to the second line, leaving the first empty', () => {
+      expect(parseIdentity({ address1: '1 Main St', address2: 'Apt 4B' }).address).toMatchObject({
+        street: '1 Main St',
+        street2: 'Apt 4B',
+      });
+    });
+
+    it('emits an address when address2 is the ONLY line present', () => {
+      // The presence guard is a disjunction. Before street2 joined it, an export whose
+      // only address content sat in address2 produced an identity with no address.
+      expect(parseIdentity({ address2: 'Apt 4B' }).address).toMatchObject({
+        street: '',
+        street2: 'Apt 4B',
+      });
+    });
+
+    it('emits no address at all when every line and locality field is empty', () => {
+      expect(parseIdentity({ firstName: 'A' }).address).toBeUndefined();
+    });
+
+    it('never invents delivery notes: no Bitwarden field maps to them', () => {
+      // Stated as a test so a future "helpful" mapping has to argue with it. Folding an
+      // unrelated column into courier instructions would be silent data corruption.
+      const address = parseIdentity({ address1: '1 Main St' }).address as Record<string, unknown>;
+      expect(address).not.toHaveProperty('deliveryNotes');
+    });
   });
 
   it('throws a friendly ImportParseError on malformed JSON', () => {

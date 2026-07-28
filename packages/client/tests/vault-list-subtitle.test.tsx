@@ -344,6 +344,86 @@ describe('getItemSubtitle', () => {
     expect(subtitle).not.toContain('123-45-6789');
   });
 
+  it('never exposes an identity Social Security or passport number', () => {
+    // Named explicitly now that both are RENDERED (masked) on the detail view and
+    // EDITABLE in the form. The detail view is a single item behind a reveal control;
+    // the list is many items at once, in front of whoever can see the screen, with no
+    // reveal to opt into — so these two must never reach a row, in any branch.
+    const secrets = { ssn: '078-05-1120', passport: 'X1234567' };
+
+    // ...not when they are the only content the identity has,
+    const bare = getItemSubtitle({
+      itemType: 'identity',
+      data: { firstName: '', lastName: '', ...secrets },
+    });
+    expect(bare).toBe('');
+
+    // ...not alongside a name that DOES supply the subtitle,
+    const named = getItemSubtitle({
+      itemType: 'identity',
+      data: { firstName: 'Ada', lastName: 'Lovelace', ...secrets },
+    });
+    expect(named).toBe('Ada Lovelace');
+
+    // ...and not on the email fallback either.
+    const emailFallback = getItemSubtitle({
+      itemType: 'identity',
+      data: { firstName: '', lastName: '', email: 'ada@example.com', ...secrets, company: 'ACME' },
+    });
+    expect(emailFallback).toBe('ada@example.com');
+
+    for (const subtitle of [bare, named, emailFallback]) {
+      expect(subtitle).not.toContain('078-05-1120');
+      expect(subtitle).not.toContain('X1234567');
+    }
+  });
+
+  it('never exposes an identity address or its delivery notes', () => {
+    // The list is the one vault surface that renders many items at once, in front of
+    // whoever can see the screen, with no reveal control to opt into. Courier
+    // instructions routinely name a building access code, so an address must stay off
+    // the row even though it is not classed as a secret elsewhere.
+    const data = {
+      firstName: '',
+      lastName: '',
+      email: 'ada@example.com',
+      address: {
+        street: '1 Main St',
+        street2: 'Flat 2',
+        city: 'London',
+        state: '',
+        zip: 'E1',
+        country: 'UK',
+        deliveryNotes: 'Gate code 1234, leave at the back door',
+      },
+    };
+    const subtitle = getItemSubtitle({ itemType: 'identity', data });
+    expect(subtitle).toBe('ada@example.com');
+    expect(subtitle).not.toContain('Gate code');
+    expect(subtitle).not.toContain('1234');
+    expect(subtitle).not.toContain('Flat 2');
+    expect(subtitle).not.toContain('1 Main St');
+  });
+
+  it('never exposes a card billing address on the row', () => {
+    const subtitle = getItemSubtitle({
+      itemType: 'card',
+      data: {
+        number: '4111111111111111',
+        billingAddress: {
+          street: '1 Main St',
+          street2: 'Suite 100',
+          city: 'Town',
+          state: '',
+          zip: '',
+          country: '',
+        },
+      },
+    });
+    expect(subtitle).toBe('•••• 1111');
+    expect(subtitle).not.toContain('Suite 100');
+  });
+
   it('gives notes and secrets no subtitle, and never leaks their content', () => {
     expect(
       getItemSubtitle({ itemType: 'note', data: { content: 'private', format: 'markdown' } }),

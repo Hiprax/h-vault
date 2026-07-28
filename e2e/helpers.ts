@@ -1,10 +1,77 @@
-import { type Page, type APIRequestContext, expect } from '@playwright/test';
+import { test, type Page, type APIRequestContext, expect } from '@playwright/test';
 import { MongoClient } from 'mongodb';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 export const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/hvault';
 export const TEST_PASSWORD = 'E2E-Test-P@ssword-2025!';
+
+/**
+ * Budget for a single step that waits on a client-side PBKDF2 key derivation.
+ *
+ * This number is governed by CPU COST, not by network latency: each register or
+ * sign-in step runs a real 600,000-iteration PBKDF2-SHA-256 derivation in the
+ * browser (plus server-side bcrypt at 12 rounds on sign-in), and the suite runs
+ * `workers: 1` alongside a Vite dev server and an in-memory MongoDB. On a
+ * contended machine one derivation alone has been observed past 30 s, which is
+ * how the old budget produced intermittent failures in `file-encryption.spec.ts`
+ * and `import-export.spec.ts` that passed on a re-run in isolation (the pipeline's
+ * `--retries=2` hid them).
+ *
+ * The two specs failed for DIFFERENT reasons, and it is worth keeping them straight:
+ * `file-encryption.spec.ts` already sets its own `test.setTimeout(120_000)`, so for
+ * it the binding constraint was this per-assertion budget alone. `import-export.spec.ts`
+ * (and `clipboard-hygiene.spec.ts`) set no timeout at all, so for those the test-level
+ * floor below is what actually rescues them. Both halves were needed.
+ *
+ * Do NOT tighten this back towards a "reasonable page-load" number. A derivation
+ * that is slow is not a bug the assertion should catch; a genuinely broken sign-in
+ * fails on the ASSERTION (wrong URL, visible error), not on the clock.
+ */
+const PBKDF2_STEP_TIMEOUT_MS = 90_000;
+
+/**
+ * Budget for an assertion that gates the FIRST mount of a lazily-loaded route.
+ *
+ * Bound by Vite's on-demand transform of the route's chunk, not by a key
+ * derivation — the same thing `gotoFileEncryptionTool` allows 60 s for. It needs
+ * saying because Playwright's default `expect` timeout is 10 s: an unbudgeted
+ * gate here would turn every spec that signs in through the UI into a flake on a
+ * contended machine, which is the class the constants in this file exist to
+ * prevent.
+ */
+const LAZY_ROUTE_TIMEOUT_MS = 60_000;
+
+/**
+ * Floor for the enclosing test's own timeout when a helper performs derivations.
+ *
+ * Raising {@link PBKDF2_STEP_TIMEOUT_MS} alone would be inert: Playwright's
+ * per-test `timeout` (30 s in `playwright.config.ts`) kills the test before a
+ * longer assertion budget can ever elapse, so the two must move together. Applied
+ * as a FLOOR via `test.info().timeout` rather than a plain `test.setTimeout`,
+ * because `setTimeout` SETS the value and an unconditional call here would silently
+ * SHORTEN `address-fields.spec.ts`, which asks for 300 s.
+ *
+ * Note what a floor of 240 s means in the other direction: it RAISES the several
+ * specs that ask for 120–150 s of their own. That is intended — those numbers were
+ * chosen against the old 30 s assertion budget and are now below what two 90 s
+ * derivations can legitimately need. The cost is paid only when something is already
+ * wrong: with `workers: 1` and ten call sites, a pathological all-timeout run takes
+ * about twice as long to report as it used to.
+ *
+ * DERIVED from the step budget rather than written as a literal, because the two
+ * numbers are not independent: `registerAndSignInViaUI` performs TWO derivations,
+ * so a floor below `2 ×` the per-step budget would let the test-level timeout fire
+ * first in exactly the contended run the step budget exists for — reintroducing the
+ * defect one layer up. The `+ 60 s` covers the non-derivation work in between (the
+ * page loads, the direct MongoDB write, and the form fills).
+ */
+const UI_SIGN_IN_TEST_TIMEOUT_MS = PBKDF2_STEP_TIMEOUT_MS * 2 + 60_000;
+
+/** Raise the current test's timeout to `floor` if it is currently lower. */
+function ensureTestTimeoutAtLeast(floor: number): void {
+  if (test.info().timeout < floor) test.setTimeout(floor);
+}
 
 /**
  * A high-entropy master password guaranteed to clear the registration gate
@@ -218,9 +285,23 @@ export async function login(page: Page, email: string, password: string): Promis
   await page.getByRole('button', { name: /log in|sign in/i }).click();
 }
 
-/** Waits for the vault page to be visible (authenticated state). */
+/**
+ * Waits for the vault page to be visible (authenticated state).
+ *
+ * Derivation-bound like the sign-in steps below: it is normally called straight
+ * after {@link login}, whose submit runs the full client-side PBKDF2 derivation.
+ *
+ * It raises the test timeout too, for the same reason `registerAndSignInViaUI`
+ * does. That is not redundant belt-and-braces: the step budget below is INERT on
+ * its own, because Playwright's 30 s per-test timeout fires first. `login` +
+ * `expectVaultVisible` is currently called by no spec (every one goes through
+ * `registerAndSignInViaUI`), so this pair is the trap a future spec would walk
+ * into — the assertion budget would look generous and be unreachable. One
+ * derivation here, so the floor is the single-step budget plus slack.
+ */
 export async function expectVaultVisible(page: Page): Promise<void> {
-  await expect(page).toHaveURL(/\/vault/, { timeout: 15_000 });
+  ensureTestTimeoutAtLeast(PBKDF2_STEP_TIMEOUT_MS + 30_000);
+  await expect(page).toHaveURL(/\/vault/, { timeout: PBKDF2_STEP_TIMEOUT_MS });
 }
 
 /**
@@ -232,12 +313,19 @@ export async function expectVaultVisible(page: Page): Promise<void> {
  *
  * Leaves the page on `/vault` with a fully unlocked, in-memory session (the
  * vault key lives only in memory), ready to navigate to any protected route.
+ *
+ * Costs TWO full PBKDF2 derivations, so it raises the enclosing test's timeout to
+ * {@link UI_SIGN_IN_TEST_TIMEOUT_MS} and gives each derivation-bound assertion
+ * {@link PBKDF2_STEP_TIMEOUT_MS} — see those constants for why the numbers are
+ * what they are and must not be tightened.
  */
 export async function registerAndSignInViaUI(
   page: Page,
   email: string = testEmail(),
   password: string = E2E_STRONG_PASSWORD,
 ): Promise<{ email: string; password: string }> {
+  ensureTestTimeoutAtLeast(UI_SIGN_IN_TEST_TIMEOUT_MS);
+
   // Suppress the first-run onboarding modal so its backdrop never intercepts
   // clicks on the vault shell. Runs before every document load in this context.
   await page.addInitScript(() => {
@@ -252,8 +340,23 @@ export async function registerAndSignInViaUI(
   await page.getByRole('checkbox').check();
   await page.getByRole('button', { name: /create account/i }).click();
 
-  // On success the register page navigates to /login.
-  await expect(page).toHaveURL(/\/login/, { timeout: 30_000 });
+  // On success the register page navigates to /login — after the client has
+  // derived the MEK and the auth hash.
+  await expect(page).toHaveURL(/\/login/, { timeout: PBKDF2_STEP_TIMEOUT_MS });
+  // The URL is NOT enough: every route is `lazy()`, so the address changes as
+  // soon as navigation commits and the login chunk mounts some time later. Until
+  // it does, the REGISTER page is still in the DOM — and it carries an "Email"
+  // label and a "Master Password" label of its own, so the fills below happily
+  // land on the page that is about to be unmounted. The observed failure was
+  // exactly that, and intermittently: the email went to the register form and
+  // was thrown away on the swap, the password (typed a few milliseconds later)
+  // reached the real login form, and Sign In failed with "Email is required".
+  // `markEmailVerified` below usually hid it by giving the chunk time to load.
+  // "Welcome Back" is LoginPage's own heading — the register page's is "Create
+  // Account" — so waiting for it is a precise test that the swap has happened.
+  await expect(page.getByRole('heading', { name: /welcome back/i })).toBeVisible({
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
 
   // 2. Verify the email server-side (no SMTP in E2E).
   await markEmailVerified(email);
@@ -263,7 +366,8 @@ export async function registerAndSignInViaUI(
   await page.getByLabel(/^master password$/i).fill(password);
   await page.getByRole('button', { name: /sign in/i }).click();
 
-  await expect(page).toHaveURL(/\/vault/, { timeout: 30_000 });
+  // The second derivation, plus server-side bcrypt on the auth hash.
+  await expect(page).toHaveURL(/\/vault/, { timeout: PBKDF2_STEP_TIMEOUT_MS });
 
   return { email, password };
 }
@@ -276,7 +380,12 @@ export async function registerAndSignInViaUI(
 export async function gotoFileEncryptionTool(page: Page): Promise<void> {
   await page.getByRole('link', { name: /file encryption/i }).click();
   await expect(page).toHaveURL(/\/tools\/file-encryption/);
-  await expect(page.locator('#file-encrypt-input')).toBeVisible({ timeout: 20_000 });
+  // Not derivation-bound, but bound by the DEV SERVER: the panel is a lazy chunk,
+  // so this is the first request that makes Vite transform it (and `@hiprax/crypto`
+  // + hash-wasm) on demand. Same contention as the sign-in steps, different cause.
+  await expect(page.locator('#file-encrypt-input')).toBeVisible({
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
 }
 
 /** Locks the vault via keyboard shortcut. */

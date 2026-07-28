@@ -23,9 +23,7 @@ import {
 import { MAX_IMPORT_ITEMS } from '@hvault/shared';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
 
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -55,7 +53,7 @@ describe('MEDIUM-4: HIBP in-memory cache', () => {
   });
 
   it('treats an expired cache entry as a miss: the controller does NOT serve stale data', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser();
 
     // Seed an already-expired entry for the prefix the request will use.
@@ -94,7 +92,7 @@ describe('MEDIUM-4: HIBP in-memory cache', () => {
   });
 
   it('should return cached data on breach check when cache is warm', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser();
 
     // Seed the cache with a known value
@@ -148,7 +146,7 @@ describe('MEDIUM-6: restore uses MAX_IMPORT_ITEMS from shared', () => {
   // below, which exercises the real restore cap end to end.
 
   it('should reject restore when total entries exceed MAX_IMPORT_ITEMS', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser();
     const { csrfToken, csrfCookie } = await getCsrf(agent);
 

@@ -455,8 +455,19 @@ export type INoteData = z.output<typeof noteDataSchema>;
 export type ICardData = z.output<typeof cardDataSchema>;
 export type IIdentityData = z.output<typeof identityDataSchema>;
 
-/** Address sub-shape used by identity items. */
-export type IAddress = NonNullable<IIdentityData['address']>;
+/**
+ * The postal-address sub-shape shared by a card's billing address and used as the
+ * base of an identity's address. Anchored on the CARD, which uses the base
+ * `addressSchema`, so this type can never silently acquire an identity-only field.
+ */
+export type IAddress = NonNullable<ICardData['billingAddress']>;
+
+/**
+ * An identity's address: {@link IAddress} plus the free-text courier instructions
+ * only an identity carries. Structurally a superset, so it is assignable wherever
+ * only the shared fields are read.
+ */
+export type IIdentityAddress = NonNullable<IIdentityData['address']>;
 
 // Public (unauthenticated) server configuration surfaced via GET /config.
 // Contains only non-sensitive, operator-tunable values the client needs before

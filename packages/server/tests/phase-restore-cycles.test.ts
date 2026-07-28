@@ -22,11 +22,7 @@ import type { TestUser } from './helpers.js';
 // non-cyclic trees — including a legitimate maximum-depth chain — untouched.
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function restore(
-  agent: request.SuperTest<request.Test>,
-  token: string,
-  body: Record<string, unknown>,
-) {
+async function restore(agent: request.Agent, token: string, body: Record<string, unknown>) {
   const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
   return agent
     .post('/api/v1/backup/restore')
@@ -72,10 +68,10 @@ function hasAnyCycle(folders: Record<string, unknown>[]): boolean {
 describe('Backup restore — multi-folder cycle break (tampered backups)', () => {
   let userA: TestUser;
   let userB: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     userA = await createTestUser();
     userB = await createTestUser();
   });

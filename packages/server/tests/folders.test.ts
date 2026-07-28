@@ -382,7 +382,7 @@ describe('Folder Routes', () => {
       // Item should have moved to parent
       const items = await VaultItem.find({ userId: user.id }).lean();
       expect(items).toHaveLength(1);
-      expect(items[0].folderId!.toString()).toBe(parent._id);
+      expect(items[0]!.folderId!.toString()).toBe(parent._id);
     });
 
     it('should move items to root when folder has no parent', async () => {
@@ -402,7 +402,7 @@ describe('Folder Routes', () => {
       // Item should now have no folderId (root)
       const items = await VaultItem.find({ userId: user.id }).lean();
       expect(items).toHaveLength(1);
-      expect(items[0].folderId).toBeUndefined();
+      expect(items[0]!.folderId).toBeUndefined();
     });
 
     it('should move child folders to the parent', async () => {
@@ -788,7 +788,7 @@ describe('Folder Routes', () => {
       // Items should be moved to parent folder
       const items = await VaultItem.find({ userId: user.id }).lean();
       expect(items).toHaveLength(1);
-      expect(items[0].folderId!.toString()).toBe(parent._id);
+      expect(items[0]!.folderId!.toString()).toBe(parent._id);
     });
 
     it('should delete an empty folder on standalone MongoDB without errors', async () => {
@@ -1040,7 +1040,7 @@ describe('Folder Routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).folderId).toBe(folder._id);
     });
@@ -1066,7 +1066,7 @@ describe('Folder Routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).folderId).toBe(folder._id);
     });
@@ -1087,7 +1087,7 @@ describe('Folder Routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).folderId).toBe(folder._id);
     });
@@ -1109,7 +1109,7 @@ describe('Folder Routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).folderId).toBe(folder._id);
       expect((auditEntry!.metadata as Record<string, unknown>).sortOrder).toBe(3);

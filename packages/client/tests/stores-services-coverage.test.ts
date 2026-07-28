@@ -785,9 +785,10 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce('My Login')
         .mockResolvedValueOnce(JSON.stringify({ password: 'new-password', username: 'user1' }));
 
-      await useVaultStore
-        .getState()
-        .updateItem('login-1', 'My Login', { password: 'new-password', username: 'user1' });
+      await useVaultStore.getState().updateItem('login-1', 'login', 'My Login', {
+        password: 'new-password',
+        username: 'user1',
+      });
 
       expect(updateItemApi).toHaveBeenCalledWith(
         'login-1',
@@ -832,9 +833,10 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce('My Login')
         .mockResolvedValueOnce(JSON.stringify({ password: 'same-password', username: 'user1' }));
 
-      await useVaultStore
-        .getState()
-        .updateItem('login-1', 'My Login', { password: 'same-password', username: 'user1' });
+      await useVaultStore.getState().updateItem('login-1', 'login', 'My Login', {
+        password: 'same-password',
+        username: 'user1',
+      });
 
       const callArgs = vi.mocked(updateItemApi).mock.calls[0]![1] as Record<string, unknown>;
       expect(callArgs.passwordHistory).toBeUndefined();
@@ -869,7 +871,9 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce('My Note')
         .mockResolvedValueOnce(JSON.stringify({ content: 'new content' }));
 
-      await useVaultStore.getState().updateItem('note-1', 'My Note', { content: 'new content' });
+      await useVaultStore
+        .getState()
+        .updateItem('note-1', 'note', 'My Note', { content: 'new content' });
 
       const callArgs = vi.mocked(updateItemApi).mock.calls[0]![1] as Record<string, unknown>;
       expect(callArgs.passwordHistory).toBeUndefined();
@@ -906,7 +910,7 @@ describe('vaultStore — additional edge cases', () => {
 
       await useVaultStore
         .getState()
-        .updateItem('login-1', 'My Login', { password: 'new-pass', username: 'user1' });
+        .updateItem('login-1', 'login', 'My Login', { password: 'new-pass', username: 'user1' });
 
       const callArgs = vi.mocked(updateItemApi).mock.calls[0]![1] as Record<string, unknown>;
       expect(callArgs.passwordHistory).toBeUndefined();
@@ -934,7 +938,9 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce('New Name')
         .mockResolvedValueOnce(JSON.stringify({ username: 'updated' }));
 
-      await useVaultStore.getState().updateItem('item-1', 'New Name', { username: 'updated' });
+      await useVaultStore
+        .getState()
+        .updateItem('item-1', 'login', 'New Name', { username: 'updated' });
 
       const { items } = useVaultStore.getState();
       expect(items).toHaveLength(1);
@@ -959,7 +965,7 @@ describe('vaultStore — additional edge cases', () => {
         },
       } as never);
 
-      await useVaultStore.getState().updateItem('item-1', 'Changed', {});
+      await useVaultStore.getState().updateItem('item-1', 'login', 'Changed', {});
 
       expect(useVaultStore.getState().items[0]!.name).toBe('Original');
     });
@@ -1188,11 +1194,12 @@ describe('API Client — comprehensive coverage', () => {
       const config = {
         method: 'get',
         headers: {
-          set Authorization(val: string) {
-            (config.headers as Record<string, string>)._auth = val;
+          // Unset until the interceptor writes it, so both accessors admit undefined.
+          set Authorization(val: string | undefined) {
+            (config.headers as Record<string, string | undefined>)._auth = val;
           },
-          get Authorization() {
-            return (config.headers as Record<string, string>)._auth;
+          get Authorization(): string | undefined {
+            return (config.headers as Record<string, string | undefined>)._auth;
           },
           _auth: undefined as string | undefined,
         },

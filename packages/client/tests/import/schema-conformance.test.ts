@@ -61,11 +61,29 @@ const BITWARDEN = JSON.stringify({
         email: 'a@b..c',
         phone: '+1 555 CALL-NOW',
         address1: '1 Main St',
+        address2: 'Apt 4B',
+        address3: 'Building C',
         city: 'Town',
         state: 'CA',
         postalCode: '90001',
         country: 'US',
         passportNumber: 'X1',
+      },
+    },
+    {
+      type: 4,
+      name: 'Over-long address',
+      // A Bitwarden export bounds NONE of these. Unclamped they exceed the vault's
+      // per-field caps and the whole identity is discarded at the validation step, so
+      // this row is the guard on the address clamp at the schema boundary.
+      identity: {
+        firstName: 'B',
+        address1: 'a'.repeat(700),
+        address2: 'b'.repeat(400),
+        address3: 'c'.repeat(400),
+        city: 'd'.repeat(300),
+        postalCode: 'e'.repeat(40),
+        country: 'f'.repeat(200),
       },
     },
     {
@@ -111,7 +129,7 @@ const cases: Case[] = [
     mapping: { Name: 'name', User: 'username', Pass: 'password', Site: 'url' },
     minItems: 1,
   },
-  { format: 'bitwarden', text: BITWARDEN, minItems: 5 },
+  { format: 'bitwarden', text: BITWARDEN, minItems: 6 },
 ];
 
 describe('every parser emits schema-conformant decrypted data', () => {

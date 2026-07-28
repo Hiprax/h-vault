@@ -227,7 +227,14 @@ describe('toPortableItems — per type', () => {
       cvv: '123',
       brand: 'Visa',
       notes: 'card note',
-      billingAddress: { street: '1 Main', city: 'Town', state: 'CA', zip: '90210', country: 'US' },
+      billingAddress: {
+        street: '1 Main',
+        street2: 'Apt 4B',
+        city: 'Town',
+        state: 'CA',
+        zip: '90210',
+        country: 'US',
+      },
     });
     const { portable } = await run([item]);
     const rec = portable[0];
@@ -237,12 +244,34 @@ describe('toPortableItems — per type', () => {
     expect(rec?.card?.brand).toBe('Visa');
     expect(rec?.card?.billingAddress).toEqual({
       street: '1 Main',
+      street2: 'Apt 4B',
       city: 'Town',
       state: 'CA',
       zip: '90210',
       country: 'US',
     });
     expect(rec?.notes).toBe('card note');
+  });
+
+  it('never lets a card billing address carry delivery notes into the portable record', async () => {
+    // Belt and braces on the schema strip: `cardDataSchema` drops the key on decrypt,
+    // and the portable model is typed on the BASE address shape, so even a blob that
+    // somehow smuggled one past the schema could not reach any export format.
+    const item = mkItem('card', {
+      cardholderName: 'A',
+      number: '4111111111111111',
+      billingAddress: {
+        street: '1 Main',
+        city: 'Town',
+        state: 'CA',
+        zip: '90210',
+        country: 'US',
+        deliveryNotes: 'leave with the doorman',
+      },
+    });
+    const { portable, skipped } = await run([item]);
+    expect(skipped).toHaveLength(0);
+    expect(portable[0]?.card?.billingAddress).not.toHaveProperty('deliveryNotes');
   });
 
   it('omits an absent card billing address', async () => {
@@ -258,7 +287,15 @@ describe('toPortableItems — per type', () => {
       lastName: 'Quinn',
       email: 'alice@example.com',
       phone: '+15551234567',
-      address: { street: '1 Main', city: 'Town', state: 'CA', zip: '90210', country: 'US' },
+      address: {
+        street: '1 Main',
+        street2: 'Flat 2',
+        city: 'Town',
+        state: 'CA',
+        zip: '90210',
+        country: 'US',
+        deliveryNotes: 'Ring twice',
+      },
       company: 'Acme',
       ssn: '000-00-0000',
       passport: 'X1234567',
@@ -272,6 +309,8 @@ describe('toPortableItems — per type', () => {
     expect(rec?.identity?.lastName).toBe('Quinn');
     expect(rec?.identity?.email).toBe('alice@example.com');
     expect(rec?.identity?.address?.zip).toBe('90210');
+    expect(rec?.identity?.address?.street2).toBe('Flat 2');
+    expect(rec?.identity?.address?.deliveryNotes).toBe('Ring twice');
     expect(rec?.identity?.ssn).toBe('000-00-0000');
     expect(rec?.identity?.passport).toBe('X1234567');
     expect(rec?.notes).toBe('id note');
@@ -282,6 +321,21 @@ describe('toPortableItems — per type', () => {
     const item = mkItem('identity', { firstName: 'A', lastName: 'B' });
     const { portable } = await run([item]);
     expect(portable[0]?.identity?.address).toBeUndefined();
+  });
+
+  it('defaults both new address fields for an address stored before they existed', async () => {
+    // An item encrypted by an older build has neither key. The shared schema's
+    // `.default('')` is what keeps every downstream reader (both exporters, the detail
+    // view) from dereferencing undefined, so this pins the default rather than the
+    // absence.
+    const item = mkItem('identity', {
+      firstName: 'A',
+      lastName: 'B',
+      address: { street: '1 Main', city: 'Town', state: 'CA', zip: '90210', country: 'US' },
+    });
+    const { portable } = await run([item]);
+    expect(portable[0]?.identity?.address?.street2).toBe('');
+    expect(portable[0]?.identity?.address?.deliveryNotes).toBe('');
   });
 });
 

@@ -445,9 +445,9 @@ describe('Account Deletion Cascade (DELETE /api/v1/user)', () => {
     await BackupLog.create({
       userId: user.id,
       status: 'success',
-      fileSize: 1024,
+      fileSizeBytes: 1024,
       itemCount: 2,
-      recipientEmail: user.email,
+      sentTo: [user.email],
     });
 
     // Verify data exists before deletion

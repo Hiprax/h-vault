@@ -55,6 +55,7 @@ interface ServiceConfig {
   networks?: NetworkAttachment;
   environment?: Record<string, string>;
   env_file?: EnvFileEntry[];
+  entrypoint?: string[] | string;
   command?: string[] | string;
   volumes?: string[];
   depends_on?: Record<string, { condition?: string }>;

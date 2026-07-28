@@ -65,10 +65,10 @@ function makeTempToken(userId: string, options: { deviceHash?: string } = {}): s
 }
 
 describe('Phase 6 — 2FA Negative Paths', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   // ── Device hash mismatch ─────────────────────────────────────────────

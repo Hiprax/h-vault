@@ -10,7 +10,9 @@
  * - Task 3.11: keypress replaced with keydown in ACTIVITY_EVENTS
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { AxiosHeaders, type AxiosResponse } from 'axios';
+import type { ApiResponse } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia (required by uiStore)
@@ -147,6 +149,20 @@ function createMockFolder(id: string): DecryptedFolder {
 const mockMek = {} as CryptoKey;
 const mockVaultKey = {} as CryptoKey;
 
+/**
+ * Minimal Axios envelope for the auth endpoints the store awaits but never reads.
+ * Built rather than cast so the shape stays honest if the signature changes.
+ */
+function emptyOkResponse(): AxiosResponse<ApiResponse<null>> {
+  return {
+    data: { success: true, data: null },
+    status: 200,
+    statusText: 'OK',
+    headers: new AxiosHeaders(),
+    config: { headers: new AxiosHeaders() },
+  };
+}
+
 // ==========================================================================
 // Task 1.2: Vault store clearStore is called on lock/logout
 // ==========================================================================
@@ -161,7 +177,7 @@ describe('Task 1.2: Vault store cleared on lock/logout', () => {
       isLocked: false,
       vaultKey: mockVaultKey,
       mek: mockMek,
-      user: { email: 'test@example.com' },
+      user: { userId: 'u1', email: 'test@example.com' },
       encryptedVaultKeyData: {
         encrypted: 'enc',
         iv: 'iv',
@@ -199,7 +215,7 @@ describe('Task 1.2: Vault store cleared on lock/logout', () => {
   });
 
   it('should clear vault store data on logout', async () => {
-    vi.mocked(logoutApi).mockResolvedValue(undefined);
+    vi.mocked(logoutApi).mockResolvedValue(emptyOkResponse());
 
     expect(useVaultStore.getState().items).toHaveLength(2);
 
@@ -224,7 +240,7 @@ describe('Task 2.2: lock() race condition fix', () => {
       isLocked: false,
       vaultKey: {} as CryptoKey,
       mek: {} as CryptoKey,
-      user: { email: 'test@example.com' },
+      user: { userId: 'u1', email: 'test@example.com' },
     });
 
     useVaultStore.setState({
@@ -265,7 +281,7 @@ describe('Task 2.1: MEK cleanup on error paths', () => {
       isLocked: true,
       vaultKey: null,
       mek: null,
-      user: { email: 'test@example.com' },
+      user: { userId: 'u1', email: 'test@example.com' },
       encryptedVaultKeyData: {
         encrypted: 'enc',
         iv: 'iv',
@@ -307,7 +323,7 @@ describe('Task 2.6: Offline cache user isolation', () => {
       isLocked: false,
       vaultKey: {} as CryptoKey,
       mek: {} as CryptoKey,
-      user: { email: 'test@example.com' },
+      user: { userId: 'u1', email: 'test@example.com' },
     });
 
     useVaultStore.setState({
@@ -416,7 +432,7 @@ describe('Logout race condition fix: state cleared before key zeroing', () => {
       folders: [createMockFolder('f1')],
     });
 
-    vi.mocked(logoutApi).mockResolvedValue(undefined);
+    vi.mocked(logoutApi).mockResolvedValue(emptyOkResponse());
   });
 
   it('should set vaultKey and mek to null before clearCryptoKey completes (same as lock pattern)', async () => {
@@ -464,6 +480,7 @@ describe('Logout race condition fix: state cleared before key zeroing', () => {
     vi.mocked(logoutApi).mockImplementation(async () => {
       // During logoutApi, the access token should still be in the store
       tokenDuringLogoutApi = useAuthStore.getState().accessToken;
+      return emptyOkResponse();
     });
 
     await useAuthStore.getState().logout();

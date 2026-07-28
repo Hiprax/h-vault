@@ -479,3 +479,76 @@ describe('computeItemIdentity — identity is computed over schema-validated dat
     expect(key.startsWith(`login${SEP}`)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Absent vs. present-but-empty, for an OPTIONAL sub-object
+//
+// The mechanism behind a real defect: `VaultItemForm` used to emit an identity's
+// `address` unconditionally, so the FIRST save of an address-less imported identity
+// gave it an all-empty address — and, as this shows, a different identity key. The
+// same file re-imported afterwards no longer matched and inserted a duplicate.
+//
+// `identityDataSchema.address` is `.optional()` with no default, so the schema pass
+// inside `computeItemIdentity` cannot normalise the two shapes together. That is
+// specific to `address`: every other optional field the item form gained a control
+// for either carries a `.default([])` (`customFields`) or collapses to an omitted
+// key when empty (`company`, `ssn`, `passport`, `notes`).
+//
+// The end-to-end consequence — that an ordinary rename must not move the key — is
+// asserted against the real form in `coverage-vault-item-form.test.tsx`.
+// ---------------------------------------------------------------------------
+
+describe('computeItemIdentity — an absent optional sub-object is not an empty one', () => {
+  const EMPTY_ADDRESS = {
+    street: '',
+    street2: '',
+    city: '',
+    state: '',
+    zip: '',
+    country: '',
+    deliveryNotes: '',
+  };
+  const base = { firstName: 'Ada', lastName: 'Lovelace' };
+
+  it('hashes an absent address differently from an all-empty one', async () => {
+    const absent = await computeItemIdentity({ itemType: 'identity', name: 'Ada', data: base });
+    const empty = await computeItemIdentity({
+      itemType: 'identity',
+      name: 'Ada',
+      data: { ...base, address: EMPTY_ADDRESS },
+    });
+
+    expect(empty).not.toBe(absent);
+  });
+
+  it('treats an absent and an empty customFields as the SAME item', async () => {
+    // The contrast that makes the address case a real hazard rather than a general
+    // rule: `customFields` carries `.default([])`, so the schema pass normalises the
+    // two shapes onto one value before hashing.
+    const absent = await computeItemIdentity({ itemType: 'identity', name: 'Ada', data: base });
+    const empty = await computeItemIdentity({
+      itemType: 'identity',
+      name: 'Ada',
+      data: { ...base, customFields: [] },
+    });
+
+    expect(empty).toBe(absent);
+  });
+
+  it('is stable once an address really exists', async () => {
+    // A partially-filled address and the same address with its defaults spelled out
+    // are one item, because `identityAddressSchema` defaults each field to ''.
+    const partial = await computeItemIdentity({
+      itemType: 'identity',
+      name: 'Ada',
+      data: { ...base, address: { street: '1 Main St' } },
+    });
+    const spelledOut = await computeItemIdentity({
+      itemType: 'identity',
+      name: 'Ada',
+      data: { ...base, address: { ...EMPTY_ADDRESS, street: '1 Main St' } },
+    });
+
+    expect(spelledOut).toBe(partial);
+  });
+});

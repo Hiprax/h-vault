@@ -90,7 +90,7 @@ const hexHash = (seed: string): string =>
 const HASH_A = hexHash('a1b2c3d4');
 const HASH_B = hexHash('9f8e7d6c');
 
-type Agent = request.SuperTest<request.Test>;
+type Agent = request.Agent;
 
 async function post(
   agent: Agent,

@@ -31,11 +31,7 @@ import type { TestUser } from './helpers.js';
 // let the E11000 data-loss bug ship.
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function restore(
-  agent: request.SuperTest<request.Test>,
-  token: string,
-  body: Record<string, unknown>,
-) {
+async function restore(agent: request.Agent, token: string, body: Record<string, unknown>) {
   const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
   return agent
     .post('/api/v1/backup/restore')
@@ -67,10 +63,10 @@ function byName(docs: Record<string, unknown>[], name: string): Record<string, u
 describe('Backup restore — cross-account & repeat (_id collision fix)', () => {
   let userA: TestUser;
   let userB: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     userA = await createTestUser();
     userB = await createTestUser();
   });
@@ -254,8 +250,8 @@ describe('Backup restore — cross-account & repeat (_id collision fix)', () => 
     const payload = await dbBackupPayload(userA.id);
 
     // Diverge the live docs so overwrite has something to revert.
-    await Folder.updateOne({ _id: folder._id }, { $set: { encryptedName: 'modified' } });
-    await VaultItem.updateOne({ _id: item._id }, { $set: { encryptedName: 'modified' } });
+    await Folder.updateOne({ _id: String(folder._id) }, { $set: { encryptedName: 'modified' } });
+    await VaultItem.updateOne({ _id: String(item._id) }, { $set: { encryptedName: 'modified' } });
 
     for (let n = 0; n < 2; n++) {
       const res = await restore(agent, userA.accessToken, {
@@ -455,8 +451,8 @@ describe('Backup restore — cross-account & repeat (_id collision fix)', () => 
     expect(await VaultItem.countDocuments({ userId: userB.id })).toBe(1);
 
     // Diverge the restored copies so the second overwrite has something to revert.
-    const restoredFolderId = byName(await rawFolders(userB.id), 'fOrig')._id;
-    const restoredItemId = byName(await rawItems(userB.id), 'iOrig')._id;
+    const restoredFolderId = String(byName(await rawFolders(userB.id), 'fOrig')._id);
+    const restoredItemId = String(byName(await rawItems(userB.id), 'iOrig')._id);
     await Folder.updateOne({ _id: restoredFolderId }, { $set: { encryptedName: 'divergent' } });
     await VaultItem.updateOne({ _id: restoredItemId }, { $set: { encryptedName: 'divergent' } });
 
@@ -489,8 +485,8 @@ describe('Backup restore — cross-account & repeat (_id collision fix)', () => 
     // Permanently delete the originals — their globally-unique _ids are now gone,
     // so a restore can no longer match them by `_id` (only by sourceRefId, which
     // does not exist yet → the first restore fresh-inserts).
-    await Folder.deleteOne({ _id: folder._id });
-    await VaultItem.deleteOne({ _id: item._id });
+    await Folder.deleteOne({ _id: String(folder._id) });
+    await VaultItem.deleteOne({ _id: String(item._id) });
     expect(await Folder.countDocuments({ userId: userA.id })).toBe(0);
     expect(await VaultItem.countDocuments({ userId: userA.id })).toBe(0);
 

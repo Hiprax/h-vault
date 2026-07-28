@@ -16,9 +16,7 @@ import {
 import type { TestUser } from './helpers.js';
 
 // Re-export with { csrfToken, csrfCookie } naming used throughout this file
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -35,7 +33,7 @@ const bwkSetupData = {
 // ── Helper: set up backup for a user ─────────────────────────────────
 
 async function setupBackupForUser(
-  agent: request.SuperTest<request.Test>,
+  agent: request.Agent,
   token: string,
   rawAuthHash = 'test-auth-hash-value',
 ) {
@@ -53,10 +51,10 @@ async function setupBackupForUser(
 
 describe('Backup routes', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -570,7 +568,7 @@ describe('Backup routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe(
         'change_backup_password',
       );
@@ -925,7 +923,7 @@ describe('Backup routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
     });
 
     it('should create audit log on backup settings update', async () => {
@@ -948,7 +946,7 @@ describe('Backup routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).updatedFields).toBeDefined();
     });
@@ -967,7 +965,7 @@ describe('Backup routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).fileSizeBytes).toBeDefined();
     });
@@ -990,7 +988,7 @@ describe('Backup routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect(typeof (auditEntry!.metadata as Record<string, unknown>).itemCount).toBe('number');
       expect(typeof (auditEntry!.metadata as Record<string, unknown>).fileSizeBytes).toBe('number');
@@ -1023,7 +1021,7 @@ describe('Backup routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       const meta = auditEntry!.metadata as Record<string, unknown>;
       expect(meta.itemsRestored).toBe(1);
@@ -1056,7 +1054,7 @@ describe('Backup routes', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
     });
   });
 

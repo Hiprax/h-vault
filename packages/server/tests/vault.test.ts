@@ -78,9 +78,10 @@ describe('Vault API', () => {
 
       expect(body).toMatchObject({ success: true });
       expect(id).toBeDefined();
-      expect((body as Record<string, Record<string, unknown>>).data.itemType).toBe('login');
+      const { data } = body as { data: Record<string, unknown> };
+      expect(data.itemType).toBe('login');
       // userId is intentionally absent from API responses (server-only field).
-      expect((body as Record<string, Record<string, unknown>>).data.userId).toBeUndefined();
+      expect(data.userId).toBeUndefined();
       // Confirm ownership at the persistence layer instead.
       const persisted = await VaultItem.findById(id);
       expect(persisted?.userId.toString()).toBe(user.id);
@@ -372,6 +373,63 @@ describe('Vault API', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.favorite).toBe(true);
       expect(res.body.data.tags).toEqual(['updated']);
+    });
+
+    it('accepts a NAME-ONLY update and leaves the item ciphertext byte-identical', async () => {
+      // The server half of the client's `renameItem` path, which exists so an item
+      // whose decrypted payload could not be read can still be renamed. Its request
+      // carries the `encryptedName` trio plus a refreshed `searchHash` and omits the
+      // `encryptedData` trio entirely — `updateVaultItemSchema` permits that, and
+      // `$set` is built only from the fields actually present, so the row's data
+      // ciphertext must be untouched. If that ever stopped holding, a rename would
+      // destroy the very item it was offered to rescue, with no way back.
+      const { id } = await createItemViaApi(user.accessToken);
+      const before = await VaultItem.findById(id).lean();
+      expect(before).not.toBeNull();
+
+      const agent = request.agent(app);
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .put(`/api/v1/vault/items/${id}`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('Cookie', csrfCookie)
+        .set('x-csrf-token', csrfToken)
+        .send({
+          encryptedName: 'renamed-ciphertext',
+          nameIv: 'new-name-iv',
+          nameTag: 'new-name-tag',
+          searchHash: 'b'.repeat(64),
+        })
+        .expect(200);
+
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.encryptedName).toBe('renamed-ciphertext');
+
+      const after = await VaultItem.findById(id).lean();
+      expect(after).not.toBeNull();
+      expect(after!.encryptedData).toBe(before!.encryptedData);
+      expect(after!.dataIv).toBe(before!.dataIv);
+      expect(after!.dataTag).toBe(before!.dataTag);
+      expect(after!.searchHash).toBe('b'.repeat(64));
+    });
+
+    it('rejects a name trio sent without its IV and tag', async () => {
+      // The schema refine that makes the name-only path safe to offer at all: the
+      // three name fields travel together or not at all, so a partial rename can
+      // never leave a name encrypted under one IV and tagged with another.
+      const { id } = await createItemViaApi(user.accessToken);
+
+      const agent = request.agent(app);
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      await agent
+        .put(`/api/v1/vault/items/${id}`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('Cookie', csrfCookie)
+        .set('x-csrf-token', csrfToken)
+        .send({ encryptedName: 'renamed-ciphertext' })
+        .expect(400);
     });
 
     it('should $unset folderId when updated to null (not store as null)', async () => {
@@ -1209,7 +1267,7 @@ describe('Vault API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).itemId).toBe(id);
       expect((auditEntry!.metadata as Record<string, unknown>).permanent).toBe(true);
@@ -1257,7 +1315,7 @@ describe('Vault API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect(auditEntry!.metadata).toBeDefined();
       expect((auditEntry!.metadata as Record<string, unknown>).action).toBe('empty_trash');
       expect((auditEntry!.metadata as Record<string, unknown>).count).toBe(2);
@@ -1567,7 +1625,7 @@ describe('Vault API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect((auditEntry!.metadata as Record<string, unknown>).itemType).toBe('login');
     });
 
@@ -1592,7 +1650,7 @@ describe('Vault API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
     });
 
     it('should create audit log on soft delete', async () => {
@@ -1615,7 +1673,7 @@ describe('Vault API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       // Soft delete should NOT have the permanent flag
       expect((auditEntry!.metadata as Record<string, unknown>).permanent).toBeUndefined();
     });
@@ -2464,7 +2522,7 @@ describe('Vault API', () => {
       });
 
       expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId.toString()).toBe(user.id);
+      expect(auditEntry!.userId!.toString()).toBe(user.id);
       expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe('bulk_reencrypt');
     });
 

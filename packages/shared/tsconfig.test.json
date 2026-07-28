@@ -1,0 +1,31 @@
+// Type-checking for this package's TESTS.
+//
+// The build config deliberately narrows `include` to `src/**/*`, so nothing ever
+// type-checked `tests/`: a fixture missing a newly-required field, or holding a
+// wrongly-typed value, produced NO error from `type-check` or `lint` (the ESLint
+// test override runs with `projectService: false`) and Vitest strips types without
+// checking them. Such a fixture failed only if a runtime assertion happened to
+// notice, which is how several of them had to be hunted down by running the suite
+// instead of by the compiler.
+//
+// A SEPARATE config rather than widening `include` in the build config, because
+// that config also drives `tsc` emit: adding `tests/` there would compile test
+// files into `dist/`.
+//
+// Strictness is inherited wholesale from the build config (and through it from
+// `tsconfig.base.json`) and must stay that way — a test fixture is exactly where a
+// weakened `exactOptionalPropertyTypes` or `noUncheckedIndexedAccess` would hide
+// the drift this config exists to catch.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // `composite` requires declaration emit and every input under `rootDir`;
+    // neither holds for a check-only pass that also reads `tests/`.
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "tests/**/*"]
+}

@@ -44,9 +44,7 @@ function routeHandlers(router: Router, method: string, path: string): RequestHan
   return [];
 }
 
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -78,7 +76,7 @@ const bwkSetupData = {
 };
 
 async function setupBackupForUser(
-  agent: request.SuperTest<request.Test>,
+  agent: request.Agent,
   token: string,
   rawAuthHash = 'test-auth-hash-value',
 ) {
@@ -95,10 +93,10 @@ async function setupBackupForUser(
 
 describe('Phase 2: Security Hardening', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 

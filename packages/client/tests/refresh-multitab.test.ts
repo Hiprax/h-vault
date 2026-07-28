@@ -15,7 +15,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import axios, { AxiosError, type AxiosAdapter, type AxiosResponse } from 'axios';
+import axios, {
+  AxiosError,
+  type AxiosAdapter,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+} from 'axios';
 
 const REFRESH_LOCK_NAME = 'hv-token-refresh';
 
@@ -163,6 +168,18 @@ async function loadClient(): Promise<typeof import('../src/services/api/client')
 
 const originalAxiosAdapter = axios.defaults.adapter;
 
+/**
+ * Axios declares `defaults.adapter` optional but never `undefined`, so putting a
+ * captured (possibly absent) original back requires a view of the field that
+ * admits `undefined`.
+ */
+function restoreAdapter(
+  defaults: { adapter?: AxiosRequestConfig['adapter'] },
+  adapter: AxiosRequestConfig['adapter'],
+): void {
+  defaults.adapter = adapter;
+}
+
 beforeEach(() => {
   refreshCount = 0;
   refreshShouldFail = false;
@@ -184,7 +201,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  axios.defaults.adapter = originalAxiosAdapter;
+  restoreAdapter(axios.defaults, originalAxiosAdapter);
   uninstallLocks();
   vi.doUnmock('../src/stores/authStore');
 });

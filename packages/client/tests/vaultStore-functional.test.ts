@@ -113,7 +113,11 @@ vi.mock('@hvault/shared', async () => {
 // ---------------------------------------------------------------------------
 
 import { useAuthStore } from '../src/stores/authStore';
-import { useVaultStore } from '../src/stores/vaultStore';
+import {
+  useVaultStore,
+  VaultItemDataInvalidError,
+  EncryptedFieldTooLargeError,
+} from '../src/stores/vaultStore';
 import {
   getScore,
   setScore,
@@ -132,6 +136,7 @@ import {
   listFoldersApi,
   listTrashApi,
 } from '../src/services/api/vaultApi';
+import { loginDataSchema, MAX_ENCRYPTED_NAME_LENGTH } from '@hvault/shared';
 import type { DecryptedVaultItem, DecryptedFolder } from '../src/stores/vaultStore';
 
 // ---------------------------------------------------------------------------
@@ -446,6 +451,182 @@ describe('vaultStore – CRUD actions', () => {
       );
 
       expect(useVaultStore.getState().items).toHaveLength(0);
+    });
+  });
+
+  // =========================================================================
+  // Shared-schema pre-flight on the way IN
+  //
+  // `vaultItemDataSchemas` used to be consulted only in `decryptItem`, on the way
+  // OUT. That asymmetry is what made the undecodable-item class possible: any
+  // payload at all could be encrypted and stored, and the failure surfaced on the
+  // NEXT read — by which point the value written was the only copy in existence,
+  // there being no server-side plaintext in a zero-knowledge vault. The item then
+  // degraded to the "could not be fully decoded" notice, costing the user UI access
+  // to a working account's password.
+  //
+  // Nothing is encrypted and no request is made when the check fails, and the error
+  // message must never carry a field VALUE — it reaches a toast, and the payload is
+  // full of secrets.
+  // =========================================================================
+
+  describe('shared-schema pre-flight', () => {
+    /** Stub just enough crypto/API for a save to succeed if it gets that far. */
+    function armSave(): void {
+      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+        encrypted: 'enc',
+        iv: 'iv',
+        tag: 'tag',
+      });
+      vi.mocked(cryptoService.decryptData).mockResolvedValue('{}');
+      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
+      vi.mocked(createItemApi).mockResolvedValue({
+        data: { success: true, data: makeRawItemResponse() },
+      } as unknown as Awaited<ReturnType<typeof createItemApi>>);
+      vi.mocked(updateItemApi).mockResolvedValue({
+        data: { success: true, data: makeRawItemResponse() },
+      } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
+    }
+
+    it('createItem rejects a payload the shared schema will not accept', async () => {
+      setupUnlockedVault();
+      armSave();
+
+      // A blank custom-field name: `customFieldSchema` requires `min(1)`, so this
+      // is precisely the value that used to encrypt fine and then degrade the whole
+      // item on read-back.
+      await expect(
+        useVaultStore
+          .getState()
+          .createItem('login', 'Name', { customFields: [{ name: '', value: 'v', type: 'text' }] }),
+      ).rejects.toThrow(VaultItemDataInvalidError);
+
+      // Nothing was encrypted and nothing was sent.
+      expect(cryptoService.encryptData).not.toHaveBeenCalled();
+      expect(createItemApi).not.toHaveBeenCalled();
+      expect(useVaultStore.getState().items).toHaveLength(0);
+    });
+
+    it('createItem rejects an over-cap field rather than storing it', async () => {
+      setupUnlockedVault();
+      armSave();
+
+      await expect(
+        useVaultStore.getState().createItem('identity', 'Ada', { ssn: 'x'.repeat(500) }),
+      ).rejects.toThrow(VaultItemDataInvalidError);
+      expect(createItemApi).not.toHaveBeenCalled();
+    });
+
+    it('names the offending path but never leaks the value', async () => {
+      setupUnlockedVault();
+      armSave();
+
+      const secret = 'SUPER-SECRET-SSN-VALUE';
+      const error = await useVaultStore
+        .getState()
+        .createItem('identity', 'Ada', { ssn: secret.padEnd(500, 'x') })
+        .catch((err: unknown) => err);
+
+      expect(error).toBeInstanceOf(VaultItemDataInvalidError);
+      const invalid = error as VaultItemDataInvalidError;
+      expect(invalid.itemType).toBe('identity');
+      expect(invalid.issues.join(' ')).toContain('ssn');
+      expect(invalid.message).not.toContain(secret);
+      expect(invalid.issues.join(' ')).not.toContain(secret);
+    });
+
+    it('createItem lets a valid payload through unchanged', async () => {
+      setupUnlockedVault();
+      armSave();
+
+      await useVaultStore
+        .getState()
+        .createItem('login', 'Name', { username: 'u', password: 'p', uris: [] });
+
+      expect(createItemApi).toHaveBeenCalledTimes(1);
+    });
+
+    it('updateItem rejects an invalid payload against the type it is GIVEN', async () => {
+      setupUnlockedVault();
+      armSave();
+      // The stored row is present but is no longer what supplies the type — the
+      // caller is. The row is set up anyway so this differs from the next test only
+      // in that respect.
+      useVaultStore.setState({
+        items: [makeMockItem({ id: 'item-1', itemType: 'identity', data: { firstName: 'Ada' } })],
+      });
+
+      await expect(
+        useVaultStore
+          .getState()
+          .updateItem('item-1', 'identity', 'Ada', { passport: 'p'.repeat(200) }),
+      ).rejects.toThrow(VaultItemDataInvalidError);
+      expect(updateItemApi).not.toHaveBeenCalled();
+    });
+
+    it('accepts a payload that is itself schema-parse OUTPUT (the BackupCodesSection path)', async () => {
+      // The interaction the pre-flight could plausibly have broken, and which no
+      // other test covers: `BackupCodesSection.write` spreads the item's DECRYPTED
+      // `data` — i.e. `loginDataSchema` parse output — adds or drops `backupCodes`,
+      // and hands the whole thing back to `updateItem`. The check is therefore
+      // re-parsing already-parsed values, so it only holds if that is idempotent.
+      //
+      // `uris` is the field where it could fail: `uriEntrySchema` measures its
+      // 2048 cap on the INPUT and only THEN prepends a scheme, so a value clamped
+      // to fit AFTER the transform is exactly at the cap on the way back in (the
+      // `clampUri` trap). A `match: 'regex'` entry is included because it takes
+      // the transform's other branch.
+      setupUnlockedVault();
+      armSave();
+
+      const atCap = `https://e.com/${'a'.repeat(2048 - 'https://e.com/'.length)}`;
+      expect(atCap).toHaveLength(2048);
+      const parsed = loginDataSchema.parse({
+        username: 'octocat',
+        password: 'pw',
+        uris: [
+          { uri: atCap, match: 'domain' },
+          { uri: '^https://.*\\.example\\.com/', match: 'regex' },
+        ],
+        backupCodes: ['AAAA-1111', 'BBBB-2222'],
+        notes: 'note',
+        customFields: [{ name: 'Recovery', value: 'v', type: 'text' }],
+      });
+      useVaultStore.setState({ items: [makeMockItem({ id: 'item-1', itemType: 'login' })] });
+
+      // Exactly what the section sends: the parsed blob minus one code.
+      const nextData: Record<string, unknown> = { ...parsed, backupCodes: ['AAAA-1111'] };
+      await useVaultStore.getState().updateItem('item-1', 'login', 'GitHub', nextData);
+
+      expect(updateItemApi).toHaveBeenCalledTimes(1);
+    });
+
+    it('updateItem still validates when the row is ABSENT from the store', async () => {
+      // This pinned the opposite until the type became a parameter: with no stored
+      // row there was no item type, so the pre-flight silently did nothing. It was
+      // reported as unreachable from the UI, but `items` was never a sound oracle for
+      // that — a TRASHED item lives in `trashItems`, so the lookup could miss a row
+      // that genuinely exists. The check now depends on the argument, not the store.
+      setupUnlockedVault();
+      armSave();
+
+      await expect(
+        useVaultStore
+          .getState()
+          .updateItem('ghost', 'login', 'Name', { password: 'p'.repeat(10_001) }),
+      ).rejects.toThrow(VaultItemDataInvalidError);
+      expect(updateItemApi).not.toHaveBeenCalled();
+    });
+
+    it('updateItem proceeds for a VALID payload with the row absent from the store', async () => {
+      // The other half: an absent row must not be treated as a failure either — the
+      // password-history build is the only thing that needs it, and it is optional.
+      setupUnlockedVault();
+      armSave();
+
+      await useVaultStore.getState().updateItem('ghost', 'login', 'Name', { username: 'u' });
+
+      expect(updateItemApi).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1344,7 +1525,7 @@ describe('vaultStore – CRUD actions', () => {
 
       const promise = useVaultStore
         .getState()
-        .updateItem('item-1', 'Stale Name', { username: 'stale' });
+        .updateItem('item-1', 'login', 'Stale Name', { username: 'stale' });
 
       // Lock/logout mid-flight, then a fresh session repopulates the same id.
       useVaultStore.getState().clearStore();
@@ -1455,5 +1636,187 @@ describe('vaultStore – clearStore clears the strength score cache', () => {
 
     // The one line under test: clearStore() must call clearScoreCache().
     expect(getScore(key)).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// renameItem — the NAME-ONLY write path (P3-F)
+//
+// NEW BEHAVIOUR: nothing could rename an undecodable item before, so these could
+// not have failed against the previous code. The invariant they pin is the reason
+// the path exists at all — the payload must carry no `encryptedData` trio, so an
+// item whose decrypted payload is only a placeholder keeps its real ciphertext.
+// Modelled on `phase9-client-vault`'s `CIPHERTEXT_FIELDS` check for
+// `updateItemMeta`, which guards the same property from the other direction.
+// ===========================================================================
+
+describe('vaultStore – renameItem', () => {
+  /** The DATA ciphertext fields a rename must never send. */
+  const DATA_CIPHERTEXT_FIELDS = ['encryptedData', 'dataIv', 'dataTag'] as const;
+
+  const ORIGINAL_CIPHERTEXT = 'original-encrypted-data';
+
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useVaultStore.setState(vaultInitialState);
+    useAuthStore.setState(authInitialState);
+  });
+
+  function armRename(): void {
+    vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      encrypted: 'new-enc-name',
+      iv: 'new-n-iv',
+      tag: 'new-n-tag',
+    });
+    vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('a'.repeat(64));
+    vi.mocked(updateItemApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: makeRawItemResponse({ _id: 'item-1', updatedAt: '2030-01-01T00:00:00Z' }),
+      },
+    } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
+  }
+
+  /** An item whose decrypted payload is the undecodable placeholder. */
+  function brokenItem(): DecryptedVaultItem {
+    return makeMockItem({
+      id: 'item-1',
+      name: 'Broken',
+      data: { _validationError: true },
+      _raw: {
+        _id: 'item-1',
+        itemType: 'login',
+        encryptedName: 'old-enc-name',
+        nameIv: 'old-n-iv',
+        nameTag: 'old-n-tag',
+        encryptedData: ORIGINAL_CIPHERTEXT,
+        dataIv: 'd-iv',
+        dataTag: 'd-tag',
+        tags: [],
+        favorite: false,
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+      } as unknown as DecryptedVaultItem['_raw'],
+    });
+  }
+
+  it('throws when the vault is locked', async () => {
+    await expect(useVaultStore.getState().renameItem('item-1', 'New')).rejects.toThrow(
+      'Vault is locked',
+    );
+  });
+
+  it('sends the name trio and searchHash, and NO data ciphertext at all', async () => {
+    setupUnlockedVault();
+    armRename();
+    useVaultStore.setState({ items: [brokenItem()] });
+
+    await useVaultStore.getState().renameItem('item-1', 'Recovered');
+
+    expect(updateItemApi).toHaveBeenCalledTimes(1);
+    const [id, payload] = vi.mocked(updateItemApi).mock.calls[0]!;
+    expect(id).toBe('item-1');
+    expect(payload).toEqual({
+      encryptedName: 'new-enc-name',
+      nameIv: 'new-n-iv',
+      nameTag: 'new-n-tag',
+      // Refreshed, not omitted: it is an HMAC of the NAME, and the server uses it
+      // for duplicate detection.
+      searchHash: 'a'.repeat(64),
+    });
+    // The decisive assertion: the item's real ciphertext was never in the request.
+    for (const field of DATA_CIPHERTEXT_FIELDS) expect(payload).not.toHaveProperty(field);
+  });
+
+  it('leaves the stored ciphertext byte-identical afterwards', async () => {
+    setupUnlockedVault();
+    armRename();
+    useVaultStore.setState({ items: [brokenItem()] });
+
+    await useVaultStore.getState().renameItem('item-1', 'Recovered');
+
+    const item = useVaultStore.getState().items[0]!;
+    expect(item.name).toBe('Recovered');
+    expect(item.updatedAt).toBe('2030-01-01T00:00:00Z');
+    // Only the NAME ciphertext moved.
+    expect(item._raw.encryptedData).toBe(ORIGINAL_CIPHERTEXT);
+    expect(item._raw.dataIv).toBe('d-iv');
+    expect(item._raw.dataTag).toBe('d-tag');
+    expect(item._raw.encryptedName).toBe('new-enc-name');
+    expect(item._raw.searchHash).toBe('a'.repeat(64));
+    // The placeholder is untouched too — a rename decrypts nothing and re-parses
+    // nothing, so it cannot "fix" or further damage the payload.
+    expect(item.data).toEqual({ _validationError: true });
+  });
+
+  it('rejects a name whose ciphertext exceeds the server bound, before any request', async () => {
+    setupUnlockedVault();
+    armRename();
+    vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      encrypted: 'n'.repeat(MAX_ENCRYPTED_NAME_LENGTH + 1),
+      iv: 'iv',
+      tag: 'tag',
+    });
+    useVaultStore.setState({ items: [brokenItem()] });
+
+    await expect(useVaultStore.getState().renameItem('item-1', 'Huge')).rejects.toThrow(
+      EncryptedFieldTooLargeError,
+    );
+    expect(updateItemApi).not.toHaveBeenCalled();
+  });
+
+  it('leaves other items alone', async () => {
+    setupUnlockedVault();
+    armRename();
+    useVaultStore.setState({
+      items: [brokenItem(), makeMockItem({ id: 'item-2', name: 'Untouched' })],
+    });
+
+    await useVaultStore.getState().renameItem('item-1', 'Recovered');
+
+    expect(useVaultStore.getState().items[1]!.name).toBe('Untouched');
+  });
+
+  it('writes nothing locally when the API reports failure', async () => {
+    setupUnlockedVault();
+    armRename();
+    vi.mocked(updateItemApi).mockResolvedValue({
+      data: { success: false },
+    } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
+    useVaultStore.setState({ items: [brokenItem()] });
+
+    await useVaultStore.getState().renameItem('item-1', 'Recovered');
+
+    expect(useVaultStore.getState().items[0]!.name).toBe('Broken');
+  });
+
+  it('does not repopulate a store that was cleared mid-flight', async () => {
+    // Mirrors every other mutation: a lock/logout bumps the mutation generation, and
+    // a response arriving afterwards must not write back into the emptied store.
+    setupUnlockedVault();
+    armRename();
+    const api = deferred<Awaited<ReturnType<typeof updateItemApi>>>();
+    vi.mocked(updateItemApi).mockReturnValue(api.promise);
+    useVaultStore.setState({ items: [brokenItem()] });
+
+    const promise = useVaultStore.getState().renameItem('item-1', 'Recovered');
+
+    useVaultStore.getState().clearStore();
+    useVaultStore.setState({ items: [makeMockItem({ id: 'item-1', name: 'Fresh Session' })] });
+
+    api.resolve({
+      data: { success: true, data: makeRawItemResponse({ _id: 'item-1' }) },
+    } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
+    await promise;
+
+    expect(useVaultStore.getState().items[0]!.name).toBe('Fresh Session');
   });
 });

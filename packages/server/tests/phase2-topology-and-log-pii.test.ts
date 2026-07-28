@@ -240,7 +240,7 @@ describe('Structured log email masking (Task 2.8)', () => {
       const email = `pii-test-${Date.now()}@example.com`;
 
       const csrfRes = await request(app).get('/api/v1/csrf-token');
-      const setCookies = csrfRes.headers['set-cookie'] as string[];
+      const setCookies: string[] = (csrfRes.headers['set-cookie'] as string[] | undefined) ?? [];
       const csrfCookie = setCookies.find((c) => c.startsWith('__csrf='))?.split(';')[0] ?? '';
       const csrfToken: string = csrfRes.body.data.csrfToken;
 

@@ -23,15 +23,13 @@ import { MAX_FOLDERS_PER_USER } from '@hvault/shared';
 
 const API = '/api/v1';
 
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
 
 function restoreRequest(
-  agent: request.SuperTest<request.Test>,
+  agent: request.Agent,
   token: string,
   csrfToken: string,
   csrfCookie: string,
@@ -51,10 +49,10 @@ function restoreRequest(
 
 describe('Backup restore atomicity — partial failures', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -139,10 +137,10 @@ describe('Backup restore atomicity — partial failures', () => {
 
 describe('Backup restore — trashed items across conflict strategies', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -308,10 +306,10 @@ describe('Backup restore — trashed items across conflict strategies', () => {
 
 describe('Backup restore — folder conflict strategies', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -396,10 +394,10 @@ describe('Backup restore — folder conflict strategies', () => {
 
 describe('Backup restore — audit log skip reasons', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -458,10 +456,10 @@ describe('Backup restore — audit log skip reasons', () => {
 
 describe('Backup restore — field allowlist enforcement', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -575,10 +573,10 @@ describe('Backup restore — field allowlist enforcement', () => {
 
 describe('Backup restore — trashed_auto_restored skip reason', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -719,10 +717,10 @@ describe('Backup restore — trashed_auto_restored skip reason', () => {
 
 describe('Backup restore — keep_both with colliding folder searchHash', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
     // The collision paths under test rely on the unique partial (userId,
     // searchHash) index being live to raise E11000. autoIndex builds it
@@ -843,10 +841,10 @@ describe('Backup restore — keep_both with colliding folder searchHash', () => 
 
 describe('Backup restore — folderId ownership validation', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -985,10 +983,10 @@ describe('Backup restore — folderId ownership validation', () => {
 
 describe('Backup restore — folder overwrite survives searchHash collisions', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
     // The unique partial (userId, searchHash) index must be live for the
     // collision to raise E11000. autoIndex builds it lazily; await it so the
@@ -1111,10 +1109,10 @@ describe('Backup restore — folder overwrite survives searchHash collisions', (
 
 describe('Backup restore — malformed item data is skipped, not fatal', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -1324,10 +1322,10 @@ describe('Backup restore — malformed item data is skipped, not fatal', () => {
 
 describe('Backup restore — malformed folder data is skipped/sanitized, not fatal', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -1504,10 +1502,10 @@ describe('Backup restore — malformed folder data is skipped/sanitized, not fat
 
 describe('Backup restore — MAX_FOLDERS_PER_USER enforcement', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -1571,10 +1569,10 @@ describe('Backup restore — MAX_FOLDERS_PER_USER enforcement', () => {
 
 describe('Backup restore — additive keep_both re-parenting', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 

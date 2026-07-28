@@ -48,7 +48,37 @@ import {
   MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH,
   MAX_FILE_ENCRYPTION_SIZE_MB,
   FILE_ENCRYPTION_FILE_EXTENSION,
+  MAX_ADDRESS_STREET_LENGTH,
+  MAX_ADDRESS_CITY_LENGTH,
+  MAX_ADDRESS_STATE_LENGTH,
+  MAX_ADDRESS_ZIP_LENGTH,
+  MAX_ADDRESS_COUNTRY_LENGTH,
+  MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
+  MAX_LOGIN_USERNAME_LENGTH,
+  MAX_LOGIN_PASSWORD_LENGTH,
+  MAX_LOGIN_TOTP_LENGTH,
+  MAX_URI_LENGTH,
+  MAX_URIS_PER_ITEM,
+  MAX_CUSTOM_FIELD_NAME_LENGTH,
+  MAX_CUSTOM_FIELDS_PER_ITEM,
+  MAX_SECRET_DESCRIPTION_LENGTH,
+  MAX_CARD_CARDHOLDER_NAME_LENGTH,
+  MAX_CARD_BRAND_LENGTH,
+  MAX_IDENTITY_NAME_LENGTH,
+  MAX_IDENTITY_EMAIL_LENGTH,
+  MAX_IDENTITY_PHONE_LENGTH,
+  MAX_IDENTITY_COMPANY_LENGTH,
+  MAX_IDENTITY_SSN_LENGTH,
+  MAX_IDENTITY_PASSPORT_LENGTH,
 } from '../src/constants/index.js';
+import {
+  cardDataSchema,
+  identityDataSchema,
+  isValidIdentityEmail,
+  isValidIdentityPhone,
+  loginDataSchema,
+  secretDataSchema,
+} from '../src/schemas/vault.js';
 
 // ---------------------------------------------------------------------------
 // Security constants
@@ -221,6 +251,60 @@ describe('Login backup-code constants', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Postal-address constants
+// ---------------------------------------------------------------------------
+describe('Postal-address constants', () => {
+  it('MAX_ADDRESS_STREET_LENGTH is 500', () => {
+    expect(MAX_ADDRESS_STREET_LENGTH).toBe(500);
+  });
+
+  it('MAX_ADDRESS_CITY_LENGTH is 200', () => {
+    expect(MAX_ADDRESS_CITY_LENGTH).toBe(200);
+  });
+
+  it('MAX_ADDRESS_STATE_LENGTH is 200', () => {
+    expect(MAX_ADDRESS_STATE_LENGTH).toBe(200);
+  });
+
+  it('MAX_ADDRESS_ZIP_LENGTH is 20', () => {
+    expect(MAX_ADDRESS_ZIP_LENGTH).toBe(20);
+  });
+
+  it('MAX_ADDRESS_COUNTRY_LENGTH is 100', () => {
+    expect(MAX_ADDRESS_COUNTRY_LENGTH).toBe(100);
+  });
+
+  it('MAX_ADDRESS_DELIVERY_NOTES_LENGTH is 1,000', () => {
+    expect(MAX_ADDRESS_DELIVERY_NOTES_LENGTH).toBe(1_000);
+  });
+
+  it('gives both street lines the same bound', () => {
+    // They are the WHATWG address-line1/address-line2 peers and hold the same kind
+    // of value, so one number serves both; two could only drift apart.
+    const shape = cardDataSchema.parse({ billingAddress: {} }).billingAddress;
+    expect(shape).toBeDefined();
+    expect(
+      cardDataSchema.safeParse({
+        billingAddress: { street: 'a'.repeat(MAX_ADDRESS_STREET_LENGTH) },
+      }).success,
+    ).toBe(true);
+    expect(
+      cardDataSchema.safeParse({
+        billingAddress: { street2: 'a'.repeat(MAX_ADDRESS_STREET_LENGTH) },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('lets delivery notes hold more than a courier will transmit', () => {
+    // Amazon's Shipping API caps its own `deliveryNotes` at 250 characters for
+    // transmission to a driver's device. This is the user's stored copy, which they
+    // paste into whatever checkout form is in front of them, so it must not be the
+    // binding limit.
+    expect(MAX_ADDRESS_DELIVERY_NOTES_LENGTH).toBeGreaterThan(250);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // File Encryption tool constants
 // ---------------------------------------------------------------------------
 describe('File Encryption constants', () => {
@@ -359,6 +443,184 @@ describe('Error codes', () => {
   it('error code keys match values', () => {
     for (const [key, value] of Object.entries(ERROR_CODES)) {
       expect(key).toBe(value);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-field item-data bounds
+//
+// Each of these was an inline literal in `schemas/vault.ts` and, separately, an
+// inline literal in `services/import/itemBuilders.ts`. They are now one named
+// constant used by the stored schema, the item form's lenient input schema and the
+// import clamp — the same reason the postal-address bounds above are named. An input
+// cap looser than the stored cap stores a value the schema later REJECTS, and a
+// rejected value degrades the WHOLE item to the "could not be fully decoded" notice.
+//
+// The assertions pin the VALUES (so a change is deliberate) and, for each one, that
+// the stored schema really is bound by it — a constant nothing enforces would be a
+// comfortable lie.
+// ---------------------------------------------------------------------------
+describe('Per-field item-data bounds', () => {
+  it.each([
+    ['MAX_LOGIN_USERNAME_LENGTH', MAX_LOGIN_USERNAME_LENGTH, 500],
+    ['MAX_LOGIN_PASSWORD_LENGTH', MAX_LOGIN_PASSWORD_LENGTH, 10_000],
+    ['MAX_LOGIN_TOTP_LENGTH', MAX_LOGIN_TOTP_LENGTH, 500],
+    ['MAX_URI_LENGTH', MAX_URI_LENGTH, 2_048],
+    ['MAX_URIS_PER_ITEM', MAX_URIS_PER_ITEM, 100],
+    ['MAX_CUSTOM_FIELD_NAME_LENGTH', MAX_CUSTOM_FIELD_NAME_LENGTH, 500],
+    ['MAX_CUSTOM_FIELDS_PER_ITEM', MAX_CUSTOM_FIELDS_PER_ITEM, 100],
+    ['MAX_SECRET_DESCRIPTION_LENGTH', MAX_SECRET_DESCRIPTION_LENGTH, 10_000],
+    ['MAX_CARD_CARDHOLDER_NAME_LENGTH', MAX_CARD_CARDHOLDER_NAME_LENGTH, 300],
+    ['MAX_CARD_BRAND_LENGTH', MAX_CARD_BRAND_LENGTH, 50],
+    ['MAX_IDENTITY_NAME_LENGTH', MAX_IDENTITY_NAME_LENGTH, 200],
+    ['MAX_IDENTITY_EMAIL_LENGTH', MAX_IDENTITY_EMAIL_LENGTH, 254],
+    ['MAX_IDENTITY_PHONE_LENGTH', MAX_IDENTITY_PHONE_LENGTH, 30],
+    ['MAX_IDENTITY_COMPANY_LENGTH', MAX_IDENTITY_COMPANY_LENGTH, 300],
+    ['MAX_IDENTITY_SSN_LENGTH', MAX_IDENTITY_SSN_LENGTH, 20],
+    ['MAX_IDENTITY_PASSPORT_LENGTH', MAX_IDENTITY_PASSPORT_LENGTH, 50],
+  ])('%s is %i', (_name, actual, expected) => {
+    expect(actual).toBe(expected);
+  });
+
+  it.each([
+    ['username', MAX_LOGIN_USERNAME_LENGTH],
+    ['password', MAX_LOGIN_PASSWORD_LENGTH],
+    ['totp', MAX_LOGIN_TOTP_LENGTH],
+    ['notes', MAX_NOTE_CONTENT_LENGTH],
+  ])('bounds loginDataSchema.%s at its named constant', (field, max) => {
+    expect(loginDataSchema.safeParse({ [field]: 'a'.repeat(max) }).success).toBe(true);
+    expect(loginDataSchema.safeParse({ [field]: 'a'.repeat(max + 1) }).success).toBe(false);
+  });
+
+  it('bounds secretDataSchema.description at its named constant', () => {
+    const at = 'a'.repeat(MAX_SECRET_DESCRIPTION_LENGTH);
+    expect(secretDataSchema.safeParse({ description: at }).success).toBe(true);
+    expect(secretDataSchema.safeParse({ description: `${at}a` }).success).toBe(false);
+  });
+
+  it.each([
+    ['cardholderName', MAX_CARD_CARDHOLDER_NAME_LENGTH],
+    ['brand', MAX_CARD_BRAND_LENGTH],
+  ])('bounds cardDataSchema.%s at its named constant', (field, max) => {
+    expect(cardDataSchema.safeParse({ [field]: 'a'.repeat(max) }).success).toBe(true);
+    expect(cardDataSchema.safeParse({ [field]: 'a'.repeat(max + 1) }).success).toBe(false);
+  });
+
+  it.each([
+    ['firstName', MAX_IDENTITY_NAME_LENGTH],
+    ['lastName', MAX_IDENTITY_NAME_LENGTH],
+    ['company', MAX_IDENTITY_COMPANY_LENGTH],
+    ['ssn', MAX_IDENTITY_SSN_LENGTH],
+    ['passport', MAX_IDENTITY_PASSPORT_LENGTH],
+  ])('bounds identityDataSchema.%s at its named constant', (field, max) => {
+    expect(identityDataSchema.safeParse({ [field]: 'a'.repeat(max) }).success).toBe(true);
+    expect(identityDataSchema.safeParse({ [field]: 'a'.repeat(max + 1) }).success).toBe(false);
+  });
+
+  it('bounds a custom field name and the list length at their named constants', () => {
+    const field = (name: string) => ({ name, value: 'v', type: 'text' as const });
+    expect(
+      loginDataSchema.safeParse({
+        customFields: [field('a'.repeat(MAX_CUSTOM_FIELD_NAME_LENGTH))],
+      }).success,
+    ).toBe(true);
+    expect(
+      loginDataSchema.safeParse({
+        customFields: [field('a'.repeat(MAX_CUSTOM_FIELD_NAME_LENGTH + 1))],
+      }).success,
+    ).toBe(false);
+    const many = (count: number) => Array.from({ length: count }, (_, i) => field(`f${String(i)}`));
+    expect(
+      loginDataSchema.safeParse({ customFields: many(MAX_CUSTOM_FIELDS_PER_ITEM) }).success,
+    ).toBe(true);
+    expect(
+      loginDataSchema.safeParse({ customFields: many(MAX_CUSTOM_FIELDS_PER_ITEM + 1) }).success,
+    ).toBe(false);
+  });
+
+  it('bounds the URI list and each URI at their named constants', () => {
+    const uri = (value: string) => ({ uri: value, match: 'exact' as const });
+    // Measured PRE-transform, which is why `clampUri` exists on the import side.
+    expect(
+      loginDataSchema.safeParse({ uris: [uri(`https://e.com/${'a'.repeat(MAX_URI_LENGTH - 14)}`)] })
+        .success,
+    ).toBe(true);
+    expect(
+      loginDataSchema.safeParse({ uris: [uri(`https://e.com/${'a'.repeat(MAX_URI_LENGTH)}`)] })
+        .success,
+    ).toBe(false);
+    const list = (count: number) =>
+      Array.from({ length: count }, (_, i) => uri(`https://e${String(i)}.com`));
+    expect(loginDataSchema.safeParse({ uris: list(MAX_URIS_PER_ITEM) }).success).toBe(true);
+    expect(loginDataSchema.safeParse({ uris: list(MAX_URIS_PER_ITEM + 1) }).success).toBe(false);
+  });
+
+  it('keeps the SSN and passport bounds generous against real formats', () => {
+    // A US SSN is 11 characters with its dashes; several states issue longer national
+    // identification strings. An ICAO passport number is 9. A cap that is too small
+    // silently costs the user a real value; one that is too large costs only bytes.
+    expect(MAX_IDENTITY_SSN_LENGTH).toBeGreaterThan(11);
+    expect(MAX_IDENTITY_PASSPORT_LENGTH).toBeGreaterThan(9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The identity email / phone format predicates
+//
+// Exported because `VaultItemForm`'s lenient input schema has to enforce the SAME
+// predicate: a local check that admits what the stored one rejects lets the value
+// through the form, past encryption, and into a blob that fails on the next decrypt,
+// degrading the whole identity. The form's old local regexes did exactly that.
+// ---------------------------------------------------------------------------
+describe('isValidIdentityEmail / isValidIdentityPhone', () => {
+  it('accepts an empty string, because the field is optional', () => {
+    expect(isValidIdentityEmail('')).toBe(true);
+    expect(isValidIdentityPhone('')).toBe(true);
+  });
+
+  it.each(['ada@example.com', 'ada+work@sub.example.co.uk'])('accepts the email %s', (value) => {
+    expect(isValidIdentityEmail(value)).toBe(true);
+  });
+
+  it.each([
+    ['consecutive dots in the local part', 'a..b@example.com'],
+    ['a leading dot', '.ada@example.com'],
+    ['a quoted local part', '"ada"@example.com'],
+    ['no TLD', 'ada@example'],
+    ['no local part', '@example.com'],
+  ])('rejects an email with %s', (_label, value) => {
+    expect(isValidIdentityEmail(value)).toBe(false);
+  });
+
+  it.each(['5', '+44 20 7946 0958', '(020) 7946-0958', '020.7946.0958'])(
+    'accepts the phone %s',
+    (value) => {
+      expect(isValidIdentityPhone(value)).toBe(true);
+    },
+  );
+
+  it.each([
+    ['a plus sign that is not leading', '12+34'],
+    ['no digit at all', '(.)'],
+    ['letters', 'call me'],
+    ['two leading plus signs', '++44'],
+  ])('rejects a phone with %s', (_label, value) => {
+    expect(isValidIdentityPhone(value)).toBe(false);
+  });
+
+  it('is the SAME predicate identityDataSchema enforces', () => {
+    // The alignment asserted rather than assumed: if the schema ever stopped using
+    // these functions, a form built on them would drift back out of step.
+    for (const value of ['a..b@example.com', 'ada@example.com', '']) {
+      expect(identityDataSchema.safeParse({ email: value }).success).toBe(
+        isValidIdentityEmail(value),
+      );
+    }
+    for (const value of ['12+34', '+44 20 7946 0958', '']) {
+      expect(identityDataSchema.safeParse({ phone: value }).success).toBe(
+        isValidIdentityPhone(value),
+      );
     }
   });
 });

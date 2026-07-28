@@ -1,6 +1,8 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { AxiosHeaders, type AxiosResponse } from 'axios';
+import type { ApiResponse } from '@hvault/shared';
 import { resetPasswordApi } from '../../src/services/api/authApi';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +53,21 @@ vi.mock('zxcvbn', () => ({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Minimal Axios envelope for the reset endpoint, whose response the page awaits
+ * but never reads. Built rather than cast so the shape stays honest if the
+ * signature changes.
+ */
+function emptyOkResponse(): AxiosResponse<ApiResponse<null>> {
+  return {
+    data: { success: true, data: null },
+    status: 200,
+    statusText: 'OK',
+    headers: new AxiosHeaders(),
+    config: { headers: new AxiosHeaders() },
+  };
+}
 
 function renderWithToken(token = 'valid-token') {
   return render(
@@ -191,7 +208,7 @@ describe('ResetPasswordPage - zxcvbn strength enforcement', () => {
   });
 
   it('accepts submission when zxcvbn score is >= 3 (strong password)', async () => {
-    vi.mocked(resetPasswordApi).mockResolvedValue(undefined);
+    vi.mocked(resetPasswordApi).mockResolvedValue(emptyOkResponse());
 
     renderWithToken();
 

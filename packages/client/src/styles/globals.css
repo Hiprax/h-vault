@@ -187,3 +187,24 @@
 .animate-in {
   animation: zoom-in 0.2s ease-out;
 }
+
+/*
+ * Respect an operating-system request for reduced motion.
+ *
+ * These two are hand-written classes rather than Tailwind utilities, so
+ * Tailwind cannot generate `motion-safe:` / `motion-reduce:` variants of them —
+ * writing `motion-safe:animate-in` produces no rule at all, and therefore no
+ * animation, which is the opposite of what it looks like it does. Guarding the
+ * classes themselves is the form that actually works, and it covers every
+ * existing consumer (every dialog, the toast viewport, the saved-address
+ * picker) rather than only the next one someone remembers to annotate.
+ *
+ * The elements still appear; only the entrance animation is dropped, which is
+ * exactly what WCAG 2.3.3 (Animation from Interactions) asks for.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .animate-slide-in-right,
+  .animate-in {
+    animation: none;
+  }
+}

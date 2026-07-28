@@ -156,7 +156,7 @@ describe('Token refresh — reuse detection revokes entire family', () => {
     expect(familyId).toBeTruthy();
 
     // Step 1: Rotate RT1 → RT2
-    const agent1 = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent1 = request(app);
     const csrf1 = await getCsrfBase(agent1, `refreshToken=${user.refreshToken}`);
 
     const rotateRes = await withCsrf(
@@ -171,7 +171,7 @@ describe('Token refresh — reuse detection revokes entire family', () => {
     expect(rt2).not.toBeNull();
 
     // Step 2: Reuse RT1 (the old, already-used token)
-    const agent2 = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent2 = request(app);
     const csrf2 = await getCsrfBase(agent2, `refreshToken=${user.refreshToken}`);
 
     const reuseRes = await withCsrf(
@@ -183,7 +183,7 @@ describe('Token refresh — reuse detection revokes entire family', () => {
     expect(reuseRes.status).toBe(401);
 
     // Step 3: Try RT2 — should also fail because the family was revoked
-    const agent3 = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent3 = request(app);
     const csrf3 = await getCsrfBase(agent3, `refreshToken=${rt2!}`);
 
     const rt2Res = await withCsrf(
@@ -215,7 +215,7 @@ describe('Token refresh — reuse detection revokes entire family', () => {
     expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(1);
 
     // Rotate RT1 → RT2, then replay RT1 to trip reuse detection.
-    const agent1 = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent1 = request(app);
     const csrf1 = await getCsrfBase(agent1, `refreshToken=${user.refreshToken}`);
     const rotateRes = await withCsrf(
       agent1.post(`${API}/auth/refresh`),
@@ -225,7 +225,7 @@ describe('Token refresh — reuse detection revokes entire family', () => {
     );
     expect(rotateRes.status).toBe(200);
 
-    const agent2 = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent2 = request(app);
     const csrf2 = await getCsrfBase(agent2, `refreshToken=${user.refreshToken}`);
     const reuseRes = await withCsrf(
       agent2.post(`${API}/auth/refresh`),
@@ -259,7 +259,7 @@ describe('Token refresh — expired tokens', () => {
       { $set: { expiresAt: new Date(Date.now() - 1000) } },
     );
 
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const csrf = await getCsrfBase(agent, `refreshToken=${user.refreshToken}`);
 
     const res = await withCsrf(
@@ -296,7 +296,7 @@ describe('Token refresh — expired tokens', () => {
     );
 
     // Try to use the expired token
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const csrf = await getCsrfBase(agent, `refreshToken=${user.refreshToken}`);
 
     await withCsrf(
@@ -330,7 +330,7 @@ describe('Token refresh — deleted user', () => {
     // Delete the user while keeping the refresh token in DB
     await User.deleteOne({ _id: user.id });
 
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const csrf = await getCsrfBase(agent, `refreshToken=${user.refreshToken}`);
 
     const res = await withCsrf(
@@ -357,8 +357,8 @@ describe('Token refresh — concurrent requests with same token', () => {
 
   it('concurrent refreshes: at most one should succeed, the other should fail safely', async () => {
     // Fire two refresh requests simultaneously using the same token
-    const agent1 = request(app) as unknown as request.SuperTest<request.Test>;
-    const agent2 = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent1 = request(app);
+    const agent2 = request(app);
 
     const csrf1 = await getCsrfBase(agent1, `refreshToken=${user.refreshToken}`);
     const csrf2 = await getCsrfBase(agent2, `refreshToken=${user.refreshToken}`);
@@ -402,7 +402,7 @@ describe('Token refresh — missing and invalid tokens', () => {
   });
 
   it('should return 401 when no refresh cookie is provided', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const csrf = await getCsrfBase(agent);
 
     const res = await withCsrf(agent.post(`${API}/auth/refresh`), csrf);
@@ -413,7 +413,7 @@ describe('Token refresh — missing and invalid tokens', () => {
   it('should return 401 for a completely fabricated refresh token', async () => {
     const fakeToken = crypto.randomBytes(64).toString('hex');
 
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const csrf = await getCsrfBase(agent, `refreshToken=${fakeToken}`);
 
     const res = await withCsrf(
@@ -440,7 +440,7 @@ describe('Token refresh — absolute family deadline (standalone)', () => {
   });
 
   async function refreshOnce(rawToken: string): Promise<request.Response> {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const csrf = await getCsrfBase(agent, `refreshToken=${rawToken}`);
     return withCsrf(agent.post(`${API}/auth/refresh`), csrf, undefined, `refreshToken=${rawToken}`);
   }

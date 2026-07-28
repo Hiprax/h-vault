@@ -22,8 +22,8 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { cn, isSafeUrl } from '../../lib/utils';
-import { isUndecodableData } from '../../lib/vaultData';
+import { cn, getApiErrorMessage, isSafeUrl } from '../../lib/utils';
+import { hasAnyValue, isUndecodableData } from '../../lib/vaultData';
 import { ErrorBoundary } from '../layout/ErrorBoundary';
 import { useVaultStore, type DecryptedVaultItem } from '../../stores/vaultStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -72,9 +72,37 @@ interface CopyFieldProps {
   masked?: boolean;
   mono?: boolean;
   isLink?: boolean;
+  /**
+   * Preserve line breaks in the rendered value.
+   *
+   * Opt-in rather than the default, and every FREE-TEXT field now opts in: `notes`
+   * on a login, card and identity, a secret's `description` and multi-line `value`
+   * (a PEM key or a certificate is exactly that), and custom-field values, which an
+   * import can populate with several lines. Each of those is edited through a
+   * `<textarea>` or arrives from a source file that permits newlines, so collapsing
+   * them on screen misrepresented what was stored.
+   *
+   * It stays opt-in because the SINGLE-line fields must keep collapsing: a username,
+   * a URI, a card number, a ZIP code and a TOTP seed cannot legitimately span lines,
+   * and `whitespace-pre-wrap` on those would let a crafted value push a row's layout
+   * around. The stored and COPIED string is byte-identical either way; this controls
+   * display only.
+   *
+   * A secure note's `content` needs nothing here — `NoteDetail` renders it through
+   * react-markdown or its own `whitespace-pre-wrap` block, not through this
+   * component.
+   */
+  multiline?: boolean;
 }
 
-function CopyField({ label, value, masked = false, mono = false, isLink = false }: CopyFieldProps) {
+function CopyField({
+  label,
+  value,
+  masked = false,
+  mono = false,
+  isLink = false,
+  multiline = false,
+}: CopyFieldProps) {
   const { toast } = useToast();
   const { clipboardClearTimeout } = useUserSettings();
   const [revealed, setRevealed] = useState(false);
@@ -130,6 +158,7 @@ function CopyField({ label, value, masked = false, mono = false, isLink = false 
             className={cn(
               'mt-1 break-all text-sm text-[hsl(var(--foreground))]',
               mono && 'font-mono',
+              multiline && 'whitespace-pre-wrap',
             )}
           >
             {displayValue || '\u2014'}
@@ -392,28 +421,21 @@ function PasswordHistorySection({ entries }: PasswordHistoryProps) {
 // Type-specific detail views
 // ---------------------------------------------------------------------------
 
-function LoginDetail({
-  data,
-  itemId,
-  itemName,
-  canEdit,
+/**
+ * The custom-field rows of an item whose form offers the Boolean type — a login and
+ * (since it gained custom-field controls) an identity.
+ *
+ * `SecretDetail` deliberately keeps its own simpler renderer: the secret form has
+ * only ever offered text/hidden, so the same split holds on both sides.
+ */
+function CustomFieldRows({
+  fields,
 }: {
-  data: ILoginData;
-  itemId: string;
-  itemName: string;
-  canEdit: boolean;
+  fields: readonly { name: string; value: string; type: 'text' | 'hidden' | 'boolean' }[];
 }) {
   return (
-    <div className="space-y-3">
-      <CopyField label="Username" value={data.username} mono />
-      <CopyField label="Password" value={data.password} masked mono />
-      {data.uris.map((uri, idx) => (
-        <CopyField key={idx} label={`URI ${idx + 1}`} value={uri.uri} isLink />
-      ))}
-      {data.totp && <TotpDisplay secret={data.totp} />}
-      <BackupCodesSection itemId={itemId} itemName={itemName} data={data} canEdit={canEdit} />
-      {data.notes && <CopyField label="Notes" value={data.notes} />}
-      {data.customFields.map((field, idx) =>
+    <>
+      {fields.map((field, idx) =>
         field.type === 'boolean' ? (
           <div
             key={idx}
@@ -447,9 +469,36 @@ function LoginDetail({
             value={field.value}
             masked={field.type === 'hidden'}
             mono={field.type === 'hidden'}
+            multiline
           />
         ),
       )}
+    </>
+  );
+}
+
+function LoginDetail({
+  data,
+  itemId,
+  itemName,
+  canEdit,
+}: {
+  data: ILoginData;
+  itemId: string;
+  itemName: string;
+  canEdit: boolean;
+}) {
+  return (
+    <div className="space-y-3">
+      <CopyField label="Username" value={data.username} mono />
+      <CopyField label="Password" value={data.password} masked mono />
+      {data.uris.map((uri, idx) => (
+        <CopyField key={idx} label={`URI ${idx + 1}`} value={uri.uri} isLink />
+      ))}
+      {data.totp && <TotpDisplay secret={data.totp} />}
+      <BackupCodesSection itemId={itemId} itemName={itemName} data={data} canEdit={canEdit} />
+      {data.notes && <CopyField label="Notes" value={data.notes} multiline />}
+      <CustomFieldRows fields={data.customFields} />
     </div>
   );
 }
@@ -509,8 +558,8 @@ function SecretDetail({ data }: { data: ISecretData }) {
 
   return (
     <div className="space-y-3">
-      <CopyField label="Value" value={data.value} masked mono />
-      {data.description && <CopyField label="Description" value={data.description} />}
+      <CopyField label="Value" value={data.value} masked mono multiline />
+      {data.description && <CopyField label="Description" value={data.description} multiline />}
       {data.expiresAt && remaining && (
         <div
           className={cn(
@@ -553,6 +602,7 @@ function SecretDetail({ data }: { data: ISecretData }) {
           value={field.value}
           masked={field.type === 'hidden'}
           mono={field.type === 'hidden'}
+          multiline
         />
       ))}
     </div>
@@ -611,6 +661,7 @@ function NoteDetail({ data }: { data: INoteData }) {
 }
 
 function CardDetail({ data }: { data: ICardData }) {
+  const billing = data.billingAddress;
   return (
     <div className="space-y-3">
       <CopyField label="Cardholder Name" value={data.cardholderName} />
@@ -620,32 +671,30 @@ function CardDetail({ data }: { data: ICardData }) {
         <CopyField label="CVV" value={data.cvv} masked mono />
       </div>
       {data.brand && <CopyField label="Brand" value={data.brand} />}
-      {data.notes && <CopyField label="Notes" value={data.notes} />}
-      {data.billingAddress &&
-        (data.billingAddress.street ||
-          data.billingAddress.city ||
-          data.billingAddress.state ||
-          data.billingAddress.zip ||
-          data.billingAddress.country) && (
+      {data.notes && <CopyField label="Notes" value={data.notes} multiline />}
+      {billing &&
+        hasAnyValue([
+          billing.street,
+          billing.street2,
+          billing.city,
+          billing.state,
+          billing.zip,
+          billing.country,
+        ]) && (
           <div className="space-y-2 rounded-lg border border-[hsl(var(--border))] p-3">
             <p className="text-xs font-medium text-[hsl(var(--muted-foreground))]">
               Billing Address
             </p>
-            {data.billingAddress.street && (
-              <CopyField label="Street" value={data.billingAddress.street} />
-            )}
-            {(data.billingAddress.city || data.billingAddress.state) && (
+            {billing.street && <CopyField label="Street" value={billing.street} />}
+            {billing.street2 && <CopyField label="Street 2" value={billing.street2} />}
+            {hasAnyValue([billing.city, billing.state]) && (
               <CopyField
                 label="City / State"
-                value={[data.billingAddress.city, data.billingAddress.state]
-                  .filter(Boolean)
-                  .join(', ')}
+                value={[billing.city, billing.state].filter(Boolean).join(', ')}
               />
             )}
-            {data.billingAddress.zip && <CopyField label="ZIP" value={data.billingAddress.zip} />}
-            {data.billingAddress.country && (
-              <CopyField label="Country" value={data.billingAddress.country} />
-            )}
+            {billing.zip && <CopyField label="ZIP" value={billing.zip} />}
+            {billing.country && <CopyField label="Country" value={billing.country} />}
           </div>
         )}
     </div>
@@ -653,6 +702,7 @@ function CardDetail({ data }: { data: ICardData }) {
 }
 
 function IdentityDetail({ data }: { data: IIdentityData }) {
+  const address = data.address;
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3">
@@ -661,20 +711,55 @@ function IdentityDetail({ data }: { data: IIdentityData }) {
       </div>
       {data.email && <CopyField label="Email" value={data.email} />}
       {data.phone && <CopyField label="Phone" value={data.phone} />}
-      {data.address && (
-        <>
-          <CopyField label="Street" value={data.address.street} />
-          <div className="grid grid-cols-2 gap-3">
-            <CopyField label="City" value={data.address.city} />
-            <CopyField label="State" value={data.address.state} />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <CopyField label="ZIP" value={data.address.zip} />
-            <CopyField label="Country" value={data.address.country} />
-          </div>
-        </>
-      )}
-      {data.notes && <CopyField label="Notes" value={data.notes} />}
+      {/* Every row is guarded and the whole block is omitted for an all-empty
+          address, matching `CardDetail`. Street/City/State/ZIP/Country used to render
+          UNCONDITIONALLY inside `{data.address && …}`, and `CopyField` shows an em
+          dash for an empty value — so, since the form always writes a FULL address
+          object, every identity created through the UI displayed an Address panel of
+          up to five blank rows. The two newest rows were already guarded; the other
+          five have now caught up. */}
+      {address &&
+        hasAnyValue([
+          address.street,
+          address.street2,
+          address.city,
+          address.state,
+          address.zip,
+          address.country,
+          address.deliveryNotes,
+        ]) && (
+          <>
+            {address.street && <CopyField label="Street" value={address.street} />}
+            {address.street2 && <CopyField label="Street 2" value={address.street2} />}
+            {hasAnyValue([address.city, address.state]) && (
+              <div className="grid grid-cols-2 gap-3">
+                {address.city && <CopyField label="City" value={address.city} />}
+                {address.state && <CopyField label="State" value={address.state} />}
+              </div>
+            )}
+            {hasAnyValue([address.zip, address.country]) && (
+              <div className="grid grid-cols-2 gap-3">
+                {address.zip && <CopyField label="ZIP" value={address.zip} />}
+                {address.country && <CopyField label="Country" value={address.country} />}
+              </div>
+            )}
+            {address.deliveryNotes && (
+              <CopyField label="Delivery Notes" value={address.deliveryNotes} multiline />
+            )}
+          </>
+        )}
+      {/* Stored by `identityDataSchema` and written by the Bitwarden importer, but
+          until now only `notes` was rendered: a retained company, SSN or passport
+          number was invisible in the app, so it could not be checked, corrected or
+          removed without deleting the whole identity.
+          `ssn` and `passport` are SECRETS and use the same masked reveal the card
+          number and CVV do — and `getItemSubtitle` must never put either on a
+          vault-list row, which `vault-list-subtitle.test.tsx` asserts. */}
+      {data.company && <CopyField label="Company" value={data.company} />}
+      {data.ssn && <CopyField label="Social Security Number" value={data.ssn} masked mono />}
+      {data.passport && <CopyField label="Passport Number" value={data.passport} masked mono />}
+      {data.notes && <CopyField label="Notes" value={data.notes} multiline />}
+      <CustomFieldRows fields={data.customFields} />
     </div>
   );
 }
@@ -684,13 +769,48 @@ function IdentityDetail({ data }: { data: IIdentityData }) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Why the Edit button is unavailable on an undecodable item.
+ *
+ * Used as the button's `title`, which is a BONUS channel: `title` is not reliably
+ * announced by a screen reader and some engines decline to render a tooltip at all.
+ * The reason is reachable to assistive technology through
+ * {@link UNDECODABLE_NOTICE_ID}, which the button points at with
+ * `aria-describedby` — and reachable to anyone reading the page, because that id
+ * belongs to {@link UndecodableNotice}'s `role="alert"` body.
+ */
+const UNDECODABLE_EDIT_HINT =
+  'Editing is unavailable because this item could not be decoded. Saving the form would overwrite its stored contents. You can still rename it.';
+
+/**
+ * The id of {@link UndecodableNotice}'s body, so the unavailable Edit control can
+ * name it as its own description.
+ *
+ * Only ONE notice is ever in the document: it renders either as the degraded
+ * content panel or as the local `ErrorBoundary`'s fallback, never both.
+ */
+const UNDECODABLE_NOTICE_ID = 'undecodable-item-notice';
+
+/**
  * Rendered in place of the type-specific detail when an item's decrypted data
  * could not be schema-validated (vaultStore flags these with `_validationError`
  * or stores a non-object payload under `_raw`). In that state Zod's array
  * defaults were never applied, so fields like `uris`/`customFields` may be
  * absent and the type views would throw. This panel keeps the page usable —
- * the name, tags, and the action bar (edit / delete / restore) live outside it
- * — so the user can still remediate the bad item.
+ * the name, tags, and the action bar live outside it — so the user can still
+ * move, favorite, delete or restore the bad item.
+ *
+ * The copy names exactly the operations that are actually safe, and Edit is not
+ * among them. Every action it does promise encrypts nothing the item depends on:
+ * move, favorite, delete and restore route through `updateItemMeta`, which encrypts
+ * NOTHING at all, and RENAME routes through `vaultStore.renameItem`, which sends the
+ * name trio plus its `searchHash` and leaves `encryptedData` out of the payload
+ * entirely. The edit FORM is the one that cannot be offered: it re-encrypts
+ * `JSON.stringify(item.data)` wholesale, and for one of these items `data` is only
+ * the placeholder wrapper, so one Save would replace the real ciphertext with it,
+ * permanently.
+ *
+ * "Rename" was removed from this copy when no path could deliver it safely. It is
+ * back only because one now can.
  */
 function UndecodableNotice() {
   return (
@@ -699,9 +819,11 @@ function UndecodableNotice() {
       className="rounded-lg border border-yellow-300 bg-yellow-50 p-4 text-sm text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300"
     >
       <p className="font-medium">This item could not be fully decoded.</p>
-      <p className="mt-1">
+      <p id={UNDECODABLE_NOTICE_ID} className="mt-1">
         Its contents may be corrupted or were saved in an unsupported format. You can still rename,
-        delete, or restore it using the actions above.
+        move, favorite, delete, or restore it using the actions above. Editing is disabled because
+        saving the form would overwrite the stored contents with this placeholder — the original
+        data would be unrecoverable.
       </p>
     </div>
   );
@@ -728,18 +850,32 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
   const permanentDeleteItem = useVaultStore((s) => s.permanentDeleteItem);
   const restoreItem = useVaultStore((s) => s.restoreItem);
   const updateItemMeta = useVaultStore((s) => s.updateItemMeta);
+  const renameItem = useVaultStore((s) => s.renameItem);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [moveFolderOpen, setMoveFolderOpen] = useState(false);
   const [favoriteLoading, setFavoriteLoading] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [restoreLoading, setRestoreLoading] = useState(false);
+  const [showRename, setShowRename] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameLoading, setRenameLoading] = useState(false);
   const deleteDialogRef = useRef<HTMLDivElement>(null);
   const closeDeleteDialog = useCallback(() => setShowDeleteConfirm(false), []);
   useInlineDialog(deleteDialogRef, showDeleteConfirm, closeDeleteDialog);
+  const renameDialogRef = useRef<HTMLDivElement>(null);
+  const closeRenameDialog = useCallback(() => setShowRename(false), []);
+  useInlineDialog(renameDialogRef, showRename, closeRenameDialog);
 
   const Icon = ICON_MAP[item.itemType];
   const data = item.data;
   const currentFolder = folders.find((f) => f.id === item.folderId);
+  // One predicate drives BOTH the degraded content panel below and the Edit
+  // affordance in the action bar. They were previously independent: the notice
+  // rendered while Edit stayed live, so the form opened on a placeholder and one
+  // Save destroyed the item's real ciphertext (a `{_raw}` payload defaults every
+  // control to `''` and writes an EMPTY item; a `_validationError` one re-stores
+  // the exact value that fails validation, wedging the item in a loop).
+  const undecodable = isUndecodableData(data);
 
   const handleDelete = useCallback(async () => {
     setDeleteLoading(true);
@@ -792,6 +928,28 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
       setFavoriteLoading(false);
     }
   }, [updateItemMeta, item.id, item.favorite, toast]);
+
+  // A NAME-ONLY write: the one thing an undecodable item can safely be changed to.
+  // `renameItem` omits `encryptedData`/`dataIv`/`dataTag` from the request, so unlike
+  // the edit form it cannot overwrite the placeholder onto the item's real ciphertext.
+  const handleRename = useCallback(async () => {
+    const nextName = renameValue.trim();
+    if (!nextName) return;
+    setRenameLoading(true);
+    try {
+      await renameItem(item.id, nextName);
+      toast({ title: 'Item renamed', type: 'success' });
+      setShowRename(false);
+    } catch (error) {
+      toast({
+        title: 'Failed to rename item',
+        description: getApiErrorMessage(error, 'Please try again.'),
+        type: 'error',
+      });
+    } finally {
+      setRenameLoading(false);
+    }
+  }, [renameItem, item.id, renameValue, toast]);
 
   const handleMoveToFolder = useCallback(
     async (folderId: string | null) => {
@@ -860,15 +1018,46 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
           </>
         ) : (
           <>
-            {/* Normal items: Edit, Favorite, Move, Delete */}
+            {/* Normal items: Edit, Favorite, Move, Delete. Edit is the ONE action
+                here that re-encrypts `data`, so it is the one action an
+                undecodable item must not offer.
+                `aria-disabled` rather than `disabled`, following `BackupCodeList`: a
+                `disabled` control leaves the tab order, so a keyboard or screen-reader
+                user could not reach it to be told WHY it is unavailable, and `title`
+                is neither reliably rendered on a disabled element nor reliably
+                announced. The control stays focusable and names the notice as its
+                description; the click handler is what makes it inert. */}
             <button
               type="button"
-              onClick={onEdit}
-              className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 transition-opacity"
+              onClick={() => {
+                if (undecodable) return;
+                onEdit();
+              }}
+              aria-disabled={undecodable ? true : undefined}
+              aria-describedby={undecodable ? UNDECODABLE_NOTICE_ID : undefined}
+              title={undecodable ? UNDECODABLE_EDIT_HINT : undefined}
+              className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 transition-opacity aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:opacity-50"
             >
               <Pencil className="h-4 w-4" />
               Edit
             </button>
+            {/* Offered ONLY for an undecodable item: every other item renames through
+                the edit form. `renameItem` sends the name trio and its `searchHash`
+                and omits `encryptedData` entirely, so the item's real ciphertext is
+                left byte-identical. */}
+            {undecodable && (
+              <button
+                type="button"
+                onClick={() => {
+                  setRenameValue(item.name);
+                  setShowRename(true);
+                }}
+                className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-3 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-colors"
+              >
+                <Pencil className="h-4 w-4" />
+                Rename
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void handleToggleFavorite()}
@@ -962,7 +1151,7 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
           unforeseen render error, degrading just this section rather than
           crashing the whole app and stranding the action bar above. */}
       <ErrorBoundary key={item.id} fallback={<UndecodableNotice />}>
-        {isUndecodableData(data) ? (
+        {undecodable ? (
           <UndecodableNotice />
         ) : (
           <>
@@ -1002,6 +1191,70 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
           </div>
         </div>
       </div>
+
+      {/* Rename dialog (undecodable items only) */}
+      {showRename && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeRenameDialog();
+          }}
+        >
+          <div
+            ref={renameDialogRef}
+            className="w-full max-w-sm rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-6 shadow-lg"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Rename item"
+          >
+            <h3 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
+              Rename Item
+            </h3>
+            <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
+              Only the name is changed. The item&rsquo;s stored contents are left exactly as they
+              are.
+            </p>
+            <label
+              htmlFor="undecodable-rename-input"
+              className="mt-4 mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]"
+            >
+              Name
+            </label>
+            <input
+              id="undecodable-rename-input"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void handleRename();
+                }
+              }}
+              placeholder="Item name"
+              autoComplete="off"
+              className="w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-2 text-sm text-[hsl(var(--foreground))]"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeRenameDialog}
+                className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleRename()}
+                disabled={renameLoading || !renameValue.trim()}
+                className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {renameLoading && <Loader2 className="h-4 w-4 animate-spin" />}
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete confirmation dialog */}
       {showDeleteConfirm && (

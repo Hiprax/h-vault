@@ -1,0 +1,23 @@
+// Type-checking for this package's TESTS. See
+// `packages/shared/tsconfig.test.json` for why this is a separate config and why
+// its strictness is inherited rather than relaxed.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    // The repo root, not `.`: `rootDir` is a pure CONSTRAINT under `noEmit`, and
+    // two suites legitimately reach above this package (see `allowJs` below).
+    "rootDir": "../..",
+    // Two suites (`ci-proc`, `local-pipeline`) exercise the pipeline helpers in
+    // the repo-root `scripts/ci/lib/*.mjs`. Letting TS INFER their types from the
+    // real sources beats hand-written `.d.mts` sidecars, which would be free to
+    // drift from the modules they describe without anything noticing. `checkJs`
+    // stays off (its default), so this only teaches the resolver to read them.
+    "allowJs": true
+  },
+  "include": ["src/**/*", "tests/**/*", "scripts/**/*"],
+  "references": [{ "path": "../shared" }]
+}

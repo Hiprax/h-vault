@@ -57,6 +57,9 @@ vi.mock('../src/stores/vaultStore', () => ({
       createItem: mockCreateItem,
       updateItem: mockUpdateItem,
       folders: [{ id: 'folder-1', name: 'Work', sortOrder: 0, createdAt: '', updatedAt: '' }],
+      // Mirrors the real store's initial value; the form reads it to offer
+      // identity addresses for a card's billing address.
+      items: [],
     };
     return selector(state);
   }),

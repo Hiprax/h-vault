@@ -68,6 +68,72 @@ export const MAX_LOGIN_BACKUP_CODE_LENGTH = 128;
 // once array quoting is counted, so this leaves roughly 3x headroom; past it the
 // parser rejects in constant time instead of scanning a whole pasted page.
 export const MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH = 20_000;
+
+// Per-field plaintext ceilings for the DECRYPTED item-data schemas
+// (`schemas/vault.ts`). Named rather than inline for the same reason the address
+// bounds below are: THREE places must agree on each number — the stored schema,
+// `VaultItemForm`'s lenient input schema, and the import clamp in
+// `services/import/itemBuilders.ts`. An input cap looser than the stored cap
+// stores a value the schema later REJECTS, and a rejected value degrades the
+// WHOLE item to the "could not be fully decoded" notice; an input cap with no
+// visible error message makes Save a dead button. Every value below is the
+// literal the field already carried, so nothing about validation changes.
+export const MAX_LOGIN_USERNAME_LENGTH = 500;
+export const MAX_LOGIN_PASSWORD_LENGTH = 10_000;
+export const MAX_LOGIN_TOTP_LENGTH = 500;
+// Measured PRE-transform: `uriEntrySchema` caps the input and only then prepends
+// a scheme, which is why `clampUri` exists (see itemBuilders.ts).
+export const MAX_URI_LENGTH = 2_048;
+export const MAX_URIS_PER_ITEM = 100;
+export const MAX_CUSTOM_FIELD_NAME_LENGTH = 500;
+export const MAX_CUSTOM_FIELDS_PER_ITEM = 100;
+export const MAX_SECRET_DESCRIPTION_LENGTH = 10_000;
+export const MAX_CARD_CARDHOLDER_NAME_LENGTH = 300;
+export const MAX_CARD_BRAND_LENGTH = 50;
+// Shared by an identity's `firstName` and `lastName`, which hold the same kind of
+// value and could only drift as two numbers.
+export const MAX_IDENTITY_NAME_LENGTH = 200;
+// 254 is the RFC 5321 ceiling on a whole address (a 64-char local part plus `@`
+// plus a 253-char domain cannot all be maximal at once).
+export const MAX_IDENTITY_EMAIL_LENGTH = 254;
+export const MAX_IDENTITY_PHONE_LENGTH = 30;
+export const MAX_IDENTITY_COMPANY_LENGTH = 300;
+// A national identification number and a passport number. Both are SECRETS: the
+// item form masks them behind a reveal control and `getItemSubtitle` must never
+// put either on a vault-list row. The caps are generous against the widest real
+// formats (a US SSN is 11 chars with dashes; an ICAO passport number is 9, but
+// several states issue longer national-ID strings).
+export const MAX_IDENTITY_SSN_LENGTH = 20;
+export const MAX_IDENTITY_PASSPORT_LENGTH = 50;
+
+// Bounds for the postal-address sub-shape shared by a CARD's billing address and
+// an IDENTITY's address (`addressSchema` in schemas/vault.ts). Named rather than
+// inline because THREE places must agree on them: the stored schema, the item
+// form's lenient input schema, and the import clamp. A clamp that mirrors a
+// literal it cannot see is one edit away from admitting a value the stored schema
+// rejects, and a stored value the schema rejects degrades the WHOLE item to the
+// "could not be fully decoded" notice. The five values below are the literals
+// those fields already carried, so nothing about validation changes.
+//
+// `street` and `street2` share ONE bound on purpose: they are the WHATWG
+// `address-line1`/`address-line2` peers (Bitwarden names the same pair
+// `address1`/`address2`) and hold the same kind of value, so two numbers for one
+// concept could only drift.
+export const MAX_ADDRESS_STREET_LENGTH = 500;
+export const MAX_ADDRESS_CITY_LENGTH = 200;
+export const MAX_ADDRESS_STATE_LENGTH = 200;
+export const MAX_ADDRESS_ZIP_LENGTH = 20;
+export const MAX_ADDRESS_COUNTRY_LENGTH = 100;
+// Free-text courier instructions on an IDENTITY's address only ("leave with the
+// concierge"), never on a card's billing address. 1,000 rather than the 250 that
+// Amazon's Shipping API transmits to a driver's device: 250 is the ceiling of what
+// a courier will ACT on, whereas this is the user's own stored copy, which they
+// paste into whatever checkout form is in front of them. A cap that is too small
+// silently truncates a real value; one that is too large costs only bytes, the
+// same trade MAX_LOGIN_BACKUP_CODE_LENGTH resolves the same way. Raising a stored
+// cap later is safe; lowering one is not.
+export const MAX_ADDRESS_DELIVERY_NOTES_LENGTH = 1_000;
+
 // Per-request byte budget the CLIENT batches an import against. It is a client
 // convention, not a server bound: the structured `operations` body is bounded
 // server-side by the global 2 MB body parser and by MAX_IMPORT_ITEMS.

@@ -328,13 +328,15 @@ describe('4.2 — ProtectedRoute session expiry feedback', () => {
   });
 
   it('redirects unauthenticated users to /login with location state', () => {
-    let loginState: Record<string, unknown> | null = null;
+    // Held in an object: a bare `let` written only from the render callback is
+    // narrowed back to its initializer by control-flow analysis.
+    const captured: { loginState: Record<string, unknown> | null } = { loginState: null };
 
     setupAuthStore({ isAuthenticated: false });
 
     function CaptureState() {
       const location = useLocation();
-      loginState = location.state as Record<string, unknown>;
+      captured.loginState = location.state as Record<string, unknown>;
       return <div data-testid="login-page">Login</div>;
     }
 
@@ -356,7 +358,7 @@ describe('4.2 — ProtectedRoute session expiry feedback', () => {
 
     expect(screen.getByTestId('login-page')).toBeInTheDocument();
     // When not session-expired, the sessionExpired flag should not be present
-    expect(loginState?.sessionExpired).toBeUndefined();
+    expect(captured.loginState?.sessionExpired).toBeUndefined();
   });
 });
 

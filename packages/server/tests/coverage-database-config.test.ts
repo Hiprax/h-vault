@@ -195,12 +195,14 @@ describe('config/database.ts', () => {
      * connection that `tests/setup.ts` owns (emitting `disconnected` on it would
      * disturb every later test in the file).
      */
-    async function captureHandlers(): Promise<Map<string, (arg?: unknown) => void>> {
-      const handlers = new Map<string, (arg?: unknown) => void>();
+    async function captureHandlers(): Promise<Map<string | symbol, (arg?: unknown) => void>> {
+      // Keyed as EventEmitter keys them (`string | symbol`); every event
+      // `connectDatabase` registers is a plain string.
+      const handlers = new Map<string | symbol, (arg?: unknown) => void>();
       vi.spyOn(mongoose, 'connect').mockResolvedValue(mongoose);
       const onSpy = vi
         .spyOn(mongoose.connection, 'on')
-        .mockImplementation((event: string, handler: (...args: unknown[]) => void) => {
+        .mockImplementation((event: string | symbol, handler: (...args: unknown[]) => void) => {
           handlers.set(event, handler);
           return mongoose.connection;
         });

@@ -3,6 +3,7 @@ import { useParams, Navigate, useNavigate } from 'react-router';
 import { Loader2 } from 'lucide-react';
 import { VaultItemDetail } from '../components/vault/VaultItemDetail';
 import { VaultItemForm } from '../components/vault/VaultItemForm';
+import { isUndecodableData } from '../lib/vaultData';
 import { useVaultStore } from '../stores/vaultStore';
 
 export default function VaultItemPage() {
@@ -66,8 +67,12 @@ export default function VaultItemPage() {
     void fetchItems();
   };
 
-  // Don't allow editing trashed items
-  if (editing && !isTrashed) {
+  // Don't allow editing trashed items, and never hand an UNDECODABLE item to the
+  // form. `VaultItemDetail` already disables its Edit button for one, so this is
+  // the second of two independent guards: the form defaults every control from
+  // `item.data`, which for such an item is only the placeholder wrapper, and one
+  // Save would encrypt that over the item's real — and only — ciphertext.
+  if (editing && !isTrashed && !isUndecodableData(item.data)) {
     return (
       <div className="mx-auto max-w-2xl">
         <VaultItemForm item={item} onSaved={handleFormSaved} onCancel={() => setEditing(false)} />

@@ -94,7 +94,9 @@ describe('TrustedDevice model', () => {
   describe('toJSON', () => {
     it('strips tokenHash and __v while keeping the safe fields', async () => {
       const doc = await TrustedDevice.create(makeDoc({ tokenHash: 'e'.repeat(64) }));
-      const json = doc.toJSON() as Record<string, unknown>;
+      // The transform drops keys the document type still declares, so read the
+      // result as a plain bag rather than as `ITrustedDevice`.
+      const json = doc.toJSON<Record<string, unknown>>();
 
       expect(json['tokenHash']).toBeUndefined();
       expect(json['__v']).toBeUndefined();

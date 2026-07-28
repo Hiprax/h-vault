@@ -33,6 +33,7 @@ import type {
   ICardData,
   IIdentityData,
   IAddress,
+  IIdentityAddress,
 } from '@hvault/shared';
 import { cryptoService } from '../crypto/cryptoService.js';
 import { isUndecodableData } from '../../lib/vaultData.js';
@@ -67,10 +68,25 @@ export interface PortableLogin {
 /** A postal address, shared by card billing and identity. */
 export interface PortableAddress {
   street: string;
+  /** The WHATWG `address-line2` / Bitwarden `address2` peer of {@link street}. */
+  street2: string;
   city: string;
   state: string;
   zip: string;
   country: string;
+}
+
+/**
+ * An identity's address: {@link PortableAddress} plus the courier instructions
+ * only an identity carries.
+ *
+ * A card's `billingAddress` stays typed as the BASE shape, so no code path in
+ * this layer can put delivery notes on a card even by accident. That mirrors the
+ * guarantee the shared base `addressSchema` gives on read-back by stripping keys
+ * it does not declare.
+ */
+export interface PortableIdentityAddress extends PortableAddress {
+  deliveryNotes: string;
 }
 
 export interface PortableCard {
@@ -88,7 +104,7 @@ export interface PortableIdentity {
   lastName: string;
   email?: string | undefined;
   phone?: string | undefined;
-  address?: PortableAddress | undefined;
+  address?: PortableIdentityAddress | undefined;
   company?: string | undefined;
   ssn?: string | undefined;
   passport?: string | undefined;
@@ -140,6 +156,16 @@ export interface PortableItem {
  * model, so the JSON and CSV serializers can never name the same thing differently.
  */
 export const BACKUP_CODES_FIELD_NAME = 'Backup Codes';
+
+/**
+ * The `fields` entry name an identity's delivery notes ride in.
+ *
+ * No Bitwarden format has a delivery-instructions field on any item type, so the
+ * value travels as a custom field rather than being dropped. Defined here with the
+ * portable model for the same reason as {@link BACKUP_CODES_FIELD_NAME}: one name,
+ * so no two serializers can label the same thing differently.
+ */
+export const DELIVERY_NOTES_FIELD_NAME = 'Delivery Notes';
 
 /** An input item that could not be represented, reported rather than dropped. */
 export interface SkippedItem {
@@ -232,11 +258,21 @@ function mapCustomFields(
 function mapAddress(address: IAddress): PortableAddress {
   return {
     street: address.street,
+    street2: address.street2,
     city: address.city,
     state: address.state,
     zip: address.zip,
     country: address.country,
   };
+}
+
+/**
+ * An identity's address. `IIdentityAddress` is a superset of `IAddress`, so the
+ * shared half is copied by the one function a card's billing address also uses and
+ * only the identity-only field is added here.
+ */
+function mapIdentityAddress(address: IIdentityAddress): PortableIdentityAddress {
+  return { ...mapAddress(address), deliveryNotes: address.deliveryNotes };
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +339,7 @@ function fillIdentity(record: PortableItem, data: IIdentityData): void {
     lastName: data.lastName,
     email: data.email,
     phone: data.phone,
-    address: data.address ? mapAddress(data.address) : undefined,
+    address: data.address ? mapIdentityAddress(data.address) : undefined,
     company: data.company,
     ssn: data.ssn,
     passport: data.passport,

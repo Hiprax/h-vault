@@ -759,7 +759,11 @@ describe('vault + tools controller edge branches', () => {
       const b = await seedFolder(user.id, { encryptedName: 'cycle-b', parentId: a._id });
       // Close the loop directly in the DB (bypassing the controller guards), the
       // way a tampered backup would.
-      await Folder.updateOne({ _id: a._id }, { $set: { parentId: b._id } });
+      // `seedFolder` returns a plain object, so its ids come back as `unknown`.
+      await Folder.updateOne(
+        { _id: a._id as mongoose.Types.ObjectId },
+        { $set: { parentId: b._id as mongoose.Types.ObjectId } },
+      );
 
       expect(await hasCycle(String(a._id), user.id)).toBe(true);
       expect(await hasCycle(String(b._id), user.id)).toBe(true);

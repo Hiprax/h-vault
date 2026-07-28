@@ -86,6 +86,19 @@ describe('PORTABLE_EXPORT_FORMATS — registry shape', () => {
     }
   });
 
+  it('every loss note accounts for an identity delivery note', () => {
+    // Same reasoning as the recovery codes above, for the other field that is
+    // TRANSFORMED rather than dropped. Bitwarden JSON demotes it from a structured
+    // address field to a custom field, and the two CSVs omit identities as whole
+    // items; either way the numbers look identical to a lossless export, so the note
+    // is the only place a user can learn what happened.
+    const byValue = new Map(PORTABLE_EXPORT_FORMATS.map((m) => [m.value, m.lossNote]));
+    expect(byValue.get('bitwarden-json')).toMatch(/delivery notes/i);
+    // The CSVs say it more broadly: the whole item type is gone.
+    expect(byValue.get('bitwarden-csv')).toMatch(/identities/i);
+    expect(byValue.get('chrome-csv')).toMatch(/logins only/i);
+  });
+
   it('maps each format to the expected extension and MIME type', () => {
     const byValue = new Map(PORTABLE_EXPORT_FORMATS.map((f) => [f.value, f]));
     expect(byValue.get('bitwarden-json')).toMatchObject({

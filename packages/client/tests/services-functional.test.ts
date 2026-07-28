@@ -604,11 +604,11 @@ describe('API Client', () => {
       const config = {
         method: 'get',
         headers: {
-          set Authorization(val: string) {
-            (config.headers as Record<string, string>)._auth = val;
+          set Authorization(val: string | undefined) {
+            (config.headers as Record<string, string | undefined>)._auth = val;
           },
-          get Authorization() {
-            return (config.headers as Record<string, string>)._auth;
+          get Authorization(): string | undefined {
+            return (config.headers as Record<string, string | undefined>)._auth;
           },
           _auth: undefined as string | undefined,
         },

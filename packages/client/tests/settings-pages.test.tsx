@@ -467,11 +467,11 @@ describe('SettingsPage', () => {
     vi.mocked(cryptoService.deriveKeys)
       .mockResolvedValueOnce({
         masterEncryptionKey: 'mek-old' as unknown as CryptoKey,
-        authKey: 'ak-old' as unknown as CryptoKey,
+        authKey: 'ak-old' as unknown as ArrayBuffer,
       })
       .mockResolvedValueOnce({
         masterEncryptionKey: 'mek-new' as unknown as CryptoKey,
-        authKey: 'ak-new' as unknown as CryptoKey,
+        authKey: 'ak-new' as unknown as ArrayBuffer,
       });
     vi.mocked(cryptoService.getAuthHash)
       .mockReturnValueOnce('hash-old')
@@ -2786,7 +2786,7 @@ describe('BackupSettingsPage', () => {
   }
 
   it('same-account un-rotated restore sends no adoptVaultKey/authHash and does not re-encrypt', async () => {
-    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new Uint8Array(32));
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
     // Backup vault key matches the current key -> rows already under it.
     vi.mocked(cryptoService.vaultKeyEqualsRaw).mockResolvedValue(true);
     vi.mocked(cryptoService.encryptData).mockClear();
@@ -2812,7 +2812,7 @@ describe('BackupSettingsPage', () => {
   });
 
   it('cross-account/rotated restore re-encrypts rows to the current key and sends no adoptVaultKey/authHash', async () => {
-    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new Uint8Array(32));
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
     // Backup vault key DIFFERS -> re-encrypt to the current key, never adopt.
     vi.mocked(cryptoService.vaultKeyEqualsRaw).mockResolvedValue(false);
     vi.mocked(cryptoService.encryptData).mockClear();
@@ -2846,7 +2846,7 @@ describe('BackupSettingsPage', () => {
   });
 
   it('drops only a single undecryptable passwordHistory entry, not the whole item', async () => {
-    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new Uint8Array(32));
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
     vi.mocked(cryptoService.vaultKeyEqualsRaw).mockResolvedValue(false);
     // One history entry fails to decrypt; data/name and the other entry succeed.
     vi.mocked(cryptoService.decryptData).mockImplementation((enc: string) =>
@@ -2908,7 +2908,7 @@ describe('BackupSettingsPage', () => {
   });
 
   it('forwards item and folder _id values verbatim (client never strips ids)', async () => {
-    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new Uint8Array(32));
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
     vi.mocked(cryptoService.vaultKeyEqualsRaw).mockResolvedValue(true);
     mockApiPost.mockResolvedValue({
       data: {
@@ -2930,7 +2930,7 @@ describe('BackupSettingsPage', () => {
   });
 
   it('surfaces the server error message when a restore is rejected', async () => {
-    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new Uint8Array(32));
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
     vi.mocked(cryptoService.vaultKeyEqualsRaw).mockResolvedValue(false);
     mockApiPost.mockRejectedValue(new Error('Restore failed on server'));
 

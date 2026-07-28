@@ -13,6 +13,28 @@ import {
   MAX_NOTE_CONTENT_LENGTH,
   MAX_LOGIN_BACKUP_CODES,
   MAX_LOGIN_BACKUP_CODE_LENGTH,
+  MAX_LOGIN_USERNAME_LENGTH,
+  MAX_LOGIN_PASSWORD_LENGTH,
+  MAX_LOGIN_TOTP_LENGTH,
+  MAX_URI_LENGTH,
+  MAX_URIS_PER_ITEM,
+  MAX_CUSTOM_FIELD_NAME_LENGTH,
+  MAX_CUSTOM_FIELDS_PER_ITEM,
+  MAX_SECRET_DESCRIPTION_LENGTH,
+  MAX_CARD_CARDHOLDER_NAME_LENGTH,
+  MAX_CARD_BRAND_LENGTH,
+  MAX_IDENTITY_NAME_LENGTH,
+  MAX_IDENTITY_EMAIL_LENGTH,
+  MAX_IDENTITY_PHONE_LENGTH,
+  MAX_IDENTITY_COMPANY_LENGTH,
+  MAX_IDENTITY_SSN_LENGTH,
+  MAX_IDENTITY_PASSPORT_LENGTH,
+  MAX_ADDRESS_STREET_LENGTH,
+  MAX_ADDRESS_CITY_LENGTH,
+  MAX_ADDRESS_STATE_LENGTH,
+  MAX_ADDRESS_ZIP_LENGTH,
+  MAX_ADDRESS_COUNTRY_LENGTH,
+  MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
 } from '../constants/index.js';
 import type { ItemType } from '../constants/index.js';
 import { normalizeUri } from '../utils/index.js';
@@ -224,17 +246,32 @@ export const folderResponseSchema = z.object({
 
 // ---------------------------------------------------------------------------
 // Decrypted vault item data schemas (client-side validation after decryption)
+//
+// EVERY schema below runs in STRIP mode: an unknown key is silently dropped from
+// the parsed output rather than rejected. That is `z.object()`'s default and is
+// relied on as an invariant, not an accident — see `addressSchema` for the case
+// where it is what keeps a field off a whole item type. These declarations used
+// to append a redundant `.strip()` to say so; zod documents that call as
+// unnecessary ("This is the default behavior"), so it now lives here as one
+// statement instead of six identical ones.
+//
+// Because they run on every DECRYPT (`vaultStore.decryptItem`) AND, since the
+// client-side pre-flight was added, on every WRITE (`vaultStore.createItem` /
+// `updateItem`), a rejection is user-visible in both directions: on the way out it
+// degrades the item to the "could not be fully decoded" notice, and on the way in
+// it blocks the save with a message. Keep them permissive about FORMAT and strict
+// about LENGTH.
 // ---------------------------------------------------------------------------
 
 const customFieldSchema = z.object({
-  name: z.string().min(1).max(500),
+  name: z.string().min(1).max(MAX_CUSTOM_FIELD_NAME_LENGTH),
   value: z.string().max(MAX_NOTE_CONTENT_LENGTH),
   type: z.enum(CUSTOM_FIELD_TYPES),
 });
 
 const uriEntrySchema = z
   .object({
-    uri: z.string().max(2048),
+    uri: z.string().max(MAX_URI_LENGTH),
     match: z.enum(URI_MATCH_TYPES),
   })
   .transform((entry) => ({
@@ -264,140 +301,178 @@ const uriEntrySchema = z
     { message: 'Invalid regular expression pattern', path: ['uri'] },
   );
 
-export const loginDataSchema = z
-  .object({
-    username: z.string().max(500).optional().default(''),
-    password: z.string().max(10_000).optional().default(''),
-    uris: z.array(uriEntrySchema).max(100).optional().default([]),
-    totp: z.string().max(500).optional(),
-    // 2FA recovery codes for the THIRD-PARTY account this login belongs to — not
-    // this vault's own account-level codes (see BACKUP_CODES_COUNT).
-    //
-    // Deliberately PERMISSIVE: length caps only. No charset rule, no `.min(1)`,
-    // no `.transform()` and no `.catch()`. This schema runs on every DECRYPT
-    // (`vaultStore.decryptItem`), and a failure there stamps `_validationError`
-    // on the item, which `isUndecodableData` degrades to the read-only "could not
-    // be fully decoded" notice — so one odd code would cost the user UI access to
-    // the item's PASSWORD. Format strictness therefore lives at INPUT time, in
-    // `parseBackupCodes` (utils/backupCodes.ts), the same split that already
-    // strips blank custom-field names in `VaultItemForm`.
-    //
-    // `.transform()` is banned because it is the exact mechanism of the old
-    // `uris` bug: a transform that GROWS the value after the length check stored
-    // an over-cap value that then failed on decrypt (see `clampUri`). `.catch()`
-    // is banned because it is the opposite of fail-soft: `_validationError`
-    // preserves the ciphertext, whereas a `.catch([])` would show a normal,
-    // editable login whose next save destroys the codes for good.
-    //
-    // `.optional()` with NO `.default([])`, unlike `uris`/`customFields`: a
-    // default is what makes the type views dereference an absent array and throw
-    // (see the UndecodableNotice docblock), it would inject `backupCodes: []` into
-    // every existing login's parsed data, and it turns a correct defensive guard
-    // into a lint-flagged redundant condition.
-    backupCodes: z
-      .array(z.string().max(MAX_LOGIN_BACKUP_CODE_LENGTH))
-      .max(MAX_LOGIN_BACKUP_CODES)
-      .optional(),
-    notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
-    customFields: z.array(customFieldSchema).max(100).optional().default([]),
-  })
-  .strip();
+export const loginDataSchema = z.object({
+  username: z.string().max(MAX_LOGIN_USERNAME_LENGTH).optional().default(''),
+  password: z.string().max(MAX_LOGIN_PASSWORD_LENGTH).optional().default(''),
+  uris: z.array(uriEntrySchema).max(MAX_URIS_PER_ITEM).optional().default([]),
+  totp: z.string().max(MAX_LOGIN_TOTP_LENGTH).optional(),
+  // 2FA recovery codes for the THIRD-PARTY account this login belongs to — not
+  // this vault's own account-level codes (see BACKUP_CODES_COUNT).
+  //
+  // Deliberately PERMISSIVE: length caps only. No charset rule, no `.min(1)`,
+  // no `.transform()` and no `.catch()`. This schema runs on every DECRYPT
+  // (`vaultStore.decryptItem`), and a failure there stamps `_validationError`
+  // on the item, which `isUndecodableData` degrades to the read-only "could not
+  // be fully decoded" notice — so one odd code would cost the user UI access to
+  // the item's PASSWORD. Format strictness therefore lives at INPUT time, in
+  // `parseBackupCodes` (utils/backupCodes.ts), the same split that already
+  // strips blank custom-field names in `VaultItemForm`.
+  //
+  // `.transform()` is banned because it is the exact mechanism of the old
+  // `uris` bug: a transform that GROWS the value after the length check stored
+  // an over-cap value that then failed on decrypt (see `clampUri`). `.catch()`
+  // is banned because it is the opposite of fail-soft: `_validationError`
+  // preserves the ciphertext, whereas a `.catch([])` would show a normal,
+  // editable login whose next save destroys the codes for good.
+  //
+  // `.optional()` with NO `.default([])`, unlike `uris`/`customFields`: a
+  // default is what makes the type views dereference an absent array and throw
+  // (see the UndecodableNotice docblock), it would inject `backupCodes: []` into
+  // every existing login's parsed data, and it turns a correct defensive guard
+  // into a lint-flagged redundant condition.
+  backupCodes: z
+    .array(z.string().max(MAX_LOGIN_BACKUP_CODE_LENGTH))
+    .max(MAX_LOGIN_BACKUP_CODES)
+    .optional(),
+  notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
+  customFields: z.array(customFieldSchema).max(MAX_CUSTOM_FIELDS_PER_ITEM).optional().default([]),
+});
 
-export const secretDataSchema = z
-  .object({
-    value: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional().default(''),
-    description: z.string().max(10_000).optional(),
-    expiresAt: z
-      .string()
-      .max(100)
-      .refine(
-        (val) =>
-          // eslint-disable-next-line security/detect-unsafe-regex -- anchored ISO 8601 regex on bounded input (max 100 chars)
-          /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/.test(val),
-        { message: 'expiresAt must be a valid ISO 8601 date or datetime string' },
-      )
-      .refine(
-        (val) => {
-          const datePart = val.split('T')[0] ?? val;
-          const [year, month, day] = datePart.split('-').map(Number) as [number, number, number];
-          const date = new Date(Date.UTC(year, month - 1, day));
-          return (
-            date.getUTCFullYear() === year &&
-            date.getUTCMonth() === month - 1 &&
-            date.getUTCDate() === day
-          );
-        },
-        { message: 'expiresAt must be a valid calendar date' },
-      )
-      .refine(
-        // The ISO regex above only constrains the SHAPE of the time part, so
-        // impossible components (T99:99:99) pass it, and the calendar refine only
-        // inspects the date half. Delegate the time half to the Date parser, which
-        // rejects out-of-range hours/minutes/seconds for an ISO 8601 string.
-        (val) => !val.includes('T') || !Number.isNaN(new Date(val).getTime()),
-        { message: 'expiresAt must have a valid time component' },
-      )
-      .optional(),
-    customFields: z.array(customFieldSchema).max(100).optional().default([]),
-  })
-  .strip();
+export const secretDataSchema = z.object({
+  value: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional().default(''),
+  description: z.string().max(MAX_SECRET_DESCRIPTION_LENGTH).optional(),
+  expiresAt: z
+    .string()
+    .max(100)
+    .refine(
+      (val) =>
+        // eslint-disable-next-line security/detect-unsafe-regex -- anchored ISO 8601 regex on bounded input (max 100 chars)
+        /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/.test(val),
+      { message: 'expiresAt must be a valid ISO 8601 date or datetime string' },
+    )
+    .refine(
+      (val) => {
+        const datePart = val.split('T')[0] ?? val;
+        const [year, month, day] = datePart.split('-').map(Number) as [number, number, number];
+        const date = new Date(Date.UTC(year, month - 1, day));
+        return (
+          date.getUTCFullYear() === year &&
+          date.getUTCMonth() === month - 1 &&
+          date.getUTCDate() === day
+        );
+      },
+      { message: 'expiresAt must be a valid calendar date' },
+    )
+    .refine(
+      // The ISO regex above only constrains the SHAPE of the time part, so
+      // impossible components (T99:99:99) pass it, and the calendar refine only
+      // inspects the date half. Delegate the time half to the Date parser, which
+      // rejects out-of-range hours/minutes/seconds for an ISO 8601 string.
+      (val) => !val.includes('T') || !Number.isNaN(new Date(val).getTime()),
+      { message: 'expiresAt must have a valid time component' },
+    )
+    .optional(),
+  customFields: z.array(customFieldSchema).max(MAX_CUSTOM_FIELDS_PER_ITEM).optional().default([]),
+});
 
-export const noteDataSchema = z
-  .object({
-    content: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional().default(''),
-    format: z.enum(NOTE_FORMATS).optional().default('markdown'),
-  })
-  .strip();
+export const noteDataSchema = z.object({
+  content: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional().default(''),
+  format: z.enum(NOTE_FORMATS).optional().default('markdown'),
+});
 
-const addressSchema = z
-  .object({
-    street: z.string().max(500).optional().default(''),
-    city: z.string().max(200).optional().default(''),
-    state: z.string().max(200).optional().default(''),
-    zip: z.string().max(20).optional().default(''),
-    country: z.string().max(100).optional().default(''),
-  })
-  .strip();
+/**
+ * The postal-address sub-shape, shared by a CARD's `billingAddress` and used as
+ * the base of an IDENTITY's `address`.
+ *
+ * `street2` is the WHATWG `address-line2` peer of `street` (Bitwarden names the
+ * same pair `address1`/`address2`), so both share one bound.
+ *
+ * This BASE shape deliberately carries no delivery instructions, and STRIP mode
+ * (see the section header above) is what makes "delivery notes are identity-only"
+ * an INVARIANT rather than a UI convention: a `deliveryNotes` key inside a card's
+ * `billingAddress` is dropped on read-back, so it can never be stored, exported,
+ * or displayed on a card.
+ */
+const addressSchema = z.object({
+  street: z.string().max(MAX_ADDRESS_STREET_LENGTH).optional().default(''),
+  street2: z.string().max(MAX_ADDRESS_STREET_LENGTH).optional().default(''),
+  city: z.string().max(MAX_ADDRESS_CITY_LENGTH).optional().default(''),
+  state: z.string().max(MAX_ADDRESS_STATE_LENGTH).optional().default(''),
+  zip: z.string().max(MAX_ADDRESS_ZIP_LENGTH).optional().default(''),
+  country: z.string().max(MAX_ADDRESS_COUNTRY_LENGTH).optional().default(''),
+});
 
-export const cardDataSchema = z
-  .object({
-    cardholderName: z.string().max(300).optional().default(''),
-    number: z.string().max(30).optional().default(''),
-    expMonth: z.string().max(2).optional().default(''),
-    expYear: z.string().max(4).optional().default(''),
-    cvv: z.string().max(4).optional().default(''),
-    brand: z.string().max(50).optional(),
-    notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
-    billingAddress: addressSchema.optional(),
-  })
-  .strip();
+/**
+ * An IDENTITY's address: {@link addressSchema} plus the free-text courier
+ * instructions a shipping address carries and a billing address has no meaning
+ * for ("leave with the concierge", "ring twice").
+ *
+ * Derived with `.extend()` rather than declared separately so the two shapes can
+ * never drift and the identity shape is provably a superset of the base.
+ */
+const identityAddressSchema = addressSchema.extend({
+  deliveryNotes: z.string().max(MAX_ADDRESS_DELIVERY_NOTES_LENGTH).optional().default(''),
+});
 
-export const identityDataSchema = z
-  .object({
-    firstName: z.string().max(200).optional().default(''),
-    lastName: z.string().max(200).optional().default(''),
-    email: z
-      .string()
-      .max(254)
-      .refine((val) => !val || z.email().safeParse(val).success, {
-        message: 'Invalid email address',
-      })
-      .optional(),
-    phone: z
-      .string()
-      .max(30)
-      .refine((val) => !val || /^\+?(?=.*\d)[\d\s().-]+$/.test(val), {
-        message: 'Invalid phone number',
-      })
-      .optional(),
-    address: addressSchema.optional(),
-    company: z.string().max(300).optional(),
-    ssn: z.string().max(20).optional(),
-    passport: z.string().max(50).optional(),
-    notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
-    customFields: z.array(customFieldSchema).max(100).optional().default([]),
-  })
-  .strip();
+export const cardDataSchema = z.object({
+  cardholderName: z.string().max(MAX_CARD_CARDHOLDER_NAME_LENGTH).optional().default(''),
+  number: z.string().max(30).optional().default(''),
+  expMonth: z.string().max(2).optional().default(''),
+  expYear: z.string().max(4).optional().default(''),
+  cvv: z.string().max(4).optional().default(''),
+  brand: z.string().max(MAX_CARD_BRAND_LENGTH).optional(),
+  notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
+  billingAddress: addressSchema.optional(),
+});
+
+/**
+ * True when `value` is an acceptable identity email address. An EMPTY string is
+ * acceptable — the field is optional and the form defaults it to `''`.
+ *
+ * Exported because `VaultItemForm`'s lenient input schema has to enforce the SAME
+ * predicate: a local check that admits what this one rejects (a quoted local
+ * part, say) lets the value through the form, past encryption, and into a stored
+ * blob that fails `identityDataSchema` on the next decrypt — which degrades the
+ * whole identity to the "could not be fully decoded" notice. One function, two
+ * call sites, and each side keeps its own user-facing message.
+ */
+export function isValidIdentityEmail(value: string): boolean {
+  return !value || z.email().safeParse(value).success;
+}
+
+/**
+ * True when `value` is an acceptable identity phone number: an optional single
+ * LEADING `+`, at least one digit somewhere, and nothing outside digits, spaces,
+ * parentheses, dots and hyphens. An empty string is acceptable.
+ *
+ * Exported for the same reason as {@link isValidIdentityEmail}. The form's own
+ * regex used to admit a `+` in the middle (`12+34`) and a punctuation-only value
+ * with no digit at all (`(.)`), both of which this rejects.
+ */
+export function isValidIdentityPhone(value: string): boolean {
+  return !value || /^\+?(?=.*\d)[\d\s().-]+$/.test(value);
+}
+
+export const identityDataSchema = z.object({
+  firstName: z.string().max(MAX_IDENTITY_NAME_LENGTH).optional().default(''),
+  lastName: z.string().max(MAX_IDENTITY_NAME_LENGTH).optional().default(''),
+  email: z
+    .string()
+    .max(MAX_IDENTITY_EMAIL_LENGTH)
+    .refine(isValidIdentityEmail, { message: 'Invalid email address' })
+    .optional(),
+  phone: z
+    .string()
+    .max(MAX_IDENTITY_PHONE_LENGTH)
+    .refine(isValidIdentityPhone, { message: 'Invalid phone number' })
+    .optional(),
+  address: identityAddressSchema.optional(),
+  company: z.string().max(MAX_IDENTITY_COMPANY_LENGTH).optional(),
+  ssn: z.string().max(MAX_IDENTITY_SSN_LENGTH).optional(),
+  passport: z.string().max(MAX_IDENTITY_PASSPORT_LENGTH).optional(),
+  notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
+  customFields: z.array(customFieldSchema).max(MAX_CUSTOM_FIELDS_PER_ITEM).optional().default([]),
+});
 
 /**
  * Map of item types to their decrypted data Zod schemas.

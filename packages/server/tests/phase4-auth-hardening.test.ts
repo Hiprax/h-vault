@@ -94,10 +94,10 @@ function makeTempToken(userId: string): string {
 }
 
 describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     mockedResetEmail.mockReset();
     mockedResetEmail.mockResolvedValue({ success: true, message: 'sent' });
     mockedVerifEmail.mockReset();

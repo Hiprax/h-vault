@@ -128,7 +128,7 @@ describe('decryptData with tampered IV', () => {
 
     // Tamper with the IV — flip bits in the first byte
     const tamperedIvBytes = new Uint8Array(crypto.base64ToArrayBuffer(iv));
-    tamperedIvBytes[0] ^= 0xff;
+    tamperedIvBytes[0]! ^= 0xff;
     const tamperedIv = crypto.arrayBufferToBase64(tamperedIvBytes.buffer as ArrayBuffer);
 
     // Decryption should fail with tampered IV
@@ -154,7 +154,7 @@ describe('decryptData with tampered IV', () => {
 
     // Flip just one bit (least significant bit of the last byte)
     const ivBytes = new Uint8Array(crypto.base64ToArrayBuffer(iv));
-    ivBytes[ivBytes.length - 1] ^= 0x01;
+    ivBytes[ivBytes.length - 1]! ^= 0x01;
     const tamperedIv = crypto.arrayBufferToBase64(ivBytes.buffer as ArrayBuffer);
 
     await expect(crypto.decryptData(encrypted, tamperedIv, tag, vaultKey)).rejects.toThrow();
@@ -178,7 +178,7 @@ describe('decryptData with tampered auth tag', () => {
     const { encrypted, iv, tag } = await crypto.encryptData(plaintext, vaultKey);
 
     const tagBytes = new Uint8Array(crypto.base64ToArrayBuffer(tag));
-    tagBytes[0] ^= 0xff;
+    tagBytes[0]! ^= 0xff;
     const tamperedTag = crypto.arrayBufferToBase64(tagBytes.buffer as ArrayBuffer);
 
     await expect(crypto.decryptData(encrypted, iv, tamperedTag, vaultKey)).rejects.toThrow();
@@ -214,7 +214,7 @@ describe('decryptData with tampered ciphertext', () => {
     const { encrypted, iv, tag } = await crypto.encryptData(plaintext, vaultKey);
 
     const ciphertextBytes = new Uint8Array(crypto.base64ToArrayBuffer(encrypted));
-    ciphertextBytes[0] ^= 0xff;
+    ciphertextBytes[0]! ^= 0xff;
     const tamperedCiphertext = crypto.arrayBufferToBase64(ciphertextBytes.buffer as ArrayBuffer);
 
     await expect(crypto.decryptData(tamperedCiphertext, iv, tag, vaultKey)).rejects.toThrow();

@@ -1,9 +1,22 @@
 import {
+  MAX_ADDRESS_CITY_LENGTH,
+  MAX_ADDRESS_COUNTRY_LENGTH,
+  MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
+  MAX_ADDRESS_STATE_LENGTH,
+  MAX_ADDRESS_STREET_LENGTH,
+  MAX_ADDRESS_ZIP_LENGTH,
+  MAX_CUSTOM_FIELDS_PER_ITEM,
+  MAX_CUSTOM_FIELD_NAME_LENGTH,
   MAX_LOGIN_BACKUP_CODES,
   MAX_LOGIN_BACKUP_CODE_LENGTH,
+  MAX_LOGIN_PASSWORD_LENGTH,
+  MAX_LOGIN_TOTP_LENGTH,
+  MAX_LOGIN_USERNAME_LENGTH,
   MAX_NOTE_CONTENT_LENGTH,
   MAX_TAG_LENGTH,
   MAX_TAGS_PER_ITEM,
+  MAX_URIS_PER_ITEM,
+  MAX_URI_LENGTH,
   normalizeUri,
 } from '@hvault/shared';
 import type { CustomFieldType, ItemType } from '@hvault/shared';
@@ -16,33 +29,21 @@ import { toUriEntry, hostFromUrl } from './uri';
  * conservative plaintext bound keeps the ciphertext well under that.
  */
 const MAX_IMPORT_NAME_LENGTH = 255;
-/** Vault URI-list cap mirrors the shared loginDataSchema (`uris` max 100). */
-const MAX_URIS_PER_ITEM = 100;
 
-/**
- * Per-field plaintext ceilings, mirroring the shared decrypted-data schemas
- * (`packages/shared/src/schemas/vault.ts`). A source export can carry a value
- * longer than the vault permits; if it reaches encryption unclamped the item
- * fails `vaultItemDataSchemas` and is discarded WHOLESALE — password included —
- * at the validation step. Clamp to these bounds instead and preserve the
- * overflow in the item's notes, so a single long field can never sink the item.
- * A `password` is the one exception: it is clamped but NEVER copied into notes,
- * and a login's `backupCodes` join it there for the same reason (see
- * {@link clampBackupCodes}).
- *
- * The literals below are literals only because the schema fields they mirror are;
- * `backupCodes` has NAMED bounds, so `clampBackupCodes` imports
- * `MAX_LOGIN_BACKUP_CODES`/`MAX_LOGIN_BACKUP_CODE_LENGTH` from the shared package
- * rather than re-stating them here, which is strictly better and the direction to
- * move the rest in.
- */
-const MAX_USERNAME_LENGTH = 500; // loginDataSchema.username
-const MAX_PASSWORD_LENGTH = 10_000; // loginDataSchema.password
-const MAX_TOTP_LENGTH = 500; // loginDataSchema.totp
-const MAX_URI_LENGTH = 2048; // uriEntrySchema.uri (INPUT cap, measured pre-transform)
-const MAX_CUSTOM_FIELD_NAME_LENGTH = 500; // customFieldSchema.name
-const MAX_CUSTOM_FIELDS_PER_ITEM = 100; // *DataSchema.customFields array cap
-// customFieldSchema.value and every `notes`/`content` field cap at
+// Per-field plaintext ceilings: every one is now the SHARED constant the stored
+// schema itself uses (imported above), not a literal restated here. That closes
+// the drift this file's own comment used to flag as "the direction to move the
+// rest in" — `backupCodes` was the only field already on named bounds.
+//
+// The bound matters because a source export can carry a value longer than the
+// vault permits; if it reaches encryption unclamped the item fails
+// `vaultItemDataSchemas` and is discarded WHOLESALE — password included — at the
+// validation step. Clamp to these bounds instead and preserve the overflow in the
+// item's notes, so a single long field can never sink the item. A `password` is
+// the one exception: it is clamped but NEVER copied into notes, and a login's
+// `backupCodes` join it there for the same reason (see `clampBackupCodes`).
+//
+// `customFieldSchema.value` and every `notes`/`content` field cap at
 // MAX_NOTE_CONTENT_LENGTH.
 
 const DEFAULT_NAMES: Record<ItemType, string> = {
@@ -230,6 +231,96 @@ export function clampBackupCodes(raw: readonly (string | undefined | null)[]): {
   return { codes, overflow };
 }
 
+/** A postal address as the import pipeline shapes it, before schema validation. */
+export interface ImportedAddress {
+  street: string;
+  street2: string;
+  city: string;
+  state: string;
+  zip: string;
+  country: string;
+  /**
+   * Identity addresses only. The shared base `addressSchema` strips this from a
+   * card's billing address, so a value here on a card is dropped by the schema
+   * rather than branched on in this module.
+   */
+  deliveryNotes?: string;
+}
+
+/**
+ * The address fields and the shared bound each must satisfy, in postal order.
+ *
+ * A single table rather than one `if` per field: six independent branches would
+ * eat most of the client's remaining branch-coverage headroom to say one thing
+ * six times.
+ */
+const ADDRESS_FIELD_BOUNDS: readonly (readonly [keyof ImportedAddress, number, string])[] = [
+  ['street', MAX_ADDRESS_STREET_LENGTH, 'Street address'],
+  ['street2', MAX_ADDRESS_STREET_LENGTH, 'Street address line 2'],
+  ['city', MAX_ADDRESS_CITY_LENGTH, 'City'],
+  ['state', MAX_ADDRESS_STATE_LENGTH, 'State'],
+  ['zip', MAX_ADDRESS_ZIP_LENGTH, 'ZIP'],
+  ['country', MAX_ADDRESS_COUNTRY_LENGTH, 'Country'],
+  ['deliveryNotes', MAX_ADDRESS_DELIVERY_NOTES_LENGTH, 'Delivery notes'],
+];
+
+/**
+ * Clamp an imported postal address to the bounds the shared address schema accepts
+ * on read-back, returning any truncated tail as overflow lines for the caller to
+ * preserve in the item's notes.
+ *
+ * Without this an over-long source line reaches encryption unclamped, fails
+ * `vaultItemDataSchemas` and discards the WHOLE identity or card at the validation
+ * step. Bitwarden's `address1`/`address2`/`address3`, `city`, `postalCode` and
+ * `country` are all individually unbounded in the source file, and a 21-character
+ * postal code is enough to exceed the vault's ZIP bound on its own.
+ *
+ * Overflow IS folded into notes, unlike a password or a recovery code. Nothing in a
+ * postal address is an authenticator, and, the decisive half, cards and
+ * identities are omitted as whole ITEMS from both CSV exports, so their notes can
+ * never reach the Chrome CSV `note` column that makes folding a leak for a login.
+ *
+ * Every base field is emitted, empty ones as `''`, which is exactly what the shared
+ * schema's `.default('')` produces: an absent key and `''` parse identically, so
+ * filling them in cannot change an item's import content hash. `deliveryNotes` is
+ * emitted only when the caller supplied it, so a card's billing address never grows
+ * the key.
+ *
+ * Exported so every arm is unit-tested directly, including the `deliveryNotes` arm
+ * that no current source format can reach.
+ */
+export function clampAddress(raw: Partial<ImportedAddress>): {
+  address: ImportedAddress;
+  overflow: string[];
+} {
+  const overflow: string[] = [];
+  const address: ImportedAddress = {
+    street: '',
+    street2: '',
+    city: '',
+    state: '',
+    zip: '',
+    country: '',
+  };
+
+  for (const [field, max, label] of ADDRESS_FIELD_BOUNDS) {
+    const source = raw[field];
+    // `deliveryNotes` is the only optional entry; skipping an absent one is what
+    // keeps it off a card's billing address.
+    if (source === undefined) continue;
+    const { value, overflow: tail } = clampWithOverflow(source, max);
+    // "<label> truncated", not "<label> was truncated": these labels are field
+    // names, and two of them ("Delivery notes", "Street address line 2") are not
+    // singular, so the copular form produced "Delivery notes was truncated".
+    // Dropping the verb reads correctly for every label without having to bend
+    // the labels themselves, which are also the user-facing field names.
+    if (tail) overflow.push(`${label} truncated; remaining value: ${tail}`);
+    address[field] = value;
+  }
+
+  return { address, overflow };
+}
+
 /**
  * Assemble the final notes for an item from its base notes plus any preserved
  * overflow, clamping the result to {@link MAX_NOTE_CONTENT_LENGTH} LAST — notes
@@ -294,12 +385,12 @@ export function buildLogin(input: LoginInput): ParsedImportItem {
   const rawUsername = input.username ?? '';
   const { value: username, overflow: usernameOverflow } = clampWithOverflow(
     rawUsername,
-    MAX_USERNAME_LENGTH,
+    MAX_LOGIN_USERNAME_LENGTH,
   );
   if (usernameOverflow) overflow.push(`Full username: ${rawUsername}`);
 
   // A password is clamped to the schema bound but is NEVER folded into notes.
-  const password = (input.password ?? '').slice(0, MAX_PASSWORD_LENGTH);
+  const password = (input.password ?? '').slice(0, MAX_LOGIN_PASSWORD_LENGTH);
 
   const { fields: customFields, overflow: fieldOverflow } = clampCustomFields(
     input.customFields ?? [],
@@ -310,7 +401,7 @@ export function buildLogin(input: LoginInput): ParsedImportItem {
   overflow.push(...codeOverflow);
 
   const data: Record<string, unknown> = { username, password, uris };
-  const totp = (input.totp ?? '').trim().slice(0, MAX_TOTP_LENGTH);
+  const totp = (input.totp ?? '').trim().slice(0, MAX_LOGIN_TOTP_LENGTH);
   if (totp) data.totp = totp;
   if (backupCodes.length > 0) data.backupCodes = backupCodes;
   if (customFields.length > 0) data.customFields = customFields;
@@ -427,12 +518,22 @@ export function makeItem(
   };
 }
 
+/** The two keys a pre-shaped card or identity can carry a postal address under. */
+const ADDRESS_KEYS = ['address', 'billingAddress'] as const;
+
 /**
- * Defensively clamp the `notes` and `customFields` of a pre-shaped data object
- * (card / identity) to the shared schema bounds. Custom-field overflow is folded
- * into `notes`; `notes` is clamped last. Scalar, structured columns (card number,
- * identity name, …) are left to the parsers, which read them from bounded source
- * fields.
+ * Defensively clamp the `notes`, `customFields` and postal address of a pre-shaped
+ * data object (card / identity) to the shared schema bounds. Every overflow is
+ * folded into `notes`, which is clamped LAST because it is the sink.
+ *
+ * The address is clamped HERE rather than in each parser so there is one choke
+ * point: every card and identity reaches the vault through `makeItem`, so a parser
+ * added later is bounded without having to opt in. Both address keys are handled
+ * even though no importer currently builds a card billing address (Bitwarden cards
+ * carry no address field, and every other parser emits logins only).
+ *
+ * Other scalar columns (card number, identity name, …) are still left to the
+ * parsers, which read them from bounded source fields.
  */
 function clampNotesAndFields(data: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...data };
@@ -443,6 +544,14 @@ function clampNotesAndFields(data: Record<string, unknown>): Record<string, unkn
     overflow.push(...fieldOverflow);
     if (fields.length > 0) out.customFields = fields;
     else delete out.customFields;
+  }
+
+  for (const key of ADDRESS_KEYS) {
+    const value = out[key];
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue;
+    const { address, overflow: addressOverflow } = clampAddress(value);
+    overflow.push(...addressOverflow);
+    out[key] = address;
   }
 
   const baseNotes = typeof out.notes === 'string' ? out.notes : '';

@@ -1,5 +1,5 @@
 import type net from 'node:net';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import {
   createGracefulShutdown,
   type GracefulShutdownDeps,
@@ -27,13 +27,26 @@ function makeSocket(): net.Socket {
   return { destroy: vi.fn() } as unknown as net.Socket;
 }
 
+/** The two async close hooks are asserted on, so the harness keeps them mocks. */
+type CloseMock = Mock<() => Promise<void>>;
+
+/** Overrides mirror the deps, except the close hooks which must stay mocks. */
+type HarnessOverrides = Omit<
+  Partial<GracefulShutdownDeps>,
+  'closeRateLimitStore' | 'closeDatabaseConnection'
+> & {
+  closeRateLimitStore?: CloseMock;
+  closeDatabaseConnection?: CloseMock;
+  callServerCloseCallback?: boolean;
+};
+
 interface Harness {
   shutdown: (signal: string) => void;
   logger: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> };
   serverClose: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
-  closeRateLimitStore: ReturnType<typeof vi.fn>;
-  closeDatabaseConnection: ReturnType<typeof vi.fn>;
+  closeRateLimitStore: CloseMock;
+  closeDatabaseConnection: CloseMock;
   exit: ReturnType<typeof vi.fn>;
   activeConnections: Set<net.Socket>;
   /** Invoke the callback passed to `server.close`, if it was captured. */
@@ -41,15 +54,14 @@ interface Harness {
   callServerCloseCallback: boolean;
 }
 
-function buildHarness(
-  overrides: Partial<GracefulShutdownDeps> & { callServerCloseCallback?: boolean } = {},
-): Harness {
+function buildHarness(overrides: HarnessOverrides = {}): Harness {
   const logger = { info: vi.fn(), warn: vi.fn() };
   const stop = vi.fn();
   const exit = vi.fn();
-  const closeRateLimitStore = overrides.closeRateLimitStore ?? vi.fn().mockResolvedValue(undefined);
-  const closeDatabaseConnection =
-    overrides.closeDatabaseConnection ?? vi.fn().mockResolvedValue(undefined);
+  const closeRateLimitStore: CloseMock =
+    overrides.closeRateLimitStore ?? vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+  const closeDatabaseConnection: CloseMock =
+    overrides.closeDatabaseConnection ?? vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   const activeConnections = overrides.activeConnections ?? new Set<net.Socket>();
 
   const callServerCloseCallback = overrides.callServerCloseCallback ?? true;
@@ -203,7 +215,9 @@ describe('createGracefulShutdown (T11)', () => {
 
   it('exits(1) when a step in the shutdown chain rejects', async () => {
     const h = buildHarness({
-      closeDatabaseConnection: vi.fn().mockRejectedValue(new Error('db close failed')),
+      closeDatabaseConnection: vi
+        .fn<() => Promise<void>>()
+        .mockRejectedValue(new Error('db close failed')),
     });
 
     h.shutdown('SIGTERM');
@@ -219,7 +233,9 @@ describe('createGracefulShutdown (T11)', () => {
   it('handles a non-Error rejection in the shutdown chain', async () => {
     const h = buildHarness({
       // Reject with a non-Error value to exercise the `Unknown error` fallback.
-      closeRateLimitStore: vi.fn().mockRejectedValue('store closed unexpectedly'),
+      closeRateLimitStore: vi
+        .fn<() => Promise<void>>()
+        .mockRejectedValue('store closed unexpectedly'),
     });
 
     h.shutdown('SIGTERM');

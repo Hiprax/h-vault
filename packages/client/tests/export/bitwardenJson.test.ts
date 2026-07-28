@@ -2,7 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { parseImportData } from '../../src/services/import';
 import type { ParsedImportItem } from '../../src/services/import';
 import { toBitwardenJson } from '../../src/services/export/formats/bitwardenJson';
-import { BACKUP_CODES_FIELD_NAME } from '../../src/services/export/portableItem';
+import {
+  BACKUP_CODES_FIELD_NAME,
+  DELIVERY_NOTES_FIELD_NAME,
+} from '../../src/services/export/portableItem';
 import type { PortableItem } from '../../src/services/export/portableItem';
 
 /**
@@ -72,7 +75,15 @@ function identity(over: Partial<PortableItem> = {}): PortableItem {
       lastName: 'Quinn',
       email: 'alice@example.com',
       phone: '+15551234567',
-      address: { street: '1 Main St', city: 'Town', state: 'CA', zip: '90210', country: 'US' },
+      address: {
+        street: '1 Main St',
+        street2: 'Flat 2',
+        city: 'Town',
+        state: 'CA',
+        zip: '90210',
+        country: 'US',
+        deliveryNotes: 'Ring twice',
+      },
       company: 'Acme',
       ssn: '000-00-0000',
       passport: 'X1234567',
@@ -139,6 +150,10 @@ describe('toBitwardenJson — document shape', () => {
     const doc = JSON.parse(content) as { items: { identity: Record<string, unknown> }[] };
     const emitted = doc.items[0]?.identity ?? {};
     expect(emitted.address1).toBe('1 Main St');
+    // `address2` is the field Bitwarden actually reads for a second line. Emitting the
+    // right KEY is the whole point: a plausible-looking wrong one produces an identity
+    // with a silently empty second line.
+    expect(emitted.address2).toBe('Flat 2');
     expect(emitted.postalCode).toBe('90210');
     expect(emitted.passportNumber).toBe('X1234567');
     for (const wrong of ['address', 'zip', 'passport']) {
@@ -216,8 +231,17 @@ describe('toBitwardenJson — per-field round-trip', () => {
     const id = byType(items, 'identity');
     expect(id.data.firstName).toBe('Alice');
     expect(id.data.lastName).toBe('Quinn');
-    const addr = id.data.address as { street: string; zip: string; country: string };
+    const addr = id.data.address as {
+      street: string;
+      street2: string;
+      zip: string;
+      country: string;
+    };
     expect(addr.street).toBe('1 Main St');
+    // The round trip that proves the emitted key and the read key agree: H-Vault writes
+    // street2 to `address2`, and the importer must map `address2` back to street2 rather
+    // than folding it into the first line as it used to.
+    expect(addr.street2).toBe('Flat 2');
     expect(addr.zip).toBe('90210');
     expect(addr.country).toBe('US');
     expect(id.data.passport).toBe('X1234567');
@@ -287,6 +311,7 @@ describe('toBitwardenJson — optional-field edges', () => {
     const doc = JSON.parse(content) as { items: { identity: Record<string, unknown> }[] };
     const emitted = doc.items[0]?.identity ?? {};
     expect(emitted.address1).toBeNull();
+    expect(emitted.address2).toBeNull();
     expect(emitted.postalCode).toBeNull();
     expect(emitted.company).toBeNull();
 
@@ -304,6 +329,7 @@ describe('toBitwardenJson — optional-field edges', () => {
         cvv: '123',
         billingAddress: {
           street: '1 Main',
+          street2: '',
           city: 'Town',
           state: 'CA',
           zip: '90210',
@@ -316,6 +342,126 @@ describe('toBitwardenJson — optional-field edges', () => {
     const doc = JSON.parse(content) as { items: { notes: string }[] };
     expect(doc.items[0]?.notes).toContain('existing note');
     expect(doc.items[0]?.notes).toContain('Billing address: 1 Main, Town, CA, 90210, US');
+  });
+
+  it("includes a card's second street line in the folded billing line, in postal order", () => {
+    const item = card({
+      card: {
+        cardholderName: 'A',
+        number: '4111111111111111',
+        expMonth: '12',
+        expYear: '2030',
+        cvv: '123',
+        billingAddress: {
+          street: '1 Main',
+          street2: 'Apt 4B',
+          city: 'Town',
+          state: 'CA',
+          zip: '90210',
+          country: 'US',
+        },
+      },
+      notes: 'existing note',
+    });
+    const { content } = toBitwardenJson([item]);
+    const doc = JSON.parse(content) as { items: { notes: string }[] };
+    // ORDER matters, not just presence: the line is meant to read as an address, so the
+    // second street line sits between the first line and the city.
+    expect(doc.items[0]?.notes).toBe(
+      'existing note\n\nBilling address: 1 Main, Apt 4B, Town, CA, 90210, US',
+    );
+  });
+
+  it("emits an identity's delivery notes as a plain-TEXT custom field", () => {
+    // Bitwarden has no delivery-instructions field on any item type. A custom field
+    // keeps the value structured and labelled rather than dissolving it into prose,
+    // and `text` (0) rather than `hidden` (1) because courier instructions are not a
+    // credential and masking them would only make them harder to find.
+    const { content } = toBitwardenJson([identity()]);
+    const doc = JSON.parse(content) as { items: { fields?: unknown[] }[] };
+    expect(doc.items[0]?.fields).toEqual([
+      { name: DELIVERY_NOTES_FIELD_NAME, value: 'Ring twice', type: 0 },
+    ]);
+  });
+
+  it('emits no fields array for an identity whose delivery notes are empty', () => {
+    const item = identity({
+      identity: {
+        firstName: 'A',
+        lastName: 'B',
+        address: {
+          street: '1 Main St',
+          street2: '',
+          city: '',
+          state: '',
+          zip: '',
+          country: '',
+          deliveryNotes: '',
+        },
+      },
+    });
+    const { content } = toBitwardenJson([item]);
+    const doc = JSON.parse(content) as { items: { fields?: unknown[] }[] };
+    expect(doc.items[0]?.fields).toBeUndefined();
+  });
+
+  it('emits no delivery-notes field for an identity with no address at all', () => {
+    const item = identity({ identity: { firstName: 'No', lastName: 'Address' } });
+    const { content } = toBitwardenJson([item]);
+    const doc = JSON.parse(content) as { items: { fields?: unknown[] }[] };
+    expect(doc.items[0]?.fields).toBeUndefined();
+  });
+
+  it('emits no delivery-notes field for an identity record with no identity payload', () => {
+    // Defensive arm of the optional chain: `toPortableItems` always populates the
+    // sub-object matching `type`, so this shape can only arrive from untyped input.
+    const { content } = toBitwardenJson([{ ...identity(), identity: undefined }]);
+    const doc = JSON.parse(content) as { items: { fields?: unknown[] }[] };
+    expect(doc.items[0]?.fields).toBeUndefined();
+  });
+
+  it('never emits a delivery-notes field on a non-identity item', () => {
+    const { content } = toBitwardenJson([card(), login()]);
+    const doc = JSON.parse(content) as { items: { fields?: { name: string }[] }[] };
+    for (const emitted of doc.items) {
+      expect(emitted.fields?.some((f) => f.name === DELIVERY_NOTES_FIELD_NAME) ?? false).toBe(
+        false,
+      );
+    }
+  });
+
+  it("places the delivery notes ahead of the identity's own custom fields", () => {
+    const item = identity({ customFields: [{ name: 'Nickname', value: 'Al', type: 'text' }] });
+    const { content } = toBitwardenJson([item]);
+    const doc = JSON.parse(content) as { items: { fields: { name: string }[] }[] };
+    expect(doc.items[0]?.fields.map((f) => f.name)).toEqual([
+      DELIVERY_NOTES_FIELD_NAME,
+      'Nickname',
+    ]);
+  });
+
+  it('re-imports the delivery notes back into the address, not as a custom field', () => {
+    // A LOSSLESS round trip, and the name match here is deliberate, unlike a login's
+    // recovery codes. The no-hoist rule for codes exists because a wrong hoist would
+    // run free text through a strict code parser; there is no parser here and the
+    // destination is itself a free-text field. What makes hoisting necessary rather
+    // than merely nice: `IdentityDetail` renders no custom fields and the identity
+    // form does not carry them, so a value left in `customFields` would be invisible
+    // in the app and destroyed by the next edit of that identity.
+    const items = roundTrip([identity()]);
+    const id = byType(items, 'identity');
+    expect((id.data.address as Record<string, unknown>).deliveryNotes).toBe('Ring twice');
+    // And it lands in exactly ONE place, not duplicated into a custom field.
+    expect(id.data.customFields).toBeUndefined();
+  });
+
+  it("keeps an identity's own custom fields while hoisting only the delivery notes", () => {
+    const items = roundTrip([
+      identity({ customFields: [{ name: 'Nickname', value: 'Al', type: 'text' }] }),
+    ]);
+    const id = byType(items, 'identity');
+    expect((id.data.address as Record<string, unknown>).deliveryNotes).toBe('Ring twice');
+    expect(id.data.customFields).toEqual([{ name: 'Nickname', value: 'Al', type: 'text' }]);
   });
 
   it('deduplicates a shared folder path to a single Bitwarden folder', () => {

@@ -21,9 +21,7 @@ import {
   getCsrf as getCsrfBase,
 } from './helpers.js';
 
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -63,10 +61,10 @@ async function create2faUser(rawCodes: string[]) {
 }
 
 describe('2FA Backup Code Consumption', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   // ── Single-Use Consumption ────────────────────────────────────────────

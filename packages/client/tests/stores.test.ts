@@ -534,7 +534,7 @@ describe('authStore', () => {
       useAuthStore.setState({
         user: { userId: 'u1', email: 'test@example.com' },
         isAuthenticated: true,
-        vaultKey: new ArrayBuffer(32),
+        vaultKey: {} as CryptoKey,
         mek: {} as CryptoKey,
       });
 
@@ -668,8 +668,8 @@ describe('authStore', () => {
 
       // State should still have the token when logoutApi was called
       // so the Axios interceptor can attach the Bearer header
-      expect(stateWhenApiCalled.accessToken).toBe('some-token');
-      expect(stateWhenApiCalled.isAuthenticated).toBe(true);
+      expect(stateWhenApiCalled!.accessToken).toBe('some-token');
+      expect(stateWhenApiCalled!.isAuthenticated).toBe(true);
 
       // After logout completes, state should be fully cleared
       const finalState = useAuthStore.getState();
@@ -705,7 +705,7 @@ describe('vaultStore', () => {
   function makeMockItem(overrides: Partial<DecryptedVaultItem> = {}): DecryptedVaultItem {
     return {
       id: 'item-1',
-      itemType: 'password',
+      itemType: 'login',
       tags: [],
       favorite: false,
       name: 'Test Item',
@@ -789,15 +789,13 @@ describe('vaultStore', () => {
 
   describe('setSelectedType', () => {
     it('should set selectedType to a type value', () => {
-      useVaultStore.getState().setSelectedType('password');
+      useVaultStore.getState().setSelectedType('login');
 
-      expect(useVaultStore.getState().selectedType).toBe('password');
+      expect(useVaultStore.getState().selectedType).toBe('login');
     });
 
     it('should set selectedType to null', () => {
-      useVaultStore.setState({
-        selectedType: 'password' as unknown as DecryptedVaultItem['itemType'],
-      });
+      useVaultStore.setState({ selectedType: 'login' });
 
       useVaultStore.getState().setSelectedType(null);
 

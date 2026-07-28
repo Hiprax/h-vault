@@ -62,10 +62,10 @@ async function createFolderViaApi(
 
 describe('Backup restore keep_both folder parentId remapping', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -355,10 +355,10 @@ describe('Non-transactional vault key rotation safety', () => {
 
 describe('Distributed backup trigger deduplication', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 

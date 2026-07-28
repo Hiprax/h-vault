@@ -712,8 +712,8 @@ describe('trashCleanup', () => {
     });
     expect(auditLogs).toHaveLength(2);
 
-    const user1Log = auditLogs.find((l) => l.userId.toString() === userId1.toString());
-    const user2Log = auditLogs.find((l) => l.userId.toString() === userId2.toString());
+    const user1Log = auditLogs.find((l) => l.userId?.toString() === userId1.toString());
+    const user2Log = auditLogs.find((l) => l.userId?.toString() === userId2.toString());
 
     expect(user1Log).toBeDefined();
     expect(user1Log!.metadata).toBeDefined();

@@ -38,7 +38,7 @@ import {
  *    a per-row skip) on both the folder and the item loop.
  */
 
-type Agent = request.SuperTest<request.Test>;
+type Agent = request.Agent;
 
 const BWK_SETUP = {
   encryptedBWK: 'test-encrypted-bwk-data',

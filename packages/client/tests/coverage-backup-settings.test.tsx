@@ -856,6 +856,46 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     expect(raw).not.toContain('backupEncryption');
   });
 
+  it('re-encrypts a restored row without altering one byte of its plaintext', async () => {
+    // The cross-key restore loop is the ONE restore path that touches the decrypted
+    // blob at all: it decrypts every row and re-encrypts it under this account's key.
+    // The assertion is on the EXACT argument handed to `encryptData`, so a future
+    // "helpful" reshape (re-parse, re-serialize, strip unknown keys) fails here rather
+    // than silently dropping whichever field that build does not know about. The
+    // payload names the two new address fields to make the intent concrete.
+    const PLAINTEXT = JSON.stringify({
+      firstName: 'Ada',
+      address: {
+        street: '1 Main St',
+        street2: 'Flat 2',
+        city: 'London',
+        state: '',
+        zip: 'E1',
+        country: 'UK',
+        deliveryNotes: 'Ring twice',
+      },
+    });
+    // The same arrangement as the cross-account case above, which is what actually
+    // puts the restore on its re-encrypting path.
+    vi.mocked(cryptoService.decryptVaultKey).mockRejectedValue(new Error('MEK mismatch'));
+    vi.mocked(cryptoService.vaultKeyEqualsRaw).mockResolvedValue(false);
+    vi.mocked(cryptoService.decryptData).mockResolvedValue(PLAINTEXT);
+
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      encryptedVaultKey: 'evk',
+      vaultKeyIv: 'vkiv',
+      vaultKeyTag: 'vktag',
+      backupEncryption: FILE_ENCRYPTION_META,
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(cryptoService.encryptData).toHaveBeenCalledWith(PLAINTEXT, expect.anything());
+  });
+
   it('warns when the backup carries no BWK-wrapped vault key to recover', async () => {
     vi.mocked(cryptoService.decryptVaultKey).mockRejectedValue(new Error('MEK mismatch'));
     const {

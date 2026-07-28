@@ -1,3 +1,4 @@
+import type { ReactElement } from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ErrorBoundary } from '../../src/components/layout/ErrorBoundary';
@@ -20,8 +21,12 @@ beforeEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** A component that throws on render, used to trigger the error boundary. */
-function ThrowingComponent({ message }: { message: string }) {
+/**
+ * A component that throws on render, used to trigger the error boundary. The
+ * explicit return type is required: an unannotated always-throwing function
+ * infers `never`, which is not a valid JSX component type.
+ */
+function ThrowingComponent({ message }: { message: string }): ReactElement {
   throw new Error(message);
 }
 

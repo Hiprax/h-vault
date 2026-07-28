@@ -25,9 +25,7 @@ import {
 } from './helpers.js';
 import type { TestUser } from './helpers.js';
 
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -59,17 +57,17 @@ async function seedUserData(userId: string) {
 
   // BackupLogs
   await BackupLog.create([
-    { userId, status: 'success', fileSize: 1024, itemCount: 5 },
-    { userId, status: 'failed', fileSize: 0, itemCount: 0, error: 'test error' },
+    { userId, status: 'success', fileSizeBytes: 1024, itemCount: 5 },
+    { userId, status: 'failed', fileSizeBytes: 0, itemCount: 0, errorMessage: 'test error' },
   ]);
 }
 
 describe('Account Deletion Cascade (API-level)', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -145,7 +143,12 @@ describe('Account Deletion Cascade (API-level)', () => {
     });
 
     it('should remove all BackupLogs for the deleted user', async () => {
-      await BackupLog.create({ userId: user.id, status: 'success', fileSize: 1024, itemCount: 5 });
+      await BackupLog.create({
+        userId: user.id,
+        status: 'success',
+        fileSizeBytes: 1024,
+        itemCount: 5,
+      });
       expect(await BackupLog.countDocuments({ userId: user.id })).toBeGreaterThan(0);
 
       const { csrfToken, csrfCookie } = await getCsrf(agent);

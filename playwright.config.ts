@@ -44,12 +44,17 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  webServer: process.env.E2E_BASE_URL
-    ? undefined
+  // An explicit `webServer: undefined` is not assignable under
+  // `exactOptionalPropertyTypes`, so drop the key entirely when the caller
+  // points the run at an already-running stack via `E2E_BASE_URL`.
+  ...(process.env.E2E_BASE_URL
+    ? {}
     : {
-        command: 'npx tsx e2e/start-server.ts',
-        url: `${CLIENT_ORIGIN}/api/v1/health`,
-        reuseExistingServer: !process.env.CI,
-        timeout: 180_000,
-      },
+        webServer: {
+          command: 'npx tsx e2e/start-server.ts',
+          url: `${CLIENT_ORIGIN}/api/v1/health`,
+          reuseExistingServer: !process.env.CI,
+          timeout: 180_000,
+        },
+      }),
 });

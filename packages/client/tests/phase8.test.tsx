@@ -69,6 +69,10 @@ vi.mock('../src/stores/vaultStore', () => ({
       updateItem: mockUpdateItem,
       updateItemMeta: mockUpdateItemMeta,
       folders: [{ id: 'folder-1', name: 'Work', sortOrder: 0, createdAt: '', updatedAt: '' }],
+      // The form reads `items` to offer identity addresses as a source for a
+      // card's billing address. Empty is the real store's initial value, so this
+      // models it rather than papering over a missing key.
+      items: [],
     };
     return selector(state);
   }),
@@ -240,6 +244,10 @@ const defaultFormProps = {
   onCancel: vi.fn(),
 };
 
+// `item` is an exact-optional prop, so the fixtures below must land on the item type
+// itself, never on the `| undefined` union that indexing the props gives back.
+type FormItem = NonNullable<Parameters<typeof VaultItemForm>[0]['item']>;
+
 function renderForm(overrides: Partial<Parameters<typeof VaultItemForm>[0]> = {}) {
   return render(<VaultItemForm {...defaultFormProps} {...overrides} />);
 }
@@ -277,7 +285,7 @@ describe('Phase 8.1: VaultItemForm boolean custom field', () => {
       _raw: {} as unknown,
     };
 
-    renderForm({ item: existingItem as unknown as Parameters<typeof VaultItemForm>[0]['item'] });
+    renderForm({ item: existingItem as unknown as FormItem });
 
     // A checkbox input should be rendered for the boolean custom field
     const checkboxes = screen.getAllByRole('checkbox');
@@ -307,7 +315,7 @@ describe('Phase 8.1: VaultItemForm boolean custom field', () => {
       _raw: {} as unknown,
     };
 
-    renderForm({ item: existingItem as unknown as Parameters<typeof VaultItemForm>[0]['item'] });
+    renderForm({ item: existingItem as unknown as FormItem });
 
     const checkbox = screen
       .getAllByRole('checkbox')

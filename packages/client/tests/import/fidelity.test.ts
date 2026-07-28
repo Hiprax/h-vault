@@ -1,8 +1,13 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll } from 'vitest';
-import { vaultItemDataSchemas } from '@hvault/shared';
+import { vaultItemDataSchemas, cardDataSchema, identityDataSchema } from '@hvault/shared';
 import { buildImportOperations } from '../../src/services/import';
-import { buildLogin, buildNote, makeItem } from '../../src/services/import/itemBuilders';
+import {
+  buildLogin,
+  buildNote,
+  clampAddress,
+  makeItem,
+} from '../../src/services/import/itemBuilders';
 
 /**
  * Phase 3 (fidelity-clamp): a single over-long field must be clamped to the
@@ -198,6 +203,143 @@ describe('import fidelity clamp — cards, identities and notes', () => {
     const item = buildNote({ name: 'Big', content: 'z'.repeat(60_000) });
     expect((item.data.content as string).length).toBe(50_000);
     assertRoundTrips('note', item.data);
+  });
+
+  it('clamps an over-long identity address instead of discarding the identity', async () => {
+    const item = makeItem('identity', 'Jane', {
+      firstName: 'Jane',
+      address: {
+        street: 'a'.repeat(700),
+        street2: 'b'.repeat(700),
+        city: 'c'.repeat(300),
+        state: 'd'.repeat(300),
+        zip: 'e'.repeat(40),
+        country: 'f'.repeat(200),
+      },
+    });
+    const address = item.data.address as Record<string, string>;
+    expect(address.street).toHaveLength(500);
+    expect(address.street2).toHaveLength(500);
+    expect(address.city).toHaveLength(200);
+    expect(address.state).toHaveLength(200);
+    expect(address.zip).toHaveLength(20);
+    expect(address.country).toHaveLength(100);
+    // Nothing is silently dropped: each trimmed tail is recoverable from the notes.
+    expect(String(item.data.notes)).toContain('Street address truncated');
+    expect(String(item.data.notes)).toContain('Street address line 2 truncated');
+    expect(String(item.data.notes)).toContain('ZIP truncated');
+    assertRoundTrips('identity', item.data);
+
+    // The point of the clamp: the item SURVIVES the real encrypt-and-validate step
+    // rather than being discarded wholesale (name, passport and all) at validation.
+    const { inserts, failedCount } = await buildImportOperations({
+      inserts: [item],
+      updates: [],
+      vaultKey,
+    });
+    expect(failedCount).toBe(0);
+    expect(inserts).toHaveLength(1);
+  });
+
+  it('clamps an over-long card billing address at the same choke point', () => {
+    // No importer builds a card billing address today (Bitwarden cards have no address
+    // field), but the clamp covers both keys so a parser added later is bounded without
+    // having to opt in.
+    const item = makeItem('card', 'Visa', {
+      cardholderName: 'Jane',
+      number: '4111111111111111',
+      billingAddress: { street: 'a'.repeat(700), zip: 'e'.repeat(40) },
+    });
+    const billing = item.data.billingAddress as Record<string, string>;
+    expect(billing.street).toHaveLength(500);
+    expect(billing.zip).toHaveLength(20);
+    // Absent fields are filled with '', matching the shared schema's own defaults.
+    expect(billing.street2).toBe('');
+    assertRoundTrips('card', item.data);
+  });
+
+  it('leaves a within-bounds address untouched and adds no notes', () => {
+    const item = makeItem('identity', 'Jane', {
+      firstName: 'Jane',
+      address: { street: '1 Main St', street2: 'Flat 2', city: 'London' },
+    });
+    expect(item.data.address).toEqual({
+      street: '1 Main St',
+      street2: 'Flat 2',
+      city: 'London',
+      state: '',
+      zip: '',
+      country: '',
+    });
+    expect(item.data.notes).toBeUndefined();
+    assertRoundTrips('identity', item.data);
+  });
+
+  it('leaves a non-object address value alone rather than reshaping it', () => {
+    // Defensive arm: a parser handing over a string or an array must not be silently
+    // rewritten into an empty address, which would look like real data.
+    const item = makeItem('identity', 'Jane', { firstName: 'Jane', address: 'nonsense' });
+    expect(item.data.address).toBe('nonsense');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// clampAddress, exercised directly.
+//
+// The `deliveryNotes` arm is unreachable through any parser (no source format has
+// such a column), which is exactly why the helper is exported: the alternative is
+// an untested arm that only wakes up the day a format gains one.
+// ---------------------------------------------------------------------------
+
+describe('clampAddress', () => {
+  it('fills every base field, defaulting the ones the caller omitted', () => {
+    const { address, overflow } = clampAddress({ street: '1 Main St' });
+    expect(address).toEqual({
+      street: '1 Main St',
+      street2: '',
+      city: '',
+      state: '',
+      zip: '',
+      country: '',
+    });
+    expect(overflow).toEqual([]);
+  });
+
+  it('reports the truncated tail so the caller can preserve it', () => {
+    const { address, overflow } = clampAddress({ street2: `${'x'.repeat(500)}TAIL` });
+    expect(address.street2).toHaveLength(500);
+    expect(overflow).toHaveLength(1);
+    expect(overflow[0]).toContain('Street address line 2 truncated');
+    expect(overflow[0]).toContain('TAIL');
+  });
+
+  it('produces an address the shared schemas accept for BOTH item types', () => {
+    // The whole contract in one assertion: whatever this returns must survive
+    // read-back, or the item it belongs to degrades to the undecodable notice.
+    const huge = 'z'.repeat(9_999);
+    const { address } = clampAddress({
+      street: huge,
+      street2: huge,
+      city: huge,
+      state: huge,
+      zip: huge,
+      country: huge,
+      deliveryNotes: huge,
+    });
+    expect(identityDataSchema.safeParse({ address }).success).toBe(true);
+    expect(cardDataSchema.safeParse({ billingAddress: address }).success).toBe(true);
+  });
+
+  it('clamps delivery notes when given them but never invents the key', () => {
+    const withNotes = clampAddress({ deliveryNotes: 'n'.repeat(1_200) });
+    expect(withNotes.address.deliveryNotes).toHaveLength(1_000);
+    // "Delivery notes truncated", not "... was truncated": the labels are field
+    // names and two of them are plural, so the copular form was ungrammatical.
+    expect(withNotes.overflow[0]).toContain('Delivery notes truncated');
+    expect(withNotes.overflow[0]).not.toContain('notes was truncated');
+
+    const without = clampAddress({ street: '1 Main St' });
+    expect(without.address).not.toHaveProperty('deliveryNotes');
   });
 });
 

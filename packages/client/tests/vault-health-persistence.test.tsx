@@ -129,7 +129,9 @@ function login(id: string, updatedAt: string, password = 'pw'): DecryptedVaultIt
     createdAt: updatedAt,
     updatedAt,
     data: { username: 'u', password },
-  } as DecryptedVaultItem;
+    // `_raw` is the untouched ciphertext envelope; nothing under test reads it,
+    // so the fixture deliberately omits it.
+  } as unknown as DecryptedVaultItem;
 }
 
 describe('formatLastChecked', () => {
@@ -237,7 +239,8 @@ function makeLogin(id: string, name: string, password: string): DecryptedVaultIt
     createdAt: now,
     updatedAt: now,
     data: { username: 'u', password },
-  } as DecryptedVaultItem;
+    // See `login` above: no `_raw` envelope in the fixture.
+  } as unknown as DecryptedVaultItem;
 }
 
 function setItems(items: DecryptedVaultItem[]): void {

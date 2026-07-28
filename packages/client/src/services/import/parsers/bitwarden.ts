@@ -1,4 +1,5 @@
 import { identityDataSchema } from '@hvault/shared';
+import { DELIVERY_NOTES_FIELD_NAME } from '../../export/portableItem';
 import { rowsToRecords, toLowerKeyed, pick } from '../csv';
 import { buildLogin, buildNote, makeItem, normalizeCustomFieldType } from '../itemBuilders';
 import type { ParsedImportItem } from '../types';
@@ -102,20 +103,56 @@ function parseBitwardenJson(text: string): ParsedImportItem[] {
       }
       case 4: {
         const id = (it.identity ?? {}) as Record<string, unknown>;
-        const street = [str(id.address1), str(id.address2), str(id.address3)]
-          .filter(Boolean)
-          .join(', ');
+        // Bitwarden's address1/address2/address3 are the WHATWG address-line1/2/3
+        // peers, and H-Vault now has two street lines of its own. Map line 1 to
+        // `street` and fold lines 2 and 3 into `street2` rather than joining all
+        // three into `street`: the export writes street→address1 and
+        // street2→address2, so the old single-field join could not round-trip a
+        // two-line address. A source `address3` (rare) is appended to line 2, where
+        // a "c/o" or building name belongs; the only cost is that a
+        // Bitwarden→H-Vault→Bitwarden trip normalizes lines 2 and 3 into one line 2.
+        //
+        // Bounds are applied downstream by makeItem → clampNotesAndFields →
+        // clampAddress, so no unbounded source line can sink the whole identity.
+        const street = str(id.address1);
+        const street2 = [str(id.address2), str(id.address3)].filter(Boolean).join(', ');
         const data: Record<string, unknown> = {
           firstName: str(id.firstName),
           lastName: str(id.lastName),
         };
-        if (street || str(id.city) || str(id.state) || str(id.postalCode) || str(id.country)) {
+        // Delivery notes are hoisted back out of the `fields` entry the export puts
+        // them in, and this IS a name match, deliberately unlike a login's recovery
+        // codes.
+        //
+        // The no-hoist rule for codes exists because a wrong hoist would run a user's
+        // own free-text field through a strict code parser and litter a
+        // security-critical list with junk. Neither half applies here: there is no
+        // parser, and the destination is itself a free-text field, so the worst a
+        // false positive can do is put a field literally named "Delivery Notes" into
+        // the delivery-notes field. It also puts the value where it BELONGS: a
+        // round-tripped delivery note read back into the address is the field the user
+        // typed it into, whereas one left in `customFields` would sit in a generic
+        // list. (The identity view and form do now render custom fields, so a
+        // non-hoisted value would at least be visible — but that is a reason the
+        // no-hoist rule for codes is safe, not a reason to stop hoisting these.)
+        const deliveryNotes = deliveryNotesFromFields(fields);
+        if (
+          street ||
+          street2 ||
+          deliveryNotes ||
+          str(id.city) ||
+          str(id.state) ||
+          str(id.postalCode) ||
+          str(id.country)
+        ) {
           data.address = {
             street,
+            street2,
             city: str(id.city),
             state: str(id.state),
             zip: str(id.postalCode),
             country: str(id.country),
+            ...(deliveryNotes ? { deliveryNotes } : {}),
           };
         }
         const company = str(id.company);
@@ -149,7 +186,9 @@ function parseBitwardenJson(text: string): ParsedImportItem[] {
         if (phone && identityFieldValid('phone', phone)) data.phone = phone;
         else if (phone) extraNote += `Phone: ${phone}\n`;
 
-        const cf = mapCustomFields(fields);
+        // The hoisted entry is excluded so the value lands in exactly one place
+        // instead of being duplicated into a custom field the identity UI cannot show.
+        const cf = mapCustomFields(fields.filter((f) => !isDeliveryNotesField(f)));
         if (cf.length > 0) data.customFields = cf;
         const combinedNotes = [notes, extraNote.trim()].filter(Boolean).join('\n\n');
         if (combinedNotes) data.notes = combinedNotes;
@@ -238,6 +277,22 @@ function parseBitwardenCsv(text: string): ParsedImportItem[] {
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : typeof v === 'number' ? String(v) : '';
+}
+
+/** True for the `fields` entry an identity's delivery notes travel in. */
+function isDeliveryNotesField(f: BwField): boolean {
+  return (f.name ?? '').trim().toLowerCase() === DELIVERY_NOTES_FIELD_NAME.toLowerCase();
+}
+
+/**
+ * The delivery-notes value carried in a `fields` entry, or `''`.
+ *
+ * Bitwarden has no delivery-instructions field, so the export promotes the value to
+ * a custom field; this reads it back so the round trip returns it to the address it
+ * came from instead of leaving it somewhere the identity UI cannot show.
+ */
+function deliveryNotesFromFields(fields: BwField[]): string {
+  return str(fields.find(isDeliveryNotesField)?.value).trim();
 }
 
 function mapCustomFields(

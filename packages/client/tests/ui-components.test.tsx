@@ -18,6 +18,17 @@ import { Badge } from '../src/components/ui/Badge';
 import { Spinner } from '../src/components/ui/Spinner';
 import { Button } from '../src/components/ui/Button';
 
+/**
+ * Reads the class list off an <svg> (the Spinner root). `getByRole` hands back
+ * an HTML-typed element, but on an SVG node `className` is an
+ * `SVGAnimatedString`, not a string — so go through `baseVal`, falling back to
+ * the raw attribute.
+ */
+function svgClassNames(el: Element): string {
+  const svg = el as SVGElement;
+  return svg.className.baseVal || svg.getAttribute('class') || '';
+}
+
 /* ========================================================================== */
 /*  1. Toast                                                                  */
 /* ========================================================================== */
@@ -471,14 +482,14 @@ describe('Spinner', () => {
   it('applies animate-spin class', () => {
     render(<Spinner />);
     const svg = screen.getByRole('status');
-    expect(svg.className.baseVal || svg.getAttribute('class')).toContain('animate-spin');
+    expect(svgClassNames(svg)).toContain('animate-spin');
   });
 
   describe('Size variants', () => {
     it('defaults to md size (h-6 w-6)', () => {
       render(<Spinner />);
       const svg = screen.getByRole('status');
-      const classes = svg.className.baseVal || svg.getAttribute('class') || '';
+      const classes = svgClassNames(svg);
       expect(classes).toContain('h-6');
       expect(classes).toContain('w-6');
     });
@@ -486,7 +497,7 @@ describe('Spinner', () => {
     it('renders sm size (h-4 w-4)', () => {
       render(<Spinner size="sm" />);
       const svg = screen.getByRole('status');
-      const classes = svg.className.baseVal || svg.getAttribute('class') || '';
+      const classes = svgClassNames(svg);
       expect(classes).toContain('h-4');
       expect(classes).toContain('w-4');
     });
@@ -494,7 +505,7 @@ describe('Spinner', () => {
     it('renders lg size (h-8 w-8)', () => {
       render(<Spinner size="lg" />);
       const svg = screen.getByRole('status');
-      const classes = svg.className.baseVal || svg.getAttribute('class') || '';
+      const classes = svgClassNames(svg);
       expect(classes).toContain('h-8');
       expect(classes).toContain('w-8');
     });
@@ -503,7 +514,7 @@ describe('Spinner', () => {
   it('merges custom className', () => {
     render(<Spinner className="text-red-500" />);
     const svg = screen.getByRole('status');
-    const classes = svg.className.baseVal || svg.getAttribute('class') || '';
+    const classes = svgClassNames(svg);
     expect(classes).toContain('text-red-500');
     expect(classes).toContain('animate-spin');
   });
@@ -719,7 +730,7 @@ describe('Button', () => {
       render(<Button loading>Load</Button>);
       const btn = screen.getByRole('button');
       const spinner = within(btn).getByRole('status');
-      const classes = spinner.className.baseVal || spinner.getAttribute('class') || '';
+      const classes = svgClassNames(spinner);
       expect(classes).toContain('h-4');
       expect(classes).toContain('w-4');
     });

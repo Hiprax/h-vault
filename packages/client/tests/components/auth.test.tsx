@@ -72,6 +72,17 @@ vi.mock('zxcvbn', () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
+type AuthState = ReturnType<typeof useAuthStore.getState>;
+
+/**
+ * Each test supplies only the slice of the store its component selects; the
+ * remaining `AuthState` members are never touched, so the cast is the shape
+ * of the mock rather than a claim about the real store.
+ */
+function authStateSlice(partial: Partial<AuthState>): AuthState {
+  return partial as AuthState;
+}
+
 function renderWithRouter(ui: React.ReactElement) {
   return render(<MemoryRouter>{ui}</MemoryRouter>);
 }
@@ -87,16 +98,14 @@ describe('LoginPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    vi.mocked(useAuthStore).mockImplementation(
-      (selector?: (state: Record<string, unknown>) => unknown) => {
-        const state = {
-          login: mockLogin,
-          verify2fa: mockVerify2fa,
-          twoFactorRequired: false,
-        };
-        return selector ? selector(state) : state;
-      },
-    );
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      const state = authStateSlice({
+        login: mockLogin,
+        verify2fa: mockVerify2fa,
+        twoFactorRequired: false,
+      });
+      return selector ? selector(state) : state;
+    });
 
     vi.mocked(useAuthStore.getState).mockReturnValue({
       twoFactorRequired: false,
@@ -357,16 +366,14 @@ describe('LoginPage', () => {
   // become unavailable inside nested describe/beforeEach blocks.
 
   function setup2FA() {
-    vi.mocked(useAuthStore).mockImplementation(
-      (selector?: (state: Record<string, unknown>) => unknown) => {
-        const state = {
-          login: mockLogin,
-          verify2fa: mockVerify2fa,
-          twoFactorRequired: true,
-        };
-        return selector ? selector(state) : state;
-      },
-    );
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      const state = authStateSlice({
+        login: mockLogin,
+        verify2fa: mockVerify2fa,
+        twoFactorRequired: true,
+      });
+      return selector ? selector(state) : state;
+    });
   }
 
   /** Fill all 6 OTP digit boxes by pasting `code` into the first box. */
@@ -513,14 +520,12 @@ describe('RegisterPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    vi.mocked(useAuthStore).mockImplementation(
-      (selector?: (state: Record<string, unknown>) => unknown) => {
-        const state = {
-          register: mockRegister,
-        };
-        return selector ? selector(state) : state;
-      },
-    );
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      const state = authStateSlice({
+        register: mockRegister,
+      });
+      return selector ? selector(state) : state;
+    });
   });
 
   it('renders the registration form with title and all fields', () => {
@@ -877,16 +882,14 @@ describe('UnlockScreen', () => {
     localStorage.removeItem('__hv_unlock_failed_attempts');
     localStorage.removeItem('__hv_unlock_lockout_until');
 
-    vi.mocked(useAuthStore).mockImplementation(
-      (selector?: (state: Record<string, unknown>) => unknown) => {
-        const state = {
-          user: { userId: 'user-1', email: 'vault@example.com' },
-          unlock: mockUnlock,
-          logout: mockLogout,
-        };
-        return selector ? selector(state) : state;
-      },
-    );
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      const state = authStateSlice({
+        user: { userId: 'user-1', email: 'vault@example.com' },
+        unlock: mockUnlock,
+        logout: mockLogout,
+      });
+      return selector ? selector(state) : state;
+    });
 
     vi.mocked(useAuthStore.getState).mockReturnValue({
       setAccessToken: mockSetAccessToken,
@@ -922,16 +925,14 @@ describe('UnlockScreen', () => {
   });
 
   it('shows fallback text when user has no email', () => {
-    vi.mocked(useAuthStore).mockImplementation(
-      (selector?: (state: Record<string, unknown>) => unknown) => {
-        const state = {
-          user: null,
-          unlock: mockUnlock,
-          logout: mockLogout,
-        };
-        return selector ? selector(state) : state;
-      },
-    );
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      const state = authStateSlice({
+        user: null,
+        unlock: mockUnlock,
+        logout: mockLogout,
+      });
+      return selector ? selector(state) : state;
+    });
 
     renderWithRouter(<UnlockScreen />);
 

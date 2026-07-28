@@ -201,7 +201,14 @@ import {
 // Typed handles on the mocks
 // ---------------------------------------------------------------------------
 
-const cs = cryptoService as unknown as Record<string, Mock>;
+/**
+ * The whole module is `vi.mock`ed, so every member is a Mock. Mapping over the
+ * real key set (rather than a `Record<string, Mock>` index signature) keeps a
+ * typo in a stub name a compile error instead of `possibly undefined`.
+ */
+type MockedCryptoService = { [K in keyof typeof cryptoService]: Mock };
+
+const cs = cryptoService as unknown as MockedCryptoService;
 const mockListItems = listItemsApi as unknown as Mock;
 const mockListTrash = listTrashApi as unknown as Mock;
 const mockListFolders = listFoldersApi as unknown as Mock;
@@ -1046,7 +1053,9 @@ describe('SettingsPage — error paths and branches', () => {
 
     await waitFor(() => screen.getByText('Map CSV Columns'));
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Import', exact: true }));
+      // A string `name` is matched against the full accessible name, so this
+      // still resolves the "Import" submit button and never "Import Vault".
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     });
 
     await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());

@@ -140,8 +140,18 @@ interface VaultState {
     data: Record<string, unknown>,
     options?: { folderId?: string; tags?: string[]; favorite?: boolean },
   ) => Promise<void>;
+  /**
+   * Re-encrypt and replace an item's whole decrypted payload.
+   *
+   * `itemType` is passed EXPLICITLY, mirroring {@link createItem}. It used to be
+   * inferred from `get().items.find(...)`, which meant the pre-flight schema check
+   * silently did nothing whenever the row was not in `items` — and `items` is not a
+   * reliable oracle: a TRASHED item lives in `trashItems`. Every caller knows the
+   * type, so nothing has to guess.
+   */
   updateItem: (
     id: string,
+    itemType: ItemType,
     name: string,
     data: Record<string, unknown>,
     options?: {
@@ -156,6 +166,15 @@ interface VaultState {
    * favorite toggle or a folder move through {@link updateItem} is unsafe.
    */
   updateItemMeta: (id: string, meta: ItemMetaUpdate) => Promise<void>;
+  /**
+   * NAME-ONLY update: re-encrypts the name (and its `searchHash`) and sends nothing
+   * else. The item's `encryptedData`/`dataIv`/`dataTag` are not in the payload at
+   * all, so its ciphertext is left byte-identical.
+   *
+   * This is the one write an UNDECODABLE item can safely take. See the action's
+   * implementation for why {@link updateItem} cannot serve that case.
+   */
+  renameItem: (id: string, name: string) => Promise<void>;
   deleteItem: (id: string) => Promise<void>;
   permanentDeleteItem: (id: string) => Promise<void>;
   emptyTrash: () => Promise<void>;
@@ -383,14 +402,87 @@ export class EncryptedFieldTooLargeError extends Error {
 }
 
 /**
+ * Thrown when a decrypted `data` payload does not satisfy the shared schema for
+ * its item type. Surfaced by the form the same way
+ * {@link EncryptedFieldTooLargeError} is.
+ */
+export class VaultItemDataInvalidError extends Error {
+  readonly itemType: ItemType;
+  /** The first few Zod issues, as `path: message` strings. Never carries a VALUE. */
+  readonly issues: string[];
+  /**
+   * EVERY issue, structured, so a caller can put each one on the control that owns
+   * it. `path` is the STORED-schema path (`address.city`, `customFields.0.value`),
+   * which is not always the form's field name — mapping it is the form's job, and
+   * `VaultItemForm.formFieldForStoredPath` does it explicitly.
+   *
+   * Carries paths and Zod messages only, never a field VALUE: the payload is full
+   * of secrets and these strings reach the DOM.
+   */
+  readonly fieldIssues: readonly { path: string; message: string }[];
+  constructor(
+    itemType: ItemType,
+    issues: string[],
+    fieldIssues: readonly { path: string; message: string }[] = [],
+  ) {
+    // The FIELD NAMES lead. This message is the FALLBACK channel: the form maps
+    // these issues onto their controls when it can, and only shows the message in a
+    // toast when a path has no control that would render it.
+    //
+    // Kept short deliberately. `getApiErrorMessage` truncates at
+    // MAX_ERROR_MESSAGE_LENGTH (200), so a long tail would be cut mid-sentence —
+    // which is why the field list comes FIRST and the advice, being the expendable
+    // part, comes last.
+    super(`Cannot save this ${itemType} — ${issues.join('; ')}. Shorten or correct these fields.`);
+    this.name = 'VaultItemDataInvalidError';
+    this.itemType = itemType;
+    this.issues = issues;
+    this.fieldIssues = fieldIssues;
+  }
+}
+
+/**
+ * How many Zod issues the error message reports before it stops listing them.
+ *
+ * Two, not more: the message is truncated at 200 characters downstream, and a
+ * Zod issue message plus its path is easily 60, so a third entry mostly buys a
+ * cut-off string.
+ */
+const MAX_REPORTED_VALIDATION_ISSUES = 2;
+
+/**
+ * Pre-flight schema check, run BEFORE `data` is encrypted.
+ *
+ * `vaultItemDataSchemas` used to be consulted only on the way OUT
+ * ({@link decryptItem}), which is the asymmetry that enabled the whole
+ * undecodable-item class: anything at all could be written, and the failure
+ * surfaced on the NEXT read — by which point the real ciphertext had already been
+ * overwritten and, this being a zero-knowledge vault, there was no server-side
+ * plaintext to recover it from. Validating on the way IN turns permanent, silent
+ * data loss into a rejected save the user can act on.
+ *
+ * The issue list carries paths and Zod messages only, never field VALUES: this
+ * message reaches a toast, and the payload is full of secrets.
+ */
+function assertValidItemData(itemType: ItemType, data: Record<string, unknown>): void {
+  const result = vaultItemDataSchemas[itemType].safeParse(data);
+  if (result.success) return;
+  const fieldIssues = result.error.issues.map((issue) => ({
+    path: issue.path.map((segment) => String(segment)).join('.'),
+    message: issue.message,
+  }));
+  const issues = fieldIssues
+    .slice(0, MAX_REPORTED_VALIDATION_ISSUES)
+    .map(({ path, message }) => (path ? `${path}: ${message}` : message));
+  throw new VaultItemDataInvalidError(itemType, issues, fieldIssues);
+}
+
+/**
  * Pre-flight size check: the server enforces max-length on encrypted fields
  * via Mongoose validators, so catching oversized payloads on the client
  * avoids an unhelpful 400 after the user has already filled out the form.
  */
-function assertEncryptedSizes(
-  encryptedName: { encrypted: string },
-  encryptedData: { encrypted: string },
-): void {
+function assertEncryptedNameSize(encryptedName: { encrypted: string }): void {
   if (encryptedName.encrypted.length > MAX_ENCRYPTED_NAME_LENGTH) {
     throw new EncryptedFieldTooLargeError(
       'name',
@@ -398,6 +490,13 @@ function assertEncryptedSizes(
       MAX_ENCRYPTED_NAME_LENGTH,
     );
   }
+}
+
+function assertEncryptedSizes(
+  encryptedName: { encrypted: string },
+  encryptedData: { encrypted: string },
+): void {
+  assertEncryptedNameSize(encryptedName);
   if (encryptedData.encrypted.length > MAX_ENCRYPTED_DATA_LENGTH) {
     throw new EncryptedFieldTooLargeError(
       'data',
@@ -969,6 +1068,11 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const vaultKey = getVaultKey();
     const myGeneration = mutationGeneration;
 
+    // Pre-flight schema check, BEFORE encryption: a payload the shared schema
+    // rejects encrypts perfectly well and only fails on the next READ, by which
+    // point it is the only copy that exists.
+    assertValidItemData(itemType, data);
+
     const encryptedName = await cryptoService.encryptData(name, vaultKey);
     const encryptedData = await cryptoService.encryptData(JSON.stringify(data), vaultKey);
     // Pre-flight size check: the server enforces these via Mongoose validators,
@@ -1008,6 +1112,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
   // -----------------------------------------------------------------------
   updateItem: async (
     id: string,
+    itemType: ItemType,
     name: string,
     data: Record<string, unknown>,
     options?: {
@@ -1019,6 +1124,18 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const vaultKey = getVaultKey();
     const myGeneration = mutationGeneration;
 
+    // Pre-flight schema check, BEFORE encryption: same rationale as createItem, and
+    // UNCONDITIONAL now that the type is a parameter. It used to be gated on finding
+    // the row in `items`, so a caller the store could not see skipped validation
+    // entirely — a gap in a data-integrity control, and `items` was never a sound
+    // oracle for it anyway (a trashed item lives in `trashItems`).
+    assertValidItemData(itemType, data);
+
+    // Still looked up, but only for password history — which genuinely needs the
+    // PREVIOUS plaintext and the previous ciphertext history, neither of which a
+    // caller can supply.
+    const existingItem = get().items.find((item) => item.id === id);
+
     const encryptedName = await cryptoService.encryptData(name, vaultKey);
     const encryptedData = await cryptoService.encryptData(JSON.stringify(data), vaultKey);
     // Pre-flight size check: same rationale as createItem.
@@ -1028,7 +1145,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // Build password history for login items when the password changes. The
     // detection + payload construction is shared with the import flow via
     // buildPasswordHistoryPayload so the two paths cannot diverge.
-    const existingItem = get().items.find((item) => item.id === id);
     const passwordHistoryPayload =
       existingItem?.itemType === 'login'
         ? await buildPasswordHistoryPayload({
@@ -1125,6 +1241,72 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
           // from consistent state. Every encrypted field is carried over
           // byte-for-byte — that is the whole point of this path.
           _raw: { ...item._raw, favorite, tags, folderId, updatedAt },
+        };
+      }),
+    }));
+  },
+
+  // -----------------------------------------------------------------------
+  // Name-only update
+  //
+  // Sends the `encryptedName`/`nameIv`/`nameTag` trio plus the `searchHash` derived
+  // from it, and NOTHING else. `updateVaultItemSchema` permits exactly this: the
+  // name trio must travel together, the data trio may be omitted entirely, and
+  // `searchHash` is optional — it is an HMAC of the NAME, so it has to be refreshed
+  // or the server's duplicate detection would still be keyed to the old one.
+  //
+  // This exists because renaming was the one safe operation an UNDECODABLE item
+  // could not be offered. `updateItem` re-encrypts `JSON.stringify(item.data)`
+  // wholesale, and for such an item `data` is only the placeholder wrapper, so a
+  // rename through it would overwrite the item's real — and only — ciphertext.
+  // `updateItemMeta` cannot help either: it sends plaintext metadata only and has
+  // no way to change a name, which is encrypted.
+  //
+  // Like `updateItemMeta`, the response is applied WITHOUT decrypting it: the new
+  // plaintext name is already known here, and decrypting an undecodable item would
+  // just fail again and throw away a write that has already succeeded.
+  // -----------------------------------------------------------------------
+  renameItem: async (id: string, name: string): Promise<void> => {
+    const vaultKey = getVaultKey();
+    const myGeneration = mutationGeneration;
+
+    const encryptedName = await cryptoService.encryptData(name, vaultKey);
+    assertEncryptedNameSize(encryptedName);
+    const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
+
+    const response = await updateItemApi(id, {
+      encryptedName: encryptedName.encrypted,
+      nameIv: encryptedName.iv,
+      nameTag: encryptedName.tag,
+      searchHash,
+    });
+
+    const renameResult = response.data;
+    if (!renameResult.success) return;
+
+    // Skip the local write if a lock/logout superseded us (see createItem).
+    if (myGeneration !== mutationGeneration) return;
+
+    const { updatedAt } = renameResult.data;
+
+    set((state) => ({
+      items: state.items.map((item) => {
+        if (item.id !== id) return item;
+        return {
+          ...item,
+          name,
+          searchHash,
+          updatedAt,
+          // Only the NAME ciphertext is replaced. `encryptedData`/`dataIv`/`dataTag`
+          // are carried over byte-for-byte — that is the whole point of this path.
+          _raw: {
+            ...item._raw,
+            encryptedName: encryptedName.encrypted,
+            nameIv: encryptedName.iv,
+            nameTag: encryptedName.tag,
+            searchHash,
+            updatedAt,
+          },
         };
       }),
     }));

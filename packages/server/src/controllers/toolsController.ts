@@ -675,7 +675,7 @@ async function executeImportOperations(
 
   // Every insert is mapped through the FIXED `ALLOWED_ITEM_FIELDS` projection,
   // never a spread, so an injected or prototype-polluting key on an import row
-  // is inert even if the schema's `.strip()` is ever relaxed.
+  // is inert even if the schema's unknown-key stripping is ever relaxed.
   const insertDocs = inserts.map((item) => {
     const doc = pickAllowedFields(item, ALLOWED_ITEM_FIELDS);
     if (typeof doc.folderId === 'string' && !ownedFolderIds.has(doc.folderId)) {

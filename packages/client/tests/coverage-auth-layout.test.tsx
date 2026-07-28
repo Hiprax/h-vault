@@ -129,18 +129,23 @@ const LOCKOUT_KEY = '__hv_unlock_lockout_until';
 
 type AnyState = Record<string, unknown>;
 
+// The store state interfaces are module-private, so recover them from the hook
+// signatures: the harness only ever supplies the slices a component reads.
+type AuthStoreState = Parameters<Parameters<typeof useAuthStore>[0]>[0];
+type VaultStoreState = Parameters<Parameters<typeof useVaultStore>[0]>[0];
+
 let authState: AnyState = {};
 let vaultState: AnyState = {};
 
 function installStores(): void {
-  vi.mocked(useAuthStore).mockImplementation((selector?: (s: AnyState) => unknown) =>
-    selector ? selector(authState) : authState,
+  vi.mocked(useAuthStore).mockImplementation((selector?: (s: AuthStoreState) => unknown) =>
+    selector ? selector(authState as unknown as AuthStoreState) : authState,
   );
   vi.mocked(useAuthStore.getState).mockImplementation(
     () => authState as unknown as ReturnType<typeof useAuthStore.getState>,
   );
-  vi.mocked(useVaultStore).mockImplementation((selector?: (s: AnyState) => unknown) =>
-    selector ? selector(vaultState) : vaultState,
+  vi.mocked(useVaultStore).mockImplementation((selector?: (s: VaultStoreState) => unknown) =>
+    selector ? selector(vaultState as unknown as VaultStoreState) : vaultState,
   );
 }
 

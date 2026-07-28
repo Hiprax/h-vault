@@ -98,7 +98,10 @@ export function BackupCodesSection({ itemId, itemName, data, canEdit }: BackupCo
         // Password history is a no-op because the password is passed through
         // unchanged, and the pre-flight size check cannot newly trip because a
         // removal only ever shrinks the payload.
-        await updateItem(itemId, itemName, nextData);
+        //
+        // `'login'` is not a guess: this section only ever renders inside
+        // `LoginDetail`, and its `data` prop is typed `ILoginData`.
+        await updateItem(itemId, 'login', itemName, nextData);
         return true;
       } catch (error) {
         toast({

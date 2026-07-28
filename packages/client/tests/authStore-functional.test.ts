@@ -1047,7 +1047,7 @@ describe('T24 — clipboard is wiped on lock / logout', () => {
     await copySecretToClipboard('s3cret', 30_000);
     writeText.mockClear();
 
-    let releaseLogoutApi: (() => void) | null = null;
+    let releaseLogoutApi: () => void = () => {};
     vi.mocked(logoutApi).mockReturnValue(
       new Promise<void>((resolve) => {
         releaseLogoutApi = resolve;
@@ -1068,7 +1068,7 @@ describe('T24 — clipboard is wiped on lock / logout', () => {
     expect(writeText).toHaveBeenCalledWith('');
     expect(logoutApi).toHaveBeenCalled();
 
-    releaseLogoutApi?.();
+    releaseLogoutApi();
     await logoutPromise;
   });
 });

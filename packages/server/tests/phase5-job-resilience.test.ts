@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 
 /**
  * Phase 5 / T10 — A transient DB error during job-lock acquire/release must not
@@ -77,14 +77,16 @@ const jobs = [
 ] as const;
 
 describe('Phase 5 — background job resilience (T10)', () => {
-  let unhandled: ReturnType<typeof vi.fn>;
+  // Typed with Node's own `unhandledRejection` listener signature so it can be
+  // registered on and removed from `process` directly.
+  let unhandled: Mock<(reason: unknown, promise: Promise<unknown>) => void>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockedSchedule.mockReturnValue({ stop: vi.fn() } as unknown as ReturnType<
       typeof cron.schedule
     >);
-    unhandled = vi.fn();
+    unhandled = vi.fn<(reason: unknown, promise: Promise<unknown>) => void>();
     process.on('unhandledRejection', unhandled);
   });
 

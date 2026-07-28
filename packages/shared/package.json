@@ -16,7 +16,7 @@
     "build": "node scripts/inject-version.js && tsc",
     "dev": "tsc --watch",
     "test": "vitest run --coverage",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "zod": "^4.4.3"

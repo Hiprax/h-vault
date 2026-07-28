@@ -15,10 +15,14 @@
  *  - NoteDetail markdown link sanitisation (REAL react-markdown — a javascript: href
  *    is neutralised to "#").
  *  - Card billing-address branch matrix (all-empty → no section; single field → only
- *    that field).
+ *    that field), and the same matrix for IdentityDetail, whose five older rows used
+ *    to render unconditionally and show em dashes.
+ *  - CopyField `multiline`: every free-text field preserves its line breaks, and the
+ *    single-line fields still collapse theirs.
  *  - Password history: no vault key, and a partially-failing decrypt (allSettled).
- *  - Degraded / undecodable items: the notice renders and the action bar stays usable;
- *    the local ErrorBoundary catches a type view that throws on malformed data.
+ *  - Degraded / undecodable items: the notice renders, the METADATA-ONLY actions stay
+ *    usable, and Edit — the one action that re-encrypts `data` — is disabled; the
+ *    local ErrorBoundary catches a type view that throws on malformed data.
  *  - Error/edge paths of the action bar: move-to-folder failure, un-favouriting,
  *    Escape / backdrop dismissal of the delete dialog, and the back button.
  */
@@ -209,6 +213,7 @@ const mockUpdateItemMeta = vi.fn().mockResolvedValue(undefined);
 const mockDeleteItem = vi.fn().mockResolvedValue(undefined);
 const mockPermanentDeleteItem = vi.fn().mockResolvedValue(undefined);
 const mockRestoreItem = vi.fn().mockResolvedValue(undefined);
+const mockRenameItem = vi.fn().mockResolvedValue(undefined);
 const onEdit = vi.fn();
 
 function renderDetail(item: ReturnType<typeof makeItem>, isTrashed = false) {
@@ -232,6 +237,7 @@ beforeEach(() => {
   mockDeleteItem.mockResolvedValue(undefined);
   mockPermanentDeleteItem.mockResolvedValue(undefined);
   mockRestoreItem.mockResolvedValue(undefined);
+  mockRenameItem.mockResolvedValue(undefined);
   mockDecryptData.mockResolvedValue('decrypted');
 
   useAuthStore.setState({
@@ -252,6 +258,7 @@ beforeEach(() => {
     deleteItem: mockDeleteItem,
     permanentDeleteItem: mockPermanentDeleteItem,
     restoreItem: mockRestoreItem,
+    renameItem: mockRenameItem,
   } as never);
 
   Object.assign(navigator, {
@@ -555,26 +562,370 @@ describe('VaultItemDetail / CardDetail billing address', () => {
   }
 
   it('omits the section entirely when every billing field is empty', () => {
-    renderDetail(cardItem({ street: '', city: '', state: '', zip: '', country: '' }));
+    renderDetail(cardItem({ street: '', street2: '', city: '', state: '', zip: '', country: '' }));
     expect(screen.queryByText('Billing Address')).not.toBeInTheDocument();
   });
 
   it('renders only the populated field when just the country is set', () => {
-    renderDetail(cardItem({ street: '', city: '', state: '', zip: '', country: 'US' }));
+    renderDetail(
+      cardItem({ street: '', street2: '', city: '', state: '', zip: '', country: 'US' }),
+    );
 
     expect(screen.getByText('Billing Address')).toBeInTheDocument();
     expect(screen.getByText('Country')).toBeInTheDocument();
     expect(screen.getByText('US')).toBeInTheDocument();
     expect(screen.queryByText('Street')).not.toBeInTheDocument();
+    expect(screen.queryByText('Street 2')).not.toBeInTheDocument();
     expect(screen.queryByText('City / State')).not.toBeInTheDocument();
     expect(screen.queryByText('ZIP')).not.toBeInTheDocument();
   });
 
   it('renders the City / State line with only the city when the state is empty', () => {
-    renderDetail(cardItem({ street: '', city: 'Springfield', state: '', zip: '', country: '' }));
+    renderDetail(
+      cardItem({ street: '', street2: '', city: 'Springfield', state: '', zip: '', country: '' }),
+    );
 
     expect(screen.getByText('City / State')).toBeInTheDocument();
     expect(screen.getByText('Springfield')).toBeInTheDocument();
+  });
+
+  it('opens the section for an address whose only entry is the second street line', () => {
+    // The presence guard is a disjunction over every field, and street2 must be able to
+    // open the section alone: a billing address that is nothing but "Apt 4B" would
+    // otherwise render no address at all, silently hiding stored data.
+    renderDetail(
+      cardItem({ street: '', street2: 'Apt 4B', city: '', state: '', zip: '', country: '' }),
+    );
+
+    expect(screen.getByText('Billing Address')).toBeInTheDocument();
+    expect(screen.getByText('Street 2')).toBeInTheDocument();
+    expect(screen.getByText('Apt 4B')).toBeInTheDocument();
+    // Exact-match query, so it cannot be satisfied by the 'Street 2' label.
+    expect(screen.queryByText('Street')).not.toBeInTheDocument();
+  });
+
+  it('renders both street lines when both are set', () => {
+    renderDetail(
+      cardItem({
+        street: '1 Main St',
+        street2: 'Apt 4B',
+        city: '',
+        state: '',
+        zip: '',
+        country: '',
+      }),
+    );
+
+    expect(screen.getByText('Street')).toBeInTheDocument();
+    expect(screen.getByText('1 Main St')).toBeInTheDocument();
+    expect(screen.getByText('Street 2')).toBeInTheDocument();
+    expect(screen.getByText('Apt 4B')).toBeInTheDocument();
+  });
+
+  it('never renders a delivery-notes row on a card, even if the blob carries one', () => {
+    // `cardDataSchema` strips the key, so this can only arrive on a hand-crafted or
+    // legacy blob. A card must still have nowhere to display courier instructions.
+    renderDetail(
+      cardItem({
+        street: '1 Main St',
+        street2: '',
+        city: '',
+        state: '',
+        zip: '',
+        country: '',
+        deliveryNotes: 'leave with the doorman',
+      }),
+    );
+
+    expect(screen.getByText('Billing Address')).toBeInTheDocument();
+    expect(screen.queryByText('Delivery Notes')).not.toBeInTheDocument();
+    expect(screen.queryByText('leave with the doorman')).not.toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// IdentityDetail: the two guarded address rows
+// ===========================================================================
+
+describe('VaultItemDetail / IdentityDetail address extras', () => {
+  function identityItem(address: Record<string, string>) {
+    return makeItem({
+      itemType: 'identity',
+      // `customFields: []` is what a schema-parsed identity always carries (the
+      // shared schema defaults it), and `IdentityDetail` now renders that list — so a
+      // fixture omitting it would make the view dereference `undefined` and throw.
+      data: { firstName: 'Ada', lastName: 'Lovelace', address, customFields: [] },
+    });
+  }
+
+  it('renders the second street line and the delivery notes when both are set', () => {
+    renderDetail(
+      identityItem({
+        street: '1 Main St',
+        street2: 'Flat 2',
+        city: 'London',
+        state: '',
+        zip: 'E1',
+        country: 'UK',
+        deliveryNotes: 'Ring twice, gate code 1234',
+      }),
+    );
+
+    expect(screen.getByText('Street 2')).toBeInTheDocument();
+    expect(screen.getByText('Flat 2')).toBeInTheDocument();
+    expect(screen.getByText('Delivery Notes')).toBeInTheDocument();
+    expect(screen.getByText('Ring twice, gate code 1234')).toBeInTheDocument();
+  });
+
+  it('preserves the line breaks in a multi-line delivery note', () => {
+    // The field exists for instructions that are naturally several lines ("ring twice"
+    // then a gate code). `CopyField` collapses newlines by default, which is how every
+    // other free-text field in the app has always rendered, so delivery notes opt in.
+    renderDetail(
+      identityItem({
+        street: '1 Main St',
+        street2: '',
+        city: '',
+        state: '',
+        zip: '',
+        country: '',
+        deliveryNotes: 'Ring twice.\nGate code 1234.',
+      }),
+    );
+
+    const value = screen.getByText(/Ring twice\./);
+    expect(value.className).toContain('whitespace-pre-wrap');
+    // The stored string is untouched either way; this is purely how it displays.
+    expect(value.textContent).toBe('Ring twice.\nGate code 1234.');
+  });
+
+  it('leaves every other field collapsing newlines as before', () => {
+    // The opt-in must stay opt-in: turning it on globally would change how existing
+    // items look, which is why the flag exists at all.
+    renderDetail(
+      identityItem({
+        street: 'Line one\nLine two',
+        street2: '',
+        city: '',
+        state: '',
+        zip: '',
+        country: '',
+        deliveryNotes: '',
+      }),
+    );
+
+    expect(screen.getByText(/Line one/).className).not.toContain('whitespace-pre-wrap');
+  });
+
+  it('omits both rows for an address that has neither, rather than showing blanks', () => {
+    renderDetail(
+      identityItem({
+        street: '1 Main St',
+        street2: '',
+        city: 'London',
+        state: '',
+        zip: '',
+        country: 'UK',
+        deliveryNotes: '',
+      }),
+    );
+
+    expect(screen.getByText('Street')).toBeInTheDocument();
+    expect(screen.queryByText('Street 2')).not.toBeInTheDocument();
+    expect(screen.queryByText('Delivery Notes')).not.toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// IdentityDetail: EVERY address row is guarded
+//
+// Street/City/State/ZIP/Country used to render unconditionally inside
+// `{data.address && …}`, and `CopyField` shows an em dash for an empty value. Since
+// `buildDataPayload` always writes a FULL address object, every identity created
+// through the UI displayed an Address block of up to five blank em-dash rows —
+// while `CardDetail`, looking at the same stored shape, guarded each field and
+// omitted the panel entirely. The two views now agree.
+// ===========================================================================
+
+describe('VaultItemDetail / IdentityDetail address row guards', () => {
+  const EMPTY = {
+    street: '',
+    street2: '',
+    city: '',
+    state: '',
+    zip: '',
+    country: '',
+    deliveryNotes: '',
+  };
+
+  function identityWith(address: Record<string, string>) {
+    return makeItem({
+      itemType: 'identity',
+      // `customFields: []` is what a schema-parsed identity always carries (the
+      // shared schema defaults it), and `IdentityDetail` now renders that list — so a
+      // fixture omitting it would make the view dereference `undefined` and throw.
+      data: { firstName: 'Ada', lastName: 'Lovelace', address, customFields: [] },
+    });
+  }
+
+  const ADDRESS_LABELS = ['Street', 'Street 2', 'City', 'State', 'ZIP', 'Country'];
+
+  it('renders NO address row at all when every field is empty', () => {
+    renderDetail(identityWith({ ...EMPTY }));
+
+    // The identity itself still renders — only the address block is gone.
+    expect(screen.getByText('First Name')).toBeInTheDocument();
+    for (const label of ADDRESS_LABELS) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+    expect(screen.queryByText('Delivery Notes')).not.toBeInTheDocument();
+    // The em dash is the tell: it is what an unconditional empty row rendered.
+    expect(screen.queryByText('—')).not.toBeInTheDocument();
+  });
+
+  // One populated field at a time: each must bring its OWN row and no other.
+  it.each([
+    ['street', 'Street', '1 Main St'],
+    ['street2', 'Street 2', 'Apt 4B'],
+    ['city', 'City', 'London'],
+    ['state', 'State', 'Greater London'],
+    ['zip', 'ZIP', 'E1 6AN'],
+    ['country', 'Country', 'UK'],
+  ])('renders only the %s row when it is the sole populated field', (field, label, value) => {
+    renderDetail(identityWith({ ...EMPTY, [field]: value }));
+
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText(value)).toBeInTheDocument();
+    for (const other of ADDRESS_LABELS.filter((l) => l !== label)) {
+      // Exact-match queries, so 'Street' cannot be satisfied by 'Street 2'.
+      expect(screen.queryByText(other)).not.toBeInTheDocument();
+    }
+    expect(screen.queryByText('—')).not.toBeInTheDocument();
+  });
+
+  it('renders every row when every field is populated', () => {
+    renderDetail(
+      identityWith({
+        street: '1 Main St',
+        street2: 'Apt 4B',
+        city: 'London',
+        state: 'Greater London',
+        zip: 'E1 6AN',
+        country: 'UK',
+        deliveryNotes: 'Ring twice',
+      }),
+    );
+
+    for (const label of [...ADDRESS_LABELS, 'Delivery Notes']) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it('renders the address block for a delivery-notes-only address', () => {
+    // `deliveryNotes` must be able to open the block on its own, exactly as
+    // `street2` must on a card — otherwise a note with no postal address behind it
+    // is stored and never shown.
+    renderDetail(identityWith({ ...EMPTY, deliveryNotes: 'Ring twice' }));
+
+    expect(screen.getByText('Delivery Notes')).toBeInTheDocument();
+    expect(screen.getByText('Ring twice')).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// CopyField multiline: every FREE-TEXT field preserves its line breaks
+//
+// Only the delivery-notes row opted in; `notes` on a login, card and identity, a
+// secret's `description` and its multi-line `value`, and custom-field values all
+// still collapsed their newlines on screen. The stored and copied strings were
+// always byte-exact — this was a display defect only.
+// ===========================================================================
+
+describe('VaultItemDetail / multi-line free-text rendering', () => {
+  const TWO_LINES = 'First line.\nSecond line.';
+
+  function classOf(matcher: RegExp): string {
+    return screen.getByText(matcher).className;
+  }
+
+  it.each([
+    [
+      'a login note',
+      makeItem({
+        data: { username: 'u', password: 'p', uris: [], customFields: [], notes: TWO_LINES },
+      }),
+    ],
+    [
+      'a card note',
+      makeItem({
+        itemType: 'card',
+        data: {
+          cardholderName: 'Ada',
+          number: '4111',
+          expMonth: '12',
+          expYear: '30',
+          cvv: '123',
+          notes: TWO_LINES,
+        },
+      }),
+    ],
+    [
+      'an identity note',
+      makeItem({
+        itemType: 'identity',
+        data: { firstName: 'Ada', lastName: 'Lovelace', notes: TWO_LINES, customFields: [] },
+      }),
+    ],
+    [
+      "a secret's description",
+      makeItem({
+        itemType: 'secret',
+        data: { value: 'v', description: TWO_LINES, customFields: [] },
+      }),
+    ],
+    [
+      'a login custom field',
+      makeItem({
+        data: {
+          username: 'u',
+          password: 'p',
+          uris: [],
+          customFields: [{ name: 'Recovery', value: TWO_LINES, type: 'text' }],
+        },
+      }),
+    ],
+    [
+      'a secret custom field',
+      makeItem({
+        itemType: 'secret',
+        data: { value: 'v', customFields: [{ name: 'Recovery', value: TWO_LINES, type: 'text' }] },
+      }),
+    ],
+  ])('preserves the line breaks of %s', (_label, item) => {
+    renderDetail(item);
+
+    const value = screen.getByText(/First line\./);
+    expect(value.className).toContain('whitespace-pre-wrap');
+    expect(value.textContent).toBe(TWO_LINES);
+  });
+
+  it("preserves the line breaks of a secret's revealed value", () => {
+    // Masked by default, so the class is asserted after revealing — the bullets a
+    // masked field renders have no newlines to preserve.
+    renderDetail(makeItem({ itemType: 'secret', data: { value: TWO_LINES, customFields: [] } }));
+
+    fireEvent.click(screen.getAllByLabelText('Reveal value')[0]!);
+    expect(classOf(/First line\./)).toContain('whitespace-pre-wrap');
+  });
+
+  it('still COLLAPSES a single-line field, so the opt-in stays an opt-in', () => {
+    // A username, URI, card number or ZIP cannot legitimately span lines; leaving
+    // them collapsed is what stops a crafted value from reshaping a row.
+    renderDetail(
+      makeItem({ data: { username: TWO_LINES, password: 'p', uris: [], customFields: [] } }),
+    );
+
+    expect(classOf(/First line\./)).not.toContain('whitespace-pre-wrap');
   });
 });
 
@@ -634,7 +985,7 @@ describe('VaultItemDetail / password history', () => {
 // ===========================================================================
 
 describe('VaultItemDetail / undecodable items', () => {
-  it('shows the degraded notice and keeps edit/favourite/delete reachable for a _validationError item', () => {
+  it('shows the degraded notice and keeps the SAFE actions reachable for a _validationError item', () => {
     renderDetail(
       makeItem({
         name: 'Broken',
@@ -645,9 +996,10 @@ describe('VaultItemDetail / undecodable items', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('This item could not be fully decoded.');
     // The type view is NOT rendered...
     expect(screen.queryByText('Username')).not.toBeInTheDocument();
-    // ...but the header + action bar (outside the ErrorBoundary) still are.
+    // ...but the header + the metadata-only actions (outside the ErrorBoundary)
+    // still are. Every one of these routes through `updateItemMeta` or a delete,
+    // so none of them re-encrypts `data`.
     expect(screen.getByText('Broken')).toBeInTheDocument();
-    expect(screen.getByText('Edit')).toBeInTheDocument();
     expect(screen.getByText('Favorite')).toBeInTheDocument();
     expect(screen.getByText('Delete')).toBeInTheDocument();
   });
@@ -656,6 +1008,70 @@ describe('VaultItemDetail / undecodable items', () => {
     renderDetail(makeItem({ data: { _raw: 'not-json' } }));
 
     expect(screen.getByRole('alert')).toHaveTextContent('This item could not be fully decoded.');
+  });
+
+  // -------------------------------------------------------------------------
+  // Edit must be UNAVAILABLE for an undecodable item.
+  //
+  // Edit is the one action in this bar that re-encrypts `data`, and for such an
+  // item `data` is only the placeholder wrapper. The two shapes fail differently
+  // and both are permanent:
+  //   `{_raw: …}`                  -> every control defaults to '' and one Save
+  //                                   writes an EMPTY item over real ciphertext.
+  //   `{...parsed, _validationError}` -> the form re-reads the invalid value and
+  //                                   Save re-stores exactly what fails, so the
+  //                                   item is wedged with no explanation.
+  // -------------------------------------------------------------------------
+
+  it.each([
+    ['_validationError', { username: 'u', _validationError: true }],
+    ['_raw', { _raw: 'not-json' }],
+  ])('marks Edit unavailable and never calls onEdit for a %s item', (_label, data) => {
+    renderDetail(makeItem({ name: 'Broken', data }));
+
+    const edit = screen.getByRole('button', { name: 'Edit' });
+    // `aria-disabled`, NOT `disabled`: the control has to stay in the tab order for a
+    // keyboard or screen-reader user to reach it and be told why it is unavailable.
+    expect(edit).toHaveAttribute('aria-disabled', 'true');
+    expect(edit).not.toBeDisabled();
+    expect(edit).toHaveAttribute('title', expect.stringContaining('could not be decoded'));
+
+    // The reason is ANNOUNCED, not merely present as a tooltip: the button names the
+    // notice body as its description, and that element really is in the document with
+    // the same id.
+    const describedBy = edit.getAttribute('aria-describedby');
+    expect(describedBy).toBe('undecodable-item-notice');
+    const description = document.getElementById(describedBy!);
+    expect(description).not.toBeNull();
+    expect(description!.textContent).toContain('Editing is disabled');
+
+    // Focusable but inert: the click handler is what refuses, not the attribute.
+    edit.focus();
+    expect(document.activeElement).toBe(edit);
+    fireEvent.click(edit);
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it('leaves Edit enabled for a normal item', () => {
+    renderDetail(makeItem({ data: { username: 'u', password: 'p', uris: [], customFields: [] } }));
+
+    const edit = screen.getByRole('button', { name: 'Edit' });
+    expect(edit).not.toBeDisabled();
+    expect(edit).not.toHaveAttribute('aria-disabled');
+    expect(edit).not.toHaveAttribute('aria-describedby');
+    fireEvent.click(edit);
+    expect(onEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it('promises only the operations that are actually safe — rename included', () => {
+    // "rename" was removed from this copy when no path could deliver it without
+    // re-encrypting `data`, i.e. without destroying the item it was describing. It is
+    // back only because `vaultStore.renameItem` now delivers it name-only.
+    renderDetail(makeItem({ data: { _validationError: true } }));
+
+    const notice = screen.getByRole('alert').textContent ?? '';
+    expect(notice).toContain('rename, move, favorite, delete, or restore');
+    expect(notice).toContain('Editing is disabled');
   });
 
   it('keeps Restore and Delete Forever reachable for a trashed undecodable item', async () => {
@@ -844,8 +1260,13 @@ describe('VaultItemDetail — backup codes', () => {
     return call!;
   }
 
+  /**
+   * `updateItem(id, itemType, name, data)` — `data` is the FOURTH argument. The
+   * item type is passed explicitly now, so the store's pre-flight schema check can
+   * never be skipped.
+   */
   function updatedData(index: number): Record<string, unknown> {
-    return updateCall(index)[2] as Record<string, unknown>;
+    return updateCall(index)[3] as Record<string, unknown>;
   }
 
   it('renders a masked row per code with positional controls', () => {
@@ -898,10 +1319,13 @@ describe('VaultItemDetail — backup codes', () => {
     expect(mockUpdateItem).toHaveBeenCalledTimes(1);
     const call = updateCall(0);
     expect(call[0]).toBe('item-1');
-    expect(call[1]).toBe('Test Item');
+    // The item type is passed explicitly and is not a guess: this section only ever
+    // renders inside `LoginDetail`.
+    expect(call[1]).toBe('login');
+    expect(call[2]).toBe('Test Item');
     expect(updatedData(0).backupCodes).toEqual(['AAAA-1111', 'CCCC-3333']);
     // No `options` argument, so folder, tags and favorite are left untouched.
-    expect(call).toHaveLength(3);
+    expect(call).toHaveLength(4);
     // The rest of the payload has to survive: the whole blob is replaced.
     expect(updatedData(0).password).toBe('secret123');
   });
@@ -1078,5 +1502,186 @@ describe('VaultItemDetail — backup codes', () => {
     renderDetail(loginWithCodes(), true);
     expect(screen.getByLabelText('Copy backup code 1')).toBeInTheDocument();
     expect(screen.queryByLabelText('Remove backup code 1')).toBeNull();
+  });
+});
+
+// ===========================================================================
+// IdentityDetail: the fields that were stored and preserved but never displayed
+//
+// NEW BEHAVIOUR, not a regression fix — no code path rendered any of these before,
+// so these tests could not have failed against the previous version. What made it
+// worth closing: `parsers/bitwarden.ts` populates `company`, `ssn` and `passport`
+// on import and the editor preserves them, so a retained national identification or
+// passport number was held encrypted in the vault while being invisible in the app,
+// and therefore impossible to check, correct or remove short of deleting the item.
+// ===========================================================================
+
+describe('VaultItemDetail / IdentityDetail stored extras', () => {
+  function identityWithExtras(extra: Record<string, unknown> = {}) {
+    return makeItem({
+      itemType: 'identity',
+      data: {
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        company: 'Analytical Engines Ltd',
+        ssn: '078-05-1120',
+        passport: 'X1234567',
+        customFields: [{ name: 'Driving licence', value: 'LOVEL753116AA9AB', type: 'text' }],
+        ...extra,
+      },
+    });
+  }
+
+  it('renders company, SSN, passport and custom fields', () => {
+    renderDetail(identityWithExtras());
+
+    expect(screen.getByText('Company')).toBeInTheDocument();
+    expect(screen.getByText('Analytical Engines Ltd')).toBeInTheDocument();
+    expect(screen.getByText('Social Security Number')).toBeInTheDocument();
+    expect(screen.getByText('Passport Number')).toBeInTheDocument();
+    expect(screen.getByText('Driving licence')).toBeInTheDocument();
+    expect(screen.getByText('LOVEL753116AA9AB')).toBeInTheDocument();
+  });
+
+  it('MASKS the SSN and the passport number until they are revealed', () => {
+    // Both are secrets and get the same treatment as the card number and CVV: the
+    // value is not in the DOM at all until the reveal control is used.
+    renderDetail(identityWithExtras());
+
+    expect(screen.queryByText('078-05-1120')).toBeNull();
+    expect(screen.queryByText('X1234567')).toBeNull();
+
+    // Two masked rows, so two reveal controls; reveal them both.
+    const reveals = screen.getAllByRole('button', { name: 'Reveal value' });
+    expect(reveals).toHaveLength(2);
+    for (const button of reveals) fireEvent.click(button);
+
+    expect(screen.getByText('078-05-1120')).toBeInTheDocument();
+    expect(screen.getByText('X1234567')).toBeInTheDocument();
+  });
+
+  it('omits each extra row when the value is absent', () => {
+    renderDetail(
+      makeItem({
+        itemType: 'identity',
+        data: { firstName: 'Ada', lastName: 'Lovelace', customFields: [] },
+      }),
+    );
+
+    expect(screen.queryByText('Company')).toBeNull();
+    expect(screen.queryByText('Social Security Number')).toBeNull();
+    expect(screen.queryByText('Passport Number')).toBeNull();
+    // No em-dash rows: that is what an unguarded row renders forever.
+    expect(screen.queryByText('—')).toBeNull();
+  });
+
+  it('renders a boolean identity custom field as a checkbox row, like a login does', () => {
+    renderDetail(
+      identityWithExtras({
+        customFields: [{ name: 'Verified', value: 'true', type: 'boolean' }],
+      }),
+    );
+
+    expect(screen.getByText('Verified')).toBeInTheDocument();
+    expect(screen.getByText('Yes')).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// Renaming an item that could not be decoded (P3-F)
+//
+// NEW BEHAVIOUR. Renaming was previously impossible for such an item: `updateItem`
+// re-encrypts `JSON.stringify(item.data)` wholesale, and for one of these `data` is
+// only the placeholder wrapper, so a rename through it would overwrite the item's
+// real — and only — ciphertext. `updateItemMeta` sends plaintext metadata only and
+// cannot change an encrypted name. `renameItem` is the third path: the name trio
+// plus its `searchHash`, and no `encryptedData` in the payload at all.
+// ===========================================================================
+
+describe('VaultItemDetail / rename for an undecodable item', () => {
+  const BROKEN = { username: 'u', _validationError: true };
+
+  function openRename(name = 'Broken') {
+    renderDetail(makeItem({ name, data: BROKEN }));
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
+    return screen.getByLabelText('Name') as HTMLInputElement;
+  }
+
+  it('offers Rename only for an undecodable item', () => {
+    renderDetail(makeItem({ data: { username: 'u', password: 'p', uris: [], customFields: [] } }));
+    // A healthy item renames through the edit form, so a second control would be
+    // redundant and would invite the two to disagree.
+    expect(screen.queryByRole('button', { name: 'Rename' })).toBeNull();
+  });
+
+  it('does not offer Rename for a TRASHED undecodable item', () => {
+    renderDetail(makeItem({ data: BROKEN }), true);
+    expect(screen.queryByRole('button', { name: 'Rename' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+  });
+
+  it('pre-fills the dialog with the current name and saves the new one', async () => {
+    const input = openRename('Broken');
+    expect(input.value).toBe('Broken');
+
+    fireEvent.change(input, { target: { value: 'Recovered item' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    });
+
+    // The NAME-ONLY store action, never `updateItem`: that is the whole point.
+    expect(mockRenameItem).toHaveBeenCalledWith('item-1', 'Recovered item');
+    expect(mockUpdateItem).not.toHaveBeenCalled();
+    expect(mockUpdateItemMeta).not.toHaveBeenCalled();
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Item renamed', type: 'success' }),
+    );
+  });
+
+  it('trims the new name and submits on Enter', async () => {
+    const input = openRename();
+    fireEvent.change(input, { target: { value: '  Padded  ' } });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' });
+    });
+    expect(mockRenameItem).toHaveBeenCalledWith('item-1', 'Padded');
+  });
+
+  it('refuses a blank name rather than storing one', async () => {
+    const input = openRename();
+    fireEvent.change(input, { target: { value: '   ' } });
+
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' });
+    });
+    expect(mockRenameItem).not.toHaveBeenCalled();
+  });
+
+  it('keeps the dialog open and reports a failed rename', async () => {
+    mockRenameItem.mockRejectedValueOnce(new Error('network down'));
+    const input = openRename();
+    fireEvent.change(input, { target: { value: 'Recovered' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    });
+
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to rename item', type: 'error' }),
+    );
+    expect(screen.getByRole('dialog', { name: 'Rename item' })).toBeInTheDocument();
+  });
+
+  it('closes without saving on Cancel', () => {
+    openRename();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Rename item' })).toBeNull();
+    expect(mockRenameItem).not.toHaveBeenCalled();
+  });
+
+  it('states that only the name changes', () => {
+    openRename();
+    expect(screen.getByText(/Only the name is changed\./, { exact: false })).toBeInTheDocument();
   });
 });

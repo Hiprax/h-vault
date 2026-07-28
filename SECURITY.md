@@ -68,6 +68,29 @@ security posture, not a disclaimer.
   backup password and carry an HMAC-SHA256 integrity signature that is verified on restore.
 - **Tampered backup files.** Restore validates the signature, rejects dangling and
   self-referential folder links, and breaks any folder cycle a malicious file plants.
+- **Irreversible loss of your own data through the app itself.** This is an availability
+  property, and zero knowledge is precisely what makes it a security concern: because the
+  server holds no plaintext, a decrypted blob the client overwrites incorrectly is gone —
+  there is nothing to restore it from and nothing to diff it against. Three controls stand
+  in the way, all three on the **editing and import paths** specifically. An item's
+  contents are validated against their format before being encrypted, so a value the
+  vault would not be able to read back is refused at the save rather than stored and
+  discovered on the next read — and the same limits are now applied in the editor as
+  well, so the common cases are caught against the field being typed into rather than
+  at the moment of saving. Saving an item preserves every stored field the editor does
+  not itself render, instead of rewriting the item from just the fields on screen; that
+  preservation stays in place even though the fields that motivated it now have editors
+  of their own, because it is what makes the next field added to an item type safe by
+  default. And an item whose contents cannot be decoded is read-only in the sense that
+  matters: nothing offered for it rewrites the contents. Move, favourite, delete and
+  restore rewrite no ciphertext at all; rename rewrites only the separately-encrypted
+  name and does not put the contents in the request; and the editor — which would
+  rewrite all of it from a placeholder — is unavailable.
+  Two limits, stated rather than implied. This is not a vault-wide integrity check:
+  backup restore and vault-key rotation re-encrypt your data as an opaque blob and
+  deliberately do not inspect its format, because they must carry through content this
+  version may not understand. And none of it substitutes for the encrypted backups
+  described above — keep them.
 
 ### What it cannot protect against
 

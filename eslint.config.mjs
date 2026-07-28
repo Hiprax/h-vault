@@ -111,7 +111,16 @@ export default tseslint.config(
     },
   },
 
-  // Test files config (relaxed type-checked rules since tests aren't in tsconfig includes)
+  // Test files config.
+  //
+  // `projectService: false` keeps LINTING non-type-aware here, which is a separate
+  // decision from TYPE-CHECKING: tests are now compiled by
+  // `packages/*/tsconfig.test.json` (wired into each package's `type-check`
+  // script), so a fixture missing a required field or holding a wrongly-typed
+  // value IS caught — by `tsc`, not by ESLint. Turning the type-aware presets on
+  // here as well would pull the whole suite through the type-checker a second time
+  // for rules (`no-floating-promises`, `no-unnecessary-condition`) that test code
+  // deliberately plays loose with.
   {
     files: ['packages/*/tests/**/*.{ts,tsx}'],
     extends: [...tseslint.configs.strict, ...tseslint.configs.stylistic],

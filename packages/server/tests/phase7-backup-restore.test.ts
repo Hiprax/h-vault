@@ -43,11 +43,7 @@ import type { TestUser } from './helpers.js';
 //     behaviorally instead.
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function restore(
-  agent: request.SuperTest<request.Test>,
-  token: string,
-  body: Record<string, unknown>,
-) {
+async function restore(agent: request.Agent, token: string, body: Record<string, unknown>) {
   const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
   return agent
     .post('/api/v1/backup/restore')
@@ -103,10 +99,10 @@ function quoteDenseBackupItem(): Record<string, unknown> {
 
 describe('Backup restore — quote-dense near-max payload (body-limit headroom)', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -146,10 +142,10 @@ describe('Backup restore — quote-dense near-max payload (body-limit headroom)'
 describe('Backup restore — narrowed existing-row projections', () => {
   let userA: TestUser;
   let userB: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     userA = await createTestUser();
     userB = await createTestUser();
   });

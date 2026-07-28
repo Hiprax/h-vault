@@ -135,7 +135,7 @@ describe('clipboardService', () => {
       await copySecretToClipboard('A', 5_000);
 
       const order: string[] = [];
-      let releaseErase: (() => void) | null = null;
+      let releaseErase: (() => void) | undefined;
       writeText.mockImplementation((text: string) => {
         if (text === '') {
           order.push('erase');
@@ -362,7 +362,7 @@ describe('clipboardService', () => {
       await vi.advanceTimersByTimeAsync(30_000);
       writeText.mockClear();
 
-      let release: (() => void) | null = null;
+      let release: (() => void) | undefined;
       writeText.mockImplementationOnce(
         () =>
           new Promise<void>((resolve) => {
@@ -442,7 +442,7 @@ describe('clipboardService', () => {
       await copySecretToClipboard('A', 5_000);
 
       const written: string[] = [];
-      let releaseCopyB: (() => void) | null = null;
+      let releaseCopyB: (() => void) | undefined;
       writeText.mockImplementation((text: string) => {
         written.push(text);
         if (text === 'B') {
@@ -478,7 +478,7 @@ describe('clipboardService', () => {
     // for up to five minutes.
     it('an erase-now that arrives mid-copy is honoured once the copy lands', async () => {
       const written: string[] = [];
-      let releaseCopy: (() => void) | null = null;
+      let releaseCopy: (() => void) | undefined;
       writeText.mockImplementation((text: string) => {
         written.push(text);
         if (text === 'B') {
@@ -510,7 +510,7 @@ describe('clipboardService', () => {
 
     it('an erase-now that arrives mid-copy is honoured when the copy FAILS', async () => {
       const written: string[] = [];
-      let rejectCopy: ((error: Error) => void) | null = null;
+      let rejectCopy: ((error: Error) => void) | undefined;
       writeText.mockImplementation((text: string) => {
         written.push(text);
         if (text === 'B') {
@@ -540,7 +540,7 @@ describe('clipboardService', () => {
       await copySecretToClipboard('A', 5_000);
 
       const written: string[] = [];
-      let rejectCopyB: ((error: Error) => void) | null = null;
+      let rejectCopyB: ((error: Error) => void) | undefined;
       writeText.mockImplementation((text: string) => {
         written.push(text);
         if (text === 'B') {

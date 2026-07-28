@@ -15,7 +15,13 @@
  * - a card's CVV field is **`code`**, never `cvv` (the importer reads
  *   `card.code`);
  * - an identity uses **`address1`/`address2`/`address3`**, **`postalCode`** and
- *   **`passportNumber`** — not `address`, `zip` or `passport`.
+ *   **`passportNumber`** — not `address`, `zip` or `passport`. H-Vault's two street
+ *   lines map onto `address1`/`address2`, which is an exact round trip; `address3`
+ *   has no H-Vault counterpart and stays `null`.
+ *
+ * An identity's delivery notes have no Bitwarden field at all, so they travel as a
+ * plain-text `fields` entry named by `DELIVERY_NOTES_FIELD_NAME`. A card's billing
+ * address likewise has no Bitwarden home and is folded into `notes`.
  *
  * Item `type` is numeric (1 = login, 2 = secure note, 3 = card, 4 = identity);
  * `fields[].type` is numeric (0 = text, 1 = hidden, 2 = boolean);
@@ -43,7 +49,7 @@ import type {
   PortableCustomField,
   PortablePasswordHistoryEntry,
 } from '../portableItem.js';
-import { BACKUP_CODES_FIELD_NAME } from '../portableItem.js';
+import { BACKUP_CODES_FIELD_NAME, DELIVERY_NOTES_FIELD_NAME } from '../portableItem.js';
 
 /** Numeric item-type codes, exactly as Bitwarden's importer expects. */
 function typeCode(type: ItemType): number {
@@ -203,6 +209,29 @@ function backupCodesField(p: PortableItem): BitwardenField | undefined {
   };
 }
 
+/**
+ * An identity's delivery notes as a plain TEXT custom field.
+ *
+ * Bitwarden has no delivery-instructions field on any item type, so the value
+ * travels as a custom field rather than being dropped. `text`, not `hidden`:
+ * courier instructions are not a credential, and masking them would only make them
+ * harder to find in the target app.
+ *
+ * Unlike {@link backupCodesField}, the round trip IS symmetric: the importer hoists
+ * this entry back into `address.deliveryNotes` by name. The no-hoist rule for
+ * recovery codes exists because a wrong hoist would run free text through a strict
+ * code parser and litter a security-critical list; neither half applies here, and
+ * leaving the value in `customFields` would be actively worse, because
+ * `IdentityDetail` renders no custom fields and the identity form does not carry
+ * them, so it would be invisible in the app and lost on the next edit.
+ */
+function deliveryNotesField(p: PortableItem): BitwardenField | undefined {
+  if (p.type !== 'identity') return undefined;
+  const notes = p.identity?.address?.deliveryNotes ?? '';
+  if (notes.length === 0) return undefined;
+  return { name: DELIVERY_NOTES_FIELD_NAME, value: notes, type: FIELD_TYPE_CODE.text };
+}
+
 function mapPasswordHistory(
   history?: PortablePasswordHistoryEntry[],
 ): BitwardenPasswordHistoryEntry[] | undefined {
@@ -295,7 +324,7 @@ export function toBitwardenJson(portable: readonly PortableItem[]): {
         // notes rather than drop it silently.
         if (card.billingAddress) {
           const a = card.billingAddress;
-          const line = [a.street, a.city, a.state, a.zip, a.country]
+          const line = [a.street, a.street2, a.city, a.state, a.zip, a.country]
             .filter((v) => v.length > 0)
             .join(', ');
           if (line) {
@@ -313,7 +342,7 @@ export function toBitwardenJson(portable: readonly PortableItem[]): {
           middleName: null,
           lastName: identity.lastName,
           address1: address ? address.street : null,
-          address2: null,
+          address2: address ? address.street2 : null,
           address3: null,
           city: address ? address.city : null,
           state: address ? address.state : null,
@@ -334,9 +363,15 @@ export function toBitwardenJson(portable: readonly PortableItem[]): {
     // Recovery codes go FIRST. `clampCustomFields` on the way back in summarises
     // anything past the 100-field cap into notes, and of everything competing for
     // those slots the recovery codes are what must not be demoted to prose.
+    // An identity's delivery notes follow for the same reason at lower stakes: they
+    // are not a secret, so being summarised into notes past the cap is acceptable,
+    // just not preferred. The two promoted fields never coexist (one is login-only,
+    // the other identity-only), so their relative order is moot.
     const codesField = backupCodesField(p);
+    const deliveryField = deliveryNotesField(p);
     const fields = [
       ...(codesField === undefined ? [] : [codesField]),
+      ...(deliveryField === undefined ? [] : [deliveryField]),
       ...(mapFields(p.customFields) ?? []),
     ];
     if (fields.length > 0) item.fields = fields;

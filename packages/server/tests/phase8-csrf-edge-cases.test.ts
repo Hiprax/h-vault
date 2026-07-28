@@ -12,9 +12,7 @@ import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js
 
 const API = '/api/v1';
 
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -24,10 +22,10 @@ async function getCsrf(
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('CSRF — safe methods bypass validation', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   it('GET requests should succeed without CSRF token', async () => {
@@ -59,10 +57,10 @@ describe('CSRF — safe methods bypass validation', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('CSRF — state-changing methods require valid token', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   it('POST without CSRF token should return 403', async () => {
@@ -94,10 +92,10 @@ describe('CSRF — state-changing methods require valid token', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('CSRF — token expiration after 24 hours', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   afterEach(() => {
@@ -157,10 +155,10 @@ describe('CSRF — token expiration after 24 hours', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('CSRF — malformed token handling', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   it('should reject empty string token', async () => {
@@ -218,10 +216,10 @@ describe('CSRF — malformed token handling', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('CSRF — constant-time comparison', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   it('routes CSRF HMAC verification through crypto.timingSafeEqual (not a fast === )', async () => {
@@ -286,7 +284,7 @@ describe('CSRF — constant-time comparison', () => {
 
 describe('CSRF — session binding to refresh-token family', () => {
   it('rejects an anon CSRF token once a refresh cookie is presented', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
     const userA = await createTestUser();
@@ -305,7 +303,7 @@ describe('CSRF — session binding to refresh-token family', () => {
   });
 
   it('rejects a CSRF token bound to a different refresh-token family', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
 
     const userA = await createTestUser();
     const userB = await createTestUser();
@@ -328,7 +326,7 @@ describe('CSRF — session binding to refresh-token family', () => {
   });
 
   it('accepts a CSRF token reissued with the active refresh cookie', async () => {
-    const agent = request(app) as unknown as request.SuperTest<request.Test>;
+    const agent = request(app);
     const user = await createTestUser();
 
     const { token, cookie } = await getCsrfBase(agent, `refreshToken=${user.refreshToken}`);
@@ -345,10 +343,10 @@ describe('CSRF — session binding to refresh-token family', () => {
 });
 
 describe('CSRF — token endpoint response', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   it('should return a token in the response body and set __csrf cookie', async () => {

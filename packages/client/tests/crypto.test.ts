@@ -226,7 +226,7 @@ describe('encryptVaultKey / decryptVaultKey', () => {
 
     // Tamper with the encrypted data
     const tamperedBytes = new Uint8Array(crypto.base64ToArrayBuffer(encrypted));
-    tamperedBytes[0] ^= 0xff;
+    tamperedBytes[0]! ^= 0xff;
     const tampered = crypto.arrayBufferToBase64(tamperedBytes.buffer as ArrayBuffer);
 
     await expect(crypto.decryptVaultKey(tampered, iv, tag, mek)).rejects.toThrow(
@@ -269,7 +269,7 @@ describe('vaultKeyEqualsRaw', () => {
     const rawVk = await crypto.generateVaultKey();
     const vk = await crypto.importVaultKey(rawVk);
     const flipped = new Uint8Array(new Uint8Array(rawVk));
-    flipped[0] ^= 0x01;
+    flipped[0]! ^= 0x01;
 
     expect(await crypto.vaultKeyEqualsRaw(vk, flipped.buffer)).toBe(false);
   });
@@ -381,7 +381,7 @@ describe('encryptData / decryptData', () => {
 
     // Flip a character in the ciphertext
     const tamperedBytes = new Uint8Array(crypto.base64ToArrayBuffer(encrypted));
-    tamperedBytes[0] ^= 0xff;
+    tamperedBytes[0]! ^= 0xff;
     const tampered = crypto.arrayBufferToBase64(tamperedBytes.buffer as ArrayBuffer);
 
     await expect(crypto.decryptData(tampered, iv, tag, vaultKey)).rejects.toThrow();
@@ -391,7 +391,7 @@ describe('encryptData / decryptData', () => {
     const { encrypted, iv, tag } = await crypto.encryptData('secret', vaultKey);
 
     const tamperedTagBytes = new Uint8Array(crypto.base64ToArrayBuffer(tag));
-    tamperedTagBytes[0] ^= 0xff;
+    tamperedTagBytes[0]! ^= 0xff;
     const tamperedTag = crypto.arrayBufferToBase64(tamperedTagBytes.buffer as ArrayBuffer);
 
     await expect(crypto.decryptData(encrypted, iv, tamperedTag, vaultKey)).rejects.toThrow();
@@ -625,7 +625,7 @@ describe('backup key derivation', () => {
       const { encrypted, iv, tag } = await crypto.encryptVaultKeyWithBWK(vk, bwk);
 
       const tamperedBytes = new Uint8Array(crypto.base64ToArrayBuffer(encrypted));
-      tamperedBytes[0] ^= 0xff;
+      tamperedBytes[0]! ^= 0xff;
       const tampered = crypto.arrayBufferToBase64(tamperedBytes.buffer as ArrayBuffer);
 
       await expect(crypto.decryptVaultKeyWithBWK(tampered, iv, tag, bwk)).rejects.toThrow();
@@ -639,7 +639,7 @@ describe('backup key derivation', () => {
       const { encrypted, iv, tag } = await crypto.encryptVaultKeyWithBWK(vk, bwk);
 
       const tamperedTagBytes = new Uint8Array(crypto.base64ToArrayBuffer(tag));
-      tamperedTagBytes[0] ^= 0xff;
+      tamperedTagBytes[0]! ^= 0xff;
       const tamperedTag = crypto.arrayBufferToBase64(tamperedTagBytes.buffer as ArrayBuffer);
 
       await expect(

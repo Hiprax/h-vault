@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import { CryptoManager, CryptoError } from '@hiprax/crypto';
 import {
@@ -22,7 +23,11 @@ const PASSWORD = 'Correct-Horse-Battery-Staple-9!';
 const WRONG_PASSWORD = 'Totally-Different-Password-7?';
 
 function fileOf(bytes: Uint8Array, name: string, type = ''): File {
-  return new File([bytes], name, type ? { type } : undefined);
+  // `BlobPart` admits only ArrayBuffer-backed views, while a bare `Uint8Array`
+  // also permits a SharedArrayBuffer-backed one. Every caller here (and
+  // `@hiprax/crypto`'s container output) is ArrayBuffer-backed, so pinning the
+  // buffer type is sound.
+  return new File([bytes as Uint8Array<ArrayBuffer>], name, type ? { type } : undefined);
 }
 
 async function bytesOf(blob: Blob): Promise<Uint8Array> {
@@ -254,9 +259,17 @@ describe('fileCryptoService — nondeterminism', () => {
 
 describe('fileCryptoService — account-agnostic', () => {
   it('imports no authStore or account crypto service', () => {
-    // Vitest runs each workspace with cwd = the package dir (packages/client).
+    // Anchored on THIS FILE's own location, never `process.cwd()`. Every other
+    // file-reading test in the repo already does this, and the one that did not was
+    // the single test whose result depended on how the runner was invoked: it passed
+    // under `npm run test -w packages/client` (cwd = the package dir) and failed with
+    // a misleading ENOENT under `npx vitest --root packages/client` from the repo
+    // root, which leaves cwd at the root.
     const source = readFileSync(
-      path.resolve(process.cwd(), 'src/services/crypto/fileCryptoService.ts'),
+      path.resolve(
+        path.dirname(fileURLToPath(import.meta.url)),
+        '../src/services/crypto/fileCryptoService.ts',
+      ),
       'utf8',
     );
     // Look only at real module specifiers, not the doc comment prose.
@@ -313,7 +326,8 @@ describe('fileCryptoService — negative paths', () => {
   it('a flipped ciphertext byte → wrong-password-or-corrupt', async () => {
     const container = await containerFor(randomBytes(1024));
     // Flip the final byte (payload GCM tag region) — auth fails.
-    container[container.length - 1] ^= 0xff;
+    const last = container.length - 1;
+    container[last] = container[last]! ^ 0xff;
     const kind = await decryptFile(fileOf(container, 'secret.txt.enc'), PASSWORD, FAST_OPTS).then(
       () => 'no-throw',
       (err) => describeFileCryptoError(err).kind,

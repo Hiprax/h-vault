@@ -26,9 +26,7 @@ import {
 import type { TestUser } from './helpers.js';
 
 // Re-export with { csrfToken, csrfCookie } naming used throughout this file
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -89,10 +87,10 @@ function historyEntry(overrides: Record<string, unknown> = {}): Record<string, u
 
 describe('Tools routes', () => {
   let user: TestUser;
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(async () => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
     user = await createTestUser();
   });
 
@@ -1615,7 +1613,7 @@ describe('Tools routes', () => {
 
       // The existing item must be preserved unchanged — the rejection must abort
       // the write, not silently succeed with truncation.
-      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      const persisted = await VaultItem.findOne({ _id: String(existing._id) }).lean();
       expect(persisted).not.toBeNull();
       expect(persisted!.encryptedData).toBe('original-data');
       expect(persisted!.encryptedName).toBe('update-validator');
@@ -1657,7 +1655,7 @@ describe('Tools routes', () => {
       expect(res.status).toBe(201);
       expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
 
-      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      const persisted = await VaultItem.findOne({ _id: String(existing._id) }).lean();
       expect(persisted).not.toBeNull();
       // The ciphertext WAS rewritten…
       expect(persisted!.encryptedData).toBe('updated-encrypted-data');
@@ -1693,7 +1691,7 @@ describe('Tools routes', () => {
         });
 
       expect(res.status).toBe(400);
-      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      const persisted = await VaultItem.findOne({ _id: String(existing._id) }).lean();
       expect(persisted).not.toBeNull();
       expect(persisted!.encryptedData).toBe('original-data');
       expect(persisted!.passwordHistory).toBeUndefined();
@@ -1720,7 +1718,7 @@ describe('Tools routes', () => {
         });
 
       expect(res.status).toBe(400);
-      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      const persisted = await VaultItem.findOne({ _id: String(existing._id) }).lean();
       expect(persisted).not.toBeNull();
       expect(persisted!.encryptedData).toBe('original-data');
       expect(persisted!.passwordHistory).toBeUndefined();
@@ -1744,7 +1742,7 @@ describe('Tools routes', () => {
 
       expect(res.status).toBe(201);
 
-      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      const persisted = await VaultItem.findOne({ _id: String(existing._id) }).lean();
       expect(persisted).not.toBeNull();
       expect(persisted!.passwordHistory).toHaveLength(1);
       expect(persisted!.passwordHistory![0]!.encryptedPassword).toBe(
@@ -1845,7 +1843,7 @@ describe('Tools routes', () => {
 
       // The pre-existing item must be UNCHANGED — the update must not have been
       // applied ahead of the rejection.
-      const persisted = await VaultItem.findOne({ _id: existing._id }).lean();
+      const persisted = await VaultItem.findOne({ _id: String(existing._id) }).lean();
       expect(persisted).not.toBeNull();
       expect(persisted!.encryptedData).toBe('original-data');
       expect(persisted!.encryptedName).toBe('update-target');

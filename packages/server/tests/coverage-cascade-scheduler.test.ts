@@ -433,16 +433,19 @@ describe('tokenCleanup — expired token with an explicit usedAt: null', () => {
 
     // `usedAt: null` is what an explicit un-set writes; the cleanup's $or must
     // treat it exactly like an absent field, otherwise these never get reaped.
+    // The model types `usedAt` as `Date | undefined`, so the stored-null case
+    // this test exists for can only be expressed through a cast.
+    const explicitNull = null as unknown as Date;
     const expiredNullUsed = await RefreshToken.create({
       ...base,
       tokenHash: crypto.randomBytes(32).toString('hex'),
-      usedAt: null,
+      usedAt: explicitNull,
       expiresAt: new Date(Date.now() - 60_000),
     });
     const liveNullUsed = await RefreshToken.create({
       ...base,
       tokenHash: crypto.randomBytes(32).toString('hex'),
-      usedAt: null,
+      usedAt: explicitNull,
       expiresAt: new Date(Date.now() + 60 * 60_000),
     });
 

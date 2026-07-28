@@ -91,7 +91,11 @@ async function enable2fa(
  * setup API for an account that was created through the real registration page
  * (so its stored auth hash genuinely matches the master password).
  */
-async function captureLoginAuthHash(page: Page, action: () => Promise<void>): Promise<string> {
+async function captureLoginAuthHash(
+  page: Page,
+  // The awaited value is irrelevant here; sign-in helpers return their credentials.
+  action: () => Promise<unknown>,
+): Promise<string> {
   let authHash: string | undefined;
   const handler = (req: import('@playwright/test').Request): void => {
     if (req.method() !== 'POST') return;

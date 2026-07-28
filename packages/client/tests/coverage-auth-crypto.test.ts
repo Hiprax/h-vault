@@ -17,7 +17,7 @@
  * hooks-functional, useConnectionStatus).
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, type Mock } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import axios, { type AxiosAdapter, type AxiosResponse } from 'axios';
 
@@ -583,7 +583,7 @@ describe('cryptoService — BWK decryption and vault-key encryption failure', ()
 
     const { encrypted, iv, tag } = await crypto.encryptBWK(bwk, bek);
     const tagBytes = new Uint8Array(crypto.base64ToArrayBuffer(tag));
-    tagBytes[0] ^= 0xff;
+    tagBytes[0]! ^= 0xff;
     const tamperedTag = crypto.arrayBufferToBase64(tagBytes.buffer as ArrayBuffer);
 
     await expect(crypto.decryptBWK(encrypted, iv, tamperedTag, bek)).rejects.toThrow();
@@ -616,6 +616,15 @@ describe('api client — CSRF token lifecycle', () => {
   const originalGlobalAdapter = axios.defaults.adapter;
   const originalApiAdapter = api.defaults.adapter;
 
+  // `adapter` is exact-optional on axios' defaults, but restoring the original
+  // means writing `undefined` back when an instance had none. Same objects, a
+  // slot that admits the absent value.
+  interface AdapterSlot {
+    adapter?: typeof axios.defaults.adapter | undefined;
+  }
+  const axiosDefaults: AdapterSlot = axios.defaults;
+  const apiDefaults: AdapterSlot = api.defaults;
+
   function ok(data: unknown, config: AxiosResponse['config']): AxiosResponse {
     return { data, status: 200, statusText: 'OK', headers: {}, config } as AxiosResponse;
   }
@@ -641,8 +650,8 @@ describe('api client — CSRF token lifecycle', () => {
   });
 
   afterEach(() => {
-    axios.defaults.adapter = originalGlobalAdapter;
-    api.defaults.adapter = originalApiAdapter;
+    axiosDefaults.adapter = originalGlobalAdapter;
+    apiDefaults.adapter = originalApiAdapter;
   });
 
   it('fetches the CSRF token once for concurrent state-changing requests', async () => {
@@ -706,7 +715,7 @@ describe('api client — CSRF token lifecycle', () => {
 
 describe('useAutoLock — tab-hidden delayed lock', () => {
   const VISIBILITY_DELAY_MS = 30_000;
-  let mockLock: ReturnType<typeof vi.fn>;
+  let mockLock: Mock<() => Promise<void>>;
 
   function setHidden(hidden: boolean): void {
     Object.defineProperty(document, 'hidden', { value: hidden, configurable: true });
@@ -714,7 +723,7 @@ describe('useAutoLock — tab-hidden delayed lock', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    mockLock = vi.fn().mockResolvedValue(undefined);
+    mockLock = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
     useAuthStore.setState({ isAuthenticated: true, isLocked: false, lock: mockLock });
   });
 

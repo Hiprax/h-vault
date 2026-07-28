@@ -32,9 +32,7 @@ async function seedTrustedDevice(userId: string): Promise<void> {
   });
 }
 
-async function getCsrf(
-  agent: request.SuperTest<request.Test>,
-): Promise<{ csrfToken: string; csrfCookie: string }> {
+async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
@@ -52,10 +50,10 @@ function resetPayload(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Password Reset Flow', () => {
-  let agent: request.SuperTest<request.Test>;
+  let agent: request.Agent;
 
   beforeEach(() => {
-    agent = request(app) as unknown as request.SuperTest<request.Test>;
+    agent = request(app);
   });
 
   // ── Token Expiration ──────────────────────────────────────────────────

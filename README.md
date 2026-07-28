@@ -60,15 +60,16 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 
 ### Vault
 
-|                        |                                                                                                                                                                                                     |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Five item types**    | Logins (with optional 2FA recovery codes), secrets, notes, cards (with Luhn validation and an optional billing address) and identities — with search, folders, tags, favorites and a trash.         |
-| **Client-side crypto** | AES-256-GCM under a vault key the server never sees. Item and folder names are ciphertext too — so search runs entirely in the browser, over data only you can decrypt.                             |
-| **Password generator** | Character-set and passphrase modes (2048-word EFF-based list, exactly 11 bits per word). Strength is reported as **exact entropy**, not a heuristic score — see [below](#honest-strength-metering). |
-| **Vault health**       | Finds weak, reused, old (90+ days) and breached passwords, and logins with no TOTP configured.                                                                                                      |
-| **Password history**   | The last 10 passwords per login, each individually encrypted, decrypted on demand.                                                                                                                  |
-| **Built-in TOTP**      | Generate 2FA codes for your stored logins, with a clipboard that clears itself.                                                                                                                     |
-| **Key rotation**       | Re-key the entire vault on demand. The server raises a write fence for the duration, so a second session can't write ciphertext under the old key and silently lose it.                             |
+|                        |                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Five item types**    | Logins (with optional 2FA recovery codes), secrets, notes, cards (with Luhn validation, notes and an optional two-line billing address) and identities (a two-line address with courier delivery notes, plus company, Social Security and passport numbers — both masked — notes and custom fields) — with search, folders, tags, favorites and a trash. |
+| **Reuse an address**   | A card's billing address can be filled from any identity that has one, chosen from a searchable list with an undo. Delivery notes stay on the identity — a card cannot hold them. Runs entirely on already-decrypted items in the browser; nothing is sent anywhere.                                                                                     |
+| **Client-side crypto** | AES-256-GCM under a vault key the server never sees. Item and folder names are ciphertext too — so search runs entirely in the browser, over data only you can decrypt.                                                                                                                                                                                  |
+| **Password generator** | Character-set and passphrase modes (2048-word EFF-based list, exactly 11 bits per word). Strength is reported as **exact entropy**, not a heuristic score — see [below](#honest-strength-metering).                                                                                                                                                      |
+| **Vault health**       | Finds weak, reused, old (90+ days) and breached passwords, and logins with no TOTP configured.                                                                                                                                                                                                                                                           |
+| **Password history**   | The last 10 passwords per login, each individually encrypted, decrypted on demand.                                                                                                                                                                                                                                                                       |
+| **Built-in TOTP**      | Generate 2FA codes for your stored logins, with a clipboard that clears itself.                                                                                                                                                                                                                                                                          |
+| **Key rotation**       | Re-key the entire vault on demand. The server raises a write fence for the duration, so a second session can't write ciphertext under the old key and silently lose it.                                                                                                                                                                                  |
 
 ### Security
 
@@ -120,7 +121,8 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   or that the chosen format cannot represent, is reported as skipped/omitted rather than silently
   dropped. Each format carries what it can: **Bitwarden JSON** is the most complete (logins, secure
   notes, cards, identities, folders, TOTP, custom fields and password history, with a login's 2FA
-  recovery codes carried as a hidden custom field); **Bitwarden CSV** keeps only logins and notes
+  recovery codes carried as a hidden custom field, an address's second street line in Bitwarden's own
+  `address2` field, and an identity's delivery notes as a plain custom field); **Bitwarden CSV** keeps only logins and notes
   (cards, identities and secrets are omitted, and recovery codes arrive as text in the notes); and
   **Chrome/Edge CSV** is logins-only, dropping even a login's TOTP, recovery codes, custom fields
   and folder. Folder paths re-import as tags,
@@ -954,10 +956,10 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                         |
 | ---------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Server** | 96    | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
-| **Client** | 83    | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                    |
-| **Shared** | 6     | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                          |
-| **E2E**    | 10    | Playwright (Chromium): 188 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock and file-encryption journeys                                                                                                                                                                                              |
+| **Server** | 105   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
+| **Client** | 106   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                    |
+| **Shared** | 7     | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                          |
+| **E2E**    | 15    | Playwright (Chromium): 195 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys                                                                                                                                                                               |
 
 **Coverage** is measured with `@vitest/coverage-v8` and enforced as a build gate — a regression
 fails the push rather than being quietly absorbed. `server` and `client` must clear **90%** on all
@@ -986,19 +988,19 @@ npm run ci -- --only=lint,test  # a subset, while iterating
 npm run ci -- --continue        # don't stop at the first failure
 ```
 
-| Gate         | What it runs                                                              | Replaces                   |
-| ------------ | ------------------------------------------------------------------------- | -------------------------- |
-| `engines`    | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version    | the CI Node matrix's floor |
-| `secrets`    | Every **tracked** file scanned for credential patterns                    | _new_                      |
-| `build`      | `npm run build` (shared → server → client)                                | `ci` job                   |
-| `lint`       | ESLint + `eslint-plugin-security`, `--max-warnings=0`                     | `ci` job                   |
-| `format`     | `prettier --check .`                                                      | _new_                      |
-| `type-check` | `tsc --noEmit` across all three packages                                  | `ci` job                   |
-| `test`       | The full Vitest suite + the coverage thresholds                           | `ci` job                   |
-| `audit`      | `npm audit --audit-level=moderate --omit=dev`                             | `ci` job                   |
-| `e2e`        | Playwright (Chromium) against an auto-started stack                       | `e2e` job                  |
-| `docker`     | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans | `docker-build` job         |
-| `sast`       | CodeQL `security-and-quality` suite                                       | `sast` job                 |
+| Gate         | What it runs                                                                                                                           | Replaces                   |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `engines`    | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                 | the CI Node matrix's floor |
+| `secrets`    | Every **tracked** file scanned for credential patterns                                                                                 | _new_                      |
+| `build`      | `npm run build` (shared → server → client)                                                                                             | `ci` job                   |
+| `lint`       | ESLint + `eslint-plugin-security`, `--max-warnings=0`                                                                                  | `ci` job                   |
+| `format`     | `prettier --check .`                                                                                                                   | _new_                      |
+| `type-check` | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                              | `ci` job                   |
+| `test`       | The full Vitest suite + the coverage thresholds                                                                                        | `ci` job                   |
+| `audit`      | `npm audit --audit-level=moderate --omit=dev`                                                                                          | `ci` job                   |
+| `e2e`        | Playwright (Chromium) against an auto-started stack                                                                                    | `e2e` job                  |
+| `docker`     | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below) | `docker-build` job         |
+| `sast`       | CodeQL `security-and-quality` suite                                                                                                    | `sast` job                 |
 
 **A full run takes 15–30 minutes.** That is the deliberate trade: time spent before the push
 instead of minutes billed after it. Two escape hatches exist:
@@ -1022,11 +1024,25 @@ git push --no-verify                    # skip the hook entirely
   tar -xzf .cache/codeql/codeql-bundle-<platform>.tar.gz -C .cache/codeql
   ```
 
-  CodeQL currently reports 18 pre-existing `js/sql-injection` findings — request values reaching a
-  Mongoose query, which it flags because it cannot see the Zod schema, the `$`-stripping middleware
-  or the field allowlist standing in front of them. They are recorded in
+  CodeQL currently reports 20 pre-existing error-severity findings: 19 `js/sql-injection` — request
+  values reaching a Mongoose query, which it flags because it cannot see the Zod schema, the
+  `$`-stripping middleware or the field allowlist standing in front of them — and one
+  `js/user-controlled-bypass` on the trusted-device 2FA skip, where the real authorization is the
+  server-side hashed-token lookup rather than the cookie's presence. They are recorded in
   `scripts/ci/codeql-baseline.json`, keyed by content hash, so the gate fails only on **new**
   findings. Refresh it with `npm run ci:sast -- --update-baseline`.
+
+- **Trivy** scans the three application images and fails the gate only on findings that have a fix,
+  so an unpatched upstream CRITICAL cannot wall off the repository — a gate nobody can satisfy gets
+  bypassed, and then it protects nothing. `scripts/ci/trivy-baseline.json` extends that to the case
+  where a fix exists for the _library_ but not in anything installable here. One finding is currently
+  accepted under it: a denial-of-service advisory against `brace-expansion` inside **npm's own
+  bundled dependency tree** in the `hvault-bootstrap` image, which no lockfile or `overrides` entry
+  of this project can reach, and for which no npm release yet exists. It is a one-shot container that
+  runs the index script with fixed arguments, takes no untrusted input and publishes no port. An
+  entry accepts a finding only when the CVE, the image, the package **and** the path all match, so
+  the same CVE appearing in this project's own dependencies still fails the gate; the file records
+  why each exception holds and what removes it.
 
 **Known gap, stated plainly:** the old CI ran the unit tests on a Node 22 + 24 matrix. The local
 pipeline runs them on your Node only. The project pins Node 24 everywhere that matters (`.nvmrc`,
@@ -1043,7 +1059,7 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 | `npm run test`                 | Every workspace's tests                       |
 | `npm run test:e2e`             | Playwright E2E tests                          |
 | `npm run lint`                 | ESLint, warnings are errors                   |
-| `npm run type-check`           | Type-check all three packages                 |
+| `npm run type-check`           | Type-check all packages, tests and `e2e/`     |
 | `npm run format`               | Prettier — write                              |
 | `npm run format:check`         | Prettier — verify only                        |
 | `npm run ci`                   | The whole pipeline (what `pre-push` runs)     |

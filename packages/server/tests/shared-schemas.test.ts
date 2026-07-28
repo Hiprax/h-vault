@@ -47,7 +47,7 @@ describe('Task 5.1 — Type exports for 2FA and unlock schemas', () => {
   });
 
   it('should export Verify2faInput type that matches schema', () => {
-    const input: Verify2faInput = { code: '123456', secret: 'JBSWY3DPEHPK3PXP' };
+    const input: Verify2faInput = { code: '123456' };
     const result = verify2faSchema.safeParse(input);
     expect(result.success).toBe(true);
   });

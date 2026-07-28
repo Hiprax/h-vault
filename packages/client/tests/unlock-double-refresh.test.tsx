@@ -16,7 +16,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import axios, { AxiosError, type AxiosAdapter, type AxiosResponse } from 'axios';
+import axios, {
+  AxiosError,
+  type AxiosAdapter,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+} from 'axios';
 
 // Mock crypto so we don't run real PBKDF2; the key objects are opaque here.
 vi.mock('../src/services/crypto/cryptoService', () => ({
@@ -114,6 +119,18 @@ const mockAdapter: AxiosAdapter = (config) => {
 const originalApiAdapter = api.defaults.adapter;
 const originalAxiosAdapter = axios.defaults.adapter;
 
+/**
+ * Axios declares `defaults.adapter` optional but never `undefined`, so putting a
+ * captured (possibly absent) original back requires a view of the field that
+ * admits `undefined`.
+ */
+function restoreAdapter(
+  defaults: { adapter?: AxiosRequestConfig['adapter'] },
+  adapter: AxiosRequestConfig['adapter'],
+): void {
+  defaults.adapter = adapter;
+}
+
 beforeEach(() => {
   refreshCount = 0;
   verifyUnlockCount = 0;
@@ -135,8 +152,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  api.defaults.adapter = originalApiAdapter;
-  axios.defaults.adapter = originalAxiosAdapter;
+  restoreAdapter(api.defaults, originalApiAdapter);
+  restoreAdapter(axios.defaults, originalAxiosAdapter);
   clearCsrfToken();
 });
 
