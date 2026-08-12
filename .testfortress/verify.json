@@ -42,6 +42,13 @@
       "gate": "every registered gate returns non-zero with one planted defect",
       "report": "selftest.json"
     },
+    "ci:local": {
+      "cmd": "npm run ci:local",
+      "tier": 2,
+      "composite": true,
+      "gate": "HEAD, checked out into a temporary worktree and installed from the lockfile alone, passes every tier",
+      "report": "cleanroom.json"
+    },
     "engines": {
       "cmd": "node scripts/ci/local-ci.mjs --only=engines",
       "tier": 0,
@@ -163,6 +170,20 @@
       "report": "fuzz.json",
       "countsTests": false,
       "requires": ["build:shared"]
+    },
+    "test:smoke": {
+      "cmd": "npm run test:smoke",
+      "tier": 1,
+      "gate": "the BUILT artifact boots in production mode against a real mongod, serves a deep-linked SPA route with a matching CSP nonce, and completes a register → sign-in → store → read-back journey whose ciphertext round-trips byte for byte",
+      "report": ["smoke.json", "smoke.log"],
+      "requires": ["build:server", "build:client"]
+    },
+    "test:deploy": {
+      "cmd": "npm run test:deploy",
+      "tier": 2,
+      "gate": "the Compose stack comes up from nothing with every service healthy and both one-shots completed, publishes exactly one loopback-bound port and nothing else, completes a vault journey through that port, keeps the data across a restart, and re-runs its bootstrap without rewriting a rotated application password",
+      "report": ["deploy.json", "deploy.log"],
+      "requires": ["docker"]
     },
     "audit:deps": {
       "cmd": "npm run audit:prod",

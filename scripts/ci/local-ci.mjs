@@ -63,7 +63,7 @@
  * `node scripts/ci/local-ci.mjs --json`, or simply
  * `.testfortress/reports/summary.json`, which every run writes regardless.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { runNpm, runExe, repoRoot, hasExe } from './lib/proc.mjs';
 import {
@@ -199,6 +199,20 @@ const PREREQUISITES = {
     // consumes the shared build rather than producing it. `npm run ci` runs the
     // build gate first and satisfies this on its own.
     fix: 'npm run build:shared',
+  },
+  // The smoke gate runs the EMITTED JavaScript, so it needs both halves of the
+  // artifact on disk — the server's `dist/` and the client bundle it serves as
+  // its SPA shell. Declared rather than probed inside the gate, so a missing
+  // build reads as "could not run" instead of as a broken artifact.
+  'build:server': {
+    label: 'a built server (packages/server/dist/server.js)',
+    ok: () => existsSync(path.join(repoRoot, 'packages', 'server', 'dist', 'server.js')),
+    fix: 'npm run build',
+  },
+  'build:client': {
+    label: 'a built client bundle (packages/client/dist/index.html)',
+    ok: () => existsSync(path.join(repoRoot, 'packages', 'client', 'dist', 'index.html')),
+    fix: 'npm run build',
   },
 };
 
@@ -408,6 +422,24 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/fuzz-gate.mjs'], options),
   },
   {
+    id: 'smoke',
+    task: 'test:smoke',
+    tier: 1,
+    // The only gate that runs the JavaScript this project actually ships.
+    // `build` proves it compiles, `e2e` drives the SOURCES through the dev
+    // server, and `docker` builds the images without ever starting one — so a
+    // defect in the emitted tree (a missing file, an import that only resolved
+    // through the TypeScript path map, a production-only branch of the config
+    // schema) had no gate in front of it until this one. It costs ~5 s because
+    // it is deliberately one journey, not a suite: the exhaustive assertions
+    // live in `test-integration` and `e2e`.
+    title: 'Boot the built artifact in production mode and complete one vault journey',
+    ci: 'new — no hosted job ever started the thing this repository emits',
+    dependsOn: ['build'],
+    requires: ['build:server', 'build:client'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/smoke-gate.mjs'], options),
+  },
+  {
     id: 'audit',
     task: 'audit:deps',
     tier: 1,
@@ -497,6 +529,27 @@ const GATES = [
     ci: 'docker-build job · image builds, nginx -t, compose config',
     requires: ['docker'],
     run: (options) => runExe(process.execPath, ['scripts/ci/docker-gate.mjs'], options),
+  },
+  {
+    id: 'deploy',
+    task: 'test:deploy',
+    // TIER 2, and the second gate to sit there. It is the heaviest thing in the
+    // repository — it builds the images, stands five containers up from nothing,
+    // restarts them and rotates a database credential — so it belongs to
+    // `verify:full` and the release, not to a hook someone is waiting on. What
+    // it proves is not covered anywhere else at any tier: `audit:image` builds
+    // the images without running one, and the E2E suite drives the sources
+    // through a dev server rather than the deployment.
+    //
+    // It runs AFTER `docker`, and that order is load-bearing rather than
+    // cosmetic: the image gate builds the same four images from the same
+    // context, so by the time the drill's `up --build` runs, every layer it
+    // needs is already in the builder's cache.
+    tier: 2,
+    title: 'Deployment clean room (compose stack from nothing, through its single port)',
+    ci: 'new — no hosted job ever ran the stack this project deploys',
+    requires: ['docker'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/deploy-drill.mjs'], options),
   },
   {
     id: 'sast',

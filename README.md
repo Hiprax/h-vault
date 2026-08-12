@@ -1009,27 +1009,46 @@ npm run ci -- --bail            # stop at the first failure instead of running t
 npm run ci -- --json            # one JSON document describing the run
 ```
 
-| Gate               | Tier | What it runs                                                                                                                           | Replaces                   |
-| ------------------ | ---- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| `engines`          | T0   | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                 | the CI Node matrix's floor |
-| `secrets`          | T0   | Every tracked **and untracked-not-ignored** file scanned for credential patterns                                                       | _new_                      |
-| `lint`             | T0   | ESLint + `eslint-plugin-security`, `--max-warnings=0`, emitting SARIF                                                                  | `ci` job                   |
-| `format`           | T0   | `prettier --check .`                                                                                                                   | _new_                      |
-| `type-check`       | T0   | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                              | `ci` job                   |
-| `integrity`        | T0   | Every marker that weakens a check, against the suppression ledger                                                                      | _new_                      |
-| `ratchet`          | T0   | The cheap numbers: suppression counts, the scan's own fingerprints, the registered task list                                           | _new_                      |
-| `build`            | T1   | `npm run build` (shared → server → client)                                                                                             | `ci` job                   |
-| `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                        | `ci` job                   |
-| `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                              | `ci` job                   |
-| `audit`            | T1   | `npm audit --audit-level=moderate --omit=dev`                                                                                          | `ci` job                   |
-| `licenses`         | T1   | Every production dependency against the committed licence allowlist; any copyleft fails                                                | _new_                      |
-| `secrets-full`     | T1   | The working tree **plus every blob in git history** scanned for credential patterns                                                    | _new_                      |
-| `deadcode`         | T1   | `knip` (unused files, exports, types, dependencies) + `jscpd` duplication against a committed ceiling                                  | _new_                      |
-| `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                             | _new_                      |
-| `e2e`              | T1   | Playwright (Chromium) against an auto-started stack                                                                                    | `e2e` job                  |
-| `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below) | `docker-build` job         |
-| `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                    | `sast` job                 |
-| `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                               | _new_                      |
+| Gate               | Tier | What it runs                                                                                                                                  | Replaces                   |
+| ------------------ | ---- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `engines`          | T0   | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                        | the CI Node matrix's floor |
+| `secrets`          | T0   | Every tracked **and untracked-not-ignored** file scanned for credential patterns                                                              | _new_                      |
+| `lint`             | T0   | ESLint + `eslint-plugin-security`, `--max-warnings=0`, emitting SARIF                                                                         | `ci` job                   |
+| `format`           | T0   | `prettier --check .`                                                                                                                          | _new_                      |
+| `type-check`       | T0   | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                                     | `ci` job                   |
+| `integrity`        | T0   | Every marker that weakens a check, against the suppression ledger                                                                             | _new_                      |
+| `ratchet`          | T0   | The cheap numbers: suppression counts, the scan's own fingerprints, the registered task list                                                  | _new_                      |
+| `build`            | T1   | `npm run build` (shared → server → client)                                                                                                    | `ci` job                   |
+| `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                               | `ci` job                   |
+| `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                                     | `ci` job                   |
+| `security`         | T1   | The cross-user authorization matrix over the whole route table                                                                                | _new_                      |
+| `observability`    | T1   | Log, audit-row and error-body redaction                                                                                                       | _new_                      |
+| `property`         | T1   | The generated-input invariants, run in two timezones                                                                                          | _new_                      |
+| `snapshot`         | T1   | The three export formats against their verified goldens, and the export/import round trip                                                     | _new_                      |
+| `smoke`            | T1   | Boots the **built artifact** in production mode and completes one vault journey against it                                                    | _new_                      |
+| `audit`            | T1   | `npm audit --audit-level=moderate --omit=dev`                                                                                                 | `ci` job                   |
+| `licenses`         | T1   | Every production dependency against the committed licence allowlist; any copyleft fails                                                       | _new_                      |
+| `secrets-full`     | T1   | The working tree **plus every blob in git history** scanned for credential patterns                                                           | _new_                      |
+| `deadcode`         | T1   | `knip` (unused files, exports, types, dependencies) + `jscpd` duplication against a committed ceiling                                         | _new_                      |
+| `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                    | _new_                      |
+| `e2e`              | T1   | Playwright (Chromium) against an auto-started stack                                                                                           | `e2e` job                  |
+| `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)        | `docker-build` job         |
+| `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a journey through it, data across a restart, an idempotent redeploy | _new_                      |
+| `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                           | `sast` job                 |
+| `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                      | _new_                      |
+
+Two gates sit in **T2** — `fuzz` and `deploy` — so they run in `npm run verify:full` and before a
+release rather than on every push. Both are deliberate parkings rather than quiet retirements: the fuzz
+suites also run inside the ordinary test gates on every push, and the deployment drill's fast sibling
+`smoke` covers the built artifact on every push. One more command sits outside the tiers entirely:
+
+```bash
+npm run ci:local                # a temporary worktree at HEAD + `npm ci` + verify:full
+```
+
+`ci:local` is the clean room. It distrusts this machine: a `node_modules` carried over from another
+platform, a tool cache that no longer matches the pinned version, a file mode inherited from the
+checkout. Uncommitted work is not in it — the subject is the commit — and it says so before it starts.
 
 Gates run in the order above and the runner **aggregates**: every selected gate runs and every
 failure is reported, rather than the run stopping at the first one. Exit `0` is a pass, `1` means

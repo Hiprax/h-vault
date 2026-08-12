@@ -369,6 +369,69 @@ export const DEFECTS = {
     evidence: (text) => /a parser emitted an item that fails its own schema/.test(text),
   },
 
+  'test:smoke': {
+    // The defect is planted in the ARTIFACT, not in the sources, and that is the
+    // point of this gate: `test:smoke` runs the emitted bundle, so the emitted
+    // bundle is what a case for it has to break. (The selftest workspace carries
+    // the built `dist` trees for exactly this reason — see prepareWorkspace.)
+    //
+    // An index.html with no script tag is a real build failure, not a contrived
+    // one: it is what a mis-configured bundler emits, it type-checks, it lints,
+    // every unit test passes, the container image builds and Trivy is happy —
+    // and every user gets a blank page. Only something that fetches a rendered
+    // document from the running artifact can see it.
+    title: 'ship an index.html with no script tag, so the built SPA never loads',
+    create: {
+      'packages/client/dist/index.html':
+        '<!doctype html>\n<html lang="en">\n  <head><title>H-Vault</title></head>\n  <body><div id="root"></div></body>\n</html>\n',
+    },
+    // The assertion's own message, which a PASSING run cannot contain — the trap
+    // recorded on `test:security`: matching a step's NAME would be satisfied by a
+    // fully green report, since every step is listed either way.
+    evidence: (text) => /script nonce=false/.test(text),
+  },
+
+  'test:deploy': {
+    requires: ['docker'],
+    // The single most dangerous edit anyone can make to this deployment, and it
+    // is a DELETION of ten characters: the host binding in front of the one
+    // published port. A port published without `127.0.0.1:` is reachable from
+    // the entire network even behind an active `ufw deny`, because Docker's
+    // iptables DOCKER chain is evaluated before INPUT — so the stack goes from
+    // "loopback only, TLS terminated by the host's Nginx" to "a password
+    // manager's API on the open internet, in cleartext", while every container
+    // stays healthy and every request keeps working.
+    //
+    // A REJECTED alternative, recorded because it is the first thing a reader
+    // will reach for: adding `ports: ["127.0.0.1:27017:27017"]` to the database
+    // service. It looks like the perfect defect and it is inert — measured here,
+    // twice. `docker compose config` renders the mapping, but the service is
+    // attached only to the `internal: true` data network, and Docker publishes
+    // nothing for such a container: the drill's own probe still finds 27017
+    // refused, and `docker compose ps` reports no publisher at all. That is a
+    // real defence-in-depth property of this stack rather than a gap in the
+    // gate, and it is worth knowing before someone "fixes" the drill to catch a
+    // defect that cannot happen.
+    //
+    // The anchor is byte-exact against today's compose file. A rewrite of that
+    // line turns `String.replace` into a no-op, which fails in the SAFE
+    // direction: the gate stays green, the harness reports `unproven`, and the
+    // run exits non-zero.
+    title: 'publish the one host port on every interface instead of on loopback',
+    mutate: {
+      'docker-compose.yml': (text) =>
+        text.replace(
+          "- '127.0.0.1:${HVAULT_HTTP_PORT:-8080}:8080'",
+          "- '${HVAULT_HTTP_PORT:-8080}:8080'",
+        ),
+    },
+    // The assertion's own message, which only a FAILING run can contain: a green
+    // drill records "only 127.0.0.1:18080 is published", and every step is named
+    // in the report either way — so matching a step's NAME would be satisfied by
+    // a fully green run (the trap recorded on `test:security`).
+    evidence: (text) => /not bound to loopback/.test(text),
+  },
+
   'audit:deps': {
     // Planting a KNOWN-vulnerable production dependency, rather than relying on
     // whatever advisories happen to be open, is what makes the evidence check

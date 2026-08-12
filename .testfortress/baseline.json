@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-08-12",
-  "commit": "e949311",
+  "commit": "cf7dd81",
   "tests": {
-    "count": 7370
+    "count": 7398
   },
   "warnings": {
     "lint": 0,
@@ -111,7 +111,7 @@
         ]
       },
       "tests": {
-        "count": 2816
+        "count": 2844
       }
     },
     "packages/client": {
@@ -265,16 +265,19 @@
     "audit:secrets",
     "audit:secrets:full",
     "build",
+    "ci:local",
     "deadcode",
     "engines",
     "format:check",
     "lint",
+    "test:deploy",
     "test:e2e",
     "test:fuzz",
     "test:integration",
     "test:observability",
     "test:property",
     "test:security",
+    "test:smoke",
     "test:snapshot",
     "test:unit",
     "typecheck",
@@ -388,5 +391,5 @@
       "spectral": 1
     }
   },
-  "reason": "Validation pass over phases 1-10: records the coverage, test-count and task-list improvements a fully green run measured. Server coverage rose because deleteFolder's orphan sweep is now awaited (its branch used to be covered or not depending on a race, which made this gate flake at two decimal places) and because both of its arms are now pinned by tests. tasks 24 -> 28 backfills the four gates Phases 8-10 registered without recording — test:observability, test:property, test:snapshot and test:fuzz — which a superset field that never named them could not have reported disappearing."
+  "reason": "Phase 11 (clean-room): registers test:smoke (T1), test:deploy (T2) and the ci:local aggregator, and adds 28 tests pinning the deployment drill's verdicts and the shared end-to-end flow's HTTP contract."
 }

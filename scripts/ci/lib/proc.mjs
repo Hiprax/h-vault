@@ -116,10 +116,16 @@ const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`
  * than `SIGTERM` because the thing being killed is by definition not responding,
  * and a terminate that is politely ignored leaves the gate hung after all.
  *
+ * `cwd` defaults to the repository root, which is what every gate wants: the
+ * pipeline's own location, not whatever directory the developer happened to be
+ * standing in. The one caller that overrides it is the clean room, which runs
+ * the whole gauntlet inside a temporary worktree — a gate that could only ever
+ * measure THIS checkout could not distrust it.
+ *
  * @returns {Promise<number>} the exit code (127 when the binary is missing, 124
  *   when the deadline expired)
  */
-function stream(command, args, { shell = false, env = {}, logFile, sink, timeoutMs } = {}) {
+function stream(command, args, { shell = false, env = {}, logFile, sink, timeoutMs, cwd } = {}) {
   return new Promise((resolve) => {
     const spawnTarget = resolveSpawn(command, args, shell);
     const out = sink ?? process.stdout;
@@ -127,7 +133,7 @@ function stream(command, args, { shell = false, env = {}, logFile, sink, timeout
     const colorful = teeing && out.isTTY === true && !process.env['NO_COLOR'];
 
     const child = spawn(spawnTarget.command, spawnTarget.args, {
-      cwd: repoRoot,
+      cwd: cwd ?? repoRoot,
       stdio: teeing ? ['inherit', 'pipe', 'pipe'] : 'inherit',
       shell,
       env: {

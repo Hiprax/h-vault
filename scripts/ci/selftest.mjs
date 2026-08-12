@@ -191,8 +191,22 @@ function prepareWorkspace() {
       symlinkSync(from, join(dir, rel), 'dir');
     }
   }
-  const dist = join(ROOT, 'packages', 'shared', 'dist');
-  if (existsSync(dist)) cpSync(dist, join(dir, 'packages', 'shared', 'dist'), { recursive: true });
+  // Build OUTPUT, copied for two different reasons. `packages/shared/dist` is
+  // written by the `build` gate, so a symlink would carry that write back into
+  // the real checkout. The server and client bundles are the SUBJECT of
+  // `test:smoke`, which runs the emitted JavaScript rather than the sources: a
+  // workspace without them makes that gate exit "no built artifact", which is a
+  // non-zero exit that has nothing to do with the planted defect — and a case
+  // that cannot be attributed proves nothing. All three are gitignored, so the
+  // `git ls-files` enumeration above never sees them.
+  for (const rel of [
+    join('packages', 'shared', 'dist'),
+    join('packages', 'server', 'dist'),
+    join('packages', 'client', 'dist'),
+  ]) {
+    const from = join(ROOT, rel);
+    if (existsSync(from)) cpSync(from, join(dir, rel), { recursive: true });
+  }
   // The gate surface's own artifacts are gitignored, so the enumeration above
   // does not carry them — and two gates COMPARE against them (`audit:ratchet`
   // reads the integrity report, `audit:ratchet:full` reads coverage and JUnit).

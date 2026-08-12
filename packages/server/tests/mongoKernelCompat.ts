@@ -6,14 +6,17 @@
  * 6.19. mongod's startup self-check aborts, and it is still unpatched upstream.
  *
  * Every place this repository launches a mongod has to set the tunable, and there are
- * four: `docker-compose.yml` and `docker-compose.dev.yml` (which set it in the
- * container's environment), plus the two Node harnesses — `tests/setup.ts` and
+ * five: `docker-compose.yml` and `docker-compose.dev.yml` (which set it in the
+ * container's environment), the two Node harnesses — `tests/setup.ts` and
  * `e2e/start-server.ts` — because `mongodb-memory-server` DOWNLOADS AND SPAWNS A REAL
- * mongod (defaulting to the 8.x line). Miss the harnesses and `npm test` /
+ * mongod (defaulting to the 8.x line), and `scripts/ci/smoke-gate.mjs`, which spawns one
+ * the same way to boot the built artifact against it. Miss the harnesses and `npm test` /
  * `npm run test:e2e`, both mandated by the project's pre-completion checklist, die at
  * mongod launch on a modern host for a reason that looks nothing like the change under
- * test. This module is the single implementation the two harnesses share, so they
- * cannot drift.
+ * test. This module is the single implementation the two TypeScript harnesses share, so
+ * they cannot drift; the smoke gate restates the merge in four lines because it is plain
+ * JavaScript with no build step in front of it and cannot import this file — it points
+ * back here for the explanation rather than repeating it.
  *
  * Why this is a MERGE and not `env.GLIBC_TUNABLES ??= 'glibc.pthread.rseq=1'`:
  * GLIBC_TUNABLES is a COLON-SEPARATED list. With `??=`, an operator or CI runner that

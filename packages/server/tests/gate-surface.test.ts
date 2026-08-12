@@ -142,8 +142,12 @@ describe('verify.json manifest', () => {
     // Without this, verify:full (T0+T1+T2) would contain a T2 aggregator that
     // runs verify:full, and the tier would recurse into itself. verify:selftest
     // is one for the same reason twice over: it would plant a defect for itself,
-    // and a defect for the container drill, on every gate it checks.
+    // and a defect for the container drill, on every gate it checks. `ci:local`
+    // is the same recursion wearing a clean-room hat: it runs `verify:full`
+    // inside a temporary worktree, so a tier that ran it as a member would run
+    // itself again, one `npm ci` deeper, without bound.
     expect(composite.map(([name]) => name).sort()).toEqual([
+      'ci:local',
       'verify',
       'verify:fast',
       'verify:full',
@@ -264,13 +268,20 @@ describe('tiers', () => {
     // exact list rather than merely counted: adding to it is a visible edit here,
     // and moving an existing gate into it fails until someone changes this line.
     //
-    // `fuzz` is the only member today. Both of its suites ALSO run inside `test`
-    // and `test-integration` on every push, because neither package narrows its
-    // include set — so the assertions are on the push gate and only the named,
-    // deadline-bounded RUN is held back for `verify:full`. That is what makes T2
-    // the right home for it rather than a way of skipping it.
+    // Two members, and each one has to justify its place:
+    //
+    //   `fuzz` — both of its suites ALSO run inside `test` and
+    //   `test-integration` on every push, because neither package narrows its
+    //   include set, so the assertions are on the push gate and only the named,
+    //   deadline-bounded RUN is held back for `verify:full`.
+    //
+    //   `deploy` — the deployment clean room builds four images, stands five
+    //   containers up from nothing, restarts them and rotates a database
+    //   credential. There is no version of that which belongs in a hook someone
+    //   is waiting on, and its fast sibling `smoke` (T1) covers the artifact on
+    //   every push.
     const t2 = gates.filter((gate) => gate.tier === 2).map((gate) => gate.id);
-    expect(t2).toEqual(['fuzz']);
+    expect(t2).toEqual(['fuzz', 'deploy']);
   });
 
   it('treats tiers as cumulative, so verify is a superset of verify:fast', () => {
