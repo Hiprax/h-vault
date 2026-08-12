@@ -1,0 +1,5 @@
+folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp
+Work/Accounts,1,login,Example Mail,recovery email is example-alt@example.com,"Backup Codes: aaaa-1111, bbbb-2222
+Security question: first pet",0,"https://mail.example.com/login,https://example.com",alice@example.com,"p@ss, ""quoted"" and spaced ",otpauth://totp/Example%20Mail?secret=JBSWY3DPEHPK3PXP&issuer=Example
+Work,,note,Wi-Fi,"ssid: example-net
+passphrase: hunter-two",,0,,,,

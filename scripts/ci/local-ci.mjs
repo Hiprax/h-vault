@@ -370,6 +370,44 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/property-gate.mjs'], options),
   },
   {
+    id: 'snapshot',
+    task: 'test:snapshot',
+    tier: 1,
+    // The export serializers write files ANOTHER password manager parses, and
+    // this is the only gate that compares one byte for byte against a golden a
+    // human verified against that application's documented import format. The
+    // existing per-serializer suites assert properties of the output; none of
+    // them notices a reordered row, a `null` that became `""`, or a field that
+    // quietly stopped being emitted — and a user finds out at the moment they
+    // are leaving, which is the worst possible moment.
+    //
+    // The file also runs inside `test`, like every other named subset here, so
+    // nothing is narrowed and the task carries `countsTests: false`.
+    title: 'Export wire formats vs their verified goldens, and the export/import round trip',
+    ci: 'new — no hosted job ever checked what leaves this application',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runNpm(['run', 'test:snapshot'], options),
+  },
+  {
+    id: 'fuzz',
+    task: 'test:fuzz',
+    // TIER 2, and the FIRST gate in this table to sit there. That is a
+    // deliberate, visible decision rather than a gate quietly parked out of the
+    // push path: both fuzz suites ALSO run inside `test` and `test-integration`
+    // on every push, because neither package narrows its include set — so the
+    // assertions are on the push gate and only the named, separately-reported
+    // and deadline-bounded RUN is held back for `verify:full`. What T2 buys is
+    // the wall-clock deadline: killing a wedged parser is a minute-scale
+    // operation and does not belong in a hook someone is waiting on.
+    tier: 2,
+    title: 'Untrusted-file fuzzing (7 import parsers, backup restore) under a deadline',
+    ci: 'new — no hosted job ever fed this application a hostile file',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/fuzz-gate.mjs'], options),
+  },
+  {
     id: 'audit',
     task: 'audit:deps',
     tier: 1,

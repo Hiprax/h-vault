@@ -1,0 +1,2 @@
+name,url,username,password,note
+Example Mail,https://mail.example.com/login,alice@example.com,"p@ss, ""quoted"" and spaced ",recovery email is example-alt@example.com

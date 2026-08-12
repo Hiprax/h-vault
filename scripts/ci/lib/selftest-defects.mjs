@@ -315,6 +315,60 @@ export const DEFECTS = {
     evidence: (text) => /AES-GCM nonce reuse: \d+ calls produced \d+ distinct IV/.test(text),
   },
 
+  'test:snapshot': {
+    // The defect this gate exists to catch, planted at its source and as the
+    // single edit a careless tidy-up would make: two columns swapped in the
+    // Chrome/Edge header. The row values are built positionally further down the
+    // same file and do NOT move with it, so the exported file now labels the
+    // username column `password` and the password column `username` — every
+    // consumer, positional or name-keyed, reads one as the other, and the user
+    // finds out while migrating away.
+    //
+    // It is invisible to every other gate. `chromeCsv.test.ts` checks the header
+    // against a literal and would catch this one, but nothing anywhere checks the
+    // whole DOCUMENT, which is what makes a reordered row, a `null` that became
+    // `""`, or a dropped field visible. The golden does.
+    title: 'swap two columns in the Chrome/Edge CSV header, so the file mislabels its own values',
+    mutate: {
+      'packages/client/src/services/export/formats/chromeCsv.ts': (text) =>
+        text.replace(
+          "['name', 'url', 'username', 'password', 'note'] as const",
+          "['name', 'url', 'password', 'username', 'note'] as const",
+        ),
+    },
+    // The assertion MESSAGE, never a test name: JUnit carries a
+    // `<testcase name=…>` for every test that RAN, so a name-matching predicate
+    // is satisfied by a fully green report — the trap recorded on `test:security`.
+    evidence: (text) => /drifted from its golden/.test(text) && /chrome-csv/.test(text),
+  },
+
+  'test:fuzz': {
+    // The defect this gate exists to catch: a per-item cap removed from a parser.
+    // Without the break, a source file listing more than `MAX_URIS_PER_ITEM`
+    // URLs for one login produces an item whose own schema rejects it — and
+    // `validateImportItems` then discards the WHOLE login, password included,
+    // reporting it as one skipped row. That is the exact class this suite exists
+    // for: not a crash, not corruption, but an item that never arrives.
+    //
+    // The pattern is byte-exact against today's `buildLogin`. A rewrite of that
+    // line turns `String.replace` into a no-op, which fails in the SAFE
+    // direction: the gate stays green, the harness reports `unproven`, and the
+    // run exits non-zero.
+    title:
+      'remove the per-item URI cap from buildLogin, so an over-full login fails its own schema',
+    mutate: {
+      'packages/client/src/services/import/itemBuilders.ts': (text) =>
+        text.replace('    if (uris.length >= MAX_URIS_PER_ITEM) break;\n', ''),
+    },
+    // The assertion MESSAGE the contract helper prints, which only a FAILING run
+    // can contain — the trap recorded on `test:security`: a JUnit report carries
+    // a `<testcase name=…>` for every test that ran, so matching a name would be
+    // satisfied by a fully green report. `bitwarden-overfull-lists.json` in the
+    // committed corpus is what makes the property, not just the regression test,
+    // reach this.
+    evidence: (text) => /a parser emitted an item that fails its own schema/.test(text),
+  },
+
   'audit:deps': {
     // Planting a KNOWN-vulnerable production dependency, rather than relying on
     // whatever advisories happen to be open, is what makes the evidence check

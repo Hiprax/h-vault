@@ -83,6 +83,15 @@ export function resolveSpawn(command, args, shell) {
   return { command, args };
 }
 
+/**
+ * The exit code a child gets when it blows its wall-clock deadline.
+ *
+ * 124 is what `timeout(1)` reports, so it reads correctly in a transcript, and
+ * it is outside the range any tool here returns on its own — which is what lets
+ * a caller tell "this hung" apart from "this failed".
+ */
+export const TIMEOUT_EXIT = 124;
+
 /** Strips ANSI so a transcript on disk is text a parser can read. */
 const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, 'g');
 
@@ -99,9 +108,18 @@ const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`
  * prettier, playwright) would drop colour the moment the pipeline started
  * recording, and a developer would pay for the report in readability.
  *
- * @returns {Promise<number>} the exit code (127 when the binary is missing)
+ * `timeoutMs` puts a wall-clock deadline on the child. A gate whose subject can
+ * HANG — a parser fed an attacker-chosen file, a drill waiting on a container —
+ * cannot detect that with an exit code, because a wedged process produces none.
+ * On expiry the child is killed and the promise resolves with
+ * {@link TIMEOUT_EXIT}, which is a FAILURE and never a skip: `SIGKILL` rather
+ * than `SIGTERM` because the thing being killed is by definition not responding,
+ * and a terminate that is politely ignored leaves the gate hung after all.
+ *
+ * @returns {Promise<number>} the exit code (127 when the binary is missing, 124
+ *   when the deadline expired)
  */
-function stream(command, args, { shell = false, env = {}, logFile, sink } = {}) {
+function stream(command, args, { shell = false, env = {}, logFile, sink, timeoutMs } = {}) {
   return new Promise((resolve) => {
     const spawnTarget = resolveSpawn(command, args, shell);
     const out = sink ?? process.stdout;
@@ -130,9 +148,12 @@ function stream(command, args, { shell = false, env = {}, logFile, sink } = {}) 
     }
 
     let settled = false;
+    /** @type {NodeJS.Timeout | undefined} */
+    let deadline;
     const finish = (code) => {
       if (settled) return;
       settled = true;
+      if (deadline) clearTimeout(deadline);
       // Close the transcript before resolving: the caller checks immediately
       // afterwards that the report exists, and an unflushed stream would make a
       // gate that ran look like a gate that wrote nothing.
@@ -150,6 +171,19 @@ function stream(command, args, { shell = false, env = {}, logFile, sink } = {}) 
       // A signal-terminated child (Ctrl-C) reports code === null.
       finish(code ?? (signal ? 130 : 1));
     });
+
+    if (typeof timeoutMs === 'number' && timeoutMs > 0) {
+      deadline = setTimeout(() => {
+        child.kill('SIGKILL');
+        // Resolved here rather than waiting for `close`, because a child that
+        // ignored the kill (an unkillable descendant holding the pipe open) would
+        // otherwise leave the gate hung on the very deadline meant to end it.
+        finish(TIMEOUT_EXIT);
+      }, timeoutMs);
+      // The timer must not keep the runner alive on its own: every other gate
+      // exits as soon as its child does.
+      deadline.unref?.();
+    }
   });
 }
 

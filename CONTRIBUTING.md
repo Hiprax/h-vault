@@ -41,9 +41,12 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twenty-two gates including the full test suite, container builds with
-Trivy scanning, and CodeQL — and refuses the push if any of them fail. A commit that
-reaches `main` has already passed everything.
+pipeline locally — twenty-three gates including the full test suite, the export-format
+goldens, container builds with Trivy scanning, and CodeQL — and refuses the push if any
+of them fail. A commit that reaches `main` has already passed everything. One further
+gate, `fuzz`, sits in the release tier: its suites still run inside the ordinary test
+gates on every push, and only the separately-reported, deadline-bounded run is held back
+for `npm run verify:full`.
 
 The gates are grouped into tiers by how long they take, so there is something worth
 running at every point in the loop:
@@ -51,7 +54,7 @@ running at every point in the loop:
 ```bash
 npm run verify:fast               # the fast tier (~80s): engines, secrets, lint, format, types
 npm run ci                        # everything the pre-push hook runs (15–30 min)
-npm run verify:full               # the above plus the release tier
+npm run verify:full               # the above plus the release tier (adds the fuzz gate)
 npm run ci -- --list              # the gates, their tiers, and what each one replaces
 npm run ci -- --only=lint,test    # a subset, while iterating
 npm run ci -- --bail              # stop at the first failure instead of running them all

@@ -10,7 +10,12 @@
  * coverage of its spawn shape.
  */
 import { describe, it, expect } from 'vitest';
-import { resolveSpawn, assertShellSafeArgs } from '../../../scripts/ci/lib/proc.mjs';
+import {
+  resolveSpawn,
+  assertShellSafeArgs,
+  runExe,
+  TIMEOUT_EXIT,
+} from '../../../scripts/ci/lib/proc.mjs';
 
 // The exact npm arg arrays the pipeline passes through `runNpm` (GATES in
 // scripts/ci/local-ci.mjs). Every one must fold losslessly into a shell string.
@@ -84,5 +89,41 @@ describe('assertShellSafeArgs', () => {
 
   it('makes resolveSpawn throw rather than silently mis-execute an unsafe join', () => {
     expect(() => resolveSpawn('npm', ['run', 'a b'], true)).toThrow(/unsafe argument/);
+  });
+});
+
+describe('the wall-clock deadline (runExe timeoutMs)', () => {
+  /**
+   * `test:fuzz` exists to prove that untrusted input never HANGS a parser, and a
+   * hang is the one failure an exit code cannot report: a wedged process
+   * produces none at all. So the deadline has to kill the child and return a
+   * verdict of its own, and these tests pin both halves — that it fires, and
+   * that it stays out of the way when it should.
+   */
+  it('kills a child that outlives its deadline and reports 124, never 0', async () => {
+    // A child that would otherwise never exit. `TIMEOUT_EXIT` is 124, what
+    // `timeout(1)` reports, and it is deliberately outside the range any tool in
+    // this pipeline returns on its own — which is what lets the caller tell "this
+    // hung" apart from "this failed".
+    const started = Date.now();
+    const code = await runExe(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      timeoutMs: 300,
+    });
+    expect(code).toBe(TIMEOUT_EXIT);
+    expect(code).not.toBe(0);
+    // It really killed it rather than waiting for a child that was going to exit
+    // anyway: an unbounded interval never ends on its own.
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('leaves a child that finishes in time completely alone', async () => {
+    // The other direction matters just as much: a deadline that fired early
+    // would turn every slow-but-healthy gate into a phantom hang.
+    expect(await runExe(process.execPath, ['-e', 'process.exit(0)'], { timeoutMs: 30_000 })).toBe(
+      0,
+    );
+    expect(await runExe(process.execPath, ['-e', 'process.exit(3)'], { timeoutMs: 30_000 })).toBe(
+      3,
+    );
   });
 });

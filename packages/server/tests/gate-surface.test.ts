@@ -40,6 +40,9 @@ import serverPropertyConfig, { SERVER_PROPERTY_SUITE } from '../vitest.property.
 import sharedPropertyConfig, { SHARED_PROPERTY_SUITE } from '../../shared/vitest.property.config';
 import clientPropertyConfig, { CLIENT_PROPERTY_SUITE } from '../../client/vitest.property.config';
 import clientVitestConfig from '../../client/vitest.config';
+import clientFuzzConfig, { CLIENT_FUZZ_SUITE } from '../../client/vitest.fuzz.config';
+import serverFuzzConfig, { SERVER_FUZZ_SUITE } from '../vitest.fuzz.config';
+import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest.snapshot.config';
 import playwrightConfig from '../../../playwright.config';
 import { DST_TZ, PINNED_TZ, RUN_TZ } from '../../../tests/harness/determinism';
 import {
@@ -254,13 +257,20 @@ describe('tiers', () => {
     ]);
   });
 
-  it('leaves no gate parked in a tier the push gate never runs', () => {
+  it('names every gate the push gate does NOT run, so parking one there is deliberate', () => {
     // `npm run ci` is T0+T1. A gate moved to T2 still appears in `--list` and
     // still looks registered, but stops running on every push — the quietest way
-    // to retire a gate without deleting it. Today nothing is T2, and a gate that
-    // moves there has to be a deliberate, visible decision.
-    const pushGate = gates.filter((gate) => gate.tier <= 1);
-    expect(pushGate).toHaveLength(gates.length);
+    // to retire a gate without deleting it. So the T2 membership is pinned as an
+    // exact list rather than merely counted: adding to it is a visible edit here,
+    // and moving an existing gate into it fails until someone changes this line.
+    //
+    // `fuzz` is the only member today. Both of its suites ALSO run inside `test`
+    // and `test-integration` on every push, because neither package narrows its
+    // include set — so the assertions are on the push gate and only the named,
+    // deadline-bounded RUN is held back for `verify:full`. That is what makes T2
+    // the right home for it rather than a way of skipping it.
+    const t2 = gates.filter((gate) => gate.tier === 2).map((gate) => gate.id);
+    expect(t2).toEqual(['fuzz']);
   });
 
   it('treats tiers as cumulative, so verify is a superset of verify:fast', () => {
@@ -454,6 +464,57 @@ describe('machine-readable reports', () => {
     expect([...declared].sort()).toEqual([...allPropertyJunitReports(), 'property.json'].sort());
     expect(allPropertyJunitReports()).toHaveLength(6);
     expect(new Set(allPropertyJunitReports()).size).toBe(6);
+  });
+
+  it.each([
+    ['client fuzz', clientFuzzConfig, CLIENT_FUZZ_SUITE, 'client', 'junit-fuzz-client.xml'],
+    ['server fuzz', serverFuzzConfig, SERVER_FUZZ_SUITE, 'server', 'junit-fuzz-server.xml'],
+    ['export golden', clientSnapshotConfig, CLIENT_SNAPSHOT_SUITE, 'client', 'junit-export.xml'],
+  ] as const)(
+    'writes the %s suite to its OWN JUnit report, from files that exist',
+    (name, config, suite, pkg, report) => {
+      // The same contract as every other named subset: its own report name, and
+      // a membership list whose every entry is on disk. Vitest errors only on an
+      // EMPTY match, so a list that has gone stale in part would shrink the gate
+      // in silence.
+      const output = junitOutputFile(config.test?.reporters);
+      expect(output, `${name}: no JUnit reporter`).toBeDefined();
+      expect(path.resolve(output!)).toBe(path.join(repoRoot, '.testfortress', 'reports', report));
+      expect(output).not.toBe(junitOutputFile(clientVitestConfig.test?.reporters));
+      expect(output).not.toBe(junitOutputFile(serverVitestConfig.test?.reporters));
+
+      expect(suite.length, `${name} suite`).toBeGreaterThan(0);
+      for (const file of suite) {
+        expect(existsSync(path.join(repoRoot, 'packages', pkg, file)), file).toBe(true);
+      }
+      expect(config.test?.include).toEqual(suite);
+    },
+  );
+
+  it("declares only the fuzz gate's JSON report, never its per-leg JUnit", () => {
+    // Load-bearing, and counter-intuitive enough to need stating. `test:fuzz` is
+    // Tier 2, so it does not run during `npm run ci` — and `ratchet-check.mjs`
+    // requires every DECLARED JUnit artifact to be FRESH before it will report
+    // `tests.count` at all. Declaring `junit-fuzz-*.xml` would therefore make the
+    // headcount UNMEASURED on every push, turning the ratchet red for a reason
+    // that has nothing to do with the code. The reports are still written and
+    // still read by the gate; they are simply not part of the every-push
+    // freshness contract.
+    expect(reportsOf(manifest.tasks['test:fuzz']!)).toEqual(['fuzz.json']);
+    const declared = nonComposite.flatMap(([, task]) => reportsOf(task));
+    expect(declared).not.toContain('junit-fuzz-client.xml');
+    expect(declared).not.toContain('junit-fuzz-server.xml');
+  });
+
+  it('keeps every re-run subset out of the test headcount, because its files run twice elsewhere', () => {
+    // `test:snapshot` and `test:fuzz` join `test:security`, `test:observability`
+    // and `test:property` here: every file they name also runs inside
+    // `test:unit` / `test:integration`, so counting them would ratchet the same
+    // tests twice — and because the field is higher-is-better, nothing would ever
+    // complain.
+    for (const name of ['test:snapshot', 'test:fuzz']) {
+      expect(manifest.tasks[name]!.countsTests, `${name}`).toBe(false);
+    }
   });
 
   it('keeps the property gate out of the test headcount, because its files run twice elsewhere', () => {

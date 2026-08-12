@@ -1,0 +1,4 @@
+﻿name,url,username,password,note
+CRLF row,https://crlf.example,a,pw-one,n1
+LF row,https://lf.example,b,pw-two,n2
+CR row,https://cr.example,c,pw-three,n3no trailing newline,https://last.example,d,pw-four,n4

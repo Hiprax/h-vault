@@ -42,5 +42,26 @@ Dockerfile text eol=lf
 *.zip binary
 *.tar.gz binary
 
+# Byte-exact test fixtures - NEVER normalize.
+#
+# The blanket `* text=auto eol=lf` at the top of this file is the reason these
+# two rules exist rather than being obvious. Both directories hold files whose
+# BYTES are the thing under test:
+#
+#   - the export goldens are CRLF-terminated because RFC 4180 mandates CRLF and
+#     that is what Bitwarden and Chrome actually receive. Normalized to LF they
+#     would still compare equal to a serializer that had switched to LF, so the
+#     line ending would silently stop being pinned - and on a fresh clone they
+#     would differ from the serializer's real output and fail for the wrong
+#     reason;
+#   - the fuzz corpus carries a deliberate mixture of CRLF, LF and bare CR,
+#     plus a UTF-8 BOM, precisely to prove the CSV tokenizer handles all of
+#     them. Normalizing it deletes the test.
+#
+# `-text` (rather than `text eol=crlf`) because the point is that git must not
+# touch these bytes in either direction.
+packages/client/tests/export/goldens/** -text
+packages/client/tests/fuzz/corpus/** -text
+
 # Lockfiles - exact (no diff noise)
 package-lock.json -diff linguist-generated=true

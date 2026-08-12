@@ -1,0 +1,7 @@
+name,url,username,password,note
+short row,https://short.example
+
+long row,https://long.example,u,pw,note,extra,cells,ignored
+,,,,
+
+last,https://last.example,u,pw,n

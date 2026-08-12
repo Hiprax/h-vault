@@ -10,3 +10,11 @@ package-lock.json
 logs
 packages/shared/src/generated
 *.tmp
+
+# Byte-exact test fixtures. These are DATA, not source: the export goldens are
+# the exact bytes another password manager parses (reformatting the JSON golden
+# would rewrite the artifact the assertion compares against), and the fuzz
+# corpus contains a deliberately truncated JSON document that Prettier cannot
+# parse at all. See the matching -text rules in .gitattributes.
+packages/client/tests/export/goldens
+packages/client/tests/fuzz/corpus

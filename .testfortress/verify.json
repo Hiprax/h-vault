@@ -148,6 +148,22 @@
       "countsTests": false,
       "requires": ["build:shared"]
     },
+    "test:snapshot": {
+      "cmd": "npm run test:snapshot",
+      "tier": 1,
+      "gate": "the Bitwarden JSON, Bitwarden CSV and Chrome/Edge CSV exports match their committed goldens byte for byte, every golden carries a provenance note naming its verifier, date and source, and import(export(items)) yields the same logical items",
+      "report": "junit-export.xml",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:fuzz": {
+      "cmd": "npm run test:fuzz",
+      "tier": 2,
+      "gate": "no import file and no backup document — arbitrary bytes, the committed corpus, or a generated hostile document — crashes a parser, exceeds its wall-clock budget, produces an item its own schema rejects, or loses a well-formed row to a swallowed duplicate key",
+      "report": "fuzz.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
     "audit:deps": {
       "cmd": "npm run audit:prod",
       "tier": 1,

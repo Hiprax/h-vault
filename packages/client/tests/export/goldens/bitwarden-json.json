@@ -1,0 +1,138 @@
+{
+  "folders": [
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Work/Accounts"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "Work"
+    }
+  ],
+  "items": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "organizationId": null,
+      "folderId": "00000000-0000-4000-8000-000000000002",
+      "type": 1,
+      "name": "Example Mail",
+      "notes": "recovery email is example-alt@example.com",
+      "favorite": true,
+      "reprompt": 0,
+      "login": {
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://mail.example.com/login"
+          },
+          {
+            "match": null,
+            "uri": "https://example.com"
+          }
+        ],
+        "username": "alice@example.com",
+        "password": "p@ss, \"quoted\" and spaced ",
+        "totp": "otpauth://totp/Example%20Mail?secret=JBSWY3DPEHPK3PXP&issuer=Example"
+      },
+      "fields": [
+        {
+          "name": "Backup Codes",
+          "value": "aaaa-1111\nbbbb-2222",
+          "type": 1
+        },
+        {
+          "name": "Security question",
+          "value": "first pet",
+          "type": 1
+        }
+      ],
+      "passwordHistory": [
+        {
+          "lastUsedDate": "2026-01-02T03:04:05.000Z",
+          "password": "previous-password"
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "organizationId": null,
+      "folderId": "00000000-0000-4000-8000-000000000004",
+      "type": 2,
+      "name": "Wi-Fi",
+      "notes": "ssid: example-net\npassphrase: hunter-two",
+      "favorite": false,
+      "reprompt": 0,
+      "secureNote": {
+        "type": 0
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "organizationId": null,
+      "folderId": null,
+      "type": 3,
+      "name": "Example Card",
+      "notes": "expires next year\n\nBilling address: 1 Example Street, Flat 2, Exampleton, EX, EX1 2AB, Exampleland",
+      "favorite": false,
+      "reprompt": 0,
+      "card": {
+        "cardholderName": "Alice Example",
+        "brand": "Visa",
+        "number": "4111111111111111",
+        "expMonth": "04",
+        "expYear": "2030",
+        "code": "123"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "organizationId": null,
+      "folderId": "00000000-0000-4000-8000-000000000002",
+      "type": 4,
+      "name": "Alice Example",
+      "notes": null,
+      "favorite": false,
+      "reprompt": 0,
+      "identity": {
+        "title": null,
+        "firstName": "Alice",
+        "middleName": null,
+        "lastName": "Example",
+        "address1": "1 Example Street",
+        "address2": "Flat 2",
+        "address3": null,
+        "city": "Exampleton",
+        "state": "EX",
+        "postalCode": "EX1 2AB",
+        "country": "Exampleland",
+        "company": "Example Ltd",
+        "email": "alice@example.com",
+        "phone": "+44 20 7946 0000",
+        "ssn": "AA 12 34 56 A",
+        "username": null,
+        "passportNumber": "X1234567",
+        "licenseNumber": null
+      },
+      "fields": [
+        {
+          "name": "Delivery Notes",
+          "value": "leave with the concierge",
+          "type": 0
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000007",
+      "organizationId": null,
+      "folderId": null,
+      "type": 2,
+      "name": "Deploy Token",
+      "notes": "CI deploy token for the staging cluster\n\nexample-deploy-token-value\n\nExpires: 2027-03-01",
+      "favorite": false,
+      "reprompt": 0,
+      "secureNote": {
+        "type": 0
+      }
+    }
+  ]
+}
