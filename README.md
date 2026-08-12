@@ -1016,6 +1016,8 @@ npm run ci -- --json            # one JSON document describing the run
 | `lint`             | T0   | ESLint + `eslint-plugin-security`, `--max-warnings=0`, emitting SARIF                                                                  | `ci` job                   |
 | `format`           | T0   | `prettier --check .`                                                                                                                   | _new_                      |
 | `type-check`       | T0   | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                              | `ci` job                   |
+| `integrity`        | T0   | Every marker that weakens a check, against the suppression ledger                                                                      | _new_                      |
+| `ratchet`          | T0   | The cheap numbers: suppression counts, the scan's own fingerprints, the registered task list                                           | _new_                      |
 | `build`            | T1   | `npm run build` (shared → server → client)                                                                                             | `ci` job                   |
 | `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                        | `ci` job                   |
 | `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                              | `ci` job                   |
@@ -1023,6 +1025,7 @@ npm run ci -- --json            # one JSON document describing the run
 | `e2e`              | T1   | Playwright (Chromium) against an auto-started stack                                                                                    | `e2e` job                  |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below) | `docker-build` job         |
 | `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                    | `sast` job                 |
+| `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                               | _new_                      |
 
 Gates run in the order above and the runner **aggregates**: every selected gate runs and every
 failure is reported, rather than the run stopping at the first one. Exit `0` is a pass, `1` means
@@ -1034,6 +1037,38 @@ and from Playwright, Cobertura coverage beside the existing lcov, SARIF from ESL
 secret scan, `summary.json` for the run, and each gate's own transcript. `.testfortress/verify.json`
 is the registry the pipeline validates itself against on every run. Nothing there is uploaded
 anywhere, and nothing there is committed.
+
+#### Keeping the gates honest
+
+A green run only means something if the definition of green cannot be edited to reach it, so three
+things guard the gates themselves.
+
+**`.testfortress/suppressions.json` is the complete, honest list of everything exempt from a gate.**
+The `integrity` gate scans every tracked and untracked file for the markers that weaken a check — a
+skipped or focused test, a silenced type checker or linter, an inline coverage pragma, a swallowed
+error, a retry that hides a race, a `sleep` used as synchronisation — and fails unless each one is
+either gone or written down with an owner, a reason, an expiry and the exact rule it excuses. Some
+patterns cannot be written down at all: a neutered exit code, a committed test filter, a strictness
+downgrade, a tautological assertion or a hook bypass **inside a file that defines a gate** is a
+defect, not a debt. Outside gate files the same pattern needs an entry pinned to the exact
+occurrence. Documentation is exempt, so this README can describe the patterns it forbids.
+
+**`.testfortress/baseline.json` records the current high-water mark of every gated number**, and the
+`ratchet` gates compare against it. Each field declares a direction — coverage and test counts may
+only rise, warnings and suppressions may only fall — and a number can be moved only by
+`node scripts/ci/ratchet-check.mjs --accept --reason "..."`, which moves each field in its improving
+direction only and refuses while anything is failing or unmeasured. The baseline records absolute
+denominators (`linesTotal`) and the **measured file set** beside every percentage, because a
+percentage whose denominator can shrink is not a gate: dropping a file from coverage raises the
+number while covering less code.
+
+**`npm run verify:selftest` proves every registered gate can still fail.** It copies the working
+tree to a temporary directory, plants exactly one defect per registered gate — an explicit `any` for
+lint, a false assertion for the test suites, a broken Nginx directive for the container gate, a
+dependency with a known advisory for the audit — and requires each gate to return non-zero for a
+reason its own report can be shown to attribute to that defect. A gate registered with no
+defect-injection case is a hard error naming it. It is the release tier, not the push gate, because
+it runs the whole pipeline once per gate.
 
 **A full run takes 15–30 minutes.** That is the deliberate trade: time spent before the push
 instead of minutes billed after it. Two escape hatches exist:
@@ -1085,30 +1120,34 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ### Scripts
 
-| Command                        | Description                                   |
-| ------------------------------ | --------------------------------------------- |
-| `npm run dev`                  | Server + client together, hot-reloading       |
-| `npm run build`                | Build all packages (shared → server → client) |
-| `npm run start`                | Start the production server                   |
-| `npm run test`                 | Every workspace's tests                       |
-| `npm run test:unit`            | The hermetic suites (shared, client)          |
-| `npm run test:integration`     | The server suite, against a real `mongod`     |
-| `npm run test:e2e`             | Playwright E2E tests                          |
-| `npm run lint`                 | ESLint, warnings are errors                   |
-| `npm run type-check`           | Type-check all packages, tests and `e2e/`     |
-| `npm run format`               | Prettier — write                              |
-| `npm run format:check`         | Prettier — verify only                        |
-| `npm run ci`                   | The whole pipeline (what `pre-push` runs)     |
-| `npm run verify:fast`          | The fast tier only (~80 s)                    |
-| `npm run verify:full`          | The whole pipeline plus the release tier      |
-| `npm run ci:list`              | List the pipeline's gates and their tiers     |
-| `npm run ci:docker`            | The container gate on its own                 |
-| `npm run ci:sast`              | The CodeQL gate on its own                    |
-| `npm run report`               | Collect the gates' warning counts             |
-| `npm run secret-scan`          | Scan every tracked file for committed secrets |
-| `npm run audit:prod`           | Dependency audit, production deps only        |
-| `npm run release:next-version` | Compute the next release tag                  |
-| `npm run clean`                | Remove `dist/`, `node_modules/` and `logs/`   |
+| Command                        | Description                                    |
+| ------------------------------ | ---------------------------------------------- |
+| `npm run dev`                  | Server + client together, hot-reloading        |
+| `npm run build`                | Build all packages (shared → server → client)  |
+| `npm run start`                | Start the production server                    |
+| `npm run test`                 | Every workspace's tests                        |
+| `npm run test:unit`            | The hermetic suites (shared, client)           |
+| `npm run test:integration`     | The server suite, against a real `mongod`      |
+| `npm run test:e2e`             | Playwright E2E tests                           |
+| `npm run lint`                 | ESLint, warnings are errors                    |
+| `npm run type-check`           | Type-check all packages, tests and `e2e/`      |
+| `npm run format`               | Prettier — write                               |
+| `npm run format:check`         | Prettier — verify only                         |
+| `npm run ci`                   | The whole pipeline (what `pre-push` runs)      |
+| `npm run verify:fast`          | The fast tier only (~80 s)                     |
+| `npm run verify:full`          | The whole pipeline plus the release tier       |
+| `npm run ci:list`              | List the pipeline's gates and their tiers      |
+| `npm run ci:docker`            | The container gate on its own                  |
+| `npm run ci:sast`              | The CodeQL gate on its own                     |
+| `npm run report`               | Collect the gates' warning counts              |
+| `npm run verify:selftest`      | Prove every registered gate can still fail     |
+| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger |
+| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline  |
+| `npm run audit:ratchet:full`   | Every gated number, against the baseline       |
+| `npm run secret-scan`          | Scan every tracked file for committed secrets  |
+| `npm run audit:prod`           | Dependency audit, production deps only         |
+| `npm run release:next-version` | Compute the next release tag                   |
+| `npm run clean`                | Remove `dist/`, `node_modules/` and `logs/`    |
 
 ---
 

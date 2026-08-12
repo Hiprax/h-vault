@@ -118,13 +118,16 @@ describe('verify.json manifest', () => {
     expect(manifest.env['SEED']).toBeTruthy();
   });
 
-  it('marks the three aggregators composite, and runs none of them as a gate', () => {
+  it('marks every aggregator composite, and runs none of them as a gate', () => {
     // Without this, verify:full (T0+T1+T2) would contain a T2 aggregator that
-    // runs verify:full, and the tier would recurse into itself.
+    // runs verify:full, and the tier would recurse into itself. verify:selftest
+    // is one for the same reason twice over: it would plant a defect for itself,
+    // and a defect for the container drill, on every gate it checks.
     expect(composite.map(([name]) => name).sort()).toEqual([
       'verify',
       'verify:fast',
       'verify:full',
+      'verify:selftest',
     ]);
     for (const [name] of composite) {
       expect(gates.some((gate) => gate.task === name)).toBe(false);
@@ -207,14 +210,31 @@ describe('manifest and runner agree', () => {
 });
 
 describe('tiers', () => {
-  it('keeps T0 to the five gates that fit a 90-second pre-commit budget', () => {
-    // Measured on the reference machine: engines 0.0s, secrets 0.1s, lint 30.6s,
-    // format 14.7s, type-check 36.1s — 82 seconds against a 90-second budget.
-    // The unit suite alone is 105 seconds and the server suite 125, which is why
-    // both are T1: a tier over budget gets bypassed, and a bypassed hook gates
-    // nothing.
+  it('keeps T0 to the seven gates that fit a 90-second pre-commit budget', () => {
+    // Measured end to end on the reference machine: engines 0.0s, secrets 0.1s,
+    // lint 30.7s, format 15.1s, type-check 36.4s, integrity 2.3s, ratchet 0.1s —
+    // 85 seconds against a 90-second budget. The two anti-cheat gates cost 2.4s
+    // between them; the unit suite alone is 105 seconds and the server suite
+    // 125, which is why both are T1. A tier over budget gets bypassed, and a
+    // bypassed hook gates nothing, so ADDING ANYTHING HERE REQUIRES RE-MEASURING.
+    // 5 seconds of headroom is the tightest this has been: the next thing added
+    // to T0 almost certainly has to buy its time back somewhere else (ESLint's
+    // --cache, or running the independent T0 gates in parallel).
+    //
+    // The order matters as much as the membership: `ratchet` reads the report
+    // `integrity` writes, so it must come after it. Running the cheap ratchet
+    // before the scan would compare against the PREVIOUS run's artifact, which
+    // it would then reject as stale — correctly, and confusingly.
     const t0 = gates.filter((gate) => gate.tier === 0).map((gate) => gate.id);
-    expect(t0).toEqual(['engines', 'secrets', 'lint', 'format', 'type-check']);
+    expect(t0).toEqual([
+      'engines',
+      'secrets',
+      'lint',
+      'format',
+      'type-check',
+      'integrity',
+      'ratchet',
+    ]);
   });
 
   it('leaves no gate parked in a tier the push gate never runs', () => {

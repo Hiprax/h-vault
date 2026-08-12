@@ -41,7 +41,7 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twelve gates including the full test suite, container builds with
+pipeline locally — fifteen gates including the full test suite, container builds with
 Trivy scanning, and CodeQL — and refuses the push if any of them fail. A commit that
 reaches `main` has already passed everything.
 
@@ -81,6 +81,36 @@ will tell you so if you forget.
 Run `npm run ci` before you open a pull request. If a gate legitimately cannot run in
 your environment, `HVAULT_SKIP_GATES=docker,e2e git push` skips named gates — say so in
 the PR description if you use it.
+
+## You may not make a gate pass by weakening it
+
+This is the one rule with no exceptions. No `.skip`, `.only` or deleted test to reach
+green; no neutered exit code, discarded error output or `--if-present`; no `@ts-ignore`,
+`as any` or `eslint-disable` to silence a diagnostic; no lowered threshold, widened
+exclusion, added retry or blanket snapshot update. When a test and the code disagree, the
+code is the suspect.
+
+Three gates enforce it rather than trusting it:
+
+- **`integrity`** scans every tracked and untracked file for those markers and fails
+  unless each one is gone or recorded in `.testfortress/suppressions.json` with an owner,
+  a reason, an expiry and the exact rule it excuses. Some of them cannot be recorded at
+  all: inside a file that DEFINES a gate — `package.json`, the manifest, anything under
+  `scripts/ci/` or `.husky/` — a neutered exit code, a committed test filter, a strictness
+  downgrade, a tautology, a swallowed failure or a hook bypass is a defect to fix.
+  Documentation is exempt, which is why this file can name the patterns it forbids.
+- **`ratchet`** compares the gated numbers against `.testfortress/baseline.json`. Each
+  field has a direction: coverage, test counts and the measured file set may only rise;
+  warnings and suppressions may only fall. Moving a number needs
+  `node scripts/ci/ratchet-check.mjs --accept --reason "..."`, which moves each field only
+  in its improving direction and refuses while anything is failing or unmeasured.
+- **`npm run verify:selftest`** plants one defect per registered gate in a throw-away copy
+  of the tree and requires every gate to go red. **Adding a gate obliges you to add its
+  defect-injection case** to `scripts/ci/lib/selftest-defects.mjs` in the same change; a
+  registered gate without one is a hard error naming it.
+
+If a gate genuinely cannot be met, the honest move is a dated, expiring ledger entry that
+says so — never a quiet edit to the gate.
 
 ## What a good change looks like
 

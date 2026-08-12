@@ -255,6 +255,28 @@ const GATES = [
     run: (options) => runNpm(['run', 'type-check'], options),
   },
   {
+    id: 'integrity',
+    task: 'audit:integrity',
+    tier: 0,
+    title: 'Integrity scan (markers vs the suppression ledger)',
+    ci: 'new — no hosted pipeline ever checked whether a gate had been weakened',
+    run: (options) => runExe(process.execPath, ['scripts/ci/integrity-scan.mjs'], options),
+  },
+  {
+    id: 'ratchet',
+    task: 'audit:ratchet',
+    tier: 0,
+    // Registered immediately after `integrity`, and that position in this array
+    // is load-bearing rather than cosmetic: gates run in array order, the cheap
+    // tier's numbers come from the report the scan has just written, and moving
+    // this above `integrity` would have it read the PREVIOUS run's artifact —
+    // which the ratchet would then reject as stale, correctly but confusingly.
+    title: 'Ratchet (cheap fields: suppressions, fingerprints, task list)',
+    ci: 'new — nothing stopped a threshold from being lowered to reach green',
+    run: (options) =>
+      runExe(process.execPath, ['scripts/ci/ratchet-check.mjs', '--tier', '0'], options),
+  },
+  {
     id: 'test',
     task: 'test:unit',
     tier: 1,
@@ -317,6 +339,20 @@ const GATES = [
     ci: 'sast job · CodeQL',
     canSkip: true, // exits 78 when the CodeQL CLI is not installed
     run: (options) => runExe(process.execPath, ['scripts/ci/sast-gate.mjs'], options),
+  },
+  {
+    id: 'ratchet-full',
+    task: 'audit:ratchet:full',
+    tier: 1,
+    // LAST on purpose. It compares every measured field — coverage
+    // denominators, the measured file set, test counts, warning counts — and
+    // every one of those artifacts is produced by a gate above it. Run earlier,
+    // it would be reading the previous run's numbers about a tree that has since
+    // changed, which is precisely what its own freshness rule exists to reject.
+    title: 'Ratchet (every measured field, against baseline.json)',
+    ci: 'new — a percentage whose denominator can shrink is not a gate',
+    dependsOn: ['build', 'test', 'test-integration'],
+    run: (options) => runNpm(['run', 'audit:ratchet:full'], options),
   },
 ];
 
@@ -463,8 +499,14 @@ const results = [];
 const started = Date.now();
 const statusOf = (id) => results.find((result) => result.id === id)?.status;
 
+/** Canonical task names whose artifacts this run has produced, in order. */
+const completed = [];
+
 const record = (gate, status, durationMs, detail) => {
   results.push({ id: gate.id, task: gate.task, status, durationMs, detail });
+  // A gate that ran and FAILED measured its subject just as truly as one that
+  // passed; a skipped or unrunnable one measured nothing.
+  if (status === 'pass' || status === 'fail') completed.push(gate.task);
 };
 
 for (const [index, gate] of selected.entries()) {
@@ -498,7 +540,17 @@ for (const [index, gate] of selected.entries()) {
   note(gate.ci);
 
   const gateStarted = Date.now();
-  const outcome = await gate.run({ logFile: reportPath(logOf(gate)), sink });
+  const outcome = await gate.run({
+    logFile: reportPath(logOf(gate)),
+    sink,
+    // Which canonical tasks have already produced an artifact IN THIS RUN.
+    // `report.mjs` needs it because it decides "was this measured?" from
+    // `summary.json`, which is only written once the run has finished — so a
+    // gate that runs report generation mid-run (`audit:ratchet:full`) would
+    // otherwise be judging this run's fresh artifacts against the PREVIOUS
+    // run's list of what ran, and on a first-ever run against no list at all.
+    env: { HVAULT_COMPLETED_TASKS: completed.join(',') },
+  });
   const durationMs = Date.now() - gateStarted;
   const code = typeof outcome === 'number' ? outcome : outcome.code;
   // An in-process gate has no child to tee, so it hands back its transcript.

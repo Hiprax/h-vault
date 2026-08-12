@@ -34,6 +34,13 @@
       "gate": "every T0 + T1 + T2 task passes",
       "report": "summary.json"
     },
+    "verify:selftest": {
+      "cmd": "npm run verify:selftest",
+      "tier": 2,
+      "composite": true,
+      "gate": "every registered gate returns non-zero with one planted defect",
+      "report": "selftest.json"
+    },
     "engines": {
       "cmd": "node scripts/ci/local-ci.mjs --only=engines",
       "tier": 0,
@@ -64,6 +71,24 @@
       "gate": "0 type errors across all 4 tsc projects",
       "report": "tsc.log",
       "requires": ["build:shared"]
+    },
+    "audit:integrity": {
+      "cmd": "npm run audit:integrity",
+      "tier": 0,
+      "gate": "0 unledgered markers, 0 non-ledgerable markers, 0 expired or stale ledger entries",
+      "report": "integrity.json"
+    },
+    "audit:ratchet": {
+      "cmd": "npm run audit:ratchet",
+      "tier": 0,
+      "gate": "no regression in the cheap fields: suppressions, scan fingerprints, registered task list",
+      "report": "ratchet-tier0.json"
+    },
+    "audit:ratchet:full": {
+      "cmd": "npm run audit:ratchet:full",
+      "tier": 1,
+      "gate": "no regression in any measured field, including coverage denominators and the measured file set",
+      "report": "ratchet.json"
     },
     "build": {
       "cmd": "npm run build",

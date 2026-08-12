@@ -44,6 +44,18 @@ const measured = new Set(
     .filter((task) => task.status === 'pass' || task.status === 'fail')
     .map((task) => task.task),
 );
+
+/**
+ * `summary.json` is written when a run FINISHES, so a gate that generates this
+ * file mid-run (`audit:ratchet:full`) would be reading the previous run's list —
+ * or, on a first-ever run, no list at all, which would report every count as
+ * unmeasured on a perfectly clean tree. The runner therefore passes the tasks
+ * that have already produced an artifact in the CURRENT run, which is strictly
+ * fresher evidence than the summary and never contradicts it.
+ */
+for (const task of (process.env['HVAULT_COMPLETED_TASKS'] ?? '').split(',').filter(Boolean)) {
+  measured.add(task);
+}
 const ran = (task) => measured.has(task);
 
 /** A tsc diagnostic. tsc has no warning level of its own; every one is an error. */
