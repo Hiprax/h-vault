@@ -1,0 +1,13 @@
+# Ruleset for `audit:config`'s OpenAPI leg (scripts/ci/config-gate.mjs).
+#
+# The document it lints is not a checked-in file: it is generated at gate time
+# from packages/server/src/config/swagger.ts, which is what the server actually
+# serves at /api/v1/docs.json. Linting the source of truth is the point — a spec
+# that has drifted into invalidity is one every client reads.
+#
+# `spectral:oas` is Spectral's own OpenAPI ruleset. It is extended as-is, with no
+# rule disabled and no severity lowered: turning a rule off here would be the
+# strictness downgrade the integrity doctrine treats as unledgerable. The gate
+# fails on ERROR results; warnings are counted into `warnings.audit:config` in
+# .testfortress/baseline.json, where the ratchet only ever lets them fall.
+extends: ['spectral:oas']

@@ -8,7 +8,7 @@ import mongoose, { Schema, type Model, type Types } from 'mongoose';
  *   (freshness is owned by the operator re-running the seed, not by per-request
  *   refresh, which would defeat the point of seeding the full corpus).
  */
-export type PwnedRangeSource = 'hibp' | 'seed';
+type PwnedRangeSource = 'hibp' | 'seed';
 
 export interface IPwnedRangeCache {
   _id: Types.ObjectId;

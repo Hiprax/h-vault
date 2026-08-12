@@ -1,4 +1,4 @@
-import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import { deviceInfoSchema, type IDeviceInfo } from './deviceInfo.js';
 
 // ----- Main Interface -----
@@ -28,8 +28,6 @@ export interface ITrustedDevice {
   createdAt: Date;
   updatedAt: Date;
 }
-
-export type TrustedDeviceDocument = HydratedDocument<ITrustedDevice>;
 
 // ----- Main Schema -----
 

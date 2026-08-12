@@ -22,22 +22,10 @@ import path from 'node:path';
 import { repoRoot } from './proc.mjs';
 
 /** Repo-relative, because that is how the manifest names them. */
-export const REPORT_DIR_REL = '.testfortress/reports';
-export const REPORT_DIR = path.join(repoRoot, '.testfortress', 'reports');
+const REPORT_DIR_REL = '.testfortress/reports';
+const REPORT_DIR = path.join(repoRoot, '.testfortress', 'reports');
 export const MANIFEST_REL = '.testfortress/verify.json';
-export const MANIFEST_PATH = path.join(repoRoot, '.testfortress', 'verify.json');
-
-/**
- * ESC is spelled with String.fromCharCode(27) rather than as a literal escape,
- * so the pattern carries no control character inside a regex literal and a diff
- * of this file stays readable.
- */
-const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, 'g');
-
-/** Colour codes belong on a terminal, never in a report a tool will parse. */
-export function stripAnsi(text) {
-  return text.replace(ANSI_PATTERN, '');
-}
+const MANIFEST_PATH = path.join(repoRoot, '.testfortress', 'verify.json');
 
 export function ensureReportDir() {
   mkdirSync(REPORT_DIR, { recursive: true });

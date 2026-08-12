@@ -134,6 +134,29 @@ const DIRECTION = {
   'mutation.scopeGlobs': 'info',
   'mutation.modules.*': 'higher',
   'tests.count': 'higher',
+  // Duplication and unused code: every one of these is lower-is-better, and
+  // `duplication.ceiling` is here deliberately. It mirrors `.jscpd.json`'s
+  // `threshold`, which is what jscpd itself fails on, so raising that ceiling to
+  // make room for a new clone is a regression this file rejects — the number
+  // that enforces the rule cannot be edited without tripping the rule.
+  'duplication.percentage': 'lower',
+  'duplication.clones': 'lower',
+  'duplication.duplicatedLines': 'lower',
+  'duplication.ceiling': 'lower',
+  // The two denominators are `info`: source files and lines both move for
+  // legitimate reasons, and gating them would punish deleting code. They cannot
+  // be gamed to lower the percentage either, because `clones` and
+  // `duplicatedLines` are ratcheted in ABSOLUTE terms. A scan that collapses to
+  // nothing is caught in the gate itself, by a floor on both.
+  'duplication.totalLines': 'info',
+  'duplication.sources': 'info',
+  'deadcode.*': 'lower',
+  // Config-lint debt, per tool. One scalar over three linters would let a
+  // hadolint regression hide behind a spectral improvement, so each is ratcheted
+  // separately; `inputsExamined` is higher-is-better because a leg that examines
+  // fewer files than it used to is a weaker gate, whatever its finding count says.
+  'config.belowError.*': 'lower',
+  'config.inputsExamined.*': 'higher',
   'warnings.*': 'lower',
   'suppressions.count': 'lower',
   'suppressions.totalHits': 'lower',
@@ -389,6 +412,8 @@ function collect() {
     const known =
       base === 'integrity.json' ||
       base === 'warnings.json' ||
+      base === 'deadcode.json' ||
+      base === 'config.sarif' ||
       base.includes('mutation') ||
       base.includes('flake');
     if (!known) continue;
@@ -411,6 +436,23 @@ function collect() {
         got['suppressions.totalHits'] = sup.totalHits ?? s.coveredOccurrences;
       }
       for (const [k, v] of Object.entries(s.fingerprints ?? {})) got[`integrity.${k}`] = v;
+    } else if (base === 'deadcode.json') {
+      // Both halves of the `deadcode` gate: knip's per-category counts and
+      // jscpd's duplication, including the ceiling jscpd itself enforces.
+      for (const [key, value] of Object.entries(j.deadcode ?? {})) got[`deadcode.${key}`] = value;
+      for (const [key, value] of Object.entries(j.duplication ?? {})) {
+        got[`duplication.${key}`] = value;
+      }
+    } else if (base === 'config.sarif') {
+      // The per-tool numbers live in the SARIF driver's properties, which is
+      // where a SARIF consumer expects tool-specific data.
+      const props = j.runs?.[0]?.tool?.driver?.properties ?? {};
+      for (const [tool, count] of Object.entries(props.belowError ?? {})) {
+        got[`config.belowError.${tool}`] = count;
+      }
+      for (const [tool, count] of Object.entries(props.inputsExamined ?? {})) {
+        got[`config.inputsExamined.${tool}`] = count;
+      }
     } else if (base === 'warnings.json') {
       // `null` means UNMEASURED in warnings.json and is deliberately not `0`;
       // passing it through as a number would fabricate a clean result.

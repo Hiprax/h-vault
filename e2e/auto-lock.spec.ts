@@ -38,7 +38,7 @@ const LOCK_CYCLE_TEST_TIMEOUT_MS = 300_000;
 /**
  * Lock the vault through the sidebar control, the way a user does.
  *
- * Deliberately NOT the `Ctrl`+`L` shortcut that `helpers.lockVault` presses:
+ * Deliberately NOT the `Ctrl`+`L` keyboard shortcut:
  * `useKeyboardShortcuts` suppresses every shortcut while focus is in an
  * `INPUT`/`TEXTAREA`/`SELECT`, and the vault page holds a focusable search field —
  * so the keypress silently did nothing here and the test failed waiting for a lock

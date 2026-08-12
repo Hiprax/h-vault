@@ -11,7 +11,7 @@ import type { ParsedImportItem } from './types';
 export const MAX_IMPORT_WARNINGS = 10;
 
 /** The ciphertext fields (plus search hash) a sealed row puts on the wire. */
-export interface SealedImportItem {
+interface SealedImportItem {
   encryptedName: string;
   nameIv: string;
   nameTag: string;

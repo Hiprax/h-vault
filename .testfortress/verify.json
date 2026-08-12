@@ -50,7 +50,7 @@
     "audit:secrets": {
       "cmd": "node scripts/ci/secret-scan.mjs --report",
       "tier": 0,
-      "gate": "0 findings across every tracked file",
+      "gate": "0 findings across every tracked and untracked-not-ignored file",
       "report": "secrets.json"
     },
     "lint": {
@@ -120,6 +120,32 @@
       "tier": 1,
       "gate": "0 production advisories at moderate or above",
       "report": "deps.log"
+    },
+    "audit:secrets:full": {
+      "cmd": "npm run audit:secrets:full",
+      "tier": 1,
+      "gate": "0 findings across the working tree AND every blob in git history",
+      "report": "secrets-full.json"
+    },
+    "deadcode": {
+      "cmd": "npm run deadcode",
+      "tier": 1,
+      "gate": "0 unused files, exports, types or dependencies; duplication at or below the committed ceiling",
+      "report": "deadcode.json",
+      "requires": ["build:shared"]
+    },
+    "audit:config": {
+      "cmd": "npm run audit:config",
+      "tier": 1,
+      "gate": "0 error-level findings from actionlint, hadolint and spectral",
+      "report": "config.sarif",
+      "requires": ["build:shared", "actionlint", "hadolint"]
+    },
+    "audit:licenses": {
+      "cmd": "npm run audit:licenses",
+      "tier": 1,
+      "gate": "every production dependency carries an allowlisted licence; 0 copyleft",
+      "report": "licenses.json"
     },
     "test:e2e": {
       "cmd": "npm run test:e2e",

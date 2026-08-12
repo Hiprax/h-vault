@@ -98,15 +98,38 @@ function compilerWarnings() {
     .filter((line) => COMPILER_WARNING.some((pattern) => pattern.test(line))).length;
 }
 
+/**
+ * actionlint, hadolint and spectral findings below error level, as one number.
+ *
+ * The `audit:config` gate FAILS on error-level findings only; everything below
+ * that is real debt (53 operations with no `operationId`, a Dockerfile
+ * `HEALTHCHECK` in shell form) that no one is going to clear in the change that
+ * wires the linters up. Counting it here puts it under the ratchet, where
+ * lower-is-better: the debt can be paid down and cannot grow, which is the
+ * difference between a recorded warning and an ignored one.
+ */
+function configWarnings() {
+  if (!ran('audit:config')) return null;
+  const sarif = readJsonReport('config.sarif');
+  if (sarif === null) return null;
+  // `warning` AND `note`. A severity level that is neither failed nor ratcheted
+  // is a level anyone can add to for free, and hadolint's `info`/`style` and
+  // spectral's `info`/`hint` all land in `note`.
+  const levels = countLevels(sarif);
+  return levels.warning + (levels.note ?? 0);
+}
+
 const warnings = {
   lint: lintWarnings(),
   typecheck: typecheckWarnings(),
   compiler: compilerWarnings(),
+  'audit:config': configWarnings(),
 };
 
 writeJsonReport('warnings.json', warnings);
 
 const render = (value) => (value === null ? color.yellow('unmeasured') : String(value));
 note(
-  `warnings.json — lint ${render(warnings.lint)} · typecheck ${render(warnings.typecheck)} · compiler ${render(warnings.compiler)}`,
+  `warnings.json — lint ${render(warnings.lint)} · typecheck ${render(warnings.typecheck)} · ` +
+    `compiler ${render(warnings.compiler)} · config ${render(warnings['audit:config'])}`,
 );

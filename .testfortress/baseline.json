@@ -8,7 +8,8 @@
   "warnings": {
     "lint": 0,
     "typecheck": 0,
-    "compiler": 0
+    "compiler": 0,
+    "audit:config": 60
   },
   "suppressions": {
     "count": 25,
@@ -253,14 +254,18 @@
     }
   },
   "tasks": [
+    "audit:config",
     "audit:deps",
     "audit:image",
     "audit:integrity",
+    "audit:licenses",
     "audit:ratchet",
     "audit:ratchet:full",
     "audit:sast",
     "audit:secrets",
+    "audit:secrets:full",
     "build",
+    "deadcode",
     "engines",
     "format:check",
     "lint",
@@ -281,6 +286,33 @@
   },
   "meta": {
     "fields": [
+      "config.belowError.actionlint",
+      "config.belowError.hadolint",
+      "config.belowError.spectral",
+      "config.inputsExamined.actionlint",
+      "config.inputsExamined.hadolint",
+      "config.inputsExamined.spectral",
+      "deadcode.duplicateExports",
+      "deadcode.unlistedBinaries",
+      "deadcode.unlistedCatalogReferences",
+      "deadcode.unlistedDependencies",
+      "deadcode.unresolvedImports",
+      "deadcode.unusedCatalogEntries",
+      "deadcode.unusedClassMembers",
+      "deadcode.unusedDependencies",
+      "deadcode.unusedDevDependencies",
+      "deadcode.unusedEnumMembers",
+      "deadcode.unusedExports",
+      "deadcode.unusedFiles",
+      "deadcode.unusedNamespaceMembers",
+      "deadcode.unusedOptionalPeerDependencies",
+      "deadcode.unusedTypes",
+      "duplication.ceiling",
+      "duplication.clones",
+      "duplication.duplicatedLines",
+      "duplication.percentage",
+      "duplication.sources",
+      "duplication.totalLines",
       "integrity.excludeHash",
       "integrity.gateFilesHash",
       "integrity.gitignoreHash",
@@ -308,9 +340,47 @@
       "suppressions.totalHits",
       "tasks",
       "tests.count",
+      "warnings.audit:config",
       "warnings.compiler",
       "warnings.lint",
       "warnings.typecheck"
     ]
+  },
+  "duplication": {
+    "percentage": 2.89,
+    "clones": 132,
+    "duplicatedLines": 1525,
+    "totalLines": 52849,
+    "ceiling": 2.89,
+    "sources": 190
+  },
+  "deadcode": {
+    "unusedFiles": 0,
+    "unusedDependencies": 0,
+    "unusedDevDependencies": 0,
+    "unusedOptionalPeerDependencies": 0,
+    "unlistedDependencies": 0,
+    "unlistedBinaries": 0,
+    "unresolvedImports": 0,
+    "unusedExports": 0,
+    "unusedTypes": 0,
+    "unusedNamespaceMembers": 0,
+    "unusedEnumMembers": 0,
+    "unusedClassMembers": 0,
+    "duplicateExports": 0,
+    "unusedCatalogEntries": 0,
+    "unlistedCatalogReferences": 0
+  },
+  "config": {
+    "belowError": {
+      "actionlint": 0,
+      "hadolint": 5,
+      "spectral": 55
+    },
+    "inputsExamined": {
+      "actionlint": 1,
+      "hadolint": 2,
+      "spectral": 1
+    }
   }
 }

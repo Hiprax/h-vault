@@ -1012,7 +1012,7 @@ npm run ci -- --json            # one JSON document describing the run
 | Gate               | Tier | What it runs                                                                                                                           | Replaces                   |
 | ------------------ | ---- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
 | `engines`          | T0   | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                 | the CI Node matrix's floor |
-| `secrets`          | T0   | Every **tracked** file scanned for credential patterns                                                                                 | _new_                      |
+| `secrets`          | T0   | Every tracked **and untracked-not-ignored** file scanned for credential patterns                                                       | _new_                      |
 | `lint`             | T0   | ESLint + `eslint-plugin-security`, `--max-warnings=0`, emitting SARIF                                                                  | `ci` job                   |
 | `format`           | T0   | `prettier --check .`                                                                                                                   | _new_                      |
 | `type-check`       | T0   | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                              | `ci` job                   |
@@ -1022,6 +1022,10 @@ npm run ci -- --json            # one JSON document describing the run
 | `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                        | `ci` job                   |
 | `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                              | `ci` job                   |
 | `audit`            | T1   | `npm audit --audit-level=moderate --omit=dev`                                                                                          | `ci` job                   |
+| `licenses`         | T1   | Every production dependency against the committed licence allowlist; any copyleft fails                                                | _new_                      |
+| `secrets-full`     | T1   | The working tree **plus every blob in git history** scanned for credential patterns                                                    | _new_                      |
+| `deadcode`         | T1   | `knip` (unused files, exports, types, dependencies) + `jscpd` duplication against a committed ceiling                                  | _new_                      |
+| `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                             | _new_                      |
 | `e2e`              | T1   | Playwright (Chromium) against an auto-started stack                                                                                    | `e2e` job                  |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below) | `docker-build` job         |
 | `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                    | `sast` job                 |

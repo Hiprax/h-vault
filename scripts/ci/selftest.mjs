@@ -58,6 +58,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
+import { hasExe } from './lib/proc.mjs';
 import { DEFECTS } from './lib/selftest-defects.mjs';
 
 const ROOT = process.cwd();
@@ -94,11 +95,24 @@ const posix = (p) => p.split(sep).join('/');
 
 // ---------------------------------------------------------------------------
 // prerequisites a case needs from the world
+//
+// Host binaries are probed through `hasExe`, the same helper `local-ci.mjs`'s
+// own PREREQUISITES table uses. One idiom for "is this tool on the machine?",
+// in one place that knows how spawning differs on Windows — and the three
+// probes below no longer restate it three times.
 // ---------------------------------------------------------------------------
 const PREREQUISITES = {
   docker: {
     label: 'the docker CLI',
-    ok: () => spawnSync('docker', ['version'], { stdio: 'ignore' }).status === 0,
+    ok: () => hasExe('docker', ['version']),
+  },
+  actionlint: {
+    label: 'the actionlint binary',
+    ok: () => hasExe('actionlint', ['-version']),
+  },
+  hadolint: {
+    label: 'the hadolint binary',
+    ok: () => hasExe('hadolint', ['--version']),
   },
   codeql: {
     label: 'a usable CodeQL CLI',
@@ -280,6 +294,53 @@ for (const task of selected) {
     execFileSync('git', ['add', '-A'], { cwd: workspace, stdio: 'ignore' });
   } catch {
     /* a gate that does not read the index does not care */
+  }
+
+  // `buryInHistory` COMMITS the planted files and then deletes them, so the
+  // defect exists ONLY in git history and the working tree is genuinely clean.
+  // Without it a history-scanning gate is "proved" by a defect its working-tree
+  // sibling would have caught anyway — the two would be indistinguishable, which
+  // is the same as not having proved the history leg at all.
+  if (defect.buryInHistory) {
+    // Plain `git commit`, with no hook-skipping flag: such a flag inside a
+    // gate-defining file is a HOOK-BYPASS marker that the integrity scan treats
+    // as non-ledgerable — it caught the first draft of this very helper — and it
+    // is not needed anyway. The temp workspace is a bare `git init` with no hooks
+    // installed, because husky wires those through `npm run prepare`, which never
+    // runs there.
+    const commit = (message) => {
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=selftest@localhost',
+          '-c',
+          'user.name=selftest',
+          'commit',
+          '-q',
+          '-m',
+          message,
+        ],
+        { cwd: workspace, stdio: 'ignore' },
+      );
+    };
+    try {
+      commit('selftest: plant');
+      for (const rel of Object.keys(defect.create ?? {})) {
+        rmSync(join(workspace, rel), { force: true });
+      }
+      execFileSync('git', ['add', '-A'], { cwd: workspace, stdio: 'ignore' });
+      commit('selftest: remove the planted file');
+    } catch (error) {
+      results.push({
+        task: task.name,
+        status: 'error',
+        defect: defect.title,
+        detail: `could not bury the defect in history: ${error.message}`,
+      });
+      cannotRun = true;
+      continue;
+    }
   }
 
   const started = Date.now();

@@ -171,6 +171,20 @@ const PREREQUISITES = {
     ok: () => hasExe('docker', ['version', '--format', '{{.Client.Version}}']),
     fix: 'start Docker — or, if you cannot, see "Escape hatches" in CONTRIBUTING.md',
   },
+  // Two external linters, each declared rather than probed inside its gate: a
+  // configuration gate that quietly passed because the binary was absent would be
+  // indistinguishable from one that checked and found nothing, and "could not
+  // run" (exit 2) is the honest verdict for a tool that is not there.
+  actionlint: {
+    label: 'the actionlint binary',
+    ok: () => hasExe('actionlint', ['-version']),
+    fix: 'install actionlint — https://github.com/rhysd/actionlint/releases',
+  },
+  hadolint: {
+    label: 'the hadolint binary',
+    ok: () => hasExe('hadolint', ['--version']),
+    fix: 'install hadolint — https://github.com/hadolint/hadolint/releases',
+  },
   'build:shared': {
     label: 'a built @hvault/shared (packages/shared/dist)',
     ok: () => {
@@ -215,7 +229,7 @@ const GATES = [
     id: 'secrets',
     task: 'audit:secrets',
     tier: 0,
-    title: 'Secret scan (all tracked files)',
+    title: 'Secret scan (tracked + untracked-not-ignored files)',
     ci: 'new — the old pipeline never scanned the repo',
     run: (options) => runExe(process.execPath, ['scripts/ci/secret-scan.mjs', '--report'], options),
   },
@@ -305,6 +319,55 @@ const GATES = [
     ci: 'ci job · Audit production dependencies',
     log: 'deps.log',
     run: (options) => runNpm(['run', 'audit:prod'], options),
+  },
+  {
+    id: 'licenses',
+    task: 'audit:licenses',
+    tier: 1,
+    title: 'Licence allowlist (production dependency tree)',
+    ci: 'new — nothing ever checked what this ships under',
+    run: (options) => runExe(process.execPath, ['scripts/ci/license-gate.mjs'], options),
+  },
+  {
+    id: 'secrets-full',
+    task: 'audit:secrets:full',
+    tier: 1,
+    // The T0 gate reads the working tree; this one adds every blob in every
+    // reachable commit. It is a separate task rather than a flag on the first
+    // because its finding asks for a different action: a secret in history is
+    // already compromised, so the remedy is rotation, not deletion.
+    title: 'Secret scan (working tree + full git history)',
+    ci: 'new — the old pipeline never scanned the repo, let alone its history',
+    run: (options) =>
+      runExe(
+        process.execPath,
+        ['scripts/ci/secret-scan.mjs', '--all', '--history', '--report'],
+        options,
+      ),
+  },
+  {
+    id: 'deadcode',
+    task: 'deadcode',
+    tier: 1,
+    title: 'Unused code + duplication (knip, jscpd)',
+    ci: 'new — no hosted job ever looked for code nothing reaches',
+    // knip resolves `@hvault/shared` through the package's `main`, so an unbuilt
+    // shared package makes every cross-package import look unresolved.
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/deadcode-gate.mjs'], options),
+  },
+  {
+    id: 'config',
+    task: 'audit:config',
+    tier: 1,
+    title: 'Config lint (actionlint, hadolint, spectral)',
+    ci: 'new — the workflow, the Dockerfiles and the OpenAPI document were unlinted',
+    // The OpenAPI document is built from source at gate time, and swagger.ts
+    // imports APP_VERSION from the shared package.
+    dependsOn: ['build'],
+    requires: ['build:shared', 'actionlint', 'hadolint'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/config-gate.mjs'], options),
   },
   {
     id: 'e2e',

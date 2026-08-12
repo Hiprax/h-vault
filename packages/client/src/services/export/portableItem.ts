@@ -66,7 +66,7 @@ export interface PortableLogin {
 }
 
 /** A postal address, shared by card billing and identity. */
-export interface PortableAddress {
+interface PortableAddress {
   street: string;
   /** The WHATWG `address-line2` / Bitwarden `address2` peer of {@link street}. */
   street2: string;
@@ -85,7 +85,7 @@ export interface PortableAddress {
  * guarantee the shared base `addressSchema` gives on read-back by stripping keys
  * it does not declare.
  */
-export interface PortableIdentityAddress extends PortableAddress {
+interface PortableIdentityAddress extends PortableAddress {
   deliveryNotes: string;
 }
 

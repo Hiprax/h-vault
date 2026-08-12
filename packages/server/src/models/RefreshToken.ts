@@ -1,4 +1,4 @@
-import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import { deviceInfoSchema, type IDeviceInfo } from './deviceInfo.js';
 
 // Re-exported from its original module so existing importers keep working.
@@ -25,8 +25,6 @@ export interface IRefreshToken {
   createdAt: Date;
   updatedAt: Date;
 }
-
-export type RefreshTokenDocument = HydratedDocument<IRefreshToken>;
 
 // ----- Main Schema -----
 
@@ -64,7 +62,7 @@ refreshTokenSchema.index({ userId: 1, familyId: 1 });
  * after rotation so the auth controller can detect replay of a stolen token.
  * Mirrors the value used by the safety-net cleanup cron in tokenCleanup.ts.
  */
-export const REUSE_DETECTION_WINDOW_SECONDS = 7 * 24 * 60 * 60;
+const REUSE_DETECTION_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 /**
  * Plain (non-TTL) range index on expiresAt for the cleanup cron to
  * efficiently sweep unused-and-expired tokens. We deliberately do NOT use

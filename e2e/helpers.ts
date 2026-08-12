@@ -3,7 +3,7 @@ import { MongoClient } from 'mongodb';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-export const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/hvault';
+const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/hvault';
 export const TEST_PASSWORD = 'E2E-Test-P@ssword-2025!';
 
 /**
@@ -100,7 +100,7 @@ async function getMongoDb() {
  * flag directly mirrors {@link createAuthenticatedUser}'s API-level path for the
  * full-UI sign-in flow (which registers and logs in through the real pages).
  */
-export async function markEmailVerified(email: string): Promise<void> {
+async function markEmailVerified(email: string): Promise<void> {
   const db = await getMongoDb();
   await db.collection('users').updateOne({ email }, { $set: { emailVerified: true } });
 }
@@ -259,45 +259,19 @@ export function testEmail(): string {
 
 // ─── UI Helpers ──────────────────────────────────────────────────────────────
 
-/** Registers a new account through the UI. */
-export async function registerAccount(
-  page: Page,
-  email?: string,
-  password?: string,
-): Promise<{ email: string; password: string }> {
-  const userEmail = email ?? testEmail();
-  const userPassword = password ?? TEST_PASSWORD;
-
-  await page.goto('/register');
-  await page.getByLabel(/email/i).fill(userEmail);
-  await page.getByLabel(/^master password$/i).fill(userPassword);
-  await page.getByLabel(/confirm master password/i).fill(userPassword);
-  await page.getByRole('button', { name: /create account|register|sign up/i }).click();
-
-  return { email: userEmail, password: userPassword };
-}
-
-/** Logs in through the UI. */
-export async function login(page: Page, email: string, password: string): Promise<void> {
-  await page.goto('/login');
-  await page.getByLabel(/email/i).fill(email);
-  await page.getByLabel(/^master password$/i).fill(password);
-  await page.getByRole('button', { name: /log in|sign in/i }).click();
-}
-
 /**
  * Waits for the vault page to be visible (authenticated state).
  *
- * Derivation-bound like the sign-in steps below: it is normally called straight
- * after {@link login}, whose submit runs the full client-side PBKDF2 derivation.
+ * Derivation-bound: it is normally called straight after a sign-in submit, which
+ * runs the full client-side PBKDF2 key derivation in the browser.
  *
  * It raises the test timeout too, for the same reason `registerAndSignInViaUI`
  * does. That is not redundant belt-and-braces: the step budget below is INERT on
- * its own, because Playwright's 30 s per-test timeout fires first. `login` +
- * `expectVaultVisible` is currently called by no spec (every one goes through
- * `registerAndSignInViaUI`), so this pair is the trap a future spec would walk
- * into — the assertion budget would look generous and be unreachable. One
- * derivation here, so the floor is the single-step budget plus slack.
+ * its own, because Playwright's 30 s per-test timeout fires first, so a caller
+ * that reaches this helper by any route other than `registerAndSignInViaUI`
+ * would otherwise get an assertion budget that looks generous and is
+ * unreachable. One derivation here, so the floor is the single-step budget plus
+ * slack.
  */
 export async function expectVaultVisible(page: Page): Promise<void> {
   ensureTestTimeoutAtLeast(PBKDF2_STEP_TIMEOUT_MS + 30_000);
@@ -388,21 +362,10 @@ export async function gotoFileEncryptionTool(page: Page): Promise<void> {
   });
 }
 
-/** Locks the vault via keyboard shortcut. */
-export async function lockVault(page: Page): Promise<void> {
-  await page.keyboard.press('Control+l');
-}
-
 /** Unlocks the vault via the unlock screen. */
 export async function unlockVault(page: Page, password: string): Promise<void> {
   await page.getByLabel(/master password/i).fill(password);
   await page.getByRole('button', { name: /unlock/i }).click();
-}
-
-/** Navigates to settings page. */
-export async function goToSettings(page: Page): Promise<void> {
-  await page.goto('/settings');
-  await expect(page).toHaveURL(/\/settings/);
 }
 
 // ─── Vault Item Helpers ──────────────────────────────────────────────────────

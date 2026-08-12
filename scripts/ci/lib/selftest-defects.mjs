@@ -53,6 +53,65 @@ export const DEFECTS = {
     evidence: (text) => /__selftest_secret/.test(text),
   },
 
+  'audit:secrets:full': {
+    // `buryInHistory` is what makes this case prove the HISTORY leg rather than
+    // the working-tree leg its T0 sibling already covers: the harness commits the
+    // planted file, deletes it, and commits again, so the tree is clean and only
+    // `git rev-list --objects --all` can still see the secret. A tree-only plant
+    // would be indistinguishable from the `audit:secrets` case and would prove
+    // nothing this gate adds.
+    title: 'commit an AWS-access-key-shaped literal, then delete it — leaving it only in history',
+    create: {
+      'packages/server/src/__selftest_secret_full.ts': `export const key = '${PLANTED_FAKE_SECRET}';\n`,
+    },
+    buryInHistory: true,
+    // The finding must be attributed to HISTORY, not to a file left lying about:
+    // both halves of this predicate matter.
+    evidence: (text) => /__selftest_secret_full/.test(text) && /"where":\s*"history"/.test(text),
+  },
+
+  deadcode: {
+    // An exported symbol nothing imports, in a file nothing imports: knip
+    // reports it, and the gate refuses to let it be ignored.
+    title: 'add a source module nothing imports, exporting a symbol nothing uses',
+    create: {
+      'packages/shared/src/__selftest_probe.ts':
+        'export const selftestProbeValue = 1;\nexport type SelftestProbe = typeof selftestProbeValue;\n',
+    },
+    evidence: (text) => /__selftest_probe/.test(text),
+  },
+
+  'audit:config': {
+    requires: ['actionlint', 'hadolint'],
+    // An undefined context in a workflow expression. actionlint resolves
+    // expressions rather than merely parsing YAML, which is exactly why it is
+    // here: a typo'd context is valid YAML and fails only at run time, on the one
+    // workflow that publishes releases.
+    title: 'reference an undefined context in the release workflow expression',
+    mutate: {
+      '.github/workflows/release.yml': (text) =>
+        text.replace(/^(\s*)(runs-on:.*)$/m, '$1$2\n$1if: ${{ selftestprobe.value == 1 }}'),
+    },
+    evidence: (text) => /selftestprobe/.test(text),
+  },
+
+  'audit:licenses': {
+    // A licence in the production tree that the policy does not accept. Planted
+    // by removing one from the allowlist rather than by installing a GPL
+    // package: the gate cannot tell the two apart — both are "a production
+    // dependency whose licence nobody has approved" — and only one of them is
+    // reproducible offline in a temp copy.
+    title: 'drop a licence the production tree really uses from the allowlist',
+    mutate: {
+      '.licenses-allowlist.json': (text) => {
+        const policy = JSON.parse(text);
+        policy.allow = policy.allow.filter((license) => license !== 'ISC');
+        return `${JSON.stringify(policy, null, 2)}\n`;
+      },
+    },
+    evidence: (text) => /is not in .licenses-allowlist.json/.test(text) && /ISC/.test(text),
+  },
+
   'audit:integrity': {
     title: 'add an unledgered lint suppression to a source file',
     create: {

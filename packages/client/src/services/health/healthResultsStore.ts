@@ -24,7 +24,7 @@ const RESULTS_STORE = 'results';
 /** Single-record key: the whole health snapshot lives in one encrypted blob. */
 const RECORD_KEY = 'v1';
 
-export interface HealthPerItem {
+interface HealthPerItem {
   /** The item's `updatedAt` at compute time — the cache-busting version. */
   v: string;
   /** HIBP breach count; present ONLY when breached (> 0). Absence ⇒ checked-clean. */

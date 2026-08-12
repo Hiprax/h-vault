@@ -17,7 +17,7 @@ interface JwtPayload {
 }
 
 /** The user object attached to `req.user` after successful authentication. */
-export interface AuthenticatedUser {
+interface AuthenticatedUser {
   _id: string;
 }
 

@@ -203,4 +203,3 @@ function useToast(): ToastContextValue {
 }
 
 export { ToastProvider, useToast };
-export type { ToastType, ToastOptions };

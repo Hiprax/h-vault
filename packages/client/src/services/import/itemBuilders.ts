@@ -72,7 +72,7 @@ export function clampName(name: string): string {
  * the removed tail (`''` when nothing was truncated). Callers decide whether to
  * preserve the overflow elsewhere (e.g. fold it into the item's notes).
  */
-export function clampWithOverflow(value: string, max: number): { value: string; overflow: string } {
+function clampWithOverflow(value: string, max: number): { value: string; overflow: string } {
   if (value.length <= max) return { value, overflow: '' };
   return { value: value.slice(0, max), overflow: value.slice(max) };
 }
@@ -88,7 +88,7 @@ export function clampWithOverflow(value: string, max: number): { value: string; 
  * Clamp so the *transformed* value fits, and return the full original as overflow
  * so it can be preserved in notes.
  */
-export function clampUri(raw: string): { uri: string; overflow: string } {
+function clampUri(raw: string): { uri: string; overflow: string } {
   // The scheme the transform prepends is fixed by the shape of the value, not its
   // length, so measuring the overhead once on the raw value is exact.
   const overhead = normalizeUri(raw).length - raw.length;
@@ -120,7 +120,7 @@ export function toTags(tags?: (string | undefined | null)[]): string[] {
  * than just that field. Mirrors the `str()` coercion the Bitwarden parser already
  * applies on its own custom-field path.
  */
-export function toFieldValue(value: unknown): string {
+function toFieldValue(value: unknown): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number') return String(value);
   return '';
@@ -148,7 +148,7 @@ interface VaultCustomField {
  * Truncated values and any fields beyond the cap are returned as `overflow`
  * lines so the caller can preserve them in notes rather than dropping them.
  */
-export function clampCustomFields(raw: readonly unknown[]): {
+function clampCustomFields(raw: readonly unknown[]): {
   fields: VaultCustomField[];
   overflow: string[];
 } {
@@ -205,7 +205,7 @@ export function clampCustomFields(raw: readonly unknown[]): {
  *
  * Exported so both arms are unit-tested directly.
  */
-export function clampBackupCodes(raw: readonly (string | undefined | null)[]): {
+function clampBackupCodes(raw: readonly (string | undefined | null)[]): {
   codes: string[];
   overflow: string[];
 } {

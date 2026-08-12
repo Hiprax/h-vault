@@ -9,7 +9,7 @@ const sizeClasses: Record<SpinnerSize, string> = {
   lg: 'h-8 w-8',
 };
 
-export interface SpinnerProps extends SVGAttributes<SVGSVGElement> {
+interface SpinnerProps extends SVGAttributes<SVGSVGElement> {
   /** Controls the dimensions of the spinner */
   size?: SpinnerSize;
 }

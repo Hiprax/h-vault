@@ -1,0 +1,47 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+
+  // Unused files, exports and dependencies over the whole repository.
+  //
+  // There is deliberately NO `ignore`, `ignoreDependencies`, `ignoreBinaries` or
+  // `ignoreExportsUsedInFile` key here, and none may be added: an ignore list is
+  // how a dead-code gate is made to pass without deleting anything, which is the
+  // one thing this gate exists to prevent. A finding is answered by deleting the
+  // code, by removing the `export` keyword when a symbol is used only inside its
+  // own module, or by declaring the dependency that was really being used.
+  //
+  // `entry` is not an exception to that rule; it is the opposite of one. knip can
+  // only follow imports, and three of this repository's programs are started by
+  // something that is not an import. Each is marked with knip's `!` (production)
+  // suffix and carries the exact line that runs it, so the claim is checkable:
+  //
+  //   e2e/start-server.ts             playwright.config.ts:72  `npx tsx e2e/start-server.ts`
+  //   ecosystem.config.cjs            README.md:568            `pm2 start ecosystem.config.cjs --env production`
+  //   docker/mongo/provision-app-user.js
+  //                                   docker-compose.yml:463   mongosh argument in `hvault-db-init`
+  "workspaces": {
+    ".": {
+      "entry": [
+        "scripts/**/*.{mjs,js}",
+        "e2e/*.spec.ts",
+        "e2e/helpers.ts",
+        "e2e/start-server.ts!",
+        "ecosystem.config.cjs!",
+        "docker/mongo/provision-app-user.js!",
+      ],
+      "project": ["scripts/**/*.{mjs,js}", "e2e/**/*.ts", "*.{ts,mjs,cjs,js}", "docker/**/*.js"],
+    },
+    "packages/shared": {
+      "entry": ["scripts/*.js", "tests/**/*.test.ts"],
+      "project": ["src/**/*.ts", "scripts/**/*.js", "tests/**/*.ts"],
+    },
+    "packages/server": {
+      "entry": ["src/cli/*.ts", "scripts/*.ts", "tests/**/*.test.ts"],
+      "project": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
+    },
+    "packages/client": {
+      "entry": ["src/**/*.worker.ts", "scripts/*.mjs", "tests/**/*.test.{ts,tsx}"],
+      "project": ["src/**/*.{ts,tsx}", "src/**/*.css", "scripts/**/*.mjs", "tests/**/*.{ts,tsx}"],
+    },
+  },
+}

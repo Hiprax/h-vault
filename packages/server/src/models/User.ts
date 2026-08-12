@@ -1,4 +1,4 @@
-import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import {
   KDF_ITERATIONS,
   KDF_ALGORITHM,
@@ -14,7 +14,7 @@ import type { Theme, BackupStatus } from '@hvault/shared';
 
 // ----- Sub-interfaces -----
 
-export interface IPasswordGenOptions {
+interface IPasswordGenOptions {
   length: number;
   uppercase: boolean;
   lowercase: boolean;
@@ -25,7 +25,7 @@ export interface IPasswordGenOptions {
   minSymbols: number;
 }
 
-export interface IBackupSettingsDoc {
+interface IBackupSettingsDoc {
   enabled: boolean;
   scheduleHour: number;
   backupEmails?: string[] | undefined;
@@ -86,8 +86,6 @@ export interface IUser {
   createdAt: Date;
   updatedAt: Date;
 }
-
-export type UserDocument = HydratedDocument<IUser>;
 
 // ----- Sub-Schemas -----
 

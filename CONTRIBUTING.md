@@ -41,7 +41,7 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — fifteen gates including the full test suite, container builds with
+pipeline locally — nineteen gates including the full test suite, container builds with
 Trivy scanning, and CodeQL — and refuses the push if any of them fail. A commit that
 reaches `main` has already passed everything.
 
@@ -80,6 +80,31 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
+### Four gates whose failure asks for something specific
+
+Most gates tell you what to fix. These four are worth reading before you meet them,
+because the obvious way past each of them is the wrong one.
+
+- **`deadcode`** runs `knip` (unused files, exports, exported types and dependencies, plus
+  dependencies used without being declared) and `jscpd` (duplication). The answer to a
+  finding is to **delete the code** — or to drop the `export` keyword when a symbol is only
+  used inside its own module, or to declare a dependency that is genuinely used. Neither
+  `knip.jsonc` nor `.jscpd.json` has an ignore list, and adding one is not an option: an
+  ignore entry is how a dead-code gate goes green without a line being removed.
+- **The duplication ceiling in `.jscpd.json` is the measured value and only ever falls.**
+  `.testfortress/baseline.json` records the same number with a lower-is-better direction,
+  so raising the ceiling to make room for a new clone fails the `ratchet-full` gate.
+- **`config`** lints the release workflow (`actionlint`), both Dockerfiles (`hadolint`) and
+  the OpenAPI document that `packages/server/src/config/swagger.ts` builds (`spectral`). It
+  fails on error-level findings; everything below that is counted into
+  `warnings.audit:config` in the baseline, where it can be paid down and cannot grow. It
+  needs `actionlint` and `hadolint` on your `PATH`; without them the gate reports **could
+  not run** rather than passing quietly.
+- **`secrets-full`** scans the working tree and **every blob in git history**. A finding in
+  history is already compromised: it is in every clone and every fork, and no later commit
+  takes it back. **Rotate the credential first.** Rewriting history is optional cleanup
+  afterwards, never the fix.
+
 ### Escape hatches
 
 Three exist, in increasing order of bluntness. They live here, in prose, rather than in
@@ -94,7 +119,7 @@ documenting its own defeat. The hatches themselves are unchanged and still work.
 | `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
 
 The first is the one to reach for: it is scoped, it is visible in the run summary, and it
-leaves the other fourteen gates in place. **Say so in the pull request description
+leaves the other eighteen gates in place. **Say so in the pull request description
 whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
 a claim someone else now has to check.
 

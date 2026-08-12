@@ -33,7 +33,7 @@ import type { PortableItem } from './portableItem.js';
 export type PortableExportFormat = 'bitwarden-json' | 'bitwarden-csv' | 'chrome-csv';
 
 /** The file extensions a portable export can carry. */
-export type PortableExportExtension = 'json' | 'csv';
+type PortableExportExtension = 'json' | 'csv';
 
 /**
  * User-facing metadata for one export format: a display label, the file

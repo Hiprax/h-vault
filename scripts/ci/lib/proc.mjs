@@ -185,6 +185,37 @@ export function captureExe(command, args, { env = {}, input } = {}) {
   };
 }
 
+/**
+ * Runs an npm script and captures its output.
+ *
+ * The npm counterpart to `captureExe`, and it exists for the same reason the
+ * `runNpm`/`runExe` split does: npm is a `.cmd` shim on Windows and cannot be
+ * spawned without a shell there. Gates use it to invoke a CLI-only tool through
+ * the npm script that names it, so package.json stays the one place a tool's
+ * invocation is declared — a gate that spawned `node_modules/.bin/<tool>`
+ * directly would make that dependency look unused to the `deadcode` gate, which
+ * can only see imports and scripts.
+ *
+ * @returns {{ status: number, stdout: string, stderr: string, ok: boolean }}
+ */
+export function captureNpm(args, { env = {} } = {}) {
+  const spawnTarget = resolveSpawn('npm', args, isWindows);
+  const result = spawnSync(spawnTarget.command, spawnTarget.args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    shell: isWindows,
+    env: { ...process.env, ...env },
+  });
+  const status = result.error ? 127 : (result.status ?? 1);
+  return {
+    status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? (result.error ? result.error.message : ''),
+    ok: status === 0,
+  };
+}
+
 /** True when `command --version` (or the given probe args) succeeds. */
 export function hasExe(command, probeArgs = ['--version']) {
   return captureExe(command, probeArgs).ok;

@@ -25,25 +25,25 @@ const SEMVER_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
 const SEMVER_VERSION = /^(\d+)\.(\d+)\.(\d+)/;
 
 /** `v1.2.3` → [1, 2, 3]; anything else → null. */
-export function parseTag(tag) {
+function parseTag(tag) {
   const match = SEMVER_TAG.exec(tag.trim());
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
 /** `1.2.3` / `1.2.3-beta.1` → [1, 2, 3]; anything else → null. */
-export function parseVersion(version) {
+function parseVersion(version) {
   const match = SEMVER_VERSION.exec(version.trim());
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
 /** Standard semver ordering: negative when a < b. */
-export function compare(a, b) {
+function compare(a, b) {
   return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
-export const format = (parts) => `v${String(parts[0])}.${String(parts[1])}.${String(parts[2])}`;
+const format = (parts) => `v${String(parts[0])}.${String(parts[1])}.${String(parts[2])}`;
 
 /**
  * Decides which tag this push should produce.

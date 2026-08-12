@@ -62,7 +62,15 @@
     "report": "node scripts/ci/report.mjs",
     "release:next-version": "node scripts/ci/next-version.mjs",
     "clean": "rimraf packages/*/dist packages/*/node_modules node_modules logs",
-    "prepare": "husky"
+    "prepare": "husky",
+    "deadcode": "node scripts/ci/deadcode-gate.mjs",
+    "deadcode:duplication": "jscpd --config .jscpd.json",
+    "audit:config": "node scripts/ci/config-gate.mjs",
+    "audit:config:openapi": "spectral lint .testfortress/reports/openapi.json --ruleset .spectral.yaml --format json --fail-severity error --quiet",
+    "audit:licenses": "node scripts/ci/license-gate.mjs",
+    "audit:secrets": "node scripts/ci/secret-scan.mjs --report",
+    "audit:secrets:full": "node scripts/ci/secret-scan.mjs --all --history --report",
+    "deadcode:unused": "knip --reporter json"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
@@ -93,15 +101,19 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
-    "@typescript-eslint/eslint-plugin": "^8.64.0",
-    "@typescript-eslint/parser": "^8.64.0",
+    "@stoplight/spectral-cli": "^6.16.3",
     "concurrently": "^10.0.3",
     "eslint": "^10.7.0",
     "eslint-plugin-security": "^4.0.1",
     "globals": "^17.7.0",
     "husky": "^9.1.7",
+    "jscpd": "^5.0.14",
+    "knip": "^6.32.2",
+    "license-checker-rseidelsohn": "^5.0.1",
     "lint-staged": "^17.1.0",
     "mongodb": "^7.5.0",
+    "mongodb-memory-server": "^11.2.0",
+    "otpauth": "^9.5.1",
     "prettier": "^3.9.5",
     "rimraf": "^6.1.3",
     "typescript": "^6.0.3",

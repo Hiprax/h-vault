@@ -177,5 +177,3 @@ export function FileDecryptPanel() {
     </Card>
   );
 }
-
-export default FileDecryptPanel;

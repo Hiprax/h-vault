@@ -101,7 +101,7 @@ export function __setHibpCacheMaxBytes(bytes: number): void {
  * enough that a batch of cache-miss prefixes resolves quickly. Cache hits never
  * count against it (they are served without an outbound call).
  */
-export const HIBP_FANOUT_CONCURRENCY = 8;
+const HIBP_FANOUT_CONCURRENCY = 8;
 
 export const hibpCache = new Map<string, HibpCacheEntry>();
 

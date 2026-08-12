@@ -278,5 +278,3 @@ export function FileEncryptPanel() {
     </Card>
   );
 }
-
-export default FileEncryptPanel;

@@ -1,4 +1,4 @@
-import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import {
   ITEM_TYPES,
   MAX_TAGS_PER_ITEM,
@@ -9,7 +9,7 @@ import type { ItemType } from '@hvault/shared';
 
 // ----- Sub-interfaces -----
 
-export interface IPasswordHistoryEntry {
+interface IPasswordHistoryEntry {
   encryptedPassword: string;
   iv: string;
   tag: string;
@@ -45,8 +45,6 @@ export interface IVaultItem {
   createdAt: Date;
   updatedAt: Date;
 }
-
-export type VaultItemDocument = HydratedDocument<IVaultItem>;
 
 // ----- Sub-Schemas -----
 
