@@ -12,9 +12,12 @@ import { describe, expect, it } from 'vitest';
 import config from '../vitest.config.js';
 import {
   DEFAULT_SEED,
+  DST_TZ,
   PINNED_LOCALE,
   PINNED_TZ,
+  RUN_TZ,
   SEED,
+  resolveRunTz,
   resolveSeed,
   resolvedOrderSeed,
   seedBanner,
@@ -42,6 +45,37 @@ describe('determinism harness — clock and locale', () => {
   it('resolves Intl to the pinned timezone', () => {
     expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(PINNED_TZ);
     expect(process.env.TZ).toBe(PINNED_TZ);
+    // The ordinary suites run with `HVAULT_TZ` unset, so the resolved zone IS the
+    // pin. Stated here because the two assertions above would also hold if the
+    // resolver had silently defaulted to something else that happens to be UTC.
+    expect(RUN_TZ).toBe(PINNED_TZ);
+  });
+
+  it('lets the property gate select the DST zone, from an allowlist of exactly two', () => {
+    // `HVAULT_TZ` exists for one reason: `combineExpiry`'s repeated-hour branch is
+    // unreachable in a zone with no DST transition, so the property gate runs its
+    // suites a second time in `DST_TZ`. It is an ALLOWLIST rather than a
+    // passthrough because the pin's whole purpose is that a suite's verdict cannot
+    // depend on the machine it ran on — an env var accepting any zone would hand
+    // that dependency straight back.
+    expect(resolveRunTz(undefined)).toBe(PINNED_TZ);
+    expect(resolveRunTz('')).toBe(PINNED_TZ);
+    expect(resolveRunTz('   ')).toBe(PINNED_TZ);
+    expect(resolveRunTz('UTC')).toBe(PINNED_TZ);
+    expect(resolveRunTz(DST_TZ)).toBe(DST_TZ);
+    expect(resolveRunTz(` ${DST_TZ} `)).toBe(DST_TZ);
+    // The two zones differ in BOTH halves of the year, so a DST leg that silently
+    // fell back to UTC could not pass for one.
+    expect(DST_TZ).not.toBe(PINNED_TZ);
+  });
+
+  it('refuses an unknown zone rather than silently running in the pinned one', () => {
+    // A silent fallback would make the gate's claim to have run in a DST-observing
+    // zone a lie about the run that just happened — the same reason `resolveSeed`
+    // throws on a malformed seed.
+    expect(() => resolveRunTz('Europe/Berlin')).toThrow(/HVAULT_TZ must be/);
+    expect(() => resolveRunTz('America/new_york')).toThrow(/received "America\/new_york"/);
+    expect(() => resolveRunTz('utc')).toThrow(/HVAULT_TZ must be/);
   });
 
   it('pins LC_ALL as well as LANG, because LC_ALL wins where both are set', () => {

@@ -36,8 +36,16 @@ import sharedVitestConfig from '../../shared/vitest.config';
 import serverVitestConfig from '../vitest.config';
 import securityVitestConfig, { SECURITY_SUITE } from '../vitest.security.config';
 import observabilityVitestConfig, { OBSERVABILITY_SUITE } from '../vitest.observability.config';
+import serverPropertyConfig, { SERVER_PROPERTY_SUITE } from '../vitest.property.config';
+import sharedPropertyConfig, { SHARED_PROPERTY_SUITE } from '../../shared/vitest.property.config';
+import clientPropertyConfig, { CLIENT_PROPERTY_SUITE } from '../../client/vitest.property.config';
 import clientVitestConfig from '../../client/vitest.config';
 import playwrightConfig from '../../../playwright.config';
+import { DST_TZ, PINNED_TZ, RUN_TZ } from '../../../tests/harness/determinism';
+import {
+  allPropertyJunitReports,
+  propertyJunitReport,
+} from '../../../tests/harness/propertyReport';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
@@ -50,6 +58,8 @@ interface ManifestTask {
   composite?: boolean;
   requires?: string[];
   canSkip?: boolean;
+  /** `false` keeps a re-run of tests another gate already counted out of `tests.count`. */
+  countsTests?: boolean;
 }
 
 interface Manifest {
@@ -403,6 +413,60 @@ describe('machine-readable reports', () => {
       expect(existsSync(path.join(repoRoot, 'packages', 'server', file)), file).toBe(true);
     }
     expect(observabilityVitestConfig.test?.include).toEqual(OBSERVABILITY_SUITE);
+  });
+
+  it.each([
+    ['shared', sharedPropertyConfig, SHARED_PROPERTY_SUITE, 'shared'],
+    ['server', serverPropertyConfig, SERVER_PROPERTY_SUITE, 'server'],
+    ['client', clientPropertyConfig, CLIENT_PROPERTY_SUITE, 'client'],
+  ] as const)(
+    'writes the %s property suite to its own per-zone JUnit report, from files that exist',
+    (name, config, suite, pkg) => {
+      // Same contract as the security and observability subsets, plus a second
+      // axis: the `test:property` gate runs each of these suites TWICE, once per
+      // timezone, so each leg needs its own report name. Six legs writing one file
+      // would leave the last one standing in for all six.
+      const output = junitOutputFile(config.test?.reporters);
+      expect(output).toBeDefined();
+      // This suite runs with `HVAULT_TZ` unset, so the resolved zone is the pin
+      // and the name carries the `-utc` suffix. Asserted through the helper rather
+      // than as a literal, so the two cannot drift.
+      expect(path.resolve(output!)).toBe(
+        path.join(repoRoot, '.testfortress', 'reports', propertyJunitReport(pkg, RUN_TZ)),
+      );
+      expect(RUN_TZ, 'the ordinary suite must run in the pinned zone').toBe(PINNED_TZ);
+      expect(propertyJunitReport(pkg, DST_TZ)).not.toBe(propertyJunitReport(pkg, PINNED_TZ));
+
+      expect(suite.length, `${name} property suite`).toBeGreaterThan(0);
+      for (const file of suite) {
+        expect(existsSync(path.join(repoRoot, 'packages', pkg, file)), file).toBe(true);
+      }
+      expect(config.test?.include).toEqual(suite);
+    },
+  );
+
+  it('declares exactly the six property reports the gate produces, in both directions', () => {
+    // A leg that stops writing its report and a declared report no leg writes are
+    // the same defect seen from two sides. The manifest is compared against the
+    // helper the CONFIGS use, so neither can quietly change alone.
+    const declared = reportsOf(manifest.tasks['test:property']!);
+    expect(declared).toContain('property.json');
+    expect([...declared].sort()).toEqual([...allPropertyJunitReports(), 'property.json'].sort());
+    expect(allPropertyJunitReports()).toHaveLength(6);
+    expect(new Set(allPropertyJunitReports()).size).toBe(6);
+  });
+
+  it('keeps the property gate out of the test headcount, because its files run twice elsewhere', () => {
+    // Every property file also runs inside `test:unit` / `test:integration`, and
+    // the gate itself runs each of them once per zone. Counting any of that into
+    // `tests.count` would ratchet the same tests three times over — and because
+    // the field is higher-is-better, nothing would ever complain.
+    expect(manifest.tasks['test:property']!.countsTests).toBe(false);
+    for (const [name, task] of nonComposite) {
+      if (name === 'test:unit' || name === 'test:integration') {
+        expect(task.countsTests, `${name} must be counted`).not.toBe(false);
+      }
+    }
   });
 
   it.each([

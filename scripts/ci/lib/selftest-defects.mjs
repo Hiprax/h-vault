@@ -277,6 +277,44 @@ export const DEFECTS = {
     evidence: (text) => /production 5xx body leaks internals/.test(text),
   },
 
+  'test:property': {
+    // The defect this gate exists to catch, planted at its source and as the
+    // single edit a careless "simplification" would make: one AES-GCM IV, reused
+    // for every encryption. A fixed IV under GCM leaks the XOR of any two
+    // plaintexts encrypted with it AND the authentication subkey, so forgery
+    // becomes possible — and it is invisible to every other kind of test, because
+    // a fixed-IV implementation round-trips correctly, rejects a wrong key, and
+    // rejects a flipped tag. Only the freshness property notices.
+    //
+    // The pattern is byte-exact against today's `encryptData`. A rewrite of that
+    // line turns `String.replace` into a no-op, which fails in the SAFE direction:
+    // the gate then stays green, the harness reports `unproven`, and the run exits
+    // non-zero — provided the evidence predicate below cannot be satisfied by a
+    // green report, which is why it matches the ASSERTION MESSAGE rather than a
+    // test name.
+    title: 'reuse one AES-GCM IV for every encryption, which only a freshness property can see',
+    mutate: {
+      'packages/client/src/services/crypto/cryptoService.ts': (text) =>
+        text.replace(
+          `  async encryptData(
+    data: string,
+    vaultKey: CryptoKey,
+  ): Promise<{ encrypted: string; iv: string; tag: string }> {
+    const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));`,
+          `  async encryptData(
+    data: string,
+    vaultKey: CryptoKey,
+  ): Promise<{ encrypted: string; iv: string; tag: string }> {
+    const iv = new Uint8Array(IV_BYTES);`,
+        ),
+    },
+    // The custom message of the failing expectation, which a PASSING report cannot
+    // contain — the trap recorded on `test:security` above: JUnit carries a
+    // `<testcase name=…>` for every test that RAN, so matching a test's name would
+    // be satisfied by a fully green run.
+    evidence: (text) => /AES-GCM nonce reuse: \d+ calls produced \d+ distinct IV/.test(text),
+  },
+
   'audit:deps': {
     // Planting a KNOWN-vulnerable production dependency, rather than relying on
     // whatever advisories happen to be open, is what makes the evidence check

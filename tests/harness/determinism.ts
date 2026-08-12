@@ -41,6 +41,62 @@ export const DEFAULT_SEED = 1337;
 export const PINNED_TZ = 'UTC';
 
 /**
+ * The one DST-observing zone this repository is allowed to run a suite in.
+ *
+ * `combineExpiry` (VaultItemForm) has a documented repeated-hour hazard: during
+ * a fall-back transition two distinct instants render to the SAME date and time
+ * pair, and the "did either control move?" test is a STRING comparison
+ * specifically because an instant comparison can satisfy at most one of them.
+ * That branch is UNREACHABLE under {@link PINNED_TZ} — UTC has no transitions —
+ * so a suite that only ever runs in UTC cannot tell the fixed implementation
+ * from the broken one. The property gate therefore runs its suites a second time
+ * in this zone.
+ *
+ * America/New_York rather than any other: its transitions are the ones every
+ * reference and every bug report about this class uses, and its offset is
+ * non-zero in BOTH halves of the year, so a zone pin that silently reverted to
+ * UTC fails visibly instead of passing.
+ */
+export const DST_TZ = 'America/New_York';
+
+/**
+ * Parses the `HVAULT_TZ` environment variable: which of the two allowed zones
+ * this run uses.
+ *
+ * An ALLOWLIST, not a passthrough, and that is the whole point. The pin exists
+ * so a suite's verdict cannot depend on the machine it ran on; an env var that
+ * accepted any zone would hand that dependency straight back, and the failure
+ * would look like a broken test rather than an unpinned harness. Unset or empty
+ * means {@link PINNED_TZ}, so every existing invocation is unchanged; anything
+ * other than the two allowed values THROWS rather than falling back, for the
+ * same reason {@link resolveSeed} does — a silent fallback makes the zone this
+ * run reports a lie about the zone it used.
+ */
+export function resolveRunTz(raw: string | undefined): string {
+  if (raw === undefined || raw.trim() === '') return PINNED_TZ;
+
+  const zone = raw.trim();
+  if (zone !== PINNED_TZ && zone !== DST_TZ) {
+    throw new Error(
+      `HVAULT_TZ must be ${PINNED_TZ} or ${DST_TZ}; received ${JSON.stringify(raw)}. ` +
+        `Unset it to use the default (${PINNED_TZ}).`,
+    );
+  }
+  return zone;
+}
+
+/**
+ * The timezone THIS run uses: {@link PINNED_TZ} unless the property gate's
+ * DST leg asked for {@link DST_TZ}.
+ *
+ * Read once at module load, like {@link SEED}, so the config file and the setup
+ * file cannot disagree about it: `vitest.config.ts` puts this in `test.env` (it
+ * applies before the first module of a test file is evaluated) and
+ * {@link applyDeterminismPins} re-applies the same value inside the worker.
+ */
+export const RUN_TZ = resolveRunTz(process.env['HVAULT_TZ']);
+
+/**
  * The locale every tier runs in. `LC_ALL` is pinned alongside `LANG` because
  * glibc and ICU resolve `LC_ALL` FIRST: a developer with `LC_ALL=de_DE.UTF-8`
  * exported (common on a localized desktop) would make a `LANG`-only pin inert,
@@ -106,7 +162,11 @@ export function seededRandom(seed: number = SEED): () => number {
  * also exported so the pin can be asserted by its own test rather than assumed.
  */
 export function applyDeterminismPins(): void {
-  process.env.TZ = PINNED_TZ;
+  // {@link RUN_TZ}, not {@link PINNED_TZ}: they are the same value everywhere
+  // except the property gate's DST leg, and hard-coding the constant here would
+  // silently CLOBBER that leg back to UTC — leaving a gate that claims to run in
+  // a DST-observing zone and does not, which is worse than not having it.
+  process.env.TZ = RUN_TZ;
   process.env['LANG'] = PINNED_LOCALE;
   process.env['LC_ALL'] = PINNED_LOCALE;
   // Children (mongod, any spawned helper) inherit the seed, so a subprocess
@@ -172,7 +232,7 @@ export function seedBanner(orderSeed?: number): string {
 
   return (
     `[determinism] data SEED=${String(SEED)} · order seed=${order} · ` +
-    `TZ=${PINNED_TZ} LANG=${PINNED_LOCALE} — reproduce this order with: ${reproduce}`
+    `TZ=${RUN_TZ} LANG=${PINNED_LOCALE} — reproduce this order with: ${reproduce}`
   );
 }
 

@@ -483,13 +483,20 @@ function pad(value: number, width: number): string {
   return String(value).padStart(width, '0');
 }
 
-/** `YYYY-MM-DD` for the LOCAL calendar date of `instant`. */
-function localDateValue(instant: Date): string {
+/**
+ * `YYYY-MM-DD` for the LOCAL calendar date of `instant`.
+ *
+ * Exported for the property suite, which has to build the two control values the
+ * way {@link getDefaultValues} builds them — a test that recomputed them from its
+ * own copy of this formatting would be asserting against itself rather than
+ * against the composition that actually runs.
+ */
+export function localDateValue(instant: Date): string {
   return `${pad(instant.getFullYear(), 4)}-${pad(instant.getMonth() + 1, 2)}-${pad(instant.getDate(), 2)}`;
 }
 
-/** `HH:MM` for the LOCAL wall-clock time of `instant`. */
-function localTimeValue(instant: Date): string {
+/** `HH:MM` for the LOCAL wall-clock time of `instant`. Exported with {@link localDateValue}. */
+export function localTimeValue(instant: Date): string {
   return `${pad(instant.getHours(), 2)}:${pad(instant.getMinutes(), 2)}`;
 }
 
@@ -503,8 +510,12 @@ function localTimeValue(instant: Date): string {
  * never reaches here. The pattern check below is therefore the empty-string gate plus
  * defense in depth — deliberately not removed, because it is what keeps a caller that
  * bypasses the form from producing an Invalid Date.
+ *
+ * Exported for the property suite: the repeated-hour case this function exists
+ * for is reachable only in a DST-observing zone, and driving it through a
+ * rendered form for hundreds of generated instants is not.
  */
-function combineExpiry(date: string, time: string, stored: string): string | undefined {
+export function combineExpiry(date: string, time: string, stored: string): string | undefined {
   const dateParts = EXPIRY_DATE_PATTERN.exec(date);
   if (!dateParts) return undefined;
   const timeParts = EXPIRY_TIME_PATTERN.exec(time);

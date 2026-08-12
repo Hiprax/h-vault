@@ -41,7 +41,7 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twenty-one gates including the full test suite, container builds with
+pipeline locally — twenty-two gates including the full test suite, container builds with
 Trivy scanning, and CodeQL — and refuses the push if any of them fail. A commit that
 reaches `main` has already passed everything.
 
@@ -80,9 +80,9 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
-### Five gates whose failure asks for something specific
+### Six gates whose failure asks for something specific
 
-Most gates tell you what to fix. These five are worth reading before you meet them,
+Most gates tell you what to fix. These six are worth reading before you meet them,
 because the obvious way past each of them is the wrong one.
 
 - **`deadcode`** runs `knip` (unused files, exports, exported types and dependencies, plus
@@ -110,6 +110,16 @@ because the obvious way past each of them is the wrong one.
   the matrix until the route is given a scenario. Neither deleting a row nor dropping a file
   from `SECURITY_SUITE` is an answer to a red run here; both are how this gate stops
   checking the thing it exists to check.
+- **`property`** runs the property-based suites, which GENERATE their inputs, once in
+  `UTC` and once in `America/New_York`. A failure names a counterexample and the seed that
+  reproduces it. **The fix is never to narrow the generator.** Shrink the counterexample,
+  decide whether the code or the property is wrong, and commit that exact case as a named
+  regression test beside the property — the suite then only ever gains cases. A generator
+  constraint is legitimate only when the excluded inputs are ones the property genuinely
+  does not claim anything about, and it carries a comment saying which and why. The two
+  timezones are not interchangeable: `combineExpiry`'s repeated-hour branch cannot be
+  reached in a zone with no daylight-saving transition, so the second leg is the only
+  thing standing between that fix and a silent regression.
 - **`secrets-full`** scans the working tree and **every blob in git history**. A finding in
   history is already compromised: it is in every clone and every fork, and no later commit
   takes it back. **Rotate the credential first.** Rewriting history is optional cleanup
@@ -129,7 +139,7 @@ documenting its own defeat. The hatches themselves are unchanged and still work.
 | `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
 
 The first is the one to reach for: it is scoped, it is visible in the run summary, and it
-leaves the other nineteen gates in place. **Say so in the pull request description
+leaves the other twenty gates in place. **Say so in the pull request description
 whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
 a claim someone else now has to check.
 

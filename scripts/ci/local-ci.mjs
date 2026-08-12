@@ -350,6 +350,26 @@ const GATES = [
     run: (options) => runNpm(['run', 'test:observability'], options),
   },
   {
+    id: 'property',
+    task: 'test:property',
+    tier: 1,
+    // SIX runs, not one: the three property suites, each in UTC and again in
+    // America/New_York. The second zone is not thoroughness for its own sake —
+    // `combineExpiry`'s repeated-hour branch is structurally unreachable where
+    // there is no DST transition, so the UTC leg alone cannot tell the fixed
+    // implementation from the broken one (measured: an instant comparison keeps
+    // the UTC leg entirely green and turns the DST leg red).
+    //
+    // The property files ALSO run inside `test` and `test-integration`, like the
+    // security and observability subsets: nothing is narrowed here, and the task
+    // carries `countsTests: false` so the same tests are not ratcheted twice.
+    title: 'Property-based invariants (crypto, schemas, expiry, folder graph) in 2 timezones',
+    ci: 'new — no hosted job ever generated its own inputs',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/property-gate.mjs'], options),
+  },
+  {
     id: 'audit',
     task: 'audit:deps',
     tier: 1,

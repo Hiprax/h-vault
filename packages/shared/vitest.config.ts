@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
-import { SEED, PINNED_LOCALE, PINNED_TZ } from './tests/determinism.js';
+import { SEED, PINNED_LOCALE, RUN_TZ } from './tests/determinism.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -62,7 +62,13 @@ export default defineConfig({
     // `tests/determinism.test.ts` asserts both halves are present. `LC_ALL` is
     // pinned alongside `LANG` because glibc and ICU resolve `LC_ALL` first.
     env: {
-      TZ: PINNED_TZ,
+      // `RUN_TZ` is `PINNED_TZ` ('UTC') for every gate but one: the property
+      // gate runs its suites a second time with `HVAULT_TZ=America/New_York`,
+      // because `combineExpiry`'s documented repeated-hour hazard is
+      // structurally unreachable in a zone with no DST transitions. Resolved in
+      // `tests/harness/determinism.ts` from an ALLOWLIST of two zones, so this
+      // is still a pin and not a machine-dependent read.
+      TZ: RUN_TZ,
       LANG: PINNED_LOCALE,
       LC_ALL: PINNED_LOCALE,
       SEED: String(SEED),

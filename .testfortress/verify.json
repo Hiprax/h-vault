@@ -132,6 +132,22 @@
       "countsTests": false,
       "requires": ["build:shared"]
     },
+    "test:property": {
+      "cmd": "npm run test:property",
+      "tier": 1,
+      "gate": "every property holds in BOTH timezones: the crypto round-trip and its fresh IV, the five schemas as fixed points, combineExpiry across a fall-back DST repeated hour, the entropy metrics monotonic, deliveryNotes unrendered, and the folder forest acyclic and within the nesting cap under any sequence of operations",
+      "report": [
+        "property.json",
+        "junit-property-shared-utc.xml",
+        "junit-property-server-utc.xml",
+        "junit-property-client-utc.xml",
+        "junit-property-shared-dst.xml",
+        "junit-property-server-dst.xml",
+        "junit-property-client-dst.xml"
+      ],
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
     "audit:deps": {
       "cmd": "npm run audit:prod",
       "tier": 1,
