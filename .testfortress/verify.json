@@ -116,6 +116,14 @@
       "coverage": ["packages/server/coverage/cobertura-coverage.xml"],
       "requires": ["build:shared"]
     },
+    "test:security": {
+      "cmd": "npm run test:security",
+      "tier": 1,
+      "gate": "the route table matches the real router stack, and every id-taking route refuses a non-owner without touching the target",
+      "report": "junit-security.xml",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
     "audit:deps": {
       "cmd": "npm run audit:prod",
       "tier": 1,

@@ -312,6 +312,26 @@ const GATES = [
     run: (options) => runNpm(['run', 'test:integration'], options),
   },
   {
+    id: 'security',
+    task: 'test:security',
+    tier: 1,
+    // Runs a NAMED SUBSET of the server suite a second time, and that is
+    // deliberate rather than duplicated work. `test:integration` proves the
+    // server behaves; this proves one specific class of thing — that no user
+    // can reach another's row — and it is the gate a reviewer points at when
+    // an endpoint is added. Naming the files is not a committed test FILTER:
+    // nothing is narrowed, because `test:integration` has no `include` of its
+    // own and still runs all of them. The membership itself is guarded by
+    // `gate-surface.test.ts`, which asserts every file in `SECURITY_SUITE`
+    // exists — vitest only errors on an EMPTY match, so a list that has gone
+    // stale in part would otherwise shrink this gate in silence.
+    title: 'Cross-user authorization matrix (route table, real mongod)',
+    ci: 'new — no hosted job ever checked the route surface for IDOR',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runNpm(['run', 'test:security'], options),
+  },
+  {
     id: 'audit',
     task: 'audit:deps',
     tier: 1,
@@ -422,7 +442,7 @@ const GATES = [
     // changed, which is precisely what its own freshness rule exists to reject.
     title: 'Ratchet (every measured field, against baseline.json)',
     ci: 'new — a percentage whose denominator can shrink is not a gate',
-    dependsOn: ['build', 'test', 'test-integration'],
+    dependsOn: ['build', 'test', 'test-integration', 'security'],
     run: (options) => runNpm(['run', 'audit:ratchet:full'], options),
   },
 ];

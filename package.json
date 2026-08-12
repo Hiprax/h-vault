@@ -43,6 +43,7 @@
     "test": "npm run test -w packages/shared && npm run test -w packages/server && npm run test -w packages/client",
     "test:unit": "npm run test -w packages/shared && npm run test -w packages/client",
     "test:integration": "npm run test -w packages/server",
+    "test:security": "npm run test:security -w packages/server",
     "test:e2e": "npx playwright test",
     "type-check": "npm run type-check -w packages/shared && npm run type-check -w packages/server && npm run type-check -w packages/client && npm run type-check:e2e",
     "type-check:e2e": "tsc -p tsconfig.e2e.json",

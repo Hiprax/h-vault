@@ -198,6 +198,67 @@ describe('audit:ratchet', () => {
     expect(result.exitCode).toBe(0);
   });
 
+  describe('a task that re-runs tests another gate already counted', () => {
+    /** A second task whose JUnit report covers a SUBSET of `test:unit`'s tests. */
+    const withRerun = (countsTests: boolean | undefined): Record<string, unknown> => ({
+      ...MANIFEST,
+      tasks: {
+        ...MANIFEST.tasks,
+        'test:subset': {
+          cmd: 'vitest run --config subset',
+          tier: 1,
+          gate: 'the subset passes',
+          report: 'junit-subset.xml',
+          ...(countsTests === undefined ? {} : { countsTests }),
+        },
+      },
+    });
+    const reports = {
+      ...HEALTHY_REPORTS,
+      '.testfortress/reports/junit-subset.xml': junit(40),
+    };
+
+    it('leaves tests.count a headcount when the task declares countsTests: false', () => {
+      // 500, not 540: the 40 are 40 of the 500, re-executed. Ratcheting them
+      // twice would make the number meaningless in the improving direction,
+      // where nothing ever complains.
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports,
+        manifest: withRerun(false),
+      });
+      expect(result.regressions).toEqual([]);
+      expect(result.missing).toEqual([]);
+      expect(result.improvements.map((entry) => entry.path)).not.toContain('tests.count');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('still requires that report to be present and fresh', () => {
+      // The flag excuses the task from the SUM, never from the evidence: a gate
+      // that writes nothing must still make the count unmeasurable, or
+      // `countsTests: false` becomes a way to register a gate that need not run.
+      const { '.testfortress/reports/junit-subset.xml': _absent, ...withoutSubset } = reports;
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports: withoutSubset,
+        manifest: withRerun(false),
+      });
+      expect(result.missing.map((entry) => entry.path)).toContain('tests.count');
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it('counts the report by default, so the flag has to be asked for', () => {
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports,
+        manifest: withRerun(undefined),
+      });
+      expect(result.improvements).toContainEqual(
+        expect.objectContaining({ path: 'tests.count', got: 540 }),
+      );
+    });
+  });
+
   /**
    * The flagship case. 54 of 60 lines is 90%, and dropping the second file
    * raises the percentage to 90% over 60 lines instead of 100 — the same number

@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
-import { Folder } from '../src/models/Folder.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import {
   createTestUser,
@@ -15,6 +14,22 @@ import {
 
 // ---------------------------------------------------------------------------
 // Test Suite: Cross-User Data Isolation
+//
+// What is left here is what the route table CANNOT express, and only that:
+//
+//   * collection scoping — a LIST endpoint returning only the caller's rows.
+//     That is an invariant about a response body, not about an id in a URL.
+//   * a foreign id carried in the BODY: `bulk-delete`'s `ids`, `bulk-move`'s
+//     `folderId`, an import's `updates[].id`. The table classifies URLs.
+//
+// The per-id cases that used to live here — reading, updating, deleting,
+// permanently deleting and restoring another user's item; updating and deleting
+// another user's folder; revoking another user's session — moved to
+// `authz-matrix.test.ts`, which derives them from `tests/support/routeTable.ts`
+// and additionally asserts what this file did not: that the target document is
+// byte-identical afterwards, that a foreign id is indistinguishable from an
+// absent one, and that the same four cases run for EVERY id-taking route,
+// including ones added after this file was written.
 // ---------------------------------------------------------------------------
 
 describe('Cross-User Data Isolation', () => {
@@ -92,87 +107,6 @@ describe('Cross-User Data Isolation', () => {
       expect(persistedB?.userId.toString()).toBe(userB.id);
     });
 
-    it('should return 404 when accessing another user vault item by ID', async () => {
-      const itemId = await createItemFor(userA.accessToken);
-
-      // User B tries to access User A's item
-      const res = await request(app)
-        .get(`/api/v1/vault/items/${itemId}`)
-        .set('Authorization', authHeader(userB.accessToken));
-
-      expect(res.status).toBe(404);
-    });
-
-    it('should return 404 when trying to update another user vault item', async () => {
-      const itemId = await createItemFor(userA.accessToken);
-
-      const agent = request.agent(app);
-      const csrf = await getCsrf(agent);
-
-      const res = await agent
-        .put(`/api/v1/vault/items/${itemId}`)
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('Cookie', csrf.cookie)
-        .set('x-csrf-token', csrf.token)
-        .send(sampleVaultItem({ encryptedName: 'hacked' }));
-
-      expect(res.status).toBe(404);
-
-      // Verify the item was NOT modified
-      const original = await VaultItem.findById(itemId).lean();
-      expect(original?.encryptedName).not.toBe('hacked');
-    });
-
-    it('should return 404 when trying to delete another user vault item', async () => {
-      const itemId = await createItemFor(userA.accessToken);
-
-      const agent = request.agent(app);
-      const csrf = await getCsrf(agent);
-
-      const res = await agent
-        .delete(`/api/v1/vault/items/${itemId}`)
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('Cookie', csrf.cookie)
-        .set('x-csrf-token', csrf.token);
-
-      expect(res.status).toBe(404);
-
-      // Verify the item still exists
-      const item = await VaultItem.findById(itemId).lean();
-      expect(item).not.toBeNull();
-      expect(item?.deletedAt).toBeUndefined();
-    });
-
-    it('should return 404 when trying to permanently delete another user vault item', async () => {
-      const itemId = await createItemFor(userA.accessToken);
-
-      // First soft-delete as User A
-      const agentA = request.agent(app);
-      const csrfA = await getCsrf(agentA);
-      await agentA
-        .delete(`/api/v1/vault/items/${itemId}`)
-        .set('Authorization', authHeader(userA.accessToken))
-        .set('Cookie', csrfA.cookie)
-        .set('x-csrf-token', csrfA.token)
-        .expect(200);
-
-      // User B tries to permanently delete User A's trashed item
-      const agentB = request.agent(app);
-      const csrfB = await getCsrf(agentB);
-
-      const res = await agentB
-        .delete(`/api/v1/vault/items/${itemId}/permanent`)
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('Cookie', csrfB.cookie)
-        .set('x-csrf-token', csrfB.token);
-
-      expect(res.status).toBe(404);
-
-      // Verify the item still exists in trash
-      const item = await VaultItem.findById(itemId).lean();
-      expect(item).not.toBeNull();
-    });
-
     it('should not return another user trash items', async () => {
       const itemId = await createItemFor(userA.accessToken);
 
@@ -193,32 +127,6 @@ describe('Cross-User Data Isolation', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.data).toHaveLength(0);
-    });
-
-    it('should return 404 when trying to restore another user trashed item', async () => {
-      const itemId = await createItemFor(userA.accessToken);
-
-      // Soft-delete as User A
-      const agentA = request.agent(app);
-      const csrfA = await getCsrf(agentA);
-      await agentA
-        .delete(`/api/v1/vault/items/${itemId}`)
-        .set('Authorization', authHeader(userA.accessToken))
-        .set('Cookie', csrfA.cookie)
-        .set('x-csrf-token', csrfA.token)
-        .expect(200);
-
-      // User B tries to restore User A's trashed item
-      const agentB = request.agent(app);
-      const csrfB = await getCsrf(agentB);
-
-      const res = await agentB
-        .post(`/api/v1/vault/items/restore/${itemId}`)
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('Cookie', csrfB.cookie)
-        .set('x-csrf-token', csrfB.token);
-
-      expect(res.status).toBe(404);
     });
   });
 
@@ -246,50 +154,12 @@ describe('Cross-User Data Isolation', () => {
       expect(resB.body.data[0].encryptedName).toBe('folder-b');
     });
 
-    it('should return 404 when updating another user folder', async () => {
-      const folderId = await createFolderFor(userA.accessToken);
-
-      const agent = request.agent(app);
-      const csrf = await getCsrf(agent);
-
-      const res = await agent
-        .put(`/api/v1/folders/${folderId}`)
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('Cookie', csrf.cookie)
-        .set('x-csrf-token', csrf.token)
-        .send(sampleFolder({ encryptedName: 'hacked-folder' }));
-
-      expect(res.status).toBe(404);
-
-      // Verify folder was NOT modified
-      const folder = await Folder.findById(folderId).lean();
-      expect(folder?.encryptedName).not.toBe('hacked-folder');
-    });
-
-    it('should return 404 when deleting another user folder', async () => {
-      const folderId = await createFolderFor(userA.accessToken);
-
-      const agent = request.agent(app);
-      const csrf = await getCsrf(agent);
-
-      const res = await agent
-        .delete(`/api/v1/folders/${folderId}?action=delete`)
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('Cookie', csrf.cookie)
-        .set('x-csrf-token', csrf.token);
-
-      expect(res.status).toBe(404);
-
-      // Verify folder still exists
-      const folder = await Folder.findById(folderId).lean();
-      expect(folder).not.toBeNull();
-    });
-
     it('should not allow moving items to another user folder', async () => {
       const folderA = await createFolderFor(userA.accessToken);
-      const itemB = await createItemFor(userB.accessToken);
+      const itemB = await createItemFor(userB.accessToken, { encryptedName: 'b-item' });
+      const before = await VaultItem.findById(itemB).lean();
 
-      // User B tries to move their item into User A's folder
+      // User B tries to move their OWN item into User A's folder.
       const agent = request.agent(app);
       const csrf = await getCsrf(agent);
 
@@ -300,15 +170,18 @@ describe('Cross-User Data Isolation', () => {
         .set('x-csrf-token', csrf.token)
         .send(sampleVaultItem({ folderId: folderA }));
 
-      // Should fail — the folder doesn't belong to User B
-      // The server should either reject with 400/404 or silently ignore the folderId
-      if (res.status === 200) {
-        // If the update succeeded, the folderId should NOT be set to User A's folder
-        const item = await VaultItem.findById(itemB).lean();
-        expect(item?.folderId?.toString()).not.toBe(folderA);
-      } else {
-        expect([400, 404]).toContain(res.status);
-      }
+      // `updateItem` resolves the target folder with `{ _id, userId }` before it
+      // writes anything, so a folder belonging to someone else is simply not
+      // found. Pinned exactly: the previous version accepted 200, 400 or 404,
+      // which meant it also passed if the move had SUCCEEDED and merely left
+      // some other folderId behind.
+      expect(res.status).toBe(404);
+      expect(String(res.body.message)).toMatch(/target folder not found/i);
+
+      // Nothing was written — not the folder, and not the rest of the item.
+      const after = await VaultItem.findById(itemB).lean();
+      expect(after).toEqual(before);
+      expect(after?.folderId).toBeUndefined();
     });
   });
 
@@ -444,34 +317,6 @@ describe('Cross-User Data Isolation', () => {
 
       // Session IDs should be different (proving they are isolated)
       expect(sessionsA[0]!._id).not.toBe(sessionsB[0]!._id);
-    });
-
-    it('should not allow revoking another user session', async () => {
-      // Get User A's session ID
-      const resA = await request(app)
-        .get('/api/v1/user/sessions')
-        .set('Authorization', authHeader(userA.accessToken));
-
-      const sessionIdA = (resA.body.data as { _id: string }[])[0]!._id;
-
-      // User B tries to revoke User A's session
-      const agent = request.agent(app);
-      const csrf = await getCsrf(agent);
-
-      const res = await agent
-        .delete(`/api/v1/user/sessions/${sessionIdA}`)
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('Cookie', csrf.cookie)
-        .set('x-csrf-token', csrf.token);
-
-      expect(res.status).toBe(404);
-
-      // Verify User A's session still exists
-      const verifyA = await request(app)
-        .get('/api/v1/user/sessions')
-        .set('Authorization', authHeader(userA.accessToken));
-
-      expect(verifyA.body.data).toHaveLength(1);
     });
   });
 

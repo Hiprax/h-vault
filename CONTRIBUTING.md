@@ -41,7 +41,7 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — nineteen gates including the full test suite, container builds with
+pipeline locally — twenty gates including the full test suite, container builds with
 Trivy scanning, and CodeQL — and refuses the push if any of them fail. A commit that
 reaches `main` has already passed everything.
 
@@ -80,9 +80,9 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
-### Four gates whose failure asks for something specific
+### Five gates whose failure asks for something specific
 
-Most gates tell you what to fix. These four are worth reading before you meet them,
+Most gates tell you what to fix. These five are worth reading before you meet them,
 because the obvious way past each of them is the wrong one.
 
 - **`deadcode`** runs `knip` (unused files, exports, exported types and dependencies, plus
@@ -100,6 +100,16 @@ because the obvious way past each of them is the wrong one.
   `warnings.audit:config` in the baseline, where it can be paid down and cannot grow. It
   needs `actionlint` and `hadolint` on your `PATH`; without them the gate reports **could
   not run** rather than passing quietly.
+- **`security`** runs the cross-user authorization matrix. It reads the real Express router
+  stack and compares it against `packages/server/tests/support/routeTable.ts`, which
+  classifies every route: its method and path, whether the path carries an id the caller
+  must own, whether authentication and CSRF apply, and which rate limiters are mounted.
+  **Adding an endpoint fails this gate until the route is classified there** — that is the
+  point of it, because the cross-user coverage it replaced was written per endpoint by hand
+  and a new route silently got none. Classifying a route as taking an owned id then fails
+  the matrix until the route is given a scenario. Neither deleting a row nor dropping a file
+  from `SECURITY_SUITE` is an answer to a red run here; both are how this gate stops
+  checking the thing it exists to check.
 - **`secrets-full`** scans the working tree and **every blob in git history**. A finding in
   history is already compromised: it is in every clone and every fork, and no later commit
   takes it back. **Rotate the credential first.** Rewriting history is optional cleanup

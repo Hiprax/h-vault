@@ -34,6 +34,7 @@ import {
 import { toSarif, countLevels } from '../../../scripts/ci/lib/sarif.mjs';
 import sharedVitestConfig from '../../shared/vitest.config';
 import serverVitestConfig from '../vitest.config';
+import securityVitestConfig, { SECURITY_SUITE } from '../vitest.security.config';
 import clientVitestConfig from '../../client/vitest.config';
 import playwrightConfig from '../../../playwright.config';
 
@@ -306,14 +307,14 @@ describe('prerequisites are declared, not discovered', () => {
   it('declares docker on the image gate and a built shared package on the rest', () => {
     const byId = new Map(gates.map((gate) => [gate.id, gate]));
     expect(byId.get('docker')?.requires).toContain('docker');
-    for (const id of ['type-check', 'test', 'test-integration', 'e2e']) {
+    for (const id of ['type-check', 'test', 'test-integration', 'security', 'e2e']) {
       expect(byId.get(id)?.requires, `gate ${id}`).toContain('build:shared');
     }
   });
 
   it('stops a failed build from dragging the gates that consume it into failure', () => {
     const byId = new Map(gates.map((gate) => [gate.id, gate]));
-    for (const id of ['type-check', 'test', 'test-integration', 'e2e']) {
+    for (const id of ['type-check', 'test', 'test-integration', 'security', 'e2e']) {
       expect(byId.get(id)?.dependsOn, `gate ${id}`).toContain('build');
     }
   });
@@ -359,6 +360,28 @@ describe('machine-readable reports', () => {
     const output = junitOutputFile(config.test?.reporters);
     expect(output).toBeDefined();
     expect(path.resolve(output!)).toBe(path.join(repoRoot, '.testfortress', 'reports', file));
+  });
+
+  it('writes the security suite to its OWN JUnit report, not the server one', () => {
+    // The security gate re-runs a named subset of the server suite. Pointed at
+    // `junit-server.xml`, it would overwrite the artifact `audit:ratchet:full`
+    // reads the server package's test count from — measured: driving the same
+    // files from the command line did exactly that, because the base config's
+    // inline `outputFile` outranks `--outputFile.junit`. Both halves are
+    // asserted: the file it writes, and that it is a different file.
+    const security = junitOutputFile(securityVitestConfig.test?.reporters);
+    const server = junitOutputFile(serverVitestConfig.test?.reporters);
+    expect(security).toBeDefined();
+    expect(path.resolve(security!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-security.xml'),
+    );
+    expect(security).not.toBe(server);
+    // And it runs a REAL subset: named files, none of them invented.
+    expect(SECURITY_SUITE.length).toBeGreaterThan(0);
+    for (const file of SECURITY_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'packages', 'server', file)), file).toBe(true);
+    }
+    expect(securityVitestConfig.test?.include).toEqual(SECURITY_SUITE);
   });
 
   it.each([

@@ -220,6 +220,40 @@ export const DEFECTS = {
     evidence: (text) => /__selftest_probe|selftest probe/.test(text),
   },
 
+  'test:security': {
+    // The defect this gate exists to catch, planted at its source: an
+    // ownership filter removed from a controller query. `getItem` is chosen
+    // because it is a READ — the matrix must go red on a leak, not only on a
+    // write — and because the mutation is the single edit a careless refactor
+    // would make.
+    //
+    // The pattern is byte-exact against today's source, and a rewrite of that
+    // line (a reordered filter, a Prettier wrap, an extraction into a helper)
+    // turns `String.replace` into a no-op. That fails in the SAFE direction:
+    // an unplanted defect leaves the gate green, which this harness reports as
+    // `unproven` and exits non-zero on — provided the evidence predicate below
+    // cannot be satisfied by a green report. Both halves depend on each other.
+    title: "drop the ownership filter from getItem, so any user can read any user's item by id",
+    mutate: {
+      'packages/server/src/controllers/vaultController.ts': (text) =>
+        text.replace(
+          /VaultItem\.findOne\(\{ _id: id, userId \}\)/,
+          'VaultItem.findOne({ _id: id })',
+        ),
+    },
+    // `status was 200` is the discriminator, and it has to be: the report this
+    // predicate reads is JUnit XML, which carries a `<testcase name=…>` for
+    // every test that RAN, passing or failing. Matching the test's NAME —
+    // "refuses user B", the route — would therefore be satisfied by a perfectly
+    // green report, and the selftest harness copies the previous run's reports
+    // into its workspace, so a command that failed before writing anything
+    // (a mongod that would not bind, an unrelated red in the same suite) would
+    // have "proved" this gate against a stale green artifact. Only the
+    // non-owner receiving a 2xx produces this string, and only the planted
+    // defect produces that.
+    evidence: (text) => /refuses user B/.test(text) && /status was 200/.test(text),
+  },
+
   'audit:deps': {
     // Planting a KNOWN-vulnerable production dependency, rather than relying on
     // whatever advisories happen to be open, is what makes the evidence check

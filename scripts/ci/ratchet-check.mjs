@@ -362,6 +362,13 @@ const tier0 = tier === '0';
  * The artifacts a COMPLETE run produces, read from the manifest rather than
  * hard-coded, so registering a test task automatically extends what this gate
  * expects to see. Port note 4 turns an absent one into UNMEASURED.
+ *
+ * `countsTests: false` on a task keeps its JUnit report REQUIRED and FRESH while
+ * leaving it out of the `tests.count` sum. Exactly one kind of task needs that:
+ * one that re-runs tests another gate already counted (`test:security` runs a
+ * named subset of the server suite as its own gate). Summing it would make
+ * `tests.count` stop being a headcount and ratchet the same tests twice — and
+ * because the field is higher-is-better, nothing would ever complain.
  */
 function declaredArtifacts() {
   const junit = [];
@@ -369,7 +376,13 @@ function declaredArtifacts() {
   for (const [task, t] of Object.entries(manifestRaw?.tasks ?? {})) {
     if (t?.composite === true) continue;
     for (const r of Array.isArray(t?.report) ? t.report : t?.report ? [t.report] : []) {
-      if (String(r).endsWith('.xml')) junit.push({ task, rel: `${manifestRaw.reportDir}/${r}` });
+      if (String(r).endsWith('.xml')) {
+        junit.push({
+          task,
+          rel: `${manifestRaw.reportDir}/${r}`,
+          countsTests: t?.countsTests !== false,
+        });
+      }
     }
     for (const c of t?.coverage ?? []) coverage.push({ task, rel: posix(String(c)) });
   }
@@ -475,7 +488,7 @@ function collect() {
   const { junit, coverage } = declaredArtifacts();
   let total = 0;
   let complete = junit.length > 0;
-  for (const { task, rel } of junit) {
+  for (const { task, rel, countsTests } of junit) {
     const abs = join(ROOT, rel);
     const state = freshness(abs, rel);
     if (state !== 'fresh') {
@@ -490,6 +503,10 @@ function collect() {
       continue;
     }
     seen.push(rel);
+    // Freshness and parseability are still REQUIRED above — the report has to
+    // exist and be from this run — but a re-run of tests another gate already
+    // counted does not add to the headcount.
+    if (!countsTests) continue;
     total += n;
     const pkg = /junit-([a-z0-9]+)\.xml$/.exec(rel)?.[1];
     const key = baselinePackages.find((k) => k.endsWith(`/${pkg}`)) ?? pkg;

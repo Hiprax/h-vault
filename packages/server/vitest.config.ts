@@ -142,6 +142,16 @@ export default defineConfig({
       // opaque 500s that have nothing to do with the change under test. Pinning it
       // to the same value keeps the resolved key identical either way.
       TWO_FACTOR_ENCRYPTION_KEY: 'TestSessionSecret4Testing!!12345',
+      // Pinned EMPTY for the same reason as the SMTP vars: a developer's root
+      // .env must not change the shape of the application under test. This one
+      // decides whether a ROUTE EXISTS — `app.ts` registers `/api/v1/metrics`
+      // only inside `if (config.METRICS_TOKEN)` — so with a token set in .env
+      // the app mounts an endpoint `tests/support/routeTable.ts` classifies as
+      // absent, and `route-table.test.ts` goes red for a reason unrelated to
+      // any change. `config/index.ts` maps '' to undefined inside a
+      // `z.preprocess`, so the empty string leaves the route unmounted rather
+      // than failing the `.min(16)` bound.
+      METRICS_TOKEN: '',
       BACKUP_MAX_SIZE_MB: '25',
       BACKUP_RETENTION_DAYS: '30',
       EXPORT_MAX_SIZE_MB: '25',
