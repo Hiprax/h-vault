@@ -20,11 +20,10 @@
  *     in-transaction idempotency-key write, plus `deleteFolder`'s transactional
  *     execute path.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
@@ -33,6 +32,7 @@ import { AuditLog } from '../src/models/AuditLog.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
 import { createTestUser, authHeader, getCsrf, seedFolder, seedItem } from './helpers.js';
 import type { TestUser, CsrfPair } from './helpers.js';
+import { useReplicaSetConnection } from './mongoHarness.js';
 
 const ORIGINAL_VAULT_KEY = 'test-encrypted-vault-key';
 
@@ -246,35 +246,26 @@ describe('vault + folder controllers — standalone branches', () => {
 // =====================================================================
 // Replica set — the transaction branches the standalone harness cannot reach.
 //
-// This block MUST come last in the file: its beforeAll swaps the shared mongoose
-// connection (opened against a standalone server by tests/setup.ts) for one
-// pointing at a single-node replica set, which is the only way
-// `supportsTransactions(...)` / `options.replicaSet` become true. Same pattern
-// as tests/vault-rotation-transaction.test.ts.
+// `useReplicaSetConnection()` swaps the shared mongoose connection (opened
+// against a standalone server by tests/setup.ts) for one pointing at a
+// single-node replica set, which is the only way `supportsTransactions(...)` /
+// `options.replicaSet` become true — and restores the standalone connection
+// afterwards, so this block is position-independent under `sequence.shuffle`.
+// Same pattern as tests/vault-rotation-transaction.test.ts.
 // =====================================================================
 
 describe('vault + folder controllers — replica-set (transaction) branches', () => {
-  let replSet: MongoMemoryReplSet;
+  useReplicaSetConnection({ timeoutMs: 60_000 });
+
   let user: TestUser;
   let agent: request.Agent;
   let csrf: CsrfPair;
 
-  beforeAll(async () => {
-    await mongoose.disconnect();
-    replSet = await MongoMemoryReplSet.create({
-      replSet: { count: 1, storageEngine: 'wiredTiger' },
-    });
-    await mongoose.connect(replSet.getUri());
-
+  beforeAll(() => {
     // If the replica set failed to register, every controller below would take
     // the sequential/no-session path and these tests would silently assert the
     // wrong branch. Fail loudly instead.
     expect(supportsTransactions(mongoose.connection)).toBe(true);
-  }, 60_000);
-
-  afterAll(async () => {
-    await mongoose.disconnect();
-    await replSet.stop();
   });
 
   beforeEach(async () => {

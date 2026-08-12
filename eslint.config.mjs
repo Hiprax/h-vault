@@ -122,7 +122,11 @@ export default tseslint.config(
   // for rules (`no-floating-promises`, `no-unnecessary-condition`) that test code
   // deliberately plays loose with.
   {
-    files: ['packages/*/tests/**/*.{ts,tsx}'],
+    // The repo-root `tests/harness/**` is included alongside each package's own
+    // `tests/`: it holds the shared determinism harness that all three packages
+    // re-export, and a file no `files` glob matches is a file ESLint silently
+    // never reads.
+    files: ['packages/*/tests/**/*.{ts,tsx}', 'tests/**/*.{ts,tsx}'],
     extends: [...tseslint.configs.strict, ...tseslint.configs.stylistic],
     languageOptions: {
       parser: tseslint.parser,

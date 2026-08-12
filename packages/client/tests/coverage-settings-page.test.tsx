@@ -179,6 +179,18 @@ vi.mock('qrcode', () => ({
   },
 }));
 
+// Mock the LAZY LOADER as well as the library, delegating to whatever this file
+// mocked `zxcvbn` to be. `lazyZxcvbn` caches the resolved library in a
+// module-level binding, and the pages that gate on strength call `getZxcvbn()`
+// from both a mount effect and a submit handler — two concurrent cold dynamic
+// imports racing for one cache slot, where a win by the unmocked module makes
+// every later assertion in the file score against the REAL zxcvbn. Order used to
+// hide it; `sequence.shuffle` does not.
+vi.mock('../src/lib/lazyZxcvbn', async () => {
+  const zxcvbn = await import('zxcvbn');
+  return { getZxcvbn: () => Promise.resolve(zxcvbn.default) };
+});
+
 vi.mock('zxcvbn', () => ({
   default: (password?: string) => {
     if (!password) return { score: 0, feedback: { warning: '', suggestions: [] } };

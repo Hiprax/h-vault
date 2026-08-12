@@ -106,15 +106,20 @@ describe('verify.json manifest', () => {
     expect(manifest.tiers).toEqual({ 0: 'verify:fast', 1: 'verify', 2: 'verify:full' });
   });
 
-  it('declares the determinism environment the harness is to run under', () => {
-    // Declares, not applies: nothing in scripts/ci reads `env` yet, so this pins
-    // the declaration and nothing more. It is worth pinning because the values
-    // are the contract the harness work is measured against — TZ and LANG belong
-    // INSIDE the harness rather than as a shell prefix (this project is also
-    // developed on Windows, where `TZ=x cmd` is not a thing), and SEED is the one
-    // knob every generator is to be threaded from.
+  it('declares the determinism environment the harness runs under', () => {
+    // `scripts/ci` still does not read this block: the values are APPLIED inside
+    // each runner (`packages/*/vitest.config.ts` `test.env` plus
+    // `tests/harness/determinism.ts`, and `playwright.config.ts`), which is what
+    // makes them hold for an IDE run or a bare `npx vitest` too — a shell prefix
+    // would not, and `TZ=x cmd` is not valid syntax on Windows, where this project
+    // is also developed. So this pins the DECLARATION and the two must agree:
+    // every key here is one the harness actually sets.
     expect(manifest.env['TZ']).toBe('UTC');
     expect(manifest.env['LANG']).toBe('C.UTF-8');
+    // `LC_ALL` as well as `LANG`, because glibc and ICU resolve `LC_ALL` FIRST: on
+    // a machine that exports `LC_ALL=en_US.UTF-8` — as the reference machine does
+    // — a `LANG`-only pin is inert.
+    expect(manifest.env['LC_ALL']).toBe('C.UTF-8');
     expect(manifest.env['SEED']).toBeTruthy();
   });
 

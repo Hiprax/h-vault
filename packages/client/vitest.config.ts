@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import { SEED, PINNED_LOCALE, PINNED_TZ } from './tests/determinism.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -66,6 +67,36 @@ export default defineConfig({
     // `default` keeps the human output; `junit` is what the pipeline reads. A
     // suite whose only output is a terminal cannot be ratcheted or audited.
     reporters: ['default', junitReporter],
+    // Order independence is a property of the suite, so it is MEASURED on every
+    // run rather than hoped for. Shuffling files exposes cross-file state;
+    // shuffling tests (which reorders `describe` blocks within a file too)
+    // exposes the in-file kind. The seed is pinned so a failing order is
+    // reproducible: an unseeded shuffle turns a real defect into an anecdote.
+    // Never "fix" a failure here by switching this off (Forbidden Action 7) — a
+    // suite that only passes in declaration order is a suite with an undeclared
+    // dependency.
+    sequence: {
+      shuffle: true,
+      seed: SEED,
+      // Pinned rather than inherited: `'stack'` is the resolved default, but
+      // Vitest's CLI help advertises `(default: "parallel")`, and teardown order
+      // is something a suite should decide rather than discover. Kept identical
+      // across the three packages so a hook behaves the same wherever it lives.
+      hooks: 'stack',
+    },
+    // The determinism pins, in the config so they apply before the first module
+    // of a test file is evaluated, and NOT as a `TZ=UTC npm test` prefix: this
+    // project is developed on Windows too, where that prefix is not valid shell
+    // syntax, so a prefix-based pin is one half the contributors silently do not
+    // get. `tests/setup.ts` re-applies them (see `tests/determinism.ts`), and
+    // `tests/determinism.test.ts` asserts both halves are present. `LC_ALL` is
+    // pinned alongside `LANG` because glibc and ICU resolve `LC_ALL` first.
+    env: {
+      TZ: PINNED_TZ,
+      LANG: PINNED_LOCALE,
+      LC_ALL: PINNED_LOCALE,
+      SEED: String(SEED),
+    },
     coverage: {
       // `cobertura` sits beside lcov because patch-coverage tooling reads
       // Cobertura XML and nothing here should have to re-derive it from lcov.

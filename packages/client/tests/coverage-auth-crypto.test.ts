@@ -196,7 +196,15 @@ const successful2faResponse = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useAuthStore.setState({ ...authInitialState });
+  // `getInitialState()` is the store as `create()` built it, so it carries the
+  // real ACTIONS; `authInitialState` above is data-only. Resetting with data
+  // alone left any action a describe had stubbed installed for the rest of the
+  // FILE: the two `useAutoLock` blocks replace `lock` with a mock that only sets
+  // `isLocked` (`lock: mockLock`), and `vi.clearAllMocks()` clears call history
+  // but not implementations. A later test that called the real `lock()` then got
+  // the stub instead, saw `vaultKey` survive, and failed — visibly only once
+  // `sequence.shuffle` stopped keeping those blocks last.
+  useAuthStore.setState({ ...useAuthStore.getInitialState(), ...authInitialState });
 
   vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
     masterEncryptionKey: mockMek,
@@ -989,7 +997,13 @@ describe('useAutoLock — deadlines are wall-clock, not elapsed-timer', () => {
   afterEach(() => {
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     vi.useRealTimers();
-    useAuthStore.setState({ ...authInitialState });
+    // Restore the real `lock` action alongside the data: this block replaced it
+    // with `mockLock`, and `authInitialState` carries no actions, so without this
+    // the stub outlives the block.
+    useAuthStore.setState({
+      ...authInitialState,
+      lock: useAuthStore.getInitialState().lock,
+    });
   });
 
   it('locks the moment the tab regains focus after the deadline passed unobserved', () => {

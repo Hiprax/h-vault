@@ -5,6 +5,7 @@
   "env": {
     "TZ": "UTC",
     "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
     "SEED": "1337"
   },
   "tiers": {

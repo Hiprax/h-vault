@@ -20,16 +20,16 @@
  *     too — the standalone half of that guarantee is in
  *     `import-cap-concurrency.test.ts`
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
-import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import { MAX_ITEMS_PER_USER } from '@hvault/shared';
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
 import { createTestUser, authHeader, sampleVaultItem, seedItem, getCsrf } from './helpers.js';
 import type { TestUser } from './helpers.js';
+import { useReplicaSetConnection } from './mongoHarness.js';
 
 function searchHashFor(index: number): string {
   return index.toString(16).padStart(64, '0');
@@ -57,32 +57,21 @@ function updateRow(id: string): Record<string, unknown> {
 }
 
 describe('Import operations — transaction (replica-set) branch', () => {
-  let replSet: MongoMemoryReplSet;
+  // setup.ts's beforeAll connected mongoose to a standalone server, where the
+  // transactional branch is unreachable. The helper borrows that connection for
+  // a single-node replica set and hands it back in its afterAll, so this block
+  // does not have to be the last one in the file. It also builds every model's
+  // indexes on the swapped connection: the collections must exist before a
+  // transaction writes to them, and `acquireJobLock` — which the import path
+  // takes per user — depends entirely on the unique `jobName` index for mutual
+  // exclusion.
+  useReplicaSetConnection({ timeoutMs: 60_000 });
+
   let user: TestUser;
 
-  beforeAll(async () => {
-    // setup.ts's beforeAll already connected mongoose to a standalone server.
-    // Drop that and reconnect to a replica set so the transactional branch is
-    // reachable; setup.ts's afterAll still stops its own (now idle) server.
-    await mongoose.disconnect();
-    replSet = await MongoMemoryReplSet.create({
-      replSet: { count: 1, storageEngine: 'wiredTiger' },
-    });
-    await mongoose.connect(replSet.getUri());
-
-    // Build every model's indexes on THIS connection. Two reasons: the
-    // collections must exist before a transaction writes to them, and
-    // `acquireJobLock` — which the import path takes per user — depends entirely
-    // on the unique `jobName` index for mutual exclusion.
-    await Promise.all(Object.values(mongoose.models).map((model) => model.createIndexes()));
-
+  beforeAll(() => {
     // Fail loudly rather than silently asserting the fallback branch.
     expect(supportsTransactions(mongoose.connection)).toBe(true);
-  }, 60_000);
-
-  afterAll(async () => {
-    await mongoose.disconnect();
-    await replSet.stop();
   });
 
   afterEach(() => {

@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 import { resolveDevPort } from './packages/client/vite.config.helpers';
+// Extensionless on purpose, like the import above: Playwright loads this config
+// through a CommonJS require path, and its TypeScript loader resolves the `.ts`
+// source from a bare specifier.
+import { PINNED_LOCALE, PINNED_TZ, SEED } from './tests/harness/determinism';
 
 /**
  * Playwright E2E test configuration for H-Vault.
@@ -33,6 +37,24 @@ const CLIENT_ORIGIN = `http://127.0.0.1:${String(CLIENT_PORT)}`;
  */
 const JUNIT_REPORT = '.testfortress/reports/junit-e2e.xml';
 
+/**
+ * The determinism pins, applied INSIDE the harness rather than as a
+ * `TZ=UTC npx playwright test` prefix — this project is developed on Windows too,
+ * where that prefix is not valid shell syntax, so a prefix-based pin is one half
+ * the contributors silently do not get.
+ *
+ * This assignment covers the Playwright runner process and, by inheritance, the
+ * dev server and the in-memory mongod that `e2e/start-server.ts` spawns. The
+ * BROWSER is pinned separately, in `use` below: a Chromium context takes its
+ * timezone and locale from launch options, not from the parent's environment, and
+ * the browser is where the app's date rendering (secret expiry countdowns, the
+ * vault-health "last checked" label) actually happens.
+ */
+process.env.TZ = PINNED_TZ;
+process.env['LANG'] = PINNED_LOCALE;
+process.env['LC_ALL'] = PINNED_LOCALE;
+process.env['SEED'] = String(SEED);
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
@@ -52,6 +74,14 @@ export default defineConfig({
   },
   use: {
     baseURL: process.env.E2E_BASE_URL ?? CLIENT_ORIGIN,
+    // The browser's own clock zone and locale. `PINNED_TZ` is an IANA id, which is
+    // exactly what `timezoneId` wants; `locale` cannot take `C.UTF-8` (not a BCP-47
+    // tag), so it is the app's single shipped language. Without these two the
+    // browser follows the host, and every rendered date — the secret-expiry
+    // countdown, the "last checked" label — becomes a function of where the
+    // machine is, which is how a date assertion passes in Berlin and fails in Denver.
+    timezoneId: PINNED_TZ,
+    locale: 'en-US',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'on-first-retry',

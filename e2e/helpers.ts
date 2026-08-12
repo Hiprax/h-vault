@@ -1,4 +1,5 @@
 import { test, type Page, type APIRequestContext, expect } from '@playwright/test';
+import { seededRandom } from '../tests/harness/determinism.js';
 import { MongoClient } from 'mongodb';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -251,9 +252,23 @@ export function sampleFolder(overrides: Record<string, unknown> = {}) {
 
 // ─── Email Generator ─────────────────────────────────────────────────────────
 
+/**
+ * A seeded pseudo-random stream, plus a counter.
+ *
+ * `Math.random` was fine for uniqueness and useless for reproduction: an E2E
+ * failure that depended on the generated address could not be re-run. The seed
+ * comes from the harness (`SEED`, default 1337) and the counter guarantees
+ * uniqueness WITHIN a run even though the stream is now identical across runs —
+ * `Date.now()` alone is not enough, two specs can start in the same millisecond.
+ */
+const nextRandom = seededRandom();
+let emailCounter = 0;
+
 /** Generates a unique test email for E2E test isolation. */
 export function testEmail(): string {
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  emailCounter += 1;
+  const noise = nextRandom().toString(36).slice(2, 8);
+  const id = `${String(Date.now())}-${String(emailCounter)}-${noise}`;
   return `e2e-${id}@test.hvault.local`;
 }
 

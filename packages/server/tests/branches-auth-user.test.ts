@@ -25,7 +25,7 @@
  *     replica set (the production topology, `rs0`) and which the standalone
  *     harness never reaches.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 
 // The email senders under assertion are stubbed so "was this mail sent, and did
 // the send succeed?" is directly observable; the real senders are inert no-ops
@@ -53,7 +53,6 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
 import { BACKUP_CODES_COUNT } from '@hvault/shared';
@@ -79,6 +78,7 @@ import {
   seedItem,
   type TestUser,
 } from './helpers.js';
+import { useReplicaSetConnection } from './mongoHarness.js';
 
 const API = '/api/v1';
 const BCRYPT_ROUNDS = 4;
@@ -648,28 +648,20 @@ describe('userController — regenerateBackupCodes guards', () => {
 // suite therefore exercises only the sequential fallback. Stand up a real
 // replica set so the production path actually runs.
 //
-// This block is LAST in the file: its beforeAll swaps the global mongoose
-// connection.
+// This block no longer has to be LAST in the file. `useReplicaSetConnection()`
+// borrows the process-wide mongoose connection and RETURNS it — its afterAll
+// reconnects to the standalone URI tests/setup.ts owns — so the block is
+// position-independent and `sequence.shuffle` can put it anywhere.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('transactional (replica-set) auth branches', () => {
-  let replSet: MongoMemoryReplSet;
+  useReplicaSetConnection({ timeoutMs: 120_000 });
 
-  beforeAll(async () => {
-    await mongoose.disconnect();
-    replSet = await MongoMemoryReplSet.create({
-      replSet: { count: 1, storageEngine: 'wiredTiger' },
-    });
-    await mongoose.connect(replSet.getUri());
-
+  beforeAll(() => {
     // Guard: without a genuine replica set the handlers would silently take the
-    // sequential path and these tests would assert the wrong branch.
+    // sequential path and these tests would assert the wrong branch. Registered
+    // after the helper's own hook, so it observes the swapped connection.
     expect(supportsTransactions(mongoose.connection)).toBe(true);
-  }, 120_000);
-
-  afterAll(async () => {
-    await mongoose.disconnect();
-    await replSet.stop();
   });
 
   afterEach(() => {

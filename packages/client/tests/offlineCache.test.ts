@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { seededRandom } from './determinism.js';
 import 'fake-indexeddb/auto';
 
 // Reset IndexedDB between tests by re-importing the module fresh
@@ -234,7 +235,11 @@ describe('deriveUserHash entropy (Task 3.8)', () => {
 
   it('SubtleCrypto path: 500 random IDs produce 500 unique hashes', async () => {
     const { deriveUserHash } = await freshImport();
-    const ids = Array.from({ length: 500 }, (_, i) => `user-${i}-${Math.random().toString(36)}`);
+    // Drawn from the harness seed rather than `Math.random`, so a collision found
+    // here is reproducible from the seed the failure banner prints instead of being
+    // a one-off anecdote nobody can re-run.
+    const next = seededRandom();
+    const ids = Array.from({ length: 500 }, (_, i) => `user-${String(i)}-${next().toString(36)}`);
     const seen = new Set<string>();
     for (const id of ids) {
       seen.add(await deriveUserHash(id));

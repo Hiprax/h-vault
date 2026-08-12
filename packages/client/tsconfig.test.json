@@ -8,7 +8,11 @@
     "composite": false,
     "declaration": false,
     "declarationMap": false,
-    "rootDir": ".",
+    // The repo root, not `.`: `rootDir` is a pure CONSTRAINT under `noEmit`, and
+    // `tests/determinism.ts` re-exports the repo-wide determinism harness in
+    // `tests/harness/`, which every package's suite must pin identically. Same
+    // reasoning as `packages/server/tsconfig.test.json`.
+    "rootDir": "../..",
     // `node` on top of the build config's list: tests run under Vitest, so they
     // reach for `process.env`, `node:crypto` and Node's timer types. It is added
     // ONLY here — `src/` stays browser-typed, so a Node-only global cannot slip

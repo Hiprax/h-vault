@@ -32,6 +32,25 @@ vi.mock('../../src/services/crypto/cryptoService', () => ({
   },
 }));
 
+// Mock the LAZY LOADER as well as the library, delegating to whatever this file
+// mocked `zxcvbn` to be.
+//
+// `lazyZxcvbn` caches the resolved library in a module-level binding, and
+// `ResetPasswordPage` calls `getZxcvbn()` TWICE on a cold cache — once from its
+// mount effect (`ResetPasswordPage.tsx:88`), once from the submit handler
+// (`:111`) — with no microtask checkpoint between them in a synchronous test
+// body. Two concurrent cold dynamic imports then race for that one cache slot,
+// and when the unmocked module won it, this file's assertions ran against the
+// REAL zxcvbn: 'short' produces neither 'Too short' nor 'Add more characters'.
+// It only surfaced once `sequence.shuffle` stopped guaranteeing that a
+// mount-only test warmed the cache first. Mocking the loader removes both the
+// cache and the race from this file's dependencies; the `zxcvbn` mock below stays
+// so any STATIC import of the library is covered too.
+vi.mock('../../src/lib/lazyZxcvbn', async () => {
+  const zxcvbn = await import('zxcvbn');
+  return { getZxcvbn: () => Promise.resolve(zxcvbn.default) };
+});
+
 // Mock zxcvbn with a lightweight score function
 vi.mock('zxcvbn', () => ({
   default: (password: string) => {

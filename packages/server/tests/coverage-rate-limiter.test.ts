@@ -710,9 +710,34 @@ describe('MongoRateLimitStore failure paths', () => {
 
     // Counting is unaffected by the index failure.
     expect(hits).toEqual([1, 2, 3, 4, 5, 6]);
+
     // ...and the store gave up after MAX_TTL_INDEX_ATTEMPTS rather than retrying
     // on every single request forever.
-    expect(createIndex).toHaveBeenCalledTimes(3);
+    //
+    // Counted over THIS STORE'S OWN index build, not over every `createIndex` in
+    // the process. The spy is installed on the driver's shared Collection
+    // PROTOTYPE, so a bare `toHaveBeenCalledTimes(3)` also counts Mongoose's
+    // background `autoIndex` builds — which run on their own schedule and land
+    // inside this ~50 ms window only sometimes. Measured: at `--sequence.seed=90210`
+    // the `users` collection's `{ deletionPending: 1 }` partial index built here in
+    // 1 run out of 6, making a 4th call and failing the assertion for a reason
+    // nobody cares about. Filtering by collection AND index spec makes the
+    // assertion strictly narrower, not looser: a 4th attempt by the store still
+    // fails it, while an unrelated build no longer can.
+    const ttlIndexBuilds = createIndex.mock.calls.filter((call, i) => {
+      const args = call as unknown as unknown[];
+      const spec = args[0] as Record<string, unknown> | undefined;
+      const options = args[1] as Record<string, unknown> | undefined;
+      const collection = (createIndex.mock.instances as unknown as { collectionName?: string }[])[
+        i
+      ];
+      return (
+        collection?.collectionName === RATE_LIMIT_COLLECTION &&
+        spec?.['expirationDate'] === 1 &&
+        options?.['expireAfterSeconds'] === 0
+      );
+    });
+    expect(ttlIndexBuilds).toHaveLength(3);
 
     // Expiry still works without the index: an already-expired record reads as
     // absent and the next hit opens a clean window.

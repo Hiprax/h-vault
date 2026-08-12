@@ -1,13 +1,13 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
-import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { createTestUser, authHeader, sampleVaultItem, sampleFolder, getCsrf } from './helpers.js';
 import type { TestUser } from './helpers.js';
+import { useReplicaSetConnection } from './mongoHarness.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
 
 // ---------------------------------------------------------------------------
@@ -58,29 +58,19 @@ describe('supportsTransactions helper', () => {
 // ---------------------------------------------------------------------------
 
 describe('Vault key rotation — transaction (replica-set) branch', () => {
-  let replSet: MongoMemoryReplSet;
+  // The global setup.ts beforeAll connected mongoose to a standalone server,
+  // which rejects multi-document transactions. The helper points it at a
+  // single-node replica set for this block and reconnects it to the standalone
+  // server afterwards, so the block carries no dependence on being declared last.
+  useReplicaSetConnection({ timeoutMs: 60_000 });
+
   let user: TestUser;
 
-  beforeAll(async () => {
-    // The global setup.ts beforeAll already connected mongoose to a standalone
-    // server. Drop that connection and reconnect to a replica set so the
-    // transaction branch is reachable. setup.ts's afterAll still stops its own
-    // (now idle) standalone server.
-    await mongoose.disconnect();
-    replSet = await MongoMemoryReplSet.create({
-      replSet: { count: 1, storageEngine: 'wiredTiger' },
-    });
-    await mongoose.connect(replSet.getUri());
-
+  beforeAll(() => {
     // Sanity guard: if the replica set did not register (e.g. the URI lacked
     // the replicaSet option), the controller would silently take the sequential
     // path and these tests would assert the wrong branch. Fail loudly instead.
     expect(supportsTransactions(mongoose.connection)).toBe(true);
-  }, 60_000);
-
-  afterAll(async () => {
-    await mongoose.disconnect();
-    await replSet.stop();
   });
 
   afterEach(() => {

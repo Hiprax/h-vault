@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
+import { SEED, PINNED_LOCALE, PINNED_TZ } from './tests/determinism.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,6 +47,29 @@ export default defineConfig({
     // `default` keeps the human output; `junit` is what the pipeline reads. A
     // suite whose only output is a terminal cannot be ratcheted or audited.
     reporters: ['default', junitReporter],
+    // Order independence is a property of the suite, so it is MEASURED on every
+    // run rather than hoped for. Shuffling files exposes cross-file state;
+    // shuffling tests (which reorders `describe` blocks within a file too)
+    // exposes the in-file kind, which is what a shared mongoose connection and a
+    // module-level cache actually produce. The seed is pinned so a failing order
+    // is reproducible: an unseeded shuffle turns a real defect into an anecdote.
+    // Never "fix" a failure here by switching this off (Forbidden Action 7) — a
+    // suite that only passes in declaration order is a suite with an undeclared
+    // dependency.
+    sequence: {
+      shuffle: true,
+      seed: SEED,
+      // Pinned rather than left to the default, because a load-bearing mechanism
+      // rests on it: `useReplicaSetConnection` (tests/mongoHarness.ts) restores
+      // the borrowed connection in an `afterAll`, and `mongoHarness.test.ts`
+      // OBSERVES that restore from an `afterAll` it registers first — which only
+      // works while teardown runs in reverse registration order. `'stack'` IS the
+      // resolved default, but Vitest's own CLI help text advertises
+      // `(default: "parallel")`, so a contributor reconciling the config with the
+      // docs would silently turn that assertion into a coin toss. Stated here so
+      // the mechanism is a decision instead of an inherited accident.
+      hooks: 'stack',
+    },
     coverage: {
       // `cobertura` sits beside lcov because patch-coverage tooling reads
       // Cobertura XML and nothing here should have to re-derive it from lcov.
@@ -83,6 +107,20 @@ export default defineConfig({
     },
     env: {
       NODE_ENV: 'test',
+      // The determinism pins, in the config so they apply before the first
+      // module of a test file is evaluated, and NOT as a `TZ=UTC npm test`
+      // prefix: this project is developed on Windows too, where that prefix is
+      // not valid shell syntax, so a prefix-based pin is one half the
+      // contributors silently do not get. `tests/setup.ts` re-applies them (see
+      // `tests/determinism.ts`), and `tests/determinism.test.ts` asserts both
+      // halves are present.
+      TZ: PINNED_TZ,
+      LANG: PINNED_LOCALE,
+      // `LC_ALL` as well as `LANG`, because glibc and ICU resolve `LC_ALL`
+      // first: with only `LANG` pinned, a developer who exports
+      // `LC_ALL=de_DE.UTF-8` runs the suite in a different locale than CI.
+      LC_ALL: PINNED_LOCALE,
+      SEED: String(SEED),
       PORT: '5555',
       MONGODB_URI: 'mongodb://localhost:27017/hvault-test',
       JWT_ACCESS_SECRET: 'test-access-secret-for-testing-only-32chars!',

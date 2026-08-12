@@ -62,20 +62,43 @@ const mockCreateItem = vi.fn().mockResolvedValue(undefined);
 const mockUpdateItem = vi.fn().mockResolvedValue(undefined);
 const mockUpdateItemMeta = vi.fn().mockResolvedValue(undefined);
 
+/**
+ * The default `useVaultStore` state every test in this file starts from.
+ *
+ * A named declaration rather than an object literal inside the `vi.mock`
+ * factory, because the global `beforeEach` has to be able to RESTORE it. Three
+ * tests here call `useVaultStore.mockImplementation(...)` to install a state
+ * shaped for the component they mount, and `vi.clearAllMocks()` clears call
+ * history but NOT implementations — so the last such state outlives its test
+ * and is handed to whichever test runs next.
+ *
+ * Under `sequence.shuffle` that is reachable in both directions. At seed 90210
+ * the 8.11 favorite test (which pins a state with no `items` key) runs ahead of
+ * 8.2's card test, and `VaultItemForm`'s card branch iterates `items` to build
+ * its saved-address options, so the mount died with `TypeError: items is not
+ * iterable` — a failure in production code caused entirely by a leaked test
+ * double. The defensive re-pin inside that 8.11 test handles the same defect one
+ * direction at a time; restoring the default here closes the class.
+ *
+ * A function declaration, so the hoisted `vi.mock` factory below can name it.
+ */
+function defaultVaultStoreState(): Record<string, unknown> {
+  return {
+    createItem: mockCreateItem,
+    updateItem: mockUpdateItem,
+    updateItemMeta: mockUpdateItemMeta,
+    folders: [{ id: 'folder-1', name: 'Work', sortOrder: 0, createdAt: '', updatedAt: '' }],
+    // The form reads `items` to offer identity addresses as a source for a
+    // card's billing address. Empty is the real store's initial value, so this
+    // models it rather than papering over a missing key.
+    items: [],
+  };
+}
+
 vi.mock('../src/stores/vaultStore', () => ({
-  useVaultStore: vi.fn((selector: (state: Record<string, unknown>) => unknown) => {
-    const state = {
-      createItem: mockCreateItem,
-      updateItem: mockUpdateItem,
-      updateItemMeta: mockUpdateItemMeta,
-      folders: [{ id: 'folder-1', name: 'Work', sortOrder: 0, createdAt: '', updatedAt: '' }],
-      // The form reads `items` to offer identity addresses as a source for a
-      // card's billing address. Empty is the real store's initial value, so this
-      // models it rather than papering over a missing key.
-      items: [],
-    };
-    return selector(state);
-  }),
+  useVaultStore: vi.fn((selector: (state: Record<string, unknown>) => unknown) =>
+    selector(defaultVaultStoreState()),
+  ),
 }));
 
 vi.mock('../src/components/ui/Toast', () => ({
@@ -261,8 +284,17 @@ function renderForm(overrides: Partial<Parameters<typeof VaultItemForm>[0]> = {}
 // Tests
 // ---------------------------------------------------------------------------
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
+
+  // Put the store double back to its declared default. `clearAllMocks` resets
+  // call history only, so without this every `mockImplementation` in this file
+  // is permanent and the suite's verdict depends on the order the shuffle
+  // picked. See `defaultVaultStoreState` for the failure this closes.
+  const { useVaultStore } = await import('../src/stores/vaultStore');
+  (useVaultStore as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+    (selector: (state: Record<string, unknown>) => unknown) => selector(defaultVaultStoreState()),
+  );
 });
 
 // ==========================================================================
