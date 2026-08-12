@@ -1,6 +1,6 @@
 import { test, type Page, type APIRequestContext, expect } from '@playwright/test';
 import { seededRandom } from '../tests/harness/determinism.js';
-import { MongoClient } from 'mongodb';
+import { MongoClient, type Db } from 'mongodb';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -91,6 +91,22 @@ async function getMongoDb() {
     await sharedClient.connect();
   }
   return sharedClient.db();
+}
+
+/**
+ * The database the server under test is actually using, for specs that have to
+ * read what was STORED rather than what was returned.
+ *
+ * Exposed through the shared client above rather than by opening a second one:
+ * the connection is pooled and closed with the process, and a spec that opened
+ * its own would leak a pool per file.
+ *
+ * The zero-knowledge spec is the caller that needs this — the server's audit
+ * rows are the one place a leak would be both durable and invisible from the
+ * browser, so proving they are clean means reading the collection itself.
+ */
+export async function testDb(): Promise<Db> {
+  return getMongoDb();
 }
 
 /**

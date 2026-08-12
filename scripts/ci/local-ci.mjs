@@ -332,6 +332,24 @@ const GATES = [
     run: (options) => runNpm(['run', 'test:security'], options),
   },
   {
+    id: 'observability',
+    task: 'test:observability',
+    tier: 1,
+    // The same shape as `security`, and deliberately so: a named subset of the
+    // server suite, re-run as its own gate because "no secret leaves through a
+    // log line, an audit row or an error body" is a claim someone has to be able
+    // to point at when a controller starts logging something new. Nothing is
+    // narrowed — `test:integration` still runs all four files — and the
+    // membership itself is guarded by `gate-surface.test.ts`, because vitest
+    // only errors on an EMPTY match and would let a half-stale list shrink this
+    // gate in silence.
+    title: 'Log, audit-row and error-body redaction (real mongod)',
+    ci: 'new — no hosted job ever checked what the server says about itself',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runNpm(['run', 'test:observability'], options),
+  },
+  {
     id: 'audit',
     task: 'audit:deps',
     tier: 1,

@@ -41,7 +41,7 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twenty gates including the full test suite, container builds with
+pipeline locally — twenty-one gates including the full test suite, container builds with
 Trivy scanning, and CodeQL — and refuses the push if any of them fail. A commit that
 reaches `main` has already passed everything.
 
@@ -129,7 +129,7 @@ documenting its own defeat. The hatches themselves are unchanged and still work.
 | `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
 
 The first is the one to reach for: it is scoped, it is visible in the run summary, and it
-leaves the other eighteen gates in place. **Say so in the pull request description
+leaves the other nineteen gates in place. **Say so in the pull request description
 whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
 a claim someone else now has to check.
 

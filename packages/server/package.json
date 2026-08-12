@@ -11,6 +11,7 @@
     "start": "node dist/server.js",
     "test": "vitest run --coverage",
     "test:security": "vitest run --config vitest.security.config.ts",
+    "test:observability": "vitest run --config vitest.observability.config.ts",
     "type-check": "tsc --noEmit && tsc -p tsconfig.test.json",
     "create-indexes": "tsx scripts/create-indexes.ts",
     "seed-breaches": "tsx src/cli/seedBreaches.ts"

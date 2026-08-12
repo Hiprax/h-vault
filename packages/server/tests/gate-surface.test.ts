@@ -35,6 +35,7 @@ import { toSarif, countLevels } from '../../../scripts/ci/lib/sarif.mjs';
 import sharedVitestConfig from '../../shared/vitest.config';
 import serverVitestConfig from '../vitest.config';
 import securityVitestConfig, { SECURITY_SUITE } from '../vitest.security.config';
+import observabilityVitestConfig, { OBSERVABILITY_SUITE } from '../vitest.observability.config';
 import clientVitestConfig from '../../client/vitest.config';
 import playwrightConfig from '../../../playwright.config';
 
@@ -382,6 +383,26 @@ describe('machine-readable reports', () => {
       expect(existsSync(path.join(repoRoot, 'packages', 'server', file)), file).toBe(true);
     }
     expect(securityVitestConfig.test?.include).toEqual(SECURITY_SUITE);
+  });
+
+  it('writes the observability suite to its OWN JUnit report, from files that exist', () => {
+    // Same contract as the security suite above, and the same two failure modes
+    // it is defending against: a subset run overwriting the whole suite's test
+    // count, and a named file that has been renamed away — which vitest reports
+    // only when NOTHING matches, so a list that is stale in part silently shrinks
+    // the gate instead of failing it.
+    const observability = junitOutputFile(observabilityVitestConfig.test?.reporters);
+    const server = junitOutputFile(serverVitestConfig.test?.reporters);
+    expect(observability).toBeDefined();
+    expect(path.resolve(observability!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-observability.xml'),
+    );
+    expect(observability).not.toBe(server);
+    expect(OBSERVABILITY_SUITE.length).toBeGreaterThan(0);
+    for (const file of OBSERVABILITY_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'packages', 'server', file)), file).toBe(true);
+    }
+    expect(observabilityVitestConfig.test?.include).toEqual(OBSERVABILITY_SUITE);
   });
 
   it.each([

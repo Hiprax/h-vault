@@ -254,6 +254,29 @@ export const DEFECTS = {
     evidence: (text) => /refuses user B/.test(text) && /status was 200/.test(text),
   },
 
+  'test:observability': {
+    // The defect this gate exists to catch, planted at its source and as the
+    // single edit a careless refactor would make: one word in app.ts, after
+    // which every production 5xx answers with the internal error message —
+    // database hostnames, credentials in a connection string, the failing query
+    // — instead of "Internal Server Error". CWE-209, and invisible in
+    // development, where the middleware exposes those messages by design.
+    title: 'let production 5xx bodies expose the internal error message',
+    mutate: {
+      'packages/server/src/app.ts': (text) =>
+        text.replace(
+          'createErrorMiddleware({ exposeServerErrors: false })',
+          'createErrorMiddleware({ exposeServerErrors: true })',
+        ),
+    },
+    // The custom assertion message, which a PASSING report cannot contain: the
+    // JUnit artifact carries a `<testcase name=…>` for every test that ran, so
+    // matching a test's NAME would be satisfied by a fully green run — the trap
+    // recorded on `test:security` above. Only the failed expectation prints
+    // this string.
+    evidence: (text) => /production 5xx body leaks internals/.test(text),
+  },
+
   'audit:deps': {
     // Planting a KNOWN-vulnerable production dependency, rather than relying on
     // whatever advisories happen to be open, is what makes the evidence check

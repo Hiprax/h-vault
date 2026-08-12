@@ -124,6 +124,14 @@
       "countsTests": false,
       "requires": ["build:shared"]
     },
+    "test:observability": {
+      "cmd": "npm run test:observability",
+      "tier": 1,
+      "gate": "no request value, audit row or production error body carries a secret, and a 5xx body is redacted to its status text",
+      "report": "junit-observability.xml",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
     "audit:deps": {
       "cmd": "npm run audit:prod",
       "tier": 1,
