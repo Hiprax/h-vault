@@ -1108,14 +1108,16 @@ git push --no-verify                    # skip the hook entirely
 - **Trivy** scans the three application images and fails the gate only on findings that have a fix,
   so an unpatched upstream CRITICAL cannot wall off the repository — a gate nobody can satisfy gets
   bypassed, and then it protects nothing. `scripts/ci/trivy-baseline.json` extends that to the case
-  where a fix exists for the _library_ but not in anything installable here. One finding is currently
-  accepted under it: a denial-of-service advisory against `brace-expansion` inside **npm's own
-  bundled dependency tree** in the `hvault-bootstrap` image, which no lockfile or `overrides` entry
-  of this project can reach, and for which no npm release yet exists. It is a one-shot container that
-  runs the index script with fixed arguments, takes no untrusted input and publishes no port. An
-  entry accepts a finding only when the CVE, the image, the package **and** the path all match, so
-  the same CVE appearing in this project's own dependencies still fails the gate; the file records
-  why each exception holds and what removes it.
+  where a fix exists for the _library_ but not in anything installable here. **Nothing is currently
+  accepted under it**: its `findings` list is empty. It held one entry — a denial-of-service
+  advisory against `brace-expansion` inside **npm's own bundled dependency tree** in the
+  `hvault-bootstrap` image, which no lockfile or `overrides` entry of this project can reach — and
+  that entry named its own removal condition, which has now been met: the bootstrap image stopped
+  shipping npm. It runs one script, so it invokes that script directly instead of through a package
+  manager, and four advisories in npm's vendored tree went with it. An entry accepts a finding only
+  when the CVE, the image, the package **and** the path all match, so the same CVE appearing in this
+  project's own dependencies still fails the gate; the file keeps a `history` of what was accepted,
+  why, and what retired it.
 
 **Known gap, stated plainly:** the old CI ran the unit tests on a Node 22 + 24 matrix. The local
 pipeline runs them on your Node only. The project pins Node 24 everywhere that matters (`.nvmrc`,

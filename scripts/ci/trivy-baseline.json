@@ -1,15 +1,15 @@
 {
   "note": "Container findings that are accepted, so the Trivy gate fails only on NEW ones. This is an exception list, not a suppression list: every entry names the deployment-specific reason the finding is not reachable AND the change that deletes the entry. Nothing goes in here because it is inconvenient. An entry that stops matching is reported by the gate so it gets removed.",
-  "findings": [
+  "history": [
     {
       "id": "CVE-2026-14257",
       "advisory": "GHSA-mh99-v99m-4gvg",
       "image": "hvault-bootstrap",
       "package": "brace-expansion",
-      "pathPrefix": "usr/local/lib/node_modules/npm/",
       "addedOn": "2026-07-28",
-      "reason": "Denial of service via unbounded brace expansion (CWE-400/770). The vulnerable copy is inside npm's OWN bundled dependency tree, not this project's node_modules — the root `overrides` floor (>=5.0.8) governs /app/node_modules and provably cannot reach /usr/local/lib/node_modules/npm. There is no npm release to move to: the advisory range is <=5.0.7, which covers every brace-expansion npm has ever bundled, and npm@12.0.1 is the newest 12.x. Not reachable in this deployment: hvault-bootstrap is a one-shot that runs `npm run create-indexes -w packages/server` with FIXED arguments, processes no untrusted input, and exits after a few seconds at deploy time; the DoS requires attacker-controlled brace/glob patterns, which would mean the attacker already controls the deploy command. The image is never network-exposed — it is not on the edge network and publishes no port.",
-      "removeWhen": "npm ships a release bundling brace-expansion >= 5.0.8, OR the bootstrap image stops shipping npm at all (invoke the index script through `node --run` / tsx directly and delete npm from the image), whichever lands first. The second removes this whole class permanently — npm's bundled tree has now tripped this gate twice, undici (CVE-2026-12151) before this."
+      "removedOn": "2026-08-12",
+      "removedBecause": "Its own removeWhen condition was met, by the second of the two options it named: the bootstrap image stopped shipping npm at all. `npm run create-indexes -w packages/server` was only ever an indirection for `tsx scripts/create-indexes.ts`, so the stage now invokes that binary directly and deletes the global npm, exactly as the `app` stage already did. That removed this finding and three more in the same vendored tree — CVE-2026-69152 (brace-expansion again), CVE-2026-69192 (ip-address, SSRF and trust-boundary bypass) and the undici advisory the npm upgrade existed to dodge — none of which npm ships a release for, because they live under /usr/local/lib/node_modules/npm/node_modules where this project's root `overrides` provably cannot reach. Kept here rather than deleted so the next person to reach for an exception can see one being paid off instead of renewed."
     }
-  ]
+  ],
+  "findings": []
 }

@@ -209,6 +209,31 @@ async function recordWire(page: Page): Promise<WireRecord[]> {
   return wire;
 }
 
+/**
+ * The forms one planted value could appear in, on the wire or in a cookie.
+ *
+ * A raw `includes` is not enough on its own. Two of the sentinels are the two
+ * passwords, and both carry a `#` by construction (they have to clear the
+ * zxcvbn gate); `encodeURIComponent` turns that into `%23`, so a leak through a
+ * query string, a form-encoded body or a cookie value would not have matched the
+ * literal at all — and those are exactly the channels where percent-encoding
+ * happens. Every other planted value is URL-safe by construction (that is why
+ * the card number is digits and the TOTP seed base32), so this expansion is a
+ * no-op for them and costs one deduplicated comparison.
+ *
+ * JSON escaping needs no equivalent: no planted value contains a quote or a
+ * backslash, so `JSON.stringify` reproduces each one verbatim.
+ */
+function searchForms(value: string): string[] {
+  const encoded = encodeURIComponent(value);
+  return encoded === value ? [value] : [value, encoded];
+}
+
+/** Whether `haystack` carries `secret` in any of the forms it could take. */
+function carries(haystack: string, secret: { value: string }): boolean {
+  return searchForms(secret.value).some((form) => haystack.includes(form));
+}
+
 /** Every recorded request whose method and URL match. */
 function callsTo(wire: readonly WireRecord[], method: string, urlPart: string): WireRecord[] {
   return wire.filter((record) => record.method === method && record.url.includes(urlPart));
@@ -327,6 +352,29 @@ const LOG_DIRS = [path.join(REPO_ROOT, 'logs'), path.join(REPO_ROOT, 'packages',
 
 type LogOffsets = Map<string, number>;
 
+/**
+ * A log file this scan must read, INCLUDING a rotated one.
+ *
+ * `@hiprax/logger` drives winston-daily-rotate-file with `maxSize: '20m'`, and
+ * file-stream-rotator names each new chunk by appending an INDEX to the current
+ * name: once `http-2026-08-12.log` fills, the live file is
+ * `http-2026-08-12.log.1`, then `.2`, while the plain `.log` never grows again.
+ * Matching only `.log` therefore reads a file the server has stopped writing to
+ * — and it does not fail loudly, because the OTHER loggers (`auth`,
+ * `backup-controller`) are small, unrotated, and keep the captured slice
+ * non-empty. Measured: the request log and the combined log were both rotated,
+ * so the slice held this session's sign-in but not one of its HTTP lines, and
+ * the anti-vacuity guard at the end of this spec failed — correctly. Without
+ * that guard the "no log line carried a secret" scan would have passed over the
+ * two files that carry every request.
+ *
+ * `.gz` is deliberately not matched: an archived chunk is compressed, so
+ * reading it as UTF-8 yields noise rather than log lines. `zippedArchive` is
+ * off, so no such file exists today; the pattern says so rather than relying on
+ * it. The `.<hash>-audit.json` bookkeeping files are excluded for free.
+ */
+const LOG_FILE_NAME = /\.log(\.\d+)?$/;
+
 async function logFiles(): Promise<string[]> {
   const files: string[] = [];
   for (const dir of LOG_DIRS) {
@@ -336,7 +384,7 @@ async function logFiles(): Promise<string[]> {
     } catch {
       continue;
     }
-    for (const name of names) if (name.endsWith('.log')) files.push(path.join(dir, name));
+    for (const name of names) if (LOG_FILE_NAME.test(name)) files.push(path.join(dir, name));
   }
   return files;
 }
@@ -348,14 +396,25 @@ async function logOffsets(): Promise<LogOffsets> {
   return offsets;
 }
 
-/** Everything the server logged after {@link logOffsets} was taken. */
+/**
+ * Everything the server logged after {@link logOffsets} was taken.
+ *
+ * The file list is re-read here rather than taken from `before`, which is what
+ * makes a rotation DURING the session visible: the new index did not exist when
+ * the offsets were captured, so `before.get(file)` is undefined, `?? 0` reads it
+ * from the beginning, and nothing of this session is missed. Re-reading a chunk
+ * in full is harmless — every sentinel is unique to this run, so an over-read
+ * cannot produce a false positive.
+ */
 async function logsWrittenSince(before: LogOffsets): Promise<string> {
   const chunks: string[] = [];
   for (const file of await logFiles()) {
     const size = (await stat(file)).size;
     const from = before.get(file) ?? 0;
-    // A file that shrank was rotated mid-run; its pre-rotation tail is gone and
-    // there is nothing to compare against, so skip it rather than re-read it all.
+    // Nothing appended since the offsets were taken. With rotated names matched
+    // this is the ordinary "idle file" case: the rotator renames forward and
+    // never truncates in place, so a file that was live at capture time either
+    // grew or was frozen by a rotation whose successor is read above.
     if (size <= from) continue;
     const handle = await open(file, 'r');
     try {
@@ -419,6 +478,30 @@ async function openItem(page: Page, name: string): Promise<void> {
 const SESSION_TIMEOUT_MS = 600_000;
 
 test.describe('zero-knowledge boundary', () => {
+  // Pins the two matchers the side-channel scans depend on, so neither can be
+  // narrowed back without a failure. Neither touches the browser, so both cost
+  // microseconds beside the session below.
+  test('the log scan reads a rotated log file, and the secret scan sees an encoded value', () => {
+    // The live file after a size rotation is the INDEXED one; the plain name
+    // stops growing. Narrowing this back to `.endsWith('.log')` was a real
+    // failure: the request log had rotated, so the captured slice held the
+    // session's sign-in but none of its HTTP lines.
+    expect(LOG_FILE_NAME.test('http-2026-08-12.log')).toBe(true);
+    expect(LOG_FILE_NAME.test('http-2026-08-12.log.1')).toBe(true);
+    expect(LOG_FILE_NAME.test('all-logs-2026-08-12.log.23')).toBe(true);
+    // A compressed chunk is not readable as UTF-8, and the rotator's own
+    // bookkeeping file is not a log at all.
+    expect(LOG_FILE_NAME.test('http-2026-08-12.log.gz')).toBe(false);
+    expect(LOG_FILE_NAME.test('.0198-audit.json')).toBe(false);
+
+    // A `#` survives JSON but not a query string or a cookie value, and both
+    // passwords carry one by construction.
+    const withHash = { value: 'Zk!7abc#Qx2' };
+    expect(carries('body=Zk!7abc#Qx2', withHash)).toBe(true);
+    expect(carries('?p=Zk!7abc%23Qx2', withHash)).toBe(true);
+    expect(carries('nothing of the sort', withHash)).toBe(false);
+  });
+
   test('no plaintext, master password, MEK or vault key ever leaves the browser', async ({
     page,
   }, testInfo) => {
@@ -779,7 +862,7 @@ test.describe('zero-knowledge boundary', () => {
       const offenders: string[] = [];
       for (const record of wire) {
         for (const secret of secrets) {
-          if (record.text.includes(secret.value)) {
+          if (carries(record.text, secret)) {
             offenders.push(`${secret.label} in ${record.method} ${record.url} (${record.channel})`);
           }
         }
@@ -789,7 +872,7 @@ test.describe('zero-knowledge boundary', () => {
 
     await test.step('no cookie carried a secret', async () => {
       const cookies = JSON.stringify(await page.context().cookies());
-      const offenders = secrets.filter((secret) => cookies.includes(secret.value));
+      const offenders = secrets.filter((secret) => carries(cookies, secret));
       expect(offenders.map((secret) => secret.label)).toEqual([]);
     });
 
@@ -814,7 +897,7 @@ test.describe('zero-knowledge boundary', () => {
       }
 
       const serialized = JSON.stringify(rows);
-      const offenders = secrets.filter((secret) => serialized.includes(secret.value));
+      const offenders = secrets.filter((secret) => carries(serialized, secret));
       expect(
         offenders.map((secret) => secret.label),
         'no audit row may carry a secret',
@@ -828,7 +911,7 @@ test.describe('zero-knowledge boundary', () => {
         const documents = await collection.find({}).toArray();
         const serialized = JSON.stringify(documents);
         for (const secret of secrets) {
-          if (serialized.includes(secret.value)) {
+          if (carries(serialized, secret)) {
             offenders.push(`${secret.label} in ${collection.collectionName}`);
           }
         }
@@ -841,7 +924,7 @@ test.describe('zero-knowledge boundary', () => {
       // Guard 4 again: a log scan over an empty slice proves nothing, so require
       // this session's own request lines to be in it first.
       expect(written, 'the server must have logged this session').toContain('/api/v1/vault/items');
-      const offenders = secrets.filter((secret) => written.includes(secret.value));
+      const offenders = secrets.filter((secret) => carries(written, secret));
       expect(
         offenders.map((secret) => secret.label),
         'no log line may carry a secret',

@@ -425,6 +425,34 @@ describe('machine-readable reports', () => {
     expect(observabilityVitestConfig.test?.include).toEqual(OBSERVABILITY_SUITE);
   });
 
+  it('pins WHICH files each named subset runs, not merely that they exist', () => {
+    // The two assertions above check that every named file is real and that the
+    // config runs exactly the named list. Neither says anything about the list
+    // itself, so DELETING a line from `SECURITY_SUITE` shrinks the gate by a
+    // quarter and every check still passes: the remaining files exist, the
+    // config still equals its own constant, and the deleted file keeps running
+    // inside `test:integration`, so no test disappears and `tests.count` does
+    // not move either. What is lost is the gate's MEANING — "this is the suite a
+    // reviewer points at when an endpoint is added" — and nothing but this
+    // assertion notices.
+    //
+    // Pinned as exact, sorted sets: adding a file to either suite is a
+    // deliberate act that updates this list in the same change, which is the
+    // review this is asking for.
+    expect([...SECURITY_SUITE].sort()).toEqual([
+      'tests/authz-matrix.test.ts',
+      'tests/cross-user-isolation.test.ts',
+      'tests/phase7-cross-user-edge-cases.test.ts',
+      'tests/route-table.test.ts',
+    ]);
+    expect([...OBSERVABILITY_SUITE].sort()).toEqual([
+      'tests/audit-logging.test.ts',
+      'tests/error-message-leakage.test.ts',
+      'tests/phase2-topology-and-log-pii.test.ts',
+      'tests/request-logger-masking.test.ts',
+    ]);
+  });
+
   it.each([
     ['shared', sharedPropertyConfig, SHARED_PROPERTY_SUITE, 'shared'],
     ['server', serverPropertyConfig, SERVER_PROPERTY_SUITE, 'server'],

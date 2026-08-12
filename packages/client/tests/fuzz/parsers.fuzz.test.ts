@@ -191,8 +191,8 @@ const NASTY_LITERALS = [
   ',',
   '\r\n',
   '\n',
-  '﻿',
-  ' ',
+  '\uFEFF',
+  '\u0000',
   '__proto__',
   'constructor',
   'toString',
@@ -415,7 +415,7 @@ describe('arbitrary bytes, through every parser', () => {
     // DATA rather than rejected as an unrecognised file.
     const prefixed = fc
       .tuple(
-        fc.constantFrom('{', '[', `${FORMAT_HEADERS[format].join(',')}\n`, '﻿', '\r\n'),
+        fc.constantFrom('{', '[', `${FORMAT_HEADERS[format].join(',')}\n`, '\uFEFF', '\r\n'),
         fc.string({ unit: anyCodeUnit, maxLength: 400 }),
       )
       .map(([prefix, tail]) => prefix + tail);

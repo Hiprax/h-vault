@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-08-12",
-  "commit": "a777378",
+  "commit": "e949311",
   "tests": {
-    "count": 7077
+    "count": 7370
   },
   "warnings": {
     "lint": 0,
@@ -36,15 +36,15 @@
         ]
       },
       "tests": {
-        "count": 875
+        "count": 895
       }
     },
     "packages/server": {
       "coverage": {
-        "line": 97.92,
+        "line": 97.95,
         "branch": 91.37,
-        "function": 97.07,
-        "linesTotal": 3077,
+        "function": 97.32,
+        "linesTotal": 3078,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/seedBreachesArgs.ts",
@@ -111,13 +111,13 @@
         ]
       },
       "tests": {
-        "count": 2772
+        "count": 2816
       }
     },
     "packages/client": {
       "coverage": {
         "line": 98.69,
-        "branch": 92.05,
+        "branch": 92.45,
         "function": 97.95,
         "linesTotal": 7038,
         "filesMeasured": [
@@ -244,12 +244,12 @@
         ]
       },
       "tests": {
-        "count": 3231
+        "count": 3458
       }
     },
     "e2e": {
       "tests": {
-        "count": 199
+        "count": 201
       }
     }
   },
@@ -270,8 +270,12 @@
     "format:check",
     "lint",
     "test:e2e",
+    "test:fuzz",
     "test:integration",
+    "test:observability",
+    "test:property",
     "test:security",
+    "test:snapshot",
     "test:unit",
     "typecheck",
     "verify",
@@ -348,7 +352,7 @@
     ]
   },
   "duplication": {
-    "percentage": 2.89,
+    "percentage": 2.88,
     "clones": 132,
     "duplicatedLines": 1525,
     "totalLines": 52849,
@@ -384,5 +388,5 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 7 (authz-matrix): registers the test:security gate and its route table; records the coverage and test-count improvements the run measured."
+  "reason": "Validation pass over phases 1-10: records the coverage, test-count and task-list improvements a fully green run measured. Server coverage rose because deleteFolder's orphan sweep is now awaited (its branch used to be covered or not depending on a race, which made this gate flake at two decimal places) and because both of its arms are now pinned by tests. tasks 24 -> 28 backfills the four gates Phases 8-10 registered without recording — test:observability, test:property, test:snapshot and test:fuzz — which a superset field that never named them could not have reported disappearing."
 }

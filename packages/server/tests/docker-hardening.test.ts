@@ -78,8 +78,8 @@ const repoRoot = path.resolve(__dirname, '..', '..', '..');
 
 const composeYaml = readFileSync(path.join(repoRoot, 'docker-compose.yml'), 'utf-8');
 // `merge: true` expands YAML merge keys (`<<: *anchor`), which the compose file uses to
-// layer a service-specific value over the shared topology anchor (the app's NODE_OPTIONS,
-// the bootstrap's npm_config_cache). Without it the parser hands back a literal `<<` key
+// layer a service-specific value over the shared topology anchor (the app's NODE_OPTIONS
+// and its own MONGODB_URI). Without it the parser hands back a literal `<<` key
 // and every assertion about an INHERITED value — NODE_ENV, PORT, MONGODB_URI,
 // TRUST_PROXY — silently reads `undefined` and the tests that matter most go quiet.
 const compose = parse(composeYaml, { merge: true }) as ComposeConfig;
@@ -141,6 +141,50 @@ const webStageCopyStatements: WebStageCopy[] = (() => {
       return { line, fromBuildContext, sourcesAreFiles };
     });
 })();
+
+/**
+ * Every `COPY` in the Dockerfile, whatever stage it is in, classified the same
+ * way {@link webStageCopyStatements} classifies the `web` stage's.
+ *
+ * The `web` stage was the first place this bit, but it is not the only one: the
+ * node stages copy the whole source tree from the same checkout, and the two
+ * images that drop to `USER node` read those files as uid 1000.
+ */
+const contextCopyStatements: (WebStageCopy & { sources: string[]; stageAfterCopy: string })[] =
+  dockerfile
+    .split('\n')
+    .map((line, index) => ({ line: line.trim(), index }))
+    .filter(({ line }) => line.startsWith('COPY '))
+    .map(({ line, index }) => {
+      const tokens = line.split(/\s+/).slice(1);
+      const flags = tokens.filter((token) => token.startsWith('--'));
+      const sources = tokens.filter((token) => !token.startsWith('--')).slice(0, -1);
+      const fromBuildContext = !flags.some((flag) => flag.startsWith('--from='));
+      const statOf = (source: string): ReturnType<typeof statSync> | null => {
+        try {
+          // `package-lock.json*` is the one globbed source; strip the glob so the
+          // stat sees the file it actually names.
+          return statSync(path.join(repoRoot, source.replace(/\*$/, '')));
+        } catch {
+          return null;
+        }
+      };
+      const sourcesAreFiles =
+        fromBuildContext &&
+        sources.length > 0 &&
+        sources.every((s) => statOf(s)?.isFile() === true);
+      // Everything from this COPY to the end of the stage it lives in: the only
+      // region where a `chmod` can be said to normalise THIS copy.
+      const lines = dockerfile.split('\n');
+      const nextStage = lines.findIndex(
+        (candidate, at) => at > index && /^FROM\s/.test(candidate.trim()),
+      );
+      const stageAfterCopy = lines
+        .slice(index + 1, nextStage === -1 ? lines.length : nextStage)
+        .join('\n');
+      return { line, fromBuildContext, sourcesAreFiles, sources, stageAfterCopy };
+    })
+    .filter((copy) => copy.fromBuildContext);
 
 /** The config default for HIBP_CACHE_MAX_BYTES — one worker's full L1 cache. */
 const HIBP_CACHE_MAX_BYTES_DEFAULT = 67_108_864; // 64 MiB
@@ -657,10 +701,15 @@ describe('Docker deployment', () => {
       expect(bootstrap?.cap_add).toBeUndefined();
       expect(bootstrap?.read_only).toBe(true);
 
-      // Everything it writes goes to a tmpfs owned by its non-root user: npm's cache
-      // (relocated off the now read-only $HOME) and the log directory @hiprax/logger
-      // mkdirs at module scope from cwd=/app/packages/server.
-      expect(bootstrap?.environment?.['npm_config_cache']).toMatch(/^\/tmp\//);
+      // Everything it writes goes to a tmpfs owned by its non-root user: the log
+      // directory @hiprax/logger mkdirs at module scope from
+      // cwd=/app/packages/server, and a general-purpose /tmp.
+      //
+      // `npm_config_cache` is deliberately GONE, and asserted gone: the image
+      // ships no npm any more, so an env var pointing npm's cache at a tmpfs
+      // describes a tool that is not there. Leaving it would read as though the
+      // package manager were still expected.
+      expect(bootstrap?.environment?.['npm_config_cache']).toBeUndefined();
       expect(tmpfsOptions(bootstrap, '/tmp')).toContain('uid=1000');
       expect(tmpfsOptions(bootstrap, '/app/packages/server/logs')).toContain('uid=1000');
     });
@@ -670,8 +719,9 @@ describe('Docker deployment', () => {
     });
 
     it('owns a writable log directory before dropping to the non-root user', () => {
-      // `npm run <script> -w packages/server` runs with cwd = /app/packages/server,
-      // and the script imports src/config, which calls createLogger() at MODULE
+      // The bootstrap runs with cwd = /app/packages/server (an explicit WORKDIR
+      // now; it used to be npm's `-w` doing it implicitly), and the script
+      // imports src/config, which calls createLogger() at MODULE
       // SCOPE. @hiprax/logger eagerly mkdirs `<cwd>/logs` and THROWS if it cannot —
       // and /app/packages/server is root-owned (COPY runs as root), so uid 1000
       // gets EACCES, the bootstrap exits non-zero, and the app's
@@ -1029,6 +1079,114 @@ describe('Docker deployment', () => {
       );
     });
 
+    it('never lets the builder umask decide what the runtime user can read', () => {
+      // The same defect as the two nginx tests above, in the node stages, and it
+      // was live: measured on the images this repository built, `/app/package.json`
+      // arrived `-rw-------` root-owned, so `hvault-app` exited 1 at launch with
+      //   Cannot find package '/app/node_modules/@hvault/shared/index.js'
+      // (Node reads a workspace's package.json to resolve it) and
+      // `hvault-bootstrap` exited 1 with
+      //   npm error EACCES ... open '/app/package.json'
+      // The app gates on `hvault-bootstrap` completing successfully, so the whole
+      // stack stayed down — on any checkout with a restrictive umask, and on no
+      // other. The image gate cannot see it: it builds and scans these images
+      // without ever running one.
+      //
+      // Two shapes, opposite treatments, both asserted:
+      //   * a FILE copy carries `--chmod=`;
+      //   * a DIRECTORY copy is normalised by a following `chmod -R a+rX,go-w`, NEVER
+      //     by `--chmod`, which would apply one mode to files and directories
+      //     alike and strip the traversal bit every directory needs.
+      const fileCopies = contextCopyStatements.filter((copy) => copy.sourcesAreFiles);
+      const dirCopies = contextCopyStatements.filter((copy) => !copy.sourcesAreFiles);
+
+      expect(
+        fileCopies.filter((copy) => !/--chmod=/.test(copy.line)).map((copy) => copy.line),
+        'build-context FILE copy with no explicit mode',
+      ).toEqual([]);
+
+      // A rule with no subjects cannot fail. Both sides are pinned so a rename
+      // that empties either list is a failure rather than a silent pass.
+      expect(fileCopies.length).toBeGreaterThanOrEqual(10);
+      expect(dirCopies.length).toBeGreaterThanOrEqual(4);
+
+      const normalised = dirCopies.filter((copy) =>
+        copy.sources.every((source) => {
+          // `COPY . .` copies the whole context; what has to be readable at
+          // runtime is the source tree and the manifests it resolves through.
+          const target = source === '.' ? 'packages' : source;
+          // Scoped to the REST OF THE COPY'S OWN STAGE, not the whole file. An
+          // unscoped search passes when any stage anywhere happens to chmod a
+          // path with a matching name — `\bpackages\b` matches inside
+          // `packages/shared`, so one stage's normalisation would vouch for
+          // another's. It must also come AFTER the copy: a chmod that ran first
+          // is undone by the copy it was supposed to fix.
+          return new RegExp(
+            `chmod -R a\\+rX[^\\n]*\\b${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+          ).test(copy.stageAfterCopy);
+        }),
+      );
+      expect(
+        dirCopies.filter((copy) => !normalised.includes(copy)).map((copy) => copy.line),
+        'build-context DIRECTORY copy with no `chmod -R a+rX,go-w` normalising it',
+      ).toEqual([]);
+
+      // And the directory form is never attempted with --chmod, which is the
+      // trap the next assertion is about.
+      expect(dirCopies.filter((copy) => /--chmod=/.test(copy.line)).map((c) => c.line)).toEqual([]);
+    });
+
+    it('creates packages/ before the mode-setting manifest copies, or it inherits 0644', () => {
+      // The other half of the trap, and it is not hypothetical: the first attempt
+      // at the fix above created `/app/packages` as `drw-r--r--`, because
+      // `COPY --chmod=0644 packages/shared/package.json ./packages/shared/` into a
+      // path that does not exist yet makes BuildKit create BOTH parents with that
+      // mode. uid 1000 then cannot traverse into `packages` at all and every file
+      // below it is EACCES — while root still sees them as world-readable, which
+      // is why it survives a casual `docker run` as root.
+      for (const stage of ['deps', 'prod-deps', 'development']) {
+        const start = dockerfile.indexOf(`AS ${stage}\n`);
+        expect(start, `stage ${stage} must exist`).toBeGreaterThan(-1);
+        const body = dockerfile.slice(start, dockerfile.indexOf('\nFROM ', start + 1));
+        expect(body, `${stage} must mkdir its package directories first`).toMatch(
+          /RUN mkdir -p packages\/[\s\S]*COPY --chmod=0644 packages\/\S+\/package\.json/,
+        );
+      }
+    });
+
+    it('ships no package manager in the one-shot bootstrap image', () => {
+      // npm was installed there solely so `npm run create-indexes -w` worked, and
+      // npm's own BUNDLED tree then became the stack's largest source of Trivy
+      // findings — undici, brace-expansion twice, ip-address — none reachable in a
+      // one-shot on an egress-less network, every one needing an argued exception.
+      // The script is invoked through its own binary instead, exactly as the `app`
+      // stage already does, which removes the class rather than accepting it again.
+      const start = dockerfile.indexOf('AS bootstrap\n');
+      expect(start).toBeGreaterThan(-1);
+      const stage = dockerfile.slice(start, dockerfile.indexOf('\nFROM ', start + 1));
+      // Comments are stripped before the negative assertion: the stage's own
+      // docblock has to NAME the install it no longer performs in order to
+      // explain why, and a naive match on the raw text is satisfied by that
+      // explanation — a rule that fails on its own rationale.
+      const directives = stage
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n');
+      expect(directives).not.toMatch(/npm install -g/);
+      // The positive assertions read `directives` too, not the raw stage text.
+      // Reading the raw text would let a comment QUOTING one of these lines
+      // satisfy it — the same trap in the opposite direction, and the reason the
+      // test this one replaced had stopped meaning anything.
+      expect(directives).toMatch(
+        /RUN rm -rf \/usr\/local\/lib\/node_modules\/npm \/usr\/local\/bin\/npm \/usr\/local\/bin\/npx/,
+      );
+      // The cwd the script's relative path and @hiprax/logger's `<cwd>/logs`
+      // mkdir both depend on, followed by the direct invocation.
+      expect(directives).toMatch(
+        /WORKDIR \/app\/packages\/server\nCMD \["\/app\/node_modules\/\.bin\/tsx", "scripts\/create-indexes\.ts"\]/,
+      );
+    });
+
     it('pins the node base image to an explicit Alpine minor, not the floating tag', () => {
       // The floating `node:24-alpine` tag rolled onto Alpine 3.24, whose musl
       // userspace SIGSEGVs npm at process launch under the WSL2 kernel used for
@@ -1044,29 +1202,31 @@ describe('Docker deployment', () => {
       expect(baseLine?.[1]).toMatch(/^node:24-alpine\d+\.\d+$/);
     });
 
-    it('mitigates the npm bundled-undici HIGH in the node images', () => {
-      // The Alpine base ships npm bundling a vulnerable undici (CVE-2026-12151).
-      // The app runtime executes `node` directly and never uses npm, so it removes
-      // npm entirely; the bootstrap runs `npm run create-indexes`, so it upgrades
-      // npm to a build bundling a patched undici. Dropping either reopens the
-      // Trivy gate on that image.
-      const bootstrapStage = dockerfile.slice(
-        dockerfile.indexOf('FROM build-server AS bootstrap'),
-        dockerfile.indexOf('FROM base AS app'),
-      );
-      expect(bootstrapStage).toMatch(/npm install -g npm@\d+/);
-      // ...and that upgrade must be PINNED to a major, never a floating `@latest`.
-      // This one-shot is load-bearing (the app gates on
-      // `service_completed_successfully`), so a future npm major that changed
-      // `npm run -w` behavior would take the whole stack down at DEPLOY time —
-      // which this gate cannot catch, since it builds and scans the image but
-      // never runs create-indexes against a live Mongo.
-      expect(bootstrapStage).not.toMatch(/npm install -g npm@latest/);
-
-      const appStage = dockerfile.slice(
-        dockerfile.indexOf('FROM base AS app'),
-        dockerfile.indexOf('FROM build-client AS web-root'),
-      );
+    it('removes npm from the app runtime, which executes node directly', () => {
+      // The Alpine base ships npm bundling advisories Trivy flags as fixable
+      // HIGHs — undici (CVE-2026-12151) first, then brace-expansion and
+      // ip-address — inside npm's OWN dependency tree, where this project's root
+      // `overrides` cannot reach. The app launches via `node` and never invokes
+      // npm, so a package manager here is pure attack surface.
+      //
+      // This test used to have a second half asserting the BOOTSTRAP stage
+      // upgraded npm instead of removing it. That half is gone because the
+      // premise is: the bootstrap no longer ships npm either, and the assertion
+      // that remained would have been satisfied by the comment explaining its own
+      // removal — the exact trap the comment-stripping in
+      // 'ships no package manager in the one-shot bootstrap image' guards
+      // against. The bootstrap's half of this rule lives in that test now.
+      // Comment-stripped, like its sibling: an assertion read against raw stage
+      // text can be satisfied by a comment quoting the very line it is looking
+      // for, which is how the test this one replaced stopped meaning anything.
+      const appStage = dockerfile
+        .slice(
+          dockerfile.indexOf('FROM base AS app'),
+          dockerfile.indexOf('FROM build-client AS web-root'),
+        )
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n');
       expect(appStage).toMatch(/rm -rf \/usr\/local\/lib\/node_modules\/npm/);
     });
   });

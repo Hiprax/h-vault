@@ -365,9 +365,31 @@ describe('decryptData refuses anything that is not exactly what was encrypted', 
         const first = await cryptoService.encryptData(plaintext, vaultKey);
         const second = await cryptoService.encryptData(plaintext, vaultKey);
 
-        await expect(
-          cryptoService.decryptData(first.encrypted, second.iv, first.tag, vaultKey),
-        ).rejects.toThrow();
+        // The same capture-and-inspect shape as the two properties above, and
+        // for the same reason: a bare `rejects.toThrow()` is satisfied by ANY
+        // rejection, including a `TypeError` raised by a typo in this test, so
+        // it cannot tell "the tag check failed" from "the call does not exist".
+        // `decryptData` does not wrap, so the GCM failure surfaces as WebCrypto's
+        // own `OperationError`, exactly as it does for a wrong key.
+        let resolved: string | undefined;
+        let thrown: unknown;
+        try {
+          resolved = await cryptoService.decryptData(
+            first.encrypted,
+            second.iv,
+            first.tag,
+            vaultKey,
+          );
+        } catch (error) {
+          thrown = error;
+        }
+
+        expect(
+          resolved,
+          `${propertyBanner()} — a mismatched IV produced plaintext`,
+        ).toBeUndefined();
+        expect(thrown, propertyBanner()).toBeInstanceOf(Error);
+        expect((thrown as Error).name, propertyBanner()).toBe('OperationError');
       }),
       propertyRun({ numRuns: CRYPTO_RUNS }),
     );

@@ -39,13 +39,21 @@ ENV MONGOMS_DISABLE_POSTINSTALL=1
 # -----------------------------------------------------------------------------
 FROM base AS development
 ENV NODE_ENV=development
-COPY package.json package-lock.json* ./
-COPY packages/shared/package.json ./packages/shared/
-COPY packages/server/package.json ./packages/server/
-COPY packages/client/package.json ./packages/client/
+# Same directory-mode trap as the `deps` stage below.
+RUN mkdir -p packages/shared packages/server packages/client
+COPY --chmod=0644 package.json package-lock.json* ./
+COPY --chmod=0644 packages/shared/package.json ./packages/shared/
+COPY --chmod=0644 packages/server/package.json ./packages/server/
+COPY --chmod=0644 packages/client/package.json ./packages/client/
 RUN npm ci && npm cache clean --force
 COPY . .
-RUN npm run build:shared
+# Same host-mode normalisation as the build stages. This image runs as root
+# today, so it is not broken by a 0600 checkout — but it is one `USER` directive
+# away from being, and a dev image that only works for the person who built it is
+# the same defect wearing a different hat.
+# One RUN, not two: hadolint's DL3059 counts consecutive RUN instructions, and
+# the config gate ratchets its below-error findings downward.
+RUN chmod -R a+rX,go-w package.json tsconfig.base.json packages && npm run build:shared
 CMD ["npm", "run", "dev"]
 
 # -----------------------------------------------------------------------------
@@ -66,11 +74,51 @@ CMD ["npm", "run", "dev"]
 #     hash-wasm. Optional dependencies are still INSTALLED (they carry the
 #     platform binaries for Rolldown, esbuild and Tailwind's oxide, which the
 #     client build and `tsx` need); only their install scripts are skipped.
+#
+# -----------------------------------------------------------------------------
+# HOST FILE MODES MUST NOT ENTER THE IMAGE — the rule for every stage below.
+# -----------------------------------------------------------------------------
+#
+# `COPY` PRESERVES the source file's mode. On a checkout created with a
+# restrictive umask — which this one is, at 0600 — every file copied from the
+# build context lands root-owned and unreadable by anyone else, and both runtime
+# images drop to `USER node` (uid 1000). Measured on the images this repository
+# builds today: `/app/package.json` arrived `-rw-------`, so `hvault-app` died at
+# launch with "Cannot find package '/app/node_modules/@hvault/shared/index.js'"
+# (Node cannot read a workspace's package.json to resolve it) and
+# `hvault-bootstrap` died with `npm error EACCES ... open '/app/package.json'`.
+# The app gates on the bootstrap completing, so the whole stack stays down — and
+# no gate sees it, because the image gate builds and scans the images without
+# ever running one.
+#
+# Two shapes, and they are not interchangeable:
+#   * a FILE copy takes `--chmod=0644` directly;
+#   * a DIRECTORY copy is normalised afterwards with `chmod -R a+rX,go-w`, never with
+#     `--chmod`. `--chmod` applies ONE mode to files and directories alike, so
+#     `--chmod=0644` on a tree strips the execute bit every directory needs and
+#     reproduces the `dr--r--r--` EACCES trap docker/mongo.Dockerfile:43-49
+#     documents. `a+rX,go-w` adds read for everyone and execute only where it
+#     already applies (directories, and files that were already executable), then
+#     removes group and other WRITE — because `a+rX` alone never takes anything
+#     away, so a `umask 000` host would ship a world-writable source tree instead
+#     of an unreadable one. The mode is then decided by this file in both
+#     directions, which is what "hermetic" has to mean.
+#
+# `docker-hardening.test.ts` asserts this statically, so the class cannot return.
 FROM base AS deps
-COPY package.json package-lock.json* ./
-COPY packages/shared/package.json ./packages/shared/
-COPY packages/server/package.json ./packages/server/
-COPY packages/client/package.json ./packages/client/
+# The parent directories are created FIRST, and that is not tidiness.
+# `COPY --chmod=0644 packages/shared/package.json ./packages/shared/` into a
+# directory that does not exist yet makes BuildKit create `packages` and
+# `packages/shared` WITH THAT MODE — `drw-r--r--`, no execute bit, so uid 1000
+# cannot traverse into it and every path below is EACCES. That is the exact trap
+# docker/mongo.Dockerfile:43-49 records, and it was reproduced here on the first
+# attempt at this fix. `mkdir -p` leaves them 0755 and the COPY then sets only
+# the file's mode.
+RUN mkdir -p packages/shared packages/server packages/client
+COPY --chmod=0644 package.json package-lock.json* ./
+COPY --chmod=0644 packages/shared/package.json ./packages/shared/
+COPY --chmod=0644 packages/server/package.json ./packages/server/
+COPY --chmod=0644 packages/client/package.json ./packages/client/
 RUN npm ci --ignore-scripts && npm cache clean --force
 
 # -----------------------------------------------------------------------------
@@ -84,9 +132,11 @@ RUN npm ci --ignore-scripts && npm cache clean --force
 # has an install script worth running anyway: the only native module in play is
 # @hiprax/crypto's optional `argon2`, which --omit=optional already excludes.
 FROM base AS prod-deps
-COPY package.json package-lock.json* ./
-COPY packages/shared/package.json ./packages/shared/
-COPY packages/server/package.json ./packages/server/
+# Same directory-mode trap as the `deps` stage above.
+RUN mkdir -p packages/shared packages/server
+COPY --chmod=0644 package.json package-lock.json* ./
+COPY --chmod=0644 packages/shared/package.json ./packages/shared/
+COPY --chmod=0644 packages/server/package.json ./packages/server/
 RUN npm ci --workspace=packages/shared --workspace=packages/server \
       --omit=dev --omit=optional --ignore-scripts \
  && npm cache clean --force
@@ -95,17 +145,17 @@ RUN npm ci --workspace=packages/shared --workspace=packages/server \
 # build-shared / build-server / build-client
 # -----------------------------------------------------------------------------
 FROM deps AS build-shared
-COPY tsconfig.base.json ./
+COPY --chmod=0644 tsconfig.base.json ./
 COPY packages/shared ./packages/shared
-RUN npm run build -w packages/shared
+RUN chmod -R a+rX,go-w packages/shared && npm run build -w packages/shared
 
 FROM build-shared AS build-server
 COPY packages/server ./packages/server
-RUN npm run build -w packages/server
+RUN chmod -R a+rX,go-w packages/server && npm run build -w packages/server
 
 FROM build-shared AS build-client
 COPY packages/client ./packages/client
-RUN npm run build -w packages/client
+RUN chmod -R a+rX,go-w packages/client && npm run build -w packages/client
 
 # -----------------------------------------------------------------------------
 # bootstrap — one-shot MongoDB index creation, then exits
@@ -127,24 +177,28 @@ RUN npm run build -w packages/client
 FROM build-server AS bootstrap
 ENV NODE_ENV=production
 
-# The bootstrap runs `npm run create-indexes` (below), so it genuinely needs npm
-# at runtime. The Alpine base ships npm bundling a vulnerable undici (Trivy
-# fixable HIGH, CVE-2026-12151 — the v6 branch is only patched at 6.27.0, and the
-# base's npm 11 bundles 6.26.0). Upgrade npm while still root, before the drop to
-# the node user. `npm run <script> -w` is an explicit named-script invocation (not
-# an install lifecycle hook), so it keeps the same cwd (/app/packages/server) and
-# the log-directory reasoning below stays intact.
+# THIS IMAGE SHIPS NO PACKAGE MANAGER.
 #
-# The major is PINNED rather than `@latest`, deliberately. This one-shot is
-# load-bearing: the app gates on `service_completed_successfully`, so if
-# create-indexes ever fails the whole stack stays down. A floating `@latest` could
-# pull a future npm MAJOR that changes `npm run -w` behavior, and that would break
-# at DEPLOY time — which the build + Trivy gate cannot catch, because it builds and
-# scans this image but never runs create-indexes against a live Mongo. Pinning the
-# major removes that un-catchable risk. Patches inside 12.x still flow (npm has
-# regressed here before, shipping a vulnerable undici transitively via node-gyp),
-# and a bundled-undici regression within the line IS caught by the Trivy gate.
-RUN npm install -g npm@12 && npm cache clean --force
+# It used to `npm install -g npm@12` purely so that `npm run create-indexes -w
+# packages/server` worked at runtime, and npm's own BUNDLED dependency tree then
+# became the largest source of findings in the whole stack: undici
+# (CVE-2026-12151), brace-expansion twice (CVE-2026-14257, then CVE-2026-69152)
+# and ip-address (CVE-2026-69192, inconsistent parsing leading to SSRF and a
+# trust-boundary bypass). None of them is reachable here — this one-shot runs a
+# fixed command against the local database and exits, on the internal `data`
+# network with no egress and no published port — but each one had to be argued
+# about in scripts/ci/trivy-baseline.json, and npm ships no release that clears
+# them: `npm@12` already resolves to the newest 12.x, and the vulnerable copies
+# live under /usr/local/lib/node_modules/npm/node_modules, which this project's
+# root `overrides` provably cannot reach.
+#
+# So the script is invoked through its own binary instead, exactly as the `app`
+# stage does and for the same reason. `npm run create-indexes -w packages/server`
+# was only ever an indirection for `tsx scripts/create-indexes.ts` with
+# cwd = /app/packages/server; the WORKDIR below supplies that cwd, which is
+# load-bearing twice over — the script's own relative path, and @hiprax/logger's
+# eager `<cwd>/logs` mkdir described below.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # The log directory MUST exist and be owned by `node` before the drop to that user.
 # This is the difference between a stack that comes up on a fresh clone and one
@@ -165,7 +219,10 @@ RUN npm install -g npm@12 && npm cache clean --force
 RUN mkdir -p /app/packages/server/logs && chown -R node:node /app/packages/server/logs
 
 USER node
-CMD ["npm", "run", "create-indexes", "-w", "packages/server"]
+# The cwd every line of the comment above depends on. Set as its own directive
+# rather than assumed, so a reader does not have to trace it back to `base`.
+WORKDIR /app/packages/server
+CMD ["/app/node_modules/.bin/tsx", "scripts/create-indexes.ts"]
 
 # -----------------------------------------------------------------------------
 # app — production API server (also serves the SPA when hit directly)

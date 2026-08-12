@@ -846,6 +846,131 @@ describe('Folder Routes', () => {
       const deletedTarget = await Folder.findById(target._id);
       expect(deletedTarget).toBeNull();
     });
+
+    it('clears a folderId the non-atomic delete left pointing at the deleted folder', async () => {
+      // The window the post-delete sweep exists for, and the only way to reach
+      // it: on standalone MongoDB the item update and the folder delete are two
+      // separate writes, so a failure between them leaves a LIVE item pointing
+      // at a folder that no longer exists. Every arm of the handler that
+      // SUCCEEDS leaves nothing behind — `action=delete` trashes the items,
+      // `action=move` re-points or unsets them — so the sweep's own branch is
+      // unreachable unless that first write is made not to happen.
+      //
+      // Reproduced by stubbing exactly ONE call: the move inside the handler.
+      // The sweep that follows is the real `updateMany` against the real
+      // database, which is what this test is about.
+      const folder = await apiCreateFolder({ encryptedName: 'orphan-window' });
+      const live = await VaultItem.create({
+        ...sampleVaultItem({ folderId: folder._id, encryptedName: 'live-item' }),
+        userId: user.id,
+      });
+      // A trashed item in the same folder, which the sweep must NOT touch: a
+      // trashed item legitimately keeps the folder it was trashed from, and
+      // that is the whole reason the sweep filters on `deletedAt: null`.
+      const trashed = await VaultItem.create({
+        ...sampleVaultItem({ folderId: folder._id, encryptedName: 'trashed-item' }),
+        userId: user.id,
+        deletedAt: new Date(),
+      });
+
+      const updateMany = vi.spyOn(VaultItem, 'updateMany').mockReturnValueOnce(
+        Promise.resolve({
+          acknowledged: true,
+          matchedCount: 0,
+          modifiedCount: 0,
+          upsertedCount: 0,
+          upsertedId: null,
+        }) as never,
+      );
+
+      let res;
+      let updateManyCalls = 0;
+      try {
+        res = await agent
+          .delete(`${BASE}/${folder._id}?action=move`)
+          .set('Authorization', authHeader(user.accessToken))
+          .set('Cookie', csrf.cookie)
+          .set('x-csrf-token', csrf.token);
+      } finally {
+        // Read the count BEFORE restoring: `mockRestore` clears the recorded
+        // calls as well as putting the original method back, so a count taken
+        // afterwards is always zero — which reads exactly like "the sweep never
+        // ran" and would make this assertion permanently, misleadingly red.
+        updateManyCalls = updateMany.mock.calls.length;
+        updateMany.mockRestore();
+      }
+
+      expect(res.status).toBe(200);
+      // Exactly two calls: the stubbed move, then the sweep. One call would
+      // mean the sweep is gone; three would mean something else started
+      // writing to items on this path.
+      expect(updateManyCalls).toBe(2);
+
+      // Read back with no polling and no waiting. That is the assertion: the
+      // sweep completed BEFORE the caller was told the folder was gone. It
+      // fails if the cleanup goes back to being a floating promise, because
+      // then whether it has run by now is a race.
+      const sweptLive = await VaultItem.findById(live._id).lean();
+      expect(sweptLive, 'the live item must survive the folder delete').not.toBeNull();
+      expect(sweptLive!.folderId, 'the orphaned folderId must be cleared').toBeUndefined();
+      expect(sweptLive!.deletedAt ?? null, 'action=move must not trash the item').toBeNull();
+
+      const sweptTrashed = await VaultItem.findById(trashed._id).lean();
+      expect(sweptTrashed, 'the trashed item must survive too').not.toBeNull();
+      expect(
+        sweptTrashed!.folderId?.toString(),
+        'a trashed item keeps the folder it was trashed from',
+      ).toBe(String(folder._id));
+
+      const deletedFolder = await Folder.findById(folder._id);
+      expect(deletedFolder).toBeNull();
+    });
+
+    it('still reports success when the orphan sweep itself fails', async () => {
+      // The sweep is compensation, not the operation: the folder the caller
+      // asked to delete is already gone by the time it runs, so a failure there
+      // must not be reported as a failed delete. This is the contract that
+      // breaks the moment someone awaits the sweep without a `try`, which is
+      // the easiest mistake to make in this handler.
+      const folder = await apiCreateFolder({ encryptedName: 'sweep-fails' });
+
+      // Only the SECOND call is stubbed. The first is the handler's own move,
+      // which must still run for real: rejecting that one is a genuine failure
+      // of the operation the caller asked for, and it correctly answers 500 —
+      // a different contract from the one under test here.
+      const realUpdateMany = VaultItem.updateMany.bind(VaultItem);
+      const updateMany = vi
+        .spyOn(VaultItem, 'updateMany')
+        .mockImplementationOnce(((...args: unknown[]) =>
+          (realUpdateMany as (...inner: unknown[]) => unknown)(...args)) as never)
+        .mockImplementationOnce(
+          () => Promise.reject(new Error('write concern error: no majority available')) as never,
+        );
+
+      let res;
+      try {
+        res = await agent
+          .delete(`${BASE}/${folder._id}?action=move`)
+          .set('Authorization', authHeader(user.accessToken))
+          .set('Cookie', csrf.cookie)
+          .set('x-csrf-token', csrf.token);
+      } finally {
+        updateMany.mockRestore();
+      }
+
+      // A 200, not a 500 — and specifically not the redacted 5xx body the error
+      // middleware would produce, which is what a rethrow would look like.
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.success).toBe(true);
+
+      // …and the delete really happened, so the success is not a lie either.
+      expect(await Folder.findById(folder._id)).toBeNull();
+      // The audit row still names the operation: the handler carried on past
+      // the failed sweep rather than short-circuiting.
+      const audit = await AuditLog.findOne({ userId: user.id, action: 'folder_delete' }).lean();
+      expect(audit, 'the delete must still be audited').not.toBeNull();
+      expect(audit!.metadata).toMatchObject({ folderId: String(folder._id) });
+    });
   });
 
   // ── 6. Auth Guards ──────────────────────────────────────────────────
