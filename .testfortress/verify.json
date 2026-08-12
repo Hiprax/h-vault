@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "runner": "npm run",
+  "reportDir": ".testfortress/reports",
+  "env": {
+    "TZ": "UTC",
+    "LANG": "C.UTF-8",
+    "SEED": "1337"
+  },
+  "tiers": {
+    "0": "verify:fast",
+    "1": "verify",
+    "2": "verify:full"
+  },
+  "tasks": {
+    "verify:fast": {
+      "cmd": "npm run verify:fast",
+      "tier": 0,
+      "composite": true,
+      "gate": "every T0 task passes",
+      "report": "summary.json"
+    },
+    "verify": {
+      "cmd": "npm run ci",
+      "tier": 1,
+      "composite": true,
+      "gate": "every T0 + T1 task passes",
+      "report": "summary.json"
+    },
+    "verify:full": {
+      "cmd": "npm run verify:full",
+      "tier": 2,
+      "composite": true,
+      "gate": "every T0 + T1 + T2 task passes",
+      "report": "summary.json"
+    },
+    "engines": {
+      "cmd": "node scripts/ci/local-ci.mjs --only=engines",
+      "tier": 0,
+      "gate": "the running Node satisfies engines.node",
+      "report": "engines.log"
+    },
+    "audit:secrets": {
+      "cmd": "node scripts/ci/secret-scan.mjs --report",
+      "tier": 0,
+      "gate": "0 findings across every tracked file",
+      "report": "secrets.json"
+    },
+    "lint": {
+      "cmd": "npm run lint:report",
+      "tier": 0,
+      "gate": "0 errors and 0 warnings",
+      "report": "eslint.sarif"
+    },
+    "format:check": {
+      "cmd": "npm run format:check",
+      "tier": 0,
+      "gate": "0 files differ from Prettier's output",
+      "report": "format.log"
+    },
+    "typecheck": {
+      "cmd": "npm run type-check",
+      "tier": 0,
+      "gate": "0 type errors across all 4 tsc projects",
+      "report": "tsc.log",
+      "requires": ["build:shared"]
+    },
+    "build": {
+      "cmd": "npm run build",
+      "tier": 1,
+      "gate": "shared, server and client build with exit 0",
+      "report": "build.log"
+    },
+    "test:unit": {
+      "cmd": "npm run test:unit",
+      "tier": 1,
+      "gate": "all pass; shared and client coverage thresholds hold",
+      "report": ["junit-shared.xml", "junit-client.xml"],
+      "coverage": [
+        "packages/shared/coverage/cobertura-coverage.xml",
+        "packages/client/coverage/cobertura-coverage.xml"
+      ],
+      "requires": ["build:shared"]
+    },
+    "test:integration": {
+      "cmd": "npm run test:integration",
+      "tier": 1,
+      "gate": "all pass against a real mongod; server coverage thresholds hold",
+      "report": "junit-server.xml",
+      "coverage": ["packages/server/coverage/cobertura-coverage.xml"],
+      "requires": ["build:shared"]
+    },
+    "audit:deps": {
+      "cmd": "npm run audit:prod",
+      "tier": 1,
+      "gate": "0 production advisories at moderate or above",
+      "report": "deps.log"
+    },
+    "test:e2e": {
+      "cmd": "npm run test:e2e",
+      "tier": 1,
+      "gate": "every Playwright spec passes",
+      "report": "junit-e2e.xml",
+      "requires": ["build:shared"]
+    },
+    "audit:image": {
+      "cmd": "npm run ci:docker",
+      "tier": 1,
+      "gate": "all 4 images build; nginx -t passes; compose config resolves; 0 fixable HIGH/CRITICAL",
+      "report": "docker.log",
+      "requires": ["docker"]
+    },
+    "audit:sast": {
+      "cmd": "npm run ci:sast",
+      "tier": 1,
+      "gate": "0 new error-severity CodeQL findings",
+      "report": "sast.log",
+      "canSkip": true
+    }
+  },
+  "gaps": [],
+  "deferred": {
+    "test:api": "No separable command exists today. Every supertest suite lives beside the unit suites in packages/server/tests/*.test.ts, so the only ways to register it would be a committed test filter (a non-ledgerable TEST-FILTER under the integrity doctrine) or a second, duplicate invocation of the 125-second server suite that would report false independence. test:integration runs those suites today. Register test:api once the API suites move under their own directory."
+  }
+}

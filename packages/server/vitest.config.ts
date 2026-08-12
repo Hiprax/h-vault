@@ -15,6 +15,18 @@ const coverageDir = process.env.VITEST_COVERAGE_DIR
   ? path.resolve(process.env.VITEST_COVERAGE_DIR, 'server')
   : path.resolve(__dirname, 'coverage');
 
+// The gate surface's report directory (`.testfortress/reports`), resolved from
+// this file rather than from `process.cwd()` so the JUnit report lands in the
+// same place whether the suite is run from the package or from the repo root.
+// The tuple is annotated rather than inferred: an unannotated `['junit', {…}]`
+// inside an array literal widens to `(string | {…})[]`, which does not match
+// vitest's reporter tuple type — and the resulting error is reported against
+// an unrelated property further down the config.
+const junitReporter: ['junit', { outputFile: string }] = [
+  'junit',
+  { outputFile: path.resolve(__dirname, '../../.testfortress/reports/junit-server.xml') },
+];
+
 export default defineConfig({
   test: {
     globals: true,
@@ -23,12 +35,22 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     pool: 'forks',
-    forks: {
-      singleFork: true,
-    },
+    // There is deliberately no `singleFork` here. The key this file used to
+    // carry — `forks: { singleFork: true }` — is not a Vitest 4 option at all
+    // (neither `test.forks` nor `test.poolOptions` exists in this version), so it
+    // was inert: two test files run in two different worker processes, measured.
+    // The suite has therefore been running file-parallel and green all along, and
+    // the type checker now rejects the key rather than accepting a setting that
+    // does nothing. Do not "restore" it as `fileParallelism: false`: pinning the
+    // suite to one worker hides shared state instead of fixing it.
+    // `default` keeps the human output; `junit` is what the pipeline reads. A
+    // suite whose only output is a terminal cannot be ratcheted or audited.
+    reporters: ['default', junitReporter],
     coverage: {
+      // `cobertura` sits beside lcov because patch-coverage tooling reads
+      // Cobertura XML and nothing here should have to re-derive it from lcov.
       provider: 'v8',
-      reporter: ['text', 'lcov'],
+      reporter: ['text', 'lcov', 'cobertura'],
       reportsDirectory: coverageDir,
       include: ['src/**/*.ts'],
       // Only genuine process entry points are excluded. Every other module —

@@ -18,6 +18,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { captureExe, repoRoot } from './lib/proc.mjs';
+import { writeJsonReport } from './lib/reports.mjs';
 import { color, symbol } from './lib/ui.mjs';
 
 const MAX_FILE_BYTES = 1024 * 1024;
@@ -90,6 +91,10 @@ function isBinary(buffer) {
 }
 
 const staged = process.argv.includes('--staged');
+// `--report` writes the findings to `.testfortress/reports/secrets.json` as well
+// as printing them. The pipeline passes it; the pre-commit hook does not, since
+// a hook run is about one commit rather than about the tree's recorded state.
+const writeReport = process.argv.includes('--report');
 
 function filesToScan() {
   const args = staged
@@ -158,6 +163,15 @@ for (const file of filesToScan()) {
       });
       return;
     }
+  });
+}
+
+if (writeReport) {
+  writeJsonReport('secrets.json', {
+    scannedAt: new Date().toISOString(),
+    mode: staged ? 'staged' : 'tracked',
+    rules: RULES.map((rule) => rule.id),
+    findings,
   });
 }
 

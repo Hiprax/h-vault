@@ -19,6 +19,7 @@
  * enforces exactly that.
  */
 import { spawn, spawnSync } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -82,26 +83,72 @@ export function resolveSpawn(command, args, shell) {
   return { command, args };
 }
 
+/** Strips ANSI so a transcript on disk is text a parser can read. */
+const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, 'g');
+
 /**
  * Runs a command, streaming stdout/stderr straight to the terminal.
  *
+ * With `logFile` set it TEES instead: the child's output still reaches the
+ * terminal (or `sink`, which the pipeline points at stderr in `--json` mode so
+ * stdout carries nothing but the JSON document), and a colour-stripped copy is
+ * written to the file — that copy is the gate's report artifact.
+ *
+ * Teeing costs the child its TTY, which is why `FORCE_COLOR` is set when the
+ * destination IS a terminal: without it every tool here (vitest, eslint,
+ * prettier, playwright) would drop colour the moment the pipeline started
+ * recording, and a developer would pay for the report in readability.
+ *
  * @returns {Promise<number>} the exit code (127 when the binary is missing)
  */
-function stream(command, args, { shell = false, env = {} } = {}) {
+function stream(command, args, { shell = false, env = {}, logFile, sink } = {}) {
   return new Promise((resolve) => {
     const spawnTarget = resolveSpawn(command, args, shell);
+    const out = sink ?? process.stdout;
+    const teeing = Boolean(logFile);
+    const colorful = teeing && out.isTTY === true && !process.env['NO_COLOR'];
+
     const child = spawn(spawnTarget.command, spawnTarget.args, {
       cwd: repoRoot,
-      stdio: 'inherit',
+      stdio: teeing ? ['inherit', 'pipe', 'pipe'] : 'inherit',
       shell,
-      env: { ...process.env, ...env },
+      env: {
+        ...process.env,
+        ...(colorful ? { FORCE_COLOR: '1' } : {}),
+        ...env,
+      },
     });
+
+    const log = teeing ? createWriteStream(logFile) : null;
+    if (teeing) {
+      for (const source of [child.stdout, child.stderr]) {
+        source?.on('data', (chunk) => {
+          out.write(chunk);
+          log?.write(chunk.toString('utf8').replace(ANSI_PATTERN, ''));
+        });
+      }
+    }
+
+    let settled = false;
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
+      // Close the transcript before resolving: the caller checks immediately
+      // afterwards that the report exists, and an unflushed stream would make a
+      // gate that ran look like a gate that wrote nothing.
+      if (log)
+        log.end(() => {
+          resolve(code);
+        });
+      else resolve(code);
+    };
+
     child.on('error', () => {
-      resolve(127);
+      finish(127);
     });
     child.on('close', (code, signal) => {
       // A signal-terminated child (Ctrl-C) reports code === null.
-      resolve(code ?? (signal ? 130 : 1));
+      finish(code ?? (signal ? 130 : 1));
     });
   });
 }

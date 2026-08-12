@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **The local pipeline now has three entry points instead of one.** `npm run verify:fast` runs the fast tier only — the Node floor, the secret scan, lint, the format check and the type check, about 80 seconds — which is short enough to run before every commit. `npm run ci` is unchanged and still runs everything the pre-push hook runs. `npm run verify:full` adds the release tier. Every gate declares which tier it belongs to, and `npm run ci -- --list` now shows it.
+- **Every gate writes a machine-readable report to `.testfortress/reports/`.** The three test suites and the E2E run emit JUnit XML, coverage now includes Cobertura beside the existing lcov, ESLint emits SARIF, the secret scan emits JSON, and each gate's full transcript is saved beside them. `npm run report` collects the warning counts into `warnings.json`. The directory is regenerated on every run and is not committed.
+- **`npm run ci -- --json` prints one JSON document describing the run** — per gate: its task name, status, duration, gate criterion, report path and a one-line summary — so a tool can read a run's result instead of scraping the terminal. The same document is always written to `.testfortress/reports/summary.json`. (`npm run` prints its own banner to stdout first; use `npm run --silent ci -- --json` to pipe it.)
+- **`.testfortress/verify.json` lists every gate**: its canonical name, the command that runs it, its tier, what it must achieve, and the report it writes. The pipeline checks itself against that file on every run and refuses to run if the two disagree.
+- **A gate now declares what it needs.** The container gate says it needs Docker and the type-check and test gates say they need a built `@hvault/shared`, so a missing prerequisite is reported as "cannot run", with the command that fixes it, instead of failing as though the code were broken.
+
+### Changed
+
+- **The pipeline now runs every gate and reports all the failures, instead of stopping at the first one.** A run that would previously have told you about one broken gate at a time now tells you about all of them at once. `npm run ci -- --bail` restores the old stop-at-the-first-failure behaviour; `--continue`, which used to request the new behaviour, is now accepted and ignored, since it asks for what already happens.
+- **A failed build no longer drags the gates that depend on it into failure.** The type check, both test gates and E2E are reported as not reached, rather than each producing its own cascade of errors caused by the same broken build.
+- **The test gate is now two gates**: `test` runs the hermetic shared and client suites, `test-integration` runs the server suite against a real database. They were always run together; separating them is what lets each sit in the tier its runtime warrants. Both still run on every push.
+- **The pipeline's exit code now distinguishes a broken gate from broken code.** `1` still means a gate failed. `2` is new and means a gate could not run at all — a missing prerequisite, a misconfiguration, or a gate that passed without writing the report it promises — because "we do not know" is not the same answer as "no".
+- The E2E gate no longer overrides the reporters on the command line; the Playwright configuration now pairs the progress reporter with the JUnit report, and pins the HTML report to never open a browser.
+
 ## [0.8.0] - 2026-07-28
 
 ### Added

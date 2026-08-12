@@ -148,13 +148,29 @@ describe('local pipeline covers every job the deleted CI workflow ran', () => {
     ['build', 'ci job · Build'],
     ['lint', 'ci job · Lint'],
     ['type-check', 'ci job · Type check'],
-    ['test', 'ci job · Test'],
+    // The old `Test` job ran every workspace in one step. It is now two gates,
+    // because they belong to different tiers: `test` is the hermetic half
+    // (shared + client) and `test-integration` spawns a real mongod. BOTH must
+    // exist, or half the CI job's coverage disappears with nothing to notice.
+    ['test', 'ci job · Test (shared + client)'],
+    ['test-integration', 'ci job · Test (server)'],
     ['audit', 'ci job · npm audit'],
     ['e2e', 'e2e job'],
     ['docker', 'docker-build job (images, nginx -t, compose config, Trivy)'],
     ['sast', 'sast job (CodeQL)'],
   ])('gate "%s" stands in for the %s', (gate) => {
     expect(gateIds).toContain(gate);
+  });
+
+  it('runs every workspace suite between the two test gates', () => {
+    // Splitting the job is only safe while the two halves still add up to all
+    // three workspaces; dropping one would leave a package untested with every
+    // gate green.
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    const covered = `${pkg.scripts['test:unit']} ${pkg.scripts['test:integration']}`;
+    for (const workspace of ['packages/shared', 'packages/client', 'packages/server']) {
+      expect(covered).toContain(workspace);
+    }
   });
 
   it('adds the checks the hosted pipeline never ran', () => {
@@ -220,6 +236,7 @@ describe('local pipeline covers every job the deleted CI workflow ran', () => {
       'format',
       'type-check',
       'test',
+      'test-integration',
       'audit',
       'e2e',
       'docker',
@@ -240,6 +257,16 @@ describe('local pipeline covers every job the deleted CI workflow ran', () => {
     // Warnings were invisible in CI (`eslint .` exits 0 on them). Running
     // locally, they are cheap enough to forbid outright.
     expect(pkg.scripts['lint']).toMatch(/--max-warnings=0/);
+  });
+
+  it('exposes each tier as its own entry point', () => {
+    // `verify:fast` is the T0 subset that fits a pre-commit budget; `ci` is the
+    // T0+T1 push gate; `verify:full` adds T2. A tier with no command is a tier
+    // nobody runs.
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    expect(pkg.scripts['verify:fast']).toMatch(/--tier=0\b/);
+    expect(pkg.scripts['verify:full']).toMatch(/--tier=full\b/);
+    expect(pkg.scripts['ci']).not.toMatch(/--tier=/);
   });
 });
 

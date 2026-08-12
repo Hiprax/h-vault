@@ -41,16 +41,42 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — eleven gates including the full test suite, container builds with
+pipeline locally — twelve gates including the full test suite, container builds with
 Trivy scanning, and CodeQL — and refuses the push if any of them fail. A commit that
 reaches `main` has already passed everything.
 
+The gates are grouped into tiers by how long they take, so there is something worth
+running at every point in the loop:
+
 ```bash
+npm run verify:fast               # the fast tier (~80s): engines, secrets, lint, format, types
 npm run ci                        # everything the pre-push hook runs (15–30 min)
-npm run ci -- --list              # the gates, and what each one replaces
+npm run verify:full               # the above plus the release tier
+npm run ci -- --list              # the gates, their tiers, and what each one replaces
 npm run ci -- --only=lint,test    # a subset, while iterating
-npm run ci -- --continue          # don't stop at the first failure
+npm run ci -- --bail              # stop at the first failure instead of running them all
+npm run ci -- --json              # one JSON document describing the run
 ```
+
+The runner **aggregates by default**: it runs every selected gate and reports all the
+failures, rather than costing you a round trip per failure. A gate whose dependency
+failed is reported as not reached rather than run again to fail the same way.
+
+Exit codes carry meaning. `0` is a pass, `1` means a gate failed, and `2` means a gate
+**could not run** — a missing prerequisite, a misconfiguration, or a gate that passed
+without writing the report it promises. Treat a `2` as "we do not know yet", never as a
+soft pass.
+
+Every gate leaves a machine-readable report in `.testfortress/reports/` (JUnit XML for
+the suites, SARIF for lint, JSON for the secret scan, and each gate's transcript beside
+them). `.testfortress/verify.json` is the registry: for each gate, its canonical name,
+the command that runs it, its tier, its criterion and its report. The pipeline checks
+itself against that file on every run and refuses to start if the two disagree, so a
+gate can never quietly stop being the thing the registry says it is.
+
+`verify:fast` deliberately does not build; it consumes `packages/shared/dist` rather
+than producing it. Run `npm run build:shared` once after a clean checkout — the runner
+will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request. If a gate legitimately cannot run in
 your environment, `HVAULT_SKIP_GATES=docker,e2e git push` skips named gates — say so in

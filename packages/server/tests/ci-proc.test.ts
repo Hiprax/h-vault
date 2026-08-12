@@ -16,12 +16,13 @@ import { resolveSpawn, assertShellSafeArgs } from '../../../scripts/ci/lib/proc.
 // scripts/ci/local-ci.mjs). Every one must fold losslessly into a shell string.
 const GATE_ARGS: readonly (readonly string[])[] = [
   ['run', 'build'],
-  ['run', 'lint'],
+  ['run', 'lint:report'],
   ['run', 'format:check'],
   ['run', 'type-check'],
-  ['test'],
+  ['run', 'test:unit'],
+  ['run', 'test:integration'],
   ['run', 'audit:prod'],
-  ['run', 'test:e2e', '--', '--forbid-only', '--retries=2', '--reporter=list'],
+  ['run', 'test:e2e', '--', '--forbid-only', '--retries=2'],
 ];
 
 describe('resolveSpawn (DEP0190 shell-join)', () => {
@@ -33,8 +34,8 @@ describe('resolveSpawn (DEP0190 shell-join)', () => {
   });
 
   it('produces the same final command line Node would build for the e2e gate', () => {
-    expect(resolveSpawn('npm', GATE_ARGS[6] as string[], true).command).toBe(
-      'npm run test:e2e -- --forbid-only --retries=2 --reporter=list',
+    expect(resolveSpawn('npm', GATE_ARGS.at(-1) as string[], true).command).toBe(
+      'npm run test:e2e -- --forbid-only --retries=2',
     );
   });
 

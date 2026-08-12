@@ -21,13 +21,31 @@ import { resolveDevPort } from './packages/client/vite.config.helpers';
  */
 const CLIENT_PORT = resolveDevPort();
 const CLIENT_ORIGIN = `http://127.0.0.1:${String(CLIENT_PORT)}`;
+
+/**
+ * The gate surface's report. Deliberately RELATIVE: Playwright resolves a
+ * reporter's `outputFile` against the config's own directory, so this is already
+ * anchored to the repository root rather than to `process.cwd()` — and it must
+ * not be built from `import.meta.url`, because Playwright loads this file
+ * through a CommonJS require path (the root package.json is not `type: module`)
+ * and `import.meta` there is a syntax error that kills the whole E2E gate before
+ * a single spec runs.
+ */
+const JUNIT_REPORT = '.testfortress/reports/junit-e2e.xml';
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: 1,
-  reporter: process.env.CI ? 'github' : 'html',
+  // `junit` is unconditional: it is the report the pipeline reads, and a gate
+  // whose only output is a terminal cannot be ratcheted or audited. `list`
+  // streams progress, and the HTML report is pinned to `open: 'never'` — its
+  // default (`on-failure`) launches a browser, which hangs a git hook forever.
+  reporter: process.env.CI
+    ? [['github'], ['junit', { outputFile: JUNIT_REPORT }]]
+    : [['list'], ['html', { open: 'never' }], ['junit', { outputFile: JUNIT_REPORT }]],
   timeout: 30_000,
   expect: {
     timeout: 10_000,

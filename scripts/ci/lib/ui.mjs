@@ -28,6 +28,7 @@ export const symbol = {
   pass: unicodeOk ? '✔' : '+',
   fail: unicodeOk ? '✖' : 'x',
   skip: unicodeOk ? '─' : '-',
+  error: unicodeOk ? '⚠' : '!',
   run: unicodeOk ? '▶' : '>',
 };
 
@@ -58,7 +59,13 @@ export function warn(text) {
   console.log(color.yellow(`      ! ${text}`));
 }
 
-/** Prints the final PASS/FAIL/SKIP table. */
+/**
+ * Prints the final PASS/FAIL/ERROR/SKIP table.
+ *
+ * ERROR is its own row rather than a colour of SKIP: a gate that could not run
+ * has produced no verdict, and rendering that as "skipped" is exactly the
+ * confusion the runner's exit code 2 exists to remove.
+ */
 export function summary(results) {
   const width = Math.max(...results.map((r) => r.id.length), 10);
   console.log(`\n${color.bold('─'.repeat(width + 34))}`);
@@ -72,6 +79,10 @@ export function summary(results) {
       console.log(`  ${color.green(symbol.pass)} ${id}  ${time}`);
     } else if (result.status === 'fail') {
       console.log(`  ${color.red(symbol.fail)} ${id}  ${time}  ${color.red(result.detail ?? '')}`);
+    } else if (result.status === 'error') {
+      console.log(
+        `  ${color.red(symbol.error)} ${id}  ${time}  ${color.red(`COULD NOT RUN — ${result.detail ?? ''}`)}`,
+      );
     } else {
       console.log(
         `  ${color.yellow(symbol.skip)} ${id}  ${' '.repeat(8)}  ${color.yellow(`SKIPPED — ${result.detail ?? ''}`)}`,

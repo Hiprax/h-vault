@@ -63,6 +63,18 @@ phases.json
 PLAN.md
 plan.md
 plan-*.md
+TEST-AUDIT.md
+
+# Working notes for the hardening plan: scratch, like PLAN.md itself.
+.testfortress/phase-logs/
+
+# Local gate surface scratch output (reports are regenerated on every run).
+# The directory's CONTENTS are ignored rather than the directory itself: git
+# cannot re-include a file underneath an excluded directory, so `.gitkeep` would
+# be unreachable behind a `.testfortress/reports/` rule and a fresh clone would
+# have no directory for the runner to write into.
+.testfortress/reports/*
+!.testfortress/reports/.gitkeep
 
 # Temporary backup copies created while editing (never commit)
 *.tmp

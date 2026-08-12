@@ -1000,25 +1000,40 @@ longer appear on a push that was already broken when it left your laptop, and no
 minutes are spent discovering it.
 
 ```bash
+npm run verify:fast             # the fast tier (~80s) — cheap enough to run constantly
 npm run ci                      # every gate — exactly what pre-push runs
-npm run ci -- --list            # what each gate is, and which CI job it replaces
+npm run verify:full             # the above plus the release tier
+npm run ci -- --list            # what each gate is, its tier, and which CI job it replaces
 npm run ci -- --only=lint,test  # a subset, while iterating
-npm run ci -- --continue        # don't stop at the first failure
+npm run ci -- --bail            # stop at the first failure instead of running them all
+npm run ci -- --json            # one JSON document describing the run
 ```
 
-| Gate         | What it runs                                                                                                                           | Replaces                   |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| `engines`    | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                 | the CI Node matrix's floor |
-| `secrets`    | Every **tracked** file scanned for credential patterns                                                                                 | _new_                      |
-| `build`      | `npm run build` (shared → server → client)                                                                                             | `ci` job                   |
-| `lint`       | ESLint + `eslint-plugin-security`, `--max-warnings=0`                                                                                  | `ci` job                   |
-| `format`     | `prettier --check .`                                                                                                                   | _new_                      |
-| `type-check` | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                              | `ci` job                   |
-| `test`       | The full Vitest suite + the coverage thresholds                                                                                        | `ci` job                   |
-| `audit`      | `npm audit --audit-level=moderate --omit=dev`                                                                                          | `ci` job                   |
-| `e2e`        | Playwright (Chromium) against an auto-started stack                                                                                    | `e2e` job                  |
-| `docker`     | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below) | `docker-build` job         |
-| `sast`       | CodeQL `security-and-quality` suite                                                                                                    | `sast` job                 |
+| Gate               | Tier | What it runs                                                                                                                           | Replaces                   |
+| ------------------ | ---- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `engines`          | T0   | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                 | the CI Node matrix's floor |
+| `secrets`          | T0   | Every **tracked** file scanned for credential patterns                                                                                 | _new_                      |
+| `lint`             | T0   | ESLint + `eslint-plugin-security`, `--max-warnings=0`, emitting SARIF                                                                  | `ci` job                   |
+| `format`           | T0   | `prettier --check .`                                                                                                                   | _new_                      |
+| `type-check`       | T0   | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                              | `ci` job                   |
+| `build`            | T1   | `npm run build` (shared → server → client)                                                                                             | `ci` job                   |
+| `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                        | `ci` job                   |
+| `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                              | `ci` job                   |
+| `audit`            | T1   | `npm audit --audit-level=moderate --omit=dev`                                                                                          | `ci` job                   |
+| `e2e`              | T1   | Playwright (Chromium) against an auto-started stack                                                                                    | `e2e` job                  |
+| `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below) | `docker-build` job         |
+| `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                    | `sast` job                 |
+
+Gates run in the order above and the runner **aggregates**: every selected gate runs and every
+failure is reported, rather than the run stopping at the first one. Exit `0` is a pass, `1` means
+a gate failed, and `2` means a gate **could not run** — a missing prerequisite, a misconfiguration,
+or a gate that passed without writing the report it declares.
+
+Each gate leaves a machine-readable report in `.testfortress/reports/`: JUnit XML from every suite
+and from Playwright, Cobertura coverage beside the existing lcov, SARIF from ESLint, JSON from the
+secret scan, `summary.json` for the run, and each gate's own transcript. `.testfortress/verify.json`
+is the registry the pipeline validates itself against on every run. Nothing there is uploaded
+anywhere, and nothing there is committed.
 
 **A full run takes 15–30 minutes.** That is the deliberate trade: time spent before the push
 instead of minutes billed after it. Two escape hatches exist:
@@ -1030,8 +1045,9 @@ git push --no-verify                    # skip the hook entirely
 
 **Two gates need tools the repository cannot ship, and they behave differently on purpose:**
 
-- **Docker** must be running for the `docker` gate. If it is not, the gate **fails** — with the
-  command to skip it — rather than pretending it passed. Container hardening is not optional here.
+- **Docker** must be running for the `docker` gate. If it is not, the gate reports **COULD NOT RUN**
+  (exit 2) — with the command to skip it — rather than pretending it passed. Container hardening is not
+  optional here.
 - **CodeQL** is optional: without the CLI the `sast` gate reports **SKIPPED** (never "passed"), and
   ESLint's security rules remain the static-analysis baseline. To enable the real thing, unpack the
   bundle into `.cache/codeql` (gitignored):
@@ -1075,15 +1091,20 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 | `npm run build`                | Build all packages (shared → server → client) |
 | `npm run start`                | Start the production server                   |
 | `npm run test`                 | Every workspace's tests                       |
+| `npm run test:unit`            | The hermetic suites (shared, client)          |
+| `npm run test:integration`     | The server suite, against a real `mongod`     |
 | `npm run test:e2e`             | Playwright E2E tests                          |
 | `npm run lint`                 | ESLint, warnings are errors                   |
 | `npm run type-check`           | Type-check all packages, tests and `e2e/`     |
 | `npm run format`               | Prettier — write                              |
 | `npm run format:check`         | Prettier — verify only                        |
 | `npm run ci`                   | The whole pipeline (what `pre-push` runs)     |
-| `npm run ci:list`              | List the pipeline's gates                     |
+| `npm run verify:fast`          | The fast tier only (~80 s)                    |
+| `npm run verify:full`          | The whole pipeline plus the release tier      |
+| `npm run ci:list`              | List the pipeline's gates and their tiers     |
 | `npm run ci:docker`            | The container gate on its own                 |
 | `npm run ci:sast`              | The CodeQL gate on its own                    |
+| `npm run report`               | Collect the gates' warning counts             |
 | `npm run secret-scan`          | Scan every tracked file for committed secrets |
 | `npm run audit:prod`           | Dependency audit, production deps only        |
 | `npm run release:next-version` | Compute the next release tag                  |
