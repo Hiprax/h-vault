@@ -6,9 +6,9 @@
  *   pipeline:    node scripts/ci/secret-scan.mjs            (every tracked file in the repo)
  *
  * The repo-wide pass is the one that matters: a secret that slipped in before
- * the hook existed, or that was committed with --no-verify, is invisible to a
- * staged-only scan forever after. Both modes share one pattern list so they can
- * never drift apart.
+ * the hook existed, or that was committed with the hook bypassed (see "Escape
+ * hatches" in CONTRIBUTING.md), is invisible to a staged-only scan forever
+ * after. Both modes share one pattern list so they can never drift apart.
  *
  * Only git-tracked files are read. An untracked `.env` holding real credentials
  * is not a finding — it is the intended way to hold them.

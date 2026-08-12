@@ -15,10 +15,11 @@
  *   npm run ci -- --only=lint,test  run a subset
  *   npm run ci -- --bail            stop at the first failure
  *
- * Escape hatches, in increasing order of bluntness:
- *
- *   HVAULT_SKIP_GATES=docker,e2e git push    skip named gates for one push
- *   git push --no-verify                     skip the hook entirely
+ * Three escape hatches exist, and they are documented in CONTRIBUTING.md under
+ * "Escape hatches" rather than here. That is deliberate: this file DEFINES the
+ * gates, and a ready-to-paste bypass command sitting in it is indistinguishable
+ * — to a reader and to the integrity scan alike — from a gate documenting how to
+ * defeat itself. The hatches themselves are unchanged; only the copy moved.
  *
  * A gate exits 78 to report itself SKIPPED rather than passed — used when the
  * tooling it needs is genuinely absent (see sast-gate.mjs). A skip is always
@@ -168,7 +169,7 @@ const PREREQUISITES = {
   docker: {
     label: 'the docker CLI',
     ok: () => hasExe('docker', ['version', '--format', '{{.Client.Version}}']),
-    fix: 'start Docker, or skip the gate for one push: HVAULT_SKIP_GATES=docker git push',
+    fix: 'start Docker — or, if you cannot, see "Escape hatches" in CONTRIBUTING.md',
   },
   'build:shared': {
     label: 'a built @hvault/shared (packages/shared/dist)',
@@ -320,7 +321,14 @@ const GATES = [
     // The reporters come from playwright.config.ts, which pairs `list` with the
     // JUnit report this gate declares and pins the HTML reporter to `open:
     // 'never'` — the default would launch a browser on failure and hang the hook.
-    run: (options) => runNpm(['run', 'test:e2e', '--', '--forbid-only', '--retries=2'], options),
+    //
+    // There is deliberately NO `--retries` flag here. A retry turns a flaky test
+    // into a green one, which is the same as deleting the bug report it was: the
+    // two genuine failures this gate's former retry count concealed are recorded
+    // in e2e/helpers.ts. A spec that only passes on the second attempt is telling
+    // you something about the code or the harness, and the gate's job is to let
+    // it.
+    run: (options) => runNpm(['run', 'test:e2e', '--', '--forbid-only'], options),
   },
   {
     id: 'docker',
@@ -491,8 +499,10 @@ note(
   `${only.length > 0 ? `only ${only.join(', ')}` : `tier ${tiers.map((tier) => `T${String(tier)}`).join(' + ')}`} · ${bail ? 'bail' : 'aggregate'}`,
 );
 if (isHook) {
-  note('bypass once with:  git push --no-verify');
-  note('skip a gate with:  HVAULT_SKIP_GATES=docker,e2e git push');
+  // A pointer, not a paste-ready bypass. Someone who genuinely cannot run a gate
+  // will read three lines of CONTRIBUTING.md; someone looking for the quickest
+  // way past a red gate should not be handed it by the gate runner itself.
+  note('a gate you genuinely cannot run: see "Escape hatches" in CONTRIBUTING.md');
 }
 
 const results = [];

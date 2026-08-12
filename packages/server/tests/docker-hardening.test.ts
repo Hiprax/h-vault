@@ -18,7 +18,7 @@
  * A refactor that drops one of these gets a red test instead of an incident.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -91,6 +91,56 @@ const ecosystemConfig = readFileSync(path.join(repoRoot, 'ecosystem.config.cjs')
 const rootPackageJson = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf-8')) as {
   version: string;
 };
+
+/**
+ * The `COPY` statements of the `web` stage that run after a `USER` directive has
+ * dropped the build out of root, classified for the hermeticity rule below.
+ *
+ * `fromBuildContext` separates the copies whose source modes come from the
+ * developer's checkout (and must therefore be pinned) from `--from=<stage>`
+ * copies, whose modes were already decided inside this build.
+ * `sourcesAreFiles` is resolved by stat-ing the real path in the repository,
+ * because a file copy and a directory copy need OPPOSITE treatment and guessing
+ * from the destination string would get that backwards on the first path without
+ * an extension.
+ */
+interface WebStageCopy {
+  line: string;
+  fromBuildContext: boolean;
+  sourcesAreFiles: boolean;
+}
+
+const webStageCopyStatements: WebStageCopy[] = (() => {
+  const stage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
+  const lines = stage.split('\n');
+  const firstUser = lines.findIndex((line) => /^USER\s/.test(line.trim()));
+  if (firstUser === -1) return [];
+
+  return lines
+    .slice(firstUser + 1)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('COPY '))
+    .map((line) => {
+      const tokens = line.split(/\s+/).slice(1);
+      const flags = tokens.filter((token) => token.startsWith('--'));
+      // Everything but the flags and the final destination argument.
+      const sources = tokens.filter((token) => !token.startsWith('--')).slice(0, -1);
+      const fromBuildContext = !flags.some((flag) => flag.startsWith('--from='));
+      const sourcesAreFiles =
+        fromBuildContext &&
+        sources.length > 0 &&
+        sources.every((source) => {
+          try {
+            return statSync(path.join(repoRoot, source)).isFile();
+          } catch {
+            // A context source that does not exist is a broken build, not this
+            // rule's business — the image build gate reports it far more clearly.
+            return false;
+          }
+        });
+      return { line, fromBuildContext, sourcesAreFiles };
+    });
+})();
 
 /** The config default for HIBP_CACHE_MAX_BYTES — one worker's full L1 cache. */
 const HIBP_CACHE_MAX_BYTES_DEFAULT = 67_108_864; // 64 MiB
@@ -925,6 +975,58 @@ describe('Docker deployment', () => {
       // Assert the ORDER: root, then the apk RUN, then drop back to 101 as the
       // final (serving) user — not merely that all three tokens appear somewhere.
       expect(webStage).toMatch(/USER root[\s\S]*RUN apk upgrade --no-cache[\s\S]*USER 101/);
+    });
+
+    it('gives every config file it copies an explicit mode, so the host checkout cannot decide it', () => {
+      // Docker COPY PRESERVES the source file's mode. The nginx config files are
+      // copied from the build context, so on a checkout whose files are 0600 —
+      // which is what a `umask 077` machine produces, and what this repo was
+      // measured at — they land in the image as `-rw-------` owned by root, and
+      // the image serves as uid 101. `nginx -t` then dies with
+      //   open() "/etc/nginx/conf.d/default.conf" failed (13: Permission denied)
+      // and the whole stack is unbootable, for a reason that lives in the
+      // developer's umask rather than anywhere in this repository. An explicit
+      // --chmod makes the built image byte-identical regardless of the checkout.
+      //
+      // The scope is BUILD-CONTEXT copies of FILES, and both halves are load-bearing:
+      //
+      //   - `COPY --from=<stage>` is exempt because its source modes were set
+      //     inside a previous build stage, not by the host filesystem.
+      //   - a DIRECTORY copy is exempt because `--chmod=0444` applied to a
+      //     directory strips its execute bit, producing `dr--r--r--` that no
+      //     non-root user can traverse — the same EACCES with a different cause.
+      //     docker/mongo.Dockerfile documents that trap; a directory needs 0555,
+      //     or a `RUN mkdir -p` first (see the next test).
+      const offenders = webStageCopyStatements
+        .filter((copy) => copy.fromBuildContext && copy.sourcesAreFiles)
+        .filter((copy) => !/--chmod=/.test(copy.line));
+
+      expect(offenders.map((copy) => copy.line)).toEqual([]);
+
+      // A rule with no live subjects cannot fail, so pin that this one still has
+      // some: if the config copies are ever removed or renamed, the assertion
+      // above starts passing vacuously and this catches that.
+      const governed = webStageCopyStatements.filter(
+        (copy) => copy.fromBuildContext && copy.sourcesAreFiles,
+      );
+      expect(governed.length).toBeGreaterThanOrEqual(2);
+      expect(governed.every((copy) => /--chmod=0444\b/.test(copy.line))).toBe(true);
+    });
+
+    it('creates /etc/nginx/hvault before copying into it, or the directory inherits 0444', () => {
+      // The other half of the same trap, and it only appears once the --chmod
+      // above exists. `/etc/nginx/hvault` does NOT exist in the
+      // nginx-unprivileged base (verified against the image), so BuildKit creates
+      // it for the COPY — and when the COPY carries --chmod, the created parent
+      // gets that same mode. Measured: `dr--r--r--`, and uid 101 gets
+      // "Permission denied" on the file inside while root still sees it as
+      // world-readable. Without the --chmod the parent is created 0755 and
+      // nothing looks wrong, which is why removing this mkdir would break the
+      // image only in combination with the fix above.
+      const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
+      expect(webStage).toMatch(
+        /RUN mkdir -p \/etc\/nginx\/hvault[\s\S]*COPY --chmod=0444 \S*proxy_app\.conf \/etc\/nginx\/hvault\//,
+      );
     });
 
     it('pins the node base image to an explicit Alpine minor, not the floating tag', () => {

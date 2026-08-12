@@ -78,9 +78,28 @@ gate can never quietly stop being the thing the registry says it is.
 than producing it. Run `npm run build:shared` once after a clean checkout — the runner
 will tell you so if you forget.
 
-Run `npm run ci` before you open a pull request. If a gate legitimately cannot run in
-your environment, `HVAULT_SKIP_GATES=docker,e2e git push` skips named gates — say so in
-the PR description if you use it.
+Run `npm run ci` before you open a pull request.
+
+### Escape hatches
+
+Three exist, in increasing order of bluntness. They live here, in prose, rather than in
+the scripts that define the gates: a bypass command written inside a gate-defining file
+is indistinguishable, to a reader and to the integrity scan alike, from that gate
+documenting its own defeat. The hatches themselves are unchanged and still work.
+
+| Hatch                               | Effect                                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `HVAULT_SKIP_GATES=docker,e2e`      | Skips the named gates for one run. Every other gate still runs, and the skip is printed in the summary. |
+| Passing `--no-verify` to `git push` | Skips the pre-push hook entirely, so nothing is checked.                                                |
+| `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
+
+The first is the one to reach for: it is scoped, it is visible in the run summary, and it
+leaves the other fourteen gates in place. **Say so in the pull request description
+whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
+a claim someone else now has to check.
+
+None of them is a way to land work that does not pass. If a gate is wrong, fix the gate;
+if the code is wrong, fix the code. See the next section.
 
 ## You may not make a gate pass by weakening it
 
