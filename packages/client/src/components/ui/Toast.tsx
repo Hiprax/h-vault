@@ -177,8 +177,15 @@ function ToastProvider({ children }: { children: ReactNode }) {
     <ToastContext.Provider value={value}>
       {children}
 
-      {/* Toast container - top right */}
+      {/* Toast container - top right.
+
+          `role="region"` is load-bearing, not decoration: `aria-label` is
+          PROHIBITED on a generic element, so the name it carried was dropped by
+          assistive technology entirely (axe: `aria-prohibited-attr`, serious) and
+          the container announced as nothing at all. A region is the APG's
+          recommendation for a notification area, and it makes the label real. */}
       <div
+        role="region"
         aria-label="Notifications"
         className="pointer-events-none fixed top-4 right-4 z-[100] flex max-h-screen flex-col gap-2"
       >

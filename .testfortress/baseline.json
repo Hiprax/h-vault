@@ -11,6 +11,11 @@
     "compiler": 0,
     "audit:config": 60
   },
+  "a11y": {
+    "critical": 0,
+    "serious": 0,
+    "viewsScanned": 15
+  },
   "suppressions": {
     "count": 23,
     "totalHits": 32
@@ -119,7 +124,7 @@
         "line": 98.69,
         "branch": 92.45,
         "function": 97.95,
-        "linesTotal": 7038,
+        "linesTotal": 7037,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",

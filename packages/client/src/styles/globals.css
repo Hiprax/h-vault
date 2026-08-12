@@ -31,16 +31,45 @@
   --secondary: 210 40% 96.1%;
   --secondary-foreground: 222.2 47.4% 11.2%;
 
-  /* Muted */
+  /* Muted.
+   *
+   * `--muted-foreground` is DARKER than the shadcn default (46.9%), and the
+   * three percentage points are load-bearing. It is the colour of every
+   * secondary label in the application — a vault row's subtitle and date, a
+   * card description, the saved-address summary — and at 46.9% it measured
+   * 4.34:1 against `--accent` (#f1f5f9), which is what those rows sit on while
+   * hovered and what several panels use as their surface. That is below the
+   * 4.5:1 WCAG 1.4.3 threshold for text under 18pt, so the text was failing
+   * exactly where a pointer user reads it. At 43% it is 5.49:1 on white and
+   * 5.01:1 on `--accent`, so it passes on both surfaces with room for a future
+   * background tweak. Verified by `e2e/a11y.spec.ts`. */
   --muted: 210 40% 96.1%;
-  --muted-foreground: 215.4 16.3% 46.9%;
+  --muted-foreground: 215.4 16.3% 43%;
 
   /* Accent */
   --accent: 210 40% 96.1%;
   --accent-foreground: 222.2 47.4% 11.2%;
 
-  /* Destructive */
-  --destructive: 0 84.2% 60.2%;
+  /* Destructive.
+   *
+   * Darker than the shadcn default (#ef4444), because that value failed WCAG
+   * 1.4.3 in BOTH of the roles this token plays. As TEXT — the sidebar's
+   * Logout, every inline error, every delete affordance — it measured 3.76:1 on
+   * white and 3.41:1 on the sidebar. As a BUTTON BACKGROUND under
+   * `--destructive-foreground` it measured the same 3.76:1, so the label on a
+   * "Delete" button was failing too. At 45% lightness it is 5.83:1 on white,
+   * 5.30:1 on the sidebar, and 5.56:1 under `--destructive-foreground` — which
+   * is #f8fafc rather than pure white, so quoting the 5.81:1 that white would
+   * give measures a colour this application never paints. Verified by
+   * `e2e/a11y.spec.ts`.
+   *
+   * The `.dark` block below is deliberately untouched and is NOT clean: dark
+   * `--destructive` (0 62.8% 30.6%) cannot pass as TEXT on a near-black surface,
+   * and no single token can serve both that and white-on-destructive buttons —
+   * it needs a separate text token, which is a design-system change rather than
+   * a token tweak. Recorded rather than half-fixed; the accessibility gate scans
+   * the light theme only, so it does not see it either way. */
+  --destructive: 0 72% 45%;
   --destructive-foreground: 210 40% 98%;
 
   /* Border, Input, Ring */

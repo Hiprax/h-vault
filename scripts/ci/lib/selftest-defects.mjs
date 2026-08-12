@@ -369,6 +369,39 @@ export const DEFECTS = {
     evidence: (text) => /a parser emitted an item that fails its own schema/.test(text),
   },
 
+  'test:a11y': {
+    // The defect this gate exists to catch, planted at its source and as the
+    // single edit a careless tidy-up would make: the accessible name removed
+    // from the note form's format `<select>`. It still works, it still looks
+    // identical, every unit test still passes — and a screen-reader user reaches
+    // a combo box announced as nothing at all. axe grades it `select-name`,
+    // CRITICAL. It is deliberately a control on a view only THIS gate visits (the
+    // create dialog's Note tab), so a green E2E run says nothing about it.
+    //
+    // A REJECTED alternative, recorded because it is the obvious first choice and
+    // it is INERT: stripping `aria-label` from the saved-address picker's search
+    // INPUT. Measured here — the gate stayed green, because the accessible-name
+    // computation falls back to the `placeholder`, so the control still has a
+    // name. A `<select>` has no such fallback, which is exactly why it is the
+    // honest plant.
+    //
+    // The pattern is byte-exact against today's source. A rewrite of that line
+    // turns `String.replace` into a no-op, which fails in the SAFE direction:
+    // the gate stays green, the harness reports `unproven`, and the run exits
+    // non-zero — provided the evidence predicate below cannot be satisfied by a
+    // green report, which is why it matches the finding rather than a view name.
+    title: "strip the accessible name from the note form's format select",
+    mutate: {
+      'packages/client/src/components/vault/VaultItemForm.tsx': (text) =>
+        text.replace('              aria-label="Note format"\n', ''),
+    },
+    // `a11y.json` records every scan, including the views that were clean, so a
+    // predicate matching a VIEW name would be satisfied by a fully green report —
+    // the trap recorded on `test:security`. Only a finding carries a rule id, and
+    // only the planted defect produces this one on that view.
+    evidence: (text) => /"id":\s*"select-name"/.test(text) && /item-form-note/.test(text),
+  },
+
   'test:smoke': {
     // The defect is planted in the ARTIFACT, not in the sources, and that is the
     // point of this gate: `test:smoke` runs the emitted bundle, so the emitted

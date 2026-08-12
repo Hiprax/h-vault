@@ -306,6 +306,19 @@
       "created": "2026-08-12",
       "expires": "2026-09-26",
       "approvedBy": ["judge:readonly"]
+    },
+    {
+      "id": "SUP-0026",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "packages/client coverage.linesTotal 7038 -> 7037",
+      "maxHits": 1,
+      "reason": "Phase 12 fixed an axe nested-interactive defect in VaultList: the row card carried role=\"button\" with the selection checkbox INSIDE it, which makes the checkbox presentational and unreachable for assistive technology. Moving the activator to be a child of the card left the label a sibling of it, so the label's onClick={(e) => e.stopPropagation()} now stops propagation to nothing and was deleted. That arrow function is the one instrumentable line. The coverage scope is unchanged (packages/client/vitest.config.ts untouched), the measured file set is unchanged at 120 files, and no coverage percentage moved: line 98.69, branch 92.45, function 97.95 before and after. Keeping the handler purely to hold the denominator at 7038 would be dead code retained to satisfy a metric, which is the move this ledger exists to make visible.",
+      "owner": "maintainer",
+      "created": "2026-08-12",
+      "expires": "2026-11-09",
+      "approvedBy": ["judge:readonly"]
     }
   ]
 }

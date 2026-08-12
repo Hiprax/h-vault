@@ -163,6 +163,14 @@
       "countsTests": false,
       "requires": ["build:shared"]
     },
+    "test:a11y": {
+      "cmd": "npm run test:a11y",
+      "tier": 1,
+      "gate": "every primary view and modal — fifteen of them, in the real authenticated DOM — carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
+      "report": ["a11y.json", "junit-a11y.xml"],
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
     "test:fuzz": {
       "cmd": "npm run test:fuzz",
       "tier": 2,

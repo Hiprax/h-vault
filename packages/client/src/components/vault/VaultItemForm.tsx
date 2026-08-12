@@ -1288,8 +1288,13 @@ function CustomFieldsSection({
                     aria-invalid={rowError ? true : undefined}
                   />
                 )}
+                {/* Named per row, because several rows carry an identical
+                    control: a bare `<select>` has no implicit label and axe
+                    grades a nameless one CRITICAL — a screen-reader user hears
+                    "combo box, Text" with nothing saying which field it types. */}
                 <select
                   {...register(`customFields.${String(idx)}.type`)}
+                  aria-label={`Custom field ${String(idx + 1)} type`}
                   className={cn(inputClass, 'w-24')}
                 >
                   <option value="text">Text</option>
@@ -1891,8 +1896,12 @@ export function VaultItemForm({
                         className={cn(inputClass, 'flex-1')}
                         aria-invalid={uriError ? true : undefined}
                       />
+                      {/* Named per row, for the reason the custom-field type
+                          select records: one of several identical controls, and
+                          a `<select>` takes no implicit label from anything. */}
                       <select
                         {...register(`uris.${idx}.match` as const)}
+                        aria-label={`URI ${String(idx + 1)} match type`}
                         className={cn(inputClass, 'w-28')}
                       >
                         <option value="domain">Domain</option>
@@ -2044,7 +2053,13 @@ export function VaultItemForm({
       {itemType === 'note' && (
         <div className="space-y-4">
           <div className="flex items-center gap-2">
-            <select {...register('format')} className={cn(inputClass, 'w-36')}>
+            {/* The only control on the note form with no visible label beside
+                it: without a name it is announced as an unlabelled combo box. */}
+            <select
+              {...register('format')}
+              aria-label="Note format"
+              className={cn(inputClass, 'w-36')}
+            >
               <option value="markdown">Markdown</option>
               <option value="plaintext">Plain Text</option>
             </select>

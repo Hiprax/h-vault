@@ -157,6 +157,17 @@ const DIRECTION = {
   // fewer files than it used to is a weaker gate, whatever its finding count says.
   'config.belowError.*': 'lower',
   'config.inputsExamined.*': 'higher',
+  // Accessibility. The two impacts that FAIL the gate are ratcheted at zero, so
+  // the number cannot creep; `viewsScanned` is higher-is-better because an axe
+  // run over nothing reports zero violations exactly like an axe run over a
+  // clean page — a shrinking surface is the one regression the violation counts
+  // themselves can never show. The `moderate` and `minor` findings are recorded
+  // in `a11y.json` and deliberately NOT ratcheted: gating them would mean a new
+  // view could not be added until its unrelated landmark debt was paid off,
+  // which prices scanning MORE of the application as a regression.
+  'a11y.critical': 'lower',
+  'a11y.serious': 'lower',
+  'a11y.viewsScanned': 'higher',
   'warnings.*': 'lower',
   'suppressions.count': 'lower',
   'suppressions.totalHits': 'lower',
@@ -427,6 +438,7 @@ function collect() {
       base === 'warnings.json' ||
       base === 'deadcode.json' ||
       base === 'config.sarif' ||
+      base === 'a11y.json' ||
       base.includes('mutation') ||
       base.includes('flake');
     if (!known) continue;
@@ -466,6 +478,12 @@ function collect() {
       for (const [tool, count] of Object.entries(props.inputsExamined ?? {})) {
         got[`config.inputsExamined.${tool}`] = count;
       }
+    } else if (base === 'a11y.json') {
+      // Only the two gated impacts and the size of the scanned surface. The
+      // gate's own report carries the rest.
+      if (typeof j.violations?.critical === 'number') got['a11y.critical'] = j.violations.critical;
+      if (typeof j.violations?.serious === 'number') got['a11y.serious'] = j.violations.serious;
+      if (typeof j.viewsScanned === 'number') got['a11y.viewsScanned'] = j.viewsScanned;
     } else if (base === 'warnings.json') {
       // `null` means UNMEASURED in warnings.json and is deliberately not `0`;
       // passing it through as a number would fabricate a clean result.

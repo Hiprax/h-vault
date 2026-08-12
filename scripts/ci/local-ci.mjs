@@ -522,6 +522,27 @@ const GATES = [
     run: (options) => runNpm(['run', 'test:e2e', '--', '--forbid-only'], options),
   },
   {
+    id: 'a11y',
+    task: 'test:a11y',
+    tier: 1,
+    // The same shape as `security`, `observability`, `property` and `snapshot`:
+    // a named subset of a suite that already runs, re-run under its own name so
+    // that "this application is operable by keyboard and free of serious
+    // machine-detectable accessibility defects" is a claim with a report behind
+    // it. Both specs also run inside `e2e` on every push — `playwright.config.ts`
+    // narrows nothing — so the task carries `countsTests: false` and the tier
+    // buys separate evidence rather than separate coverage.
+    //
+    // It runs AFTER `e2e`, and that order is worth keeping: both drive the same
+    // dev server, and Playwright reuses one that is already listening, so the
+    // second run does not pay for Vite's cold transform of every route chunk.
+    title: 'Accessibility (axe over 15 views, plus the keyboard invariants)',
+    ci: 'new — no hosted job ever checked whether this application can be used without a mouse',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/a11y-gate.mjs'], options),
+  },
+  {
     id: 'docker',
     task: 'audit:image',
     tier: 1,

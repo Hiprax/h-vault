@@ -44,6 +44,8 @@ import clientFuzzConfig, { CLIENT_FUZZ_SUITE } from '../../client/vitest.fuzz.co
 import serverFuzzConfig, { SERVER_FUZZ_SUITE } from '../vitest.fuzz.config';
 import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest.snapshot.config';
 import playwrightConfig from '../../../playwright.config';
+import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
+import { A11Y_BLOCKING_IMPACTS, A11Y_VIEWS, A11Y_VIEW_IDS } from '../../../e2e/a11yViews';
 import { DST_TZ, PINNED_TZ, RUN_TZ } from '../../../tests/harness/determinism';
 import {
   allPropertyJunitReports,
@@ -545,13 +547,81 @@ describe('machine-readable reports', () => {
     expect(declared).not.toContain('junit-fuzz-server.xml');
   });
 
+  it('runs the accessibility suite from its own config, its own report and its own files', () => {
+    // The same contract as every other named subset, in the other runner. Three
+    // failure modes are covered together, because they are indistinguishable
+    // from the outside: a config that has stopped naming both specs (Playwright
+    // errors only when NOTHING matches, so a half-stale `testMatch` shrinks the
+    // gate in silence), a config pointed at the E2E gate's JUnit report (which
+    // would overwrite the artifact `audit:ratchet:full` reads the headcount
+    // from), and an HTML reporter that would overwrite `playwright-report/` with
+    // a two-test run.
+    expect([...A11Y_SUITE].sort()).toEqual(['a11y-keyboard.spec.ts', 'a11y.spec.ts']);
+    for (const file of A11Y_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'e2e', file)), file).toBe(true);
+    }
+    expect(a11yPlaywrightConfig.testMatch).toEqual([...A11Y_SUITE]);
+
+    const junit = playwrightReporter('junit', a11yPlaywrightConfig);
+    expect(junit).toBeDefined();
+    expect(path.resolve(repoRoot, String(junit!['outputFile']))).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-a11y.xml'),
+    );
+    expect(junit!['outputFile']).not.toBe(
+      (playwrightReporter('junit', playwrightConfig) ?? {})['outputFile'],
+    );
+    expect(playwrightReporter('html', a11yPlaywrightConfig)).toBeUndefined();
+
+    // It inherits the E2E harness rather than restating it: the same dev server,
+    // the same pinned timezone and locale, the same single worker. A config that
+    // quietly grew its own `use` block would be testing a different application
+    // from the one every other spec drives.
+    expect(a11yPlaywrightConfig.use).toEqual(playwrightConfig.use);
+    expect(a11yPlaywrightConfig.webServer).toEqual(playwrightConfig.webServer);
+  });
+
+  it('pins WHICH views the accessibility gate scans, and what fails it', () => {
+    // The reason this list is pinned rather than merely counted: an axe run over
+    // NOTHING reports zero violations, exactly like an axe run over a clean page.
+    // Deleting a view therefore makes the gate greener and quieter at the same
+    // time, and neither the spec's own completeness check nor the gate's
+    // (both of which read this same list) would notice — they would simply agree
+    // about a smaller surface. Adding one here is a deliberate act; so is
+    // removing one.
+    expect([...A11Y_VIEW_IDS]).toEqual([
+      'login',
+      'register',
+      'vault-list',
+      'item-detail',
+      'item-form-login',
+      'item-form-secret',
+      'item-form-note',
+      'item-form-card',
+      'item-form-card-billing',
+      'item-form-address-picker',
+      'item-form-identity',
+      'settings',
+      'vault-health',
+      'file-encryption',
+      'unlock-screen',
+    ]);
+    // Every id is unique and every view says what state the page is in — the
+    // description is what makes a report readable a year later.
+    expect(new Set(A11Y_VIEW_IDS).size).toBe(A11Y_VIEW_IDS.length);
+    for (const view of A11Y_VIEWS) expect(view.description, view.id).toBeTruthy();
+    // The threshold is the gate. Widening it to `moderate` would be a stricter
+    // gate; narrowing it to `critical` alone would silently drop colour contrast,
+    // missing labels and broken ARIA relationships, which are all `serious`.
+    expect([...A11Y_BLOCKING_IMPACTS]).toEqual(['serious', 'critical']);
+  });
+
   it('keeps every re-run subset out of the test headcount, because its files run twice elsewhere', () => {
     // `test:snapshot` and `test:fuzz` join `test:security`, `test:observability`
     // and `test:property` here: every file they name also runs inside
     // `test:unit` / `test:integration`, so counting them would ratchet the same
     // tests twice — and because the field is higher-is-better, nothing would ever
     // complain.
-    for (const name of ['test:snapshot', 'test:fuzz']) {
+    for (const name of ['test:snapshot', 'test:fuzz', 'test:a11y']) {
       expect(manifest.tasks[name]!.countsTests, `${name}`).toBe(false);
     }
   });
@@ -597,8 +667,11 @@ describe('machine-readable reports', () => {
    * assertions below pass on a bare `'html'`, which is exactly the configuration
    * that reintroduces the hazard they exist to forbid.
    */
-  const playwrightReporter = (name: string): Record<string, unknown> | undefined => {
-    const configured: unknown = playwrightConfig.reporter;
+  const playwrightReporter = (
+    name: string,
+    config: { reporter?: unknown } = playwrightConfig,
+  ): Record<string, unknown> | undefined => {
+    const configured: unknown = config.reporter;
     const entries: unknown[] = Array.isArray(configured) ? configured : [configured];
     for (const entry of entries) {
       if (entry === name) return {};

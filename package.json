@@ -50,6 +50,7 @@
     "test:smoke": "node scripts/ci/smoke-gate.mjs",
     "test:deploy": "node scripts/ci/deploy-drill.mjs",
     "test:snapshot": "npm run test:snapshot -w packages/client",
+    "test:a11y": "node scripts/ci/a11y-gate.mjs",
     "test:e2e": "npx playwright test",
     "type-check": "npm run type-check -w packages/shared && npm run type-check -w packages/server && npm run type-check -w packages/client && npm run type-check:e2e",
     "type-check:e2e": "tsc -p tsconfig.e2e.json",
@@ -108,6 +109,7 @@
     "yaml": ">=2.8.3"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.61.1",
     "@stoplight/spectral-cli": "^6.16.3",
     "concurrently": "^10.0.3",

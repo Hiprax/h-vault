@@ -16,6 +16,11 @@
   // suffix and carries the exact line that runs it, so the claim is checkable:
   //
   //   e2e/start-server.ts             playwright.config.ts:72  `npx tsx e2e/start-server.ts`
+  //   playwright.a11y.config.ts       scripts/ci/a11y-gate.mjs `playwright test --config
+  //                                   playwright.a11y.config.ts` (knip's Playwright plugin only
+  //                                   recognises the default config NAME, so the a11y config —
+  //                                   which the accessibility gate passes on the command line —
+  //                                   is invisible to it)
   //   ecosystem.config.cjs            README.md:568            `pm2 start ecosystem.config.cjs --env production`
   //   docker/mongo/provision-app-user.js
   //                                   docker-compose.yml:463   mongosh argument in `hvault-db-init`
@@ -26,6 +31,7 @@
         "e2e/*.spec.ts",
         "e2e/helpers.ts",
         "e2e/start-server.ts!",
+        "playwright.a11y.config.ts!",
         "ecosystem.config.cjs!",
         "docker/mongo/provision-app-user.js!",
       ],
