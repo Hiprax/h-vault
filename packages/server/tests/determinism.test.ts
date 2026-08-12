@@ -72,7 +72,10 @@ describe('determinism harness — the seed', () => {
     expect(() => resolveSeed('abc')).toThrow(/SEED must be a non-negative integer/);
     expect(() => resolveSeed('1.5')).toThrow(/received "1\.5"/);
     expect(() => resolveSeed('-1')).toThrow(/non-negative/);
-    expect(() => resolveSeed('1e3')).not.toThrow(); // 1000 is an integer
+    // `1e3` is an integer in exponent notation, so it is ACCEPTED and read as
+    // 1000. Asserting the value, not merely the absence of a throw: a parser
+    // that quietly fell back to the default would also "not throw".
+    expect(resolveSeed('1e3')).toBe(1000);
   });
 
   it('produces a reproducible stream for one seed and a different one for another', () => {

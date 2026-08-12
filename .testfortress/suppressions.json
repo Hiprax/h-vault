@@ -230,32 +230,6 @@
       "approvedBy": ["judge:readonly"]
     },
     {
-      "id": "SUP-0018",
-      "rule": "SLEEP-SYNC",
-      "kind": "sleep-sync",
-      "file": "e2e/auto-lock.spec.ts",
-      "symbol": "waitForTimeout",
-      "maxHits": 3,
-      "reason": "The auto-lock deadline is wall-clock by design, so the spec waits it out. Replacing the wait with an injectable clock is Phase 6 Task 6.3's work; this entry expires with it.",
-      "owner": "maintainer",
-      "created": "2026-08-12",
-      "expires": "2026-10-26",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
-      "id": "SUP-0019",
-      "rule": "SLEEP-SYNC",
-      "kind": "sleep-sync",
-      "file": "e2e/clipboard-hygiene.spec.ts",
-      "symbol": "waitForTimeout",
-      "maxHits": 2,
-      "reason": "Waits out the clipboard erase deadline, which is a real timer in the product. Deterministic replacement is Phase 6 Task 6.3's work; this entry expires with it.",
-      "owner": "maintainer",
-      "created": "2026-08-12",
-      "expires": "2026-10-26",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
       "id": "SUP-0020",
       "rule": "SLEEP-SYNC",
       "kind": "sleep-sync",

@@ -327,8 +327,12 @@ describe('Token Refresh Reuse Detection (POST /api/v1/auth/refresh)', () => {
   it('should revoke entire token family on refresh token reuse', async () => {
     // First, get the family ID of the user's refresh token
     const tokenHash = hashToken(user.refreshToken);
-    const storedToken = await RefreshToken.findOne({ tokenHash });
-    expect(storedToken).toBeDefined();
+    const storedToken = await RefreshToken.findOne({ tokenHash }).lean();
+    // The token this test is about to reuse must start out as a live, unused
+    // grant owned by this user — otherwise the revocation proves nothing.
+    expect(storedToken?.userId?.toString()).toBe(user.id);
+    expect(storedToken?.usedAt).toBeUndefined();
+    expect(storedToken?.expiresAt.getTime()).toBeGreaterThan(Date.now());
     const familyId = storedToken!.familyId;
 
     // First refresh — legitimate use (marks original token as used, creates new one)

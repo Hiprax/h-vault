@@ -1459,15 +1459,22 @@ describe('useUserSettings', () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
-  it('clearSettingsCache should not throw when localStorage.setItem fails', () => {
+  it('clearSettingsCache still notifies same-tab listeners when localStorage.setItem fails', () => {
     const orig = Storage.prototype.setItem;
+    const listener = vi.fn();
+    const unsubscribe = onSettingsInvalidated(listener);
     Storage.prototype.setItem = () => {
       throw new Error('quota exceeded');
     };
     try {
-      expect(() => clearSettingsCache()).not.toThrow();
+      // Only the CROSS-TAB broadcast is best-effort. The same-tab subscription
+      // is the one this tab's own components depend on, so a storage failure
+      // must degrade to same-tab only — never swallow the invalidation.
+      clearSettingsCache();
+      expect(listener).toHaveBeenCalledTimes(1);
     } finally {
       Storage.prototype.setItem = orig;
+      unsubscribe();
     }
   });
 

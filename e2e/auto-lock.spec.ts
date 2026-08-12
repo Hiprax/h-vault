@@ -71,16 +71,41 @@ async function emulateVisibility(page: Page, state: 'hidden' | 'visible'): Promi
   }, state);
 }
 
+/**
+ * How far the two backgrounding specs advance the page's clock while the tab is
+ * hidden.
+ *
+ * Two minutes is chosen against three real numbers, not by feel:
+ *
+ *  - It is FOUR TIMES the old hidden-lock delay of a flat 30 s, and above the
+ *    1-minute floor `lockOnHiddenDelay` can be configured to, so any timer that
+ *    locks a hidden tab is due and fires during the jump.
+ *  - It is under the 5-minute access-token lifetime, so the jump does not turn
+ *    an auto-lock test into a token-refresh test.
+ *  - It is far under the 15-minute idle timeout, which legitimately locks and
+ *    would make a lock here the CORRECT outcome rather than the defect.
+ *
+ * These specs used to spend 40 s and 10 s of real wall clock waiting this out.
+ * `page.clock` jumps it instead, which is both instant and stricter: a real
+ * sleep only proves nothing fired within the seconds it was willing to burn.
+ */
+const HIDDEN_WINDOW = '02:00';
+
 test.describe('auto-lock', () => {
   test('backgrounding the tab does not lock the vault', async ({ page }) => {
+    // Installed before sign-in so every timer the app arms is a fake one. Time
+    // still flows normally until a jump is requested, so the derivation-bound
+    // sign-in below behaves exactly as it does without the clock.
+    await page.clock.install();
+
     await registerAndSignInViaUI(page);
     await expectVaultVisible(page);
 
     await emulateVisibility(page, 'hidden');
 
-    // Well past the old hardcoded 30-second hidden delay. The configured timeout
-    // is 15 minutes, so nothing may lock in this window.
-    await page.waitForTimeout(40_000);
+    // Two minutes pass with the tab hidden. `fastForward` fires every due timer,
+    // so the old hardcoded 30-second hidden lock would land right here.
+    await page.clock.fastForward(HIDDEN_WINDOW);
     await emulateVisibility(page, 'visible');
 
     // Still open: no unlock screen, and the vault is usable.
@@ -89,14 +114,20 @@ test.describe('auto-lock', () => {
   });
 
   test('repeated hide/show cycles never accumulate into a lock', async ({ page }) => {
+    await page.clock.install();
+
     await registerAndSignInViaUI(page);
     await expectVaultVisible(page);
 
+    // Four hidden windows of two minutes each. Returning to the tab does NOT
+    // reset `lastActivity` (only real input does), so this accumulates just
+    // over eight idle minutes — deliberately still inside the 15-minute idle
+    // timeout, which would otherwise lock legitimately and prove nothing.
     for (let cycle = 0; cycle < 4; cycle++) {
       await emulateVisibility(page, 'hidden');
-      await page.waitForTimeout(2_000);
+      await page.clock.fastForward(HIDDEN_WINDOW);
       await emulateVisibility(page, 'visible');
-      await page.waitForTimeout(500);
+      await page.clock.fastForward('05');
     }
 
     await expect(page.getByText('Vault Locked')).toHaveCount(0);

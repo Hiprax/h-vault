@@ -232,10 +232,13 @@ describe('Additional Coverage', () => {
 
       expect(res.status).toBe(404);
 
-      // Verify the original folder is unchanged
+      // Verify the original folder is unchanged and still owned by user A:
+      // the 404 must mean "not yours", not "deleted on your behalf".
       const original = await Folder.findById(folderAId).lean();
-      expect(original).toBeDefined();
-      expect(original!.encryptedName).toBe('user-a-private-folder');
+      expect(original?.encryptedName).toBe('user-a-private-folder');
+      expect(original?.userId?.toString()).toBe(user.id);
+      expect(original?.nameIv).not.toBe('hacked-iv');
+      expect(original?.nameTag).not.toBe('hacked-tag');
     });
 
     it('should not allow user B to delete user A folder', async () => {

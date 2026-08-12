@@ -111,17 +111,28 @@ describe('repo write guard', () => {
     // all written from inside a worker. Blocking any of them would break the run.
     const allowed = path.join(REPO_ROOT, 'packages', 'server', 'coverage', '.probe-allowed');
     fs.mkdirSync(path.dirname(allowed), { recursive: true });
-    expect(() => fs.writeFileSync(allowed, 'ok')).not.toThrow();
+
+    // The write must actually LAND, not merely avoid throwing: a guard that
+    // swallowed the call would keep this green while silently discarding the
+    // coverage and JUnit payloads the ratchet reads.
+    fs.writeFileSync(allowed, 'ok');
+    expect(fs.readFileSync(allowed, 'utf8')).toBe('ok');
     fs.rmSync(allowed, { force: true });
 
-    expect(() =>
-      fs.mkdirSync(path.join(REPO_ROOT, '.testfortress', 'reports'), { recursive: true }),
-    ).not.toThrow();
+    const reports = path.join(REPO_ROOT, '.testfortress', 'reports');
+    fs.mkdirSync(reports, { recursive: true });
+    expect(fs.existsSync(reports)).toBe(true);
   });
 
   it('leaves writes outside the repository alone', () => {
     const dir = createTestTempDir('hv-tempdir-outside-');
-    expect(() => fs.writeFileSync(path.join(dir, 'anything.txt'), 'ok')).not.toThrow();
-    expect(() => fs.mkdirSync(path.join(dir, 'nested'))).not.toThrow();
+
+    fs.writeFileSync(path.join(dir, 'anything.txt'), 'ok');
+    fs.mkdirSync(path.join(dir, 'nested'));
+
+    // Outside the repository the guard is inert, so both operations take
+    // effect exactly as the unguarded `fs` would.
+    expect(fs.readFileSync(path.join(dir, 'anything.txt'), 'utf8')).toBe('ok');
+    expect(fs.statSync(path.join(dir, 'nested')).isDirectory()).toBe(true);
   });
 });

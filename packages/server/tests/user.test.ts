@@ -1209,13 +1209,21 @@ describe('User routes', () => {
         .send({ code: validCode, secret })
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const enables = await AuditLog.find({
         userId: user.id,
         action: '2fa_enable',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
+      // Exactly one row, and it carries NO metadata: the request body held the
+      // TOTP seed, and the audit trail must not become a second copy of it.
+      expect(enables).toHaveLength(1);
+      expect(enables[0]?.userId?.toString()).toBe(user.id);
+      expect(enables[0]?.metadata).toBeUndefined();
+      expect(JSON.stringify(enables[0])).not.toContain(secret);
+
+      // ...and the row describes something that actually happened.
+      const enabled = await User.findById(user.id).lean();
+      expect(enabled?.twoFactorEnabled).toBe(true);
     });
 
     it('should create audit log when 2FA is disabled', async () => {
@@ -1257,13 +1265,27 @@ describe('User routes', () => {
         .send({ code: validCode, password: user.rawPassword })
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const disables = await AuditLog.find({
         userId: user.id,
         action: '2fa_disable',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
+      // One row, owned by this user, with no metadata: neither the TOTP code
+      // nor the password that authorised the disable may be recorded.
+      expect(disables).toHaveLength(1);
+      expect(disables[0]?.userId?.toString()).toBe(user.id);
+      expect(disables[0]?.metadata).toBeUndefined();
+      expect(JSON.stringify(disables[0])).not.toContain(validCode);
+
+      // ...and 2FA is genuinely off, with the stored secret and backup codes
+      // cleared rather than left behind.
+      // Both fields are `select: false`, so they are requested explicitly here
+      // — asserting them undefined on a default projection would be a
+      // tautology rather than a check that `$unset` ran.
+      const disabled = await User.findById(user.id).select('+twoFactorSecret +backupCodes').lean();
+      expect(disabled?.twoFactorEnabled).toBe(false);
+      expect(disabled?.twoFactorSecret).toBeUndefined();
+      expect(disabled?.backupCodes).toBeUndefined();
     });
   });
 
@@ -1674,14 +1696,20 @@ describe('User routes', () => {
           newVaultKeyTag: 'new-tag',
         });
 
-      const auditEntry = await AuditLog.findOne({
+      const failures = await AuditLog.find({
         userId: user.id,
         action: 'password_verification_failed',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe('change_password');
+      // One row naming the endpoint that rejected the attempt, and nothing
+      // else: neither the attempted password nor the new key material.
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.metadata).toEqual({ endpoint: 'change_password' });
+
+      // ...and the rejected attempt changed nothing.
+      const unchanged = await User.findById(user.id).lean();
+      expect(unchanged?.encryptedVaultKey).not.toBe('new-key');
+      expect(unchanged?.vaultKeyIv).not.toBe('new-iv');
     });
 
     it('should create audit log on failed password for 2fa/setup', async () => {
@@ -1695,13 +1723,18 @@ describe('User routes', () => {
         .set('Cookie', csrfCookie)
         .send({ password: 'wrong-password' });
 
-      const auditEntry = await AuditLog.findOne({
+      const failures = await AuditLog.find({
         userId: user.id,
         action: 'password_verification_failed',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe('2fa_setup');
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.metadata).toEqual({ endpoint: '2fa_setup' });
+
+      // ...and no pending TOTP secret was minted for a rejected caller.
+      const untouched = await User.findById(user.id).select('+pendingTwoFactorSecret').lean();
+      expect(untouched?.pendingTwoFactorSecret).toBeUndefined();
+      expect(untouched?.twoFactorEnabled).toBe(false);
     });
 
     it('should create audit log on failed password for 2fa disable', async () => {
@@ -1715,13 +1748,18 @@ describe('User routes', () => {
         .set('Cookie', csrfCookie)
         .send({ code: '123456', password: 'wrong-password' });
 
-      const auditEntry = await AuditLog.findOne({
+      const failures = await AuditLog.find({
         userId: user.id,
         action: 'password_verification_failed',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe('2fa_disable');
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.metadata).toEqual({ endpoint: '2fa_disable' });
+
+      // ...and the rejected attempt did not count as a disable.
+      await expect(
+        AuditLog.countDocuments({ userId: user.id, action: '2fa_disable' }),
+      ).resolves.toBe(0);
     });
 
     it('should create audit log on failed password for regenerate-backup-codes', async () => {
@@ -1745,15 +1783,18 @@ describe('User routes', () => {
         .set('Cookie', csrfCookie)
         .send({ password: 'wrong-password' });
 
-      const auditEntry = await AuditLog.findOne({
+      const failures = await AuditLog.find({
         userId: user.id,
         action: 'password_verification_failed',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe(
-        'regenerate_backup_codes',
-      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.metadata).toEqual({ endpoint: 'regenerate_backup_codes' });
+
+      // ...and the existing backup codes were left exactly as they were: a
+      // rejected caller must not be able to invalidate the real owner's codes.
+      const untouched = await User.findById(user.id).select('+backupCodes').lean();
+      expect(untouched?.backupCodes).toEqual(['hashed-code']);
     });
 
     it('should reject regenerate-backup-codes without code when 2FA is enabled', async () => {
@@ -1844,12 +1885,19 @@ describe('User routes', () => {
 
       expect(res.status).toBe(200);
 
-      // The account_delete audit log should survive because it uses userId: null
-      const auditEntry = await AuditLog.findOne({ action: 'account_delete' });
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId).toBeNull();
-      expect((auditEntry!.metadata as Record<string, unknown>).deletedUserId).toBe(user.id);
-      expect((auditEntry!.metadata as Record<string, unknown>).deletedEmail).toBe(user.email);
+      // The account_delete audit log survives the cascade precisely because it
+      // is system-scoped (`userId: null`), so the deleteMany keyed on the
+      // user's id cannot reach it.
+      const deletions = await AuditLog.find({ action: 'account_delete' }).lean();
+      expect(deletions).toHaveLength(1);
+      expect(deletions[0]?.userId).toBeNull();
+      expect(deletions[0]?.metadata).toMatchObject({
+        deletedUserId: user.id,
+        deletedEmail: user.email,
+      });
+
+      // ...and the account itself is gone.
+      await expect(User.findById(user.id).lean()).resolves.toBeNull();
     });
 
     it('should delete all user-scoped audit logs while preserving system-scoped ones', async () => {

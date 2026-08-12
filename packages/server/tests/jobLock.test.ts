@@ -25,14 +25,30 @@ describe('JobLock', () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
 
-      await expect(
-        JobLock.create({
-          jobName: 'unique-job',
-          lockedBy: 'instance-2',
-          lockedAt: new Date(),
-          expiresAt: new Date(Date.now() + 60_000),
-        }),
-      ).rejects.toThrow();
+      // The unique index — not application code — is what makes the lock
+      // mutually exclusive, so the rejection must be MongoDB's duplicate-key
+      // error (11000) and not, say, a Mongoose validation error that would
+      // also satisfy a bare `toThrow()`.
+      const failure: unknown = await JobLock.create({
+        jobName: 'unique-job',
+        lockedBy: 'instance-2',
+        lockedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60_000),
+      }).then(
+        () => {
+          throw new Error('expected the duplicate jobName insert to be rejected');
+        },
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as { code?: number }).code).toBe(11000);
+      expect((failure as Error).message).toMatch(/duplicate key/i);
+
+      // ...and the original holder still owns the lock.
+      const holders = await JobLock.find({ jobName: 'unique-job' }).lean();
+      expect(holders).toHaveLength(1);
+      expect(holders[0]?.lockedBy).toBe('instance-1');
     });
   });
 

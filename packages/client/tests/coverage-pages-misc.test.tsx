@@ -762,10 +762,19 @@ describe('VaultPage - decryption failure notifications', () => {
     const view = await act(async () => renderPage(<VaultPage />));
     view.unmount();
 
-    // Dispatching after unmount must not throw (listener removed).
-    expect(() => {
-      window.dispatchEvent(new CustomEvent('vault-decryption-failures', { detail: { count: 1 } }));
-    }).not.toThrow();
+    // Dispatching after unmount reaches nobody: `dispatchEvent` returns true
+    // (nothing called preventDefault) and no React state update is attempted
+    // on the torn-down tree, which would surface as a console error.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const delivered = window.dispatchEvent(
+        new CustomEvent('vault-decryption-failures', { detail: { count: 1 } }),
+      );
+      expect(delivered).toBe(true);
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
     expect(screen.queryByText('1 item(s) could not be decrypted')).not.toBeInTheDocument();
   });
 });

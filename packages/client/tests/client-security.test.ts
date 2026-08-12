@@ -357,15 +357,24 @@ describe('CSRF cross-tab synchronization (Task 4.4)', () => {
   it('clearCsrfToken should not throw when localStorage is unavailable', async () => {
     const { clearCsrfToken } = await import('../src/services/api/client');
 
-    // Mock localStorage.setItem to throw
-    const originalSetItem = localStorage.setItem.bind(localStorage);
-    localStorage.setItem = () => {
+    // Spied on the PROTOTYPE, not by assigning `localStorage.setItem = fn`:
+    // jsdom's Storage is a Proxy that turns a property assignment into
+    // `setItem('setItem', fn)`, so the assignment form stores an item and
+    // leaves the real method in place — the failure path was never entered.
+    const failingSetItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('localStorage unavailable');
-    };
+    });
 
-    expect(() => clearCsrfToken()).not.toThrow();
-
-    localStorage.setItem = originalSetItem;
+    try {
+      // The cross-tab broadcast is best-effort. It must still be ATTEMPTED —
+      // a version that stopped writing the key would leave other tabs holding
+      // a stale token — and its failure must be swallowed rather than
+      // propagated to the caller that is clearing its own token.
+      clearCsrfToken();
+      expect(failingSetItem).toHaveBeenCalledWith('__hv_csrf_invalidated', expect.any(String));
+    } finally {
+      failingSetItem.mockRestore();
+    }
   });
 });
 
@@ -437,14 +446,19 @@ describe('CSRF token fetch deduplication (Task 4.8)', () => {
   it('clearCsrfToken should be callable and reset state without errors', async () => {
     const { clearCsrfToken } = await import('../src/services/api/client');
 
-    // Should be a callable function
-    expect(typeof clearCsrfToken).toBe('function');
-
-    // Should not throw when called multiple times
-    expect(() => {
+    // Idempotent: the second call broadcasts again (other tabs may have missed
+    // the first) and neither call throws on an already-cleared token.
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+    try {
       clearCsrfToken();
       clearCsrfToken();
-    }).not.toThrow();
+      const invalidations = setItemSpy.mock.calls.filter(
+        ([key]) => key === '__hv_csrf_invalidated',
+      );
+      expect(invalidations).toHaveLength(2);
+    } finally {
+      setItemSpy.mockRestore();
+    }
   });
 
   it('cross-tab CSRF invalidation listener should clear both csrfToken and csrfFetchPromise', () => {

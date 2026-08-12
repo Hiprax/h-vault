@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, type Mock } from 'vitest';
+import { expectGcmAuthFailure } from './cryptoFailure.js';
 import { renderHook, act } from '@testing-library/react';
 import axios, { type AxiosAdapter, type AxiosResponse } from 'axios';
 
@@ -590,7 +591,10 @@ describe('cryptoService — BWK decryption and vault-key encryption failure', ()
 
     const { encrypted, iv, tag } = await crypto.encryptBWK(bwk, bek);
 
-    await expect(crypto.decryptBWK(encrypted, iv, tag, wrongBek)).rejects.toThrow();
+    // The wrong backup password is an authentication failure and nothing more
+    // specific: `decryptBWK` does not wrap it, so the caller sees WebCrypto's
+    // OperationError, identical to the tampered-tag case below.
+    await expectGcmAuthFailure(crypto.decryptBWK(encrypted, iv, tag, wrongBek));
   });
 
   it('decryptBWK rejects a tampered auth tag rather than returning garbage key bytes', async () => {
@@ -603,7 +607,7 @@ describe('cryptoService — BWK decryption and vault-key encryption failure', ()
     tagBytes[0]! ^= 0xff;
     const tamperedTag = crypto.arrayBufferToBase64(tagBytes.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptBWK(encrypted, iv, tamperedTag, bek)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptBWK(encrypted, iv, tamperedTag, bek));
   });
 
   it('encryptVaultKey surfaces a user-facing error when the vault key cannot be exported', async () => {

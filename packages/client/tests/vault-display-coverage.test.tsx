@@ -3354,9 +3354,10 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
       data: { username: 'still-here', _validationError: true },
     });
 
-    expect(() =>
-      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />),
-    ).not.toThrow();
+    // Rendered directly rather than wrapped in `not.toThrow()`: an escaping
+    // render error fails the test either way, and the assertions below are
+    // what prove it DEGRADED rather than merely survived.
+    renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
 
     expect(screen.getByText(/could not be fully decoded/i)).toBeInTheDocument();
     // Identity + remediation actions remain reachable.
@@ -3373,9 +3374,7 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
       data: { value: 'partial', _validationError: true },
     });
 
-    expect(() =>
-      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />),
-    ).not.toThrow();
+    renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
 
     expect(screen.getByText(/could not be fully decoded/i)).toBeInTheDocument();
   });
@@ -3387,9 +3386,7 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
       data: { _raw: 'not-an-object' },
     });
 
-    expect(() =>
-      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />),
-    ).not.toThrow();
+    renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
 
     expect(screen.getByText(/could not be fully decoded/i)).toBeInTheDocument();
   });
@@ -3406,9 +3403,7 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
         data: { username: 'x', password: 'y' }, // no uris / customFields, no flags
       });
 
-      expect(() =>
-        renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />),
-      ).not.toThrow();
+      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
 
       expect(screen.getByText(/could not be fully decoded/i)).toBeInTheDocument();
       expect(screen.getByText('Edit')).toBeInTheDocument();

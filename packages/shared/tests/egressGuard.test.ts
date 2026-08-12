@@ -37,8 +37,19 @@ describe('egress guard (shared)', () => {
   it('leaves loopback alone, or it would block a local fixture server', () => {
     const server = net.createServer();
     try {
-      expect(() => net.connect({ host: '127.0.0.1', port: 1 }).destroy()).not.toThrow();
-      expect(() => net.connect({ host: 'localhost', port: 1 }).destroy()).not.toThrow();
+      // A real Socket is handed back for both spellings of loopback. The
+      // guard throws synchronously from `net.connect` when it blocks, so
+      // receiving a socket at all is the proof it did not — and asserting the
+      // returned object distinguishes "allowed" from "silently stubbed".
+      const byIp = net.connect({ host: '127.0.0.1', port: 1 });
+      const byName = net.connect({ host: 'localhost', port: 1 });
+      try {
+        expect(byIp).toBeInstanceOf(net.Socket);
+        expect(byName).toBeInstanceOf(net.Socket);
+      } finally {
+        byIp.destroy();
+        byName.destroy();
+      }
     } finally {
       server.close();
     }

@@ -78,9 +78,14 @@ describe('loginThrottle', () => {
     });
 
     it('tolerates resetting an email that was never recorded', () => {
-      expect(() => {
-        resetLoginAttempts('never@example.com');
-      }).not.toThrow();
+      recordFailedLoginAttempt('tracked@example.com');
+
+      resetLoginAttempts('never@example.com');
+
+      // Absent from the map: reads as zero, is not created as an entry, and
+      // the unrelated email's counter is untouched.
+      expect(peekLoginAttempts('never@example.com')).toBe(0);
+      expect(peekLoginAttempts('tracked@example.com')).toBe(1);
     });
 
     it('clears every tracked email', () => {

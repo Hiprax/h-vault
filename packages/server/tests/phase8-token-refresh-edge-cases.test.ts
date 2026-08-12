@@ -83,7 +83,11 @@ describe('Token refresh — rotation preserves familyId', () => {
     const originalToken = await RefreshToken.findOne({
       tokenHash: hashToken(user.refreshToken),
     }).lean();
-    expect(originalToken).toBeDefined();
+    // The row this test rotates must be the login's own live token: owned by
+    // this user, unconsumed, and carrying a family to preserve.
+    expect(originalToken?.userId?.toString()).toBe(user.id);
+    expect(originalToken?.usedAt).toBeUndefined();
+    expect(originalToken?.familyId).toEqual(expect.any(String));
     const originalFamilyId = originalToken!.familyId;
 
     // Perform a refresh
@@ -104,12 +108,16 @@ describe('Token refresh — rotation preserves familyId', () => {
     const newRawToken = extractRefreshToken(res.headers['set-cookie']);
     expect(newRawToken).not.toBeNull();
 
-    // The new token should share the same familyId
+    // The new token is a distinct, unconsumed row for the same user that
+    // carries the family forward — that shared id is what makes reuse
+    // detection able to revoke the whole chain later.
     const newToken = await RefreshToken.findOne({
       tokenHash: hashToken(newRawToken!),
     }).lean();
-    expect(newToken).toBeDefined();
-    expect(newToken!.familyId).toBe(originalFamilyId);
+    expect(newToken?.familyId).toBe(originalFamilyId);
+    expect(newToken?.userId?.toString()).toBe(user.id);
+    expect(newToken?.usedAt).toBeUndefined();
+    expect(newToken?.tokenHash).not.toBe(hashToken(user.refreshToken));
   });
 
   it('original token should be marked as used after rotation', async () => {
@@ -123,12 +131,14 @@ describe('Token refresh — rotation preserves familyId', () => {
       `refreshToken=${user.refreshToken}`,
     ).expect(200);
 
+    // The consumed row is kept, not deleted: `usedAt` is the tombstone the
+    // 7-day reuse-detection window and its TTL both hang off.
     const original = await RefreshToken.findOne({
       tokenHash: hashToken(user.refreshToken),
     }).lean();
-    expect(original).toBeDefined();
-    expect(original!.usedAt).toBeDefined();
-    expect(original!.usedAt).toBeInstanceOf(Date);
+    expect(original?.usedAt).toBeInstanceOf(Date);
+    expect(original?.userId?.toString()).toBe(user.id);
+    expect(original?.usedAt?.getTime()).toBeLessThanOrEqual(Date.now());
   });
 });
 
@@ -306,12 +316,21 @@ describe('Token refresh — expired tokens', () => {
       `refreshToken=${user.refreshToken}`,
     ).expect(401);
 
-    // The second token should NOT be revoked (family not deleted)
+    // An EXPIRED token is not a reused one, so the sibling in the same family
+    // survives untouched: still present, still unconsumed, still in the family.
     const secondStillExists = await RefreshToken.findOne({
       tokenHash: hashToken(secondRaw),
     }).lean();
-    expect(secondStillExists).toBeDefined();
-    expect(secondStillExists!.usedAt).toBeFalsy();
+    expect(secondStillExists?.usedAt).toBeUndefined();
+    expect(secondStillExists?.familyId).toBe(familyId);
+    expect(secondStillExists?.userId?.toString()).toBe(user.id);
+    // ...and only the lapsed row itself was reaped: an expired-but-unused
+    // token is deleted on its own (`deleteOne({_id})`), whereas a REUSED one
+    // revokes every descendant. One survivor is the whole distinction.
+    await expect(RefreshToken.countDocuments({ familyId })).resolves.toBe(1);
+    await expect(
+      RefreshToken.countDocuments({ tokenHash: hashToken(user.refreshToken) }),
+    ).resolves.toBe(0);
   });
 });
 

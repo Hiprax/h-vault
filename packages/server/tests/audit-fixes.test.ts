@@ -370,11 +370,15 @@ describe('Task 1.1: 2FA encryption key consistency', () => {
     expect(res.body.data.secret).toBeDefined();
 
     // Verify the encrypted secret is stored in the database
-    const dbUser = await User.findById(user.id).select('+pendingTwoFactorSecret');
-    expect(dbUser).toBeDefined();
-    expect(dbUser!.pendingTwoFactorSecret).toBeDefined();
-    // The stored secret should be encrypted (not the raw base32)
-    expect(dbUser!.pendingTwoFactorSecret).not.toBe(res.body.data.secret);
+    const dbUser = await User.findById(user.id).select('+pendingTwoFactorSecret').lean();
+    const stored = dbUser?.pendingTwoFactorSecret;
+    // The secret is held only as PENDING ciphertext until a valid code
+    // confirms it: it is stored, it is not the raw base32 the client was
+    // shown, and 2FA is not yet live.
+    expect(typeof stored).toBe('string');
+    expect(stored).not.toBe(res.body.data.secret);
+    expect(stored).not.toContain(res.body.data.secret);
+    expect(dbUser?.twoFactorEnabled).toBe(false);
   });
 });
 

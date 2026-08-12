@@ -73,7 +73,9 @@ describe('normalizeHost', () => {
   });
 
   it('returns an empty host for a malformed URI instead of throwing', () => {
-    expect(() => normalizeHost('ht tp://not a url')).not.toThrow();
+    // The empty string is what makes the row fall back to a content-hash
+    // match; a thrown URL parse error would abort the whole import instead.
+    expect(normalizeHost('ht tp://not a url')).toBe('');
     expect(normalizeHost('ht tp://not a url')).toBe('');
     expect(normalizeHost('^https://.*regex.*$')).toBe('');
   });

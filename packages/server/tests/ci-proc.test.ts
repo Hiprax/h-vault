@@ -61,9 +61,14 @@ describe('resolveSpawn (DEP0190 shell-join)', () => {
 
 describe('assertShellSafeArgs', () => {
   it('accepts every real gate arg array', () => {
+    // Every argument the pipeline actually spawns passes the allowlist. If
+    // this ever fails it names the offending gate rather than reporting an
+    // anonymous "expected function not to throw".
     for (const args of GATE_ARGS) {
-      expect(() => assertShellSafeArgs(args as string[])).not.toThrow();
+      assertShellSafeArgs(args as string[]);
     }
+
+    expect(GATE_ARGS.length).toBeGreaterThan(0);
   });
 
   it('rejects an argument containing whitespace', () => {

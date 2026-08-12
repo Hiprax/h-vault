@@ -21,12 +21,14 @@ describe('egress guard (client)', () => {
     await expect(fetch(EXTERNAL)).rejects.toThrow(/must not reach a third party/);
   });
 
-  it('rejects rather than throwing synchronously, because fetch returns a promise', () => {
+  it('rejects rather than throwing synchronously, because fetch returns a promise', async () => {
     // A synchronous throw would surface as a different failure shape than a real
-    // network error, so a caller's `.catch()` would not see it.
-    expect(() => {
-      void fetch(EXTERNAL).catch(() => undefined);
-    }).not.toThrow();
+    // network error, so a caller's `.catch()` would not see it. The call must
+    // return a promise that REJECTS — asserting only "did not throw" would also
+    // pass on a guard that quietly resolved and let the request out.
+    const returned = fetch(EXTERNAL);
+    expect(returned).toBeInstanceOf(Promise);
+    await expect(returned).rejects.toBeInstanceOf(EgressBlockedError);
   });
 
   it('blocks XMLHttpRequest.open, which is the adapter axios picks under jsdom', () => {
@@ -45,9 +47,11 @@ describe('egress guard (client)', () => {
     // path. A guard that treated an unparseable relative URL as external would
     // block the entire client suite instead of only its third-party calls.
     const xhr = new XMLHttpRequest();
-    expect(() => {
-      xhr.open('GET', '/api/v1/vault/items');
-    }).not.toThrow();
+    xhr.open('GET', '/api/v1/vault/items');
+
+    // Opened for real, against the jsdom origin: `readyState === OPENED` is
+    // what distinguishes "allowed through" from "silently swallowed".
+    expect(xhr.readyState).toBe(XMLHttpRequest.OPENED);
   });
 
   it('carries the host and the patch point on the error object', async () => {

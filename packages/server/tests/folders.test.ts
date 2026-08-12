@@ -308,10 +308,13 @@ describe('Folder Routes', () => {
 
       expect(res.status).toBe(200);
 
-      // Child should now be under parent
+      // The child survives its parent's deletion intact and is reparented onto
+      // the grandparent; the target itself is gone.
       const updatedChild = await Folder.findById(child._id).lean();
-      expect(updatedChild).toBeDefined();
-      expect(updatedChild!.parentId!.toString()).toBe(parent._id);
+      expect(updatedChild?.parentId?.toString()).toBe(parent._id);
+      expect(updatedChild?.encryptedName).toBe('child');
+      expect(updatedChild?.userId?.toString()).toBe(user.id);
+      await expect(Folder.findById(target._id).lean()).resolves.toBeNull();
     });
 
     it('should move child folders to root when deleted folder has no parent', async () => {
@@ -324,9 +327,13 @@ describe('Folder Routes', () => {
         .set('Cookie', csrf.cookie)
         .set('x-csrf-token', csrf.token);
 
+      // With no grandparent to inherit, the child is promoted to the root and
+      // is otherwise untouched.
       const updatedChild = await Folder.findById(child._id).lean();
-      expect(updatedChild).toBeDefined();
-      expect(updatedChild!.parentId).toBeUndefined();
+      expect(updatedChild?.parentId).toBeUndefined();
+      expect(updatedChild?.encryptedName).toBe('child');
+      expect(updatedChild?.userId?.toString()).toBe(user.id);
+      await expect(Folder.findById(target._id).lean()).resolves.toBeNull();
     });
 
     it('should not affect items in other folders', async () => {
@@ -423,10 +430,12 @@ describe('Folder Routes', () => {
         .set('Cookie', csrf.cookie)
         .set('x-csrf-token', csrf.token);
 
-      // Child should now be under grandparent
+      // Child should now be under grandparent, intact, and the deleted parent
+      // must be gone rather than merely re-pointed.
       const updatedChild = await Folder.findById(child._id).lean();
-      expect(updatedChild).toBeDefined();
-      expect(updatedChild!.parentId!.toString()).toBe(grandparent._id);
+      expect(updatedChild?.parentId?.toString()).toBe(grandparent._id);
+      expect(updatedChild?.encryptedName).toBe('child');
+      await expect(Folder.findById(parent._id).lean()).resolves.toBeNull();
     });
 
     it('should move child folders to root when deleted folder has no parent', async () => {
@@ -443,8 +452,9 @@ describe('Folder Routes', () => {
         .set('x-csrf-token', csrf.token);
 
       const updatedChild = await Folder.findById(child._id).lean();
-      expect(updatedChild).toBeDefined();
-      expect(updatedChild!.parentId).toBeUndefined();
+      expect(updatedChild?.parentId).toBeUndefined();
+      expect(updatedChild?.encryptedName).toBe('child');
+      await expect(Folder.findById(rootFolder._id).lean()).resolves.toBeNull();
     });
 
     it('should not delete items when using default move action', async () => {
@@ -826,10 +836,11 @@ describe('Folder Routes', () => {
 
       expect(res.status).toBe(200);
 
-      // Child should now be under parent (grandparent)
+      // Child should now be under parent (grandparent), intact
       const updatedChild = await Folder.findById(child._id).lean();
-      expect(updatedChild).toBeDefined();
-      expect(updatedChild!.parentId!.toString()).toBe(parent._id);
+      expect(updatedChild?.parentId?.toString()).toBe(parent._id);
+      expect(updatedChild?.encryptedName).toBe('grandchild-standalone');
+      expect(updatedChild?.userId?.toString()).toBe(user.id);
 
       // Target folder should be deleted
       const deletedTarget = await Folder.findById(target._id);
@@ -1034,15 +1045,16 @@ describe('Folder Routes', () => {
     it('should create audit log on folder create', async () => {
       const folder = await apiCreateFolder({ encryptedName: 'audit-create' });
 
-      const auditEntry = await AuditLog.findOne({
+      const creates = await AuditLog.find({
         userId: user.id,
         action: 'folder_create',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).folderId).toBe(folder._id);
+      // One row, naming the folder that was created and recording that it was
+      // created at the root. `toEqual` also pins that the encrypted name is
+      // NOT copied into the audit trail.
+      expect(creates).toHaveLength(1);
+      expect(creates[0]?.metadata).toEqual({ folderId: folder._id, parentId: null });
     });
 
     it('should create audit log on folder update', async () => {
@@ -1060,15 +1072,15 @@ describe('Folder Routes', () => {
         })
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const updates = await AuditLog.find({
         userId: user.id,
         action: 'folder_update',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).folderId).toBe(folder._id);
+      // One row naming the folder, and no echo of the new encrypted name or IV
+      // the request carried.
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.metadata).toEqual({ folderId: folder._id });
     });
 
     it('should create audit log on folder delete', async () => {
@@ -1081,15 +1093,16 @@ describe('Folder Routes', () => {
         .set('x-csrf-token', csrf.token)
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const deletes = await AuditLog.find({
         userId: user.id,
         action: 'folder_delete',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).folderId).toBe(folder._id);
+      // One row naming the folder AND which of the two deletion semantics ran:
+      // a request with no `?action=` is recorded as the non-destructive
+      // `move`, so the trail distinguishes it from `delete`.
+      expect(deletes).toHaveLength(1);
+      expect(deletes[0]?.metadata).toEqual({ folderId: folder._id, action: 'move' });
     });
 
     it('should create audit log on folder reorder', async () => {
@@ -1103,16 +1116,18 @@ describe('Folder Routes', () => {
         .send({ sortOrder: 3 })
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const reorders = await AuditLog.find({
         userId: user.id,
         action: 'folder_reorder',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).folderId).toBe(folder._id);
-      expect((auditEntry!.metadata as Record<string, unknown>).sortOrder).toBe(3);
+      // One row carrying the folder and the position it was moved to...
+      expect(reorders).toHaveLength(1);
+      expect(reorders[0]?.metadata).toEqual({ folderId: folder._id, sortOrder: 3 });
+      // ...and the position the audit row claims is the position that was
+      // actually persisted.
+      const reordered = await Folder.findById(folder._id).lean();
+      expect(reordered?.sortOrder).toBe(3);
     });
   });
 
