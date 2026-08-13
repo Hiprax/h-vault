@@ -468,6 +468,33 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/upgrade-gate.mjs'], options),
   },
   {
+    id: 'recovery',
+    task: 'test:recovery',
+    // TIER 2, on the `fuzz`/`upgrade` model rather than the `resource` one: both
+    // of its files ALSO run inside `test-integration` on every push, because the
+    // base server config does not narrow its include set — so the assertions are
+    // on the push gate, and what T2 buys is the named, separately-reported run
+    // and a wall-clock deadline.
+    //
+    // The deadline is not decoration here. This is the only gate that spawns
+    // processes in order to KILL them, and the two ways that goes wrong — a
+    // child that never reaches its injection point, and a mongod still holding
+    // locks for the transaction an abandoned process left open — both present as
+    // a hang rather than as a red assertion. A gate that can hang is a gate
+    // someone eventually disables, so a hang is reported as the failure it is.
+    //
+    // It sits beside `upgrade` because it answers the third question nobody had
+    // asked of a shipped release: not what a full vault costs, nor whether the
+    // last release's vault still opens, but whether this one survives the day
+    // the server does not.
+    tier: 2,
+    title: 'Recovery drills (backup restored onto a second mongod; a process killed mid-write)',
+    ci: 'new — no hosted job ever restored a backup or killed this application mid-write',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/recovery-gate.mjs'], options),
+  },
+  {
     id: 'smoke',
     task: 'test:smoke',
     tier: 1,

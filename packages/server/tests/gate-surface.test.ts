@@ -44,6 +44,7 @@ import clientFuzzConfig, { CLIENT_FUZZ_SUITE } from '../../client/vitest.fuzz.co
 import serverFuzzConfig, { SERVER_FUZZ_SUITE } from '../vitest.fuzz.config';
 import resourceVitestConfig, { RESOURCE_SUITE } from '../vitest.resource.config';
 import upgradeVitestConfig, { UPGRADE_SUITE } from '../vitest.upgrade.config';
+import recoveryVitestConfig, { RECOVERY_SUITE } from '../vitest.recovery.config';
 import clientUpgradeConfig, { CLIENT_UPGRADE_SUITE } from '../../client/vitest.upgrade.config';
 import { RESOURCE_SCENARIOS } from '../../../scripts/ci/lib/resource-budgets.mjs';
 import { chunkBaseName } from '../../../scripts/ci/bundle-gate.mjs';
@@ -296,13 +297,20 @@ describe('tiers', () => {
     //   real child process per case, where a HANG is a distinct defect from a
     //   refusal.
     //
+    //   `recovery` — the disaster drills: a backup restored onto a second
+    //   mongod, and a real process SIGKILLed mid-write. Like `fuzz` and
+    //   `upgrade`, both of its files also run inside `test-integration` on every
+    //   push; T2 buys the named run and a deadline, which this gate needs more
+    //   than any other because it spawns processes in order to kill them and the
+    //   two ways that goes wrong both present as a hang.
+    //
     //   `deploy` — the deployment clean room builds four images, stands five
     //   containers up from nothing, restarts them and rotates a database
     //   credential. There is no version of that which belongs in a hook someone
     //   is waiting on, and its fast sibling `smoke` (T1) covers the artifact on
     //   every push.
     const t2 = gates.filter((gate) => gate.tier === 2).map((gate) => gate.id);
-    expect(t2).toEqual(['fuzz', 'resource', 'upgrade', 'deploy']);
+    expect(t2).toEqual(['fuzz', 'resource', 'upgrade', 'recovery', 'deploy']);
   });
 
   it('treats tiers as cumulative, so verify is a superset of verify:fast', () => {
@@ -667,6 +675,51 @@ describe('machine-readable reports', () => {
     expect(declaredReports).not.toContain('junit-upgrade-client.xml');
   });
 
+  it('runs the recovery drills from their own config, their own report and their own files', () => {
+    // The same contract as every other named subset. What is specific to this
+    // gate is the SHAPE of the thing it protects: the two files spawn real child
+    // processes and kill them, so a membership list that lost one would quietly
+    // stop rehearsing an entire disaster while the gate kept reporting green.
+    const output = junitOutputFile(recoveryVitestConfig.test?.reporters);
+    expect(output).toBeDefined();
+    expect(path.resolve(output!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-recovery.xml'),
+    );
+    expect(output).not.toBe(junitOutputFile(serverVitestConfig.test?.reporters));
+
+    expect(RECOVERY_SUITE.length).toBeGreaterThan(0);
+    for (const file of RECOVERY_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'packages', 'server', file)), file).toBe(true);
+    }
+    expect(recoveryVitestConfig.test?.include).toEqual(RECOVERY_SUITE);
+
+    // Both directions, as for `test:resource` and `test:upgrade`: a file on disk
+    // this gate does not claim would still run inside `test:integration`, so no
+    // test would disappear and `tests.count` would not move — the gate would
+    // simply be smaller than it says it is, and nothing but this would notice.
+    const dir = path.join(repoRoot, 'packages', 'server', 'tests', 'recovery');
+    const onDisk = readdirSync(dir)
+      .filter((entry) => entry.endsWith('.test.ts'))
+      .map((entry) => `tests/recovery/${entry}`)
+      .sort();
+    expect(onDisk).toEqual([...RECOVERY_SUITE].sort());
+
+    // Pinned as an exact set, for the reason the security and observability
+    // suites are: deleting a line here halves the gate while every other check
+    // in this test still passes.
+    expect([...RECOVERY_SUITE].sort()).toEqual([
+      'tests/recovery/crash-consistency.test.ts',
+      'tests/recovery/restore-drill.test.ts',
+    ]);
+
+    // And, like `test:fuzz`, `test:resource` and `test:upgrade`, only the JSON
+    // report is DECLARED: a Tier 2 JUnit in the manifest makes `tests.count`
+    // UNMEASURED on every push.
+    expect(reportsOf(manifest.tasks['test:recovery']!)).toEqual(['recovery.json']);
+    const declaredReports = nonComposite.flatMap(([, task]) => reportsOf(task));
+    expect(declaredReports).not.toContain('junit-recovery.xml');
+  });
+
   it('reads a chunk budget by base name, with the content hash stripped exactly', () => {
     // The budgets in `lib/bundle-budgets.mjs` are keyed by chunk base name
     // because the filenames carry a content hash that changes on every
@@ -771,7 +824,13 @@ describe('machine-readable reports', () => {
     // `test:unit` / `test:integration`, so counting them would ratchet the same
     // tests twice — and because the field is higher-is-better, nothing would ever
     // complain.
-    for (const name of ['test:snapshot', 'test:fuzz', 'test:a11y', 'test:upgrade']) {
+    for (const name of [
+      'test:snapshot',
+      'test:fuzz',
+      'test:a11y',
+      'test:upgrade',
+      'test:recovery',
+    ]) {
       expect(manifest.tasks[name]!.countsTests, `${name}`).toBe(false);
     }
   });

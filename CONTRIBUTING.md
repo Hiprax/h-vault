@@ -44,16 +44,19 @@ There is **no CI workflow that tests your code**. The `pre-push` hook runs the e
 pipeline locally — twenty-six gates including the full test suite, the export-format
 goldens, a smoke run of the built artifact, the browser bundle's size budgets, container
 builds with Trivy scanning, and CodeQL — and refuses the push if any of them fail. A
-commit that reaches `main` has already passed everything. Four further gates sit in the
+commit that reaches `main` has already passed everything. Five further gates sit in the
 release tier: `fuzz`, whose suites still run inside the ordinary test gates on every push
 so that only the separately-reported, deadline-bounded run is held back; `resource`, the
 volume and memory budgets, which builds ten-thousand-item vaults and therefore both takes
 a minute and needs a machine that is not running three other workers for its numbers to
 mean anything; `upgrade`, which reads a vault and a `.env` written by the previous release
 and, like `fuzz`, keeps its assertions on the push tier while the named, deadline-bounded
-run waits for a release; and `deploy`, the deployment clean room, which stands the whole
-Compose stack up from nothing and is far too heavy for a hook — its fast sibling `smoke`
-covers the built artifact on every push. All four run in `npm run verify:full`.
+run waits for a release; `recovery`, which restores a backup onto a second database and
+kills a real server process mid-write, and which needs its deadline more than any other
+gate because it spawns processes in order to kill them; and `deploy`, the deployment clean
+room, which stands the whole Compose stack up from nothing and is far too heavy for a hook
+— its fast sibling `smoke` covers the built artifact on every push. All five run in
+`npm run verify:full`.
 
 The gates are grouped into tiers by how long they take, so there is something worth
 running at every point in the loop:
@@ -61,7 +64,7 @@ running at every point in the loop:
 ```bash
 npm run verify:fast               # the fast tier (~80s): engines, secrets, lint, format, types
 npm run ci                        # everything the pre-push hook runs (15–30 min)
-npm run verify:full               # the above plus the release tier (fuzz, volume budgets, upgrade path, deploy drill)
+npm run verify:full               # the above plus the release tier (fuzz, volume budgets, upgrade path, recovery drills, deploy drill)
 npm run ci:local                  # all of it again, from a fresh worktree at HEAD (clean room)
 npm run ci -- --list              # the gates, their tiers, and what each one replaces
 npm run ci -- --only=lint,test    # a subset, while iterating

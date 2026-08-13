@@ -195,6 +195,14 @@
       "countsTests": false,
       "requires": ["build:shared"]
     },
+    "test:recovery": {
+      "cmd": "npm run test:recovery",
+      "tier": 2,
+      "gate": "this application survives the two disasters it is built for: a backup downloaded from one database restores into an empty account on a SECOND mongod with every item decrypting to the bytes that were sealed and each one still paired with its own name, the downloaded document survives the round trip its signature is computed over (so a signed backup still verifies, and an altered one does not), a backup is worthless without its backup password, and a real process killed mid-write always leaves the stored vault key OLD with its write fence still up — a login clearing that fence only once the dead rotation's lock has genuinely expired, the interrupted rotation completing on retry, and no crash before, inside or after the import write leaving a partial insert behind",
+      "report": "recovery.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
     "test:smoke": {
       "cmd": "npm run test:smoke",
       "tier": 1,

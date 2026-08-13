@@ -202,9 +202,63 @@ async function createReplicaSet(): Promise<MongoMemoryReplSet> {
  */
 let standaloneUri: string | undefined;
 
+/**
+ * The URI the process-wide mongoose singleton is connected to RIGHT NOW —
+ * the standalone by default, the replica set while a block has borrowed the
+ * connection.
+ *
+ * It exists for the crash drill (`tests/recovery/`), which spawns a real child
+ * process that has to reach THE SAME database this worker is using: without it
+ * the child would either guess or be handed a URI the enclosing block has since
+ * swapped away from, and a probe pointed at the wrong database asserts nothing
+ * while looking green. Maintained beside the two places that actually move the
+ * connection, so it cannot describe a state the process is not in.
+ */
+let activeUri: string | undefined;
+
 /** Called once by `tests/setup.ts` after it starts its server. */
 export function setStandaloneUri(uri: string): void {
   standaloneUri = uri;
+  activeUri = uri;
+}
+
+/**
+ * Points the process-wide mongoose singleton at `uri` and builds every model's
+ * indexes there.
+ *
+ * The one way a test moves the connection outside {@link useReplicaSetConnection},
+ * so that {@link getActiveMongoUri} cannot describe a database the process left.
+ * The caller owns the RETURN: pair it with {@link restoreStandaloneConnection}
+ * in a `finally`, or the next test in the file — and `tests/setup.ts`'s own
+ * `afterEach` truncation — runs against the wrong database.
+ */
+export async function switchMongoConnection(uri: string): Promise<void> {
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.disconnect();
+  }
+  await mongoose.connect(uri);
+  activeUri = uri;
+  await buildModelIndexes();
+}
+
+/** Returns the borrowed connection to the standalone server `setup.ts` owns. */
+export async function restoreStandaloneConnection(): Promise<void> {
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.disconnect();
+  }
+  await mongoose.connect(getStandaloneUri());
+  activeUri = getStandaloneUri();
+}
+
+/** The URI of the mongod this worker is connected to at this moment. */
+export function getActiveMongoUri(): string {
+  if (activeUri === undefined) {
+    throw new Error(
+      'No mongod URI is registered. tests/setup.ts must call setStandaloneUri() in its ' +
+        'beforeAll before anything asks which database this worker is using.',
+    );
+  }
+  return activeUri;
 }
 
 export function getStandaloneUri(): string {
@@ -263,7 +317,9 @@ export function useReplicaSetConnection(options: { timeoutMs?: number } = {}): v
       await mongoose.disconnect();
     }
     replSet = await createReplicaSet();
-    await mongoose.connect(replSet.getUri());
+    const uri = replSet.getUri();
+    await mongoose.connect(uri);
+    activeUri = uri;
     await buildModelIndexes();
   }, timeoutMs);
 
@@ -289,6 +345,7 @@ export function useReplicaSetConnection(options: { timeoutMs?: number } = {}): v
       // than cascading one teardown error into every remaining test.
       if (mongoose.connection.readyState === 0) {
         await mongoose.connect(getStandaloneUri());
+        activeUri = getStandaloneUri();
       }
     }
   }, timeoutMs);

@@ -11,9 +11,10 @@
   // own module, or by declaring the dependency that was really being used.
   //
   // `entry` is not an exception to that rule; it is the opposite of one. knip can
-  // only follow imports, and three of this repository's programs are started by
-  // something that is not an import. Each is marked with knip's `!` (production)
-  // suffix and carries the exact line that runs it, so the claim is checkable:
+  // only follow imports, and five of this repository's programs are started by
+  // something that is not an import. Each carries the exact line that runs it, so
+  // the claim is checkable; the four that ship carry knip's `!` (production)
+  // suffix, and the test-tier one deliberately does not:
   //
   //   e2e/start-server.ts             playwright.config.ts:72  `npx tsx e2e/start-server.ts`
   //   playwright.a11y.config.ts       scripts/ci/a11y-gate.mjs `playwright test --config
@@ -24,6 +25,13 @@
   //   ecosystem.config.cjs            README.md:568            `pm2 start ecosystem.config.cjs --env production`
   //   docker/mongo/provision-app-user.js
   //                                   docker-compose.yml:463   mongosh argument in `hvault-db-init`
+  //   packages/server/tests/recovery/crashChild.ts
+  //                                   tests/recovery/crashProbe.ts:91  `spawn(node, ['--import',
+  //                                   'tsx', crashChild.ts, …])` — the crash drill's doomed
+  //                                   process, which exists to be SIGKILLed, so it can only be
+  //                                   started as a program and never imported (importing it runs
+  //                                   its request, which is why `crashContract.ts` holds the types
+  //                                   the parent needs)
   "workspaces": {
     ".": {
       "entry": [
@@ -42,7 +50,12 @@
       "project": ["src/**/*.ts", "scripts/**/*.js", "tests/**/*.ts"],
     },
     "packages/server": {
-      "entry": ["src/cli/*.ts", "scripts/*.ts", "tests/**/*.test.ts"],
+      "entry": [
+        "src/cli/*.ts",
+        "scripts/*.ts",
+        "tests/**/*.test.ts",
+        "tests/recovery/crashChild.ts",
+      ],
       "project": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
     },
     "packages/client": {

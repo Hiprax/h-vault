@@ -1151,37 +1151,38 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ### Scripts
 
-| Command                        | Description                                    |
-| ------------------------------ | ---------------------------------------------- |
-| `npm run dev`                  | Server + client together, hot-reloading        |
-| `npm run build`                | Build all packages (shared → server → client)  |
-| `npm run start`                | Start the production server                    |
-| `npm run test`                 | Every workspace's tests                        |
-| `npm run test:unit`            | The hermetic suites (shared, client)           |
-| `npm run test:integration`     | The server suite, against a real `mongod`      |
-| `npm run test:e2e`             | Playwright E2E tests                           |
-| `npm run lint`                 | ESLint, warnings are errors                    |
-| `npm run type-check`           | Type-check all packages, tests and `e2e/`      |
-| `npm run format`               | Prettier — write                               |
-| `npm run format:check`         | Prettier — verify only                         |
-| `npm run ci`                   | The whole pipeline (what `pre-push` runs)      |
-| `npm run verify:fast`          | The fast tier only (~80 s)                     |
-| `npm run verify:full`          | The whole pipeline plus the release tier       |
-| `npm run ci:list`              | List the pipeline's gates and their tiers      |
-| `npm run ci:docker`            | The container gate on its own                  |
-| `npm run ci:sast`              | The CodeQL gate on its own                     |
-| `npm run audit:bundle`         | The client bundle size budgets on their own    |
-| `npm run test:resource`        | The volume and memory budgets on their own     |
-| `npm run test:upgrade`         | The previous release's vault and `.env`, read  |
-| `npm run report`               | Collect the gates' warning counts              |
-| `npm run verify:selftest`      | Prove every registered gate can still fail     |
-| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger |
-| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline  |
-| `npm run audit:ratchet:full`   | Every gated number, against the baseline       |
-| `npm run secret-scan`          | Scan every tracked file for committed secrets  |
-| `npm run audit:prod`           | Dependency audit, production deps only         |
-| `npm run release:next-version` | Compute the next release tag                   |
-| `npm run clean`                | Remove `dist/`, `node_modules/` and `logs/`    |
+| Command                        | Description                                     |
+| ------------------------------ | ----------------------------------------------- |
+| `npm run dev`                  | Server + client together, hot-reloading         |
+| `npm run build`                | Build all packages (shared → server → client)   |
+| `npm run start`                | Start the production server                     |
+| `npm run test`                 | Every workspace's tests                         |
+| `npm run test:unit`            | The hermetic suites (shared, client)            |
+| `npm run test:integration`     | The server suite, against a real `mongod`       |
+| `npm run test:e2e`             | Playwright E2E tests                            |
+| `npm run lint`                 | ESLint, warnings are errors                     |
+| `npm run type-check`           | Type-check all packages, tests and `e2e/`       |
+| `npm run format`               | Prettier — write                                |
+| `npm run format:check`         | Prettier — verify only                          |
+| `npm run ci`                   | The whole pipeline (what `pre-push` runs)       |
+| `npm run verify:fast`          | The fast tier only (~80 s)                      |
+| `npm run verify:full`          | The whole pipeline plus the release tier        |
+| `npm run ci:list`              | List the pipeline's gates and their tiers       |
+| `npm run ci:docker`            | The container gate on its own                   |
+| `npm run ci:sast`              | The CodeQL gate on its own                      |
+| `npm run audit:bundle`         | The client bundle size budgets on their own     |
+| `npm run test:resource`        | The volume and memory budgets on their own      |
+| `npm run test:upgrade`         | The previous release's vault and `.env`, read   |
+| `npm run test:recovery`        | The backup-restore and crash-consistency drills |
+| `npm run report`               | Collect the gates' warning counts               |
+| `npm run verify:selftest`      | Prove every registered gate can still fail      |
+| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger  |
+| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline   |
+| `npm run audit:ratchet:full`   | Every gated number, against the baseline        |
+| `npm run secret-scan`          | Scan every tracked file for committed secrets   |
+| `npm run audit:prod`           | Dependency audit, production deps only          |
+| `npm run release:next-version` | Compute the next release tag                    |
+| `npm run clean`                | Remove `dist/`, `node_modules/` and `logs/`     |
 
 ---
 

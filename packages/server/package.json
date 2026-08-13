@@ -14,6 +14,7 @@
     "test:fuzz": "vitest run --config vitest.fuzz.config.ts",
     "test:resource": "vitest run --config vitest.resource.config.ts",
     "test:upgrade": "vitest run --config vitest.upgrade.config.ts",
+    "test:recovery": "vitest run --config vitest.recovery.config.ts",
     "test:security": "vitest run --config vitest.security.config.ts",
     "test:observability": "vitest run --config vitest.observability.config.ts",
     "type-check": "tsc --noEmit && tsc -p tsconfig.test.json",

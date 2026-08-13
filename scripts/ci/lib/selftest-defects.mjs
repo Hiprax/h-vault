@@ -519,6 +519,54 @@ export const DEFECTS = {
     evidence: (text) => /expected 'undefined' to be 'boolean'/.test(text),
   },
 
+  'test:recovery': {
+    // The defect this gate was built for, and it is the DELETION OF ONE
+    // ARGUMENT: the import's `insertMany` stops running in the transaction's
+    // session.
+    //
+    // What it breaks: on a replica set every imported row is then committed the
+    // instant it is written, outside the transaction that is supposed to make
+    // the request atomic. A process killed between that insert and the commit —
+    // an OOM kill, a container eviction, a deploy that restarted the pod — leaves
+    // a PARTIAL import behind: rows the client believes were never accepted,
+    // which its next attempt will insert again.
+    //
+    // What makes it the right case is what does NOT notice it. Measured here:
+    // the whole import estate stays green (119 tests across
+    // `import-operations`, `tools` and `coverage-controllers-vault-tools`),
+    // because the rows still arrive, the counts still add up, the types are
+    // identical and the lint is clean. `import-operations.test.ts` even says the
+    // quiet part out loud — "this harness is standalone, so a mixed request would
+    // leave its inserts committed" — which is exactly why it cannot see this.
+    // Only a crash inside the transaction can, and only on a replica set.
+    //
+    // Planted in `packages/server/src`, deliberately: the gate runs vitest over
+    // the server sources directly and does NOT rebuild `packages/shared/dist`,
+    // so a defect planted in the shared package would never reach the code under
+    // test.
+    //
+    // The pattern is byte-exact against today's source. A rewrite of that line
+    // turns `String.replace` into a no-op, which fails in the SAFE direction: the
+    // gate stays green, the harness reports `unproven`, and the run exits
+    // non-zero — provided the evidence predicate below cannot be satisfied by a
+    // green report, which is why it matches the ASSERTION MESSAGE.
+    title:
+      'take the import’s insert out of its transaction, so a crash can leave half of it behind',
+    mutate: {
+      'packages/server/src/controllers/toolsController.ts': (text) =>
+        text.replace(
+          'const created = await VaultItem.insertMany(insertDocs, sessionOpt);',
+          'const created = await VaultItem.insertMany(insertDocs);',
+        ),
+    },
+    // The assertion's own message, which a PASSING run cannot contain — the trap
+    // recorded on `test:security`: the JUnit report lists a `<testcase>` for
+    // every test that ran, so matching a test NAME would be satisfied by a fully
+    // green report. Only a surviving row produces this line.
+    evidence: (text) =>
+      /a crash inside the import transaction left \d+ item\(s\) behind/.test(text),
+  },
+
   'test:smoke': {
     // The defect is planted in the ARTIFACT, not in the sources, and that is the
     // point of this gate: `test:smoke` runs the emitted bundle, so the emitted
