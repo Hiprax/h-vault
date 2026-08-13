@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-08-13",
-  "commit": "56672aa",
+  "commit": "5b5f7ed",
   "tests": {
-    "count": 7414
+    "count": 7463
   },
   "warnings": {
     "lint": 0,
@@ -117,7 +117,7 @@
         ]
       },
       "tests": {
-        "count": 2853
+        "count": 2892
       }
     },
     "packages/client": {
@@ -250,7 +250,7 @@
         ]
       },
       "tests": {
-        "count": 3463
+        "count": 3473
       }
     },
     "e2e": {
@@ -289,6 +289,7 @@
     "test:smoke",
     "test:snapshot",
     "test:unit",
+    "test:upgrade",
     "typecheck",
     "verify",
     "verify:fast",
@@ -433,7 +434,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 13 (volume-budgets): registers audit:bundle (T1) and test:resource (T2); adds src/utils/logger.ts to the server's measured file set; adds 9 server tests (logger directory resolution, the log-directory write guard) and 5 client tests (lazyZxcvbn in-flight dedupe and retry); 2 new e2e tests come from the a11y suite already registered in Phase 12.",
+  "reason": "Phase 14 upgrade-path: the client leg of test:upgrade adds 10 tests to the client suite",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

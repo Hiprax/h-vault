@@ -12,6 +12,7 @@
     "test:property": "vitest run --config vitest.property.config.ts",
     "test:fuzz": "vitest run --config vitest.fuzz.config.ts",
     "test:snapshot": "vitest run --config vitest.snapshot.config.ts",
+    "test:upgrade": "vitest run --config vitest.upgrade.config.ts",
     "type-check": "tsc --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {

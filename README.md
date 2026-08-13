@@ -1172,6 +1172,7 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 | `npm run ci:sast`              | The CodeQL gate on its own                     |
 | `npm run audit:bundle`         | The client bundle size budgets on their own    |
 | `npm run test:resource`        | The volume and memory budgets on their own     |
+| `npm run test:upgrade`         | The previous release's vault and `.env`, read  |
 | `npm run report`               | Collect the gates' warning counts              |
 | `npm run verify:selftest`      | Prove every registered gate can still fail     |
 | `npm run audit:integrity`      | Markers that weaken a gate, against the ledger |

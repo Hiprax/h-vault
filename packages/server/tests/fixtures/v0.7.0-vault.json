@@ -1,0 +1,322 @@
+{
+  "provenance": {
+    "fixture": "packages/server/tests/fixtures/v0.7.0-vault.json",
+    "subject": "A vault as release 0.7.0 persisted it: the previous release of this application, and the last one before the changes the current tree carries.",
+    "generatedFromTag": "v0.7.0",
+    "generatedFromCommit": "8ab3c7609a505e65c02276e78e673eff4195d262",
+    "generatedBy": "Hiprax <sajadkhmz@gmail.com>",
+    "generatedOn": "2026-08-13",
+    "howGenerated": [
+      "git worktree add --detach <tmp> v0.7.0",
+      "every ciphertext below was produced by that worktree's own packages/client/src/services/crypto/cryptoService.ts (PBKDF2-SHA256 600k over the master password with the lowercased email as salt, AES-256-GCM with a 12-byte IV and a 16-byte tag held separately, HMAC-SHA256 search hash over the trimmed lowercased name)",
+      "every `plaintext` was parsed by that worktree's own packages/shared/src/schemas/vault.ts before being sealed; the generator throws rather than emit a payload v0.7.0 would reject",
+      "`parsedByV070` is the output of that parse — recorded, not asserted, so the current schemas can be compared against what the previous release actually made of the same bytes",
+      "`account.settings` was instantiated from that worktree's own packages/server/src/models/User.ts, so the subtree carries that release's defaults rather than a hand-typed approximation of them"
+    ],
+    "verifiedThat": [
+      "each item decrypts, under the key derived from `account.masterPassword` and `account.email`, to exactly its `plaintext`",
+      "each `plaintext` satisfies v0.7.0 vaultItemDataSchemas[itemType]",
+      "the wrapped vault key unwraps under the master encryption key derived from the same two inputs"
+    ],
+    "notVerified": [
+      "that any of these rows was written by a real user through the 0.7.0 UI — the shapes are derived from the schema history (backupCodes 0.6.0, street2 and deliveryNotes 0.7.0, absoluteExpiresAt 0.5.0), not captured from a production database",
+      "anything about releases older than 0.5.0 beyond what that schema history states",
+      "browser behaviour: the ciphertext was produced by Node’s Web Crypto implementation of the same algorithms, not by a browser"
+    ],
+    "neverRegenerate": "There is no --update path and there must not be one. Regenerating this file from the CURRENT tree would replace the previous release’s output with today’s and turn the test into a tautology; if the fixture ever has to change, generate it again from the v0.7.0 tag and say so here."
+  },
+  "account": {
+    "email": "n-minus-one@hvault.test",
+    "masterPassword": "fixture-master-password-not-a-real-account",
+    "kdfIterations": 600000,
+    "kdfAlgorithm": "PBKDF2-SHA256",
+    "encryptionVersion": 1,
+    "authHash": "2ss2jgWrczfeBn7f4n6FHLFa8U41JE1vL2bvJ/Nd0l0=",
+    "encryptedVaultKey": "PVuNWkCqPHQjBMA4oQcjfhhsOYHyr/SDlkKDZ1uO6MY=",
+    "vaultKeyIv": "JTABNU+YHi9je2RA",
+    "vaultKeyTag": "u6Ayf4XTSlEdkTIoSRH7ZA==",
+    "settingsNote": "The settings subtree 0.7.0 wrote for a new account. It has no lockOnHidden and no lockOnHiddenDelay: the current release added both, with defaults, and nothing backfills them into an existing document.",
+    "settings": {
+      "autoLockTimeout": 15,
+      "clipboardClearTimeout": 30,
+      "defaultPasswordLength": 20,
+      "theme": "system",
+      "language": "en",
+      "defaultPasswordOptions": {
+        "length": 20,
+        "uppercase": true,
+        "lowercase": true,
+        "numbers": true,
+        "symbols": true,
+        "excludeAmbiguous": false,
+        "minNumbers": 1,
+        "minSymbols": 1
+      },
+      "backup": {
+        "enabled": false,
+        "scheduleHour": 3,
+        "backupEmails": [],
+        "isConfigured": false
+      }
+    }
+  },
+  "items": [
+    {
+      "id": "login-without-backup-codes",
+      "itemType": "login",
+      "note": "A login as every release before 0.6.0 wrote one: loginDataSchema gained backupCodes in 0.6.0, so a vault at 0.7.0 still holds logins with no such key. backupCodes is .optional() with NO default, deliberately, so an absent one must stay absent.",
+      "omits": ["backupCodes"],
+      "name": "Mail provider",
+      "plaintext": "{\"username\":\"someone@example.com\",\"password\":\"correct horse battery staple\",\"uris\":[{\"uri\":\"https://mail.example.com/login\",\"match\":\"domain\"}],\"totp\":\"otpauth://totp/Example:someone?secret=JBSWY3DPEHPK3PXP&issuer=Example\",\"notes\":\"Recovery contact is the work address.\",\"customFields\":[{\"name\":\"Security question\",\"value\":\"First pet's name\",\"type\":\"hidden\"}]}",
+      "parsedByV070": {
+        "username": "someone@example.com",
+        "password": "correct horse battery staple",
+        "uris": [
+          {
+            "uri": "https://mail.example.com/login",
+            "match": "domain"
+          }
+        ],
+        "totp": "otpauth://totp/Example:someone?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+        "notes": "Recovery contact is the work address.",
+        "customFields": [
+          {
+            "name": "Security question",
+            "value": "First pet's name",
+            "type": "hidden"
+          }
+        ]
+      },
+      "encryptedName": "Qy8agJ4TkjtA1ZkdQg==",
+      "nameIv": "J9VRcL7Z41qYrYgs",
+      "nameTag": "QfaxKWTHiaaRWwXflRbFeA==",
+      "searchHash": "c9935a363163a3d1289acc3411220ef6e9a2858621f2ad1dd173e0cfaf577057",
+      "encryptedData": "PMTMteAPPazwdGhbX783UCjvAlLgtD1oAXGZvaqbLvj/ZxlTbtwSD8SRGZsG7Y95cbWkyX9xexK7K0COqP2LAXxtLDXkBgoid92RWymsXZ32Bgwj8Ssd7yZFAh1optBnS7C6SaNUAmIPWYi9JiwrjNnQateDFjHOLH467iMGJyuamE1/Mq12vUchMUpJunUKAn4BXMyF+7O0g0DEk4kWuy3DG/fC+MyjqkGda030c6Hf+iW8q1gITn0k5H5hhNQCJieEldmFuyZt4YMvO1Sb0thVCrGMU1GAAmiCAxLoy5D5o0eat7W6JwpKVxxMmjDZuKa4du1ov6JtUlcO9V7j3tNPMrkg0atxAS3HIiOxrOiq4KAZJSW8QsW8D/zkmYgY2XDnjMT7olDl2cfOcbFsqkooONADkKx/wgzlzSmQ4jJWTUJQwZUO3oVxgzdSKQbYSib4kX0jnCkUHQzsWopLW572a1eXlqA=",
+      "dataIv": "zVgKoc2EUSDJJt6X",
+      "dataTag": "4m6EUF7ALduVZbveL+zAag=="
+    },
+    {
+      "id": "login-with-backup-codes",
+      "itemType": "login",
+      "note": "The 0.7.0-era counterpart of the row above, carrying the backupCodes array. Present so the pair distinguishes \"an absent optional array stays absent\" from \"the field is never read at all\".",
+      "omits": [],
+      "name": "Bank",
+      "plaintext": "{\"username\":\"account-holder\",\"password\":\"a different stored password\",\"uris\":[{\"uri\":\"https://bank.example.com\",\"match\":\"exact\"}],\"backupCodes\":[\"11112222\",\"33334444\",\"55556666\"],\"customFields\":[]}",
+      "parsedByV070": {
+        "username": "account-holder",
+        "password": "a different stored password",
+        "uris": [
+          {
+            "uri": "https://bank.example.com",
+            "match": "exact"
+          }
+        ],
+        "backupCodes": ["11112222", "33334444", "55556666"],
+        "customFields": []
+      },
+      "encryptedName": "JUSxWw==",
+      "nameIv": "8PdJtkUE8UgXmPXW",
+      "nameTag": "9U7mWKzTtOihkXWcL0ls3A==",
+      "searchHash": "d766289d4e18f88a7d134a701be63d16ffe70a4463418add69dd7f30db3ba05b",
+      "encryptedData": "O7dpfuY49odUgg0kU5SqYgHTSMTayXVrp6XvmhqoImZ45aUtbzgYN4CX5LWjtw9dIT34xC1LTJYYkodMknW/R/SIXmQrHSEI7UTIdvHoXWnuCK5eBVDKhrBLQxpok5SnAkLs8watlfuSO4HT3ptQ1Wvhwk61880NgFgbpdY7L99ccI2iL6D8mpC6GCfGHQYHRiII5iQHTbhk3PGNlLUCU3kru7MeXzekmEn1YkLlSL+MmueVBnHXA8cQUaImmAqrx+bKjxY=",
+      "dataIv": "A5jeCASiNm6EZPZu",
+      "dataTag": "RQUNmHeFvgdb1vPlHEY7eQ=="
+    },
+    {
+      "id": "identity-without-street2-or-delivery-notes",
+      "itemType": "identity",
+      "note": "An identity as 0.6.0 wrote one. addressSchema gained street2 and identityAddressSchema gained deliveryNotes in 0.7.0, so every identity stored before that release carries a five-field address.",
+      "omits": ["address.street2", "address.deliveryNotes"],
+      "name": "Home identity",
+      "plaintext": "{\"firstName\":\"Alex\",\"lastName\":\"Fixture\",\"email\":\"alex@example.com\",\"phone\":\"+1 (555) 010-9999\",\"address\":{\"street\":\"14 Old Line Road\",\"city\":\"Springfield\",\"state\":\"IL\",\"zip\":\"62704\",\"country\":\"US\"},\"company\":\"Example Ltd\",\"ssn\":\"000-00-0000\",\"passport\":\"X1234567\",\"notes\":\"Second address is the office.\",\"customFields\":[]}",
+      "parsedByV070": {
+        "firstName": "Alex",
+        "lastName": "Fixture",
+        "email": "alex@example.com",
+        "phone": "+1 (555) 010-9999",
+        "address": {
+          "street": "14 Old Line Road",
+          "street2": "",
+          "city": "Springfield",
+          "state": "IL",
+          "zip": "62704",
+          "country": "US",
+          "deliveryNotes": ""
+        },
+        "company": "Example Ltd",
+        "ssn": "000-00-0000",
+        "passport": "X1234567",
+        "notes": "Second address is the office.",
+        "customFields": []
+      },
+      "encryptedName": "M/UuXGfRX7bIu1pjQw==",
+      "nameIv": "GwElyenIhEItM3Io",
+      "nameTag": "9AmOFQzm8GhRk750G/SBZg==",
+      "searchHash": "abe781fef4629c354c68f41696ba256beac683c714fa20651ad250ec021409cb",
+      "encryptedData": "kcuPVqyNzSp/1GV6ZlJvUuNqJJC68KIvu9F/mcmo4z1YloJiVi0JRQtKJfaLH9gYfyzUZHigvn97xO6tNW6sC299fS6I41h6dluP9Ew5Tk96ducUealWgx74Tex4ONIYdx57SkX9CzLtEkQPBfL8Xc3Tjhr/xOexSKRmXoDzVF2nKsCZGgO2Ujs2Gbay8cBuf57qIu63wHO9ESoJC7voqJyty19ZR0hVPe8YAdo8fV1i7BmmWyWTIrUvWiRjaYknQ/QXJk/2gSFmwbCjntmiMFUy8HiSzuJm1qFE2gnuJSY6lfVN4TLemBVX+n4KwfrFLqzlBnfs+jEDixtdMf9ey4KLkfAtYiNFzDJJAQ19jcbKl+p08W5tHe7kp2Hftts1hxw6CQUbzA3f9/57Pb/B1o5mz1GcRyTlTx9+O3moSpb9Hks=",
+      "dataIv": "Ncn6NypbrQhgP5H1",
+      "dataTag": "ToSNhAMMyTVlsjntOfMvJA=="
+    },
+    {
+      "id": "identity-with-street2-and-delivery-notes",
+      "itemType": "identity",
+      "note": "The 0.7.0-era counterpart: a six-field address plus delivery notes. deliveryNotes is identity-only by construction (the base address schema strips it), so this row is also what proves the pair of address shapes stayed distinct.",
+      "omits": [],
+      "name": "Shipping identity",
+      "plaintext": "{\"firstName\":\"Sam\",\"lastName\":\"Fixture\",\"address\":{\"street\":\"2 New Wharf\",\"street2\":\"Flat 4B\",\"city\":\"Bristol\",\"state\":\"Avon\",\"zip\":\"BS1 4RN\",\"country\":\"GB\",\"deliveryNotes\":\"Ring twice, leave with the concierge.\"},\"customFields\":[]}",
+      "parsedByV070": {
+        "firstName": "Sam",
+        "lastName": "Fixture",
+        "address": {
+          "street": "2 New Wharf",
+          "street2": "Flat 4B",
+          "city": "Bristol",
+          "state": "Avon",
+          "zip": "BS1 4RN",
+          "country": "GB",
+          "deliveryNotes": "Ring twice, leave with the concierge."
+        },
+        "customFields": []
+      },
+      "encryptedName": "NCUBnh9oV7isIuEH8cipswY=",
+      "nameIv": "8kmFfmXZQSWUNFi1",
+      "nameTag": "5i92DyiBkktJAtbfO2wsAA==",
+      "searchHash": "9283b33b7e98eb9c80dfcbefee18fbec74c2ae0059414504f7d16111e24fa619",
+      "encryptedData": "hSDbEKlGqYE1JWAuJSXihh9KO2V3OEil1SX9hgz9faemLJXp/WAYr7gjURZ7CtWdhYoSNU1KwTijHGQxSPhGPyPYaupmAXyxaWKtPrEZEJcwBWGwMxnSd58dYQpxBleX8QVIUNAyHFPVM6WVRoQK+bZyZxwU7Z8XvHELKZvphUasOcQhhrZ917fLGWcBOKJUpFxZNiFV+3OHu+WXP+NScyPo2zZH8jOsPTi5vdcE3xTRaWAQcKuA6MqK+JlZwkmUaFZHHPwTQa7IZE1JCkY29xb2Z7/6bOzBcvi0YaV11IgF1fFEOieKwg==",
+      "dataIv": "Y4khtiC25bi41luR",
+      "dataTag": "e3x/P/BI4/XZzH0JL/I0zg=="
+    },
+    {
+      "id": "card-without-street2",
+      "itemType": "card",
+      "note": "A card as 0.6.0 wrote one: its billingAddress predates street2. A card never has deliveryNotes in any release — the base address schema strips it — so this row also pins that the two address shapes did not converge.",
+      "omits": ["billingAddress.street2"],
+      "name": "Travel card",
+      "plaintext": "{\"cardholderName\":\"ALEX FIXTURE\",\"number\":\"4111111111111111\",\"expMonth\":\"04\",\"expYear\":\"2031\",\"cvv\":\"123\",\"brand\":\"Visa\",\"notes\":\"Travel only.\",\"billingAddress\":{\"street\":\"14 Old Line Road\",\"city\":\"Springfield\",\"state\":\"IL\",\"zip\":\"62704\",\"country\":\"US\"}}",
+      "parsedByV070": {
+        "cardholderName": "ALEX FIXTURE",
+        "number": "4111111111111111",
+        "expMonth": "04",
+        "expYear": "2031",
+        "cvv": "123",
+        "brand": "Visa",
+        "notes": "Travel only.",
+        "billingAddress": {
+          "street": "14 Old Line Road",
+          "street2": "",
+          "city": "Springfield",
+          "state": "IL",
+          "zip": "62704",
+          "country": "US"
+        }
+      },
+      "encryptedName": "SYTqjRk0/lVXhNc=",
+      "nameIv": "yY/p0XkoVWAbxGFi",
+      "nameTag": "gbHuDqOvTixc5U6+gy7JJA==",
+      "searchHash": "0774297426787162be9ab64e05253b842c8cfc73e1ace5a884c72d527e31f637",
+      "encryptedData": "i56U25Qe2Xu86NyJrEdNOs0gqmfM6aUozTcAXGzqkINMF6DJnFM05z+RFpGuIo/ofSk9oWArA+0FELCvBq+XHCjzVp+zcJ2/26nXrxFVA/Qnc1krEd3u8CJVv18g7FtlDUnVT36W07+4DMS9mm4pCTheS4E93cRGcS3XecUo2x213ucCl1dAIIVIFyjZhexFvN080KPPEVLSiZCqEj02HULT3f4rNausmyssPdkQ5lphFSfP8C+S8t2x6XRNbf6qf0HF1mFZ5SfL3Gf+fYU2lwWax7/mTta4qHMNBQ91wApU6I1w/bwhktLB0cItD6ZhALvOoksoO5njglS6IAg=",
+      "dataIv": "RbAjkSOVzcSKd1/l",
+      "dataTag": "/3pxq560CTXOzL7H4VRmww=="
+    },
+    {
+      "id": "note-without-format",
+      "itemType": "note",
+      "note": "A note carrying only its content. noteDataSchema.format is .optional().default(\"markdown\"), so this row is the one place the fixture exercises a DEFAULT being injected into an older document rather than a field simply staying absent.",
+      "omits": ["format"],
+      "name": "Router details",
+      "plaintext": "{\"content\":\"# Router\\n\\nAdmin panel at 192.168.1.1.\"}",
+      "parsedByV070": {
+        "content": "# Router\n\nAdmin panel at 192.168.1.1.",
+        "format": "markdown"
+      },
+      "encryptedName": "HW03uzCKRrJ32FUKKxk=",
+      "nameIv": "eHAoLVoQVxEsopJq",
+      "nameTag": "n/phPn8njud61maeLQcoAA==",
+      "searchHash": "86ee065a4c9d2b996e03cdaf0ad49c914298f53534ede056a4df5779d05ef6dd",
+      "encryptedData": "T+m5rxFl3g1UfGDRw5BdH59eYGDUyMqCYeAgOIEvlQkf7TRv4gldx9zJxv9FmD9kvBJHTtc=",
+      "dataIv": "K09BUAnv44WyXgkb",
+      "dataTag": "Am4FhbKYPe26bLJXldPDEA=="
+    },
+    {
+      "id": "secret-with-expiry",
+      "itemType": "secret",
+      "note": "A secret carrying an absolute ISO 8601 expiry with an explicit offset. expiresAt is read back through new Date(), so the stored string is an instant rather than a wall-clock reading, and it must survive a decrypt byte for byte.",
+      "omits": [],
+      "name": "Deploy token",
+      "plaintext": "{\"value\":\"ghs-not-a-real-token-0000\",\"description\":\"Rotate every 90 days.\",\"expiresAt\":\"2027-03-14T09:30:00+01:00\",\"customFields\":[{\"name\":\"Scope\",\"value\":\"read:packages\",\"type\":\"text\"}]}",
+      "parsedByV070": {
+        "value": "ghs-not-a-real-token-0000",
+        "description": "Rotate every 90 days.",
+        "expiresAt": "2027-03-14T09:30:00+01:00",
+        "customFields": [
+          {
+            "name": "Scope",
+            "value": "read:packages",
+            "type": "text"
+          }
+        ]
+      },
+      "encryptedName": "6ulp6hSCvrd2ddMz",
+      "nameIv": "nZeonmdNrlgJPhqP",
+      "nameTag": "XAkOCeVX60Pqv1yhdSiF6w==",
+      "searchHash": "9a4c3a53c3064f0a0370fba45ff20247b90b78e3feaf2ae4e3db764ac5c828fa",
+      "encryptedData": "pkqdT9RhPgiPBbqw9WE9tR6Wleh3bxON82qQIjNj1FIx9rgNIYAPcN417ZOCTc2Lb3KOaJUcXxQP4MSMlOrLx6Pn3gxfRXku2+8Lj8jyQLB/d3ZKdBGv5wPAUXNW05wLEBA+XVR6PhqdKN6bMwXCrH7aDG6FVUdV6OBIZA9/FBb7Eyx0eAKPBfPOkro4KKrI1XAXTxBX7csko8uiBbSKb0e6Zcn/yWHjzmOzx9Z4dY3/Xja7H9bxj7vbqA==",
+      "dataIv": "myp5NRXMYC2ptT7Y",
+      "dataTag": "Kg/zjqqEbMp07jxhPKxr+A=="
+    }
+  ],
+  "folders": [
+    {
+      "id": "folder-root",
+      "note": "An ordinary folder. sourceRefId is stamped only on a fresh restore insert, so the overwhelming majority of real folders have never carried the key at all.",
+      "name": "Personal",
+      "sortOrder": 0,
+      "encryptedName": "58E5epz+IX8=",
+      "nameIv": "ggz1Kj6WEp7biCNL",
+      "nameTag": "lz0Tn2fGO5/DV0+QboFNJA==",
+      "searchHash": "36421d2b6d27c25901ee9192619bb1d672daee4696c18476bd23f3c47aee142a"
+    },
+    {
+      "id": "folder-child",
+      "note": "A nested folder, also without sourceRefId, so the parent edge is exercised on a row that lacks the optional field.",
+      "name": "Personal / Finance",
+      "parent": "folder-root",
+      "sortOrder": 1,
+      "encryptedName": "V8s1rsD8PnTRhiDYcNnNXh1n",
+      "nameIv": "URe0QFn2/3+pbaDr",
+      "nameTag": "3TZ5AA1JMkrNm/HnVZsJHA==",
+      "searchHash": "3d32df9b0a3db61ed35fd092040a90672b76ff5c18c855ba2120b62534ac53c7"
+    },
+    {
+      "id": "folder-restored",
+      "note": "The counterpart: a folder that DID come from a restore and carries another account’s ObjectId in sourceRefId. Present so \"an absent sourceRefId is accepted\" is not confused with \"sourceRefId is ignored\", and so the never-serialize rule has something to hide.",
+      "name": "Restored",
+      "sourceRefId": "6512c0ffee0000000000beef",
+      "sortOrder": 2,
+      "encryptedName": "lU/sJcxusCM=",
+      "nameIv": "k4+45scDBilxdM16",
+      "nameTag": "NKeO0AV+Gm5vSJVkyvf9lg==",
+      "searchHash": "cc1848db714ec55ef539b89f94a539a60949fe735c0e7afcd8187320b2e4fb82"
+    }
+  ],
+  "refreshTokens": [
+    {
+      "id": "standard-session-without-absolute-deadline",
+      "note": "Every refresh row written before 0.5.0, and every non-remembered session since: no absoluteExpiresAt at all. By design this must keep sliding by REFRESH_TOKEN_DAYS on each rotation, with no migration. Seeded PARTIALLY ELAPSED (2 days left, not a fresh 7) on purpose: a row seeded at the full horizon is indistinguishable from one a rotation just minted, so a rotation that carried the old expiry forward instead of sliding it would land inside any sane tolerance and the test would not see the defect it exists to catch.",
+      "omits": ["absoluteExpiresAt"],
+      "rawToken": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "familyId": "3f2b7c9e-0d51-4a6f-9a2b-7c1e5d8f0a41",
+      "expiresInDays": 2,
+      "absoluteExpiresInDays": null
+    },
+    {
+      "id": "remembered-session-with-absolute-deadline",
+      "note": "The 0.5.0-era counterpart: a remembered family whose hard deadline rotation must carry forward unchanged rather than slide.",
+      "omits": [],
+      "rawToken": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "familyId": "8c4d1a02-6e93-4b7f-8d15-2a9f3e6c0b77",
+      "expiresInDays": 30,
+      "absoluteExpiresInDays": 30
+    }
+  ]
+}

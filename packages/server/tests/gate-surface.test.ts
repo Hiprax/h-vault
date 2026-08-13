@@ -43,6 +43,8 @@ import clientVitestConfig from '../../client/vitest.config';
 import clientFuzzConfig, { CLIENT_FUZZ_SUITE } from '../../client/vitest.fuzz.config';
 import serverFuzzConfig, { SERVER_FUZZ_SUITE } from '../vitest.fuzz.config';
 import resourceVitestConfig, { RESOURCE_SUITE } from '../vitest.resource.config';
+import upgradeVitestConfig, { UPGRADE_SUITE } from '../vitest.upgrade.config';
+import clientUpgradeConfig, { CLIENT_UPGRADE_SUITE } from '../../client/vitest.upgrade.config';
 import { RESOURCE_SCENARIOS } from '../../../scripts/ci/lib/resource-budgets.mjs';
 import { chunkBaseName } from '../../../scripts/ci/bundle-gate.mjs';
 import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest.snapshot.config';
@@ -287,13 +289,20 @@ describe('tiers', () => {
     //   process running nothing else — while the push tier runs three workers at
     //   once. Measured under that contention a budget is a coin toss.
     //
+    //   `upgrade` — the previous release's vault and .env, read by this one. Like
+    //   `fuzz` and unlike `resource`, both of its files also run inside
+    //   `test-integration` on every push; what T2 buys is the named,
+    //   separately-reported run and a wall-clock deadline over a half that boots a
+    //   real child process per case, where a HANG is a distinct defect from a
+    //   refusal.
+    //
     //   `deploy` — the deployment clean room builds four images, stands five
     //   containers up from nothing, restarts them and rotates a database
     //   credential. There is no version of that which belongs in a hook someone
     //   is waiting on, and its fast sibling `smoke` (T1) covers the artifact on
     //   every push.
     const t2 = gates.filter((gate) => gate.tier === 2).map((gate) => gate.id);
-    expect(t2).toEqual(['fuzz', 'resource', 'deploy']);
+    expect(t2).toEqual(['fuzz', 'resource', 'upgrade', 'deploy']);
   });
 
   it('treats tiers as cumulative, so verify is a superset of verify:fast', () => {
@@ -581,6 +590,83 @@ describe('machine-readable reports', () => {
     expect(declaredReports).not.toContain('junit-resource.xml');
   });
 
+  it('runs the upgrade suite from its own config, its own report and its own files', () => {
+    // The same contract as every other named subset, plus one thing only this
+    // gate has: two committed GOLDENS. A vault and a `.env` recorded from the
+    // v0.7.0 tag are the entire basis of the claim "the previous release's data
+    // is still readable", so their existence is pinned here rather than left to
+    // surface as a module-load error inside the suite.
+    const output = junitOutputFile(upgradeVitestConfig.test?.reporters);
+    expect(output).toBeDefined();
+    expect(path.resolve(output!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-upgrade.xml'),
+    );
+    expect(output).not.toBe(junitOutputFile(serverVitestConfig.test?.reporters));
+
+    expect(UPGRADE_SUITE.length).toBeGreaterThan(0);
+    for (const file of UPGRADE_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'packages', 'server', file)), file).toBe(true);
+    }
+    expect(upgradeVitestConfig.test?.include).toEqual(UPGRADE_SUITE);
+
+    // Both directions, as for `test:resource`: a file on disk that the gate does
+    // not claim would still run inside `test:integration`, so no test would
+    // disappear and `tests.count` would not move — the gate would simply be
+    // smaller than it says it is, and nothing but this would notice.
+    const dir = path.join(repoRoot, 'packages', 'server', 'tests', 'upgrade');
+    const onDisk = readdirSync(dir)
+      .filter((entry) => entry.endsWith('.test.ts'))
+      .map((entry) => `tests/upgrade/${entry}`)
+      .sort();
+    expect(onDisk).toEqual([...UPGRADE_SUITE].sort());
+
+    // Pinned as an exact set, for the reason the security and observability
+    // suites are: deleting a line here shrinks the gate by half while every
+    // other check in this test still passes.
+    expect([...UPGRADE_SUITE].sort()).toEqual([
+      'tests/upgrade/config-compat.test.ts',
+      'tests/upgrade/n-minus-1.test.ts',
+    ]);
+
+    // The CLIENT leg, and it is not decoration. `cryptoService.ts` lives in that
+    // package, so a server test structurally cannot make this gate's headline
+    // claim — that a vault written by the previous release DECRYPTS under this
+    // one. Deleting this leg would leave the gate asserting only that a 0.7.0
+    // document still parses, while its name and its report still promised more.
+    const clientOutput = junitOutputFile(clientUpgradeConfig.test?.reporters);
+    expect(path.resolve(clientOutput!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-upgrade-client.xml'),
+    );
+    expect(clientOutput).not.toBe(junitOutputFile(clientVitestConfig.test?.reporters));
+    expect(clientOutput).not.toBe(output);
+    expect(clientUpgradeConfig.test?.include).toEqual(CLIENT_UPGRADE_SUITE);
+    expect([...CLIENT_UPGRADE_SUITE].sort()).toEqual(['tests/upgrade/n-minus-1-crypto.test.ts']);
+    const clientDir = path.join(repoRoot, 'packages', 'client', 'tests', 'upgrade');
+    expect(
+      readdirSync(clientDir)
+        .filter((entry) => entry.endsWith('.test.ts'))
+        .map((entry) => `tests/upgrade/${entry}`)
+        .sort(),
+    ).toEqual([...CLIENT_UPGRADE_SUITE].sort());
+
+    // The goldens, and the tag they came from. A fixture regenerated from the
+    // current tree — the one edit that turns this whole gate into a tautology —
+    // would no longer name v0.7.0.
+    for (const fixture of ['v0.7.0-vault.json', 'v0.7.0.env']) {
+      const full = path.join(repoRoot, 'packages', 'server', 'tests', 'fixtures', fixture);
+      expect(existsSync(full), fixture).toBe(true);
+      expect(readFileSync(full, 'utf-8'), fixture).toContain('v0.7.0');
+    }
+
+    // And, like `test:fuzz` and `test:resource`, only the JSON report is
+    // DECLARED: a Tier 2 JUnit in the manifest makes `tests.count` UNMEASURED on
+    // every push.
+    expect(reportsOf(manifest.tasks['test:upgrade']!)).toEqual(['upgrade.json']);
+    const declaredReports = nonComposite.flatMap(([, task]) => reportsOf(task));
+    expect(declaredReports).not.toContain('junit-upgrade.xml');
+    expect(declaredReports).not.toContain('junit-upgrade-client.xml');
+  });
+
   it('reads a chunk budget by base name, with the content hash stripped exactly', () => {
     // The budgets in `lib/bundle-budgets.mjs` are keyed by chunk base name
     // because the filenames carry a content hash that changes on every
@@ -685,7 +771,7 @@ describe('machine-readable reports', () => {
     // `test:unit` / `test:integration`, so counting them would ratchet the same
     // tests twice — and because the field is higher-is-better, nothing would ever
     // complain.
-    for (const name of ['test:snapshot', 'test:fuzz', 'test:a11y']) {
+    for (const name of ['test:snapshot', 'test:fuzz', 'test:a11y', 'test:upgrade']) {
       expect(manifest.tasks[name]!.countsTests, `${name}`).toBe(false);
     }
   });

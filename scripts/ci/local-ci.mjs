@@ -445,6 +445,29 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/resource-gate.mjs'], options),
   },
   {
+    id: 'upgrade',
+    task: 'test:upgrade',
+    // TIER 2, on the `fuzz` model rather than the `resource` one: both of its
+    // files ALSO run inside `test-integration` on every push, because the base
+    // server config does not narrow its include set — so the assertions are on
+    // the push gate, and what T2 buys is the named, separately-reported run and
+    // a wall-clock deadline. The deadline matters here for the same reason it
+    // does for `fuzz`: the configuration half boots a real child process per
+    // case, and "an operator gets a reason rather than a restart loop" is one of
+    // the things it asserts, so a boot that HANGS has to be reportable as a
+    // failure rather than as a slow machine.
+    //
+    // It sits beside `resource` because it answers the other question nobody had
+    // asked of a shipped release: not what a full vault costs, but whether the
+    // last one's vault can still be opened at all.
+    tier: 2,
+    title: 'The previous release’s vault and .env, read by this one (v0.7.0 → HEAD)',
+    ci: 'new — no hosted job ever upgraded this application',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/upgrade-gate.mjs'], options),
+  },
+  {
     id: 'smoke',
     task: 'test:smoke',
     tier: 1,

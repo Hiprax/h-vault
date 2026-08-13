@@ -475,6 +475,50 @@ export const DEFECTS = {
     evidence: (text) => /expected 100\d\d to be less than 10000/.test(text),
   },
 
+  'test:upgrade': {
+    // The defect this gate was built for, and it is a DELETION of one line:
+    // `withSettingsDefaults` stops filling in a setting the current release
+    // added.
+    //
+    // What the defect breaks: both read paths use `.lean()`, which returns raw
+    // BSON with no schema defaults applied, so an account created before the
+    // field existed comes back without the key. The client then arms an
+    // auto-lock timer from `undefined`, every deadline comparison against `NaN`
+    // is false, and the vault the user asked to lock itself never locks.
+    //
+    // HONESTY NOTE, because the obvious claim to make here is false: this defect
+    // is NOT invisible to the rest of the suite. `packages/server/tests/user.test.ts`
+    // synthesizes the same shape with `$unset` and asserts the profile fills it
+    // in, so the mutation also turns `test:integration` red on every push. That
+    // does not disqualify the case — the obligation is to prove THIS gate can
+    // fail, attributably, and it does — but nobody should read this entry as
+    // evidence that the gate is the only thing covering the behaviour. What the
+    // gate adds over `user.test.ts` is the document itself: a real 0.7.0 vault
+    // rather than a current one with two keys removed by hand.
+    //
+    // Planted in `packages/server/src`, deliberately, rather than in the shared
+    // schemas: the gate's command runs vitest over the server sources directly
+    // and does NOT rebuild `packages/shared/dist`, so a defect planted in the
+    // shared package would never reach the code under test and would prove
+    // nothing.
+    //
+    // The pattern is byte-exact against today's source. A rewrite of that line
+    // turns `String.replace` into a no-op, which fails in the SAFE direction: the
+    // gate stays green, the harness reports `unproven`, and the run exits
+    // non-zero.
+    title: 'stop filling in a setting the previous release’s user document does not carry',
+    mutate: {
+      'packages/server/src/controllers/userController.ts': (text) =>
+        text.replace('    lockOnHidden: raw.lockOnHidden ?? LOCK_ON_HIDDEN_DEFAULT,\n', ''),
+    },
+    // The assertion's own rendered failure, which a PASSING run cannot contain —
+    // the trap recorded on `test:security`: the JUnit report lists a `<testcase>`
+    // for every test that ran, so matching a test NAME would be satisfied by a
+    // fully green report. `boolean` rather than `number` pins it to
+    // `lockOnHidden` specifically, since its sibling delay is a number.
+    evidence: (text) => /expected 'undefined' to be 'boolean'/.test(text),
+  },
+
   'test:smoke': {
     // The defect is planted in the ARTIFACT, not in the sources, and that is the
     // point of this gate: `test:smoke` runs the emitted bundle, so the emitted

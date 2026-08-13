@@ -48,6 +48,7 @@
     "test:property": "node scripts/ci/property-gate.mjs",
     "test:fuzz": "node scripts/ci/fuzz-gate.mjs",
     "test:resource": "node scripts/ci/resource-gate.mjs",
+    "test:upgrade": "node scripts/ci/upgrade-gate.mjs",
     "test:smoke": "node scripts/ci/smoke-gate.mjs",
     "test:deploy": "node scripts/ci/deploy-drill.mjs",
     "test:snapshot": "npm run test:snapshot -w packages/client",

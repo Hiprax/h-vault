@@ -187,6 +187,14 @@
       "countsTests": false,
       "requires": ["build:shared"]
     },
+    "test:upgrade": {
+      "cmd": "npm run test:upgrade",
+      "tier": 2,
+      "gate": "a vault and a .env written by the previous release are still readable by this one: every stored item opens under the crypto this release ships, decrypts to the bytes 0.7.0 sealed and parses to exactly what 0.7.0 parsed it to, no item schema declares a required field, a folder without sourceRefId and a refresh row without absoluteExpiresAt are accepted and the latter still slides by seven days, the settings that release lacked are filled in without a migration, that release's .env loads the current server's environment configuration in production, every variable since removed is ignored rather than fatal, and every required one that is absent or blank refuses the boot by name and fast",
+      "report": "upgrade.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
     "test:smoke": {
       "cmd": "npm run test:smoke",
       "tier": 1,
