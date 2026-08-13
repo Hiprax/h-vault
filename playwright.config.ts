@@ -59,7 +59,14 @@ export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  // PINNED AT ZERO, unconditionally, and the `process.env.CI ? 2 : 0` this
+  // replaced was a live cheat rather than a theoretical one. `release.yml` runs
+  // `npm run ci` on `ubuntu-latest`, where GitHub sets `CI=true` — so the one
+  // hosted run whose whole purpose is to make "every published release was built
+  // from a commit that passed" a FACT was the one run that retried its E2E
+  // failures twice and reported the third attempt. A retry does not fix a race,
+  // it hides it; `test:flake` is where the rate is measured instead.
+  retries: 0,
   workers: 1,
   // `junit` is unconditional: it is the report the pipeline reads, and a gate
   // whose only output is a terminal cannot be ratcheted or audited. `list`

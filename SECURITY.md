@@ -70,6 +70,20 @@ security posture, not a disclaimer.
   regardless — the per-account tier keys on the submitted email for that reason, and the
   refresh tier, which has no such companion, keys on the address alone. Getting either wrong
   turns a limiter into a lockout of the legitimate user, an open door for the attacker, or both.
+  Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by the individual address,
+  because a single routed IPv6 allocation hands one attacker 18 quintillion addresses: keyed on the
+  full `/128`, an IP-keyed limiter is not a limiter at all, it is a counter that never reaches two.
+  That aggregation happens inside the library that parses the address, so it is a dependency this
+  project deliberately keeps current — the advisory that stood in exactly that code path
+  (`ip-address`, reachable from every rate-limit key) is cleared, and the `/64` bucketing is pinned
+  by a test rather than left to a default.
+- **One account reading or changing another's data.** Every route that takes an id scopes its query
+  to the authenticated user, and that is asserted **exhaustively rather than by sampling**: the
+  route table is built from the real Express router — so a route added tomorrow appears in it
+  automatically and cannot be forgotten — and every id-taking route is driven with a second
+  account's credentials against the first account's resource. Both halves are checked, because only
+  the second one is the security property: the request is refused, **and** the target is unchanged
+  afterwards. A 404 that deleted the row on the way out would pass the first check on its own.
 - **Backup theft.** Emailed and downloaded backups are encrypted under a _separate_
   backup password and carry an HMAC-SHA256 integrity signature that is verified on restore.
 - **Tampered backup files.** Restore validates the signature, rejects dangling and
@@ -330,9 +344,21 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 
 ## Security practices in this repository
 
-- Every push runs `npm run ci` locally through the `pre-push` hook: dependency audit,
-  ESLint with `eslint-plugin-security`, CodeQL, container builds scanned with Trivy
-  (zero fixable CRITICAL/HIGH), and a secret scan over every tracked file.
+- Every push runs `npm run ci` locally through the `pre-push` hook — twenty-eight gates,
+  including a dependency audit at moderate and above over the production tree, ESLint with
+  `eslint-plugin-security`, CodeQL, container builds scanned with Trivy (zero fixable
+  CRITICAL/HIGH), a secret scan over every tracked file **and every blob in git history**,
+  the cross-user authorization matrix over the whole route table, and a redaction suite
+  that asserts no request value, audit row or production error body carries a secret.
+  Eight further gates run before a release, among them a fuzz run over the seven import
+  parsers, a crash-consistency drill that SIGKILLs a real process mid-write, and the
+  deployment clean room.
+- The gates are themselves guarded, because a security gate that can be edited to pass is
+  not a control. Every marker that weakens a check — a skipped test, a silenced analyzer, a
+  swallowed error — must be absent or written down in `.testfortress/suppressions.json`
+  with an owner, a reason and an expiry; every gated number is ratcheted in one direction
+  only against `.testfortress/baseline.json`; and `npm run verify:selftest` plants one
+  defect per registered gate and requires each to go red.
 - Production images run non-root on read-only root filesystems, drop all Linux
   capabilities, and set `no-new-privileges`. The Compose stack publishes exactly one
   loopback-bound port; the database has no published port and no route to the internet.

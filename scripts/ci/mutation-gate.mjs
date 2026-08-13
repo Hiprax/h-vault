@@ -328,12 +328,25 @@ writeJsonReport(REPORT, payload);
 const failures = [];
 
 if (!recorded) {
-  // The bootstrap, and the ONLY path that passes without a floor. It is not a
-  // hole: `ratchet-check.mjs` lists `mutation.overall` and `mutation.filesMutated`
-  // among its REQUIRED_FIELDS, so a baseline with no mutation block fails
-  // `audit:ratchet:full` as ABSENT until the measured numbers are recorded.
-  warn(
-    'no mutation block in baseline.json — this run has no floor to hold. ' +
+  // THE BOOTSTRAP, AND IT FAILS. This branch used to pass with a warning, on the
+  // stated grounds that `ratchet-check.mjs` listed `mutation.overall` and
+  // `mutation.filesMutated` among its REQUIRED_FIELDS so a missing block would
+  // be caught there instead. That was true when it was written and is not true
+  // now: those two live in MUTATION_REQUIRED_FIELDS, which is applied only
+  // `...(baselineRaw.mutation ? MUTATION_REQUIRED_FIELDS : [])` — conditional on
+  // the very block whose absence it was supposed to report. So the safety net
+  // this comment promised had been removed from under it, and a registered gate
+  // spent hours mutating the whole codebase and then exited 0 having held
+  // nothing. A judge found it by reading both files; the hash pinned nothing,
+  // because deleting a check deletes its comparison too.
+  //
+  // It is a FAILURE rather than a hard exit at the top of the file on purpose:
+  // the legs still run and `mutation.json` is still written above, because that
+  // report is exactly what an operator needs in order to record the first
+  // baseline (`--accept` reads it). A gate that refused to run could never be
+  // bootstrapped; a gate that passes with no floor is not a gate.
+  failures.push(
+    'no mutation block in baseline.json — this run held no floor. ' +
       'Record it with: npm run audit:ratchet:full && node scripts/ci/ratchet-check.mjs --accept --reason "..."',
   );
 } else {

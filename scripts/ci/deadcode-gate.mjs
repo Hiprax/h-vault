@@ -51,9 +51,23 @@ const EXIT_OK = 0;
 const EXIT_FINDINGS = 1;
 const EXIT_CANNOT_RUN = 2;
 
-/** Collapse detectors for the duplication scan; measured today: 190 files, 52,851 lines. */
-const MIN_EXPECTED_SOURCES = 50;
-const MIN_EXPECTED_LINES = 10_000;
+/**
+ * Collapse detectors for the duplication scan. Measured 2026-08-13: 191 files,
+ * 53,257 lines.
+ *
+ * These are the DENOMINATOR guard, and they were far too loose to be one: at 50
+ * files and 10,000 lines they sat at roughly a quarter of the real measurement,
+ * so a `.jscpd.json` narrowed to 51 files would have cleared the floor, dropped
+ * `clones` and `duplicatedLines` — both ratcheted lower-is-better — and been
+ * applauded by the ratchet as an improvement. A percentage whose denominator can
+ * shrink is not a gate, and neither is a floor a quarter of the way down.
+ *
+ * Set just under the measurement with room for ordinary deletion (about 8%), not
+ * for a scope change: losing twenty files or four thousand lines is either a
+ * narrowed scan or a refactor big enough to deserve a deliberate re-measure.
+ */
+const MIN_EXPECTED_SOURCES = 175;
+const MIN_EXPECTED_LINES = 49_000;
 
 const asJson = process.argv.includes('--json');
 const fatal = (message) => {

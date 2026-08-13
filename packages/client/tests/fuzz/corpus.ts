@@ -133,20 +133,7 @@ export const CORPUS: readonly CorpusEntry[] = [
   {
     file: 'bitwarden-scalar-bounds.json',
     origin: 'bitwarden',
-    why: 'One character past every card and identity scalar the JSON path does NOT clamp. This is the witness for the deferred defect the KNOWN DEFECT block pins; see the block for the whole story.',
-    knownInvalidPaths: [
-      'cardholderName',
-      'number',
-      'expMonth',
-      'expYear',
-      'cvv',
-      'brand',
-      'firstName',
-      'lastName',
-      'company',
-      'ssn',
-      'passport',
-    ],
+    why: 'One character past every card and identity scalar on the JSON path. It witnessed the deferred defect that those eleven were unclamped, and now witnesses the clamp that fixed it: it carries no knownInvalidPaths, so the corpus loop holds it to the unconditional schema clause.',
   },
   {
     file: 'bitwarden-overfull-lists.json',

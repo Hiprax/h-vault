@@ -72,9 +72,10 @@ import {
   MAX_NOTE_CONTENT_LENGTH,
   MAX_SECRET_DESCRIPTION_LENGTH,
   MAX_TAGS_PER_ITEM,
-  MAX_URI_LENGTH,
+  URI_TOO_LONG_MESSAGE,
   isValidIdentityEmail,
   isValidIdentityPhone,
+  isValidUriLength,
   normalizeUri,
 } from '@hvault/shared';
 import type { ItemType } from '@hvault/shared';
@@ -131,13 +132,24 @@ function boundedField(max: number, label: string) {
 
 const uriEntrySchema = z
   .object({
-    uri: z.string().max(MAX_URI_LENGTH, 'URI too long').optional().default(''),
+    // Unbounded here, then bounded by the SHARED `isValidUriLength` after the
+    // transform, exactly as the stored schema does. Bounding the input at
+    // `MAX_URI_LENGTH` was a real defect rather than a cosmetic mismatch: the
+    // transform prepends `https://` to a bare domain, so a 2041-2048 character one
+    // passed this control, was stored eight characters longer, and every later save
+    // of that item was refused by the write pre-flight with "Too big" on
+    // `uris.0.uri` — an item the editor could open and never save again.
+    uri: z.string().optional().default(''),
     match: z.enum(['domain', 'exact', 'startsWith', 'regex']).default('domain'),
   })
   .transform((entry) => ({
     ...entry,
     uri: entry.match === 'regex' ? entry.uri : normalizeUri(entry.uri),
   }))
+  .refine((entry) => isValidUriLength(entry.uri, entry.match), {
+    message: URI_TOO_LONG_MESSAGE,
+    path: ['uri'],
+  })
   .refine(
     (entry) => {
       if (entry.match === 'regex') return true;

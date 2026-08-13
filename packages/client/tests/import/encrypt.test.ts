@@ -124,6 +124,21 @@ describe('buildImportOperations — validate + encrypt', () => {
     });
     expect(result.skipped).toBe(MAX_IMPORT_WARNINGS + 2);
     expect(result.warnings).toHaveLength(MAX_IMPORT_WARNINGS);
+
+    // Each warning must NAME the item and the failing field, not just count.
+    // These strings are spread verbatim into the import toast, and a count on
+    // its own ("3 could not be converted") leaves the user unable to tell which
+    // entry was lost or why — and re-running the import cannot reveal it, since
+    // the same rows are skipped again just as silently. This is the assertion
+    // that keeps that promise; it is made here rather than at the SettingsPage,
+    // because after the import scalars were clamped no PARSER can produce an
+    // item this function rejects, so a UI-level test would need a defect
+    // elsewhere in order to reach the message at all.
+    expect(result.warnings[0]).toContain('bad-0');
+    expect(result.warnings[0]).toMatch(/uris\.0\.match/);
+    // And it never names a survivor: a warning list that mentioned `ok-0` would
+    // send the user looking for an item that imported perfectly well.
+    for (const warning of result.warnings) expect(warning).not.toContain('ok-');
   });
 
   it('skips an item whose data is not an object at all (root-level validation error)', async () => {

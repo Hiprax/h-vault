@@ -82,6 +82,7 @@ import {
   resolveExitCode,
   resolveTiers,
   selectGates,
+  tierBudgetSeconds,
 } from './lib/tiers.mjs';
 import {
   MANIFEST_REL,
@@ -1073,12 +1074,17 @@ for (const gate of selected) {
 
 const durationMs = Date.now() - started;
 const exitCode = resolveExitCode(results);
+// Recorded, and reported below, but deliberately NOT enforced: see the comment on
+// TIER_BUDGET_SECONDS for why a wall-clock gate on a contributor's laptop would
+// buy nothing except a bypassed hook.
+const budgetSeconds = tierBudgetSeconds(tiers);
 
 const payload = {
   version: 1,
   runner: 'scripts/ci/local-ci.mjs',
   startedAt: new Date(started).toISOString(),
   durationMs,
+  budgetSeconds,
   tiers,
   bail,
   exitCode,
@@ -1108,7 +1114,15 @@ writeJsonReport('summary.json', payload);
 await import('./report.mjs');
 
 summary(results);
-console.log(color.gray(`  total ${formatDuration(durationMs)}\n`));
+console.log(
+  color.gray(
+    budgetSeconds === null
+      ? `  total ${formatDuration(durationMs)} (tier ${String(Math.max(...tiers))}: no budget)\n`
+      : `  total ${formatDuration(durationMs)} of a ${formatDuration(budgetSeconds * 1000)} ` +
+          `tier-${String(Math.max(...tiers))} budget` +
+          `${durationMs > budgetSeconds * 1000 ? ' — OVER' : ''}\n`,
+  ),
+);
 
 if (asJson) {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);

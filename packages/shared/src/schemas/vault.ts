@@ -23,6 +23,10 @@ import {
   MAX_SECRET_DESCRIPTION_LENGTH,
   MAX_CARD_CARDHOLDER_NAME_LENGTH,
   MAX_CARD_BRAND_LENGTH,
+  MAX_CARD_NUMBER_LENGTH,
+  MAX_CARD_EXP_MONTH_LENGTH,
+  MAX_CARD_EXP_YEAR_LENGTH,
+  MAX_CARD_CVV_LENGTH,
   MAX_IDENTITY_NAME_LENGTH,
   MAX_IDENTITY_EMAIL_LENGTH,
   MAX_IDENTITY_PHONE_LENGTH,
@@ -269,9 +273,41 @@ const customFieldSchema = z.object({
   type: z.enum(CUSTOM_FIELD_TYPES),
 });
 
+/**
+ * The message `isValidUriLength` reports, exported so the editor's own mirror of
+ * this schema cannot word it differently.
+ */
+export const URI_TOO_LONG_MESSAGE = `URI must be ${String(MAX_URI_LENGTH)} characters or fewer, counting the https:// that a bare domain is given`;
+
+/**
+ * Does this URI fit `MAX_URI_LENGTH` once the transform below has run?
+ *
+ * The ONE definition of the URI length bound, in the same spirit as
+ * `isValidIdentityEmail`/`isValidIdentityPhone`: `VaultItemForm`'s local mirror of
+ * this schema calls it too, so the editor and the store cannot disagree about
+ * which values are storable.
+ *
+ * The length is measured AFTER normalization, and that is the whole point. It used
+ * to be measured before, as `z.string().max(MAX_URI_LENGTH)` on the input, so a bare
+ * domain of exactly `MAX_URI_LENGTH` characters parsed happily into a
+ * `MAX_URI_LENGTH + 8` one — a value this very schema then rejected on the way back
+ * in, leaving the item editable exactly once. The overhead is also measured per
+ * value rather than assumed: `normalizeUri` adds eight characters to a bare domain,
+ * six to a protocol-relative one and none to a value that already carries a scheme,
+ * so a flat subtraction would refuse values that are perfectly storable.
+ *
+ * Safe to call on either side of the transform: `normalizeUri` is idempotent.
+ */
+export function isValidUriLength(uri: string, match: string): boolean {
+  return (match === 'regex' ? uri : normalizeUri(uri)).length <= MAX_URI_LENGTH;
+}
+
 const uriEntrySchema = z
   .object({
-    uri: z.string().max(MAX_URI_LENGTH),
+    // Deliberately unbounded HERE; the bound is the post-transform one below.
+    // `normalizeUri` only ever prepends, so an output within the cap implies an
+    // input within it, and there is no second, looser boundary to drift.
+    uri: z.string(),
     match: z.enum(URI_MATCH_TYPES),
   })
   .transform((entry) => ({
@@ -279,6 +315,10 @@ const uriEntrySchema = z
     // Auto-prepend https:// to bare domains (skip regex match type — those are patterns)
     uri: entry.match === 'regex' ? entry.uri : normalizeUri(entry.uri),
   }))
+  .refine((entry) => isValidUriLength(entry.uri, entry.match), {
+    message: URI_TOO_LONG_MESSAGE,
+    path: ['uri'],
+  })
   .refine(
     (entry) => {
       // Skip protocol validation for regex match type — the URI is a pattern, not a URL
@@ -354,7 +394,14 @@ export const secretDataSchema = z.object({
       (val) => {
         const datePart = val.split('T')[0] ?? val;
         const [year, month, day] = datePart.split('-').map(Number) as [number, number, number];
-        const date = new Date(Date.UTC(year, month - 1, day));
+        // Built by MUTATION, never `new Date(Date.UTC(year, …))`. `Date.UTC` applies
+        // the two-digit-year legacy rule and maps a year in 0-99 to 1900-1999, so the
+        // comparison below failed for every first-century date and the schema refused
+        // dates the editor's own message ("between 0001-01-01 and 9999-12-31")
+        // advertises as valid. `combineExpiry` in `VaultItemForm` already avoids this
+        // exact trap the same way; this is the other half of it.
+        const date = new Date(0);
+        date.setUTCFullYear(year, month - 1, day);
         return (
           date.getUTCFullYear() === year &&
           date.getUTCMonth() === month - 1 &&
@@ -416,10 +463,10 @@ const identityAddressSchema = addressSchema.extend({
 
 export const cardDataSchema = z.object({
   cardholderName: z.string().max(MAX_CARD_CARDHOLDER_NAME_LENGTH).optional().default(''),
-  number: z.string().max(30).optional().default(''),
-  expMonth: z.string().max(2).optional().default(''),
-  expYear: z.string().max(4).optional().default(''),
-  cvv: z.string().max(4).optional().default(''),
+  number: z.string().max(MAX_CARD_NUMBER_LENGTH).optional().default(''),
+  expMonth: z.string().max(MAX_CARD_EXP_MONTH_LENGTH).optional().default(''),
+  expYear: z.string().max(MAX_CARD_EXP_YEAR_LENGTH).optional().default(''),
+  cvv: z.string().max(MAX_CARD_CVV_LENGTH).optional().default(''),
   brand: z.string().max(MAX_CARD_BRAND_LENGTH).optional(),
   notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
   billingAddress: addressSchema.optional(),

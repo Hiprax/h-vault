@@ -5,8 +5,18 @@ import {
   MAX_ADDRESS_STATE_LENGTH,
   MAX_ADDRESS_STREET_LENGTH,
   MAX_ADDRESS_ZIP_LENGTH,
+  MAX_CARD_BRAND_LENGTH,
+  MAX_CARD_CARDHOLDER_NAME_LENGTH,
+  MAX_CARD_CVV_LENGTH,
+  MAX_CARD_EXP_MONTH_LENGTH,
+  MAX_CARD_EXP_YEAR_LENGTH,
+  MAX_CARD_NUMBER_LENGTH,
   MAX_CUSTOM_FIELDS_PER_ITEM,
   MAX_CUSTOM_FIELD_NAME_LENGTH,
+  MAX_IDENTITY_COMPANY_LENGTH,
+  MAX_IDENTITY_NAME_LENGTH,
+  MAX_IDENTITY_PASSPORT_LENGTH,
+  MAX_IDENTITY_SSN_LENGTH,
   MAX_LOGIN_BACKUP_CODES,
   MAX_LOGIN_BACKUP_CODE_LENGTH,
   MAX_LOGIN_PASSWORD_LENGTH,
@@ -39,9 +49,10 @@ const MAX_IMPORT_NAME_LENGTH = 255;
 // vault permits; if it reaches encryption unclamped the item fails
 // `vaultItemDataSchemas` and is discarded WHOLESALE — password included — at the
 // validation step. Clamp to these bounds instead and preserve the overflow in the
-// item's notes, so a single long field can never sink the item. A `password` is
-// the one exception: it is clamped but NEVER copied into notes, and a login's
-// `backupCodes` join it there for the same reason (see `clampBackupCodes`).
+// item's notes, so a single long field can never sink the item. Three fields are
+// the exception: a login's `password` is clamped but NEVER copied into notes, its
+// `backupCodes` join it there (see `clampBackupCodes`), and a card's `number` and
+// `cvv` are clamped and reported without their value (see `SCALAR_FIELD_BOUNDS`).
 //
 // `customFieldSchema.value` and every `notes`/`content` field cap at
 // MAX_NOTE_CONTENT_LENGTH.
@@ -80,11 +91,15 @@ function clampWithOverflow(value: string, max: number): { value: string; overflo
 /**
  * Clamp a raw URI to the vault's per-URI bound.
  *
- * `uriEntrySchema` caps the uri at {@link MAX_URI_LENGTH} on its INPUT and only
- * THEN runs the transform that prepends a scheme (`https://`, or `https:` for a
- * protocol-relative `//host`) to a scheme-less value. A 2041-2048-char bare
- * domain therefore validates on the way in but is stored several chars over the
- * cap and FAILS `safeParse` on decrypt — leaving a permanently undecodable item.
+ * `uriEntrySchema` bounds the uri at {@link MAX_URI_LENGTH} AFTER the transform
+ * that prepends a scheme (`https://`, or `https:` for a protocol-relative
+ * `//host`) to a scheme-less value, through the shared `isValidUriLength`. This
+ * function has always computed the same bound, and the two now agree — but they
+ * did not always: the schema used to measure its INPUT, so a 2041-2048-character
+ * bare domain validated on the way in, was stored eight characters over the cap
+ * and failed `safeParse` on the way back out. This clamp is what kept an IMPORT
+ * from producing such an item while the editor still could.
+ *
  * Clamp so the *transformed* value fits, and return the full original as overflow
  * so it can be preserved in notes.
  */
@@ -499,9 +514,10 @@ export function buildNote(input: NoteInput): ParsedImportItem {
 /**
  * Build an item of any type from a pre-shaped `data` object (used for Bitwarden
  * card/identity/secure-note where the parser assembles the fields directly).
- * The two fields most likely to overflow on such an item — free-text `notes` and
- * the `customFields` list — are clamped to the shared bounds, with any trimmed
- * content folded back into `notes`, so an over-long field cannot discard the item.
+ * EVERY bounded field of such an item — its scalars, its free-text `notes`, its
+ * `customFields` list and its postal address — is clamped to the shared bounds,
+ * with the trimmed content folded back into `notes`, so no over-long field can
+ * discard the item at validation.
  */
 export function makeItem(
   itemType: ItemType,
@@ -512,7 +528,7 @@ export function makeItem(
   return {
     itemType,
     name: clampName(name) || DEFAULT_NAMES[itemType],
-    data: clampNotesAndFields(data),
+    data: clampNotesAndFields(itemType, data),
     tags: toTags(opts?.tags),
     favorite: Boolean(opts?.favorite),
   };
@@ -521,23 +537,124 @@ export function makeItem(
 /** The two keys a pre-shaped card or identity can carry a postal address under. */
 const ADDRESS_KEYS = ['address', 'billingAddress'] as const;
 
+/** One scalar field of a pre-shaped item, and the stored bound it must satisfy. */
+interface ScalarBound {
+  readonly field: string;
+  readonly max: number;
+  /** The user-facing field name, used in the overflow line. */
+  readonly label: string;
+  /**
+   * Fold the trimmed tail into `notes`, or report the truncation WITHOUT its
+   * value?
+   *
+   * `false` for a card's `number` and `cvv` alone. Those two are what make a card
+   * chargeable, and `notes` is rendered in the clear on the same item — so
+   * copying the tail there would duplicate the one field the UI is careful with
+   * into the one field it is not. They still produce a line, because a truncation
+   * nobody is told about is indistinguishable from data loss; the line simply
+   * states that a cut happened and how long the field is, which is the same shape
+   * `clampBackupCodes` uses when it reports a count rather than the codes.
+   *
+   * Everything else folds, for the reason `clampAddress` documents: the tail is
+   * not an authenticator, and cards and identities are omitted as whole ITEMS
+   * from both CSV exports, so their notes cannot reach the Chrome CSV `note`
+   * column that makes folding a leak for a login.
+   */
+  readonly foldTail: boolean;
+}
+
 /**
- * Defensively clamp the `notes`, `customFields` and postal address of a pre-shaped
- * data object (card / identity) to the shared schema bounds. Every overflow is
- * folded into `notes`, which is clamped LAST because it is the sink.
+ * The scalar bounds this module enforces, per item type.
  *
- * The address is clamped HERE rather than in each parser so there is one choke
- * point: every card and identity reaches the vault through `makeItem`, so a parser
- * added later is bounded without having to opt in. Both address keys are handled
- * even though no importer currently builds a card billing address (Bitwarden cards
- * carry no address field, and every other parser emits logins only).
+ * These eleven fields had no clamp at all: the module assumed the parsers read
+ * them "from bounded source fields", and Bitwarden bounds none of these columns
+ * in its own export. A source value ONE character too long therefore failed
+ * `vaultItemDataSchemas` and `validateImportItems` discarded the WHOLE card or
+ * identity — password-equivalent secrets included — reported as a single skipped
+ * row. Clamping is strictly better than discarding: the item arrives, the trim is
+ * stated, and the user can repair one field instead of hunting for a row that
+ * silently never came.
  *
- * Other scalar columns (card number, identity name, …) are still left to the
- * parsers, which read them from bounded source fields.
+ * A table rather than one `if` per field, for the same reason `ADDRESS_FIELD_BOUNDS`
+ * is one: eleven independent branches would say one thing eleven times and eat the
+ * client's remaining branch-coverage headroom to do it.
+ *
+ * Every bound is the SHARED constant the schema itself uses. The four card ones
+ * were inline literals in `cardDataSchema` until this clamp became their third
+ * consumer; a clamp that disagrees with its schema by one character reintroduces
+ * the exact defect it was written to remove.
  */
-function clampNotesAndFields(data: Record<string, unknown>): Record<string, unknown> {
+const SCALAR_FIELD_BOUNDS: Partial<Record<ItemType, readonly ScalarBound[]>> = {
+  card: [
+    {
+      field: 'cardholderName',
+      max: MAX_CARD_CARDHOLDER_NAME_LENGTH,
+      label: 'Cardholder name',
+      foldTail: true,
+    },
+    { field: 'number', max: MAX_CARD_NUMBER_LENGTH, label: 'Card number', foldTail: false },
+    { field: 'expMonth', max: MAX_CARD_EXP_MONTH_LENGTH, label: 'Expiry month', foldTail: true },
+    { field: 'expYear', max: MAX_CARD_EXP_YEAR_LENGTH, label: 'Expiry year', foldTail: true },
+    { field: 'cvv', max: MAX_CARD_CVV_LENGTH, label: 'Security code', foldTail: false },
+    { field: 'brand', max: MAX_CARD_BRAND_LENGTH, label: 'Brand', foldTail: true },
+  ],
+  identity: [
+    { field: 'firstName', max: MAX_IDENTITY_NAME_LENGTH, label: 'First name', foldTail: true },
+    { field: 'lastName', max: MAX_IDENTITY_NAME_LENGTH, label: 'Last name', foldTail: true },
+    { field: 'company', max: MAX_IDENTITY_COMPANY_LENGTH, label: 'Company', foldTail: true },
+    {
+      field: 'ssn',
+      max: MAX_IDENTITY_SSN_LENGTH,
+      label: 'Social Security number',
+      foldTail: true,
+    },
+    {
+      field: 'passport',
+      max: MAX_IDENTITY_PASSPORT_LENGTH,
+      label: 'Passport number',
+      foldTail: true,
+    },
+  ],
+};
+
+/**
+ * Defensively clamp every bounded field of a pre-shaped data object (card /
+ * identity) to the shared schema bounds: the eleven scalars in
+ * {@link SCALAR_FIELD_BOUNDS}, the `customFields` list, both postal addresses and
+ * `notes` itself. Every overflow is folded into `notes`, which is clamped LAST
+ * because it is the sink.
+ *
+ * Clamped HERE rather than in each parser so there is one choke point: every card
+ * and identity reaches the vault through `makeItem`, so a parser added later is
+ * bounded without having to opt in. Both address keys are handled even though no
+ * importer currently builds a card billing address (Bitwarden cards carry no
+ * address field, and every other parser emits logins only).
+ *
+ * The item TYPE is a parameter rather than inferred from the keys present,
+ * because the scalar table is per type and a key name alone does not identify a
+ * field: nothing should clamp a `number` on an item type where that key means
+ * something else.
+ */
+function clampNotesAndFields(
+  itemType: ItemType,
+  data: Record<string, unknown>,
+): Record<string, unknown> {
   const out: Record<string, unknown> = { ...data };
   const overflow: string[] = [];
+
+  for (const { field, max, label, foldTail } of SCALAR_FIELD_BOUNDS[itemType] ?? []) {
+    const source = out[field];
+    if (typeof source !== 'string') continue;
+    const { value, overflow: tail } = clampWithOverflow(source, max);
+    if (tail) {
+      overflow.push(
+        foldTail
+          ? `${label} truncated; remaining value: ${tail}`
+          : `${label} truncated to ${String(max)} characters; the rest was not imported.`,
+      );
+    }
+    out[field] = value;
+  }
 
   if (Array.isArray(out.customFields)) {
     const { fields, overflow: fieldOverflow } = clampCustomFields(out.customFields);

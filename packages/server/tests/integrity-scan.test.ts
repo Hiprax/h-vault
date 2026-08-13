@@ -533,6 +533,65 @@ describe('anti-overfitting: a previously-unseen marker of each non-ledgerable fa
     expect(reported[0]).toMatchObject({ rule: 'TEST-FILTER', violation: 'FORBIDDEN' });
   });
 
+  it('CMD-TEST-FILTER: a filter appended to a manifest command is forbidden, a plain one is not', () => {
+    // The hole this closes, found by a judge picking a probe the executor had
+    // not imagined. TEST-FILTER (above) anchors on a runner NAME so that a bare
+    // workspace filter in a monorepo build script is not a false positive.
+    // (This comment names neither a runner nor a flag on one line, because that
+    // rule reads comments too and reported this very paragraph the first time.)
+    // But EVERY command in this repository's manifest is
+    // phrased `npm run <script>`, so a filter appended to one matched nothing at
+    // all: Forbidden Action 1, committed into the file that defines the gates,
+    // reported as zero violations. Here the anchor is the LOCATION instead, and
+    // a manifest `cmd` is a gate command by definition.
+    const result = scan(CLEAN, {
+      manifest: {
+        version: 1,
+        reportDir: '.testfortress/reports',
+        tasks: {
+          'test:unit': {
+            cmd: `npm run test:unit -- ${m('--testName', 'Pattern')}=smoke`,
+            tier: 0,
+            gate: 'all pass',
+            report: 'junit-unit.xml',
+          },
+          lint: { cmd: 'npm run lint', tier: 0, gate: 'clean', report: 'lint.log' },
+        },
+      },
+    });
+    const reported = at(result, '.testfortress/verify.json');
+    // Exactly one: the untouched `lint` command must not be swept up with it.
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toMatchObject({
+      rule: 'CMD-TEST-FILTER',
+      violation: 'FORBIDDEN',
+      // The offending command itself, so the report names WHICH task carries the
+      // filter rather than only that some task does.
+      text: expect.stringContaining('test:unit') as unknown as string,
+    });
+    expect(result.exitCode).toBe(1);
+  });
+
+  it('FLAKE-HIDE: a runner config may set retries to the literal 0 and to nothing else', () => {
+    // The other half of the same judge probe, and the reason the rule is stated
+    // positively rather than as a negative lookahead. This repository shipped
+    // `retries: process.env.CI ? 2 : 0` in its Playwright config — two retries in
+    // exactly the environment the release job runs in — and no `[1-9]` pattern
+    // can see it, because the character after the colon is a `p`.
+    const result = scan({
+      ...CLEAN,
+      'playwright.config.ts': 'export default { retries: process.env.CI ? 2 : 0 };\n',
+      'playwright.flake.config.ts': 'export default { retries: 0 };\n',
+      // Not a runner config, so the same expression there is ordinary code.
+      'src/http/client.ts': 'const retries = process.env.RETRIES ?? 3;\n',
+    });
+    expect(at(result, 'playwright.config.ts')[0]).toMatchObject({ rule: 'FLAKE-HIDE' });
+    // Both negatives matter: a config that is already correct must stay silent,
+    // or the rule reports the fix as the defect.
+    expect(at(result, 'playwright.flake.config.ts')).toEqual([]);
+    expect(at(result, 'src/http/client.ts')).toEqual([]);
+  });
+
   it('STRICT-DOWN: a strictness downgrade is forbidden in a gate file and reported elsewhere', () => {
     const result = scan({
       ...CLEAN,

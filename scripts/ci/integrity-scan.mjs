@@ -355,6 +355,37 @@ const RULES = [
     kind: 'quarantine',
     severity: 'high',
     forbidden: false,
+    // The LITERAL-DIGIT form above is not enough, and the gap was live rather
+    // than hypothetical: this repository shipped `retries: process.env.CI ? 2 : 0`
+    // in `playwright.config.ts`, which no `[1-9]` pattern can see because the
+    // character after the colon is a `p`. That expression retried twice in
+    // exactly one environment — a hosted runner, where `CI` is always set —
+    // which is to say in the release job whose entire purpose is to prove the
+    // suite passed. The rule that forbids concealed flakiness could not see the
+    // one place this repository concealed it.
+    //
+    // So inside a RUNNER CONFIG, and only there, a retry count must be the
+    // literal `0`; anything else — a non-zero digit, a variable, a call, a
+    // ternary, an environment read — is reported. Runner configs are the one
+    // place where `retries:` is unambiguously the runner's own option, which is
+    // why this form is NOT extended to gate files: there, `const retries = n` is
+    // ordinary code and a rule this broad would report it.
+    //
+    // Stated POSITIVELY (the value's first character) rather than as a negative
+    // lookahead, and that is not a style choice. `\s*[:=]\s*(?!0\b)` looks
+    // correct and matches `retries: 0` anyway: the second `\s*` backtracks to
+    // zero width, the lookahead then tests ` 0` instead of `0`, and a lookahead
+    // that fails is exactly what a negative lookahead needs to succeed. Measured
+    // — it reported the one config in this repository that is already correct.
+    scope: isRunnerConfigPath,
+    re: /\bretr(?:y|ies)\s*[:=]\s*(?:[1-9]|0[0-9]|[A-Za-z_$({[])/,
+    msg: 'a retry count in a runner config must be the literal 0',
+  },
+  {
+    id: 'FLAKE-HIDE',
+    kind: 'quarantine',
+    severity: 'high',
+    forbidden: false,
     scope: isTestPath,
     // The runner-level forms have no meaning outside a test: each one asks the
     // runner to re-run a test that failed. A BARE `flaky` is deliberately not
@@ -491,6 +522,30 @@ const MULTILINE_RULES = [
 
 /** Checked against the verify manifest's `cmd` strings only. */
 const MANIFEST_RULES = [
+  {
+    id: 'CMD-TEST-FILTER',
+    kind: 'gate-narrowed',
+    severity: 'critical',
+    forbidden: true,
+    // TEST-FILTER (above) is anchored to a runner invocation — `vitest`, `jest`,
+    // `pytest` — because a bare `--filter` is legitimate and ubiquitous in
+    // monorepo build scripts, and that false positive would force a blanket
+    // entry which then hides the real hits. That anchor leaves a hole exactly
+    // where it matters most: EVERY command in this manifest is phrased
+    // `npm run <script>`, never `vitest run …`, so a filter appended to one of
+    // them — `npm run test:unit -- --testNamePattern=x`, which is Forbidden
+    // Action 1 committed into the file that DEFINES the gates — matched
+    // nothing. Measured: a judge picked that exact edit as a probe and the scan
+    // reported zero violations.
+    //
+    // Here the anchor is the location instead of the tool, which is stronger:
+    // a manifest `cmd` is a gate command by definition, so a test filter in one
+    // is unambiguous and needs no runner name to disambiguate it. `--filter` is
+    // included for the same reason it is excluded from the general rule: in a
+    // gate command there is no legitimate reading of it.
+    re: /--testNamePattern|--grep\b|--shard\b|--filter\b|\s-t[\s=]|\s-k[\s=]|-run[\s=]/,
+    msg: 'a test filter is committed into a gate command',
+  },
   {
     id: 'CMD-SILENCED',
     kind: 'gate-neutered',

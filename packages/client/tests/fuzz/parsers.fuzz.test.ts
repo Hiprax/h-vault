@@ -39,6 +39,10 @@ import {
   MAX_ADDRESS_ZIP_LENGTH,
   MAX_CARD_BRAND_LENGTH,
   MAX_CARD_CARDHOLDER_NAME_LENGTH,
+  MAX_CARD_CVV_LENGTH,
+  MAX_CARD_EXP_MONTH_LENGTH,
+  MAX_CARD_EXP_YEAR_LENGTH,
+  MAX_CARD_NUMBER_LENGTH,
   MAX_CUSTOM_FIELDS_PER_ITEM,
   MAX_IDENTITY_COMPANY_LENGTH,
   MAX_IDENTITY_NAME_LENGTH,
@@ -306,27 +310,29 @@ const bitwardenDocument = fc
           totp: hostileCell,
           uris: fc.array(fc.record({ uri: hostileCell }), { maxLength: 3 }),
         }),
-        // The card and identity scalars are drawn WITHIN their bounds on
-        // purpose; see the KNOWN DEFECT block at the foot of this file for the
-        // deferred defect that exclusion names, and for the tests that pin it.
+        // Every card and identity scalar is drawn PAST its bound. They used to
+        // be drawn within their bounds, because none of them was clamped and the
+        // generator would otherwise have reported the same recorded defect on
+        // every run; Task 20.5 clamped all eleven, so the exclusion is gone and
+        // this property covers them like every other field.
         card: fc.record({
-          cardholderName: fc.string({ maxLength: MAX_CARD_CARDHOLDER_NAME_LENGTH }),
-          number: fc.string({ maxLength: 30 }),
-          expMonth: fc.string({ maxLength: 2 }),
-          expYear: fc.string({ maxLength: 4 }),
-          code: fc.string({ maxLength: 4 }),
-          brand: fc.string({ maxLength: MAX_CARD_BRAND_LENGTH }),
+          cardholderName: hostileCell,
+          number: hostileCell,
+          expMonth: hostileCell,
+          expYear: hostileCell,
+          code: hostileCell,
+          brand: hostileCell,
         }),
         identity: fc.record({
-          firstName: fc.string({ maxLength: MAX_IDENTITY_NAME_LENGTH }),
-          lastName: fc.string({ maxLength: MAX_IDENTITY_NAME_LENGTH }),
-          company: fc.string({ maxLength: MAX_IDENTITY_COMPANY_LENGTH }),
-          ssn: fc.string({ maxLength: MAX_IDENTITY_SSN_LENGTH }),
-          passportNumber: fc.string({ maxLength: MAX_IDENTITY_PASSPORT_LENGTH }),
+          firstName: hostileCell,
+          lastName: hostileCell,
+          company: hostileCell,
+          ssn: hostileCell,
+          passportNumber: hostileCell,
           email: hostileCell,
           phone: hostileCell,
-          // Address lines ARE drawn past their bounds: `clampAddress` is the
-          // clamp this half of the property exists to hold in place.
+          // Address lines too: `clampAddress` is the clamp this half of the
+          // property exists to hold in place.
           address1: hostileCell,
           address2: hostileCell,
           address3: hostileCell,
@@ -439,11 +445,12 @@ describe('structurally valid but hostile documents', () => {
     );
   });
 
-  it('bitwarden clamps every JSON field EXCEPT the eleven the KNOWN DEFECT block names', () => {
-    // The name says "except" because the generator draws the card and identity
-    // scalars WITHIN their bounds; those eleven are covered by the KNOWN DEFECT
-    // block at the foot of this file instead. A name claiming "every field"
-    // would be the claim, and a JUnit report is where a future reader meets it.
+  it('bitwarden clamps every JSON field, card and identity scalars included', () => {
+    // The name used to say "except the eleven the KNOWN DEFECT block names",
+    // because the generator drew the card and identity scalars within their
+    // bounds while they were unclamped. Both halves changed together in Task
+    // 20.5: the clamp landed and the generator went hostile on those fields, so
+    // the claim this name makes is now the claim the generator tests.
     fc.assert(
       fc.property(bitwardenDocument, (text) => {
         assertParserContract('bitwarden', text, 'a generated Bitwarden JSON document');
@@ -742,51 +749,55 @@ describe('REGRESSION: an over-long postal address does not sink the identity', (
     expect(data.notes ?? '').toContain('truncated');
   });
 
-  it('keeps the scalar-bounds corpus entry as the witness for the deferred defect', () => {
-    // Pinned here so the corpus file cannot be quietly emptied: the KNOWN DEFECT
-    // block below is about the fields this file carries.
+  it('keeps the scalar-bounds corpus entry as the witness for the clamp', () => {
+    // Pinned here so the corpus file cannot be quietly emptied: the clamp block
+    // below is about the fields this file carries, and it is the one entry that
+    // carries every card and identity scalar one character past its bound.
     expect(text).toContain('card scalars');
     expect(text).toContain('identity scalars');
   });
 });
 
 // ---------------------------------------------------------------------------
-// KNOWN DEFECT — recorded, pinned, and deliberately NOT fixed here
+// The eleven card and identity scalars, clamped rather than discarded
 // ---------------------------------------------------------------------------
 
 /**
- * Eleven scalar fields on the Bitwarden JSON path have no clamp, so a source
- * value one character too long discards the WHOLE card or identity at
- * validation.
+ * Eleven scalar fields on the Bitwarden JSON path had no clamp, so a source value
+ * one character too long discarded the WHOLE card or identity at validation.
  *
- * `itemBuilders.ts` says as much in its own words — "Other scalar columns (card
+ * `itemBuilders.ts` said as much in its own words — "Other scalar columns (card
  * number, identity name, …) are still left to the parsers, which read them from
  * bounded source fields" — and that assumption is what a hostile or simply
- * unusual export breaks. Bitwarden bounds none of these columns. The failure is
+ * unusual export breaks. Bitwarden bounds none of these columns. The failure was
  * the exact class this suite exists to catch: not a crash, not corruption, but a
  * card that never arrives and a report that says one item was skipped.
  *
- * It is NOT fixed here. Changing which values a parser accepts is production
- * behavior, and Section 0 of the plan allows that only in a task explicitly
- * designated a fix. So it is pinned in both directions instead — at the bound
- * the item survives, one past it the item is discarded — which makes the fix
- * visible when it lands: each row below turns red and is rewritten to assert
- * the clamp.
+ * FIXED: all eleven now go through `clampWithOverflow` inside
+ * `clampNotesAndFields`, exactly as the address fields already did, with each
+ * tail folded into `notes` — except a card's `number` and `cvv`, which are
+ * clamped and reported WITHOUT their value, because those two are the pair that
+ * makes a card chargeable and notes are rendered in the clear.
  *
- * **The fix, when it lands:** route these ten through `clampWithOverflow` in
- * `clampNotesAndFields`, exactly as the address fields already are, folding each
- * tail into `notes` — with the one exception the module already documents, that
- * a card `number` and `cvv` are clamped but never copied into notes, because
- * notes travel verbatim into the Chrome CSV `note` column.
+ * The rows below were the pinned assertions of the broken behaviour; each now
+ * asserts the clamp in both directions. Three things are pinned per field, and
+ * all three matter: the item SURVIVES, the value is cut to exactly its bound
+ * (not dropped, not left over-long), and the schema accepts the result — which
+ * is the property the whole fix exists for, since `validateImportItems` discards
+ * on exactly that check.
  *
- * Recorded in `.testfortress/phase-logs/phase-10-parser-fuzz.md` and appended to
- * Phase 20 as a fix task.
+ * Recorded in `.testfortress/phase-logs/phase-10-parser-fuzz.md`, fixed in
+ * Phase 20 Task 20.5.
  */
-describe('KNOWN DEFECT: unclamped card and identity scalars discard the whole item', () => {
-  interface Unclamped {
+describe('over-long card and identity scalars are clamped, never discarded', () => {
+  interface Clamped {
     field: string;
     itemType: 'card' | 'identity';
     bound: number;
+    /** The key the clamped value reads back under, when it differs from `field`. */
+    dataKey: string;
+    /** Is the trimmed tail folded into `notes`, or reported without its value? */
+    foldsTail: boolean;
     /** Builds a Bitwarden JSON document whose one item carries a value of `length`. */
     document: (length: number) => string;
   }
@@ -800,80 +811,174 @@ describe('KNOWN DEFECT: unclamped card and identity scalars discard the whole it
       items: [{ type: 4, name: 'i', identity: { [field]: 'x'.repeat(length) } }],
     });
 
-  const UNCLAMPED: Unclamped[] = [
+  const CLAMPED: Clamped[] = [
     {
       field: 'card.cardholderName',
       itemType: 'card',
       bound: MAX_CARD_CARDHOLDER_NAME_LENGTH,
+      dataKey: 'cardholderName',
+      foldsTail: true,
       document: (n) => card('cardholderName', n),
     },
-    { field: 'card.number', itemType: 'card', bound: 30, document: (n) => card('number', n) },
-    { field: 'card.expMonth', itemType: 'card', bound: 2, document: (n) => card('expMonth', n) },
-    { field: 'card.expYear', itemType: 'card', bound: 4, document: (n) => card('expYear', n) },
-    { field: 'card.cvv', itemType: 'card', bound: 4, document: (n) => card('code', n) },
+    {
+      // Clamped, and the tail is reported WITHOUT its value: `number` and `cvv`
+      // are the pair that makes a card chargeable, and notes are rendered in the
+      // clear beside them.
+      field: 'card.number',
+      itemType: 'card',
+      bound: MAX_CARD_NUMBER_LENGTH,
+      dataKey: 'number',
+      foldsTail: false,
+      document: (n) => card('number', n),
+    },
+    {
+      field: 'card.expMonth',
+      itemType: 'card',
+      bound: MAX_CARD_EXP_MONTH_LENGTH,
+      dataKey: 'expMonth',
+      foldsTail: true,
+      document: (n) => card('expMonth', n),
+    },
+    {
+      field: 'card.expYear',
+      itemType: 'card',
+      bound: MAX_CARD_EXP_YEAR_LENGTH,
+      dataKey: 'expYear',
+      foldsTail: true,
+      document: (n) => card('expYear', n),
+    },
+    {
+      field: 'card.cvv',
+      itemType: 'card',
+      bound: MAX_CARD_CVV_LENGTH,
+      dataKey: 'cvv',
+      foldsTail: false,
+      document: (n) => card('code', n),
+    },
     {
       field: 'card.brand',
       itemType: 'card',
       bound: MAX_CARD_BRAND_LENGTH,
+      dataKey: 'brand',
+      foldsTail: true,
       document: (n) => card('brand', n),
     },
     {
       field: 'identity.firstName',
       itemType: 'identity',
       bound: MAX_IDENTITY_NAME_LENGTH,
+      dataKey: 'firstName',
+      foldsTail: true,
       document: (n) => identity('firstName', n),
     },
     {
-      // `lastName` shares `firstName`'s bound and `firstName`'s lack of a clamp.
-      // It is a separate row rather than a note on the `firstName` one because
-      // this table is the ONLY mechanism that can detect the defect shrinking:
-      // `knownInvalidPaths` is permissive-only (it excuses a failure, it never
-      // requires one), so a field listed there but missing here would keep being
-      // excused forever after Task 20.5 clamps its neighbours.
+      // `lastName` shares `firstName`'s bound and shared its lack of a clamp. It
+      // is a separate row rather than a note on the `firstName` one because this
+      // table is the ONLY mechanism that could detect the list shrinking:
+      // `knownInvalidPaths` was permissive-only (it excused a failure, it never
+      // required one), so a field listed there but missing here would have kept
+      // being excused after its neighbours were clamped.
       field: 'identity.lastName',
       itemType: 'identity',
       bound: MAX_IDENTITY_NAME_LENGTH,
+      dataKey: 'lastName',
+      foldsTail: true,
       document: (n) => identity('lastName', n),
     },
     {
       field: 'identity.company',
       itemType: 'identity',
       bound: MAX_IDENTITY_COMPANY_LENGTH,
+      dataKey: 'company',
+      foldsTail: true,
       document: (n) => identity('company', n),
     },
     {
       field: 'identity.ssn',
       itemType: 'identity',
       bound: MAX_IDENTITY_SSN_LENGTH,
+      dataKey: 'ssn',
+      foldsTail: true,
       document: (n) => identity('ssn', n),
     },
     {
       field: 'identity.passport',
       itemType: 'identity',
       bound: MAX_IDENTITY_PASSPORT_LENGTH,
+      dataKey: 'passport',
+      foldsTail: true,
       document: (n) => identity('passportNumber', n),
     },
   ];
 
-  it.each(UNCLAMPED)(
-    '$field survives AT its bound and is discarded ONE past it (today, wrongly)',
-    ({ itemType, bound, document }) => {
+  it.each(CLAMPED)(
+    '$field survives AT its bound and is CLAMPED one past it, never discarded',
+    ({ itemType, bound, dataKey, document }) => {
       const atBound = parseImportData('bitwarden', document(bound)).items;
       expect(atBound).toHaveLength(1);
       expect(vaultItemDataSchemas[itemType].safeParse(atBound[0]!.data).success).toBe(true);
+      expect((atBound[0]!.data as Record<string, string>)[dataKey]).toHaveLength(bound);
 
       const past = parseImportData('bitwarden', document(bound + 1)).items;
       expect(past).toHaveLength(1);
-      // TODAY's behavior, asserted so the fix is a visible, deliberate change.
-      expect(vaultItemDataSchemas[itemType].safeParse(past[0]!.data).success).toBe(false);
+      const data = past[0]!.data as Record<string, unknown>;
+      // The item is still valid — this is the property `validateImportItems`
+      // checks, and the one whose failure discarded the whole card.
+      const parsed = vaultItemDataSchemas[itemType].safeParse(data);
+      expect(
+        parsed.success,
+        `${dataKey} one past its bound: ${JSON.stringify(parsed.error?.issues ?? [])}`,
+      ).toBe(true);
+      // Cut to exactly the bound, not dropped and not left over-long. Dropping
+      // the field would also satisfy "the schema accepts it", so the length is
+      // asserted separately.
+      expect(data[dataKey]).toHaveLength(bound);
     },
   );
 
-  it('names a bound for every unclamped field, so the list cannot quietly shrink', () => {
-    // A row deleted from the table is a defect that stops being recorded. Both
-    // the count and the field names are pinned; the count alone would be
-    // satisfied by swapping one field for another.
-    expect(UNCLAMPED.map((entry) => entry.field).sort()).toEqual([
+  it.each(CLAMPED.filter((entry) => entry.foldsTail))(
+    '$field folds its trimmed tail into notes, so nothing is lost silently',
+    ({ bound, document }) => {
+      const past = parseImportData('bitwarden', document(bound + 5)).items;
+      const notes = (past[0]!.data as { notes?: string }).notes ?? '';
+      expect(notes).toContain('truncated');
+      // The tail itself, verbatim: a notice with no value would still lose the
+      // characters it is announcing.
+      expect(notes).toContain('xxxxx');
+    },
+  );
+
+  it.each(CLAMPED.filter((entry) => !entry.foldsTail))(
+    '$field is clamped and REPORTED, but its value never reaches notes',
+    ({ bound, dataKey, document }) => {
+      // A distinctive tail, so "the tail is absent" is a real assertion rather
+      // than a claim about a string of x's that also appears in the clamped
+      // value itself.
+      const doc = JSON.parse(document(bound)) as {
+        items: { card: Record<string, string> }[];
+      };
+      const sourceKey = dataKey === 'cvv' ? 'code' : dataKey;
+      doc.items[0]!.card[sourceKey] = `${'9'.repeat(bound)}SECRETTAIL`;
+      const past = parseImportData('bitwarden', JSON.stringify(doc)).items;
+
+      const data = past[0]!.data as Record<string, unknown>;
+      expect(vaultItemDataSchemas.card.safeParse(data).success).toBe(true);
+      expect(data[dataKey]).toBe('9'.repeat(bound));
+
+      const notes = (data.notes as string | undefined) ?? '';
+      // Reported, so the user knows something was cut …
+      expect(notes).toContain('truncated');
+      // … but the value is not duplicated into a field rendered in the clear.
+      expect(notes).not.toContain('SECRETTAIL');
+      expect(notes).not.toContain('9999');
+    },
+  );
+
+  it('names a bound for every clamped field, so the list cannot quietly shrink', () => {
+    // A row deleted from the table is a field that stops being pinned. Both the
+    // count and the field names are pinned; the count alone would be satisfied
+    // by swapping one field for another.
+    expect(CLAMPED.map((entry) => entry.field).sort()).toEqual([
       'card.brand',
       'card.cardholderName',
       'card.cvv',
@@ -886,18 +991,13 @@ describe('KNOWN DEFECT: unclamped card and identity scalars discard the whole it
       'identity.passport',
       'identity.ssn',
     ]);
-    // Both directions: every path the corpus entry is allowed to fail on must
-    // have a row here. A field listed as known-invalid but never pinned at its
-    // bound is a defect that is excused and not recorded — which is exactly how
-    // `identity.lastName` was missed in the first draft of this block.
-    const fields = new Set(UNCLAMPED.map((entry) => entry.field.split('.')[1]));
-    const excused = CORPUS.find(
-      (entry) => entry.file === 'bitwarden-scalar-bounds.json',
-    )?.knownInvalidPaths;
-    expect(excused, 'the witness entry must carry the excused list').toBeDefined();
-    for (const path of excused ?? []) {
-      expect(fields, `${path} is excused by the corpus but pinned by no row`).toContain(path);
-    }
+    // The corpus witness no longer carries `knownInvalidPaths`: with the clamp in
+    // place there is nothing left to excuse, so the corpus loop's schema clause
+    // is unconditional again. Asserting its ABSENCE is what stops it being
+    // reintroduced as a way to quiet a future failure on this file.
+    const witness = CORPUS.find((entry) => entry.file === 'bitwarden-scalar-bounds.json');
+    expect(witness, 'the witness entry must still exist').toBeDefined();
+    expect(witness?.knownInvalidPaths).toBeUndefined();
   });
 
   it('is confined to the Bitwarden JSON path — no CSV parser can reach these fields', () => {

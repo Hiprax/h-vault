@@ -1000,15 +1000,35 @@ runs on your machine, in the `pre-push` hook, before the commits leave it — so
 longer appear on a push that was already broken when it left your laptop, and no repository
 minutes are spent discovering it.
 
+There are three entry points, one per tier, and **tiers are cumulative**: `verify` is a superset of
+`verify:fast`, and `verify:full` a superset of both. A gate therefore cannot be quietly demoted out
+of the push gate by moving it down a tier.
+
 ```bash
-npm run verify:fast             # the fast tier (~80s) — cheap enough to run constantly
-npm run ci                      # every gate — exactly what pre-push runs
-npm run verify:full             # the above plus the release tier
+npm run verify:fast             # the fast tier (T0) — cheap enough to run constantly
+npm run ci                      # T0 + T1 — exactly what pre-push runs
+npm run verify:full             # T0 + T1 + T2 — the above plus the release tier
 npm run ci -- --list            # what each gate is, its tier, and which CI job it replaces
 npm run ci -- --only=lint,test  # a subset, while iterating
 npm run ci -- --bail            # stop at the first failure instead of running them all
 npm run ci -- --json            # one JSON document describing the run
 ```
+
+Each tier has a stated time budget on the reference machine:
+
+| Tier   | Entry point           | Budget        | Why that number                                                                                                                                                 |
+| ------ | --------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **T0** | `npm run verify:fast` | **90 s**      | It is meant to be run without thinking about it. Measured at ~82 s, and those eight seconds of headroom are why a gate is not added to T0 without re-measuring. |
+| **T1** | `npm run ci`          | **12 min**    | The server suite alone is ~150 s and Playwright is ~6 minutes. Twelve rather than a rounder ten, because a budget nobody meets is a budget nobody respects.     |
+| **T2** | `npm run verify:full` | **unbounded** | `mutation` re-runs the whole suite once per mutant. Any number written here would be fiction.                                                                   |
+
+The budgets are **design budgets, not gates**, and both halves of that are deliberate. They are not
+gates because the wall clock of the machine you happen to be on is not a property of this
+repository, and failing a push over it would only teach people to reach for `--no-verify`. They are
+not decoration either: every run records `budgetSeconds` beside its own `durationMs` in
+`summary.json` and prints the comparison, so "T0 is still cheap enough to run constantly" is a
+measurement you can check rather than a claim from the day it was written. They live in
+`scripts/ci/lib/tiers.mjs`, and `docs-sync.test.ts` fails if this table and that file disagree.
 
 | Gate               | Tier | What it runs                                                                                                                                                  | Replaces                   |
 | ------------------ | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
@@ -1034,12 +1054,17 @@ npm run ci -- --json            # one JSON document describing the run
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                    | _new_                      |
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit             | _new_                      |
 | `e2e`              | T1   | Playwright (Chromium) against an auto-started stack                                                                                                           | `e2e` job                  |
+| `a11y`             | T1   | axe-core over fifteen primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                | _new_                      |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                        | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import              | _new_                      |
+| `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline      | _new_                      |
 | `resource`         | T2   | Volume and memory budgets over a 10,000-item vault: streaming backup collection, a full-vault key rotation, a 25 MiB restore, the cleanup sweeps' query plans | _new_                      |
 | `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a journey through it, data across a restart, an idempotent redeploy                 | _new_                      |
+| `upgrade`          | T2   | A vault and a `.env` written by the PREVIOUS release, read by this one: every item still decrypts and parses to what that release parsed it to                | _new_                      |
+| `recovery`         | T2   | A backup restored into a second, empty database, and a real process SIGKILLed mid-rotation and mid-import                                                     | _new_                      |
 | `dst`              | T2   | The whole suite again in a DST-observing zone, so an assertion that is right only because local time and UTC agree fails here rather than on a user's machine | _new_                      |
 | `flake`            | T2   | Ten complete runs of every suite in ten different shuffled orders, plus the Playwright suite three times over with retries off                                | _new_                      |
+| `mutation`         | T2   | The oracle: Stryker mutates every file in the declared scope and the suite must kill the recorded share of them, per package and per core module              | _new_                      |
 | `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                                           | `sast` job                 |
 | `coverage`         | T1   | Each package against its recorded line/branch/function coverage, and 100% of the production lines the change touched                                          | _new_                      |
 | `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                                      | _new_                      |
@@ -1089,14 +1114,37 @@ downgrade, a tautological assertion or a hook bypass **inside a file that define
 defect, not a debt. Outside gate files the same pattern needs an entry pinned to the exact
 occurrence. Documentation is exempt, so this README can describe the patterns it forbids.
 
+**What an entry costs, before you reach for one.** A ledger entry is not a free pass; it is a debt
+recorded against four separate limits, and the limits are the point:
+
+- **It expires.** Every entry carries an `expires` date, at most **90 days** out (**30** for a
+  type-checker or linter suppression). The day it lapses, `integrity` fails — so an entry buys time,
+  never permission. Renewing one means re-arguing it, in writing.
+- **It is pinned to one occurrence.** An entry names the exact rule id — never the looser `kind`,
+  because several rules share a kind and kind-matching would let one entry excuse every other marker
+  in the same file — plus the file and a `symbol` anchor, and covers at most **3** occurrences.
+  Move the code and the anchor stops matching, which is a failure, not a silent renewal.
+- **The totals only go down.** `suppressions.count` and `suppressions.totalHits` are ratcheted
+  fields. Adding an entry today lowers the ceiling you may hold tomorrow: once the count falls it
+  cannot rise again without an explicit, reasoned `--accept`. There is a ceiling of **26** on top of
+  that, and the sanctioned escape valves (`DEFERRED-ROW`, `EQUIV-MUTANT`, `BASELINE-REDUCTION`,
+  `COV-DIFF-EXEMPT`) are exempt from it only so the ceiling cannot block the mechanism that lowers it.
+- **Five families cannot be written down at all**, inside a file that defines a gate: a neutered exit
+  code, a narrowed gate, a strictness downgrade, a tautological assertion and a swallowed failure.
+  Those are defects. Coverage and mutation **scope** is not ledgerable anywhere — it is policed by
+  the ratchet's absolute denominators and measured file sets instead.
+
 **`.testfortress/baseline.json` records the current high-water mark of every gated number**, and the
 `ratchet` gates compare against it. Each field declares a direction — coverage and test counts may
-only rise, warnings and suppressions may only fall — and a number can be moved only by
+only rise, warnings and suppressions may only fall — and an unlisted field is a hard error rather
+than an unchecked one. A number can be moved only by
 `node scripts/ci/ratchet-check.mjs --accept --reason "..."`, which moves each field in its improving
-direction only and refuses while anything is failing or unmeasured. The baseline records absolute
-denominators (`linesTotal`) and the **measured file set** beside every percentage, because a
-percentage whose denominator can shrink is not a gate: dropping a file from coverage raises the
-number while covering less code.
+direction only and refuses while anything is failing or unmeasured; there is no flag that worsens a
+number. The baseline records absolute denominators (`linesTotal`) and the **measured file set**
+beside every percentage, because a percentage whose denominator can shrink is not a gate: dropping a
+file from coverage raises the number while covering less code. A field that is absent from the
+baseline has no gate at all — which is the quieter half of the same mistake, so the baseline's own
+sorted field list is pinned too, and deleting a field is itself a regression.
 
 **`npm run verify:selftest` proves every registered gate can still fail.** It copies the working
 tree to a temporary directory, plants exactly one defect per registered gate — an explicit `any` for

@@ -117,16 +117,16 @@ const customFieldArbitrary = fc.record({
 });
 
 /**
- * A URI entry whose `uri` is short enough that the schema's `https://` prepend
- * cannot push it past `MAX_URI_LENGTH`.
+ * A URI entry the schema accepts, measured the way the schema now measures it:
+ * AFTER `normalizeUri` has prepended a scheme to a bare domain.
  *
- * That bound is measured PRE-transform, so a bare domain of exactly
- * `MAX_URI_LENGTH` characters parses to a `MAX_URI_LENGTH + 8` one — which the
- * schema then refuses on the way back in. The importer already subtracts this
- * overhead (`clampUri` in `services/import/itemBuilders.ts`); the generator
- * subtracts it too, and the ONE input family that does not survive is pinned
- * explicitly as a known defect at the bottom of this file rather than being
- * quietly excluded here.
+ * The bound used to be checked PRE-transform, so a bare domain of exactly
+ * `MAX_URI_LENGTH` characters parsed to a `MAX_URI_LENGTH + 8` one that the
+ * schema then refused on the way back in. The check now sits after the
+ * transform, which is the same bound `clampUri` (`services/import/itemBuilders.ts`)
+ * has always computed — so this filter states the schema's real acceptance
+ * condition rather than working around a gap in it. The boundary itself is
+ * pinned by name at the bottom of this file.
  */
 const uriEntryArbitrary = fc
   .record({
@@ -177,12 +177,13 @@ const loginArbitrary = fc.record({
  */
 const expiresAtArbitrary = fc
   .tuple(
-    // Year 100 and up, NOT 1: `Date.UTC(y, …)` maps a year in 0-99 to 1900-1999,
-    // so the schema's calendar refine rejects every such date — including the
-    // `0001-01-01` the editor's own error message advertises as the lower bound.
-    // Pinned as a known defect at the bottom of this file; excluded here so the
-    // fixed-point property fails for fixed-point reasons.
-    fc.integer({ min: 100, max: 9999 }),
+    // From year 1, the lower bound the editor's own error message advertises.
+    // This range used to start at 100, because the calendar refine built its
+    // Date through `Date.UTC(y, …)`, whose two-digit-year legacy rule maps a
+    // year in 0-99 to 1900-1999 and made every first-century date fail. The
+    // refine now builds the Date by mutation, so the whole advertised range is
+    // generated here and the boundary is pinned by name below.
+    fc.integer({ min: 1, max: 9999 }),
     fc.integer({ min: 1, max: 12 }),
     fc.integer({ min: 1, max: 28 }),
     fc.integer({ min: 0, max: 23 }),
@@ -344,7 +345,7 @@ describe.each(SCHEMAS)('$itemType data schema', ({ schema, arbitrary }) => {
 });
 
 describe('secretDataSchema — the expiry refines', () => {
-  it('accepts every shape its own ISO grammar allows, from year 100 onward', () => {
+  it('accepts every shape its own ISO grammar allows, across the whole advertised range', () => {
     fc.assert(
       fc.property(expiresAtArbitrary, (expiresAt) => {
         const parsed = secretDataSchema.parse({ expiresAt });
@@ -370,19 +371,33 @@ describe('secretDataSchema — the expiry refines', () => {
    *
    * `combineExpiry` (VaultItemForm) already documents and avoids exactly this trap
    * — it builds its Date by mutation "rather than `new Date(y, m, d, …)`, whose
-   * two-digit-year legacy behaviour maps year 50 to 1950" — so the schema is the
-   * one place where it survives. The visible consequence is small but real: the
+   * two-digit-year legacy behaviour maps year 50 to 1950" — so the schema was the
+   * one place where it survived. The visible consequence was small but real: the
    * editor's own message advertises "Enter a date between 0001-01-01 and
-   * 9999-12-31", and a date in the first century is then refused by the write
-   * pre-flight instead. No stored value can be affected, because the same refine
-   * runs on the way in.
+   * 9999-12-31", and a date in the first century was then refused by the write
+   * pre-flight instead.
    *
-   * PINNED, NOT FIXED: changing which values the schema accepts is production
-   * behavior, out of scope for a test phase (see the phase log's deferred-defect
-   * entry). Asserting today's behavior makes the fix a deliberate edit here.
+   * FIXED: the refine now builds its Date by mutation too, so the accepted range
+   * matches the advertised one. This test pins BOTH halves of that fix — the
+   * first century parses, AND an impossible date in the first century is still
+   * refused — because the cheapest way to make the first half pass is to delete
+   * the calendar check altogether, which would let `0001-02-30` through.
    */
-  it('KNOWN DEFECT: rejects a first-century date, because Date.UTC maps year 0-99 into the 1900s', () => {
-    for (const expiresAt of ['0001-01-01', '0050-06-15', '0099-12-31']) {
+  it('accepts a first-century date, and still rejects an impossible one in the same century', () => {
+    for (const expiresAt of ['0001-01-01', '0050-06-15', '0099-12-31', '0004-02-29']) {
+      const result = secretDataSchema.safeParse({ expiresAt });
+      expect(result.success, `${expiresAt}: ${JSON.stringify(result.error?.issues ?? [])}`).toBe(
+        true,
+      );
+      // Stored verbatim, like every other accepted shape: a zero-padded year is
+      // not rewritten into a four-digit one on the way through.
+      expect(result.success ? result.data.expiresAt : undefined).toBe(expiresAt);
+    }
+
+    // The calendar check itself must survive the fix. `0001-02-30` and
+    // `0099-02-29` (1 and 99 are not leap years) are the two that a deleted
+    // refine would silently start accepting.
+    for (const expiresAt of ['0001-02-30', '0099-02-29', '2026-02-30', '2026-13-01']) {
       const result = secretDataSchema.safeParse({ expiresAt });
       expect(result.success, expiresAt).toBe(false);
       expect(result.success ? [] : result.error.issues).toEqual([
@@ -392,11 +407,9 @@ describe('secretDataSchema — the expiry refines', () => {
         }),
       ]);
     }
-    // The first year that is NOT remapped, so the bound is stated rather than
-    // implied: 100 parses, 99 does not.
-    expect(secretDataSchema.safeParse({ expiresAt: '0100-01-01' }).success).toBe(true);
-    // And the mechanism itself, so a reader does not have to take the claim on
-    // trust: this is the remap the refine trips over.
+
+    // And the mechanism the refine must NOT use, so a reader does not have to
+    // take the claim on trust: this is the remap that caused the defect.
     expect(new Date(Date.UTC(99, 0, 1)).getUTCFullYear()).toBe(1999);
     expect(new Date(Date.UTC(100, 0, 1)).getUTCFullYear()).toBe(100);
   });
@@ -429,41 +442,68 @@ describe('loginDataSchema — the URI transform', () => {
    * character URI — and that output is no longer valid input.
    *
    * Reachable from the editor, not from an import: `clampUri`
-   * (`services/import/itemBuilders.ts`) already subtracts the scheme's length
-   * from the bound, but `VaultItemForm`'s own `uri` field bounds at
-   * `MAX_URI_LENGTH` with no such allowance. Saving a 2041-2048 character bare
-   * domain therefore stores it, `decryptItem` returns the grown value, and every
-   * later save of that item is refused by the write pre-flight with "Too big" on
+   * (`services/import/itemBuilders.ts`) already subtracted the scheme's length
+   * from the bound, but the schema did not. Saving a 2041-2048 character bare
+   * domain therefore stored it, `decryptItem` returned the grown value, and every
+   * later save of that item was refused by the write pre-flight with "Too big" on
    * `uris.0.uri`.
    *
-   * PINNED, NOT FIXED, and deliberately so: the fix changes production
-   * validation behavior, which is out of scope for a test phase (see the phase
-   * log's deferred-defect entry). This test asserts TODAY'S behavior so that the
-   * fix, when it lands, is a visible, deliberate change here rather than a silent
-   * one — and so the failure mode cannot get worse unnoticed in the meantime.
+   * FIXED by moving the length check AFTER the transform, in one exported
+   * predicate (`isValidUriLength`) that the editor's own mirror of this schema
+   * calls too. The bound is therefore on the value that gets STORED, which is
+   * the only length that has ever mattered, and the two boundaries cannot drift.
+   *
+   * The overhead is measured per value, never assumed: `normalizeUri` adds eight
+   * characters to a bare domain, six to a protocol-relative one and none to a
+   * value that already carries a scheme, so a flat subtraction would be wrong in
+   * two of those three cases. Each is asserted below.
    */
-  it('KNOWN DEFECT: a bare domain at the URI cap grows past it, so its own output no longer parses', () => {
+  it('bounds a URI by its POST-transform length, measuring the prepended scheme per value', () => {
+    const overhead = 'https://'.length;
+    const parseUri = (
+      uri: string,
+      match = 'domain',
+    ): ReturnType<typeof loginDataSchema.safeParse> =>
+      loginDataSchema.safeParse({ uris: [{ uri, match }] });
+
+    // The value that used to slip through and brick the item: accepted at parse,
+    // grown to 2056, then rejected on read-back. It is now refused up front, on
+    // the row it belongs to.
     const bareDomainAtCap = 'x'.repeat(MAX_URI_LENGTH);
-    const overhead = normalizeUri(bareDomainAtCap).length - bareDomainAtCap.length;
-    expect(overhead).toBe('https://'.length);
-
-    const first = loginDataSchema.parse({ uris: [{ uri: bareDomainAtCap, match: 'domain' }] });
-    expect(first.uris[0]?.uri).toHaveLength(MAX_URI_LENGTH + overhead);
-
-    const second = loginDataSchema.safeParse(throughStorage(first));
-    expect(second.success).toBe(false);
-    expect(second.success ? [] : second.error.issues).toEqual([
-      expect.objectContaining({
-        code: 'too_big',
-        maximum: MAX_URI_LENGTH,
-        path: ['uris', 0, 'uri'],
-      }),
+    expect(normalizeUri(bareDomainAtCap)).toHaveLength(MAX_URI_LENGTH + overhead);
+    const atCap = parseUri(bareDomainAtCap);
+    expect(atCap.success).toBe(false);
+    expect(atCap.success ? [] : atCap.error.issues).toEqual([
+      expect.objectContaining({ path: ['uris', 0, 'uri'] }),
     ]);
 
-    // One character below the overhead-adjusted bound is the last value that
-    // round-trips, which is the bound `clampUri` computes.
-    const safe = 'x'.repeat(MAX_URI_LENGTH - overhead);
-    const parsedSafe = loginDataSchema.parse({ uris: [{ uri: safe, match: 'domain' }] });
-    expect(loginDataSchema.safeParse(throughStorage(parsedSafe)).success).toBe(true);
+    // The boundary is exact and is `clampUri`'s: 2040 is the last bare domain
+    // that parses, its output is exactly at the cap, and that output re-parses.
+    // That last clause is the fixed point this test exists for.
+    const largestBareDomain = 'x'.repeat(MAX_URI_LENGTH - overhead);
+    const parsed = loginDataSchema.parse({ uris: [{ uri: largestBareDomain, match: 'domain' }] });
+    expect(parsed.uris[0]?.uri).toHaveLength(MAX_URI_LENGTH);
+    expect(loginDataSchema.safeParse(throughStorage(parsed)).success).toBe(true);
+    expect(parseUri('x'.repeat(MAX_URI_LENGTH - overhead + 1)).success).toBe(false);
+
+    // The cap was NOT simply lowered by eight for everything. A value that
+    // already carries its scheme is not grown, so the full 2048 is available to
+    // it — and one more is not.
+    expect(parseUri(`https://${'x'.repeat(MAX_URI_LENGTH - overhead)}`).success).toBe(true);
+    expect(parseUri(`https://${'x'.repeat(MAX_URI_LENGTH - overhead + 1)}`).success).toBe(false);
+
+    // A protocol-relative URI grows by six, not eight, so its input may be two
+    // characters LONGER than a bare domain's. A flat "input ≤ 2040" rule would
+    // reject this one; the per-value measurement accepts it.
+    expect(normalizeUri('//x')).toBe('https://x');
+    const protocolRelative = `//${'x'.repeat(MAX_URI_LENGTH - overhead)}`;
+    expect(protocolRelative.length).toBeGreaterThan(MAX_URI_LENGTH - overhead);
+    expect(normalizeUri(protocolRelative)).toHaveLength(MAX_URI_LENGTH);
+    expect(parseUri(protocolRelative).success).toBe(true);
+    expect(parseUri(`//${'x'.repeat(MAX_URI_LENGTH - overhead + 1)}`).success).toBe(false);
+
+    // And a regex pattern is never transformed at all, so it gets the whole cap.
+    expect(parseUri('x'.repeat(MAX_URI_LENGTH), 'regex').success).toBe(true);
+    expect(parseUri('x'.repeat(MAX_URI_LENGTH + 1), 'regex').success).toBe(false);
   });
 });

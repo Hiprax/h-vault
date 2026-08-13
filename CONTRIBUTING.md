@@ -68,15 +68,24 @@ The gates are grouped into tiers by how long they take, so there is something wo
 running at every point in the loop:
 
 ```bash
-npm run verify:fast               # the fast tier (~80s): engines, secrets, lint, format, types
-npm run ci                        # everything the pre-push hook runs (15–30 min)
-npm run verify:full               # the above plus the release tier (fuzz, volume budgets, upgrade path, recovery drills, deploy drill)
+npm run verify:fast               # the fast tier (T0): engines, secrets, lint, format, types
+npm run ci                        # everything the pre-push hook runs (T0 + T1)
+npm run verify:full               # the above plus the release tier (T0 + T1 + T2)
 npm run ci:local                  # all of it again, from a fresh worktree at HEAD (clean room)
 npm run ci -- --list              # the gates, their tiers, and what each one replaces
 npm run ci -- --only=lint,test    # a subset, while iterating
 npm run ci -- --bail              # stop at the first failure instead of running them all
 npm run ci -- --json              # one JSON document describing the run
 ```
+
+Tiers are **cumulative** — `verify` is a superset of `verify:fast`, and `verify:full` of both — so
+a gate cannot be demoted out of the push gate by moving it down a tier. Each has a stated budget on
+the reference machine: **T0 90 s**, **T1 12 minutes**, **T2 unbounded**. Those are design budgets
+rather than gates, because the wall clock of your laptop is not a property of this repository and
+failing a push over it would only teach people to reach for `--no-verify`. They are still measured:
+every run records `budgetSeconds` beside its own `durationMs` in `summary.json` and prints the
+comparison. The numbers live in `scripts/ci/lib/tiers.mjs`. If you add a gate to T0, re-measure —
+the measured value is ~82 s against a 90 s budget, and there is not much room in it.
 
 The runner **aggregates by default**: it runs every selected gate and reports all the
 failures, rather than costing you a round trip per failure. A gate whose dependency
@@ -209,7 +218,7 @@ documenting its own defeat. The hatches themselves are unchanged and still work.
 | `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
 
 The first is the one to reach for: it is scoped, it is visible in the run summary, and it
-leaves the other twenty-three gates in place. **Say so in the pull request description
+leaves the other twenty-six gates in place. **Say so in the pull request description
 whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
 a claim someone else now has to check.
 
@@ -244,7 +253,24 @@ Three gates enforce it rather than trusting it:
   registered gate without one is a hard error naming it.
 
 If a gate genuinely cannot be met, the honest move is a dated, expiring ledger entry that
-says so — never a quiet edit to the gate.
+says so — never a quiet edit to the gate. Know what one costs before you write it:
+
+- **It expires**, at most 90 days out, and 30 for a type-checker or linter suppression. When the
+  date passes, `integrity` fails. An entry buys time; it never buys permission.
+- **It is pinned to one occurrence** — the exact rule id (never the looser `kind`, which several
+  rules share), the file, a `symbol` anchor, and at most three hits. Move the code and the anchor
+  stops matching, which is a failure rather than a silent renewal.
+- **It lowers a ceiling you will have to live under.** `suppressions.count` and
+  `suppressions.totalHits` are ratcheted downward, so today's total becomes tomorrow's limit: an
+  entry removed cannot be spent again on something else without an explicit, reasoned `--accept`.
+- **It needs an owner, a reason and approval**, and the reason has to be an argument. "Flaky" is
+  not one; "the JWT `iat` has one-second precision, so this wait buys a strictly later second, and
+  the injectable clock removes it" is.
+
+Five things cannot be written down at all inside a gate-defining file, and coverage or mutation
+**scope** cannot be written down anywhere — that one is policed by the ratchet's absolute
+denominators and measured file sets, because a percentage whose denominator can shrink is not a
+gate.
 
 ## What a good change looks like
 

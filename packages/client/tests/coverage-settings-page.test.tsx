@@ -199,6 +199,38 @@ vi.mock('zxcvbn', () => ({
   },
 }));
 
+/**
+ * A seam on ONE function of the real import service, for one test.
+ *
+ * `SettingsPage` reports WHICH item was skipped and why, not just how many, and
+ * that promise lives in a spread at `SettingsPage.tsx:958-962`. Until Task 20.5
+ * it was reachable from a real file — a card number past its bound discarded the
+ * whole card — but clamping those eleven scalars removed the last input any
+ * parser can turn into an item its own schema rejects, so nothing in the
+ * application can produce a skip any more. That is the better state, and it left
+ * the promise with no test: deleting the `description` spread would have gone
+ * unnoticed.
+ *
+ * Everything else in the module stays REAL (`importActual`), and the override is
+ * null for every other test in this file, so no other assertion is affected. The
+ * unit under test is `SettingsPage`; `validateImportItems` is a collaborator, and
+ * standing in for a collaborator whose real inputs no longer exist is the honest
+ * way to keep testing the caller's own behaviour.
+ */
+let mockValidateImportOverride: ((parsed: unknown[]) => unknown) | null = null;
+
+vi.mock('../src/services/import', async () => {
+  const actual =
+    await vi.importActual<typeof import('../src/services/import')>('../src/services/import');
+  return {
+    ...actual,
+    validateImportItems: (parsed: never) =>
+      mockValidateImportOverride
+        ? mockValidateImportOverride(parsed as unknown[])
+        : actual.validateImportItems(parsed),
+  };
+});
+
 import { useAuthStore } from '../src/stores/authStore';
 import { useUIStore } from '../src/stores/uiStore';
 import { cryptoService } from '../src/services/crypto/cryptoService';
@@ -327,6 +359,9 @@ function installEmptyVaultRotationApis() {
 describe('SettingsPage — error paths and branches', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The seam is inert unless a test opts in, so no other assertion in this
+    // file runs against anything but the real import service.
+    mockValidateImportOverride = null;
     installCryptoStubs();
     installEmptyVaultRotationApis();
     setProfile();
@@ -1031,24 +1066,90 @@ describe('SettingsPage — error paths and branches', () => {
   });
 
   // An item that fails the shared schema is dropped at the validation step.
-  // Reporting only a count ("1 could not be converted") leaves the user unable to
-  // tell WHICH entry was lost or why, and re-running the import cannot reveal it,
-  // so the per-item reason must reach the toast.
-  //
-  // Over-long free-text/login fields (username, password, notes, URLs, custom
-  // fields) are now CLAMPED rather than dropped (fidelity-clamp), so they no
-  // longer trigger this path. A scalar, structured field with its own tight
-  // bound — a card `number` (max 30), read from a fixed source column — is left
-  // to the parser and still fails validation, which is the case exercised here.
-  it('tells the user which item was skipped and why, not just how many', async () => {
+  /**
+   * This test used to assert the OPPOSITE, and the change is deliberate.
+   *
+   * A card `number` far past the shared 30-character cap was the last field a
+   * source file could carry that no clamp bounded, so it failed
+   * `vaultItemDataSchemas` and `validateImportItems` discarded the whole card —
+   * every other field of it, and any password-equivalent value with them —
+   * reported to the user as "1 could not be converted". This test pinned that
+   * behaviour, including the requirement that the reason at least name the item
+   * and the field.
+   *
+   * Clamping those eleven card and identity scalars removed the last path by
+   * which a parser can emit an item its own schema rejects, so the case this
+   * test was written around is no longer reachable from any import format, and
+   * the stronger property is worth pinning in its place: the card ARRIVES rather
+   * than being dropped, and no "could not be converted" toast fires at all. The
+   * clamped LENGTH is not asserted here and cannot be — what reaches the API is
+   * ciphertext — so it is pinned in `tests/fuzz/parsers.fuzz.test.ts`, against
+   * the parser's plaintext output.
+   *
+   * The per-item reason itself is still pinned, at the tier where it remains
+   * reachable without a parser defect: `tests/import/encrypt.test.ts` drives
+   * `validateImportItems` with a synthetic invalid item and asserts both the
+   * skip count and the warning text.
+   */
+  it('names WHICH item was skipped and why, not just how many', async () => {
+    // The wiring at `SettingsPage.tsx:958-962`: the per-item reasons must reach
+    // the toast's `description`. Reporting only a count leaves the user unable to
+    // tell which entry was lost, and re-running the import cannot reveal it —
+    // the same rows are skipped again, just as silently.
+    //
+    // Driven through the collaborator seam because no real file can produce a
+    // skipped item any more (see the seam's own note). What is asserted is
+    // entirely `SettingsPage`'s own behaviour: it renders the reasons it is
+    // given, and it does not send an import when nothing survived.
+    mockValidateImportOverride = () => ({
+      items: [],
+      skipped: 2,
+      warnings: ['Skipped "Payroll": number: Too big', 'Skipped "Passport": ssn: Too big'],
+    });
+
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
     fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), {
       target: { value: 'bitwarden' },
     });
-    // A card number far past the shared `number` cap (30) fails validation for
-    // the whole item — that field is not clamped by import (see fidelity-clamp).
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: {
+        value: JSON.stringify({ items: [{ type: 3, name: 'Payroll', card: { number: '4' } }] }),
+      },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Import'));
+    });
+
+    const call = await waitFor(() => {
+      const found = mockToast.mock.calls
+        .map(([arg]) => arg as { title: string; description?: string })
+        .find((arg) => /could not be converted/i.test(arg.title));
+      expect(found).toBeDefined();
+      return found!;
+    });
+    expect(call.title).toContain('2');
+    // The reasons themselves, both of them, each naming its item and its field.
+    expect(call.description).toContain('Payroll');
+    expect(call.description).toContain('number');
+    expect(call.description).toContain('Passport');
+    // And the negative: nothing was sent to the server for an import in which
+    // nothing survived validation.
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+  });
+
+  it('imports a card whose number is past the cap, clamped, instead of dropping the card', async () => {
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue(JSON_FORMAT_LABEL), {
+      target: { value: 'bitwarden' },
+    });
     const overlong = JSON.stringify({
       items: [{ type: 3, name: 'Overlong', card: { number: '4'.repeat(60) } }],
     });
@@ -1060,18 +1161,19 @@ describe('SettingsPage — error paths and branches', () => {
       fireEvent.click(screen.getByText('Import'));
     });
 
-    await waitFor(() =>
-      expect(mockToast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: expect.stringMatching(/could not be converted/i) }),
-      ),
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    const payload = mockImportVaultApi.mock.calls[0]?.[0] as {
+      operations: { inserts: unknown[] };
+    };
+    expect(payload.operations.inserts).toHaveLength(1);
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Imported 1 items', type: 'success' }),
     );
-    // The reason names the offending item and the field that failed — without it
-    // the user only learns that "1" item vanished.
-    const call = mockToast.mock.calls
-      .map(([arg]) => arg as { title: string; description?: string })
-      .find((arg) => /could not be converted/i.test(arg.title));
-    expect(call?.description).toMatch(/Overlong/);
-    expect(call?.description).toMatch(/number/i);
+    // The negative half, and the one that matters: nothing was skipped, so the
+    // user is never told an item vanished.
+    for (const [arg] of mockToast.mock.calls) {
+      expect((arg as { title: string }).title).not.toMatch(/could not be converted/i);
+    }
   });
 
   // The mirror of the case above: an over-long free-text field (here a URL well
