@@ -1,12 +1,12 @@
 import cron, { type ScheduledTask } from 'node-cron';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { RefreshToken } from '../models/RefreshToken.js';
 import { User } from '../models/User.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
 import { trackJob } from '../utils/jobTracker.js';
 
-const logger = createLogger({ moduleName: 'jobs/tokenCleanup' });
+const logger = createModuleLogger('jobs/tokenCleanup');
 
 const TOKEN_CLEANUP_LOCK_TTL_MS = 10 * 60 * 1000; // 10 minutes
 

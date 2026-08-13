@@ -72,6 +72,38 @@ describe('repo write guard', () => {
     expect(fs.existsSync(target)).toBe(false);
   });
 
+  it('blocks the log directories the application logger used to fill', () => {
+    // These four paths were on the allowlist, as a written-down debt rather than
+    // an endorsement: every `createLogger({ moduleName })` in the server took
+    // @hiprax/logger's default `<cwd>/logs` with both rotating file transports
+    // on, so each `npm test -w packages/server` appended ~1.6 MB of log files
+    // into the checkout — 448 MB accumulated, and gitignored, so no gate ever saw
+    // it. The call sites now route through `src/utils/logger.ts`, which reads
+    // `LOG_DIRECTORY` and attaches no file transport under `NODE_ENV=test`.
+    //
+    // Their removal is what proves that fix, and this case is what keeps it
+    // proven: re-add a bare `createLogger({ moduleName })` anywhere in the server
+    // and the suite fails at the first import that builds a logger, because
+    // @hiprax/logger creates its directory the moment a file transport is
+    // enabled. Deleting this case to make that green would be re-adding the
+    // allowlist entry with extra steps.
+    // Each probe is a subdirectory of the log directory, never the log directory
+    // itself. Those directories may still exist on a developer's machine from
+    // before the fix, holding hundreds of megabytes of old output, and
+    // `repoProbePath` removes what it names when the test finishes — pointing it
+    // at `packages/server/logs` would make this case delete them as a side
+    // effect. A path inside is blocked by exactly the same rule.
+    for (const target of [
+      repoProbePath('logs', '.repo-write-probe'),
+      repoProbePath('packages', 'server', 'logs', '.repo-write-probe'),
+      repoProbePath('packages', 'client', 'logs', '.repo-write-probe'),
+      repoProbePath('packages', 'shared', 'logs', '.repo-write-probe'),
+    ]) {
+      expect(() => fs.mkdirSync(target, { recursive: true })).toThrow(RepoWriteBlockedError);
+      expect(fs.existsSync(target)).toBe(false);
+    }
+  });
+
   it('blocks the directory-creating and removing calls too, not only writeFile', () => {
     const dir = repoProbePath('stray-dir');
     expect(() => fs.mkdirSync(dir)).toThrow(RepoWriteBlockedError);

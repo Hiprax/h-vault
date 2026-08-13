@@ -1,12 +1,12 @@
 import cron, { type ScheduledTask } from 'node-cron';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { VaultItem } from '../models/VaultItem.js';
 import { AuditLog } from '../models/AuditLog.js';
 import { TRASH_AUTO_PURGE_DAYS } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 
-const logger = createLogger({ moduleName: 'jobs/trashCleanup' });
+const logger = createModuleLogger('jobs/trashCleanup');
 
 const TRASH_CLEANUP_LOCK_TTL_MS = 15 * 60 * 1000; // 15 minutes
 

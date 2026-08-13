@@ -1,10 +1,10 @@
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import type { ClientSession } from 'mongoose';
 import type { AuditAction } from '@hvault/shared';
 import { AuditLog } from '../models/AuditLog.js';
 import { MAX_USER_AGENT_LENGTH } from '../utils/controllerHelpers.js';
 
-const logger = createLogger({ moduleName: 'audit-service' });
+const logger = createModuleLogger('audit-service');
 
 /**
  * Optional persistence options for {@link createAuditLog}.

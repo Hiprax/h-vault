@@ -1,9 +1,9 @@
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from './logger.js';
 import { Migration } from '../models/Migration.js';
 import { JobLock } from '../models/JobLock.js';
 import { acquireJobLock, releaseJobLock } from './jobLock.js';
 
-const logger = createLogger({ moduleName: 'migrations' });
+const logger = createModuleLogger('migrations');
 
 /**
  * Distributed-lock identity for the migration runner. Acquiring this lock

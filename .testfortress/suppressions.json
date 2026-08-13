@@ -319,6 +319,19 @@
       "created": "2026-08-12",
       "expires": "2026-11-09",
       "approvedBy": ["judge:readonly"]
+    },
+    {
+      "id": "SUP-0027",
+      "rule": "KNOWN-GAP",
+      "kind": "known-gap",
+      "file": "scripts/ci/lib/resource-budgets.mjs",
+      "symbol": "RESOURCE_BUDGETS time and memory ceilings",
+      "maxHits": 1,
+      "reason": "test:resource's time and memory budgets can see a STEP CHANGE and nothing smaller, and this records how much smaller. Measured over five consecutive runs of the whole suite on an idle reference machine, the good runs themselves vary by 11-50 percent: rotation-volume rssGrowthMb spans 66.68-126.05 MB (50 percent of its median), backup-streaming durationMs spans 268-443 ms (49.7 percent), backup-full-vault durationMs 439-724 ms (47.1 percent). Every ceiling is therefore set at 1.6x-11x the observed maximum, which means a real regression smaller than roughly 1.7x on memory or 3x on time passes unseen. Shipping tighter numbers would produce a gate that fires on a loaded laptop, and a gate that fires for reasons unrelated to the code is a gate that gets deleted. ONE budget is exempt from this gap and is the reason the streaming scenario has a real verdict: backup-streaming rssGrowthMb, whose good band (43.43-58.11 MB over eleven runs) and regression band (118.54-156.41 MB over three runs of the find().lean() rewrite) do not overlap, so the 95 MB ceiling sits clear of both; and backup-streaming documentsDelivered, which measured 3320 of 10000 in eleven out of eleven runs against 10003 for the regression, with no spread at all. The gap is closed either by a metric with no noise band (a counter read from the server, as documentsDelivered is) or by a dedicated benchmark harness that controls for machine load; adding either is worth more than tightening these numbers.",
+      "owner": "maintainer",
+      "created": "2026-08-13",
+      "expires": "2026-11-11",
+      "approvedBy": ["maintainer"]
     }
   ]
 }

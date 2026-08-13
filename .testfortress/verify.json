@@ -179,6 +179,14 @@
       "countsTests": false,
       "requires": ["build:shared"]
     },
+    "test:resource": {
+      "cmd": "npm run test:resource",
+      "tier": 2,
+      "gate": "every operation over a vault at MAX_ITEMS_PER_USER stays inside its committed time and memory budget: the backup collector refuses an oversized vault with 413 after mongod has delivered a fraction of it, the largest permitted backup still collects in full, a 10,000-item key rotation completes and one naming an unknown id changes nothing, a ~25 MiB backup whose escaped body exceeds 26 MB restores through the route's 30 MB parser, and both cross-user cleanup sweeps seek rather than scan",
+      "report": "resource.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
     "test:smoke": {
       "cmd": "npm run test:smoke",
       "tier": 1,
@@ -192,6 +200,13 @@
       "gate": "the Compose stack comes up from nothing with every service healthy and both one-shots completed, publishes exactly one loopback-bound port and nothing else, completes a vault journey through that port, keeps the data across a restart, and re-runs its bootstrap without rewriting a rotated application password",
       "report": ["deploy.json", "deploy.log"],
       "requires": ["docker"]
+    },
+    "audit:bundle": {
+      "cmd": "npm run audit:bundle",
+      "tier": 1,
+      "gate": "the built client's initial payload and every emitted chunk stay inside their committed size budgets, so a library this application loads on demand — zxcvbn, Argon2id, the file-encryption tool — cannot become a static import without the build going red",
+      "report": "bundle.json",
+      "requires": ["build:client"]
     },
     "audit:deps": {
       "cmd": "npm run audit:prod",

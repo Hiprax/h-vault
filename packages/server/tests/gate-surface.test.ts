@@ -22,7 +22,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -42,6 +42,9 @@ import clientPropertyConfig, { CLIENT_PROPERTY_SUITE } from '../../client/vitest
 import clientVitestConfig from '../../client/vitest.config';
 import clientFuzzConfig, { CLIENT_FUZZ_SUITE } from '../../client/vitest.fuzz.config';
 import serverFuzzConfig, { SERVER_FUZZ_SUITE } from '../vitest.fuzz.config';
+import resourceVitestConfig, { RESOURCE_SUITE } from '../vitest.resource.config';
+import { RESOURCE_SCENARIOS } from '../../../scripts/ci/lib/resource-budgets.mjs';
+import { chunkBaseName } from '../../../scripts/ci/bundle-gate.mjs';
 import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest.snapshot.config';
 import playwrightConfig from '../../../playwright.config';
 import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
@@ -270,12 +273,19 @@ describe('tiers', () => {
     // exact list rather than merely counted: adding to it is a visible edit here,
     // and moving an existing gate into it fails until someone changes this line.
     //
-    // Two members, and each one has to justify its place:
+    // Three members, and each one has to justify its place:
     //
     //   `fuzz` — both of its suites ALSO run inside `test` and
     //   `test-integration` on every push, because neither package narrows its
     //   include set, so the assertions are on the push gate and only the named,
     //   deadline-bounded RUN is held back for `verify:full`.
+    //
+    //   `resource` — the volume budgets. Unlike `fuzz` these files run HERE and
+    //   nowhere else, because the base server config excludes them: each builds a
+    //   vault at MAX_ITEMS_PER_USER and times an operation over it, so the suite
+    //   is a minute of wall clock, and its numbers are only meaningful in a
+    //   process running nothing else — while the push tier runs three workers at
+    //   once. Measured under that contention a budget is a coin toss.
     //
     //   `deploy` — the deployment clean room builds four images, stands five
     //   containers up from nothing, restarts them and rotates a database
@@ -283,7 +293,7 @@ describe('tiers', () => {
     //   is waiting on, and its fast sibling `smoke` (T1) covers the artifact on
     //   every push.
     const t2 = gates.filter((gate) => gate.tier === 2).map((gate) => gate.id);
-    expect(t2).toEqual(['fuzz', 'deploy']);
+    expect(t2).toEqual(['fuzz', 'resource', 'deploy']);
   });
 
   it('treats tiers as cumulative, so verify is a superset of verify:fast', () => {
@@ -531,6 +541,60 @@ describe('machine-readable reports', () => {
       expect(config.test?.include).toEqual(suite);
     },
   );
+
+  it('runs every resource scenario, and leaves none of them to no gate at all', () => {
+    // `test:resource` is the one suite the push tier does NOT also run: the base
+    // server config excludes `tests/resource/**` outright, because these
+    // scenarios build 10,000-item vaults and their numbers are only meaningful in
+    // a process running nothing else. That exclusion is exactly the shape a
+    // quietly retired suite has, so both halves are pinned here — the base config
+    // excludes the directory, and the resource config claims every file in it.
+    expect(serverVitestConfig.test?.exclude).toContain('tests/resource/**');
+
+    const declared = RESOURCE_SCENARIOS.map((scenario) => scenario.file);
+    expect(resourceVitestConfig.test?.include).toEqual(declared);
+    expect(RESOURCE_SUITE).toEqual(declared);
+    expect(declared.length).toBeGreaterThan(0);
+
+    // Both directions. A file on disk that no scenario declares would be run by
+    // NOTHING — excluded from the push tier and never included here — which is a
+    // test that exists and cannot fail.
+    const dir = path.join(repoRoot, 'packages', 'server', 'tests', 'resource');
+    const onDisk = readdirSync(dir)
+      .filter((entry) => entry.endsWith('.test.ts'))
+      .map((entry) => `tests/resource/${entry}`)
+      .sort();
+    expect(onDisk).toEqual([...declared].sort());
+
+    // Its own JUnit report, never the server suite's — pointed there it would
+    // overwrite the artifact `audit:ratchet:full` reads the headcount from.
+    const output = junitOutputFile(resourceVitestConfig.test?.reporters);
+    expect(path.resolve(output!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-resource.xml'),
+    );
+    expect(output).not.toBe(junitOutputFile(serverVitestConfig.test?.reporters));
+
+    // And, like `test:fuzz`, only the JSON report is DECLARED: a Tier 2 JUnit in
+    // the manifest makes `tests.count` UNMEASURED on every push.
+    expect(reportsOf(manifest.tasks['test:resource']!)).toEqual(['resource.json']);
+    const declaredReports = nonComposite.flatMap(([, task]) => reportsOf(task));
+    expect(declaredReports).not.toContain('junit-resource.xml');
+  });
+
+  it('reads a chunk budget by base name, with the content hash stripped exactly', () => {
+    // The budgets in `lib/bundle-budgets.mjs` are keyed by chunk base name
+    // because the filenames carry a content hash that changes on every
+    // meaningful edit. Getting that strip wrong is silent: an over-greedy
+    // pattern collapsed `vendor-core` and `vendor-react` into one `vendor`
+    // bucket, which put both over a budget meant for neither. The hash alphabet
+    // is base64url, so it contains `-` — that is what made the greedy form
+    // wrong, and it is why these two cases are here rather than one.
+    expect(chunkBaseName('main-4aSwR9SA.js')).toBe('main');
+    expect(chunkBaseName('vendor-core-1-AcZIh1.js')).toBe('vendor-core');
+    expect(chunkBaseName('vendor-react-BP6A0-cs.js')).toBe('vendor-react');
+    expect(chunkBaseName('passwordStrength.worker-BZCvnOAA.js')).toBe('passwordStrength.worker');
+    expect(chunkBaseName('index-Tp2RFl97.css')).toBe('index');
+  });
 
   it("declares only the fuzz gate's JSON report, never its per-leg JUnit", () => {
     // Load-bearing, and counter-intuitive enough to need stating. `test:fuzz` is

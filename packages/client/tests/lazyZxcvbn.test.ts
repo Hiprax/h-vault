@@ -12,6 +12,10 @@
  *     the ~400 kB chunk is fetched again on a form the user is already typing into.
  *   • caching the module namespace instead of `mod.default` — callers get an object
  *     rather than a function, and every strength meter throws.
+ *   • dropping the IN-FLIGHT memo (`inFlight ??= …`) — a caller that arrives while
+ *     the first load is still running re-enters the load path instead of joining
+ *     it, which is the shape all three consumers produce when a user submits
+ *     before the mount effect's load has landed.
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -63,5 +67,67 @@ describe('lazyZxcvbn', () => {
 
     expect(typeof a).toBe('function');
     expect(b).toBe(a);
+  });
+
+  it('performs ONE load for two cold callers, not one per caller', async () => {
+    const { getZxcvbn } = await freshLoader();
+
+    // Both calls are made before either can resolve — the submit-before-mount-
+    // effect-lands race the three consumers above can all produce.
+    const first = getZxcvbn();
+    const second = getZxcvbn();
+
+    // Promise IDENTITY is what "one load" means here, and it is the only form of
+    // it that can fail. Counting `import('zxcvbn')` evaluations cannot: the ES
+    // module map keys on the specifier and holds an entry for a graph that is
+    // still loading, so a duplicate import attaches to the in-flight load instead
+    // of starting a second one, and the count is 1 whether or not this module
+    // memoizes anything. What the memoization decides is whether the SECOND
+    // caller re-enters the load path at all — a fresh `import()` expression, a
+    // fresh `__vitePreload` walk over the chunk's dependency list, a fresh `.then`
+    // chain — and that is visible precisely as whether it is handed the first
+    // caller's promise.
+    //
+    // This is why `getZxcvbn` is not declared `async`: an async function returns
+    // a NEW promise on every call by construction, which would make this
+    // assertion unwritable and the in-flight cache unobservable.
+    expect(second).toBe(first);
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(typeof a).toBe('function');
+    expect(b).toBe(a);
+  });
+
+  it('lets a failed load be retried instead of caching the rejection forever', async () => {
+    vi.resetModules();
+    let failNextRead = true;
+    // The failure is raised from the namespace's `default` GETTER rather than
+    // from the factory body. A factory that throws is reported as vitest's own
+    // "there was an error when mocking a module", which would leave this case
+    // asserting on the harness's wording instead of on the error a failed chunk
+    // load actually produces.
+    vi.doMock('zxcvbn', () => ({
+      get default() {
+        if (failNextRead) {
+          failNextRead = false;
+          throw new Error('chunk load failed');
+        }
+        return () => ({ score: 4 });
+      },
+    }));
+    const { getZxcvbn } = await import('../src/lib/lazyZxcvbn');
+
+    await expect(getZxcvbn()).rejects.toThrow(/chunk load failed/);
+    // The retry succeeds, which it cannot do if the rejected promise stayed in
+    // the cache slot: a user whose network blipped on the register screen would
+    // otherwise never get a strength meter again without a full reload.
+    // The discriminating assertion: with `inFlight` left holding the rejected
+    // promise, this second call would reject with the SAME error rather than
+    // resolve.
+    await expect(getZxcvbn()).resolves.toBeTypeOf('function');
+    expect(failNextRead).toBe(false);
+
+    vi.doUnmock('zxcvbn');
+    vi.resetModules();
   });
 });

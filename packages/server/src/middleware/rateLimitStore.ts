@@ -1,8 +1,8 @@
 import mongoose from 'mongoose';
 import type { Store, Options, ClientRateLimitInfo } from 'express-rate-limit';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 
-const logger = createLogger({ moduleName: 'rate-limit-store' });
+const logger = createModuleLogger('rate-limit-store');
 
 /**
  * The single collection every MongoDB-backed rate-limit counter lives in.

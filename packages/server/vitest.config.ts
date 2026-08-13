@@ -36,6 +36,23 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     pool: 'forks',
+    // The ONE directory this suite does not pick up, and the reason is not that
+    // its assertions are weaker.
+    //
+    // `tests/resource/**` measures wall-clock duration and peak RSS while
+    // building 10,000-item vaults — a minute of work whose numbers are only
+    // meaningful in a process running nothing else. Included here they would (a)
+    // add that minute to every push, against a 12-minute tier budget, and (b) be
+    // measured under three-way worker contention, which is how a budget becomes a
+    // coin toss. They run as `test:resource` (Tier 2) through
+    // `vitest.resource.config.ts`, which serializes them.
+    //
+    // This is a NEW directory carved out at the moment it was written, not an
+    // existing suite quietly parked: nothing that ran here before still runs
+    // nowhere. `gate-surface.test.ts` asserts every file under `tests/resource`
+    // is claimed by the resource gate, so a scenario cannot fall between the two
+    // configs and be run by neither.
+    exclude: ['**/node_modules/**', '**/dist/**', 'tests/resource/**'],
     // There is deliberately no `singleFork` here. The key this file used to
     // carry — `forks: { singleFork: true }` — is not a Vitest 4 option at all
     // (neither `test.forks` nor `test.poolOptions` exists in this version), so it

@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { Folder } from '../models/Folder.js';
 import { VaultItem } from '../models/VaultItem.js';
 import { createAuditLog } from '../services/auditService.js';
@@ -19,7 +19,7 @@ import {
 } from '@hvault/shared';
 import type { CreateFolderInput, UpdateFolderInput, ReorderFolderInput } from '@hvault/shared';
 
-const logger = createLogger({ moduleName: 'folder-controller' });
+const logger = createModuleLogger('folder-controller');
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

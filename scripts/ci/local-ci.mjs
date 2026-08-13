@@ -422,6 +422,29 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/fuzz-gate.mjs'], options),
   },
   {
+    id: 'resource',
+    task: 'test:resource',
+    // TIER 2, and unlike `fuzz` this one is not also covered by the push tier:
+    // `vitest.config.ts` excludes `tests/resource/**` outright, so these files
+    // run here and nowhere else. That is deliberate and it is the cost of what
+    // they measure. Each scenario builds a vault at MAX_ITEMS_PER_USER and times
+    // an operation over it, so the suite is a minute of wall clock against a
+    // 12-minute push budget — and, worse, its numbers are only meaningful in a
+    // process running nothing else, while the push tier runs three workers at
+    // once on a four-core machine. Measured under that contention a budget is a
+    // coin toss, and a coin toss is a gate someone eventually deletes.
+    //
+    // Nothing that ran before now runs nowhere: this is a new directory, and
+    // `gate-surface.test.ts` asserts every file in it is claimed here, so a
+    // scenario cannot fall between the two vitest configs.
+    tier: 2,
+    title: 'Volume and memory budgets over a full vault (10,000 items)',
+    ci: 'new — no hosted job ever asked this application what a full vault costs',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/resource-gate.mjs'], options),
+  },
+  {
     id: 'smoke',
     task: 'test:smoke',
     tier: 1,
@@ -438,6 +461,23 @@ const GATES = [
     dependsOn: ['build'],
     requires: ['build:server', 'build:client'],
     run: (options) => runExe(process.execPath, ['scripts/ci/smoke-gate.mjs'], options),
+  },
+  {
+    id: 'bundle',
+    task: 'audit:bundle',
+    tier: 1,
+    // T1 rather than T2, and next to `smoke` rather than beside the volume
+    // budgets, because it is about the artifact the `build` gate immediately
+    // above has just produced and it costs milliseconds. The regression it
+    // catches — a deliberately lazy library (zxcvbn, Argon2id, the file
+    // encryption tool) becoming a static import — is a one-line change that
+    // every other gate accepts, so catching it on the push rather than at the
+    // release is the whole point.
+    title: 'Client bundle budgets (initial payload and per-chunk ceilings)',
+    ci: 'new — the 850 kB chunkSizeWarningLimit only ever printed a warning',
+    dependsOn: ['build'],
+    requires: ['build:client'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/bundle-gate.mjs'], options),
   },
   {
     id: 'audit',

@@ -47,6 +47,7 @@
     "test:observability": "npm run test:observability -w packages/server",
     "test:property": "node scripts/ci/property-gate.mjs",
     "test:fuzz": "node scripts/ci/fuzz-gate.mjs",
+    "test:resource": "node scripts/ci/resource-gate.mjs",
     "test:smoke": "node scripts/ci/smoke-gate.mjs",
     "test:deploy": "node scripts/ci/deploy-drill.mjs",
     "test:snapshot": "npm run test:snapshot -w packages/client",
@@ -77,6 +78,7 @@
     "audit:config": "node scripts/ci/config-gate.mjs",
     "audit:config:openapi": "spectral lint .testfortress/reports/openapi.json --ruleset .spectral.yaml --format json --fail-severity error --quiet",
     "audit:licenses": "node scripts/ci/license-gate.mjs",
+    "audit:bundle": "node scripts/ci/bundle-gate.mjs",
     "audit:secrets": "node scripts/ci/secret-scan.mjs --report",
     "audit:secrets:full": "node scripts/ci/secret-scan.mjs --all --history --report",
     "deadcode:unused": "knip --reporter json"

@@ -41,15 +41,17 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twenty-four gates including the full test suite, the export-format
-goldens, a smoke run of the built artifact, container builds with Trivy scanning, and
-CodeQL — and refuses the push if any of them fail. A commit that reaches `main` has
-already passed everything. Two further gates sit in the release tier: `fuzz`, whose
-suites still run inside the ordinary test gates on every push so that only the
-separately-reported, deadline-bounded run is held back; and `deploy`, the deployment
-clean room, which stands the whole Compose stack up from nothing and is far too heavy
-for a hook — its fast sibling `smoke` covers the built artifact on every push. Both run
-in `npm run verify:full`.
+pipeline locally — twenty-six gates including the full test suite, the export-format
+goldens, a smoke run of the built artifact, the browser bundle's size budgets, container
+builds with Trivy scanning, and CodeQL — and refuses the push if any of them fail. A
+commit that reaches `main` has already passed everything. Three further gates sit in the
+release tier: `fuzz`, whose suites still run inside the ordinary test gates on every push
+so that only the separately-reported, deadline-bounded run is held back; `resource`, the
+volume and memory budgets, which builds ten-thousand-item vaults and therefore both takes
+a minute and needs a machine that is not running three other workers for its numbers to
+mean anything; and `deploy`, the deployment clean room, which stands the whole Compose
+stack up from nothing and is far too heavy for a hook — its fast sibling `smoke` covers
+the built artifact on every push. All three run in `npm run verify:full`.
 
 The gates are grouped into tiers by how long they take, so there is something worth
 running at every point in the loop:
@@ -57,7 +59,7 @@ running at every point in the loop:
 ```bash
 npm run verify:fast               # the fast tier (~80s): engines, secrets, lint, format, types
 npm run ci                        # everything the pre-push hook runs (15–30 min)
-npm run verify:full               # the above plus the release tier (fuzz + the deployment drill)
+npm run verify:full               # the above plus the release tier (fuzz, volume budgets, deploy drill)
 npm run ci:local                  # all of it again, from a fresh worktree at HEAD (clean room)
 npm run ci -- --list              # the gates, their tiers, and what each one replaces
 npm run ci -- --only=lint,test    # a subset, while iterating

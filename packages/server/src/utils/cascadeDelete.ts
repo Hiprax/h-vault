@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from './logger.js';
 import { User } from '../models/User.js';
 import { VaultItem } from '../models/VaultItem.js';
 import { Folder } from '../models/Folder.js';
@@ -9,7 +9,7 @@ import { BackupLog } from '../models/BackupLog.js';
 import { createAuditLog } from '../services/auditService.js';
 import { revokeTrustedDevices } from './trustedDevices.js';
 
-const logger = createLogger({ moduleName: 'cascade-delete' });
+const logger = createModuleLogger('cascade-delete');
 
 /**
  * Check if the current MongoDB topology supports multi-document transactions

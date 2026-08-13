@@ -402,6 +402,79 @@ export const DEFECTS = {
     evidence: (text) => /"id":\s*"select-name"/.test(text) && /item-form-note/.test(text),
   },
 
+  'audit:bundle': {
+    // The defect is planted in the ARTIFACT, for the same reason `test:smoke`
+    // plants one there: this gate's subject IS the build output, and a defect in
+    // the sources would only reach it through a rebuild the selftest workspace
+    // does not perform.
+    //
+    // What it simulates is the regression the gate exists for, in the one form
+    // that has a byte-stable path: `index.html` inflated past the shell budget,
+    // which is what an inlined asset (a base64 font, a data-URI image, a
+    // bundler's `assetsInlineLimit` raised) produces. The same code path — and
+    // the same `problems` list — is what a chunk over its ceiling trips, so
+    // proving one proves the mechanism. Every chunk file carries a content hash
+    // in its name, so no per-chunk defect has a path that survives a rebuild.
+    //
+    // A REJECTED alternative, recorded because it is the obvious first choice:
+    // creating an extra `assets/main-selftest.js` over the `main` budget. It
+    // works today and is a lie tomorrow — it asserts that a file NOTHING imports
+    // counts against a chunk budget, which is a property of this gate's file
+    // walk rather than of the application, and it would keep passing if the walk
+    // were narrowed to what `index.html` actually references.
+    title: 'inflate the built index.html past the shell budget, as an inlined asset would',
+    mutate: {
+      'packages/client/dist/index.html': (text) =>
+        text.replace('</body>', `<!--${'p'.repeat(16 * 1024)}--></body>`),
+    },
+    // The gate's own violation text. A PASSING run's report carries `problems:
+    // []` and no such line, so this cannot be satisfied by a green run — the trap
+    // recorded on `test:security`.
+    evidence: (text) => /index\.html is [\d.]+ KiB, over its \d+ KiB budget/.test(text),
+  },
+
+  'test:resource': {
+    // The exact refactor this gate was built for, and the reason it is worth its
+    // minute: `collectBackupData`'s item cursor replaced by `find().lean()`.
+    //
+    // Nothing else in the repository notices. The endpoint returns the same 413
+    // for the same oversized vault, with the same message; every backup test
+    // stays green, the types are identical, the lint is clean — and the process
+    // now materialises the entire collection before deciding it is too large. On
+    // an account near MAX_ITEMS_PER_USER that is the difference between reading
+    // tens of megabytes and reading hundreds, on an authenticated request.
+    //
+    // Measured on the reference machine: mongod delivers 3,320 of 10,000 items
+    // with the cursor and 10,003 with this line, and peak RSS growth goes from
+    // ~56 MB to ~120 MB. Either half of the scenario catches it.
+    //
+    // The pattern is byte-exact against today's source. A rewrite of those lines
+    // turns `String.replace` into a no-op, which fails in the SAFE direction: the
+    // gate stays green, the harness reports `unproven`, and the run exits
+    // non-zero.
+    title: 'read the whole vault before the backup size guard, instead of streaming it',
+    mutate: {
+      'packages/server/src/controllers/backupController.ts': (text) =>
+        text.replace(
+          `  const itemCursor = VaultItem.find({ userId, deletedAt: { $exists: false } })
+    .select('-sourceRefId')
+    .lean()
+    .cursor();
+  for await (const item of itemCursor) {`,
+          `  const allItems = await VaultItem.find({ userId, deletedAt: { $exists: false } })
+    .select('-sourceRefId')
+    .lean();
+  for (const item of allItems) {`,
+        ),
+    },
+    // The assertion's own failure text, which a PASSING run cannot contain — the
+    // trap recorded on `test:security`: `resource.json` lists every scenario
+    // either way, so matching a scenario id would be satisfied by a fully green
+    // report. This matches vitest's rendering of the delivered-documents
+    // assertion, which only goes red when the vault was drained.
+    evidence: (text) => /expected 100\d\d to be less than 10000/.test(text),
+  },
+
   'test:smoke': {
     // The defect is planted in the ARTIFACT, not in the sources, and that is the
     // point of this gate: `test:smoke` runs the emitted bundle, so the emitted

@@ -3,11 +3,11 @@ import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt';
 import type { Algorithm } from 'jsonwebtoken';
 import type { Request, Response, NextFunction } from 'express';
 import { httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { User } from '../models/User.js';
 
-const logger = createLogger({ moduleName: 'auth-middleware' });
+const logger = createModuleLogger('auth-middleware');
 
 /** Shape of the JWT payload after decoding. */
 interface JwtPayload {

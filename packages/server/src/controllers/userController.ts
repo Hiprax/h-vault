@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import bcrypt from 'bcryptjs';
 import { TOTP, Secret } from 'otpauth';
 import { User, type IUserSettings } from '../models/User.js';
@@ -37,7 +37,7 @@ import type {
   RegenerateBackupCodesInput,
 } from '@hvault/shared';
 
-const logger = createLogger({ moduleName: 'user-controller' });
+const logger = createModuleLogger('user-controller');
 
 /**
  * Fill in settings an existing account has no stored value for.

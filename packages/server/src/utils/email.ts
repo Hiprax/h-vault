@@ -1,10 +1,10 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from './logger.js';
 import { maskEmail } from '@hvault/shared';
 import { config } from '../config/index.js';
 
-const logger = createLogger({ moduleName: 'email' });
+const logger = createModuleLogger('email');
 
 // ── HTML encoding ────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 import { VaultItem } from '../models/VaultItem.js';
@@ -33,7 +33,7 @@ import type {
   ExportInput,
 } from '@hvault/shared';
 
-const logger = createLogger({ moduleName: 'tools-controller' });
+const logger = createModuleLogger('tools-controller');
 
 // ── HIBP response cache ─────────────────────────────────────────────
 // Bounded per-process cache keyed by 5-char hash prefix, with 1-hour TTL

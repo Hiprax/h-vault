@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-08-12",
-  "commit": "cf7dd81",
+  "recordedAt": "2026-08-13",
+  "commit": "56672aa",
   "tests": {
-    "count": 7398
+    "count": 7414
   },
   "warnings": {
     "lint": 0,
@@ -17,8 +17,8 @@
     "viewsScanned": 15
   },
   "suppressions": {
-    "count": 23,
-    "totalHits": 32
+    "count": 24,
+    "totalHits": 33
   },
   "packages": {
     "packages/shared": {
@@ -46,10 +46,10 @@
     },
     "packages/server": {
       "coverage": {
-        "line": 97.95,
-        "branch": 91.37,
-        "function": 97.32,
-        "linesTotal": 3078,
+        "line": 97.96,
+        "branch": 91.39,
+        "function": 97.34,
+        "linesTotal": 3085,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/seedBreachesArgs.ts",
@@ -106,6 +106,7 @@
           "src/utils/hibp.ts",
           "src/utils/jobLock.ts",
           "src/utils/jobTracker.ts",
+          "src/utils/logger.ts",
           "src/utils/loginThrottle.ts",
           "src/utils/migrations.ts",
           "src/utils/sizeEstimator.ts",
@@ -116,7 +117,7 @@
         ]
       },
       "tests": {
-        "count": 2844
+        "count": 2853
       }
     },
     "packages/client": {
@@ -124,7 +125,7 @@
         "line": 98.69,
         "branch": 92.45,
         "function": 97.95,
-        "linesTotal": 7037,
+        "linesTotal": 7041,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -249,16 +250,17 @@
         ]
       },
       "tests": {
-        "count": 3458
+        "count": 3463
       }
     },
     "e2e": {
       "tests": {
-        "count": 201
+        "count": 203
       }
     }
   },
   "tasks": [
+    "audit:bundle",
     "audit:config",
     "audit:deps",
     "audit:image",
@@ -275,12 +277,14 @@
     "engines",
     "format:check",
     "lint",
+    "test:a11y",
     "test:deploy",
     "test:e2e",
     "test:fuzz",
     "test:integration",
     "test:observability",
     "test:property",
+    "test:resource",
     "test:security",
     "test:smoke",
     "test:snapshot",
@@ -299,6 +303,22 @@
   },
   "meta": {
     "fields": [
+      "a11y.critical",
+      "a11y.serious",
+      "a11y.viewsScanned",
+      "bundle.budgetKb.VaultItemForm",
+      "bundle.budgetKb.index_esm",
+      "bundle.budgetKb.main",
+      "bundle.budgetKb.passwordStrength_worker",
+      "bundle.budgetKb.vendor-core",
+      "bundle.budgetKb.vendor-react",
+      "bundle.defaultChunkBudgetKb",
+      "bundle.htmlShellBudgetKb",
+      "bundle.initialPayloadBudgetKb",
+      "bundle.measured.chunkCount",
+      "bundle.measured.htmlShellKb",
+      "bundle.measured.initialPayloadKb",
+      "bundle.measured.totalJsKb",
       "config.belowError.actionlint",
       "config.belowError.hadolint",
       "config.belowError.spectral",
@@ -349,6 +369,23 @@
       "packages.packages/shared.coverage.line",
       "packages.packages/shared.coverage.linesTotal",
       "packages.packages/shared.tests.count",
+      "resource.budgetMs.backupFullVault",
+      "resource.budgetMs.backupStreaming",
+      "resource.budgetMs.restoreVolume",
+      "resource.budgetMs.rotationVolume",
+      "resource.budgetRssMb.backupFullVault",
+      "resource.budgetRssMb.backupStreaming",
+      "resource.budgetRssMb.restoreVolume",
+      "resource.budgetRssMb.rotationVolume",
+      "resource.deliveredFractionCeiling.backupStreaming",
+      "resource.noiseBandPct.backup-full-vault_durationMs",
+      "resource.noiseBandPct.backup-full-vault_rssGrowthMb",
+      "resource.noiseBandPct.backup-streaming_durationMs",
+      "resource.noiseBandPct.backup-streaming_rssGrowthMb",
+      "resource.noiseBandPct.restore-volume_durationMs",
+      "resource.noiseBandPct.restore-volume_rssGrowthMb",
+      "resource.noiseBandPct.rotation-volume_durationMs",
+      "resource.noiseBandPct.rotation-volume_rssGrowthMb",
       "suppressions.count",
       "suppressions.totalHits",
       "tasks",
@@ -360,7 +397,7 @@
     ]
   },
   "duplication": {
-    "percentage": 2.88,
+    "percentage": 2.87,
     "clones": 132,
     "duplicatedLines": 1525,
     "totalLines": 52849,
@@ -396,5 +433,51 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 11 (clean-room): registers test:smoke (T1), test:deploy (T2) and the ci:local aggregator, and adds 28 tests pinning the deployment drill's verdicts and the shared end-to-end flow's HTTP contract."
+  "reason": "Phase 13 (volume-budgets): registers audit:bundle (T1) and test:resource (T2); adds src/utils/logger.ts to the server's measured file set; adds 9 server tests (logger directory resolution, the log-directory write guard) and 5 client tests (lazyZxcvbn in-flight dedupe and retry); 2 new e2e tests come from the a11y suite already registered in Phase 12.",
+  "bundle": {
+    "budgetKb": {
+      "VaultItemForm": 230,
+      "index_esm": 280,
+      "main": 850,
+      "passwordStrength_worker": 850,
+      "vendor-core": 220,
+      "vendor-react": 280
+    },
+    "defaultChunkBudgetKb": 128,
+    "initialPayloadBudgetKb": 700,
+    "htmlShellBudgetKb": 8,
+    "measured": {
+      "chunkCount": 58,
+      "htmlShellKb": 1.11,
+      "initialPayloadKb": 582.85,
+      "totalJsKb": 2895.8
+    }
+  },
+  "resource": {
+    "budgetMs": {
+      "backupFullVault": 6000,
+      "backupStreaming": 5000,
+      "restoreVolume": 75000,
+      "rotationVolume": 45000
+    },
+    "budgetRssMb": {
+      "backupFullVault": 120,
+      "backupStreaming": 95,
+      "restoreVolume": 260,
+      "rotationVolume": 220
+    },
+    "deliveredFractionCeiling": {
+      "backupStreaming": 0.6
+    },
+    "noiseBandPct": {
+      "backup-full-vault_durationMs": 47.1,
+      "backup-full-vault_rssGrowthMb": 11.2,
+      "backup-streaming_durationMs": 49.7,
+      "backup-streaming_rssGrowthMb": 32.4,
+      "restore-volume_durationMs": 18.2,
+      "restore-volume_rssGrowthMb": 23.1,
+      "rotation-volume_durationMs": 35,
+      "rotation-volume_rssGrowthMb": 50
+    }
+  }
 }

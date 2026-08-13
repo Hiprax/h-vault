@@ -51,33 +51,27 @@ export function createTestTempDir(prefix = 'hv-test-'): string {
  *   • `packages/*​/coverage/**` — the V8 coverage provider writes its per-worker
  *     `.tmp` payloads from inside the worker process.
  *   • `.testfortress/**` — the JUnit reporter and every gate's report.
- *   • `logs/**` and `packages/*​/logs/**` — the application logger's rotating file
- *     transports, which are NOT silent under `NODE_ENV=test`.
  *
- * That last entry is an allowlist for a real defect rather than an endorsement,
- * and it is written down here because the guard is what found it. Every
- * `createLogger({ moduleName })` call in `packages/server/src` omits
- * `logDirectory`, which @hiprax/logger defaults to `path.resolve(cwd(), 'logs')`,
- * with `includeFile` and `includeGlobalFile` both defaulting to true. Under
- * `npm test -w packages/server` the cwd is the package, so every run appends
- * rotating log files to `packages/server/logs` — measured at ~1.6 MB for one
- * server run and 448 MB accumulated over the project's history. Blocking it here
- * would fail the suite inside production code at import time, and redirecting it
- * needs a production change (a `logDirectory` from config, or `includeFile:
- * !isTest`), which a test-only phase may not make. Recorded as an out-of-scope
- * finding instead; remove this entry when the logger's directory becomes
- * configurable.
+ * `logs/**` and `packages/*​/logs/**` used to be on that list, and their REMOVAL
+ * is what proves a defect this guard found is fixed. Every
+ * `createLogger({ moduleName })` call in `packages/server/src` omitted
+ * `logDirectory`, which @hiprax/logger defaults to `path.resolve(cwd(), 'logs')`
+ * with `includeFile` and `includeGlobalFile` both true — so under
+ * `npm test -w packages/server` every run appended rotating log files to
+ * `packages/server/logs`, measured at ~1.6 MB per run and 448 MB accumulated,
+ * invisible to every gate because the directory is gitignored. The call sites now
+ * go through `packages/server/src/utils/logger.ts`, which takes its directory
+ * from `LOG_DIRECTORY` and attaches no file transport under `NODE_ENV=test`.
+ * @hiprax/logger creates the directory only when a file transport is enabled, so
+ * with the entries gone a regression here fails LOUDLY, at the first import that
+ * builds a logger, instead of silently filling the checkout again.
  */
 const ALLOWED_REPO_WRITES = [
   path.join(REPO_ROOT, 'node_modules'),
   path.join(REPO_ROOT, '.testfortress'),
-  path.join(REPO_ROOT, 'logs'),
   path.join(REPO_ROOT, 'packages', 'shared', 'coverage'),
-  path.join(REPO_ROOT, 'packages', 'shared', 'logs'),
   path.join(REPO_ROOT, 'packages', 'server', 'coverage'),
-  path.join(REPO_ROOT, 'packages', 'server', 'logs'),
   path.join(REPO_ROOT, 'packages', 'client', 'coverage'),
-  path.join(REPO_ROOT, 'packages', 'client', 'logs'),
 ];
 
 /** Thrown when a test tries to write inside the checkout. */

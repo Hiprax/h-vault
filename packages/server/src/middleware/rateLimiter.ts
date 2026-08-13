@@ -2,7 +2,7 @@ import { rateLimit, ipKeyGenerator, type Store } from 'express-rate-limit';
 import type { Request, Response, NextFunction } from 'express';
 import { MongoRateLimitStore } from './rateLimitStore.js';
 import { httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { isProduction } from '../config/index.js';
 import {
   MAX_ITEMS_PER_USER,
@@ -13,7 +13,7 @@ import {
 } from '@hvault/shared';
 import { MAX_IP_ADDRESS_LENGTH } from '../utils/controllerHelpers.js';
 
-const logger = createLogger({ moduleName: 'rate-limiter' });
+const logger = createModuleLogger('rate-limiter');
 
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 

@@ -96,6 +96,20 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
+// The committed BUDGETS, imported as source rather than read from a report, for
+// the reason `tasks` is read from the manifest: they are not measurements, they
+// are the ceilings, and a ceiling that may only move DOWN is exactly the kind of
+// thing this file exists to pin. Reading them from source also means they are
+// always available — `test:resource` is Tier 2 and does not run during a push, so
+// a budget sourced from its report would be UNMEASURED on every push and turn
+// this gate permanently red (port note 1's mistake, one layer along).
+import {
+  CHUNK_BUDGETS_KB,
+  DEFAULT_CHUNK_BUDGET_KB,
+  HTML_SHELL_BUDGET_KB,
+  INITIAL_PAYLOAD_BUDGET_KB,
+} from './lib/bundle-budgets.mjs';
+import { RESOURCE_BUDGETS } from './lib/resource-budgets.mjs';
 
 const ROOT = process.cwd();
 const TF = join(ROOT, '.testfortress');
@@ -168,6 +182,21 @@ const DIRECTION = {
   'a11y.critical': 'lower',
   'a11y.serious': 'lower',
   'a11y.viewsScanned': 'higher',
+  // Size and volume budgets. These are CEILINGS, not measurements, so
+  // lower-is-better means "a budget may be tightened, never quietly raised".
+  // Their measured counterparts are `info`: a chunk that grows within its budget
+  // is ordinary feature work, and gating every byte would price adding a page as
+  // a regression. What must not happen silently is the ceiling moving to
+  // accommodate one.
+  'bundle.budgetKb.*': 'lower',
+  'bundle.defaultChunkBudgetKb': 'lower',
+  'bundle.initialPayloadBudgetKb': 'lower',
+  'bundle.htmlShellBudgetKb': 'lower',
+  'bundle.measured.*': 'info',
+  'resource.budgetMs.*': 'lower',
+  'resource.budgetRssMb.*': 'lower',
+  'resource.deliveredFractionCeiling.*': 'lower',
+  'resource.noiseBandPct.*': 'info',
   'warnings.*': 'lower',
   'suppressions.count': 'lower',
   'suppressions.totalHits': 'lower',
@@ -575,6 +604,36 @@ const base = flatten(baselineRaw);
 const { cur, seen, stale, notes } = collect();
 
 if (manifestRaw?.tasks) cur['tasks'] = Object.keys(manifestRaw.tasks).sort();
+
+// The committed ceilings, from source. Like `tasks` above, these are read from
+// the repository rather than from a report: they are what the gates enforce, not
+// what the gates measured, so they are always present and can never be
+// UNMEASURED. Injected outside `collect()` for exactly that reason — `collect()`
+// answers "what did this run observe", and these are not observations.
+//
+// The key is DOT-SANITISED, and that is load-bearing rather than cosmetic:
+// `flatten` splits a baseline path on `.`, and `directionFor` only falls back to
+// a wildcard over the LAST segment. A chunk literally named
+// `passwordStrength.worker` would flatten to
+// `bundle.budgetKb.passwordStrength.worker`, whose wildcard is
+// `bundle.budgetKb.passwordStrength.*` — which is declared nowhere, so the field
+// would be reported as having no direction and fail the run.
+const keySafe = (name) => name.replace(/\./g, '_');
+if (!tier0) {
+  for (const [chunk, budget] of Object.entries(CHUNK_BUDGETS_KB)) {
+    cur[`bundle.budgetKb.${keySafe(chunk)}`] = budget;
+  }
+  cur['bundle.defaultChunkBudgetKb'] = DEFAULT_CHUNK_BUDGET_KB;
+  cur['bundle.initialPayloadBudgetKb'] = INITIAL_PAYLOAD_BUDGET_KB;
+  cur['bundle.htmlShellBudgetKb'] = HTML_SHELL_BUDGET_KB;
+  for (const [scenario, budget] of Object.entries(RESOURCE_BUDGETS)) {
+    cur[`resource.budgetMs.${scenario}`] = budget.durationMs;
+    cur[`resource.budgetRssMb.${scenario}`] = budget.rssGrowthMb;
+    if (typeof budget.deliveredFraction === 'number') {
+      cur[`resource.deliveredFractionCeiling.${scenario}`] = budget.deliveredFraction;
+    }
+  }
+}
 
 const inTier0 = (p) => TIER0_PREFIXES.some((t) => p.startsWith(t));
 /** `meta.*` is bookkeeping; `meta.fields` is compared against the computed list below. */
