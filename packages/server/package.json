@@ -10,6 +10,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
     "test": "vitest run --coverage",
+    "test:flake": "vitest run --config vitest.flake.config.ts",
     "test:property": "vitest run --config vitest.property.config.ts",
     "test:fuzz": "vitest run --config vitest.fuzz.config.ts",
     "test:resource": "vitest run --config vitest.resource.config.ts",

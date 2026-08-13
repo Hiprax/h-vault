@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
 import request from 'supertest';
 import app from '../src/app.js';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
+import { installTestClock, uninstallTestClock } from './clock.js';
 
 const API = '/api/v1';
 
@@ -99,7 +100,7 @@ describe('CSRF — token expiration after 24 hours', () => {
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    uninstallTestClock();
   });
 
   it('should accept a token that is less than 24 hours old', async () => {
@@ -120,9 +121,13 @@ describe('CSRF — token expiration after 24 hours', () => {
     // Fetch token at real time
     const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-    // Advance time by 24h + 1 minute
-    const now = Date.now();
-    vi.useFakeTimers({ now: now + 24 * 60 * 60 * 1000 + 60_000 });
+    // Advance time by 24h + 1 minute, through the shared clock seam rather than
+    // by reaching for `vi.useFakeTimers` here. Its default fakes `Date` ALONE, so
+    // the supertest round trip below still has real timers — the bare
+    // `useFakeTimers()` this replaced faked those too, which is a live hazard
+    // rather than a style point: a request that needed a timer to settle would
+    // hang, not fail.
+    installTestClock({ at: Date.now() + 24 * 60 * 60 * 1000 + 60_000 });
 
     const res = await agent
       .post(`${API}/auth/login`)
@@ -136,8 +141,7 @@ describe('CSRF — token expiration after 24 hours', () => {
   it('expired token should return 403, not 500', async () => {
     const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-    const now = Date.now();
-    vi.useFakeTimers({ now: now + 25 * 60 * 60 * 1000 });
+    installTestClock({ at: Date.now() + 25 * 60 * 60 * 1000 });
 
     const res = await agent
       .post(`${API}/auth/login`)

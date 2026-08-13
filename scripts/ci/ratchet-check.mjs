@@ -73,19 +73,20 @@
  * PORT NOTES — deliberate differences from the reference implementation.
  * ---------------------------------------------------------------------------
  *
- *  1. `flake.*` IS NOT A REQUIRED FIELD YET, because this repository has no
- *     extractor for it until Phase 19 adds `test:flake`. Under (c) a baseline
- *     field with no report is a hard failure, so requiring it now would define a
- *     permanently red gate — and the cheapest escape from a permanently red gate
- *     is deleting baseline fields, which is the pressure this file exists to
- *     remove. That phase adds the field AND its entry in REQUIRED_FIELDS in the
- *     same change; `selftest`'s per-task registry is where that obligation is
- *     enforced. `mutation.*` was the other half of this note until Phase 16
- *     shipped `test:mutation`. It is now required CONDITIONALLY — see
- *     MUTATION_REQUIRED_FIELDS, which arms the moment a baseline carries a
- *     mutation block — and the tier-2 half of the problem, a gate that is
- *     registered but does not run on a push, is handled by DEFERRABLE rather
- *     than by leaving the field out.
+ *  1. `flake.*` AND `mutation.*` ARE REQUIRED CONDITIONALLY, NOT UNCONDITIONALLY.
+ *     This note used to say neither had an extractor and that the phase adding
+ *     one would move the fields into REQUIRED_FIELDS outright. Phases 16 and 19
+ *     shipped `test:mutation` and `test:flake`, and outright is the wrong shape:
+ *     under (c) a baseline field with no report is a hard failure, so a field
+ *     required before its gate has ever produced a measurement defines a
+ *     permanently red gate — and the cheapest escape from one of those is
+ *     deleting baseline fields, which is the pressure this file exists to
+ *     remove. Both are therefore required the moment a baseline carries their
+ *     block at all (MUTATION_REQUIRED_FIELDS, FLAKE_REQUIRED_FIELDS), which is
+ *     strict from the first real run and unsatisfiable in no state. The tier-2
+ *     half of the problem — a gate that is registered but does not run on a push
+ *     — is handled by DEFERRABLE rather than by leaving the field out.
+ *     `selftest`'s per-task registry enforces the registration obligation.
  *  2. REQUIRED FIELDS ARE SATISFIED PER PACKAGE. In a monorepo the honest place
  *     for coverage is `packages.<pkg>.coverage.*`; a global average lets a
  *     well-tested package subsidise a neglected one. So presence is checked
@@ -226,7 +227,14 @@ const DIRECTION = {
   'warnings.*': 'lower',
   'suppressions.count': 'lower',
   'suppressions.totalHits': 'lower',
+  // Two sample sizes and one failure count, and the directions are what make the
+  // trio a gate rather than a statistic. `runs` and `e2eExecutions` are
+  // higher-is-better so NEITHER half of the sample can quietly shrink — dropping
+  // the end-to-end leg entirely would otherwise LOWER `failures`, which reads as
+  // an improvement. `failures` is lower-is-better so an observed flake can never
+  // be accepted into the baseline and stop being a failure.
   'flake.runs': 'higher',
+  'flake.e2eExecutions': 'higher',
   'flake.failures': 'lower',
   'performance.p95Ms.*': 'lower',
   'performance.p99Ms.*': 'lower',
@@ -273,6 +281,37 @@ const REQUIRED_FIELDS = [
  */
 const MUTATION_REQUIRED_FIELDS = ['mutation.overall', 'mutation.filesMutated'];
 
+/**
+ * The flake hunt's three load-bearing fields, required as soon as the baseline
+ * carries a `flake` block AT ALL. Same conditional shape as
+ * MUTATION_REQUIRED_FIELDS, for the same reason and one more that is specific to
+ * this gate and sharper.
+ *
+ * THE SHARED REASON. Before the first complete run there is no measurement, and
+ * both ways to satisfy an unconditional requirement then are worse than waiting:
+ * invent a number, or record one from a shortened sample. `flake-run.mjs`
+ * refuses to write a report at all under `--runs`/`--only` precisely so the
+ * second cannot happen by accident.
+ *
+ * THE REASON SPECIFIC TO THIS GATE, and it is why the requirement lives here
+ * rather than in `gate-surface.test.ts` where the equivalent mutation assertions
+ * sit. `test:flake` runs every package suite TEN TIMES, and `gate-surface.test.ts`
+ * is inside that suite. An assertion there that "the baseline carries a flake
+ * record" would be a postcondition of the run asserting itself mid-run: ten runs
+ * would each fail that one test, `flake.json` would report `failures: 10`, and
+ * `--accept` refuses a failing report — so the record could never be written,
+ * and the gate could never go green by any change to production code. That is
+ * not a strict gate, it is an unsatisfiable one, and an unsatisfiable gate is
+ * deleted rather than met. Checking it HERE puts it outside the sample it
+ * describes, where it can actually bind.
+ *
+ * All three fields, not just `failures`: a zero-run sample also reports zero
+ * failures, so `runs` and `e2eExecutions` are what make that number mean
+ * anything. Deleting the block to escape the requirement is not a way out —
+ * `meta.fields` pins the baseline's own field list as a superset.
+ */
+const FLAKE_REQUIRED_FIELDS = ['flake.runs', 'flake.failures', 'flake.e2eExecutions'];
+
 /** Fields cheap enough for T0: no test artifact needed. */
 const TIER0_PREFIXES = ['suppressions.', 'integrity.', 'tasks', 'meta.fields'];
 /** (Port note 3) Which reports T0 is allowed to read. */
@@ -302,10 +341,23 @@ const TIER0_REPORTS = ['integrity.json'];
  *      before this one — every field is compared for real, superset check
  *      included. Deferral is a property of the run, not of the field.
  *
- * Phase 19's `flake.*` joins this table when `test:flake` exists.
+ * `flake.*` is here for exactly the same reason and under exactly the same three
+ * conditions. `test:flake` is ten complete runs of every suite plus the whole
+ * Playwright suite three times over — about an hour — so it is Tier 2 and does
+ * not run on a push. Its own gate enforces the floor at the moment it has the
+ * number (zero failures, or it exits 1), `test:flake` must still be a registered
+ * tier-2 task or both fields become hard UNMEASURED failures, and inside
+ * `verify:full` the report IS fresh and both are compared for real.
+ *
+ * Note which direction each moves, because they are opposites and that is the
+ * point: `flake.runs` is higher-is-better, so the SAMPLE can never quietly
+ * shrink — a gate that dropped to three runs would otherwise report a cleaner
+ * bound over less evidence — while `flake.failures` is lower-is-better, so an
+ * observed flake can never quietly be normalised into the baseline.
  */
 const DEFERRABLE = [
   { prefix: 'mutation.', report: 'mutation.json', owner: 'test:mutation', tier: 2 },
+  { prefix: 'flake.', report: 'flake.json', owner: 'test:flake', tier: 2 },
 ];
 
 const deferrableForReport = (base) => DEFERRABLE.find((entry) => entry.report === base);
@@ -783,6 +835,7 @@ const absent = [];
 const requiredFields = [
   ...REQUIRED_FIELDS,
   ...(baselineRaw.mutation ? MUTATION_REQUIRED_FIELDS : []),
+  ...(baselineRaw.flake ? FLAKE_REQUIRED_FIELDS : []),
 ];
 for (const req of requiredFields) {
   const present = Object.keys(base).some(

@@ -97,6 +97,77 @@ export function resolveRunTz(raw: string | undefined): string {
 export const RUN_TZ = resolveRunTz(process.env['HVAULT_TZ']);
 
 /**
+ * What each allowed zone actually MEANS, in numbers computed by hand rather than
+ * by the same platform call the assertions use.
+ *
+ * The determinism suites used to hardcode UTC's answers (`getTimezoneOffset()`
+ * is 0, a zone-less noon is `Date.UTC(…, 12)`). That was correct and it was also
+ * why those suites could never run anywhere else: `test:dst` runs the WHOLE
+ * suite in {@link DST_TZ}, and an assertion that says "the offset is zero" is
+ * then a statement about the harness's own pin rather than about the zone the
+ * run asked for.
+ *
+ * Parameterising it is a strengthening, not a relaxation, for two reasons:
+ *
+ *   1. Each row is still an exact, hand-checked expectation — `2026-01-15T12:00`
+ *      with no zone is 17:00Z in New York (EST, UTC-5) and 16:00Z on
+ *      `2026-07-15` (EDT, UTC-4) — so a machine zone that leaked past the pin
+ *      fails in either leg, exactly as before.
+ *   2. The {@link DST_TZ} row's two values DIFFER BY AN HOUR, which pins the one
+ *      property that makes a DST leg worth running at all. A zone pin that
+ *      silently reverted to UTC would satisfy the old "offset is 0" assertion in
+ *      the DST leg; it cannot satisfy this one.
+ *
+ * `getTimezoneOffset()` reports minutes BEHIND UTC as POSITIVE, so UTC-5 is 300.
+ */
+const ZONE_FACTS: Record<
+  string,
+  {
+    winterOffsetMinutes: number;
+    summerOffsetMinutes: number;
+    winterNoon: number;
+    summerNoon: number;
+  }
+> = {
+  [PINNED_TZ]: {
+    winterOffsetMinutes: 0,
+    summerOffsetMinutes: 0,
+    winterNoon: Date.UTC(2026, 0, 15, 12),
+    summerNoon: Date.UTC(2026, 6, 15, 12),
+  },
+  [DST_TZ]: {
+    winterOffsetMinutes: 300,
+    summerOffsetMinutes: 240,
+    winterNoon: Date.UTC(2026, 0, 15, 17),
+    summerNoon: Date.UTC(2026, 6, 15, 16),
+  },
+};
+
+/**
+ * The hand-checked facts for one allowed zone.
+ *
+ * Throws on anything else rather than returning a default, for the same reason
+ * {@link resolveRunTz} does: a zone with no recorded facts is a zone nobody has
+ * checked, and answering with UTC's numbers would make every assertion below it
+ * pass while describing a different clock.
+ */
+export function zoneFacts(zone: string): {
+  winterOffsetMinutes: number;
+  summerOffsetMinutes: number;
+  winterNoon: number;
+  summerNoon: number;
+} {
+  const facts = ZONE_FACTS[zone];
+  if (!facts) {
+    throw new Error(
+      `No recorded clock facts for ${JSON.stringify(zone)}. ` +
+        `Only ${PINNED_TZ} and ${DST_TZ} are allowed zones; add a row to ZONE_FACTS with hand-checked values.`,
+    );
+  }
+  return facts;
+}
+
+/**
  * The locale every tier runs in. `LC_ALL` is pinned alongside `LANG` because
  * glibc and ICU resolve `LC_ALL` FIRST: a developer with `LC_ALL=de_DE.UTF-8`
  * exported (common on a localized desktop) would make a `LANG`-only pin inert,

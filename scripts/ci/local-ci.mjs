@@ -511,6 +511,29 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/recovery-gate.mjs'], options),
   },
   {
+    id: 'dst',
+    task: 'test:dst',
+    // TIER 2, and it sits beside `recovery` because it is the same shape: a
+    // named, separately-reported re-run of suites that ALSO run on every push,
+    // narrowing nothing. What it buys is the one thing the push tier structurally
+    // cannot give — a different clock.
+    //
+    // `test:property` already runs its three property suites in
+    // America/New_York, and that covers `combineExpiry`'s repeated-hour branch
+    // alone. Everything else this application renders about time — a secret's
+    // expiry countdown, the vault-health "last checked" label, every stored
+    // datetime — is computed in LOCAL time, and until this gate existed ~7,400 of
+    // the repository's tests had only ever been executed where local time and UTC
+    // are the same thing. An assertion that is right by coincidence is
+    // indistinguishable from one that is right.
+    tier: 2,
+    title: 'The whole suite, once, in a timezone that observes DST (America/New_York)',
+    ci: 'new — no hosted job ever ran this application on a clock that changes',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/dst-gate.mjs'], options),
+  },
+  {
     id: 'smoke',
     task: 'test:smoke',
     tier: 1,
@@ -696,6 +719,34 @@ const GATES = [
     ci: 'new — no hosted job ever ran the stack this project deploys',
     requires: ['docker'],
     run: (options) => runExe(process.execPath, ['scripts/ci/deploy-drill.mjs'], options),
+  },
+  {
+    id: 'flake',
+    task: 'test:flake',
+    // TIER 2, and placed here — after every other suite gate and immediately
+    // before the oracle — because it is the second-longest thing in this
+    // repository: ten complete runs of all three package suites plus the whole
+    // Playwright suite three times over, about an hour.
+    //
+    // It is the gate that measures the property every OTHER gate quietly assumes.
+    // A suite whose verdict depends on the order it happened to run in is not a
+    // gate, and nothing here could see that: the suites shuffle on every push,
+    // but with one pinned seed, so every push takes the SAME shuffled order.
+    // This gate is the only thing that varies it.
+    //
+    // What it reports is a RATE, not a property. Ten clean runs bound the
+    // per-run flake rate near one in ten; they do not establish zero, and the
+    // report says so in its own `bound` field rather than leaving a reader to
+    // overstate it. `flake.runs` is ratcheted upward so the sample can never
+    // quietly shrink, and `flake.failures` downward so a failure can never
+    // quietly be normalised — the pair is what makes the number a gate instead
+    // of a statistic.
+    tier: 2,
+    title: 'Ten shuffled parallel runs of the whole suite, plus the E2E suite three times over',
+    ci: 'new — nothing has ever asked whether this suite gives the same answer twice',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/flake-run.mjs'], options),
   },
   {
     id: 'mutation',

@@ -166,7 +166,7 @@
     "test:a11y": {
       "cmd": "npm run test:a11y",
       "tier": 1,
-      "gate": "every primary view and modal — fifteen of them, in the real authenticated DOM — carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
+      "gate": "every primary view and modal \u2014 fifteen of them, in the real authenticated DOM \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
       "report": ["a11y.json", "junit-a11y.xml"],
       "countsTests": false,
       "requires": ["build:shared"]
@@ -174,7 +174,7 @@
     "test:fuzz": {
       "cmd": "npm run test:fuzz",
       "tier": 2,
-      "gate": "no import file and no backup document — arbitrary bytes, the committed corpus, or a generated hostile document — crashes a parser, exceeds its wall-clock budget, produces an item its own schema rejects, or loses a well-formed row to a swallowed duplicate key",
+      "gate": "no import file and no backup document \u2014 arbitrary bytes, the committed corpus, or a generated hostile document \u2014 crashes a parser, exceeds its wall-clock budget, produces an item its own schema rejects, or loses a well-formed row to a swallowed duplicate key",
       "report": "fuzz.json",
       "countsTests": false,
       "requires": ["build:shared"]
@@ -198,22 +198,38 @@
     "test:recovery": {
       "cmd": "npm run test:recovery",
       "tier": 2,
-      "gate": "this application survives the two disasters it is built for: a backup downloaded from one database restores into an empty account on a SECOND mongod with every item decrypting to the bytes that were sealed and each one still paired with its own name, the downloaded document survives the round trip its signature is computed over (so a signed backup still verifies, and an altered one does not), a backup is worthless without its backup password, and a real process killed mid-write always leaves the stored vault key OLD with its write fence still up — a login clearing that fence only once the dead rotation's lock has genuinely expired, the interrupted rotation completing on retry, and no crash before, inside or after the import write leaving a partial insert behind",
+      "gate": "this application survives the two disasters it is built for: a backup downloaded from one database restores into an empty account on a SECOND mongod with every item decrypting to the bytes that were sealed and each one still paired with its own name, the downloaded document survives the round trip its signature is computed over (so a signed backup still verifies, and an altered one does not), a backup is worthless without its backup password, and a real process killed mid-write always leaves the stored vault key OLD with its write fence still up \u2014 a login clearing that fence only once the dead rotation's lock has genuinely expired, the interrupted rotation completing on retry, and no crash before, inside or after the import write leaving a partial insert behind",
       "report": "recovery.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:dst": {
+      "cmd": "npm run test:dst",
+      "tier": 2,
+      "gate": "every test in all three packages passes in a timezone that observes daylight saving, not only in UTC: the whole suite is re-run under America/New_York, narrowing nothing, so a rendered date, a stored instant, an expiry countdown or a harness pin that is right only because local time and UTC happen to agree fails here rather than on a user's machine",
+      "report": "dst.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:flake": {
+      "cmd": "npm run test:flake",
+      "tier": 2,
+      "gate": "the suite gives the same answer every time: ten complete runs of all three package suites, each in a DIFFERENT shuffled order derived from the one pinned seed and each with the file parallelism the push tier uses, plus the whole Playwright suite with three executions per test and retries pinned off, produce zero failures \u2014 and the number of runs and the number of failures are both recorded, because ten clean runs bound the per-run flake rate near one in ten rather than establishing zero",
+      "report": "flake.json",
       "countsTests": false,
       "requires": ["build:shared"]
     },
     "test:mutation": {
       "cmd": "npm run test:mutation",
       "tier": 2,
-      "gate": "the oracle: Stryker mutates every production file in the declared scope — packages/*/src/** minus the coverage-excluded entry points and the presentational UI primitives — and the suite kills at least the recorded share of them, with the six core modules held to their own recorded scores, no file dropping out of the measured set, and no mutant left untested that was tested before",
+      "gate": "the oracle: Stryker mutates every production file in the declared scope \u2014 packages/*/src/** minus the coverage-excluded entry points and the presentational UI primitives \u2014 and the suite kills at least the recorded share of them, with the six core modules held to their own recorded scores, no file dropping out of the measured set, and no mutant left untested that was tested before",
       "report": "mutation.json",
       "requires": ["build:shared"]
     },
     "test:smoke": {
       "cmd": "npm run test:smoke",
       "tier": 1,
-      "gate": "the BUILT artifact boots in production mode against a real mongod, serves a deep-linked SPA route with a matching CSP nonce, and completes a register → sign-in → store → read-back journey whose ciphertext round-trips byte for byte",
+      "gate": "the BUILT artifact boots in production mode against a real mongod, serves a deep-linked SPA route with a matching CSP nonce, and completes a register \u2192 sign-in \u2192 store \u2192 read-back journey whose ciphertext round-trips byte for byte",
       "report": ["smoke.json", "smoke.log"],
       "requires": ["build:server", "build:client"]
     },
@@ -227,14 +243,14 @@
     "coverage:check": {
       "cmd": "npm run coverage:check",
       "tier": 1,
-      "gate": "every package holds the line, branch and function coverage recorded in baseline.json, every production line this change touched is covered — with a dated COV-DIFF-EXEMPT ledger entry the only way to excuse one — and no changed production file sits outside the measured scope, where its patch coverage would read as 100% over nothing",
+      "gate": "every package holds the line, branch and function coverage recorded in baseline.json, every production line this change touched is covered \u2014 with a dated COV-DIFF-EXEMPT ledger entry the only way to excuse one \u2014 and no changed production file sits outside the measured scope, where its patch coverage would read as 100% over nothing",
       "report": "coverage.json",
       "requires": ["diff-cover"]
     },
     "audit:bundle": {
       "cmd": "npm run audit:bundle",
       "tier": 1,
-      "gate": "the built client's initial payload and every emitted chunk stay inside their committed size budgets, so a library this application loads on demand — zxcvbn, Argon2id, the file-encryption tool — cannot become a static import without the build going red",
+      "gate": "the built client's initial payload and every emitted chunk stay inside their committed size budgets, so a library this application loads on demand \u2014 zxcvbn, Argon2id, the file-encryption tool \u2014 cannot become a static import without the build going red",
       "report": "bundle.json",
       "requires": ["build:client"]
     },

@@ -16,6 +16,7 @@
     "build": "node scripts/inject-version.js && tsc",
     "dev": "tsc --watch",
     "test": "vitest run --coverage",
+    "test:flake": "vitest run --config vitest.flake.config.ts",
     "test:property": "vitest run --config vitest.property.config.ts",
     "type-check": "tsc --noEmit && tsc -p tsconfig.test.json"
   },

@@ -620,6 +620,91 @@ export const DEFECTS = {
       /a crash inside the import transaction left \d+ item\(s\) behind/.test(text),
   },
 
+  'test:dst': {
+    // The defect this gate was built for, and it is a THREE-CHARACTER edit
+    // repeated twice: `getHours`/`getMinutes` become `getUTCHours`/
+    // `getUTCMinutes` in the helper that renders a secret's stored expiry
+    // instant into the form's two local-time controls.
+    //
+    // What it breaks: a user in any zone but UTC opens a secret and sees an
+    // expiry time four or five hours away from the one they set, and a save then
+    // stores that shifted instant. What makes it the right case is what does NOT
+    // notice. Measured on the reference machine, with the defect planted:
+    //
+    //   TZ=UTC              119 files, 3,477 tests, ALL GREEN
+    //   TZ=America/New_York 3 files, 7 tests RED
+    //
+    // — because in UTC `getHours()` and `getUTCHours()` are the same function by
+    // coincidence. Every other gate in this repository runs in UTC.
+    //
+    // Three of those seven failures are in `tests/components/VaultItemForm.test.tsx`
+    // and `tests/coverage-vault-item-form.test.tsx`, which is what this gate adds
+    // over `test:property`: that gate also runs in America/New_York, but its
+    // config includes `tests/property/**` and nothing else, so the four property
+    // failures were the only ones anything could have seen. The evidence
+    // predicate below is anchored to a NON-property file for exactly that reason.
+    //
+    // The anchor is byte-exact against today's source. A rewrite of that line
+    // turns `String.replace` into a no-op, which fails in the SAFE direction: the
+    // gate stays green, the harness reports `unproven`, and the run exits
+    // non-zero.
+    title:
+      'render a stored expiry instant in UTC instead of local time, which only a DST zone can see',
+    mutate: {
+      'packages/client/src/components/vault/VaultItemForm.tsx': (text) =>
+        text.replace(
+          'return `${pad(instant.getHours(), 2)}:${pad(instant.getMinutes(), 2)}`;',
+          'return `${pad(instant.getUTCHours(), 2)}:${pad(instant.getUTCMinutes(), 2)}`;',
+        ),
+    },
+    // `dst.json` records `failedTests` ONLY for a leg that failed — a green run
+    // carries an empty array — so unlike a JUnit document it cannot be satisfied
+    // by naming a test that merely ran. That is the trap recorded on
+    // `test:security`, and it is why this can safely match a test name at all.
+    // Both halves are required: the file pins the failure to a suite the property
+    // gate does not run, which is the claim this gate makes for itself.
+    evidence: (text) =>
+      /VaultItemForm\.test\.tsx[^"]*renders a UTC expiresAt as the LOCAL date and time/.test(text),
+  },
+
+  'test:flake': {
+    // The Forbidden Action this gate is most likely to attract, planted exactly
+    // as someone would write it while tidying up: the per-run order seed
+    // collapsed to a constant.
+    //
+    // Nothing downstream could tell. The gate would still perform ten complete
+    // runs, still take an hour, still write `flake.json` saying `runs: 10,
+    // failures: 0`, and `flake.runs` would still ratchet — while measuring one
+    // order ten times. The suites shuffle from `sequence.seed`, so a fixed seed
+    // is a FIXED ORDER, and order independence is the entire risk this gate owns.
+    //
+    // It fails in the gate's PRE-FLIGHT, before the first suite starts, which is
+    // what makes this case runnable at all: an unplanted run is about an hour,
+    // and a selftest that took an hour per case is a selftest nobody runs. That
+    // is the same shape as `test:mutation`'s case and for the same reason.
+    title: 'collapse the per-run order seed to a constant, so ten runs measure one order',
+    mutate: {
+      'scripts/ci/flake-run.mjs': (text) =>
+        text.replace(
+          'const orderSeedFor = (index) => dataSeed + index;',
+          'const orderSeedFor = () => dataSeed;',
+        ),
+    },
+    // The backstop for the other direction, and this case needs it MORE than
+    // `test:mutation` does. Its whole runnability rests on the plant landing in a
+    // millisecond pre-flight; if the anchor above ever drifts, `String.replace`
+    // becomes a no-op and the harness would instead sit through ten complete runs
+    // of every suite plus three Playwright passes — the leg deadlines alone permit
+    // hours — before honestly reporting `unproven`. Killed at five minutes, which
+    // is an order of magnitude more than the pre-flight can ever need and far less
+    // than one leg.
+    timeoutMs: 300_000,
+    // The pre-flight's own refusal. A green run never prints it, and `flake.json`
+    // is not written at all when it fires — so this cannot be satisfied by a
+    // stale artifact from an earlier run either.
+    evidence: (text) => /do not use \d+ distinct order seeds/.test(text),
+  },
+
   'test:smoke': {
     // The defect is planted in the ARTIFACT, not in the sources, and that is the
     // point of this gate: `test:smoke` runs the emitted bundle, so the emitted

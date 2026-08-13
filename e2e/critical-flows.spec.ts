@@ -207,9 +207,16 @@ test.describe('Password Change Flow', () => {
     expect(changeBody.success).toBe(true);
     expect(changeBody.message).toMatch(/password changed|log in again/i);
 
-    // Wait so the new JWT iat is strictly after the ceiled passwordChangedAt.
-    await new Promise((r) => setTimeout(r, 1100));
-
+    // There is deliberately NO wait here, unlike the two sites below, and the
+    // difference is what each test does NEXT.
+    //
+    // The `iat` vs `passwordChangedAt` comparison lives in ONE place — the JWT
+    // strategy in `middleware/auth.ts` — so it is reached only by an
+    // AUTHENTICATED request. This test ends at `loginRes.ok()`: it never presents
+    // the token it just minted, so the comparison never runs and the second this
+    // login lands in cannot matter. Measured: 3/3 green with the wait removed.
+    // The two sites below DO use their token afterwards, which is why they keep
+    // theirs.
     // Login with the NEW password
     const loginCsrf = await getCsrf(request);
     const loginRes = await request.post('/api/v1/auth/login', {

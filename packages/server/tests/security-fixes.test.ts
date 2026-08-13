@@ -35,6 +35,7 @@ import {
   JWT_PURPOSE_SECRET,
 } from './helpers.js';
 import type { TestUser } from './helpers.js';
+import { advanceClockBy, installTestClock, uninstallTestClock, withTestClock } from './clock.js';
 
 // Re-export with { csrfToken, csrfCookie } naming used throughout this file
 async function getCsrf(
@@ -457,19 +458,33 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
   (cm as unknown as { validatePassword: (_p: string) => boolean }).validatePassword = () => true;
 
   const PERIOD_MS = 30_000;
-  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
   /**
-   * Wait until the wall clock is comfortably mid-step (≥3s from either 30s
-   * boundary) so that a code generated for `currentStep - k` stays exactly `k`
-   * steps out when the server validates a moment later — making the window
-   * boundary deterministic rather than boundary-flaky.
+   * Freeze the clock comfortably mid-step (≥3s from either 30s boundary), so a
+   * code generated for `currentStep - k` is still exactly `k` steps out when the
+   * server validates it a moment later.
+   *
+   * This used to SLEEP up to 3 seconds of real time to reach the same position,
+   * which is the shape the doctrine calls sleep-as-synchronization: it made the
+   * suite slower on every run and it was still probabilistic, because the
+   * request could cross the next boundary while it was in flight. Freezing
+   * removes both — the step cannot advance underneath the assertion at all.
+   *
+   * `installTestClock`'s default `toFake: ['Date']` is what makes this usable
+   * here: the supertest round trip and mongoose's own timers keep running, and
+   * only the wall clock stops. The clock is handed back in `afterEach` below, so
+   * a failure cannot leave the worker frozen for every later file.
    */
-  const alignToMidStep = async (): Promise<void> => {
+  const alignToMidStep = (): void => {
+    installTestClock();
     const into = Date.now() % PERIOD_MS;
-    if (into < 3_000) await sleep(3_000 - into);
-    else if (into > 27_000) await sleep(PERIOD_MS - into + 3_000);
+    if (into < 3_000) advanceClockBy(3_000 - into);
+    else if (into > 27_000) advanceClockBy(PERIOD_MS - into + 3_000);
   };
+
+  afterEach(() => {
+    uninstallTestClock();
+  });
 
   /** Provision a 2FA-enabled user and return its TOTP handle + a temp token. */
   const setup2faUser = async (
@@ -514,7 +529,7 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
     const agent = request(app);
     const { totp, tempToken, csrfToken, csrfCookie } = await setup2faUser(agent);
 
-    await alignToMidStep();
+    alignToMidStep();
     const step = Math.floor(Date.now() / PERIOD_MS);
     const oneStepAgo = totp.generate({ timestamp: (step - 1) * PERIOD_MS });
 
@@ -535,7 +550,7 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
     const agent = request(app);
     const { totp, tempToken, csrfToken, csrfCookie } = await setup2faUser(agent);
 
-    await alignToMidStep();
+    alignToMidStep();
     const step = Math.floor(Date.now() / PERIOD_MS);
     const twoStepsAgo = totp.generate({ timestamp: (step - 2) * PERIOD_MS });
 
@@ -1340,17 +1355,17 @@ describe('HIGH-8 / MISSING-1: passwordChangedAt invalidates existing JWTs', () =
         newVaultKeyTag: 'tag2',
       });
 
-    // Wait >1s to guarantee the new JWT iat is strictly greater than passwordChangedAt
-    // (JWT iat is second-precision while passwordChangedAt is millisecond-precision).
-    await new Promise((r) => setTimeout(r, 1100));
-
-    // Issue a fresh access token AFTER the password change
-    const { generateAccessToken } = await import('./helpers.js');
-    const freshToken = generateAccessToken(user.id);
-
-    const res = await agent
-      .get('/api/v1/user/profile')
-      .set('Authorization', authHeader(freshToken));
+    // The new token's `iat` must be strictly greater than `passwordChangedAt`.
+    // A JWT `iat` is second-precision while `passwordChangedAt` is millisecond-
+    // precision and ceiled, so a token minted in the same second as the change is
+    // legitimately rejected — which used to be bought with a real 1.1-second
+    // sleep. The clock seam buys the same second without spending it.
+    const res = await withTestClock({}, async () => {
+      advanceClockBy(1_100);
+      const { generateAccessToken } = await import('./helpers.js');
+      const freshToken = generateAccessToken(user.id);
+      return agent.get('/api/v1/user/profile').set('Authorization', authHeader(freshToken));
+    });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
   });

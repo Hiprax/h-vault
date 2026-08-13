@@ -41,11 +41,11 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twenty-seven gates including the full test suite, the export-format
+pipeline locally — twenty-eight gates including the full test suite, the export-format
 goldens, patch coverage on the lines you changed, a smoke run of the built artifact, the
 browser bundle's size budgets, container builds with Trivy scanning, and CodeQL — and
 refuses the push if any of them fail. A
-commit that reaches `main` has already passed everything. Five further gates sit in the
+commit that reaches `main` has already passed everything. Eight further gates sit in the
 release tier: `fuzz`, whose suites still run inside the ordinary test gates on every push
 so that only the separately-reported, deadline-bounded run is held back; `resource`, the
 volume and memory budgets, which builds ten-thousand-item vaults and therefore both takes
@@ -54,10 +54,15 @@ mean anything; `upgrade`, which reads a vault and a `.env` written by the previo
 and, like `fuzz`, keeps its assertions on the push tier while the named, deadline-bounded
 run waits for a release; `recovery`, which restores a backup onto a second database and
 kills a real server process mid-write, and which needs its deadline more than any other
-gate because it spawns processes in order to kill them; and `deploy`, the deployment clean
-room, which stands the whole Compose stack up from nothing and is far too heavy for a hook
-— its fast sibling `smoke` covers the built artifact on every push. All five run in
-`npm run verify:full`.
+gate because it spawns processes in order to kill them; `dst`, which re-runs the whole
+suite in `America/New_York` because everything this application renders about time is
+computed in local time and every other gate runs where local time and UTC are the same
+thing; `deploy`, the deployment clean room, which stands the whole Compose stack up from
+nothing and is far too heavy for a hook — its fast sibling `smoke` covers the built
+artifact on every push; `flake`, ten complete runs of every suite in ten different
+shuffled orders plus the Playwright suite three times over, which is about an hour; and
+`mutation`, the oracle, which re-runs the suite once per mutant and is measured in hours.
+All eight run in `npm run verify:full`.
 
 The gates are grouped into tiers by how long they take, so there is something worth
 running at every point in the loop:
@@ -95,9 +100,9 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
-### Seven gates whose failure asks for something specific
+### Eight gates whose failure asks for something specific
 
-Most gates tell you what to fix. These seven are worth reading before you meet them,
+Most gates tell you what to fix. These eight are worth reading before you meet them,
 because the obvious way past each of them is the wrong one.
 
 - **`coverage`** holds each package to the line, branch and function coverage already
@@ -162,6 +167,29 @@ because the obvious way past each of them is the wrong one.
   timezones are not interchangeable: `combineExpiry`'s repeated-hour branch cannot be
   reached in a zone with no daylight-saving transition, so the second leg is the only
   thing standing between that fix and a silent regression.
+- **`flake`** runs every suite ten times, each in a different shuffled order derived from
+  the one pinned seed, and the Playwright suite three times over with retries pinned off.
+  Its verdict is a **rate**, and the report says what that rate licenses you to claim: ten
+  clean runs bound the per-run flake probability near one in ten, they do not establish
+  zero. **A red run here is a bug report about the code or the harness, never noise.** The
+  three things that look like fixes and are not: a `retries` count (which reports that a
+  test passed eventually — the pipeline used to carry `--retries=2` and it concealed two
+  genuine failures, recorded in `e2e/helpers.ts`), a raised timeout (which converts a race
+  into a slower race), and pinning the suite to one worker (which hides shared state
+  instead of finding it). The two real answers are to fix it at its cause, or — if you
+  genuinely cannot yet — to quarantine that one test in its own task with a dated,
+  expiring `kind: quarantine` entry in `.testfortress/suppressions.json`. **Quarantine is
+  a thirty-day loan, not a graveyard**: the test still runs, in its own tier, with its own
+  report, and a flaky test is never deleted. Both numbers are ratcheted and they move in
+  opposite directions — `flake.runs` upward, so the sample can never quietly shrink, and
+  `flake.failures` downward, so an observed flake can never quietly be normalised.
+- **`dst`** re-runs every suite in `America/New_York`. A test that passes in UTC and fails
+  here has an undeclared dependency on the machine's timezone, and the answer is to make
+  the assertion state which zone it means — the harness exports `zoneFacts(RUN_TZ)` for
+  exactly that. **Pinning the gate back to UTC is not an answer**; it is the gate deleting
+  itself. Note what it adds over `property`, which also runs two zones: that gate's config
+  includes `tests/property/**` and nothing else, so until this one existed roughly 7,400 of
+  this repository's tests had only ever been executed where local time and UTC agree.
 - **`secrets-full`** scans the working tree and **every blob in git history**. A finding in
   history is already compromised: it is in every clone and every fork, and no later commit
   takes it back. **Rotate the credential first.** Rewriting history is optional cleanup

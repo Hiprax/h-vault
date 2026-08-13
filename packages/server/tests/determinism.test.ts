@@ -22,33 +22,120 @@ import {
   resolvedOrderSeed,
   seedBanner,
   seededRandom,
+  zoneFacts,
 } from './determinism.js';
 
 describe('determinism harness — clock and locale', () => {
-  it('runs in UTC, so a local-time Date and its UTC counterpart are the same instant', () => {
+  it('runs in the resolved zone, so a local-time Date reads as that zone says', () => {
     // A zone-less ISO string is parsed as LOCAL time by ES2015+. Under any
-    // non-UTC zone these two differ, which is precisely how a date assertion
-    // starts passing in Berlin and failing in Denver.
-    expect(new Date('2026-01-15T12:00:00').getTime()).toBe(Date.UTC(2026, 0, 15, 12, 0, 0));
-    expect(new Date('2026-07-15T12:00:00').getTime()).toBe(Date.UTC(2026, 6, 15, 12, 0, 0));
+    // unpinned zone these differ from the recorded values, which is precisely how
+    // a date assertion starts passing in Berlin and failing in Denver.
+    //
+    // Asserted against RUN_TZ's hand-checked facts rather than against UTC's
+    // literals, because `test:dst` runs this whole suite in America/New_York and
+    // a hardcoded `Date.UTC(..., 12)` would then describe a clock the run is not
+    // using. The DST row's two values differ by an hour, so a zone pin that
+    // silently reverted to UTC fails there rather than passing.
+    const facts = zoneFacts(RUN_TZ);
+    expect(new Date('2026-01-15T12:00:00').getTime()).toBe(facts.winterNoon);
+    expect(new Date('2026-07-15T12:00:00').getTime()).toBe(facts.summerNoon);
   });
 
-  it('reports a zero UTC offset in both halves of the year, so no DST transition exists', () => {
-    // Checked in January AND July: a zone such as America/New_York has a
-    // non-zero offset in both, but a zone such as Europe/London has offset 0 in
-    // January only — asserting one month would accept it and then break every
-    // summer.
-    expect(new Date(Date.UTC(2026, 0, 15)).getTimezoneOffset()).toBe(0);
-    expect(new Date(Date.UTC(2026, 6, 15)).getTimezoneOffset()).toBe(0);
+  it('reports the resolved zone’s UTC offset in both halves of the year', () => {
+    // Checked in January AND July, because one month is not enough to identify a
+    // zone: Europe/London has offset 0 in January only, so a January-only
+    // assertion accepts it and then breaks every summer. In the DST leg the two
+    // months differ (EST 300, EDT 240), which is the transition the leg exists
+    // to make reachable.
+    const facts = zoneFacts(RUN_TZ);
+    expect(new Date(Date.UTC(2026, 0, 15)).getTimezoneOffset()).toBe(facts.winterOffsetMinutes);
+    expect(new Date(Date.UTC(2026, 6, 15)).getTimezoneOffset()).toBe(facts.summerOffsetMinutes);
   });
 
-  it('resolves Intl to the pinned timezone', () => {
-    expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(PINNED_TZ);
-    expect(process.env.TZ).toBe(PINNED_TZ);
-    // The ordinary suites run with `HVAULT_TZ` unset, so the resolved zone IS the
-    // pin. Stated here because the two assertions above would also hold if the
-    // resolver had silently defaulted to something else that happens to be UTC.
-    expect(RUN_TZ).toBe(PINNED_TZ);
+  it('keeps the DEFAULT zone free of DST transitions, which is why it is the default', () => {
+    // The invariant the two assertions above used to carry implicitly. It is a
+    // statement about PINNED_TZ, so it holds in either leg — unlike "this run has
+    // a zero offset", which the DST leg deliberately falsifies.
+    expect(zoneFacts(PINNED_TZ).winterOffsetMinutes).toBe(0);
+    expect(zoneFacts(PINNED_TZ).summerOffsetMinutes).toBe(0);
+    expect(zoneFacts(DST_TZ).winterOffsetMinutes).not.toBe(zoneFacts(DST_TZ).summerOffsetMinutes);
+  });
+
+  it('honours HVAULT_TZ when the DST gate sets it, rather than falling back to the pin', () => {
+    // The other half of `dst-gate.mjs`'s zone probe, and it closes the failure the
+    // allowlist cannot see. `resolveRunTz` THROWS on a WRONG zone but returns the
+    // pin for a MISSING one — so if `HVAULT_TZ` reached this worker and the config
+    // failed to read it, `RUN_TZ` would be UTC, every assertion above would pass,
+    // and `test:dst` would report a green leg in a zone it never ran in.
+    //
+    // Conditional because this file runs in BOTH legs: on the push tier the
+    // variable is genuinely absent and there is nothing to check.
+    const requested = process.env['HVAULT_TZ'];
+    if (requested !== undefined && requested.trim() !== '') {
+      expect(RUN_TZ, 'HVAULT_TZ was set but the harness did not resolve to it').toBe(
+        requested.trim(),
+      );
+      expect(process.env.TZ).toBe(requested.trim());
+    }
+  });
+
+  it('checks BOTH recorded zones against the platform, not only the one this run uses', () => {
+    // Without this, `ZONE_FACTS[DST_TZ]` is only ever compared with reality when a
+    // T2 gate runs, so a swapped 300/240 would sit green on every push and surface
+    // as a mysterious DST failure at release time. Read through `Intl` with an
+    // EXPLICIT `timeZone`, which is independent of the zone this process is in, so
+    // the whole table is validated in either leg.
+    const offsetMinutes = (zone: string, instant: number): number => {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: zone,
+        timeZoneName: 'longOffset',
+      }).formatToParts(new Date(instant));
+      const name = parts.find((part) => part.type === 'timeZoneName')?.value ?? '';
+      // 'GMT-05:00', or plain 'GMT' for a zero offset.
+      const matched = /GMT([+-])(\d{2}):(\d{2})/.exec(name);
+      if (!matched) return 0;
+      const magnitude = Number(matched[2]) * 60 + Number(matched[3]);
+      // `getTimezoneOffset()` reports minutes BEHIND UTC as positive, which is the
+      // opposite sign to the offset `Intl` prints. The `|| 0` normalises NEGATIVE
+      // ZERO: some ICU builds render UTC as `GMT+00:00`, which negates to `-0`,
+      // and `Object.is(-0, +0)` is false — so without it this fails on the one
+      // zone it is least interesting about.
+      return (matched[1] === '-' ? magnitude : -magnitude) || 0;
+    };
+
+    for (const zone of [PINNED_TZ, DST_TZ]) {
+      const facts = zoneFacts(zone);
+      expect(offsetMinutes(zone, Date.UTC(2026, 0, 15)), `${zone} winter`).toBe(
+        facts.winterOffsetMinutes,
+      );
+      expect(offsetMinutes(zone, Date.UTC(2026, 6, 15)), `${zone} summer`).toBe(
+        facts.summerOffsetMinutes,
+      );
+      // And the recorded instants agree with those offsets: a zone-less noon is
+      // local noon, so it is UTC noon pushed forward by the offset.
+      expect(facts.winterNoon, `${zone} winter noon`).toBe(
+        Date.UTC(2026, 0, 15, 12) + facts.winterOffsetMinutes * 60_000,
+      );
+      expect(facts.summerNoon, `${zone} summer noon`).toBe(
+        Date.UTC(2026, 6, 15, 12) + facts.summerOffsetMinutes * 60_000,
+      );
+    }
+  });
+
+  it('refuses a zone nobody has recorded facts for', () => {
+    // `zoneFacts` answering with UTC's numbers for an unknown zone would make
+    // every assertion above it pass while describing a different clock.
+    expect(() => zoneFacts('Europe/Berlin')).toThrow(/no recorded clock facts/i);
+  });
+
+  it('resolves Intl to the resolved timezone', () => {
+    expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(RUN_TZ);
+    expect(process.env.TZ).toBe(RUN_TZ);
+    // The ordinary suites run with `HVAULT_TZ` unset, so the resolved zone is the
+    // pin; `test:dst` and the property gate's DST legs are the two that set it.
+    // Stated as a property of the RESOLVER rather than of this run, because the
+    // latter is exactly what stopped this file from being runnable in both.
+    expect(resolveRunTz(undefined)).toBe(PINNED_TZ);
   });
 
   it('lets the property gate select the DST zone, from an allowlist of exactly two', () => {
@@ -212,7 +299,10 @@ describe('determinism harness — the runner is configured for it', () => {
   });
 
   it('pins the timezone and locale in the config env, not only in the setup file', () => {
-    expect(config.test?.env?.['TZ']).toBe(PINNED_TZ);
+    // RUN_TZ, not PINNED_TZ: the config reads RUN_TZ so the DST legs are not
+    // silently clobbered back to UTC, and a hardcoded constant would only ever be
+    // asserted in the leg that does not need it.
+    expect(config.test?.env?.['TZ']).toBe(RUN_TZ);
     expect(config.test?.env?.['LANG']).toBe(PINNED_LOCALE);
     expect(config.test?.env?.['LC_ALL']).toBe(PINNED_LOCALE);
   });

@@ -147,6 +147,7 @@ import { api, clearCsrfToken } from '../src/services/api/client.js';
 import { useAutoLock } from '../src/hooks/useAutoLock.js';
 import { useConnectionStatus } from '../src/hooks/useConnectionStatus.js';
 import type { CryptoService as CryptoServiceType } from '../src/services/crypto/cryptoService.js';
+import { advanceClockBy } from './clock.js';
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -887,7 +888,7 @@ describe('useAutoLock — hidden-tab locking is opt-in', () => {
 
     // Model a suspend: 30 minutes of wall clock pass with no timer allowed to run.
     act(() => {
-      vi.setSystemTime(Date.now() + 30 * MINUTE);
+      advanceClockBy(30 * MINUTE);
     });
     expect(mockLock).not.toHaveBeenCalled();
 
@@ -906,7 +907,7 @@ describe('useAutoLock — hidden-tab locking is opt-in', () => {
 
     hide();
     act(() => {
-      vi.setSystemTime(Date.now() + 2 * MINUTE);
+      advanceClockBy(2 * MINUTE);
     });
     reveal();
 
@@ -1018,7 +1019,7 @@ describe('useAutoLock — deadlines are wall-clock, not elapsed-timer', () => {
     // `setSystemTime` moves only the clock, which is what a resumed machine looks
     // like to the page.
     act(() => {
-      vi.setSystemTime(Date.now() + 20 * MINUTE);
+      advanceClockBy(20 * MINUTE);
     });
     expect(mockLock).not.toHaveBeenCalled();
 
@@ -1033,7 +1034,7 @@ describe('useAutoLock — deadlines are wall-clock, not elapsed-timer', () => {
     renderHook(() => useAutoLock());
 
     act(() => {
-      vi.setSystemTime(Date.now() + 20 * MINUTE);
+      advanceClockBy(20 * MINUTE);
       // A single poll tick is enough; the check is a Date.now() comparison, not a
       // count of elapsed timer time.
       vi.advanceTimersByTime(20_000);

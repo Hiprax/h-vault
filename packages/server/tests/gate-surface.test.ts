@@ -52,11 +52,15 @@ import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest
 import sharedMutationConfig from '../../shared/vitest.mutation.config';
 import serverMutationConfig from '../vitest.mutation.config';
 import clientMutationConfig from '../../client/vitest.mutation.config';
+import sharedFlakeConfig from '../../shared/vitest.flake.config';
+import serverFlakeConfig from '../vitest.flake.config';
+import clientFlakeConfig from '../../client/vitest.flake.config';
 import { CORE_MODULES, MUTATION_LEGS } from '../../../scripts/ci/lib/mutation-scope.mjs';
 import playwrightConfig from '../../../playwright.config';
 import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
+import flakePlaywrightConfig, { FLAKE_REPEAT_EACH } from '../../../playwright.flake.config';
 import { A11Y_BLOCKING_IMPACTS, A11Y_VIEWS, A11Y_VIEW_IDS } from '../../../e2e/a11yViews';
-import { DST_TZ, PINNED_TZ, RUN_TZ } from '../../../tests/harness/determinism';
+import { DST_TZ, PINNED_TZ, RUN_TZ, resolveRunTz } from '../../../tests/harness/determinism';
 import {
   allPropertyJunitReports,
   propertyJunitReport,
@@ -322,8 +326,30 @@ describe('tiers', () => {
     //   keeps `mutation.*` in the baseline as a floor the gate enforces itself
     //   and turns the fields back into hard failures the moment this task stops
     //   being a registered tier-2 gate.
+    //
+    //   `dst` — the whole suite, once, in America/New_York. Like `fuzz`,
+    //   `upgrade` and `recovery` it narrows nothing and every one of its tests
+    //   also runs on every push; what T2 buys is the one thing the push tier
+    //   structurally cannot, which is a different clock. `test:property` already
+    //   runs two zones, but only over `tests/property/**`, so ~7,400 tests had
+    //   never been executed anywhere local time and UTC disagree.
+    //
+    //   `flake` — ten complete runs of all three suites in ten different
+    //   shuffled orders, plus the Playwright suite three times over: about an
+    //   hour, and the second-longest gate here after the oracle. It measures the
+    //   property every other gate assumes, which is that the suite's verdict does
+    //   not depend on the order it happened to run in.
     const t2 = gates.filter((gate) => gate.tier === 2).map((gate) => gate.id);
-    expect(t2).toEqual(['fuzz', 'resource', 'upgrade', 'recovery', 'deploy', 'mutation']);
+    expect(t2).toEqual([
+      'fuzz',
+      'resource',
+      'upgrade',
+      'recovery',
+      'dst',
+      'deploy',
+      'flake',
+      'mutation',
+    ]);
   });
 
   it('treats tiers as cumulative, so verify is a superset of verify:fast', () => {
@@ -519,13 +545,19 @@ describe('machine-readable reports', () => {
       // would leave the last one standing in for all six.
       const output = junitOutputFile(config.test?.reporters);
       expect(output).toBeDefined();
-      // This suite runs with `HVAULT_TZ` unset, so the resolved zone is the pin
-      // and the name carries the `-utc` suffix. Asserted through the helper rather
-      // than as a literal, so the two cannot drift.
+      // The name carries the suffix for whichever zone THIS run resolved.
+      // Asserted through the helper rather than as a literal, so the two cannot
+      // drift.
       expect(path.resolve(output!)).toBe(
         path.join(repoRoot, '.testfortress', 'reports', propertyJunitReport(pkg, RUN_TZ)),
       );
-      expect(RUN_TZ, 'the ordinary suite must run in the pinned zone').toBe(PINNED_TZ);
+      // What used to be asserted here was `RUN_TZ === PINNED_TZ`, i.e. "the
+      // ordinary suite runs in UTC". That was true until `test:dst` existed, and
+      // it is now false BY DESIGN in that gate's leg — this whole file is one of
+      // the suites it runs in America/New_York. The invariant worth keeping is
+      // the one about the RESOLVER: an unset `HVAULT_TZ` yields the pin, never
+      // the machine's zone.
+      expect(resolveRunTz(undefined), 'an unset HVAULT_TZ must resolve to the pin').toBe(PINNED_TZ);
       expect(propertyJunitReport(pkg, DST_TZ)).not.toBe(propertyJunitReport(pkg, PINNED_TZ));
 
       expect(suite.length, `${name} property suite`).toBeGreaterThan(0);
@@ -883,6 +915,192 @@ describe('machine-readable reports', () => {
     const declared = nonComposite.flatMap(([, task]) => reportsOf(task));
     expect(declared).not.toContain('junit-fuzz-client.xml');
     expect(declared).not.toContain('junit-fuzz-server.xml');
+  });
+
+  it.each([
+    ['shared', sharedFlakeConfig, sharedVitestConfig],
+    ['server', serverFlakeConfig, serverVitestConfig],
+    ['client', clientFlakeConfig, clientVitestConfig],
+  ])('runs the %s flake leg against the WHOLE suite, into its own report', (name, flake, base) => {
+    // The same contract as the mutation configs, and it matters more here for one
+    // reason: `test:flake` and `test:dst` BOTH drive these configs, so a narrowed
+    // include would silently shrink two gates at once. Nothing about a flake hunt
+    // or a timezone re-run justifies asking a subset of the suite.
+    expect(flake.test?.include).toEqual(base.test?.include);
+    expect(flake.test?.exclude).toEqual(base.test?.exclude);
+
+    // Its own JUnit, and it must NOT be the canonical one: `test:flake` runs this
+    // suite ten times, so pointed at `junit-<pkg>.xml` it would leave the tenth
+    // run standing in for `test:unit`/`test:integration`'s evidence, which is
+    // what `audit:ratchet:full` reads the headcount from.
+    const output = junitOutputFile(flake.test?.reporters);
+    expect(output, `${name} flake JUnit`).toBeDefined();
+    expect(path.resolve(output!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', `junit-flake-${name}.xml`),
+    );
+
+    // Coverage OFF, and this is correctness rather than speed: ten instrumented
+    // runs would race the real run's `coverage/.tmp` directory and overwrite the
+    // LCOV document the measured-file-set defence is computed from.
+    expect(flake.test?.coverage?.enabled).toBe(false);
+    // Vitest resolves `root` from the CWD, so an invocation from the repository
+    // root would otherwise scan the wrong tree.
+    expect(flake.test?.root).toBe(path.join(repoRoot, 'packages', name));
+    // Shuffling is what makes a differently-seeded run a different ORDER. It is
+    // inherited rather than restated, so assert it survived the spread.
+    expect(flake.test?.sequence?.shuffle).toBe(true);
+    // And the parallelism the gate claims to inherit. `flake-run.mjs` states
+    // "parallelism is inherited, never reduced" as a load-bearing decision, and
+    // until this line nothing enforced it: pinning either config to one worker
+    // would hide exactly the shared state ten shuffled runs exist to find, while
+    // every message the gate prints stayed true.
+    expect(flake.test?.fileParallelism).not.toBe(false);
+    // The runner names TWO more ways to reduce it — "no pool override, no worker
+    // cap" — and in Vitest 4 they are the same key. `poolOptions.forks.singleFork`
+    // was the Vitest 3 spelling and it is GONE from this version's config surface
+    // entirely (the base config carries a note about the same removal), so a line
+    // asserting it stayed undefined guarded a key nothing reads. `maxWorkers` is
+    // what caps workers here, and it is pinned to the BASE config's value rather
+    // than to `undefined`: that is the "inherited, never reduced" claim stated
+    // literally, and it still fails if this leg halves a cap the base config sets.
+    expect(flake.test?.maxWorkers).toBe(base.test?.maxWorkers);
+    // And never one, which the equality check alone would wave through if the
+    // base config were ever pinned and this leg faithfully inherited it.
+    expect(flake.test?.maxWorkers).not.toBe(1);
+  });
+
+  it('runs the end-to-end flake leg three times per test, with retries pinned off', () => {
+    // `repeatEach` is the SAMPLE and `retries: 0` is the verdict: a retried run
+    // reports that a test passed eventually, which is precisely what this gate
+    // exists to stop anyone claiming. Both are pinned in the config rather than
+    // passed as flags, so a future edit of the runner cannot drop them while the
+    // gate keeps printing a flake rate.
+    expect(flakePlaywrightConfig.repeatEach).toBe(FLAKE_REPEAT_EACH);
+    expect(FLAKE_REPEAT_EACH).toBeGreaterThan(1);
+    expect(flakePlaywrightConfig.retries).toBe(0);
+    // Unconditionally, not `!!process.env.CI`: a stray `.only` would shrink the
+    // suite to one test, and three green executions of one test would be reported
+    // as a clean sample of two hundred.
+    expect(flakePlaywrightConfig.forbidOnly).toBe(true);
+    // No `testMatch`: unlike the a11y config, this leg's whole claim is about the
+    // suite `test:e2e` runs.
+    expect(flakePlaywrightConfig.testMatch).toBeUndefined();
+
+    // Its own JUnit — `junit-e2e.xml` would overwrite the E2E gate's evidence —
+    // and no HTML reporter, which would replace `playwright-report/` with this
+    // run and send an investigation to the wrong artifact.
+    const junit = playwrightReporter('junit', flakePlaywrightConfig);
+    expect(junit).toBeDefined();
+    expect((junit as { outputFile: string }).outputFile).toBe(
+      '.testfortress/reports/junit-flake-e2e.xml',
+    );
+    expect(playwrightReporter('html', flakePlaywrightConfig)).toBeUndefined();
+
+    // The runner restates the count because it is a `.mjs` file and this is a
+    // TypeScript module; the two must agree or the report claims a sample the run
+    // did not take.
+    const runner = readFileSync(path.join(repoRoot, 'scripts', 'ci', 'flake-run.mjs'), 'utf-8');
+    expect(runner).toContain(`const E2E_REPEAT_EACH = ${String(FLAKE_REPEAT_EACH)};`);
+  });
+
+  it('actually varies the order it runs in, and actually runs the end-to-end leg', () => {
+    const runner = readFileSync(path.join(repoRoot, 'scripts', 'ci', 'flake-run.mjs'), 'utf-8');
+
+    // The pre-flight checks the PLANNED seeds; it cannot see whether they reach
+    // vitest. Delete the argument and all ten runs fall back to the config-pinned
+    // `sequence.seed` — ten identical orders, a green pre-flight, a green
+    // `flake.json`, and the gate measuring one order ten times. This is the line
+    // that notices, and it is the same shape as the `E2E_REPEAT_EACH` check below:
+    // a constant restated in a `.mjs` runner needs something pinning it.
+    expect(runner).toContain('`--sequence.seed=${String(orderSeed)}`');
+    expect(runner).toContain('const orderSeedFor = (index) => dataSeed + index;');
+
+    // And the end-to-end half. `failures` spans both halves while `runs` counts
+    // only the unit half, so deleting the e2e leg would LOWER `failures` — an
+    // apparent improvement — leave `runs` at ten, and pass.
+    expect(runner).toContain("runNpm(['run', 'test:flake:e2e']");
+    expect(Object.keys(pkg.scripts)).toContain('test:flake:e2e');
+  });
+
+  it('measures a flake RATE, and records the sample size beside it', () => {
+    // Both fields, in opposite directions, and neither is optional. Without
+    // `flake.runs` ratcheting UP, a gate quietly reduced to three runs would
+    // report a cleaner bound over less evidence and nothing would object; without
+    // `flake.failures` ratcheting DOWN, an observed flake could be accepted into
+    // the baseline and stop being a failure at all.
+    const ratchet = readFileSync(
+      path.join(repoRoot, 'scripts', 'ci', 'ratchet-check.mjs'),
+      'utf-8',
+    );
+    expect(ratchet).toContain("'flake.runs': 'higher'");
+    expect(ratchet).toContain("'flake.failures': 'lower'");
+    expect(ratchet).toContain("'flake.e2eExecutions': 'higher'");
+
+    // The direction table is necessary and NOT sufficient, and asserting only it
+    // would certify a ratchet that guards nothing: `ratchet-check.mjs` iterates
+    // the BASELINE's fields, so a direction declared for a field the baseline does
+    // not carry is never compared and never even reported as unmeasured.
+    //
+    // That requirement is asserted HERE as source text and enforced THERE at run
+    // time, and the split is load-bearing rather than stylistic. This file is part
+    // of the server suite, and `test:flake` runs that suite ten times — so an
+    // assertion here that the baseline already carries a flake record would be a
+    // postcondition of the run asserting itself mid-run. It would fail in all ten
+    // runs, `flake.json` would report ten failures, and `--accept` refuses a
+    // failing report: the record could never be written and no change to
+    // production code could ever make the gate green. `FLAKE_REQUIRED_FIELDS` is
+    // the mutation oracle's answer to the identical bootstrap, and it binds from
+    // the first real run: the moment a baseline carries a `flake` block, all three
+    // fields are mandatory, and `meta.fields` makes deleting the block a
+    // regression in its own right.
+    expect(ratchet).toContain('const FLAKE_REQUIRED_FIELDS = [');
+    expect(ratchet).toContain("'flake.runs', 'flake.failures', 'flake.e2eExecutions'");
+    expect(ratchet).toContain('...(baselineRaw.flake ? FLAKE_REQUIRED_FIELDS : []),');
+
+    // And once the record does exist, its CONTENT is checked — this half is
+    // conditional on presence only, never on the numbers, so a sample that shrank
+    // or a failure that got normalised into the baseline still turns this red.
+    const baseline = JSON.parse(
+      readFileSync(path.join(repoRoot, '.testfortress', 'baseline.json'), 'utf-8'),
+    ) as { flake?: { runs?: number; failures?: number; e2eExecutions?: number } };
+    if (baseline.flake) {
+      expect(baseline.flake.runs).toBeGreaterThanOrEqual(10);
+      expect(baseline.flake.failures).toBe(0);
+      expect(baseline.flake.e2eExecutions).toBeGreaterThan(0);
+    }
+    // Deferred, conditional on this exact tier — the rule that stops a gate being
+    // retired by moving it somewhere it never runs.
+    expect(ratchet).toContain("owner: 'test:flake', tier: 2");
+    expect(manifest.tasks['test:flake']!.tier).toBe(2);
+
+    // Only the JSON is declared. The per-run JUnit documents are written and read
+    // by the gate, but declaring them would make `tests.count` UNMEASURED on
+    // every push — the rule that shaped `test:fuzz`.
+    expect(reportsOf(manifest.tasks['test:flake']!)).toEqual(['flake.json']);
+    const declared = nonComposite.flatMap(([, task]) => reportsOf(task));
+    for (const name of ['shared', 'client', 'server', 'e2e']) {
+      expect(declared).not.toContain(`junit-flake-${name}.xml`);
+    }
+    // Its tests all run elsewhere too, so counting them here would ratchet the
+    // same suite eleven times over.
+    expect(manifest.tasks['test:flake']!.countsTests).toBe(false);
+  });
+
+  it('runs the DST gate in the harness-allowlisted zone, and only there', () => {
+    // The zone is restated in a `.mjs` runner because it cannot import this
+    // TypeScript module; if the two ever disagree the gate reports a zone it did
+    // not run in. The harness itself THROWS on any zone outside its allowlist, so
+    // a typo fails at the first import rather than quietly running in UTC and
+    // reporting a green DST leg.
+    const runner = readFileSync(path.join(repoRoot, 'scripts', 'ci', 'dst-gate.mjs'), 'utf-8');
+    expect(runner).toContain(`const DST_TZ = '${DST_TZ}';`);
+    expect(DST_TZ).not.toBe(PINNED_TZ);
+    expect(() => resolveRunTz(DST_TZ)).not.toThrow();
+
+    expect(reportsOf(manifest.tasks['test:dst']!)).toEqual(['dst.json']);
+    expect(manifest.tasks['test:dst']!.tier).toBe(2);
+    // Every one of its tests also runs on the push tier in UTC.
+    expect(manifest.tasks['test:dst']!.countsTests).toBe(false);
   });
 
   it('runs the accessibility suite from its own config, its own report and its own files', () => {

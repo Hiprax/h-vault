@@ -1957,11 +1957,19 @@ describe('Auth API', () => {
 
     it('should return 401 with an expired access token', async () => {
       const testUser = await createTestUser();
+
+      // There is deliberately NO wait here, and it is worth saying why, because
+      // there used to be a 1.1-second one and it pinned nothing.
+      //
+      // `generateExpiredToken` signs with `expiresIn: '0s'`, so `exp === iat`:
+      // the token is expired at the very instant it is minted. jsonwebtoken
+      // rejects when `now >= exp` (not `>`), with a default `clockTolerance` of
+      // zero, so the 401 holds in EVERY ordering, including a request served
+      // inside the same second. Measured: with the wait removed the test still
+      // passes, which by Law 1 makes the wait decoration rather than
+      // synchronization. Do not re-add it — if `clockTolerance` is ever
+      // configured, this test going red is the correct signal.
       const expiredToken = generateExpiredToken(testUser.id);
-
-      // Wait a moment for the token to actually expire (issued with 0s expiry)
-      await new Promise((resolve) => setTimeout(resolve, 1100));
-
       const res = await withCsrf(agent.post(`${API}/auth/logout`), csrf, expiredToken);
 
       expect(res.status).toBe(401);

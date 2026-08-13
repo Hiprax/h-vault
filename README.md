@@ -1038,17 +1038,22 @@ npm run ci -- --json            # one JSON document describing the run
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import              | _new_                      |
 | `resource`         | T2   | Volume and memory budgets over a 10,000-item vault: streaming backup collection, a full-vault key rotation, a 25 MiB restore, the cleanup sweeps' query plans | _new_                      |
 | `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a journey through it, data across a restart, an idempotent redeploy                 | _new_                      |
+| `dst`              | T2   | The whole suite again in a DST-observing zone, so an assertion that is right only because local time and UTC agree fails here rather than on a user's machine | _new_                      |
+| `flake`            | T2   | Ten complete runs of every suite in ten different shuffled orders, plus the Playwright suite three times over with retries off                                | _new_                      |
 | `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                                           | `sast` job                 |
 | `coverage`         | T1   | Each package against its recorded line/branch/function coverage, and 100% of the production lines the change touched                                          | _new_                      |
 | `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                                      | _new_                      |
 
-Three gates sit in **T2** — `fuzz`, `resource` and `deploy` — so they run in `npm run verify:full`
-and before a release rather than on every push. Each parking is deliberate rather than a quiet
-retirement: the fuzz suites also run inside the ordinary test gates on every push; the deployment
-drill's fast sibling `smoke` covers the built artifact on every push; and the volume budgets measure
-wall-clock time and peak memory while building ten-thousand-item vaults, which takes a minute and is
-only meaningful in a process running nothing else, so measuring them beside three other workers would
-turn a budget into a coin toss. One more command sits outside the tiers entirely:
+Eight gates sit in **T2** — `fuzz`, `resource`, `upgrade`, `recovery`, `dst`, `deploy`, `flake` and
+`mutation` — so they run in `npm run verify:full` and before a release rather than on every push. Each
+parking is deliberate rather than a quiet retirement: the fuzz, upgrade, recovery and DST suites all
+run inside the ordinary test gates on every push, so only the separately-reported, deadline-bounded
+run waits; the deployment drill's fast sibling `smoke` covers the built artifact on every push; and
+the volume budgets measure wall-clock time and peak memory while building ten-thousand-item vaults,
+which takes a minute and is only meaningful in a process running nothing else, so measuring them
+beside three other workers would turn a budget into a coin toss. The last two are the long ones:
+`flake` runs the whole suite ten times, which is about an hour, and `mutation` re-runs it once per
+mutant, which is hours. One more command sits outside the tiers entirely:
 
 ```bash
 npm run ci:local                # a temporary worktree at HEAD + `npm ci` + verify:full
@@ -1176,6 +1181,8 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 | `npm run test:resource`        | The volume and memory budgets on their own      |
 | `npm run test:upgrade`         | The previous release's vault and `.env`, read   |
 | `npm run test:recovery`        | The backup-restore and crash-consistency drills |
+| `npm run test:dst`             | The whole suite again, in a DST-observing zone  |
+| `npm run test:flake`           | Ten shuffled runs, plus E2E three times over    |
 | `npm run report`               | Collect the gates' warning counts               |
 | `npm run verify:selftest`      | Prove every registered gate can still fail      |
 | `npm run audit:integrity`      | Markers that weaken a gate, against the ledger  |

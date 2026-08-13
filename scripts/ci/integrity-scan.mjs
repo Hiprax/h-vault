@@ -231,8 +231,17 @@ const SELF_DESCRIBING = [
 const isTestPath = (p) =>
   /(?:^|\/)(?:tests?|__tests__|e2e|spec|specs)\//.test(p) ||
   /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(p);
+// The VARIANT configs count too, and that is not a detail. This repository runs
+// several suites through `vitest.<name>.config.ts` and `playwright.<name>.config.ts`
+// — flake, dst, property, mutation, a11y, fuzz, resource, upgrade, recovery — and
+// a `workers: 1` or a `retries: 2` in one of those neuters a real gate exactly as
+// it would in the base config. Matching only the base names left every variant
+// outside FLAKE-HIDE's scope, which mattered the moment `test:flake` existed: its
+// whole claim is that the suite is run in parallel, in many orders, without
+// retries, and the two files that could silently withdraw that claim were the two
+// the rule could not see.
 const isRunnerConfigPath = (p) =>
-  /(?:^|\/)(?:vitest\.config|vitest\.workspace|playwright\.config|jest\.config|karma\.conf|\.mocharc)\./.test(
+  /(?:^|\/)(?:vitest\.[\w.]*config|vitest\.workspace|playwright\.[\w.]*config|jest\.[\w.]*config|karma\.conf|\.mocharc)\./.test(
     p,
   );
 

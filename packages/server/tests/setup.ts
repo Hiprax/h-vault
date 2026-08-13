@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { beforeAll, afterAll, afterEach, beforeEach } from 'vitest';
 import { applyDeterminismPins, printSeedBannerOnce } from './determinism.js';
 import { installEgressGuard, withEgressAllowed } from './egressGuard.js';
+import { uninstallTestClock } from './clock.js';
 import { applyMongoKernelCompat } from './mongoKernelCompat.js';
 import { buildModelIndexes, createStandaloneMongo, setStandaloneUri } from './mongoHarness.js';
 import { installRepoWriteGuard } from './tempDir.js';
@@ -162,6 +163,27 @@ afterEach(async () => {
   // assignment above, which is the hazard that keeps every other production
   // module out of this file.
   clearLoginThrottle();
+});
+
+/**
+ * The safety net under the test clock.
+ *
+ * `tests/clock.ts` restores in every place it is used — `withTestClock`'s
+ * `finally`, and a describe-scoped `afterEach` beside each bare
+ * `installTestClock`. This makes that structural rather than a matter of
+ * per-file discipline: a file that installs a fake clock and fails before its own
+ * cleanup would otherwise leave the whole WORKER frozen, and every later file in
+ * it would then run against an instant that stopped inside a test it has never
+ * heard of — an order-dependent failure produced by the very mechanism installed
+ * to remove one, and one that `test:flake` would surface as a mystery.
+ *
+ * `vi.useRealTimers()` is a no-op when no fake clock is installed (asserted in
+ * `packages/server/tests/clock.test.ts`), and `sequence.hooks: 'stack'` runs this
+ * hook LAST — after every describe-scoped `afterEach` — so a suite that installs
+ * its clock in a `beforeEach` is unaffected.
+ */
+afterEach(() => {
+  uninstallTestClock();
 });
 
 afterAll(async () => {

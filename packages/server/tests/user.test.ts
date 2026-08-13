@@ -12,6 +12,7 @@ import { hashToken } from '../src/utils/token.js';
 import { MAX_SESSIONS, MAX_TRUSTED_DEVICES } from '@hvault/shared';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
+import { advanceClockBy, withTestClock } from './clock.js';
 
 const SESSION_SECRET = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
 
@@ -815,16 +816,20 @@ describe('User routes', () => {
         });
 
       // Issue a new access token AFTER the password change so it passes the
-      // passwordChangedAt check in the JWT strategy. JWT iat has 1-second
-      // precision, so we wait >1s to ensure the new iat is strictly after
-      // the (ms-precision) passwordChangedAt ceiling.
-      await new Promise((r) => setTimeout(r, 1100));
-      const { generateAccessToken } = await import('./helpers.js');
-      const freshAccessToken = generateAccessToken(user.id);
-
-      const res = await agent
-        .get('/api/v1/user/audit-log?page=1&limit=10')
-        .set('Authorization', authHeader(freshAccessToken));
+      // passwordChangedAt check in the JWT strategy. A JWT `iat` has 1-second
+      // precision while `passwordChangedAt` is millisecond-precision and ceiled,
+      // so a token minted in the same second is legitimately rejected. That used
+      // to be bought with a real 1.1-second sleep; the clock seam buys the same
+      // second without spending it, and its default `toFake: ['Date']` leaves the
+      // supertest round trip's own timers running. See tests/clock.ts.
+      const res = await withTestClock({}, async () => {
+        advanceClockBy(1_100);
+        const { generateAccessToken } = await import('./helpers.js');
+        const freshAccessToken = generateAccessToken(user.id);
+        return agent
+          .get('/api/v1/user/audit-log?page=1&limit=10')
+          .set('Authorization', authHeader(freshAccessToken));
+      });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
