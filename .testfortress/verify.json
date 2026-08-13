@@ -224,6 +224,13 @@
       "report": ["deploy.json", "deploy.log"],
       "requires": ["docker"]
     },
+    "coverage:check": {
+      "cmd": "npm run coverage:check",
+      "tier": 1,
+      "gate": "every package holds the line, branch and function coverage recorded in baseline.json, every production line this change touched is covered — with a dated COV-DIFF-EXEMPT ledger entry the only way to excuse one — and no changed production file sits outside the measured scope, where its patch coverage would read as 100% over nothing",
+      "report": "coverage.json",
+      "requires": ["diff-cover"]
+    },
     "audit:bundle": {
       "cmd": "npm run audit:bundle",
       "tier": 1,

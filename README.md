@@ -1038,6 +1038,7 @@ npm run ci -- --json            # one JSON document describing the run
 | `resource`         | T2   | Volume and memory budgets over a 10,000-item vault: streaming backup collection, a full-vault key rotation, a 25 MiB restore, the cleanup sweeps' query plans | _new_                      |
 | `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a journey through it, data across a restart, an idempotent redeploy                 | _new_                      |
 | `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                                           | `sast` job                 |
+| `coverage`         | T1   | Each package against its recorded line/branch/function coverage, and 100% of the production lines the change touched                                          | _new_                      |
 | `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                                      | _new_                      |
 
 Three gates sit in **T2** — `fuzz`, `resource` and `deploy` — so they run in `npm run verify:full`

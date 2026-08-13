@@ -140,6 +140,34 @@ export const DEFECTS = {
     evidence: (text) => /"path":\s*"tasks"/.test(text) && /format:check/.test(text),
   },
 
+  'coverage:check': {
+    // A NEW production module, deliberately, and not an uncovered line added to
+    // an existing one. The distinction is the whole point of the case.
+    //
+    // This harness copies the coverage reports rather than re-running the
+    // suites, so a line added to a measured file has no entry in the report at
+    // all — and diff-cover, correctly, only reports on lines it can find
+    // coverage data for. The plant would therefore be INVISIBLE to the
+    // patch-coverage half, and the case would quietly prove nothing.
+    //
+    // A whole new file is visible to the half written for exactly it: a file in
+    // no coverage report is indistinguishable from a file that does not exist,
+    // so unless the gate enumerates the changed production files ITSELF and
+    // checks them against the measured set, an entire untested module reads as
+    // 100% patch coverage over zero lines. That is the hole, and this is the
+    // defect that proves it is closed. The diff-cover half is exercised on the
+    // real tree, where the suites have run and the report describes it.
+    title: 'add a production module nothing has ever executed, so its changed lines are unmeasured',
+    create: {
+      'packages/shared/src/__selftest_uncovered.ts':
+        'export function selftestUncovered(value: number): number {\n' +
+        '  if (value > 0) return value * 2;\n' +
+        '  return -1;\n' +
+        '}\n',
+    },
+    evidence: (text) => /__selftest_uncovered/.test(text),
+  },
+
   'audit:ratchet:full': {
     title: 'raise a coverage percentage while the measured file set loses a file',
     mutate: {

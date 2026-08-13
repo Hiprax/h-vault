@@ -41,9 +41,10 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twenty-six gates including the full test suite, the export-format
-goldens, a smoke run of the built artifact, the browser bundle's size budgets, container
-builds with Trivy scanning, and CodeQL — and refuses the push if any of them fail. A
+pipeline locally — twenty-seven gates including the full test suite, the export-format
+goldens, patch coverage on the lines you changed, a smoke run of the built artifact, the
+browser bundle's size budgets, container builds with Trivy scanning, and CodeQL — and
+refuses the push if any of them fail. A
 commit that reaches `main` has already passed everything. Five further gates sit in the
 release tier: `fuzz`, whose suites still run inside the ordinary test gates on every push
 so that only the separately-reported, deadline-bounded run is held back; `resource`, the
@@ -94,10 +95,28 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
-### Six gates whose failure asks for something specific
+### Seven gates whose failure asks for something specific
 
-Most gates tell you what to fix. These six are worth reading before you meet them,
+Most gates tell you what to fix. These seven are worth reading before you meet them,
 because the obvious way past each of them is the wrong one.
+
+- **`coverage`** holds each package to the line, branch and function coverage already
+  recorded for it, and requires **100% coverage of the production lines your change
+  touches**. The package percentages are an average over thousands of lines, so a new
+  module with no tests at all barely moves them; this is the gate that notices. Three
+  things are worth knowing before you meet it. First, **branch coverage is the thin
+  metric** — server sits at 91.39% and client at 92.45%, so a handful of uncovered
+  `if`/`??`/`?.`/default-parameter arms in one new module will fail the run. Budget branch
+  tests, not just line tests. Second, a changed production file that appears in **no**
+  coverage report fails the gate by name, because a file nothing measured is otherwise
+  indistinguishable from a file that does not exist, and it would read as 100% patch
+  coverage over zero lines. Third, the **only** way to ship an uncovered line is a dated,
+  owned, expiring `COV-DIFF-EXEMPT` entry in `.testfortress/suppressions.json` naming that
+  file and bounding how many lines it excuses — there is no pragma, no ignore file and no
+  `--fail-under` to lower, and the entry stops excusing anything the day it expires. It
+  needs `diff-cover` on your `PATH` (`uv tool install diff-cover`, or
+  `pipx install diff-cover`); without it the gate reports **could not run** rather than
+  passing quietly.
 
 - **`deadcode`** runs `knip` (unused files, exports, exported types and dependencies, plus
   dependencies used without being declared) and `jscpd` (duplication). The answer to a

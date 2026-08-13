@@ -1,9 +1,12 @@
 {
   "version": 1,
   "recordedAt": "2026-08-13",
-  "commit": "5b5f7ed",
+  "commit": "ed63ecc",
   "tests": {
-    "count": 7463
+    "count": 7608
+  },
+  "coverage": {
+    "diff": 100
   },
   "warnings": {
     "lint": 0,
@@ -41,7 +44,7 @@
         ]
       },
       "tests": {
-        "count": 895
+        "count": 990
       }
     },
     "packages/server": {
@@ -117,7 +120,7 @@
         ]
       },
       "tests": {
-        "count": 2892
+        "count": 2939
       }
     },
     "packages/client": {
@@ -250,7 +253,7 @@
         ]
       },
       "tests": {
-        "count": 3473
+        "count": 3476
       }
     },
     "e2e": {
@@ -273,6 +276,7 @@
     "audit:secrets:full",
     "build",
     "ci:local",
+    "coverage:check",
     "deadcode",
     "engines",
     "format:check",
@@ -282,8 +286,10 @@
     "test:e2e",
     "test:fuzz",
     "test:integration",
+    "test:mutation",
     "test:observability",
     "test:property",
+    "test:recovery",
     "test:resource",
     "test:security",
     "test:smoke",
@@ -299,7 +305,7 @@
   "integrity": {
     "excludeHash": "4cb96b90dcc7465c",
     "gateFilesHash": "81179afcb986fb6a",
-    "selfHash": "62930283abc235b7",
+    "selfHash": "7d797faf6c2f5d21",
     "gitignoreHash": "47d310512d28d77e"
   },
   "meta": {
@@ -326,6 +332,7 @@
       "config.inputsExamined.actionlint",
       "config.inputsExamined.hadolint",
       "config.inputsExamined.spectral",
+      "coverage.diff",
       "deadcode.duplicateExports",
       "deadcode.unlistedBinaries",
       "deadcode.unlistedCatalogReferences",
@@ -434,7 +441,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 14 upgrade-path: the client leg of test:upgrade adds 10 tests to the client suite",
+  "reason": "Phase 17 coverage-gates: register coverage:check (patch coverage + per-package floors), pin coverage.diff at 100, and record the test counts Phases 14-16 added",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

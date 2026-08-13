@@ -358,6 +358,72 @@ describe('audit:ratchet', () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it('fails when the percentage RISES while linesTotal falls and the file set is intact', () => {
+    // The purest form of the cheat, and the one the measured-file-set defence
+    // cannot see: both files are still there, so `filesMeasured` is unchanged
+    // and its superset check passes. What moved is the DENOMINATOR — 40 lines
+    // deleted, of which the deleted ones happened to be the uncovered ones — so
+    // the percentage climbs from 90% to 100% while ten fewer lines are covered
+    // than before. Only the absolute `linesTotal` catches it, which is why the
+    // field is ratcheted in absolute terms rather than left as a denominator
+    // nobody watches.
+    const result = ratchet({
+      baseline: HEALTHY_BASELINE,
+      reports: {
+        ...HEALTHY_REPORTS,
+        'packages/app/coverage/lcov.info': lcov([
+          { name: 'src/index.ts', lines: 40, hit: 40 },
+          { name: 'src/other.ts', lines: 20, hit: 20 },
+        ]),
+      },
+    });
+    expect(result.improvements.map((i) => i.path)).toContain('packages.packages/app.coverage.line');
+    expect(result.regressions.map((r) => r.path)).toContain(
+      'packages.packages/app.coverage.linesTotal',
+    );
+    // The file set is genuinely untouched, so nothing else is masking the catch.
+    expect(result.regressions.map((r) => r.path)).not.toContain(
+      'packages.packages/app.coverage.filesMeasured',
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
+  describe('patch coverage, which is measured by a gate rather than by a suite', () => {
+    const withDiff = (diff: number): Record<string, string> => ({
+      ...HEALTHY_REPORTS,
+      '.testfortress/reports/coverage.json': JSON.stringify({ coverage: { diff } }),
+    });
+    const baselineWithDiff = {
+      ...HEALTHY_BASELINE,
+      coverage: { diff: 100 },
+      meta: { fields: [...HEALTHY_BASELINE.meta.fields, 'coverage.diff'].sort() },
+    };
+
+    it('reads coverage.diff from the gate report and passes when it holds at 100', () => {
+      const result = ratchet({ baseline: baselineWithDiff, reports: withDiff(100) });
+      expect(result.regressions).toEqual([]);
+      expect(result.missing).toEqual([]);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('fails when patch coverage drops below the pinned 100', () => {
+      const result = ratchet({ baseline: baselineWithDiff, reports: withDiff(97.5) });
+      expect(result.regressions.map((r) => r.path)).toContain('coverage.diff');
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('treats a missing coverage report as unmeasured, never as a pass', () => {
+      // `coverage:check` is TIER 1: it runs on every push, so unlike the
+      // mutation fields there is nothing to defer to. A run that produced no
+      // report has not measured patch coverage, and saying so is the only
+      // honest answer — the alternative is a gate that disappears quietly.
+      const result = ratchet({ baseline: baselineWithDiff, reports: HEALTHY_REPORTS });
+      expect(result.missing.map((m) => m.path)).toContain('coverage.diff');
+      expect(result.deferred.map((d) => d.path)).not.toContain('coverage.diff');
+      expect(result.exitCode).toBe(1);
+    });
+  });
+
   it('fails when a baseline field has no fresh report at all', () => {
     const { 'packages/app/coverage/lcov.info': _dropped, ...withoutCoverage } = HEALTHY_REPORTS;
     const result = ratchet({ baseline: HEALTHY_BASELINE, reports: withoutCoverage });

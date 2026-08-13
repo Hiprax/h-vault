@@ -71,6 +71,7 @@
     "audit:integrity": "node scripts/ci/integrity-scan.mjs",
     "audit:ratchet": "node scripts/ci/ratchet-check.mjs --tier 0",
     "audit:ratchet:full": "npm run report && node scripts/ci/ratchet-check.mjs",
+    "coverage:check": "node scripts/ci/coverage-check.mjs",
     "lint:report": "node scripts/ci/lint-gate.mjs",
     "report": "node scripts/ci/report.mjs",
     "release:next-version": "node scripts/ci/next-version.mjs",

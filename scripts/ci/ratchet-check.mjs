@@ -124,6 +124,9 @@ import { RESOURCE_BUDGETS } from './lib/resource-budgets.mjs';
 // gate that writes `mutation.modules.*` and the gate that reads it cannot
 // disagree about what a module key is.
 import { moduleKey } from './lib/mutation-scope.mjs';
+// The one parser for an LCOV document, shared with `coverage-check.mjs` — see
+// `fromLcov` below. `pct` comes with it for the same reason.
+import { parseLcov, pct } from './lib/lcov.mjs';
 
 const ROOT = process.cwd();
 const TF = join(ROOT, '.testfortress');
@@ -381,23 +384,23 @@ function newestSourceMtime() {
 // well-formed output of the tools named and is the first thing to replace with
 // a real parser if that stops being true.
 // ---------------------------------------------------------------------------
-const pct = (hit, total) => (total ? +((hit / total) * 100).toFixed(2) : undefined);
-
+/**
+ * The LCOV totals, parsed by `lib/lcov.mjs` rather than here.
+ *
+ * `coverage-check.mjs` enforces the same floors at the moment it measures them,
+ * and two readers of one artifact is the intended shape — but two PARSERS of it
+ * would eventually disagree about what "the branch percentage" means, and the
+ * more generous one would be whichever happened to run. This function is now
+ * only the mapping from those totals onto baseline field names.
+ */
 function fromLcov(text) {
-  const files = [...text.matchAll(/^SF:(.+)$/gm)].map((m) => normPath(m[1]));
-  const sum = (re) => [...text.matchAll(re)].reduce((n, m) => n + Number(m[1]), 0);
-  const lf = sum(/^LF:(\d+)$/gm);
-  const lh = sum(/^LH:(\d+)$/gm);
-  const brf = sum(/^BRF:(\d+)$/gm);
-  const brh = sum(/^BRH:(\d+)$/gm);
-  const fnf = sum(/^FNF:(\d+)$/gm);
-  const fnh = sum(/^FNH:(\d+)$/gm);
+  const totals = parseLcov(text, normPath);
   return {
-    'coverage.line': pct(lh, lf),
-    'coverage.branch': pct(brh, brf),
-    'coverage.function': pct(fnh, fnf),
-    'coverage.linesTotal': lf || undefined,
-    'coverage.filesMeasured': files.length ? [...new Set(files)].sort() : undefined,
+    'coverage.line': totals.line,
+    'coverage.branch': totals.branch,
+    'coverage.function': totals.function,
+    'coverage.linesTotal': totals.linesTotal,
+    'coverage.filesMeasured': totals.filesMeasured,
   };
 }
 
@@ -552,6 +555,7 @@ function collect() {
     const known =
       base === 'integrity.json' ||
       base === 'warnings.json' ||
+      base === 'coverage.json' ||
       base === 'deadcode.json' ||
       base === 'config.sarif' ||
       base === 'a11y.json' ||
@@ -609,6 +613,18 @@ function collect() {
       if (typeof j.violations?.critical === 'number') got['a11y.critical'] = j.violations.critical;
       if (typeof j.violations?.serious === 'number') got['a11y.serious'] = j.violations.serious;
       if (typeof j.viewsScanned === 'number') got['a11y.viewsScanned'] = j.viewsScanned;
+    } else if (base === 'coverage.json') {
+      // ONLY the patch-coverage number. The per-package percentages, the
+      // denominators and the measured file set are read from the LCOV documents
+      // further down, which is the artifact the suites themselves write — this
+      // gate's report would be a second-hand copy of them, and a ratchet reading
+      // a number a gate re-stated rather than the one the tool emitted is how
+      // the two quietly stop describing the same run.
+      //
+      // The value counts a LEDGERED line as covered; `coverage-check.mjs` says
+      // why, and the debt it defers to is `suppressions.count`, which ratchets
+      // down.
+      if (typeof j.coverage?.diff === 'number') got['coverage.diff'] = j.coverage.diff;
     } else if (base === 'warnings.json') {
       // `null` means UNMEASURED in warnings.json and is deliberately not `0`;
       // passing it through as a number would fabricate a clean result.

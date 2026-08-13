@@ -6,7 +6,7 @@
     "maxAgeDaysStrict": 30,
     "maxHitsPerEntry": 3,
     "requireApproval": true,
-    "exemptFromTotal": ["DEFERRED-ROW", "EQUIV-MUTANT", "BASELINE-REDUCTION"]
+    "exemptFromTotal": ["DEFERRED-ROW", "EQUIV-MUTANT", "BASELINE-REDUCTION", "COV-DIFF-EXEMPT"]
   },
   "entries": [
     {

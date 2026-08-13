@@ -225,9 +225,28 @@ function prepareWorkspace() {
   }
   // A repository, because two gates enumerate through git and one of them reads
   // the INDEX (`secret-scan` scans tracked files), so the copy needs one.
+  //
+  // With a BASE COMMIT on `main`, and both halves of that are load-bearing for
+  // `coverage:check`. That gate's subject is the production lines this change
+  // touched, which is meaningless without a trunk to have diverged from: in a
+  // repository holding nothing but a staged initial import there is no `main`,
+  // no `HEAD`, and therefore no diff — so the gate reported "could not run" and
+  // the case proved nothing about a gate that works perfectly. One commit makes
+  // the copy what every other checkout already is: a tree with a history, where
+  // a planted file is a CHANGE rather than the entire world. The other cases are
+  // unaffected — they were already comparing nothing — and `buryInHistory` still
+  // works, its two commits now simply having a parent.
   const git = (args) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
-  git(['init', '-q']);
-  git(['-c', 'user.email=selftest@localhost', '-c', 'user.name=selftest', 'add', '-A']);
+  const asSelftest = (...args) => [
+    '-c',
+    'user.email=selftest@localhost',
+    '-c',
+    'user.name=selftest',
+    ...args,
+  ];
+  git(['init', '-q', '-b', 'main']);
+  git(asSelftest('add', '-A'));
+  git(asSelftest('commit', '-q', '-m', 'selftest: baseline'));
   mkdirSync(join(dir, '.testfortress', 'reports'), { recursive: true });
   return dir;
 }

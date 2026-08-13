@@ -513,6 +513,12 @@ const MARKERLESS = {
   'DEFERRED-ROW': 'known-gap',
   'EQUIV-MUTANT': 'known-gap',
   'BASELINE-REDUCTION': 'known-gap',
+  // An uncovered line in a change, excused by `coverage-check.mjs`. It has its
+  // OWN id rather than reusing `KNOWN-GAP` because matching is by exact rule id:
+  // a bare `KNOWN-GAP` on a file would otherwise excuse its patch coverage as a
+  // side effect of having been written about something else entirely, which is
+  // the cross-talk the exact-id rule exists to prevent.
+  'COV-DIFF-EXEMPT': 'known-gap',
 };
 
 const PATTERN_RULES = [...RULES, ...MULTILINE_RULES, ...MANIFEST_RULES];
@@ -610,7 +616,16 @@ const policy = {
   maxAgeDaysStrict: 30,
   maxHitsPerEntry: 3,
   requireApproval: true,
-  exemptFromTotal: ['DEFERRED-ROW', 'EQUIV-MUTANT', 'BASELINE-REDUCTION'],
+  // `COV-DIFF-EXEMPT` joins the three sanctioned escape valves for the reason
+  // they are exempt at all: `suppressions.count` ratchets DOWN and `--accept`
+  // moves no field upward, so a COUNTED new entry can never be added without
+  // baseline surgery. For a marker in the tree that is the point — fix the code.
+  // For a dated, owned, expiring, judge-approved record of a line that genuinely
+  // cannot be covered, it would mean the escape valve is blocked by the very
+  // ceiling it exists to work within, and the cheapest way out becomes deleting
+  // the gate or writing a tautological test. The debt is still bounded: the
+  // entry expires, and `coverage:check` goes red again by itself when it does.
+  exemptFromTotal: ['DEFERRED-ROW', 'EQUIV-MUTANT', 'BASELINE-REDUCTION', 'COV-DIFF-EXEMPT'],
   ...(ledger.policy ?? {}),
 };
 const entries = ledger.entries ?? [];

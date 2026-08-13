@@ -185,6 +185,14 @@ const PREREQUISITES = {
     ok: () => hasExe('hadolint', ['--version']),
     fix: 'install hadolint — https://github.com/hadolint/hadolint/releases',
   },
+  // Patch coverage is computed by diff-cover, and a coverage gate that quietly
+  // passed because the tool was absent would be worse than no gate at all: it
+  // would report "every changed line is covered" having looked at none of them.
+  'diff-cover': {
+    label: 'the diff-cover binary',
+    ok: () => hasExe('diff-cover'),
+    fix: 'install diff-cover — uv tool install diff-cover (or pipx install diff-cover)',
+  },
   'build:shared': {
     label: 'a built @hvault/shared (packages/shared/dist)',
     ok: () => {
@@ -693,6 +701,29 @@ const GATES = [
     ci: 'sast job · CodeQL',
     canSkip: true, // exits 78 when the CodeQL CLI is not installed
     run: (options) => runExe(process.execPath, ['scripts/ci/sast-gate.mjs'], options),
+  },
+  {
+    id: 'coverage',
+    task: 'coverage:check',
+    tier: 1,
+    // Placed here — after every suite, immediately before the ratchet — because
+    // both halves of its subject are produced by gates above it: the LCOV and
+    // Cobertura documents come from `test` and `test-integration`, and the
+    // `coverage.diff` number it measures is read by `ratchet-full` below.
+    //
+    // It is NOT a second copy of the vitest thresholds. Those already fail a
+    // package that drops below its configured floor, and they are a whole-tree
+    // AVERAGE: a new module landing with no tests at all moves the client's
+    // 98.69% by hundredths, so the suite stays green while the code written
+    // today is the code nothing asserts. This gate asks the question that
+    // scales — is what you just changed covered? — and closes the hole that
+    // question has on its own, which is that a file in no coverage report is
+    // indistinguishable from a file that does not exist.
+    title: 'Coverage floors per package, and 100% of the production lines this change touched',
+    ci: 'new — a whole-tree percentage cannot see an untested module arriving',
+    dependsOn: ['build', 'test', 'test-integration'],
+    requires: ['diff-cover'],
+    run: (options) => runNpm(['run', 'coverage:check'], options),
   },
   {
     id: 'ratchet-full',
