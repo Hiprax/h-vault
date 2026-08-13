@@ -14,6 +14,11 @@
  *   requires  prerequisites the case needs from the world ('docker', 'codeql')
  *   create    files to write into the temp copy (path -> contents)
  *   mutate    existing files to edit in the temp copy (path -> text => text)
+ *   timeoutMs optional wall-clock bound on the gate's own run. Only one case
+ *             needs it (`test:mutation`, whose unplanted run is hours), and it
+ *             is per-case rather than global because a gate killed by a clock it
+ *             did not expect would be reported as failing for a reason nobody
+ *             planted.
  *   evidence  optional (text) => boolean over the gate's own report, proving the
  *             non-zero exit is ATTRIBUTABLE to this defect. Without it, a gate
  *             that is already red for an unrelated reason would "prove" itself,
@@ -628,6 +633,35 @@ export const DEFECTS = {
     // in the report either way — so matching a step's NAME would be satisfied by
     // a fully green run (the trap recorded on `test:security`).
     evidence: (text) => /not bound to loopback/.test(text),
+  },
+
+  'test:mutation': {
+    // The Forbidden Action this gate is most likely to attract, planted exactly
+    // as someone would write it: an extra `!` pattern in the declared scope.
+    // Nothing else in the repository notices. The percentage goes UP (the
+    // excluded files were the ones with survivors), the run gets faster, the
+    // config diff reads like a tidy-up, and the gate reports a better number
+    // over less code — which is the whole reason `mutation.filesMutated` is
+    // ratcheted as a superset rather than the globs being ratcheted as a list.
+    //
+    // It fails in the gate's PRE-FLIGHT, before Stryker starts, which is what
+    // makes this case runnable at all: a full run is hours, and a selftest that
+    // took hours per case is a selftest nobody runs. `timeoutMs` is the backstop
+    // for the other direction — if the anchor below ever drifts and the replace
+    // becomes a no-op, the case is killed and reported `unproven` rather than
+    // mutating the whole codebase while the harness waits.
+    title: 'exclude the client import services from the declared mutation scope',
+    mutate: {
+      'scripts/ci/lib/mutation-scope.mjs': (text) =>
+        text.replace(
+          '      PRESENTATIONAL_EXCLUDE,\n',
+          "      PRESENTATIONAL_EXCLUDE,\n      '!packages/client/src/services/import/**',\n",
+        ),
+    },
+    timeoutMs: 120_000,
+    // The pre-flight's own message. A green run says nothing of the kind, and
+    // the file list it prints names the excluded directory.
+    evidence: (text) => /scope narrowed/.test(text),
   },
 
   'audit:deps': {

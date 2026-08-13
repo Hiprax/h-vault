@@ -508,6 +508,41 @@ describe('VaultItemDetail / CopyField', () => {
 // ===========================================================================
 
 describe('VaultItemDetail / NoteDetail markdown', () => {
+  it('renders raw HTML in a markdown note as text, never as markup', async () => {
+    // `skipHtml` on the real react-markdown, asserted through what it produces.
+    // This replaces a source-text assertion for `skipHtml={true}` in
+    // `client-security.test.ts`, which asserted the SHAPE of the call: it passes
+    // for a prop that is never read, and it fails under `test:mutation`, where
+    // the instrumented file reads `skipHtml={stryMutAct(…) ? false : true}`.
+    //
+    // A note's content is user data that arrives from an import file as easily
+    // as from the editor, so raw HTML inside one is exactly the input this
+    // setting exists for.
+    renderDetail(
+      makeItem({
+        itemType: 'note',
+        data: {
+          content: '<img src=x onerror="alert(1)"> and <b>bold</b> text',
+          format: 'markdown',
+        },
+      }),
+    );
+
+    // The markup is not interpreted: no element is created for it…
+    const note = await screen.findByText(/bold/);
+    expect(note.querySelector('img')).toBeNull();
+    expect(document.querySelector('img[onerror]')).toBeNull();
+    expect(document.querySelector('b')).toBeNull();
+    // …and the surrounding text still renders, so the note is not lost with it.
+    expect(note.textContent).toContain('and');
+    expect(note.textContent).toContain('text');
+    // `skipHtml` DROPS the markup rather than escaping it, which is the
+    // strictest of the three possible outcomes and the one worth pinning: an
+    // escaped-but-present `<img …>` would still be one CSS trick away from
+    // mattering, and a rendered one is the vulnerability itself.
+    expect(note.textContent).not.toContain('onerror');
+  });
+
   it('neutralises an unsafe markdown link href to "#" while keeping its text', async () => {
     renderDetail(
       makeItem({

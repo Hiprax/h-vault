@@ -39,7 +39,12 @@
  *  c. A MISSING REPORT IS A FAILURE, NEVER A PASS. Deleting a task from the
  *     manifest removes its numbers, and a ratchet that skips absent metrics then
  *     guards nothing. Skipping a test gate therefore makes this gate red: the
- *     remedy is to run the gate, never to delete the baseline field.
+ *     remedy is to run the gate, never to delete the baseline field. The ONE
+ *     exception is named, narrow and conditional — see DEFERRABLE, which covers
+ *     a measurement whose gate is registered at TIER 2 and therefore does not
+ *     run on a push at all. Deferral survives only while the owning task is
+ *     still registered at that tier, and the owning gate enforces the same floor
+ *     itself; delete or move it and the fields go back to being hard failures.
  *
  *  d. A FIELD THAT NEVER ENTERS THE BASELINE HAS NO GATE. This is the mirror of
  *     (c) and the easier mistake, because it is silent: omitting
@@ -68,15 +73,19 @@
  * PORT NOTES — deliberate differences from the reference implementation.
  * ---------------------------------------------------------------------------
  *
- *  1. `mutation.*` AND `flake.*` ARE NOT REQUIRED FIELDS YET, because this
- *     repository has no extractor for them until Phases 16 and 19 add
- *     `test:mutation` and `test:flake`. Under (c) a baseline field with no
- *     report is a hard failure, so requiring them now would define a
+ *  1. `flake.*` IS NOT A REQUIRED FIELD YET, because this repository has no
+ *     extractor for it until Phase 19 adds `test:flake`. Under (c) a baseline
+ *     field with no report is a hard failure, so requiring it now would define a
  *     permanently red gate — and the cheapest escape from a permanently red gate
  *     is deleting baseline fields, which is the pressure this file exists to
- *     remove. Those two phases add the field AND its entry in REQUIRED_FIELDS in
- *     the same change; `selftest`'s per-task registry is where that obligation
- *     is enforced.
+ *     remove. That phase adds the field AND its entry in REQUIRED_FIELDS in the
+ *     same change; `selftest`'s per-task registry is where that obligation is
+ *     enforced. `mutation.*` was the other half of this note until Phase 16
+ *     shipped `test:mutation`. It is now required CONDITIONALLY — see
+ *     MUTATION_REQUIRED_FIELDS, which arms the moment a baseline carries a
+ *     mutation block — and the tier-2 half of the problem, a gate that is
+ *     registered but does not run on a push, is handled by DEFERRABLE rather
+ *     than by leaving the field out.
  *  2. REQUIRED FIELDS ARE SATISFIED PER PACKAGE. In a monorepo the honest place
  *     for coverage is `packages.<pkg>.coverage.*`; a global average lets a
  *     well-tested package subsidise a neglected one. So presence is checked
@@ -110,6 +119,11 @@ import {
   INITIAL_PAYLOAD_BUDGET_KB,
 } from './lib/bundle-budgets.mjs';
 import { RESOURCE_BUDGETS } from './lib/resource-budgets.mjs';
+// The one function shared with the mutation gate: a core module is a PATH, and
+// a baseline key may not contain a dot. Imported rather than restated so the
+// gate that writes `mutation.modules.*` and the gate that reads it cannot
+// disagree about what a module key is.
+import { moduleKey } from './lib/mutation-scope.mjs';
 
 const ROOT = process.cwd();
 const TF = join(ROOT, '.testfortress');
@@ -228,10 +242,62 @@ const REQUIRED_FIELDS = [
   'integrity', // the scanner's blind-spot fingerprints
 ];
 
+/**
+ * The mutation oracle's two load-bearing fields, required as soon as the
+ * baseline carries a `mutation` block AT ALL.
+ *
+ * Conditional rather than unconditional, and the condition is the honest half of
+ * the rule. Before the first complete run there is no measurement, and the two
+ * ways to satisfy an unconditional requirement then are both worse than waiting:
+ * invent a number, or record one from a partial run over a fraction of the
+ * declared scope. Once a real block exists the pair is mandatory, because a
+ * block carrying `overall` without `filesMutated` reads as a gate while
+ * silently disabling the scope-narrowing defence — the mutation-side twin of
+ * omitting `coverage.filesMeasured`.
+ *
+ * Deleting the block to escape the requirement is not a way out: `meta.fields`
+ * pins the baseline's own sorted field list as a superset, so removing a field
+ * that was once recorded is itself a regression.
+ */
+const MUTATION_REQUIRED_FIELDS = ['mutation.overall', 'mutation.filesMutated'];
+
 /** Fields cheap enough for T0: no test artifact needed. */
 const TIER0_PREFIXES = ['suppressions.', 'integrity.', 'tasks', 'meta.fields'];
 /** (Port note 3) Which reports T0 is allowed to read. */
 const TIER0_REPORTS = ['integrity.json'];
+
+/**
+ * Measurements produced by a TIER 2 gate, and what to do when they are absent.
+ *
+ * This is the narrow, named exception to decision (c), and it exists because
+ * decision (c) and the tier system otherwise contradict each other. `test:mutation`
+ * is Tier 2: it is hours long and does not run during `npm run ci`. Requiring a
+ * FRESH `mutation.json` on every push would therefore make `audit:ratchet:full`
+ * permanently red — and the cheapest escape from a permanently red gate is
+ * deleting the baseline fields, which is the pressure this file exists to remove.
+ *
+ * DEFERRED IS NOT SKIPPED. Three things hold the field to account instead:
+ *
+ *   1. `owner` must still be a registered task at `tier`. Deleting `test:mutation`
+ *      from the manifest, or quietly moving it to a tier that never runs, turns
+ *      every field under `prefix` back into a hard UNMEASURED failure. (`tasks`
+ *      is separately ratcheted as a superset, so the deletion fails twice.)
+ *   2. The owning gate enforces the same floor ITSELF, at the moment it has the
+ *      number: `mutation-gate.mjs` reads this baseline and fails on a lower
+ *      score, a smaller denominator or a lost file. The ratchet is the second
+ *      reader, not the only one.
+ *   3. When the report IS fresh — inside `verify:full`, where the gate runs
+ *      before this one — every field is compared for real, superset check
+ *      included. Deferral is a property of the run, not of the field.
+ *
+ * Phase 19's `flake.*` joins this table when `test:flake` exists.
+ */
+const DEFERRABLE = [
+  { prefix: 'mutation.', report: 'mutation.json', owner: 'test:mutation', tier: 2 },
+];
+
+const deferrableForReport = (base) => DEFERRABLE.find((entry) => entry.report === base);
+const deferrableForField = (path) => DEFERRABLE.find((entry) => path.startsWith(entry.prefix));
 
 function directionFor(path, problems) {
   const direct = DIRECTION[path];
@@ -342,40 +408,61 @@ function fromJunit(xml) {
   return suites.length ? suites.reduce((a, b) => a + b, 0) : undefined;
 }
 
+/**
+ * The mutation report, read as EVIDENCE rather than as a headline.
+ *
+ * Three things here are deliberate:
+ *
+ *  - The score is RECOMPUTED from the per-mutant statuses. `mutation.json`
+ *    carries an `overall` of its own, and it is not read: a gate that reports a
+ *    number it did not measure is exactly what this file exists to catch, and
+ *    the two computations disagreeing is a defect worth surfacing rather than
+ *    hiding behind whichever one is more convenient.
+ *  - `Ignored` mutants are excluded from the denominator, matching the gate's
+ *    own definition and Stryker's. They are the mutants a CONFIGURATION chose
+ *    not to test, which is why `mutation.totalMutants` is ratcheted upward:
+ *    turning `ignoreStatic` on would raise the percentage while shrinking this
+ *    number, and the smaller denominator is what fails the run.
+ *  - Module keys are matched with BOTH sides sanitised through `moduleKey`.
+ *    A core module is a path, three of the six end in `.ts`, and an unsanitised
+ *    key would flatten to a field whose wildcard is
+ *    `mutation.modules.…rateLimiter.*` — declared nowhere, so the field would
+ *    fail as having no direction. Sanitising both sides cannot change which
+ *    files a module claims.
+ */
 function fromMutationJson(json, baselineModules) {
   const out = {};
-  if (json.files && typeof json.files === 'object') {
-    const perFile = new Map();
-    let total = 0;
-    let killed = 0;
-    for (const raw of Object.keys(json.files)) {
-      const f = normPath(raw);
-      let t = 0;
-      let k = 0;
-      for (const m of json.files[raw].mutants ?? []) {
-        t++;
-        if (['Killed', 'Timeout'].includes(m.status)) k++;
-      }
-      perFile.set(f, { t, k });
-      total += t;
-      killed += k;
+  if (!json.files || typeof json.files !== 'object') return out;
+  const perFile = new Map();
+  let total = 0;
+  let killed = 0;
+  for (const raw of Object.keys(json.files)) {
+    const f = normPath(raw);
+    let t = 0;
+    let k = 0;
+    for (const m of json.files[raw].mutants ?? []) {
+      if (m.status === 'Ignored') continue;
+      t++;
+      if (['Killed', 'Timeout'].includes(m.status)) k++;
     }
-    out['mutation.filesMutated'] = [...perFile.keys()].sort();
-    out['mutation.totalMutants'] = total;
-    if (total) out['mutation.overall'] = pct(killed, total);
-    for (const mod of baselineModules) {
-      let t = 0;
-      let k = 0;
-      for (const [f, v] of perFile) {
-        if (f.startsWith(normPath(mod))) {
-          t += v.t;
-          k += v.k;
-        }
-      }
-      if (t) out[`mutation.modules.${mod}`] = pct(k, t);
-    }
+    perFile.set(f, { t, k });
+    total += t;
+    killed += k;
   }
-  if (typeof json.mutationScore === 'number') out['mutation.overall'] = json.mutationScore;
+  out['mutation.filesMutated'] = [...perFile.keys()].sort();
+  out['mutation.totalMutants'] = total;
+  if (total) out['mutation.overall'] = pct(killed, total);
+  for (const mod of baselineModules) {
+    let t = 0;
+    let k = 0;
+    for (const [f, v] of perFile) {
+      if (moduleKey(normPath(f)).startsWith(moduleKey(normPath(mod)))) {
+        t += v.t;
+        k += v.k;
+      }
+    }
+    if (t) out[`mutation.modules.${moduleKey(mod)}`] = pct(k, t);
+  }
   return out;
 }
 
@@ -471,7 +558,16 @@ function collect() {
       base.includes('mutation') ||
       base.includes('flake');
     if (!known) continue;
-    if (freshness(p, rel) !== 'fresh') continue;
+    // A deferrable report is checked for freshness WITHOUT being recorded as
+    // stale: its gate did not run in this invocation, so "older than the newest
+    // source file" is the expected state on a push rather than a finding. The
+    // compare loop turns that into a DEFERRED field, which is where the
+    // conditions in `DEFERRABLE` are enforced.
+    const deferrable = deferrableForReport(base);
+    if (deferrable) {
+      const st = safeStat(p);
+      if (!st || (newestSrc && st.mtimeMs < newestSrc)) continue;
+    } else if (freshness(p, rel) !== 'fresh') continue;
 
     let j;
     try {
@@ -643,11 +739,17 @@ const skipMeta = (p) =>
 const regressions = [];
 const improvements = [];
 const missing = [];
+/** Tier-2 measurements this invocation did not produce; see DEFERRABLE. */
+const deferred = [];
 const undeclared = [];
 const absent = [];
 
 // (d) + port note 2: required fields must be present, per package or plainly.
-for (const req of REQUIRED_FIELDS) {
+const requiredFields = [
+  ...REQUIRED_FIELDS,
+  ...(baselineRaw.mutation ? MUTATION_REQUIRED_FIELDS : []),
+];
+for (const req of requiredFields) {
   const present = Object.keys(base).some(
     (p) =>
       p === req ||
@@ -674,11 +776,22 @@ for (const [path, want] of Object.entries(base)) {
 
   const got = cur[path];
   if (got === undefined) {
+    // A Tier 2 measurement whose gate is still registered at its declared tier
+    // is DEFERRED, not unmeasured — see the DEFERRABLE table. Anything else,
+    // including a deferrable field whose owning task has been deleted or moved,
+    // is the hard failure decision (c) requires.
+    const deferrable = deferrableForField(path);
+    const owner = deferrable ? manifestRaw?.tasks?.[deferrable.owner] : undefined;
+    if (deferrable && owner?.tier === deferrable.tier) {
+      deferred.push({ path, want, owner: deferrable.owner, report: deferrable.report });
+      continue;
+    }
     missing.push({
       path,
       want,
-      detail:
-        'no fresh report supplies this field; a metric that stops being measured stops being a gate',
+      detail: deferrable
+        ? `${deferrable.owner} is no longer a registered tier-${String(deferrable.tier)} task, so nothing produces ${deferrable.report}`
+        : 'no fresh report supplies this field; a metric that stops being measured stops being a gate',
     });
     continue;
   }
@@ -810,6 +923,7 @@ if (has('--accept')) {
     absent: [],
     undeclared: [],
     staleReports: [],
+    deferred,
     improvements,
   };
   if (has('--json')) console.log(JSON.stringify(accepted, null, 2));
@@ -827,6 +941,7 @@ const result = {
   absent,
   undeclared,
   staleReports: stale,
+  deferred,
   notes,
   improvements,
 };
@@ -853,6 +968,12 @@ else {
       `STALE        ${s}  older than the newest source file, so it describes a different tree`,
     );
   }
+  for (const d of deferred) {
+    console.error(
+      `DEFERRED     ${d.path}  (baseline ${JSON.stringify(d.want)})  not measured in this run; ` +
+        `${d.owner} is tier 2 and produces ${d.report}. It enforces this floor itself.`,
+    );
+  }
   for (const n of notes) console.error(`note         ${n}`);
   for (const m of missing) {
     console.error(`MISSING      ${m.path}  (baseline ${JSON.stringify(m.want)})  ${m.detail}`);
@@ -868,6 +989,7 @@ else {
   console.error(
     `\nratchet: ${regressions.length} regression(s), ${missing.length} unmeasured, ${absent.length} absent-from-baseline, ` +
       `${undeclared.length} undeclared-direction, ${stale.length} stale report(s), ` +
+      `${deferred.length} deferred to a tier-2 gate, ` +
       `${improvements.length} improvement(s) from ${seen.length} report(s).`,
   );
   if (improvements.length && !blocking) {

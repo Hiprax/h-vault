@@ -364,6 +364,15 @@ for (const task of selected) {
     encoding: 'utf8',
     env: { ...process.env, ...(manifest.env ?? {}), FORCE_COLOR: '0' },
     maxBuffer: 64 << 20,
+    // Optional, and declared per case rather than globally. One gate needs it:
+    // `test:mutation` fails its planted defect in a PRE-FLIGHT that costs
+    // milliseconds, but if that plant ever drifted into a no-op the gate would
+    // instead do the thing it actually does — mutate ~53,000 lines of source,
+    // for hours, while this harness waited. A killed child reports no exit
+    // status, which lands as a non-zero code with no matching evidence, so the
+    // case is reported `unproven` (the honest verdict for a run that proved
+    // nothing) rather than as a pass.
+    ...(defect.timeoutMs ? { timeout: defect.timeoutMs } : {}),
   });
   const durationMs = Date.now() - started;
   const code = run.status ?? 1;

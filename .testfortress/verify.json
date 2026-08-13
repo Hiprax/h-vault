@@ -203,6 +203,13 @@
       "countsTests": false,
       "requires": ["build:shared"]
     },
+    "test:mutation": {
+      "cmd": "npm run test:mutation",
+      "tier": 2,
+      "gate": "the oracle: Stryker mutates every production file in the declared scope — packages/*/src/** minus the coverage-excluded entry points and the presentational UI primitives — and the suite kills at least the recorded share of them, with the six core modules held to their own recorded scores, no file dropping out of the measured set, and no mutant left untested that was tested before",
+      "report": "mutation.json",
+      "requires": ["build:shared"]
+    },
     "test:smoke": {
       "cmd": "npm run test:smoke",
       "tier": 1,

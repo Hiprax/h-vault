@@ -35,7 +35,8 @@ interface RatchetResult {
   absent: { path: string }[];
   undeclared: string[];
   staleReports: string[];
-  improvements: { path: string }[];
+  deferred: { path: string; owner: string }[];
+  improvements: { path: string; want: unknown; got: unknown }[];
   stderr: string;
 }
 
@@ -69,8 +70,52 @@ const MANIFEST = {
       report: 'junit-app.xml',
       coverage: ['packages/app/coverage/cobertura-coverage.xml'],
     },
+    // TIER 2, which is what makes its fields DEFERRABLE rather than required to
+    // be fresh on every run. The cases at the end of this file are about
+    // exactly that distinction.
+    'test:mutation': {
+      cmd: 'stryker run',
+      tier: 2,
+      gate: 'the suite kills at least the recorded share of mutants',
+      report: 'mutation.json',
+    },
   },
 };
+
+/**
+ * A Stryker-shaped report: per file, a list of mutants with a status.
+ *
+ * `Ignored` is present on purpose. It is the status a CONFIGURATION produces
+ * (`ignoreStatic: true`), and it must stay out of both halves of the score —
+ * otherwise turning that option on would raise the percentage while testing
+ * hundreds fewer mutants.
+ */
+function mutationReport(
+  files: { name: string; killed: number; survived: number; ignored?: number }[],
+  extra: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    ...extra,
+    files: Object.fromEntries(
+      files.map((f) => [
+        f.name,
+        {
+          mutants: [
+            ...Array.from({ length: f.killed }, () => ({ status: 'Killed' })),
+            ...Array.from({ length: f.survived }, () => ({ status: 'Survived' })),
+            ...Array.from({ length: f.ignored ?? 0 }, () => ({ status: 'Ignored' })),
+          ],
+        },
+      ]),
+    ),
+  });
+}
+
+/** 14 of 20 scored mutants killed = 70%, with five ignored ones that must not count. */
+const HEALTHY_MUTATION = [
+  { name: 'packages/app/src/index.ts', killed: 8, survived: 2, ignored: 5 },
+  { name: 'packages/app/src/other.ts', killed: 6, survived: 4 },
+];
 
 interface Fixture {
   baseline: Record<string, unknown>;
@@ -120,6 +165,7 @@ function ratchet(fixture: Fixture): RatchetResult & { dir: string } {
         absent: [],
         undeclared: [],
         staleReports: [],
+        deferred: [],
         improvements: [],
       } as Omit<RatchetResult, 'exitCode' | 'stderr'>);
   return { ...parsed, exitCode: proc.status ?? -1, stderr: proc.stderr, dir };
@@ -144,6 +190,7 @@ const HEALTHY_REPORTS = {
     },
   }),
   '.testfortress/reports/warnings.json': JSON.stringify({ lint: 0, typecheck: 0, compiler: 0 }),
+  '.testfortress/reports/mutation.json': mutationReport(HEALTHY_MUTATION),
 };
 
 const HEALTHY_BASELINE = {
@@ -161,7 +208,16 @@ const HEALTHY_BASELINE = {
       tests: { count: 500 },
     },
   },
-  tasks: ['lint', 'test:unit'],
+  mutation: {
+    overall: 70,
+    totalMutants: 20,
+    filesMutated: ['packages/app/src/index.ts', 'packages/app/src/other.ts'],
+    // A module key may not contain a dot: the baseline is flattened on `.`, and
+    // a field's direction is resolved through a wildcard over its LAST segment.
+    modules: { 'packages/app/src/index_ts': 80 },
+    scopeGlobs: ['packages/app/src/**'],
+  },
+  tasks: ['lint', 'test:mutation', 'test:unit'],
   integrity: {
     excludeHash: 'aaaa',
     gateFilesHash: 'bbbb',
@@ -174,6 +230,11 @@ const HEALTHY_BASELINE = {
       'integrity.gateFilesHash',
       'integrity.gitignoreHash',
       'integrity.selfHash',
+      'mutation.filesMutated',
+      'mutation.modules.packages/app/src/index_ts',
+      'mutation.overall',
+      'mutation.scopeGlobs',
+      'mutation.totalMutants',
       'packages.packages/app.coverage.filesMeasured',
       'packages.packages/app.coverage.line',
       'packages.packages/app.coverage.linesTotal',
@@ -415,6 +476,182 @@ describe('audit:ratchet', () => {
         reports: HEALTHY_REPORTS,
       });
       expect(result.undeclared).toContain('invented.metric');
+      expect(result.exitCode).toBe(1);
+    });
+  });
+
+  describe('the mutation oracle, whose gate runs in a tier the push never reaches', () => {
+    it('requires BOTH fields as soon as the baseline carries a mutation block, and neither before', () => {
+      // The requirement is conditional, so both directions have to hold. A
+      // baseline with no block at all is a repository that has not run the
+      // oracle yet, and demanding a number nobody measured would leave a
+      // permanently red gate whose cheapest cure is deleting baseline fields.
+      const { mutation: _none, ...withoutMutation } = HEALTHY_BASELINE;
+      const { '.testfortress/reports/mutation.json': _report, ...reportsWithout } = HEALTHY_REPORTS;
+      const unmeasured = ratchet({
+        baseline: {
+          ...withoutMutation,
+          meta: { fields: HEALTHY_BASELINE.meta.fields.filter((f) => !f.startsWith('mutation.')) },
+        },
+        reports: reportsWithout,
+      });
+      expect(unmeasured.absent).toEqual([]);
+      expect(unmeasured.exitCode).toBe(0);
+
+      // …but a block that carries the score WITHOUT the measured file set reads
+      // as a gate while the scope-narrowing defence is silently off.
+      const { filesMutated: _dropped, ...partialMutation } = HEALTHY_BASELINE.mutation;
+      const partial = ratchet({
+        baseline: {
+          ...HEALTHY_BASELINE,
+          mutation: partialMutation,
+          meta: {
+            fields: HEALTHY_BASELINE.meta.fields.filter((f) => f !== 'mutation.filesMutated'),
+          },
+        },
+        reports: HEALTHY_REPORTS,
+      });
+      expect(partial.absent.map((a) => a.path)).toContain('mutation.filesMutated');
+      expect(partial.exitCode).toBe(1);
+    });
+
+    it('scores from the per-mutant statuses, and never from a headline the report states itself', () => {
+      // A gate that reports a number it did not measure is precisely what this
+      // file exists to catch, so the `overall` in the report is IGNORED and the
+      // score is recomputed. The fixture claims 99; the mutants say 70.
+      const result = ratchet({
+        baseline: { ...HEALTHY_BASELINE, mutation: { ...HEALTHY_BASELINE.mutation, overall: 60 } },
+        reports: {
+          ...HEALTHY_REPORTS,
+          '.testfortress/reports/mutation.json': mutationReport(HEALTHY_MUTATION, {
+            overall: 99,
+            mutationScore: 99,
+          }),
+        },
+      });
+      const improved = result.improvements.find((i) => i.path === 'mutation.overall');
+      expect(improved?.got).toBe(70);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('keeps Ignored mutants out of the denominator, so skipping them cannot raise the score', () => {
+      // `ignoreStatic: true` turns tested mutants into ignored ones. If they
+      // counted, the same report would read 14/25 = 56%; if they were dropped
+      // from BOTH halves silently, the denominator would stop being a gate. It
+      // is the denominator that catches it: 20, not 25.
+      const result = ratchet({
+        baseline: {
+          ...HEALTHY_BASELINE,
+          mutation: { ...HEALTHY_BASELINE.mutation, totalMutants: 15, overall: 60 },
+        },
+        reports: HEALTHY_REPORTS,
+      });
+      expect(result.improvements.find((i) => i.path === 'mutation.totalMutants')?.got).toBe(20);
+      expect(result.improvements.find((i) => i.path === 'mutation.overall')?.got).toBe(70);
+    });
+
+    it('fails when the score rises while a file drops out of the mutated set', () => {
+      // The mutation-side twin of the coverage case above, and the reason the
+      // measured file set is ratcheted rather than the config globs: narrowing
+      // a scope normally GROWS the glob list, so a superset check on globs
+      // passes the exact cheat it was meant to catch.
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports: {
+          ...HEALTHY_REPORTS,
+          '.testfortress/reports/mutation.json': mutationReport([
+            { name: 'packages/app/src/index.ts', killed: 10, survived: 0 },
+          ]),
+        },
+      });
+      expect(result.improvements.map((i) => i.path)).toContain('mutation.overall');
+      expect(result.regressions.map((r) => r.path)).toContain('mutation.filesMutated');
+      expect(result.regressions.map((r) => r.path)).toContain('mutation.totalMutants');
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('fails when a core module falls, even while the overall score holds', () => {
+      // The whole point of a per-module threshold: an average over 20 mutants
+      // hides a crypto module going from 80% to 50%.
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports: {
+          ...HEALTHY_REPORTS,
+          '.testfortress/reports/mutation.json': mutationReport([
+            { name: 'packages/app/src/index.ts', killed: 5, survived: 5, ignored: 5 },
+            { name: 'packages/app/src/other.ts', killed: 9, survived: 1 },
+          ]),
+        },
+      });
+      expect(result.regressions.map((r) => r.path)).toContain(
+        'mutation.modules.packages/app/src/index_ts',
+      );
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('DEFERS the fields when the tier-2 gate has not run, rather than reporting them unmeasured', () => {
+      // The push tier does not run `test:mutation`, so requiring a fresh report
+      // on every run would make this gate permanently red — and the cheapest
+      // escape from a permanently red gate is deleting the baseline fields,
+      // which is the pressure this whole file exists to remove.
+      const { '.testfortress/reports/mutation.json': _absent, ...withoutMutation } =
+        HEALTHY_REPORTS;
+      const result = ratchet({ baseline: HEALTHY_BASELINE, reports: withoutMutation });
+      expect(result.deferred.map((d) => d.path)).toContain('mutation.overall');
+      expect(result.deferred.map((d) => d.path)).toContain('mutation.filesMutated');
+      expect(result.missing.map((m) => m.path)).not.toContain('mutation.overall');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('defers a STALE mutation report too, because its gate did not run in this invocation', () => {
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports: HEALTHY_REPORTS,
+        stale: ['.testfortress/reports/mutation.json'],
+      });
+      // Deferred, and NOT counted as a stale report — a stale artifact from a
+      // gate that only runs on demand is the expected state, not a finding.
+      expect(result.deferred.map((d) => d.path)).toContain('mutation.overall');
+      expect(result.staleReports).not.toContain('.testfortress/reports/mutation.json');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('stops deferring the moment the gate is no longer registered at that tier', () => {
+      // The condition that keeps deferral from being a hole: retire the gate,
+      // or move it to a tier that never runs it, and every field it supplied
+      // becomes the hard failure it would have been all along.
+      const { '.testfortress/reports/mutation.json': _absent, ...withoutMutation } =
+        HEALTHY_REPORTS;
+      const { 'test:mutation': _gone, ...tasksWithoutMutation } = MANIFEST.tasks;
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports: withoutMutation,
+        manifest: { ...MANIFEST, tasks: tasksWithoutMutation },
+      });
+      expect(result.missing.map((m) => m.path)).toContain('mutation.overall');
+      expect(result.deferred).toEqual([]);
+      // …and the disappearance is ALSO caught as a registered gate that vanished.
+      expect(result.regressions.map((r) => r.path)).toContain('tasks');
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('stops deferring when the gate is moved to a tier the push DOES run', () => {
+      // A gate promoted to T1 has no excuse for an absent report: it ran, or it
+      // did not, and either way the number is measurable in this invocation.
+      const { '.testfortress/reports/mutation.json': _absent, ...withoutMutation } =
+        HEALTHY_REPORTS;
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports: withoutMutation,
+        manifest: {
+          ...MANIFEST,
+          tasks: {
+            ...MANIFEST.tasks,
+            'test:mutation': { ...MANIFEST.tasks['test:mutation'], tier: 1 },
+          },
+        },
+      });
+      expect(result.missing.map((m) => m.path)).toContain('mutation.overall');
       expect(result.exitCode).toBe(1);
     });
   });

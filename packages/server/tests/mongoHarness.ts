@@ -123,7 +123,26 @@ export function workerBandIndex(
   // port) rather than to a failure, so it is stated honestly here instead of
   // being claimed away.
   const runOffset = Number.isInteger(parentPid) ? Math.abs(parentPid) : 0;
-  return (slot + runOffset) % MAX_WORKER_BANDS;
+  // Stryker's own worker index, which is the one case the two shifts above
+  // cannot separate.
+  //
+  // `test:mutation` runs several test-runner processes at once, and every one of
+  // them is a child of the same Stryker process (so `parentPid` is IDENTICAL)
+  // pinned to a single vitest worker (so `VITEST_POOL_ID` is `1` in all of
+  // them). Both discriminators therefore collapse and every concurrent runner
+  // computes the same band — reintroducing exactly the port race the bands
+  // exist to remove, in the one gate where a lost race is worst: a mongod that
+  // fails to start fails its test file, and Stryker records a failing test file
+  // as a KILLED mutant. That is a false kill, which inflates the score with a
+  // test that never ran.
+  //
+  // The variable is set by `@stryker-mutator/vitest-runner` on each runner
+  // process (it names its per-worker setup file with it) and is absent
+  // everywhere else, so this term is 0 in every ordinary run and the mapping
+  // above is unchanged.
+  const strykerWorker = Number.parseInt(env['STRYKER_MUTATOR_WORKER'] ?? '0', 10);
+  const strykerOffset = Number.isInteger(strykerWorker) && strykerWorker > 0 ? strykerWorker : 0;
+  return (slot + strykerOffset + runOffset) % MAX_WORKER_BANDS;
 }
 
 /**

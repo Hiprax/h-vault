@@ -391,6 +391,28 @@ describe('SettingsPage — error paths and branches', () => {
     expect(cs.encryptVaultKey).toHaveBeenCalledWith(OLD_VAULT_KEY, { mek: 'NewMasterPassword1!' });
   });
 
+  it('logs the session out after a successful master-password change', async () => {
+    // The server revokes every refresh token when the password changes, and the
+    // MEK in memory no longer opens the vault key that was just re-wrapped — so
+    // a session that survived the change would be a stale-key session that fails
+    // on its next read. This is asserted here rather than as a source-text check
+    // for `navigate('/login'` in `client-security.test.ts`, which could not
+    // survive the mutation gate's instrumentation of that route literal.
+    mockChangePasswordApi.mockResolvedValue({ data: { success: true } });
+    await renderSettings();
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    });
+    // The keys go with it: an authenticated flag flipped without clearing the
+    // vault key would leave the plaintext-capable material resident.
+    expect(useAuthStore.getState().vaultKey).toBeNull();
+    expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses to change the master password while the vault is locked', async () => {
     mockChangePasswordApi.mockResolvedValue({ data: { success: true } });
     await renderSettings();

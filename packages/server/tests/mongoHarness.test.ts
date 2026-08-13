@@ -58,6 +58,26 @@ describe('mongoHarness — worker band selection', () => {
     expect(sameRun.size).toBe(4);
   });
 
+  it('separates the mutation runner’s sibling processes, which share both other discriminators', () => {
+    // The case neither shift above can see. Under `test:mutation` every vitest
+    // process is a child of the same Stryker process and is pinned to ONE
+    // worker, so `parentPid` and `VITEST_POOL_ID` are identical across all of
+    // them — and without this term they would all probe the same 64 ports. A
+    // mongod that loses that race fails its test file, and Stryker reads a
+    // failing test file as a killed mutant, so the cost of the collision is a
+    // score inflated by tests that never ran.
+    const strykerRun = ['0', '1', '2', '3'].map((worker) =>
+      workerBandIndex({ VITEST_POOL_ID: '1', STRYKER_MUTATOR_WORKER: worker }, 7777),
+    );
+    expect(new Set(strykerRun).size).toBe(4);
+    // Absent — every ordinary run — the term contributes nothing, so the slot
+    // mapping the other tests pin is untouched.
+    expect(workerBandIndex({ VITEST_POOL_ID: '1' }, 7777)).toBe(
+      workerBandIndex({ VITEST_POOL_ID: '1', STRYKER_MUTATOR_WORKER: '0' }, 7777),
+    );
+    expect(workerBandIndex({ VITEST_POOL_ID: '1', STRYKER_MUTATOR_WORKER: 'x' }, 0)).toBe(0);
+  });
+
   it('falls back to the worker id, then to band 0, without ever returning NaN', () => {
     // `VITEST_WORKER_ID` counts FILES and grows without bound, so it is only a
     // fallback: modulo the band count it still spreads.

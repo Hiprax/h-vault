@@ -663,6 +663,29 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/deploy-drill.mjs'], options),
   },
   {
+    id: 'mutation',
+    task: 'test:mutation',
+    // TIER 2, and the only gate here whose runtime is measured in HOURS. It is
+    // also the only one that audits the other gates: coverage proves a line ran,
+    // and nothing else in this repository proves a line was ASSERTED. Stryker
+    // changes the production code — a bound, an operator, a whole block — and
+    // asks whether any of the 7,463 tests notices.
+    //
+    // It runs AFTER `deploy` and BEFORE `ratchet-full`, and the second half of
+    // that is load-bearing: `ratchet-full` compares `mutation.overall`,
+    // `mutation.totalMutants` and the measured file set, and its own freshness
+    // rule rejects a report older than the newest source file. Ordered after it,
+    // the ratchet would read a report about a different tree — or, on a push
+    // where this gate does not run at all, defer the fields to this gate, which
+    // is exactly what `DEFERRABLE` in `ratchet-check.mjs` describes.
+    tier: 2,
+    title: 'Mutation testing (Stryker over the declared logic scope, three legs)',
+    ci: 'new — nothing has ever asked whether these tests assert anything',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/mutation-gate.mjs'], options),
+  },
+  {
     id: 'sast',
     task: 'audit:sast',
     tier: 1,

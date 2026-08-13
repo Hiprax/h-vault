@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { maskEmail, formatBytes, generateId, normalizeUri } from '../src/utils/index.js';
 
 // ---------------------------------------------------------------------------
@@ -152,6 +152,26 @@ describe('generateId', () => {
     expect(id).not.toContain('-');
   });
 
+  it('USES randomUUID when it is available, rather than the fallback', () => {
+    // Chosen by the mutation oracle: with only the two tests below, deleting the
+    // `randomUUID` branch entirely changed nothing — the `getRandomValues`
+    // fallback produces an id of the same shape, so every assertion still
+    // passed. The branch is preferred for a reason (the platform's own UUID
+    // generator, rather than 16 bytes formatted by hand), so the preference is
+    // what gets asserted.
+    const spy = vi.spyOn(crypto, 'randomUUID');
+    try {
+      const id = generateId();
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(id).toMatch(/^[0-9a-f]{32}$/);
+      // …and the hyphens of the UUID form are what is stripped, not some other
+      // character: a `replace` of the wrong thing would leave a 36-character id.
+      expect(id).toHaveLength(32);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('falls back to getRandomValues when randomUUID is unavailable', () => {
     const origRandomUUID = crypto.randomUUID;
     // Temporarily remove randomUUID to exercise fallback
@@ -211,6 +231,22 @@ describe('generateId', () => {
 // normalizeUri
 // ---------------------------------------------------------------------------
 describe('normalizeUri', () => {
+  it('matches a scheme only at the START of the value', () => {
+    // Both scheme patterns are anchored, and the oracle reported both anchors
+    // as unasserted: every existing case put its scheme at position 0, so
+    // `/^(https?:|mailto:)/` and `/(https?:|mailto:)/` are indistinguishable.
+    // An unanchored pattern returns these VERBATIM, and a URI stored verbatim is
+    // one the item detail view renders as a link to nowhere.
+    expect(normalizeUri('example.com/?next=https://elsewhere.test')).toBe(
+      'https://example.com/?next=https://elsewhere.test',
+    );
+    expect(normalizeUri('example.com/mailto:someone')).toBe('https://example.com/mailto:someone');
+    // The second guard — "some other scheme, leave it alone" — is anchored for
+    // the same reason: a colon anywhere in a path must not read as a scheme.
+    expect(normalizeUri('example.com/a:b')).toBe('https://example.com/a:b');
+    expect(normalizeUri('example.com/tel:123')).toBe('https://example.com/tel:123');
+  });
+
   it('prepends https:// to bare domains', () => {
     expect(normalizeUri('example.com')).toBe('https://example.com');
   });

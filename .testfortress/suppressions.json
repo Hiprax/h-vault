@@ -332,6 +332,32 @@
       "created": "2026-08-13",
       "expires": "2026-11-11",
       "approvedBy": ["maintainer"]
+    },
+    {
+      "id": "SUP-0028",
+      "rule": "EQUIV-MUTANT",
+      "kind": "known-gap",
+      "file": "packages/shared/src/schemas/auth.ts",
+      "symbol": "emailSchema's .trim() and its 'must have a TLD' refine",
+      "maxHits": 1,
+      "reason": "Twenty mutants in lines 1-27 of auth.ts are BEHAVIOURALLY EQUIVALENT rather than unasserted, and the reason is that the code they mutate is unreachable as a decider. emailSchema is z.email().max(254).toLowerCase().trim().refine(hasTld). The refine's own comment says zod accepts user@host, and that was true of the zod version it was written against; the installed zod 4 rejects it in z.email() itself, along with every other input the refine rejects. Its regex is anchored, admits no whitespace, forbids consecutive dots, requires each host label to start alphanumeric and requires a 2-or-more-letter TLD, so host.length === 0, host.startsWith('.'), host.endsWith('.'), labels.length < 2, an empty label and a label containing whitespace or an at sign are all already impossible by the time the refine runs. The same argument covers .trim(): a value with leading or trailing whitespace never reaches it. Verified structurally AND empirically - 1,248 addresses built from 6 local parts x 13 hosts x 4 leading x 4 trailing padding characters, comparing z.email().max(254).toLowerCase() against the full schema, produced ZERO disagreements in acceptance or in output. The code is KEPT rather than deleted, as defense-in-depth against a future loosening of zod's email format, on the same footing as toolsController's assertImportFieldLengths (which CLAUDE.md records as deliberately uncovered for the same reason). Removal condition: this entry goes away if zod's email check is ever replaced or loosened, at which point the refine becomes reachable and every one of these mutants becomes a missing assertion. What IS asserted, in tests/schema-bounds.test.ts, is the one transform that does change a value that reaches it: .toLowerCase(), which matters because the email is the PBKDF2 salt.",
+      "owner": "maintainer",
+      "created": "2026-08-13",
+      "expires": "2026-11-11",
+      "approvedBy": ["maintainer"]
+    },
+    {
+      "id": "SUP-0029",
+      "rule": "EQUIV-MUTANT",
+      "kind": "known-gap",
+      "file": "packages/shared/src/utils/index.ts",
+      "symbol": "formatBytes guards, normalizeUri optional-s, and the noUncheckedIndexedAccess fallbacks",
+      "maxHits": 1,
+      "reason": "Seven survivors in utils/index.ts are behaviourally equivalent, verified by REIMPLEMENTING each mutant beside the original and comparing outputs rather than by reading the code. (1) formatBytes line 12, 'bytes < 0' becoming 'bytes <= 0': zero is returned as '0 B' by the very next line either way. (2) formatBytes line 13, the 'bytes === 0' early return deleted: Math.log(0) is -Infinity, which the Math.max(...,0) clamp on line 21 turns into exponent 0, so the function still returns '0 B'. Both compared over 334 values - every power of two from 2^-40 to 2^63 and its neighbours, plus 0, -0, negatives, Infinity, NaN, Number.MIN_VALUE, Number.EPSILON and each unit boundary - with ZERO disagreements. The early return is kept because it states the intent at the top rather than leaving it to a clamp four lines down. (3) normalizeUri line 32, '/^(https?:|mailto:)/i' becoming '/^(https:|mailto:)/i': an http: URI that stops matching the first guard is caught by the SECOND guard on line 34 ('some other scheme, leave it alone') and returned unchanged, so the two are indistinguishable from outside; compared over 15 scheme shapes with zero disagreements. What is NOT equivalent, and is now asserted in tests/utils.test.ts, is either ANCHOR being dropped from either pattern. (4) Three NoCoverage mutants on the '?? ' and \"?? 'B'\" fallbacks at lines 6, 7 and 22: these exist to satisfy noUncheckedIndexedAccess and are unreachable - local[0] and local[local.length-1] are defined whenever atIndex > 0, and sizes[i] is defined because i is clamped to the array's own length. CLAUDE.md already records this class as deliberately uncovered ('noUncheckedIndexedAccess nullish guards'), and lighting them up would need a contrived mock of an index operation. Removal condition: (1)-(3) go away if the guards they duplicate are removed; (4) goes away if the compiler stops requiring the fallback.",
+      "owner": "maintainer",
+      "created": "2026-08-13",
+      "expires": "2026-11-11",
+      "approvedBy": ["maintainer"]
     }
   ]
 }

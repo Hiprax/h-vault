@@ -49,6 +49,10 @@ import clientUpgradeConfig, { CLIENT_UPGRADE_SUITE } from '../../client/vitest.u
 import { RESOURCE_SCENARIOS } from '../../../scripts/ci/lib/resource-budgets.mjs';
 import { chunkBaseName } from '../../../scripts/ci/bundle-gate.mjs';
 import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest.snapshot.config';
+import sharedMutationConfig from '../../shared/vitest.mutation.config';
+import serverMutationConfig from '../vitest.mutation.config';
+import clientMutationConfig from '../../client/vitest.mutation.config';
+import { CORE_MODULES, MUTATION_LEGS } from '../../../scripts/ci/lib/mutation-scope.mjs';
 import playwrightConfig from '../../../playwright.config';
 import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
 import { A11Y_BLOCKING_IMPACTS, A11Y_VIEWS, A11Y_VIEW_IDS } from '../../../e2e/a11yViews';
@@ -309,8 +313,17 @@ describe('tiers', () => {
     //   credential. There is no version of that which belongs in a hook someone
     //   is waiting on, and its fast sibling `smoke` (T1) covers the artifact on
     //   every push.
+    //
+    //   `mutation` — the oracle, and the longest-running gate in the repository
+    //   by an order of magnitude: it re-runs the suite once per mutant over
+    //   ~53,000 lines of source. Unlike every other member it has no cheap
+    //   sibling on the push tier, and that is stated rather than hidden: what
+    //   guards it between runs is `ratchet-check.mjs`'s DEFERRABLE rule, which
+    //   keeps `mutation.*` in the baseline as a floor the gate enforces itself
+    //   and turns the fields back into hard failures the moment this task stops
+    //   being a registered tier-2 gate.
     const t2 = gates.filter((gate) => gate.tier === 2).map((gate) => gate.id);
-    expect(t2).toEqual(['fuzz', 'resource', 'upgrade', 'recovery', 'deploy']);
+    expect(t2).toEqual(['fuzz', 'resource', 'upgrade', 'recovery', 'deploy', 'mutation']);
   });
 
   it('treats tiers as cumulative, so verify is a superset of verify:fast', () => {
@@ -733,6 +746,128 @@ describe('machine-readable reports', () => {
     expect(chunkBaseName('vendor-react-BP6A0-cs.js')).toBe('vendor-react');
     expect(chunkBaseName('passwordStrength.worker-BZCvnOAA.js')).toBe('passwordStrength.worker');
     expect(chunkBaseName('index-Tp2RFl97.css')).toBe('index');
+  });
+
+  it('mutates every core module the plan names, and nothing has fallen out of the tree', () => {
+    // A core module is a PATH PREFIX matched against the measured file set, and
+    // a typo in one is SILENT in both directions that matter: the gate never
+    // writes a score for it, so the baseline never gains a floor for it, and the
+    // "core modules carry the higher threshold" claim quietly applies to
+    // nothing. Existence on disk is what makes the six real.
+    expect(CORE_MODULES).toEqual([
+      'packages/client/src/services/crypto/',
+      'packages/shared/src/schemas/',
+      'packages/server/src/middleware/rateLimiter.ts',
+      'packages/server/src/controllers/vaultController.ts',
+      'packages/client/src/services/import/',
+      'packages/server/src/utils/folderGraph.ts',
+    ]);
+    for (const modulePath of CORE_MODULES) {
+      expect(existsSync(path.join(repoRoot, modulePath)), modulePath).toBe(true);
+    }
+  });
+
+  it('keeps every core module inside the declared scope, so a threshold cannot be dodged', () => {
+    // The failure this forbids: excluding a core module from `mutate` while
+    // leaving it in `CORE_MODULES`. The per-module score then disappears rather
+    // than dropping, and a floor with no measurement is not a floor. Directory
+    // modules are probed through a real file inside them, because a glob matches
+    // files rather than directories.
+    const probes: Record<string, string> = {
+      'packages/client/src/services/crypto/':
+        'packages/client/src/services/crypto/cryptoService.ts',
+      'packages/shared/src/schemas/': 'packages/shared/src/schemas/vault.ts',
+      'packages/client/src/services/import/': 'packages/client/src/services/import/identity.ts',
+    };
+    for (const modulePath of CORE_MODULES) {
+      const file = probes[modulePath] ?? modulePath;
+      expect(existsSync(path.join(repoRoot, file)), file).toBe(true);
+      const selected = MUTATION_LEGS.some((leg) => {
+        let hit = false;
+        for (const glob of leg.mutate) {
+          if (glob.startsWith('!')) {
+            if (path.matchesGlob(file, glob.slice(1))) hit = false;
+          } else if (path.matchesGlob(file, glob)) {
+            hit = true;
+          }
+        }
+        return hit;
+      });
+      expect(selected, `${file} must be inside the declared mutation scope`).toBe(true);
+    }
+  });
+
+  it('excludes from mutation exactly what coverage excludes, plus the UI primitives', () => {
+    // The two denominators describe the same body of code on purpose: a file
+    // that is measured for coverage but not for mutation is a file whose
+    // execution is proven and whose assertions are not, and the discrepancy
+    // would be invisible in either report on its own. Each entry below is a
+    // NEGATION in the declared scope, and the list is pinned so adding a
+    // seventh is a deliberate, reviewable act rather than a config edit.
+    const negations = MUTATION_LEGS.flatMap((leg) =>
+      leg.mutate.filter((glob) => glob.startsWith('!')),
+    ).sort();
+    expect(negations).toEqual([
+      '!packages/client/src/**/*.d.ts',
+      '!packages/client/src/**/*.worker.ts',
+      '!packages/client/src/components/ui/**',
+      '!packages/client/src/main.tsx',
+      '!packages/server/src/**/*.d.ts',
+      '!packages/server/src/cli/seedBreaches.ts',
+      '!packages/server/src/server.ts',
+      '!packages/shared/src/**/*.d.ts',
+      '!packages/shared/src/generated/**',
+      '!packages/shared/src/types/**',
+    ]);
+  });
+
+  it.each([
+    ['shared', sharedMutationConfig, sharedVitestConfig],
+    ['server', serverMutationConfig, serverVitestConfig],
+    ['client', clientMutationConfig, clientVitestConfig],
+  ])(
+    'runs the %s mutation leg against the WHOLE suite, writing no JUnit',
+    (name, mutation, base) => {
+      // Two failures, and they pull in opposite directions.
+      //
+      // A NARROWED include would hand the oracle a subset of the suite and report
+      // the result as if the whole suite had been asked — the mutation-testing
+      // equivalent of a committed test filter. So the include and exclude sets
+      // must be exactly the base suite's.
+      expect(mutation.test?.include).toEqual(base.test?.include);
+      expect(mutation.test?.exclude).toEqual(base.test?.exclude);
+      // A JUnit reporter here would rewrite the artifact `audit:ratchet:full`
+      // reads the package's test count from — once per mutant, leaving the LAST
+      // MUTANT'S run behind as the headcount for the whole repository.
+      const reporters = (mutation.test?.reporters ?? []) as unknown[];
+      for (const reporter of reporters) {
+        const named = Array.isArray(reporter) ? reporter[0] : reporter;
+        expect(named, `${name} mutation reporters`).not.toBe('junit');
+      }
+      // Vitest resolves `root` from the CWD, and Stryker runs from the repository
+      // root. Unpinned, the runner scanned the whole sandbox with the default
+      // include, matched nothing, and Stryker exited before testing one mutant.
+      expect(mutation.test?.root).toBe(path.join(repoRoot, 'packages', name));
+    },
+  );
+
+  it("declares only the mutation gate's merged report, and defers it to its own tier", () => {
+    // `mutation.json` and nothing else. There is no JUnit here to declare — the
+    // legs are Stryker runs, not vitest runs with a reporter — but the rule that
+    // shaped `test:fuzz` still applies to the JSON: `test:mutation` is tier 2 and
+    // does not run during `npm run ci`, so the ratchet must be able to defer the
+    // fields it supplies rather than reporting them stale on every push.
+    expect(reportsOf(manifest.tasks['test:mutation']!)).toEqual(['mutation.json']);
+    expect(manifest.tasks['test:mutation']!.tier).toBe(2);
+    // The deferral is conditional on exactly that tier, which is what stops a
+    // gate being retired by moving it somewhere it never runs.
+    const ratchet = readFileSync(
+      path.join(repoRoot, 'scripts', 'ci', 'ratchet-check.mjs'),
+      'utf-8',
+    );
+    expect(ratchet).toContain("owner: 'test:mutation', tier: 2");
+    expect(ratchet).toContain("'mutation.overall'");
+    expect(ratchet).toContain("'mutation.filesMutated'");
   });
 
   it("declares only the fuzz gate's JSON report, never its per-leg JUnit", () => {
