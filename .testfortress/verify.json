@@ -264,6 +264,13 @@
       "report": "config.sarif",
       "requires": ["build:shared", "actionlint", "hadolint"]
     },
+    "audit:openapi": {
+      "cmd": "npm run audit:openapi",
+      "tier": 1,
+      "gate": "the HTTP contract the server generates carries no breaking change against the committed snapshot of the last release it describes, unless the root package.json MAJOR has been raised in the same commit",
+      "report": "openapi-compat.json",
+      "requires": ["build:shared", "oasdiff"]
+    },
     "audit:licenses": {
       "cmd": "npm run audit:licenses",
       "tier": 1,

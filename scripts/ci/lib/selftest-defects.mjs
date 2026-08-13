@@ -100,6 +100,26 @@ export const DEFECTS = {
     evidence: (text) => /selftestprobe/.test(text),
   },
 
+  'audit:openapi': {
+    requires: ['oasdiff'],
+    // A response field deleted from the contract the server serves, at an
+    // unchanged version. This is the exact shape the gate exists to catch: the
+    // field is optional, so no type breaks and no test fails — the SPA simply
+    // stops receiving `encryptedVaultKey` and cannot open the vault.
+    //
+    // Planted in `swagger.ts` rather than in the committed snapshot, because
+    // the snapshot is the BASE: editing it would prove the gate notices an
+    // edited base, which is not the claim. The claim is that a change to the
+    // served document is caught.
+    title: 'delete a response field from the served OpenAPI contract without a MAJOR bump',
+    mutate: {
+      'packages/server/src/config/swagger.ts': (text) =>
+        text.replace(/\n\s+encryptedVaultKey: \{ type: 'string' \},(?=\n\s+vaultKeyIv)/, ''),
+    },
+    evidence: (text) =>
+      /encryptedVaultKey/.test(text) && /response-optional-property-removed/.test(text),
+  },
+
   'audit:licenses': {
     // A licence in the production tree that the policy does not accept. Planted
     // by removing one from the allowlist rather than by installing a GPL

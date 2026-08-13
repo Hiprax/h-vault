@@ -133,6 +133,15 @@ because the obvious way past each of them is the wrong one.
   `warnings.audit:config` in the baseline, where it can be paid down and cannot grow. It
   needs `actionlint` and `hadolint` on your `PATH`; without them the gate reports **could
   not run** rather than passing quietly.
+- **`openapi`** asks a different question from `config`: not whether the OpenAPI document is
+  well-formed, but whether shipping it would break somebody's client. `oasdiff` compares the
+  document the server generates against `packages/server/openapi.snapshot.json` — the
+  committed contract of the release that snapshot names — and a breaking change fails unless
+  the root `package.json` MAJOR has been raised in the same commit. Removing a field from a
+  response breaks no type and fails no test, which is exactly why it needs its own gate.
+  **The snapshot moves only in the same commit as the version it describes**; refreshing it
+  on its own erases the evidence of whatever it was about to be compared against. It needs
+  `oasdiff` on your `PATH`; without it the gate reports **could not run**.
 - **`security`** runs the cross-user authorization matrix. It reads the real Express router
   stack and compares it against `packages/server/tests/support/routeTable.ts`, which
   classifies every route: its method and path, whether the path carries an id the caller
@@ -235,17 +244,23 @@ says so — never a quiet edit to the gate.
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
 (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`, `perf:`, `build:`). This is a
-convention, not a hook — but the release notes are generated from the commit history, so
-a clear subject line ends up in front of users.
+convention, not a hook. Release notes no longer come from the commit history — they are
+the `CHANGELOG.md` section for the version being released — so the place to write for
+users is that entry, and a clear subject line is for the people reading `git log`.
 
 1. Fork, and branch from `main` (`git checkout -b feat/my-feature`).
 2. Make the change, with tests and docs.
 3. `npm run ci` — green.
 4. Open a pull request describing **what** changed and **why**, and how you verified it.
 
-Every push to `main` is released automatically: the release workflow tags the commit and
-publishes a GitHub Release. That is the only workflow in the repository and the only thing
-that spends Actions minutes.
+The release workflow is the only workflow in the repository and the only thing that spends
+Actions minutes. It runs `npm run ci` on a clean checkout first, and tags and publishes only
+if that passes — the local run before your push is not a substitute, because the escape
+hatches above mean an unchecked commit can reach `main`.
+
+A push to `main` releases only when the root `package.json` version has been bumped and
+`CHANGELOG.md` has a matching `## [X.Y.Z]` section; that section becomes the Release body.
+An ordinary push publishes nothing and says so.
 
 ## Project layout
 

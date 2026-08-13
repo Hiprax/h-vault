@@ -185,6 +185,14 @@ const PREREQUISITES = {
     ok: () => hasExe('hadolint', ['--version']),
     fix: 'install hadolint — https://github.com/hadolint/hadolint/releases',
   },
+  // The breaking-change comparison. Declared for the same reason as the two
+  // above: a release-policy gate that quietly passed because the differ was
+  // absent would report "this change breaks nobody" having compared nothing.
+  oasdiff: {
+    label: 'the oasdiff binary',
+    ok: () => hasExe('oasdiff', ['--version']),
+    fix: 'install oasdiff — https://github.com/oasdiff/oasdiff/releases',
+  },
   // Patch coverage is computed by diff-cover, and a coverage gate that quietly
   // passed because the tool was absent would be worse than no gate at all: it
   // would report "every changed line is covered" having looked at none of them.
@@ -594,6 +602,25 @@ const GATES = [
     dependsOn: ['build'],
     requires: ['build:shared', 'actionlint', 'hadolint'],
     run: (options) => runExe(process.execPath, ['scripts/ci/config-gate.mjs'], options),
+  },
+  {
+    id: 'openapi',
+    task: 'audit:openapi',
+    tier: 1,
+    title: 'OpenAPI compatibility (oasdiff vs the committed snapshot)',
+    ci: 'new — nothing ever compared the served contract against the last release',
+    // Deliberately NOT a fourth leg of `config`. That gate asks whether the
+    // document is well-formed; this asks whether shipping it would break a
+    // client, which is release policy — and `verify:selftest` plants one defect
+    // per registered task, so sharing a task with `config` would have meant
+    // proving either the actionlint leg or this one, never both.
+    //
+    // It builds the document itself rather than reading the copy `config` leaves
+    // in the report directory, so `--only=openapi` checks the same thing a full
+    // run does.
+    dependsOn: ['build'],
+    requires: ['build:shared', 'oasdiff'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/openapi-gate.mjs'], options),
   },
   {
     id: 'e2e',

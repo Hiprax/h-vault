@@ -1032,6 +1032,7 @@ npm run ci -- --json            # one JSON document describing the run
 | `secrets-full`     | T1   | The working tree **plus every blob in git history** scanned for credential patterns                                                                           | _new_                      |
 | `deadcode`         | T1   | `knip` (unused files, exports, types, dependencies) + `jscpd` duplication against a committed ceiling                                                         | _new_                      |
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                    | _new_                      |
+| `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit             | _new_                      |
 | `e2e`              | T1   | Playwright (Chromium) against an auto-started stack                                                                                                           | `e2e` job                  |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                        | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import              | _new_                      |
@@ -1189,22 +1190,32 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ## Releases
 
-`.github/workflows/release.yml` is the only workflow in the repository. On every push to `main` it
-tags the commit and publishes a GitHub Release with generated notes. It is **gated on nothing** —
-the pipeline already ran, locally, before the push.
+`.github/workflows/release.yml` is the only workflow in the repository, and it has two jobs.
 
-The tag is chosen by `scripts/ci/next-version.mjs`: the highest existing `vX.Y.Z` with its patch
-bumped, unless `package.json`'s version is higher, which is how a minor or major release is cut.
+The first runs `npm run ci` — the same T0 + T1 gates the pre-push hook runs, not a narrower set —
+on a clean checkout. The second tags the commit and publishes the Release, and runs only if the
+first passed. The pipeline having already run locally is not a substitute: the hook has documented
+escape hatches (see below), so an unverified commit can reach `main`, and re-running the gauntlet
+on a hosted runner costs nothing on a public repository.
+
+**A release happens when the version says so.** `package.json` is the version of truth —
+`scripts/inject-version.js` compiles it into `APP_VERSION`, which `/health` and the OpenAPI
+document both serve — so the tag follows it and never leads it:
 
 ```text
-v0.1.0 → v0.1.1 → v0.1.2          # ordinary pushes
-                                  # set package.json to 0.2.0, then:
-             → v0.2.0 → v0.2.1
+push to main, version unchanged     → nothing published; the workflow says so and exits green
+bump package.json to 0.2.0, push    → v0.2.0 tagged and released
+tags ahead of package.json          → refused, rather than releasing a version nothing reports
 ```
 
+To cut a release: bump the version everywhere it appears, rename `## [Unreleased]` in
+[CHANGELOG.md](CHANGELOG.md) to `## [X.Y.Z] - <date>`, and push. The Release body is that section,
+verbatim; a release whose section is missing or empty fails rather than publishing empty notes.
+
 Tags are ordered numerically, not lexically (`v1.10.0` is above `v1.9.0`). If HEAD is already
-tagged, nothing new is minted, so a re-run is idempotent. The workflow never commits back to the
-repository, and it cannot trigger itself.
+tagged, no second tag is minted but the Release is still reconciled, so a run interrupted between
+the two heals on the retry. The workflow never commits back to the repository, and it cannot
+trigger itself.
 
 Every user-visible change is recorded in the **[changelog](CHANGELOG.md)**
 ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/), [SemVer](https://semver.org/)).

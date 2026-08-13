@@ -114,6 +114,10 @@ const PREREQUISITES = {
     label: 'the hadolint binary',
     ok: () => hasExe('hadolint', ['--version']),
   },
+  oasdiff: {
+    label: 'the oasdiff binary',
+    ok: () => hasExe('oasdiff', ['--version']),
+  },
   codeql: {
     label: 'a usable CodeQL CLI',
     ok: () => {

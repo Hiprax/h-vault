@@ -1,15 +1,19 @@
 name: Release
 
-# The only workflow in this repository, and the only thing here that spends
-# GitHub Actions minutes. Everything the old CI workflow did — build, lint,
-# type-check, unit tests, dependency audit, E2E, container builds, Trivy, static
-# analysis — now runs on the developer's machine before the push, via the
-# pre-push hook (`npm run ci`). A commit that reaches `main` has already passed
-# all of it, which is precisely why nothing here is gated on tests: re-running
-# them on a hosted runner would spend money to learn something already known.
+# The only workflow in this repository. It does two things, in this order: it
+# runs the whole gauntlet, and then — only if the gauntlet passed and this
+# commit is genuinely a release — it tags the commit and publishes the Release.
 #
-# Cost: one job, no dependency install, no build. It finishes in well under a
-# minute — and GitHub bills Actions per job, rounded up to the minute.
+# It used to be gated on nothing, on the argument that a commit reaching `main`
+# had already passed everything through the pre-push hook. That argument does
+# not survive contact with CONTRIBUTING.md, whose "Escape hatches" table
+# documents three supported ways past that hook — skipping named gates, a push
+# flag, and an environment variable that disables every hook. Any of them puts
+# an unverified commit on `main`, and the release published it without a single
+# check having run anywhere. This repository is public, so
+# hosted minutes are free and uncapped: re-running the gauntlet here costs
+# nothing and is the only thing that makes "every published release was built
+# from a commit that passed" a fact rather than an assumption.
 on:
   push:
     branches: [main]
@@ -22,45 +26,143 @@ permissions:
   contents: write
 
 # Serialised, and deliberately NOT cancel-in-progress. Two pushes landing
-# seconds apart would otherwise both read the same "highest existing tag" and
-# race to create the same one, and the loser fails with a red X — the exact
-# thing this repository is trying to stop seeing. Serialised, the second run
-# starts after the first has pushed its tag, sees it, and picks the next one.
+# seconds apart would otherwise both read the same tag state and race, and the
+# loser fails with a red X. Serialised, the second run starts after the first
+# has pushed its tag and sees it.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Tag and release
+  # ---------------------------------------------------------------------------
+  # The gauntlet. Identical to what the pre-push hook runs — `npm run ci`, the
+  # T0 and T1 tiers — so there is one definition of "verified" and this job
+  # cannot drift into checking less than the hook does.
+  #
+  # The four host binaries below are gate PREREQUISITES: `local-ci.mjs` declares
+  # them per gate and reports a missing one as "could not run" (exit 2) rather
+  # than as a pass, so leaving any of them out would turn this job red instead of
+  # quietly shrinking it. CodeQL is deliberately not installed: `sast` is the one
+  # gate allowed to report itself SKIPPED, and it falls back to the ESLint
+  # security baseline that `lint` already enforces.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify (the full local gauntlet)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # The next tag is derived from the tags that already exist, so a shallow
-          # clone (the default) would compute the wrong one — it would see none at
-          # all and re-mint the version already in package.json.
+          # The secret scan's history leg reads every blob ever committed, and
+          # the coverage gate diffs against `main`. Both need the whole history.
           fetch-depth: 0
 
-      # No actions/setup-node: the runner image already ships Node, this script
-      # has no dependencies, and skipping the install keeps the job short.
-      - name: Compute the release tag
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install the gate prerequisites
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          HADOLINT_VERSION: 2.14.0
+          OASDIFF_VERSION: 1.28.0
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar xz -C "$HOME/.local/bin" actionlint
+
+          curl -fsSL -o "$HOME/.local/bin/hadolint" \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          chmod +x "$HOME/.local/bin/hadolint"
+
+          curl -fsSL "https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}/oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" \
+            | tar xz -C "$HOME/.local/bin" oasdiff
+
+          pipx install diff-cover
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install the Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      # Every gate tees its own transcript, and the runner prints the failing
+      # ones, so a red run is diagnosed from the job log. The reports are
+      # deliberately NOT uploaded as an artifact: artifact and cache storage is
+      # the one part of Actions this repository has never spent anything on, and
+      # `local-pipeline.test.ts` keeps it that way.
+      - name: Run the gauntlet
+        run: npm run ci
+
+  # ---------------------------------------------------------------------------
+  # The release. Runs only after the gauntlet is green.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Tag and release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The release decision reads every existing tag, so a shallow clone
+          # (the default) would see none and re-mint a version already released.
+          fetch-depth: 0
+
+      # Answers two questions at once, and refuses rather than guessing when
+      # they disagree: is this commit a release, and under which tag?
+      #
+      # `package.json` is the version of truth — `scripts/inject-version.js`
+      # compiles it into APP_VERSION, which `/health` and the OpenAPI document
+      # both serve — so the tag follows it and never leads it. An ordinary push
+      # that bumped nothing sets `should_release=false` and publishes nothing;
+      # a tag series that has run AHEAD of package.json exits non-zero, because
+      # publishing v0.9.1 from an artifact reporting 0.8.0 is the exact defect
+      # this step exists to stop. See scripts/ci/lib/version.mjs (planRelease).
+      - name: Decide the release
         id: version
         run: |
           git fetch --tags --force --quiet
           node scripts/ci/next-version.mjs
 
-      # Skipped when HEAD is already tagged — a re-run, or a workflow_dispatch on
-      # an unchanged commit. The next step still reconciles the Release itself,
-      # so a run interrupted between tagging and publishing heals on the retry.
+      # The GitHub Release body is the curated CHANGELOG.md section, not
+      # `--generate-notes`' list of commit subjects. This project treats a
+      # changelog entry as a blocking requirement of every change; publishing
+      # commit subjects instead threw that work away on the way to the only
+      # place users read it. A missing section fails the release.
+      - name: Extract the release notes from CHANGELOG.md
+        if: steps.version.outputs.should_release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/ci/changelog-extract.mjs "$VERSION" > release-notes.md
+          echo "--- release notes ---"
+          cat release-notes.md
+
+      # Skipped when the tag already exists — a re-run, or a workflow_dispatch on
+      # an unchanged commit. The publish step still reconciles the Release, so a
+      # run interrupted between tagging and publishing heals when THAT run is
+      # retried (or dispatched again on the same commit). It does not heal on a
+      # later commit: once `v<version>` exists, a subsequent push reports
+      # "nothing to release" and that version's Release stays unpublished until
+      # someone re-dispatches this workflow on the tagged commit. The failed run
+      # is red, so the gap is visible rather than silent.
       - name: Create the tag
-        if: steps.version.outputs.tag_exists == 'false'
+        if: steps.version.outputs.should_release == 'true' && steps.version.outputs.create_tag == 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
+          set -euo pipefail
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git tag -a "$TAG" -m "$TAG"
@@ -76,12 +178,14 @@ jobs:
       # creates the tag "from the latest state of the default branch", which on a
       # busy repo is a DIFFERENT commit than the one this run built. Better to
       # abort and let the next push retry than to publish a release pointing at
-      # code nobody reviewed under this tag.
+      # code nobody built.
       - name: Publish the GitHub Release
+        if: steps.version.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
+          set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists — nothing to do."
             exit 0
@@ -89,4 +193,12 @@ jobs:
           gh release create "$TAG" \
             --title "$TAG" \
             --verify-tag \
-            --generate-notes
+            --notes-file release-notes.md
+
+      - name: Report a push that released nothing
+        if: steps.version.outputs.should_release != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "No release: v$VERSION is already tagged. Bump the root package.json" \
+               "version and add its CHANGELOG.md section to cut a new release."

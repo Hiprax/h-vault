@@ -188,6 +188,15 @@ const DIRECTION = {
   // fewer files than it used to is a weaker gate, whatever its finding count says.
   'config.belowError.*': 'lower',
   'config.inputsExamined.*': 'higher',
+  // The SIZE of the committed OpenAPI base, for the same reason as
+  // `config.inputsExamined` and `a11y.viewsScanned`: an addition is never a
+  // breaking change, so a snapshot that shrank makes `audit:openapi` report "0
+  // breaking changes" having compared the served contract against almost
+  // nothing. The finding count cannot show that; the denominator can. Removing
+  // an endpoint in a genuine MAJOR release therefore costs an `--accept` with a
+  // written reason, which is exactly the friction that decision deserves.
+  'openapi.snapshotPaths': 'higher',
+  'openapi.snapshotOperations': 'higher',
   // Accessibility. The two impacts that FAIL the gate are ratcheted at zero, so
   // the number cannot creep; `viewsScanned` is higher-is-better because an axe
   // run over nothing reports zero violations exactly like an axe run over a
@@ -558,6 +567,7 @@ function collect() {
       base === 'coverage.json' ||
       base === 'deadcode.json' ||
       base === 'config.sarif' ||
+      base === 'openapi-compat.json' ||
       base === 'a11y.json' ||
       base.includes('mutation') ||
       base.includes('flake');
@@ -606,6 +616,15 @@ function collect() {
       }
       for (const [tool, count] of Object.entries(props.inputsExamined ?? {})) {
         got[`config.inputsExamined.${tool}`] = count;
+      }
+    } else if (base === 'openapi-compat.json') {
+      // Only the size of the BASE. The breaking-change count is the gate's own
+      // verdict and is already zero-or-fail; what the gate cannot see about
+      // itself is a snapshot that stopped describing the API.
+      const snap = j.snapshot ?? {};
+      if (typeof snap.paths === 'number') got['openapi.snapshotPaths'] = snap.paths;
+      if (typeof snap.operations === 'number') {
+        got['openapi.snapshotOperations'] = snap.operations;
       }
     } else if (base === 'a11y.json') {
       // Only the two gated impacts and the size of the scanned surface. The

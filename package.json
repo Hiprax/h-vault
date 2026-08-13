@@ -80,6 +80,7 @@
     "deadcode": "node scripts/ci/deadcode-gate.mjs",
     "deadcode:duplication": "jscpd --config .jscpd.json",
     "audit:config": "node scripts/ci/config-gate.mjs",
+    "audit:openapi": "node scripts/ci/openapi-gate.mjs",
     "audit:config:openapi": "spectral lint .testfortress/reports/openapi.json --ruleset .spectral.yaml --format json --fail-severity error --quiet",
     "audit:licenses": "node scripts/ci/license-gate.mjs",
     "audit:bundle": "node scripts/ci/bundle-gate.mjs",

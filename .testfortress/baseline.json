@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-08-13",
-  "commit": "ed63ecc",
+  "commit": "9b0fb50",
   "tests": {
-    "count": 7608
+    "count": 7632
   },
   "coverage": {
     "diff": 100
@@ -120,7 +120,7 @@
         ]
       },
       "tests": {
-        "count": 2939
+        "count": 2963
       }
     },
     "packages/client": {
@@ -269,6 +269,7 @@
     "audit:image",
     "audit:integrity",
     "audit:licenses",
+    "audit:openapi",
     "audit:ratchet",
     "audit:ratchet:full",
     "audit:sast",
@@ -358,6 +359,8 @@
       "integrity.gateFilesHash",
       "integrity.gitignoreHash",
       "integrity.selfHash",
+      "openapi.snapshotOperations",
+      "openapi.snapshotPaths",
       "packages.e2e.tests.count",
       "packages.packages/client.coverage.branch",
       "packages.packages/client.coverage.filesMeasured",
@@ -441,7 +444,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 17 coverage-gates: register coverage:check (patch coverage + per-package floors), pin coverage.diff at 100, and record the test counts Phases 14-16 added",
+  "reason": "Phase 18: pin the OpenAPI contract snapshot's own size (openapi.snapshotPaths/snapshotOperations) so a shrunken base cannot make audit:openapi vacuous, and record the tests added for the tightened MAJOR-bump exemption.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -487,5 +490,9 @@
       "rotation-volume_durationMs": 35,
       "rotation-volume_rssGrowthMb": 50
     }
+  },
+  "openapi": {
+    "snapshotPaths": 47,
+    "snapshotOperations": 53
   }
 }
