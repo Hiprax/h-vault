@@ -14,6 +14,7 @@ import { AuditLog } from '../src/models/AuditLog.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { JobLock } from '../src/models/JobLock.js';
+import { advanceClockBy, installTestClock } from './clock.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { acquireJobLock } from '../src/utils/jobLock.js';
 import { getProgressiveDelay } from '../src/controllers/authController.js';
@@ -479,21 +480,29 @@ describe('TOTP window consistency', () => {
   }
 
   /**
-   * Wait until we are comfortably clear of a 30s TOTP step boundary before an
-   * adjacent-step (`window: 1`) ACCEPTANCE check. A code generated at `now - 30s`
-   * is exactly one step behind, but if the request happens to cross a step boundary
-   * between code generation and server-side validation the server's clock advances a
-   * step and the same code lands two steps away — outside window 1 — flaking the
-   * assertion. Waiting for the boundary to tick over first leaves ~30s of margin, far
-   * more than any request needs. Only waits when within 2s of the next step; a no-op
-   * otherwise, so it costs nothing in the common case. Has no effect on the reject
-   * tests (a two-step-away code stays outside window 1 regardless of a boundary cross).
+   * FREEZE the clock comfortably clear of a 30s TOTP step boundary, before an
+   * adjacent-step (`window: 1`) ACCEPTANCE check.
+   *
+   * A code generated at `now - 30s` is exactly one step behind; if the request
+   * crosses a step boundary between generation and server-side validation, the
+   * same code lands two steps away — outside window 1 — and the assertion flakes.
+   *
+   * This used to SLEEP up to ~2 s of real time to move past the boundary, which
+   * left the underlying race intact: the step could still advance while the
+   * request was in flight, so the wait made the flake unlikely rather than
+   * impossible. It also EVADED `audit:integrity`'s SLEEP-SYNC rule, whose literal
+   * form cannot see a computed delay — an unledgered instance of exactly the class
+   * Phase 19 Task 19.3 closed in `security-fixes.test.ts`.
+   *
+   * Freezing removes the race outright: the server runs in this process, so it
+   * reads the same stopped clock, and `installTestClock`'s default `toFake:
+   * ['Date']` leaves the supertest round trip's own timers running. The harness
+   * `afterEach` in `tests/setup.ts` hands the clock back.
    */
-  async function awaitStableTotpWindow(): Promise<void> {
+  function freezeMidTotpStep(): void {
+    installTestClock();
     const msToNextStep = 30_000 - (Date.now() % 30_000);
-    if (msToNextStep < 2_000) {
-      await new Promise((resolve) => setTimeout(resolve, msToNextStep + 50));
-    }
+    if (msToNextStep < 2_000) advanceClockBy(msToNextStep + 50);
   }
 
   function tempTokenFor(userId: string): string {
@@ -506,7 +515,7 @@ describe('TOTP window consistency', () => {
     const { user, secret } = await enable2faUser();
     const { token: csrf, cookie } = await getCsrf();
 
-    await awaitStableTotpWindow();
+    freezeMidTotpStep();
     const res = await request(app)
       .post('/api/v1/auth/login/2fa')
       .set('x-csrf-token', csrf)
@@ -545,7 +554,7 @@ describe('TOTP window consistency', () => {
     const secret = Secret.fromBase32(setupRes.body.data.secret as string);
 
     const { token: csrf2, cookie: cookie2 } = await getCsrf();
-    await awaitStableTotpWindow();
+    freezeMidTotpStep();
     const res = await request(app)
       .post('/api/v1/user/2fa/verify')
       .set('Authorization', authHeader(user.accessToken))

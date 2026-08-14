@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { CryptoService } from '../src/services/crypto/cryptoService';
+import { expectGcmAuthFailure, expectVaultKeyDecryptFailure } from './cryptoFailure.js';
 
 let crypto: CryptoService;
 
@@ -131,8 +132,9 @@ describe('decryptData with tampered IV', () => {
     tamperedIvBytes[0]! ^= 0xff;
     const tamperedIv = crypto.arrayBufferToBase64(tamperedIvBytes.buffer as ArrayBuffer);
 
-    // Decryption should fail with tampered IV
-    await expect(crypto.decryptData(encrypted, tamperedIv, tag, vaultKey)).rejects.toThrow();
+    // A flipped IV byte fails authentication exactly like a wrong key does:
+    // the same OperationError, with nothing naming the IV as the culprit.
+    await expectGcmAuthFailure(crypto.decryptData(encrypted, tamperedIv, tag, vaultKey));
   });
 
   it('fails to decrypt when IV is completely replaced with random bytes', async () => {
@@ -145,7 +147,7 @@ describe('decryptData with tampered IV', () => {
     globalThis.crypto.getRandomValues(randomIv);
     const wrongIv = crypto.arrayBufferToBase64(randomIv.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptData(encrypted, wrongIv, tag, vaultKey)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptData(encrypted, wrongIv, tag, vaultKey));
   });
 
   it('fails to decrypt when a single bit is flipped in the IV', async () => {
@@ -157,7 +159,7 @@ describe('decryptData with tampered IV', () => {
     ivBytes[ivBytes.length - 1]! ^= 0x01;
     const tamperedIv = crypto.arrayBufferToBase64(ivBytes.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptData(encrypted, tamperedIv, tag, vaultKey)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptData(encrypted, tamperedIv, tag, vaultKey));
   });
 });
 
@@ -181,7 +183,7 @@ describe('decryptData with tampered auth tag', () => {
     tagBytes[0]! ^= 0xff;
     const tamperedTag = crypto.arrayBufferToBase64(tagBytes.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptData(encrypted, iv, tamperedTag, vaultKey)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptData(encrypted, iv, tamperedTag, vaultKey));
   });
 
   it('fails to decrypt when auth tag is completely replaced', async () => {
@@ -193,7 +195,7 @@ describe('decryptData with tampered auth tag', () => {
     globalThis.crypto.getRandomValues(randomTag);
     const wrongTag = crypto.arrayBufferToBase64(randomTag.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptData(encrypted, iv, wrongTag, vaultKey)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptData(encrypted, iv, wrongTag, vaultKey));
   });
 });
 
@@ -217,7 +219,7 @@ describe('decryptData with tampered ciphertext', () => {
     ciphertextBytes[0]! ^= 0xff;
     const tamperedCiphertext = crypto.arrayBufferToBase64(ciphertextBytes.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptData(tamperedCiphertext, iv, tag, vaultKey)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptData(tamperedCiphertext, iv, tag, vaultKey));
   });
 
   it('fails to decrypt when ciphertext is truncated', async () => {
@@ -228,7 +230,10 @@ describe('decryptData with tampered ciphertext', () => {
     const truncated = ciphertextBytes.slice(0, Math.floor(ciphertextBytes.length / 2));
     const truncatedCiphertext = crypto.arrayBufferToBase64(truncated.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptData(truncatedCiphertext, iv, tag, vaultKey)).rejects.toThrow();
+    // Truncation is rejected as an authentication failure, NOT as a length or
+    // parse error: a distinct error here would tell an attacker how much of
+    // the ciphertext survived.
+    await expectGcmAuthFailure(crypto.decryptData(truncatedCiphertext, iv, tag, vaultKey));
   });
 });
 
@@ -246,7 +251,7 @@ describe('cross-key decryption failures', () => {
 
     const { encrypted, iv, tag } = await crypto.encryptVaultKey(vaultKey, mek1);
 
-    await expect(crypto.decryptVaultKey(encrypted, iv, tag, mek2)).rejects.toThrow();
+    await expectVaultKeyDecryptFailure(crypto.decryptVaultKey(encrypted, iv, tag, mek2));
   });
 
   it('fails to decrypt data with a different vault key', async () => {
@@ -259,7 +264,7 @@ describe('cross-key decryption failures', () => {
     const plaintext = 'secret-data-for-cross-key-test';
     const { encrypted, iv, tag } = await crypto.encryptData(plaintext, vaultKey1);
 
-    await expect(crypto.decryptData(encrypted, iv, tag, vaultKey2)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptData(encrypted, iv, tag, vaultKey2));
   });
 });
 

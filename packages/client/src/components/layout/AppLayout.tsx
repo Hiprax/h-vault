@@ -285,9 +285,13 @@ export function AppLayout() {
           className={cn(
             'mx-3 mb-1 flex items-center rounded-md px-3 py-1.5 text-xs font-medium',
             expanded ? 'gap-2' : 'justify-center',
+            // The 800 shades, not 600: this is 12px text on the sidebar's own
+            // background, where green-600 measured 2.92:1 and yellow-600 2.67:1
+            // against a 4.5:1 requirement. The dark-theme shades are unchanged
+            // — they are light text on a near-black surface.
             isOnline
-              ? 'text-green-600 dark:text-green-400'
-              : 'text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20',
+              ? 'text-green-800 dark:text-green-400'
+              : 'text-yellow-800 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20',
           )}
         >
           {isOnline ? (

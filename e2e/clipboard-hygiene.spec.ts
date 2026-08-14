@@ -67,8 +67,50 @@ async function emulateVisibility(page: Page, state: 'hidden' | 'visible'): Promi
     });
     document.dispatchEvent(new Event('visibilitychange'));
   }, state);
-  // Let any handler's async work settle before the spy is inspected.
-  await page.waitForTimeout(250);
+}
+
+/**
+ * The live countdown the guard drives, e.g. "Clipboard will clear in 27s".
+ *
+ * `useClipboardCountdown` renders it from `subscribeClipboardGuard`, so it is a
+ * direct read-out of the guard's own state: it appears when a secret is pending,
+ * re-titles once a second from the deadline, and is DISMISSED the moment the
+ * erase is confirmed. That makes it the synchronisation signal these tests need.
+ */
+function countdownToast(page: Page) {
+  return page.getByText(/clipboard will clear in \d+s/i);
+}
+
+/**
+ * Seconds remaining, or `NaN` when no countdown is on screen.
+ *
+ * The `count()` guard is load-bearing: `textContent()` auto-waits for its
+ * element, so on a DISMISSED toast — exactly the state an unwanted erase
+ * produces — it would block until the whole test timed out instead of letting
+ * the poll below fail with a message that names the countdown.
+ */
+async function countdownSeconds(page: Page): Promise<number> {
+  const toast = countdownToast(page);
+  if ((await toast.count()) === 0) return Number.NaN;
+  const text = (await toast.first().textContent()) ?? '';
+  const match = /clipboard will clear in (\d+)s/i.exec(text);
+  return match?.[1] === undefined ? Number.NaN : Number(match[1]);
+}
+
+/**
+ * Wait for the guard to make observable progress, and assert the deadline is
+ * still running while doing it.
+ *
+ * This replaces a blind 250 ms `waitForTimeout`. Polling for a countdown STRICTLY
+ * BELOW the value seen before the transition proves three things a sleep cannot:
+ * the guard's handler has run, at least a full second of its deadline has
+ * elapsed, and the deadline was neither cancelled nor restarted. An erase would
+ * clear `pending` and dismiss the toast entirely, so the poll fails on the very
+ * defect these tests exist for instead of silently racing it.
+ */
+async function expectCountdownStillTicking(page: Page, below: number): Promise<number> {
+  await expect.poll(() => countdownSeconds(page), { timeout: 15_000 }).toBeLessThan(below);
+  return countdownSeconds(page);
 }
 
 async function copyGeneratedPassword(page: Page): Promise<void> {
@@ -96,9 +138,15 @@ test.describe('clipboard hygiene', () => {
     expect(afterCopy).toHaveLength(1);
     expect(afterCopy[0]).not.toBe('');
 
+    // The deadline is running and visible to the user.
+    await expect(countdownToast(page)).toBeVisible();
+    const started = await countdownSeconds(page);
+    expect(started).toBeGreaterThan(0);
+
     // THE regression: the old implementation erased the clipboard right here, so
     // the password the user was on their way to paste was already gone.
     await emulateVisibility(page, 'hidden');
+    const whileHidden = await expectCountdownStillTicking(page, started);
     expect(await clipboardWrites(page)).toEqual(afterCopy);
 
     // Returning must not erase it early either. `focus` is the retry path, so this
@@ -107,7 +155,7 @@ test.describe('clipboard hygiene', () => {
     await page.evaluate(() => {
       window.dispatchEvent(new Event('focus'));
     });
-    await page.waitForTimeout(250);
+    const afterFocus = await expectCountdownStillTicking(page, whileHidden);
     expect(await clipboardWrites(page)).toEqual(afterCopy);
 
     // Repeated hide/show cycles, still untouched.
@@ -115,6 +163,7 @@ test.describe('clipboard hygiene', () => {
       await emulateVisibility(page, 'hidden');
       await emulateVisibility(page, 'visible');
     }
+    await expectCountdownStillTicking(page, afterFocus);
     const writes = await clipboardWrites(page);
     expect(writes).toEqual(afterCopy);
     expect(writes.filter((text) => text === '')).toHaveLength(0);

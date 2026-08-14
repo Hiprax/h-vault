@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { VaultItem } from '../models/VaultItem.js';
@@ -27,7 +27,7 @@ import type {
   BulkReEncryptInput,
 } from '@hvault/shared';
 
-const logger = createLogger({ moduleName: 'vault-controller' });
+const logger = createModuleLogger('vault-controller');
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

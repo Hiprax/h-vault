@@ -1,4 +1,67 @@
 import '@testing-library/jest-dom';
+import { afterEach, beforeEach } from 'vitest';
+import { applyDeterminismPins, printSeedBannerOnce } from './determinism.js';
+import { installEgressGuard } from './egressGuard.js';
+import { uninstallTestClock } from './clock.js';
+import { installRepoWriteGuard } from './tempDir.js';
+
+/**
+ * Pin timezone, locale and the seed inside the harness rather than as a shell
+ * prefix (`TZ=UTC npm test` is not valid syntax on Windows, where this project is
+ * also developed, so a prefix-based pin is one half the contributors silently do
+ * not get). `vitest.config.ts` carries the same values in `test.env` so they
+ * apply before the first module is evaluated; this re-applies them so the pin
+ * survives an invocation that bypassed the config's env block.
+ */
+applyDeterminismPins();
+
+/**
+ * Block outbound network access for the whole suite, and block writes into the
+ * checkout. Both at module scope, so they also cover a test file's import-time
+ * code.
+ *
+ * The write guard is installed here even though no client test writes a file
+ * today. That is the point: it is cheap now and it makes the FIRST such test
+ * fail with a message naming `createTestTempDir()`, rather than quietly leaving
+ * a fixture in the working tree for `audit:integrity` to trip over later. The
+ * server tier has carried it since this harness landed; leaving one tier
+ * unguarded is how the two drift.
+ */
+installEgressGuard();
+installRepoWriteGuard();
+
+/**
+ * Name the seed beside the first failure in each file, so a shuffled run's order
+ * is reproducible. A hook rather than a reporter: a reporter is configuration a
+ * contributor can drop without noticing, while this rides along with the setup
+ * file every test file already loads.
+ */
+beforeEach((ctx) => {
+  ctx.onTestFailed(() => {
+    printSeedBannerOnce();
+  });
+});
+
+/**
+ * The safety net under the test clock.
+ *
+ * `tests/clock.ts` restores in every place it is used — `withTestClock`'s
+ * `finally`, and a describe-scoped `afterEach` beside each bare
+ * `installTestClock`. This makes that structural rather than a matter of
+ * per-file discipline: a file that installs a fake clock and fails before its own
+ * cleanup would otherwise leave the whole WORKER frozen, and every later file in
+ * it would then run against an instant that stopped inside a test it has never
+ * heard of — an order-dependent failure produced by the very mechanism installed
+ * to remove one, and one that `test:flake` would surface as a mystery.
+ *
+ * `vi.useRealTimers()` is a no-op when no fake clock is installed (asserted in
+ * `packages/server/tests/clock.test.ts`), and `sequence.hooks: 'stack'` runs this
+ * hook LAST — after every describe-scoped `afterEach` — so a suite that installs
+ * its clock in a `beforeEach` is unaffected.
+ */
+afterEach(() => {
+  uninstallTestClock();
+});
 
 // Ensure Web Crypto API is available in jsdom environment
 if (!globalThis.crypto?.subtle) {

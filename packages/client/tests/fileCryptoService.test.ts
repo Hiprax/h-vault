@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import { CryptoManager, CryptoError } from '@hiprax/crypto';
+import { argon2id, sha256 } from 'hash-wasm';
 import {
   encryptFile,
   decryptFile,
@@ -74,6 +75,29 @@ describe('fileCryptoService — browser build resolution', () => {
     }
     expect(caught).toBeInstanceOf(CryptoError);
     expect((caught as CryptoError).code).toBe('UNSUPPORTED_IN_BROWSER');
+  });
+
+  /**
+   * The File Encryption tool's Argon2id comes from `hash-wasm`, which
+   * `@hiprax/crypto`'s web engine reaches through a bare `import('hash-wasm')`
+   * at run time and which `@hiprax/crypto` declares as an OPTIONAL dependency
+   * (`optionalDependencies: { argon2, hash-wasm }`). An optional dependency is
+   * installed by default but is skipped by `npm ci --omit=optional`, and npm
+   * treats a FAILED optional install as success — so leaning on it alone would
+   * leave the tool broken at the moment a user encrypts, with no build-time
+   * signal at all. The client declares `hash-wasm` directly for that reason.
+   *
+   * This asserts the provider is present AND that it computes: a module that
+   * resolves but cannot hash would satisfy an existence check and still fail a
+   * user's encrypt.
+   */
+  it('resolves the WASM Argon2id provider the browser build imports at run time', async () => {
+    expect(typeof argon2id).toBe('function');
+    // A known digest, so this proves the module COMPUTES rather than merely
+    // loading: FIPS 180-4 SHA-256("abc").
+    await expect(sha256('abc')).resolves.toBe(
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    );
   });
 
   it('completes one real container round-trip in jsdom', async () => {

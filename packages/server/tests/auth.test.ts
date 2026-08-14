@@ -88,10 +88,16 @@ describe('Auth API', () => {
       expect(res.body.message).toMatch(/registration successful/i);
       expect(res.body.data).toHaveProperty('emailSent');
 
-      // Confirm user was created in DB
-      const user = await User.findOne({ email: body.email });
-      expect(user).toBeDefined();
-      expect(user!.emailVerified).toBe(false);
+      // Confirm exactly one user was created, unverified, storing the client's
+      // wrapped vault key verbatim and the auth hash only as a bcrypt digest —
+      // never the value the client sent.
+      const users = await User.find({ email: body.email }).select('+authHash').lean();
+      expect(users).toHaveLength(1);
+      expect(users[0]?.emailVerified).toBe(false);
+      expect(users[0]?.encryptedVaultKey).toBe(body.encryptedVaultKey);
+      expect(users[0]?.kdfIterations).toBe(body.kdfIterations);
+      expect(users[0]?.authHash).not.toBe(body.authHash);
+      expect(users[0]?.authHash).toMatch(/^\$2[aby]\$/);
     });
 
     it('should return 201 with generic message when registering a duplicate email (no enumeration)', async () => {
@@ -1786,15 +1792,21 @@ describe('Auth API', () => {
         csrf,
       ).expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const unlocks = await AuditLog.find({
         userId: testUser.id,
         action: 'account_unlock',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(testUser.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).method).toBe('email_link');
+      // One row, recording which of the unlock routes was used and carrying no
+      // trace of the single-use token that authorised it.
+      expect(unlocks).toHaveLength(1);
+      expect(unlocks[0]?.metadata).toEqual({ method: 'email_link' });
+      expect(JSON.stringify(unlocks[0])).not.toContain(unlockToken);
+
+      // ...and the account is genuinely unlocked.
+      const unlocked = await User.findById(testUser.id).lean();
+      expect(unlocked?.lockoutUntil).toBeUndefined();
+      expect(unlocked?.failedLoginAttempts).toBe(0);
     });
   });
 
@@ -1945,11 +1957,19 @@ describe('Auth API', () => {
 
     it('should return 401 with an expired access token', async () => {
       const testUser = await createTestUser();
+
+      // There is deliberately NO wait here, and it is worth saying why, because
+      // there used to be a 1.1-second one and it pinned nothing.
+      //
+      // `generateExpiredToken` signs with `expiresIn: '0s'`, so `exp === iat`:
+      // the token is expired at the very instant it is minted. jsonwebtoken
+      // rejects when `now >= exp` (not `>`), with a default `clockTolerance` of
+      // zero, so the 401 holds in EVERY ordering, including a request served
+      // inside the same second. Measured: with the wait removed the test still
+      // passes, which by Law 1 makes the wait decoration rather than
+      // synchronization. Do not re-add it — if `clockTolerance` is ever
+      // configured, this test going red is the correct signal.
       const expiredToken = generateExpiredToken(testUser.id);
-
-      // Wait a moment for the token to actually expire (issued with 0s expiry)
-      await new Promise((resolve) => setTimeout(resolve, 1100));
-
       const res = await withCsrf(agent.post(`${API}/auth/logout`), csrf, expiredToken);
 
       expect(res.status).toBe(401);
@@ -2522,13 +2542,22 @@ describe('Auth API', () => {
         csrf,
       ).expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const logins = await AuditLog.find({
         userId: testUser.id,
         action: 'login',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(testUser.id);
+      // One row, carrying the request context this test deliberately set and
+      // no metadata: a single-factor login records nothing beyond the fact.
+      expect(logins).toHaveLength(1);
+      expect(logins[0]?.userAgent).toBe('AuditTestAgent/1.0');
+      expect(logins[0]?.ipAddress).toMatch(/127\.0\.0\.1$/);
+      expect(logins[0]?.metadata).toBeUndefined();
+
+      // ...and no failure was recorded for a login that succeeded.
+      await expect(
+        AuditLog.countDocuments({ userId: testUser.id, action: 'login_failed' }),
+      ).resolves.toBe(0);
     });
 
     it('should create audit log entry on failed login', async () => {
@@ -2542,13 +2571,22 @@ describe('Auth API', () => {
         csrf,
       ).expect(401);
 
-      const auditEntry = await AuditLog.findOne({
+      const failures = await AuditLog.find({
         userId: testUser.id,
         action: 'login_failed',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(testUser.id);
+      // One row, naming the reason and carrying the request context — and
+      // never the password that was attempted.
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.metadata).toEqual({ reason: 'invalid_password' });
+      expect(failures[0]?.userAgent).toBe('AuditTestAgent/1.0');
+      expect(JSON.stringify(failures[0])).not.toContain('wrong-password');
+
+      // ...and a rejected attempt is not also recorded as a login.
+      await expect(AuditLog.countDocuments({ userId: testUser.id, action: 'login' })).resolves.toBe(
+        0,
+      );
     });
 
     it('should create audit log on successful 2FA login', async () => {

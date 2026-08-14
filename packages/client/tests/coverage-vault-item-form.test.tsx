@@ -7,6 +7,7 @@ import {
   type DecryptedVaultItem,
 } from '../src/stores/vaultStore';
 import { computeItemIdentity } from '../src/services/import/identity';
+import { MAX_URI_LENGTH, URI_TOO_LONG_MESSAGE } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -208,8 +209,63 @@ describe('VaultItemForm — login payload', () => {
 
     submit();
 
-    await waitFor(() => expect(screen.getByText('URI too long')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(URI_TOO_LONG_MESSAGE)).toBeInTheDocument());
     expect(mockCreateItem).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The control's bound is measured on the value that gets STORED, not on the one
+   * that was typed. It used to be measured on the typed value, so a bare domain of
+   * 2041-2048 characters passed here, was stored eight characters longer, and was
+   * then refused by the write pre-flight on every later save — an item the editor
+   * could open and never save again. Both directions are pinned, because the cheap
+   * wrong fix is to lower the bound by eight for everything.
+   */
+  it('measures the URI bound after the https:// it prepends, not before', async () => {
+    renderForm();
+
+    typeIn('Item name', 'Bare domain at the cap');
+    typeIn('example.com', 'x'.repeat(MAX_URI_LENGTH));
+
+    submit();
+
+    await waitFor(() => expect(screen.getByText(URI_TOO_LONG_MESSAGE)).toBeInTheDocument());
+    expect(mockCreateItem).not.toHaveBeenCalled();
+  });
+
+  it('still accepts the longest bare domain that fits once the scheme is prepended', async () => {
+    renderForm();
+
+    const largestBareDomain = 'x'.repeat(MAX_URI_LENGTH - 'https://'.length);
+    typeIn('Item name', 'Bare domain one under the cap');
+    typeIn('example.com', largestBareDomain);
+
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    // Stored normalized and exactly AT the cap, which is the value the stored
+    // schema will re-parse on the next decrypt.
+    expect(createdData().uris).toEqual([{ uri: `https://${largestBareDomain}`, match: 'domain' }]);
+    expect((createdData().uris as { uri: string }[])[0]?.uri).toHaveLength(MAX_URI_LENGTH);
+  });
+
+  it('gives a URI that already carries its scheme the whole cap, not the cap minus eight', async () => {
+    renderForm();
+
+    // The mutation this kills is the cheap wrong fix: subtracting the scheme's
+    // length from the bound unconditionally. `normalizeUri` does not grow this
+    // value at all, so all 2048 characters are storable and refusing it would be
+    // a new false rejection introduced by the repair.
+    const fullLengthUrl = `https://${'x'.repeat(MAX_URI_LENGTH - 'https://'.length)}`;
+    expect(fullLengthUrl).toHaveLength(MAX_URI_LENGTH);
+    typeIn('Item name', 'Full-length URL');
+    typeIn('example.com', fullLengthUrl);
+
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect(createdData().uris).toEqual([{ uri: fullLengthUrl, match: 'domain' }]);
+    expect(screen.queryByText(URI_TOO_LONG_MESSAGE)).not.toBeInTheDocument();
   });
 
   it('adds and removes URI rows', async () => {

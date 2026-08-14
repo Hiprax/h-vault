@@ -44,5 +44,3 @@ export function BrandLogo({ size = 24, className, ...props }: BrandLogoProps) {
     </svg>
   );
 }
-
-export default BrandLogo;

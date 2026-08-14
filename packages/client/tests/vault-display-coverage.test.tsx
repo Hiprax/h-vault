@@ -231,6 +231,18 @@ vi.mock('react-window', () => ({
   },
 }));
 
+// Mock the LAZY LOADER as well as the library, delegating to whatever this file
+// mocked `zxcvbn` to be. `lazyZxcvbn` caches the resolved library in a
+// module-level binding, and the pages that gate on strength call `getZxcvbn()`
+// from both a mount effect and a submit handler — two concurrent cold dynamic
+// imports racing for one cache slot, where a win by the unmocked module makes
+// every later assertion in the file score against the REAL zxcvbn. Order used to
+// hide it; `sequence.shuffle` does not.
+vi.mock('../src/lib/lazyZxcvbn', async () => {
+  const zxcvbn = await import('zxcvbn');
+  return { getZxcvbn: () => Promise.resolve(zxcvbn.default) };
+});
+
 vi.mock('zxcvbn', () => ({
   default: (password?: string) => {
     if (!password) return { score: 0, feedback: { warning: '', suggestions: [] } };
@@ -3342,9 +3354,10 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
       data: { username: 'still-here', _validationError: true },
     });
 
-    expect(() =>
-      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />),
-    ).not.toThrow();
+    // Rendered directly rather than wrapped in `not.toThrow()`: an escaping
+    // render error fails the test either way, and the assertions below are
+    // what prove it DEGRADED rather than merely survived.
+    renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
 
     expect(screen.getByText(/could not be fully decoded/i)).toBeInTheDocument();
     // Identity + remediation actions remain reachable.
@@ -3361,9 +3374,7 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
       data: { value: 'partial', _validationError: true },
     });
 
-    expect(() =>
-      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />),
-    ).not.toThrow();
+    renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
 
     expect(screen.getByText(/could not be fully decoded/i)).toBeInTheDocument();
   });
@@ -3375,9 +3386,7 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
       data: { _raw: 'not-an-object' },
     });
 
-    expect(() =>
-      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />),
-    ).not.toThrow();
+    renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
 
     expect(screen.getByText(/could not be fully decoded/i)).toBeInTheDocument();
   });
@@ -3394,9 +3403,7 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
         data: { username: 'x', password: 'y' }, // no uris / customFields, no flags
       });
 
-      expect(() =>
-        renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />),
-      ).not.toThrow();
+      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
 
       expect(screen.getByText(/could not be fully decoded/i)).toBeInTheDocument();
       expect(screen.getByText('Edit')).toBeInTheDocument();

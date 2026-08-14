@@ -1,4 +1,4 @@
-import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import { AUDIT_ACTIONS } from '@hvault/shared';
 import type { AuditAction } from '@hvault/shared';
 import { config } from '../config/index.js';
@@ -14,8 +14,6 @@ export interface IAuditLog {
   userAgent: string;
   timestamp: Date;
 }
-
-export type AuditLogDocument = HydratedDocument<IAuditLog>;
 
 // ----- Schema -----
 

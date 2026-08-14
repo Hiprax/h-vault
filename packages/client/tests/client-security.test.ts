@@ -16,6 +16,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as pathResolve } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import axios, { type InternalAxiosRequestConfig } from 'axios';
+import { api, clearCsrfToken } from '../src/services/api/client';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -357,15 +359,24 @@ describe('CSRF cross-tab synchronization (Task 4.4)', () => {
   it('clearCsrfToken should not throw when localStorage is unavailable', async () => {
     const { clearCsrfToken } = await import('../src/services/api/client');
 
-    // Mock localStorage.setItem to throw
-    const originalSetItem = localStorage.setItem.bind(localStorage);
-    localStorage.setItem = () => {
+    // Spied on the PROTOTYPE, not by assigning `localStorage.setItem = fn`:
+    // jsdom's Storage is a Proxy that turns a property assignment into
+    // `setItem('setItem', fn)`, so the assignment form stores an item and
+    // leaves the real method in place — the failure path was never entered.
+    const failingSetItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('localStorage unavailable');
-    };
+    });
 
-    expect(() => clearCsrfToken()).not.toThrow();
-
-    localStorage.setItem = originalSetItem;
+    try {
+      // The cross-tab broadcast is best-effort. It must still be ATTEMPTED —
+      // a version that stopped writing the key would leave other tabs holding
+      // a stale token — and its failure must be swallowed rather than
+      // propagated to the caller that is clearing its own token.
+      clearCsrfToken();
+      expect(failingSetItem).toHaveBeenCalledWith('__hv_csrf_invalidated', expect.any(String));
+    } finally {
+      failingSetItem.mockRestore();
+    }
   });
 });
 
@@ -414,47 +425,168 @@ describe('vaultStore fetchItems/fetchFolders concurrency guard (L15)', () => {
 });
 
 describe('CSRF token fetch deduplication (Task 4.8)', () => {
-  it('API client source should deduplicate concurrent CSRF token fetches via csrfFetchPromise', async () => {
-    const source = readFileSync(pathResolve(clientSrcDir, 'services/api/client.ts'), 'utf-8');
+  /**
+   * These four cases used to read `services/api/client.ts` as TEXT and assert it
+   * contained `if (csrfFetchPromise) return csrfFetchPromise`. That asserts the
+   * SHAPE of an implementation rather than its behaviour: it passes for code
+   * that never runs, it fails for a rename that changes nothing, and — the
+   * reason it had to go — it fails outright under `test:mutation`, where every
+   * source file is instrumented before it is read. A test that cannot survive
+   * the oracle cannot be checked by it either.
+   *
+   * The deduplication is now driven through the real request interceptor: a
+   * stubbed transport resolves each request, and `axios.get` is the seam where
+   * the token fetch is counted.
+   */
+  const csrfGet = () =>
+    vi.spyOn(axios, 'get').mockResolvedValue({ data: { data: { csrfToken: 'tok-1' } } });
 
-    // csrfFetchPromise should be declared for deduplication
-    expect(source).toContain('let csrfFetchPromise: Promise<string> | null = null');
+  /**
+   * A transport that never reaches the network and records what the
+   * interceptors put on each request.
+   */
+  const stubTransport = () => {
+    const sent: InternalAxiosRequestConfig[] = [];
+    // `exactOptionalPropertyTypes` makes `adapter` non-assignable from its own
+    // getter (which widens with `undefined`), so the restore deletes the key
+    // rather than writing that value back — which is what "unset" means here.
+    const defaults = api.defaults as { adapter?: unknown };
+    const original = defaults.adapter;
+    defaults.adapter = (config: InternalAxiosRequestConfig) => {
+      sent.push(config);
+      return Promise.resolve({
+        data: { success: true },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      });
+    };
+    return {
+      sent,
+      restore: () => {
+        if (original === undefined) delete defaults.adapter;
+        else defaults.adapter = original;
+      },
+    };
+  };
 
-    // ensureCsrfToken should check for an in-flight promise before starting a new fetch
-    expect(source).toContain('if (csrfFetchPromise) return csrfFetchPromise');
-
-    // The promise should be reset in the finally block after fetch completes
-    expect(source).toMatch(/\.finally\(\(\)\s*=>\s*\{[\s\S]*?csrfFetchPromise = null/);
+  beforeEach(() => {
+    // Module-level cache: without this the first case in the file leaves a
+    // token behind and every later one measures nothing.
+    clearCsrfToken();
   });
 
-  it('clearCsrfToken should also reset csrfFetchPromise', async () => {
-    const source = readFileSync(pathResolve(clientSrcDir, 'services/api/client.ts'), 'utf-8');
+  it('fetches the CSRF token ONCE for concurrent state-changing requests', async () => {
+    const getSpy = csrfGet();
+    const transport = stubTransport();
+    try {
+      await Promise.all([api.post('/api/v1/a', {}), api.post('/api/v1/b', {})]);
 
-    // clearCsrfToken should reset both csrfToken and csrfFetchPromise
-    expect(source).toMatch(/clearCsrfToken[\s\S]*?csrfToken = null[\s\S]*?csrfFetchPromise = null/);
+      const csrfFetches = getSpy.mock.calls.filter(([url]) => url === '/api/v1/csrf-token');
+      expect(csrfFetches).toHaveLength(1);
+      // Both requests carry the token the single fetch produced — a
+      // deduplication that dropped the second caller's header instead of
+      // sharing the promise would also make exactly one fetch.
+      expect(transport.sent).toHaveLength(2);
+      for (const config of transport.sent) {
+        expect(config.headers['x-csrf-token']).toBe('tok-1');
+      }
+    } finally {
+      transport.restore();
+      getSpy.mockRestore();
+    }
+  });
+
+  it('does not re-fetch once a token is cached, and never fetches for a safe method', async () => {
+    const getSpy = csrfGet();
+    const transport = stubTransport();
+    try {
+      await api.post('/api/v1/a', {});
+      await api.post('/api/v1/b', {});
+      await api.get('/api/v1/c');
+
+      expect(getSpy.mock.calls.filter(([url]) => url === '/api/v1/csrf-token')).toHaveLength(1);
+      // A GET carries no token at all: fetching one for a safe method would
+      // spend a round trip on every read.
+      expect(transport.sent[2]?.headers['x-csrf-token']).toBeUndefined();
+    } finally {
+      transport.restore();
+      getSpy.mockRestore();
+    }
+  });
+
+  it('re-fetches after clearCsrfToken, because the cookie it was bound to has rotated', async () => {
+    const getSpy = csrfGet();
+    const transport = stubTransport();
+    try {
+      await api.post('/api/v1/a', {});
+      clearCsrfToken();
+      getSpy.mockResolvedValue({ data: { data: { csrfToken: 'tok-2' } } });
+      await api.post('/api/v1/b', {});
+
+      expect(getSpy.mock.calls.filter(([url]) => url === '/api/v1/csrf-token')).toHaveLength(2);
+      expect(transport.sent[1]?.headers['x-csrf-token']).toBe('tok-2');
+    } finally {
+      transport.restore();
+      getSpy.mockRestore();
+    }
+  });
+
+  it('re-fetches after ANOTHER TAB invalidates the token', async () => {
+    const getSpy = csrfGet();
+    const transport = stubTransport();
+    try {
+      await api.post('/api/v1/a', {});
+      // The cross-tab signal, delivered the way the browser delivers it. A
+      // listener that cleared only the cached token and not the in-flight
+      // promise would keep resolving the stale one, which is why the next
+      // request must produce a SECOND fetch and carry the new value.
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: '__hv_csrf_invalidated', newValue: '1' }),
+      );
+      getSpy.mockResolvedValue({ data: { data: { csrfToken: 'tok-3' } } });
+      await api.post('/api/v1/b', {});
+
+      expect(getSpy.mock.calls.filter(([url]) => url === '/api/v1/csrf-token')).toHaveLength(2);
+      expect(transport.sent[1]?.headers['x-csrf-token']).toBe('tok-3');
+    } finally {
+      transport.restore();
+      getSpy.mockRestore();
+    }
+  });
+
+  it('ignores a storage event for an unrelated key', async () => {
+    const getSpy = csrfGet();
+    const transport = stubTransport();
+    try {
+      await api.post('/api/v1/a', {});
+      window.dispatchEvent(new StorageEvent('storage', { key: '__hv_other', newValue: '1' }));
+      await api.post('/api/v1/b', {});
+
+      expect(getSpy.mock.calls.filter(([url]) => url === '/api/v1/csrf-token')).toHaveLength(1);
+    } finally {
+      transport.restore();
+      getSpy.mockRestore();
+    }
   });
 
   it('clearCsrfToken should be callable and reset state without errors', async () => {
-    const { clearCsrfToken } = await import('../src/services/api/client');
+    const { clearCsrfToken: clear } = await import('../src/services/api/client');
 
-    // Should be a callable function
-    expect(typeof clearCsrfToken).toBe('function');
-
-    // Should not throw when called multiple times
-    expect(() => {
-      clearCsrfToken();
-      clearCsrfToken();
-    }).not.toThrow();
-  });
-
-  it('cross-tab CSRF invalidation listener should clear both csrfToken and csrfFetchPromise', () => {
-    const source = readFileSync(pathResolve(clientSrcDir, 'services/api/client.ts'), 'utf-8');
-
-    // The storage event listener should reset csrfFetchPromise alongside csrfToken
-    // to prevent stale in-flight fetches from resolving after cross-tab invalidation
-    expect(source).toMatch(
-      /addEventListener\('storage'[\s\S]*?CSRF_INVALIDATION_KEY[\s\S]*?csrfToken = null[\s\S]*?csrfFetchPromise = null/,
-    );
+    // Idempotent: the second call broadcasts again (other tabs may have missed
+    // the first) and neither call throws on an already-cleared token.
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+    try {
+      clear();
+      clear();
+      const invalidations = setItemSpy.mock.calls.filter(
+        ([key]) => key === '__hv_csrf_invalidated',
+      );
+      expect(invalidations).toHaveLength(2);
+    } finally {
+      setItemSpy.mockRestore();
+    }
   });
 });
 
@@ -770,14 +902,13 @@ describe('Hardened markdown rendering (Task 8.7)', () => {
     expect(source).not.toMatch(/from ['"]dompurify['"]/);
   });
 
-  it('ReactMarkdown should have skipHtml enabled for defense-in-depth', () => {
-    const source = readFileSync(
-      pathResolve(clientSrcDir, 'components/vault/VaultItemDetail.tsx'),
-      'utf-8',
-    );
-
-    expect(source).toContain('skipHtml={true}');
-  });
+  // `skipHtml` is asserted BEHAVIOURALLY in `coverage-vault-item-detail.test.tsx`
+  // ("renders raw HTML in a markdown note as text, never as markup"), against the
+  // REAL react-markdown. It used to be `expect(source).toContain('skipHtml={true}')`
+  // here — a JSX boolean is mutable, so the instrumented file carries
+  // `skipHtml={stryMutAct(…) ? false : true}` and that assertion failed the
+  // mutation gate's dry run, which is a gate failing for the shape of an
+  // implementation rather than for its behaviour.
 
   it('ReactMarkdown should sanitize links with isSafeUrl', () => {
     const source = readFileSync(
@@ -845,6 +976,12 @@ describe('Password strength validation in change password flow (Task 8.8)', () =
     // After a successful password change the server revokes all refresh tokens,
     // so the client must force a full logout to prevent stale-MEK issues.
     expect(source).toContain('await logout()');
-    expect(source).toContain("navigate('/login'");
+    // The redirect that follows is asserted BEHAVIOURALLY, in
+    // `coverage-settings-page.test.tsx` ("logs the session out after a successful
+    // master-password change"). It used to be a second `toContain` here, for
+    // `navigate('/login'`, and that string does not survive instrumentation: the
+    // route literal is mutable, so under `test:mutation` the text reads
+    // `navigate(stryMutAct(…) ? "" : '/login'` and the assertion failed the
+    // oracle's own dry run — taking the whole gate down with it.
   });
 });

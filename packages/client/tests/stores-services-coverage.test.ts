@@ -1164,14 +1164,22 @@ describe('API Client — comprehensive coverage', () => {
       vi.resetModules();
       const { clearCsrfToken } = await importRealClient();
 
-      const originalSetItem = localStorage.setItem;
-      localStorage.setItem = () => {
+      // Spied on the PROTOTYPE, not by assigning `localStorage.setItem = fn`:
+      // jsdom's Storage is a Proxy that turns a property assignment into
+      // `setItem('setItem', fn)`, so the assignment form stores an item and
+      // leaves the real method in place — the failure path was never entered.
+      const failingSetItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
         throw new Error('localStorage disabled');
-      };
+      });
 
-      expect(() => clearCsrfToken()).not.toThrow();
-
-      localStorage.setItem = originalSetItem;
+      try {
+        // The cross-tab broadcast is attempted and its failure absorbed: the
+        // caller clearing its own token must not inherit a storage error.
+        clearCsrfToken();
+        expect(failingSetItem).toHaveBeenCalledWith('__hv_csrf_invalidated', expect.any(String));
+      } finally {
+        failingSetItem.mockRestore();
+      }
     });
   });
 
@@ -1602,10 +1610,17 @@ describe('logger', () => {
       const spyInfo = vi.spyOn(console, 'info').mockImplementation(() => {});
       const spyDebug = vi.spyOn(console, 'debug').mockImplementation(() => {});
 
-      expect(() => logger.error()).not.toThrow();
-      expect(() => logger.warn()).not.toThrow();
-      expect(() => logger.info()).not.toThrow();
-      expect(() => logger.debug()).not.toThrow();
+      // Called with no arguments at all: each level still forwards to its
+      // console counterpart exactly once rather than bailing out early.
+      logger.error();
+      logger.warn();
+      logger.info();
+      logger.debug();
+
+      expect(spyError).toHaveBeenCalledTimes(1);
+      expect(spyWarn).toHaveBeenCalledTimes(1);
+      expect(spyInfo).toHaveBeenCalledTimes(1);
+      expect(spyDebug).toHaveBeenCalledTimes(1);
 
       spyError.mockRestore();
       spyWarn.mockRestore();

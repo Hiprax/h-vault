@@ -15,6 +15,12 @@ export default tseslint.config(
       // Machine-local pipeline scratch (scripts/ci): the unpacked CodeQL bundle
       // and its database. Thousands of files; never linted, never traversed.
       '.cache/**',
+      // Machine-local mutation scratch (scripts/ci/mutation-gate.mjs): Stryker's
+      // sandbox is a COPY of the whole checkout with every file in scope
+      // instrumented, so linting it means linting the repository twice — the
+      // second time against generated code that is not written by anyone and
+      // fails thousands of rules. Measured: 23,122 errors from one sandbox.
+      '.stryker-tmp/**',
       '**/*.js',
       '**/*.mjs',
       '**/*.cjs',
@@ -122,7 +128,11 @@ export default tseslint.config(
   // for rules (`no-floating-promises`, `no-unnecessary-condition`) that test code
   // deliberately plays loose with.
   {
-    files: ['packages/*/tests/**/*.{ts,tsx}'],
+    // The repo-root `tests/harness/**` is included alongside each package's own
+    // `tests/`: it holds the shared determinism harness that all three packages
+    // re-export, and a file no `files` glob matches is a file ESLint silently
+    // never reads.
+    files: ['packages/*/tests/**/*.{ts,tsx}', 'tests/**/*.{ts,tsx}'],
     extends: [...tseslint.configs.strict, ...tseslint.configs.stylistic],
     languageOptions: {
       parser: tseslint.parser,

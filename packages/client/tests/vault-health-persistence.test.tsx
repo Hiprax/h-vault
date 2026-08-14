@@ -113,7 +113,7 @@ import {
   saveBreachResults,
   saveStrengthScores,
 } from '../src/services/health/healthResultsStore';
-import { clearScoreCache } from '../src/services/health/strengthCache';
+import { clearScoreCache, getScore, strengthCacheKey } from '../src/services/health/strengthCache';
 
 // ---------------------------------------------------------------------------
 // Pure-helper unit tests (deterministic branch coverage)
@@ -406,6 +406,40 @@ describe('VaultHealthPage — encrypted result persistence', () => {
     renderPage();
     await flush();
     expect(screen.getByText(/Click .*Check for Breaches/i)).toBeTruthy();
+  });
+
+  it('applies nothing from a hydrate that outlived the page', async () => {
+    // The snapshot load is fired from an effect and settles later, so leaving the
+    // page mid-read abandons a promise that still holds the vault key and the
+    // decrypted scores. Its continuation must apply NOTHING — in particular it
+    // must not prime `strengthCache`, which is module-level and therefore shared
+    // with whatever the user navigates to next.
+    //
+    // The unmount is synchronous, in the same tick that starts the read, so the
+    // cancelled path is taken on every run rather than whenever the IndexedDB
+    // read happens to lose a race.
+    const item = makeLogin('item-1', 'Weak Site', 'weak');
+    await saveStrengthScores(userId, vaultKey, [{ id: 'item-1', v: item.updatedAt, strength: 0 }]);
+    setItems([item]);
+
+    const { unmount } = renderPage();
+    unmount();
+
+    // Let the abandoned read resolve and run its continuation. Microtask ticks
+    // are not enough: the IndexedDB request and the AES-GCM decrypt behind it
+    // both settle on macrotasks, so a `flush()` alone would end the test before
+    // the continuation ran and assert on nothing.
+    await act(async () => {
+      for (let turn = 0; turn < 5; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // ...and this independent read is issued after the abandoned one, so its
+    // completion is a second, positive signal that the queue has drained. It
+    // doubles as the assertion that cancelling a READ left the stored snapshot
+    // alone rather than looking like a reason to drop it.
+    const persisted = await loadHealthResults(userId, vaultKey);
+    expect(persisted?.perItem['item-1']?.strength).toBe(0);
+
+    expect(getScore(strengthCacheKey('item-1', item.updatedAt))).toBeUndefined();
   });
 
   it('bumps the health generation on clearStore', () => {

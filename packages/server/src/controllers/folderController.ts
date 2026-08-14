@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { Folder } from '../models/Folder.js';
 import { VaultItem } from '../models/VaultItem.js';
 import { createAuditLog } from '../services/auditService.js';
@@ -19,7 +19,7 @@ import {
 } from '@hvault/shared';
 import type { CreateFolderInput, UpdateFolderInput, ReorderFolderInput } from '@hvault/shared';
 
-const logger = createLogger({ moduleName: 'folder-controller' });
+const logger = createModuleLogger('folder-controller');
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -390,18 +390,38 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
   // just-deleted folder rather than scanning all folders on every list request.
   // Only targets non-trashed items — trashed items may legitimately retain
   // the deleted folder's ID from the action=delete soft-delete path.
-  void VaultItem.updateMany({ userId, folderId: id, deletedAt: null }, { $unset: { folderId: 1 } })
-    .then((result) => {
-      if (result.modifiedCount > 0) {
-        logger.info(`Cleaned up ${String(result.modifiedCount)} orphaned folderId references`, {
-          userId,
-          folderId: id,
-        });
-      }
-    })
-    .catch((err: unknown) => {
-      logger.warn('Failed to clean orphaned folderId references', { error: err });
-    });
+  //
+  // AWAITED, deliberately. This used to be a floating `void ....then()`, which
+  // gave the mitigation the very failure mode it exists to mitigate: a process
+  // that dies just after answering loses the sweep exactly as it lost the write
+  // the sweep was compensating for, and the orphan survives. One indexed
+  // `updateMany` before the audit row costs a single round trip and makes the
+  // reference provably gone by the time the caller is told the folder is.
+  //
+  // It also removed a race the suite could see but not control: whether the
+  // floating promise resolved before the worker moved on decided whether this
+  // branch was executed at all, so `packages/server` line and branch coverage
+  // differed run to run (measured: 3012 vs 3013 lines, 1417 vs 1418 branches on
+  // two runs of the same tree at the same seed) and the ratchet gate flickered.
+  try {
+    const cleanup = await VaultItem.updateMany(
+      { userId, folderId: id, deletedAt: null },
+      { $unset: { folderId: 1 } },
+    );
+    if (cleanup.modifiedCount > 0) {
+      logger.info(`Cleaned up ${String(cleanup.modifiedCount)} orphaned folderId references`, {
+        userId,
+        folderId: id,
+      });
+    }
+  } catch (err: unknown) {
+    // Never fail the delete over the sweep, which is what the previous `.catch`
+    // did too: the folder IS gone, and a stale folderId on an item is a
+    // cosmetic inconsistency that the client's tree builder and the next delete
+    // both tolerate. Turning it into a 500 would report the whole operation as
+    // failed when the part the caller asked for succeeded.
+    logger.warn('Failed to clean orphaned folderId references', { error: err });
+  }
 
   const deleteCtx = getRequestContext(req);
   await createAuditLog(

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { advanceClockBy } from './clock.js';
 import {
   copySecretToClipboard,
   eraseCopiedSecretNow,
@@ -348,7 +349,7 @@ describe('clipboardService', () => {
       // Chromium throttles timers in hidden tabs (once per minute under intensive
       // throttling), so the wall clock can pass the deadline before the timer
       // runs. Move the clock WITHOUT running the timer queue.
-      vi.setSystemTime(new Date(Date.now() + 31_000));
+      advanceClockBy(31_000);
       flushDueErase();
       await flushMicrotasks();
 

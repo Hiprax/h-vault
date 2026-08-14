@@ -25,7 +25,13 @@
     "composite": false,
     "declaration": false,
     "declarationMap": false,
-    "rootDir": "."
+    // The repo root, not `.`: `rootDir` is a pure CONSTRAINT under `noEmit`, and
+    // `tests/determinism.ts` re-exports the repo-wide determinism harness in
+    // `tests/harness/`, which every package's suite must pin identically (three
+    // copies of that contract would drift, and a package that quietly stopped
+    // pinning `LC_ALL` would start depending on the developer's desktop locale).
+    // Same reasoning as `packages/server/tsconfig.test.json`.
+    "rootDir": "../.."
   },
   "include": ["src/**/*", "tests/**/*"]
 }

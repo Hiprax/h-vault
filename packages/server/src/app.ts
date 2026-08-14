@@ -11,7 +11,8 @@ import type { ServerResponse } from 'node:http';
 import hppx from 'hppx';
 import passport from 'passport';
 import { createErrorMiddleware } from '@hiprax/errors';
-import { createLogger, createRequestLogger } from '@hiprax/logger';
+import { createRequestLogger } from '@hiprax/logger';
+import { createModuleLogger } from './utils/logger.js';
 import { config } from './config/index.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
@@ -181,6 +182,13 @@ app.use(passport.initialize());
 // Request logging
 app.use(
   createRequestLogger({
+    // The HTTP logger is built HERE rather than left to `createRequestLogger`'s
+    // own default. That default is `createLogger({ moduleName: 'http' })` — the
+    // bare call, with @hiprax/logger's `<cwd>/logs` directory and both rotating
+    // file transports on — so leaving it out would reintroduce, on the single
+    // busiest logger in the process, exactly what `utils/logger.ts` exists to
+    // route through one place.
+    logger: createModuleLogger('http'),
     maskBodyKeys: [
       'password',
       'authHash',
@@ -218,7 +226,7 @@ app.get('/api/v1/csrf-token', csrfLimiter, csrfTokenHandler);
 // API documentation (Swagger UI) — available in development/test or when explicitly enabled
 if (config.NODE_ENV !== 'production' || config.ENABLE_SWAGGER) {
   // Surface a warning in operator logs when API docs are exposed in production.
-  warnIfSwaggerEnabledInProduction(config, createLogger({ moduleName: 'app' }));
+  warnIfSwaggerEnabledInProduction(config, createModuleLogger('app'));
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
   app.get('/api/v1/docs.json', (_req: Request, res: Response) => {
     res.json(swaggerSpec);

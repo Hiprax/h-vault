@@ -57,7 +57,27 @@ vi.mock('../../src/services/crypto/cryptoService', () => ({
   },
 }));
 
-// Provide a lightweight mock for zxcvbn so we don't need the full dictionary
+// Mock the LAZY LOADER as well as the library, delegating to whatever this file
+// mocked `zxcvbn` to be.
+//
+// `lazyZxcvbn` caches the resolved library in a module-level binding, and
+// `RegisterPage` calls `getZxcvbn()` TWICE on a cold cache — once from its mount
+// effect (`RegisterPage.tsx:88`), once from the submit handler (`:105`) — with no
+// microtask checkpoint between them in a synchronous test body. Two concurrent
+// cold dynamic imports then race for that one cache slot, and when the unmocked
+// module won it, every later test in this file scored against the REAL zxcvbn:
+// '12345678' rendered 'Very weak' (real score 0) instead of the 'Weak' the scorer
+// below defines (score 1). It only surfaced once `sequence.shuffle` stopped
+// guaranteeing that a mount-only test warmed the cache first. Mocking the loader
+// removes both the cache and the race; the `zxcvbn` mock stays so any STATIC
+// import of the library is covered too.
+vi.mock('../../src/lib/lazyZxcvbn', async () => {
+  const zxcvbn = await import('zxcvbn');
+  return { getZxcvbn: () => Promise.resolve(zxcvbn.default) };
+});
+
+// A lightweight scorer, so the tests need neither the ~400 KB dictionary nor the
+// real library's exact scores.
 vi.mock('zxcvbn', () => ({
   default: (password: string) => {
     let score = 0;

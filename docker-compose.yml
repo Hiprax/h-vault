@@ -383,10 +383,15 @@ services:
     logging: *hvault-logging
     env_file: *hvault-env-file
     environment:
+      # No `npm_config_cache` here any more, and its absence is the point: this
+      # image no longer ships npm at all. It carried one only so that
+      # `npm run create-indexes -w packages/server` worked, and npm's bundled
+      # dependency tree was the stack's largest source of vulnerability findings;
+      # the stage now invokes `tsx scripts/create-indexes.ts` directly, exactly as
+      # hvault-app already invokes node directly. The /tmp tmpfs below stays: a
+      # read-only root filesystem with no writable temp directory is a trap for
+      # the next tool that needs one.
       <<: *hvault-app-environment
-      # $HOME (/home/node) sits on the read-only root filesystem, and npm insists on
-      # a writable cache directory even for `npm run <script>`. Point it at the tmpfs.
-      npm_config_cache: /tmp/.npm
     networks:
       # `data` only. It opens one MongoDB connection and makes no outbound call, so
       # it is deliberately kept off `edge` and has no route to the internet.
@@ -556,8 +561,19 @@ services:
       # report healthy only once this node IS a writable primary — i.e. once
       # transactions are actually available. `$$` is Compose's escape for a literal
       # `$`, so the credentials are read from the container's own environment and
-      # never appear in the command line stored in `docker inspect`. Output is
-      # discarded so a failing probe leaks no replica-set state or stack frames.
+      # never appear in the command line stored in `docker inspect`.
+      #
+      # A failed `rs.initiate` is REPORTED, not discarded. On an already-initiated
+      # set it is the expected outcome and says so; any other failure — bad
+      # credentials, an unreachable member, a host name that does not resolve —
+      # used to be swallowed by an empty catch, leaving an unhealthy container
+      # whose probe explained nothing. Only the error's `codeName` is printed: a
+      # short enum, never the message or a stack frame.
+      #
+      # stderr alone is discarded (`2>/dev/null`), which is what keeps replica-set
+      # state and stack traces out of the probe log that `docker inspect` retains.
+      # Under `--quiet` the only thing this writes to stdout is the `print` below:
+      # `rs.status()` and `db.hello()` sit inside blocks and are not echoed.
       test:
         - CMD-SHELL
         - >-
@@ -566,10 +582,11 @@ services:
           --authenticationDatabase admin
           --eval '
             try { rs.status() } catch (e) {
-              try { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "hvault-db:27017" }] }) } catch (e2) {}
+              try { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "hvault-db:27017" }] }) }
+              catch (e2) { print("rs.initiate: " + (e2.codeName || "failed")) }
             }
             quit(db.hello().isWritablePrimary ? 0 : 1)
-          ' >/dev/null 2>&1
+          ' 2>/dev/null
       interval: 10s
       timeout: 10s
       retries: 12

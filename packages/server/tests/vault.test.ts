@@ -5,6 +5,7 @@ import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { AuditLog } from '../src/models/AuditLog.js';
+import { User } from '../src/models/User.js';
 import {
   createTestUser,
   authHeader,
@@ -1260,17 +1261,27 @@ describe('Vault API', () => {
         .set('x-csrf-token', csrfToken)
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const permanentDeletes = await AuditLog.find({
         userId: user.id,
         action: 'item_delete',
         'metadata.permanent': true,
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).itemId).toBe(id);
-      expect((auditEntry!.metadata as Record<string, unknown>).permanent).toBe(true);
+      // One row, naming the item and its type and flagging the deletion as
+      // irreversible: the flag is what separates this from the soft delete
+      // that preceded it, and both rows exist.
+      expect(permanentDeletes).toHaveLength(1);
+      expect(permanentDeletes[0]?.metadata).toEqual({
+        itemId: id,
+        itemType: 'login',
+        permanent: true,
+      });
+      await expect(
+        AuditLog.countDocuments({ userId: user.id, action: 'item_delete' }),
+      ).resolves.toBe(2);
+
+      // ...and the row is gone from the database, not merely re-trashed.
+      await expect(VaultItem.findById(id).lean()).resolves.toBeNull();
     });
 
     it('should create audit log on empty trash', async () => {
@@ -1308,17 +1319,17 @@ describe('Vault API', () => {
         .set('x-csrf-token', csrf3.csrfToken)
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const emptied = await AuditLog.find({
         userId: user.id,
         action: 'item_delete',
         'metadata.action': 'empty_trash',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).action).toBe('empty_trash');
-      expect((auditEntry!.metadata as Record<string, unknown>).count).toBe(2);
+      // One row, and the count it reports is the number of rows the request
+      // actually destroyed.
+      expect(emptied).toHaveLength(1);
+      expect(emptied[0]?.metadata).toEqual({ action: 'empty_trash', count: 2 });
+      await expect(VaultItem.countDocuments({ userId: user.id })).resolves.toBe(0);
     });
 
     it('should handle batched deletion for large trash volumes', async () => {
@@ -1618,15 +1629,16 @@ describe('Vault API', () => {
     it('should create audit log on item creation', async () => {
       const { id } = await createItemViaApi(user.accessToken);
 
-      const auditEntry = await AuditLog.findOne({
+      const creates = await AuditLog.find({
         userId: user.id,
         action: 'item_create',
-        'metadata.itemId': id,
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect((auditEntry!.metadata as Record<string, unknown>).itemType).toBe('login');
+      // One row naming the item and its type — and nothing else. `toEqual` is
+      // the zero-knowledge assertion here: no ciphertext, IV, tag or name may
+      // be copied into the audit trail.
+      expect(creates).toHaveLength(1);
+      expect(creates[0]?.metadata).toEqual({ itemId: id, itemType: 'login' });
     });
 
     it('should create audit log on item update', async () => {
@@ -1643,14 +1655,19 @@ describe('Vault API', () => {
         .send({ favorite: true })
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const updates = await AuditLog.find({
         userId: user.id,
         action: 'item_update',
         'metadata.itemId': id,
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
+      // One row naming the item and its type, with no echo of what changed.
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.metadata).toEqual({ itemId: id, itemType: 'login' });
+
+      // ...and the update the row claims actually landed.
+      const updated = await VaultItem.findById(id).lean();
+      expect(updated?.favorite).toBe(true);
     });
 
     it('should create audit log on soft delete', async () => {
@@ -1666,16 +1683,21 @@ describe('Vault API', () => {
         .set('x-csrf-token', csrfToken)
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const deletes = await AuditLog.find({
         userId: user.id,
         action: 'item_delete',
         'metadata.itemId': id,
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      // Soft delete should NOT have the permanent flag
-      expect((auditEntry!.metadata as Record<string, unknown>).permanent).toBeUndefined();
+      // A soft delete carries no `permanent` flag, and the exhaustive
+      // `toEqual` is what proves that: checking the single key for `undefined`
+      // passes just as happily when no row was written at all.
+      expect(deletes).toHaveLength(1);
+      expect(deletes[0]?.metadata).toEqual({ itemId: id, itemType: 'login' });
+
+      // ...and "soft" means the row survives, merely stamped as trashed.
+      const trashed = await VaultItem.findById(id).lean();
+      expect(trashed?.deletedAt).toBeInstanceOf(Date);
     });
   });
 
@@ -2516,14 +2538,20 @@ describe('Vault API', () => {
         })
         .expect(401);
 
-      const auditEntry = await AuditLog.findOne({
+      const failures = await AuditLog.find({
         userId: user.id,
         action: 'password_verification_failed',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe('bulk_reencrypt');
+      // One row naming the endpoint, carrying nothing else.
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.metadata).toEqual({ endpoint: 'bulk_reencrypt' });
+
+      // ...and the rejected rotation left the wrapped vault key untouched and
+      // the write fence clear.
+      const untouched = await User.findById(user.id).lean();
+      expect(untouched?.encryptedVaultKey).not.toBe('new-evk');
+      expect(untouched?.rotationInProgress ?? false).toBe(false);
     });
 
     // ── Body-size limit (route-level 30 MB override) ──────────────────

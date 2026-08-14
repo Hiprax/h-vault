@@ -35,8 +35,8 @@ function makeReq(opts: { ip?: string; body?: unknown; remoteAddress?: string }):
 describe('buildAccountKey (T14)', () => {
   it('does NOT throw when req.body is undefined (non-JSON / bodyless request)', () => {
     const req = makeReq({ ip: '203.0.113.7', body: undefined });
-    expect(() => buildAccountKey(req)).not.toThrow();
-    // Falls back to the IP-keyed no-email bucket.
+    // Returning the IP-keyed fallback IS the no-throw proof: reaching this
+    // value at all means the optional chain absorbed the missing body.
     expect(buildAccountKey(req)).toBe('account:no-email:203.0.113.7');
   });
 
@@ -73,7 +73,6 @@ describe('buildAccountKey (T14)', () => {
     const bodies: unknown[] = ['plaintext-body', 42, true, ['x'], null];
     for (const body of bodies) {
       const req = makeReq({ ip: '203.0.113.7', body });
-      expect(() => buildAccountKey(req)).not.toThrow();
       expect(buildAccountKey(req)).toBe('account:no-email:203.0.113.7');
     }
   });
@@ -82,7 +81,6 @@ describe('buildAccountKey (T14)', () => {
 describe('skipAccountLimiter (T14)', () => {
   it('does NOT throw and returns true when req.body is undefined', () => {
     const req = makeReq({ body: undefined });
-    expect(() => skipAccountLimiter(req)).not.toThrow();
     expect(skipAccountLimiter(req)).toBe(true);
   });
 
@@ -108,7 +106,6 @@ describe('skipAccountLimiter (T14)', () => {
     const bodies: unknown[] = ['plaintext-body', 42, true, ['x'], null];
     for (const body of bodies) {
       const req = makeReq({ body });
-      expect(() => skipAccountLimiter(req)).not.toThrow();
       expect(skipAccountLimiter(req)).toBe(true);
     }
   });

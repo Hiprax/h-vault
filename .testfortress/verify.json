@@ -1,0 +1,322 @@
+{
+  "version": 1,
+  "runner": "npm run",
+  "reportDir": ".testfortress/reports",
+  "env": {
+    "TZ": "UTC",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "SEED": "1337"
+  },
+  "tiers": {
+    "0": "verify:fast",
+    "1": "verify",
+    "2": "verify:full"
+  },
+  "tasks": {
+    "verify:fast": {
+      "cmd": "npm run verify:fast",
+      "tier": 0,
+      "composite": true,
+      "gate": "every T0 task passes",
+      "report": "summary.json"
+    },
+    "verify": {
+      "cmd": "npm run ci",
+      "tier": 1,
+      "composite": true,
+      "gate": "every T0 + T1 task passes",
+      "report": "summary.json"
+    },
+    "verify:full": {
+      "cmd": "npm run verify:full",
+      "tier": 2,
+      "composite": true,
+      "gate": "every T0 + T1 + T2 task passes",
+      "report": "summary.json"
+    },
+    "verify:selftest": {
+      "cmd": "npm run verify:selftest",
+      "tier": 2,
+      "composite": true,
+      "gate": "every registered gate returns non-zero with one planted defect",
+      "report": "selftest.json"
+    },
+    "ci:local": {
+      "cmd": "npm run ci:local",
+      "tier": 2,
+      "composite": true,
+      "gate": "HEAD, checked out into a temporary worktree and installed from the lockfile alone, passes every tier",
+      "report": "cleanroom.json"
+    },
+    "engines": {
+      "cmd": "node scripts/ci/local-ci.mjs --only=engines",
+      "tier": 0,
+      "gate": "the running Node satisfies engines.node",
+      "report": "engines.log"
+    },
+    "audit:secrets": {
+      "cmd": "node scripts/ci/secret-scan.mjs --report",
+      "tier": 0,
+      "gate": "0 findings across every tracked and untracked-not-ignored file",
+      "report": "secrets.json"
+    },
+    "lint": {
+      "cmd": "npm run lint:report",
+      "tier": 0,
+      "gate": "0 errors and 0 warnings",
+      "report": "eslint.sarif"
+    },
+    "format:check": {
+      "cmd": "npm run format:check",
+      "tier": 0,
+      "gate": "0 files differ from Prettier's output",
+      "report": "format.log"
+    },
+    "typecheck": {
+      "cmd": "npm run type-check",
+      "tier": 0,
+      "gate": "0 type errors across all 4 tsc projects",
+      "report": "tsc.log",
+      "requires": ["build:shared"]
+    },
+    "audit:integrity": {
+      "cmd": "npm run audit:integrity",
+      "tier": 0,
+      "gate": "0 unledgered markers, 0 non-ledgerable markers, 0 expired or stale ledger entries",
+      "report": "integrity.json"
+    },
+    "audit:ratchet": {
+      "cmd": "npm run audit:ratchet",
+      "tier": 0,
+      "gate": "no regression in the cheap fields: suppressions, scan fingerprints, registered task list",
+      "report": "ratchet-tier0.json"
+    },
+    "audit:ratchet:full": {
+      "cmd": "npm run audit:ratchet:full",
+      "tier": 1,
+      "gate": "no regression in any measured field, including coverage denominators and the measured file set",
+      "report": "ratchet.json"
+    },
+    "build": {
+      "cmd": "npm run build",
+      "tier": 1,
+      "gate": "shared, server and client build with exit 0",
+      "report": "build.log"
+    },
+    "test:unit": {
+      "cmd": "npm run test:unit",
+      "tier": 1,
+      "gate": "all pass; shared and client coverage thresholds hold",
+      "report": ["junit-shared.xml", "junit-client.xml"],
+      "coverage": [
+        "packages/shared/coverage/cobertura-coverage.xml",
+        "packages/client/coverage/cobertura-coverage.xml"
+      ],
+      "requires": ["build:shared"]
+    },
+    "test:integration": {
+      "cmd": "npm run test:integration",
+      "tier": 1,
+      "gate": "all pass against a real mongod; server coverage thresholds hold",
+      "report": "junit-server.xml",
+      "coverage": ["packages/server/coverage/cobertura-coverage.xml"],
+      "requires": ["build:shared"]
+    },
+    "test:security": {
+      "cmd": "npm run test:security",
+      "tier": 1,
+      "gate": "the route table matches the real router stack, and every id-taking route refuses a non-owner without touching the target",
+      "report": "junit-security.xml",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:observability": {
+      "cmd": "npm run test:observability",
+      "tier": 1,
+      "gate": "no request value, audit row or production error body carries a secret, and a 5xx body is redacted to its status text",
+      "report": "junit-observability.xml",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:property": {
+      "cmd": "npm run test:property",
+      "tier": 1,
+      "gate": "every property holds in BOTH timezones: the crypto round-trip and its fresh IV, the five schemas as fixed points, combineExpiry across a fall-back DST repeated hour, the entropy metrics monotonic, deliveryNotes unrendered, and the folder forest acyclic and within the nesting cap under any sequence of operations",
+      "report": [
+        "property.json",
+        "junit-property-shared-utc.xml",
+        "junit-property-server-utc.xml",
+        "junit-property-client-utc.xml",
+        "junit-property-shared-dst.xml",
+        "junit-property-server-dst.xml",
+        "junit-property-client-dst.xml"
+      ],
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:snapshot": {
+      "cmd": "npm run test:snapshot",
+      "tier": 1,
+      "gate": "the Bitwarden JSON, Bitwarden CSV and Chrome/Edge CSV exports match their committed goldens byte for byte, every golden carries a provenance note naming its verifier, date and source, and import(export(items)) yields the same logical items",
+      "report": "junit-export.xml",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:a11y": {
+      "cmd": "npm run test:a11y",
+      "tier": 1,
+      "gate": "every primary view and modal \u2014 fifteen of them, in the real authenticated DOM \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
+      "report": ["a11y.json", "junit-a11y.xml"],
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:fuzz": {
+      "cmd": "npm run test:fuzz",
+      "tier": 2,
+      "gate": "no import file and no backup document \u2014 arbitrary bytes, the committed corpus, or a generated hostile document \u2014 crashes a parser, exceeds its wall-clock budget, produces an item its own schema rejects, or loses a well-formed row to a swallowed duplicate key",
+      "report": "fuzz.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:resource": {
+      "cmd": "npm run test:resource",
+      "tier": 2,
+      "gate": "every operation over a vault at MAX_ITEMS_PER_USER stays inside its committed time and memory budget: the backup collector refuses an oversized vault with 413 after mongod has delivered a fraction of it, the largest permitted backup still collects in full, a 10,000-item key rotation completes and one naming an unknown id changes nothing, a ~25 MiB backup whose escaped body exceeds 26 MB restores through the route's 30 MB parser, and both cross-user cleanup sweeps seek rather than scan",
+      "report": "resource.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:upgrade": {
+      "cmd": "npm run test:upgrade",
+      "tier": 2,
+      "gate": "a vault and a .env written by the previous release are still readable by this one: every stored item opens under the crypto this release ships, decrypts to the bytes 0.7.0 sealed and parses to exactly what 0.7.0 parsed it to, no item schema declares a required field, a folder without sourceRefId and a refresh row without absoluteExpiresAt are accepted and the latter still slides by seven days, the settings that release lacked are filled in without a migration, that release's .env loads the current server's environment configuration in production, every variable since removed is ignored rather than fatal, and every required one that is absent or blank refuses the boot by name and fast",
+      "report": "upgrade.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:recovery": {
+      "cmd": "npm run test:recovery",
+      "tier": 2,
+      "gate": "this application survives the two disasters it is built for: a backup downloaded from one database restores into an empty account on a SECOND mongod with every item decrypting to the bytes that were sealed and each one still paired with its own name, the downloaded document survives the round trip its signature is computed over (so a signed backup still verifies, and an altered one does not), a backup is worthless without its backup password, and a real process killed mid-write always leaves the stored vault key OLD with its write fence still up \u2014 a login clearing that fence only once the dead rotation's lock has genuinely expired, the interrupted rotation completing on retry, and no crash before, inside or after the import write leaving a partial insert behind",
+      "report": "recovery.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:dst": {
+      "cmd": "npm run test:dst",
+      "tier": 2,
+      "gate": "every test in all three packages passes in a timezone that observes daylight saving, not only in UTC: the whole suite is re-run under America/New_York, narrowing nothing, so a rendered date, a stored instant, an expiry countdown or a harness pin that is right only because local time and UTC happen to agree fails here rather than on a user's machine",
+      "report": "dst.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:flake": {
+      "cmd": "npm run test:flake",
+      "tier": 2,
+      "gate": "the suite gives the same answer every time: ten complete runs of all three package suites, each in a DIFFERENT shuffled order derived from the one pinned seed and each with the file parallelism the push tier uses, plus the whole Playwright suite with three executions per test and retries pinned off, produce zero failures \u2014 and the number of runs and the number of failures are both recorded, because ten clean runs bound the per-run flake rate near one in ten rather than establishing zero",
+      "report": "flake.json",
+      "countsTests": false,
+      "requires": ["build:shared"]
+    },
+    "test:mutation": {
+      "cmd": "npm run test:mutation",
+      "tier": 2,
+      "gate": "the oracle: Stryker mutates every production file in the declared scope \u2014 packages/*/src/** minus the coverage-excluded entry points and the presentational UI primitives \u2014 and the suite kills at least the recorded share of them, with the six core modules held to their own recorded scores, no file dropping out of the measured set, and no mutant left untested that was tested before",
+      "report": "mutation.json",
+      "requires": ["build:shared"]
+    },
+    "test:smoke": {
+      "cmd": "npm run test:smoke",
+      "tier": 1,
+      "gate": "the BUILT artifact boots in production mode against a real mongod, serves a deep-linked SPA route with a matching CSP nonce, and completes a register \u2192 sign-in \u2192 store \u2192 read-back journey whose ciphertext round-trips byte for byte",
+      "report": ["smoke.json", "smoke.log"],
+      "requires": ["build:server", "build:client"]
+    },
+    "test:deploy": {
+      "cmd": "npm run test:deploy",
+      "tier": 2,
+      "gate": "the Compose stack comes up from nothing with every service healthy and both one-shots completed, publishes exactly one loopback-bound port and nothing else, completes a vault journey through that port, keeps the data across a restart, and re-runs its bootstrap without rewriting a rotated application password",
+      "report": ["deploy.json", "deploy.log"],
+      "requires": ["docker"]
+    },
+    "coverage:check": {
+      "cmd": "npm run coverage:check",
+      "tier": 1,
+      "gate": "every package holds the line, branch and function coverage recorded in baseline.json, every production line this change touched is covered \u2014 with a dated COV-DIFF-EXEMPT ledger entry the only way to excuse one \u2014 and no changed production file sits outside the measured scope, where its patch coverage would read as 100% over nothing",
+      "report": "coverage.json",
+      "requires": ["diff-cover"]
+    },
+    "audit:bundle": {
+      "cmd": "npm run audit:bundle",
+      "tier": 1,
+      "gate": "the built client's initial payload and every emitted chunk stay inside their committed size budgets, so a library this application loads on demand \u2014 zxcvbn, Argon2id, the file-encryption tool \u2014 cannot become a static import without the build going red",
+      "report": "bundle.json",
+      "requires": ["build:client"]
+    },
+    "audit:deps": {
+      "cmd": "npm run audit:prod",
+      "tier": 1,
+      "gate": "0 production advisories at moderate or above",
+      "report": "deps.log"
+    },
+    "audit:secrets:full": {
+      "cmd": "npm run audit:secrets:full",
+      "tier": 1,
+      "gate": "0 findings across the working tree AND every blob in git history",
+      "report": "secrets-full.json"
+    },
+    "deadcode": {
+      "cmd": "npm run deadcode",
+      "tier": 1,
+      "gate": "0 unused files, exports, types or dependencies; duplication at or below the committed ceiling",
+      "report": "deadcode.json",
+      "requires": ["build:shared"]
+    },
+    "audit:config": {
+      "cmd": "npm run audit:config",
+      "tier": 1,
+      "gate": "0 error-level findings from actionlint, hadolint and spectral",
+      "report": "config.sarif",
+      "requires": ["build:shared", "actionlint", "hadolint"]
+    },
+    "audit:openapi": {
+      "cmd": "npm run audit:openapi",
+      "tier": 1,
+      "gate": "the HTTP contract the server generates carries no breaking change against the committed snapshot of the last release it describes, unless the root package.json MAJOR has been raised in the same commit",
+      "report": "openapi-compat.json",
+      "requires": ["build:shared", "oasdiff"]
+    },
+    "audit:licenses": {
+      "cmd": "npm run audit:licenses",
+      "tier": 1,
+      "gate": "every production dependency carries an allowlisted licence; 0 copyleft",
+      "report": "licenses.json"
+    },
+    "test:e2e": {
+      "cmd": "npm run test:e2e",
+      "tier": 1,
+      "gate": "every Playwright spec passes",
+      "report": "junit-e2e.xml",
+      "requires": ["build:shared"]
+    },
+    "audit:image": {
+      "cmd": "npm run ci:docker",
+      "tier": 1,
+      "gate": "all 4 images build; nginx -t passes; compose config resolves; 0 fixable HIGH/CRITICAL",
+      "report": "docker.log",
+      "requires": ["docker"]
+    },
+    "audit:sast": {
+      "cmd": "npm run ci:sast",
+      "tier": 1,
+      "gate": "0 new error-severity CodeQL findings",
+      "report": "sast.log",
+      "canSkip": true
+    }
+  },
+  "gaps": [],
+  "deferred": {
+    "test:api": "No separable command exists today. Every supertest suite lives beside the unit suites in packages/server/tests/*.test.ts, so the only ways to register it would be a committed test filter (a non-ledgerable TEST-FILTER under the integrity doctrine) or a second, duplicate invocation of the 125-second server suite that would report false independence. test:integration runs those suites today. Register test:api once the API suites move under their own directory."
+  }
+}

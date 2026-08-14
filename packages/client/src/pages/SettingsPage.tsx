@@ -1463,7 +1463,17 @@ export default function SettingsPage() {
             <span
               className={cn(
                 'flex items-center gap-1 text-sm font-medium',
-                profile?.emailVerified ? 'text-green-600' : 'text-yellow-600',
+                // The 800 shades in the light theme: at 600 this 14px status
+                // read 3.21:1 (verified) and 2.94:1 (unverified) on the card's
+                // white surface. The 400 shades in the dark theme, and they are
+                // not optional — the card there is near-black (#020817), where
+                // green-800 falls to 2.80:1 and yellow-800 to 2.92:1, so
+                // darkening this for the light theme alone would break the dark
+                // one harder than the light one was ever broken. Same pairing as
+                // the sidebar's connectivity indicator in AppLayout.
+                profile?.emailVerified
+                  ? 'text-green-800 dark:text-green-400'
+                  : 'text-yellow-800 dark:text-yellow-400',
               )}
             >
               {profile?.emailVerified ? (
@@ -2004,11 +2014,19 @@ export default function SettingsPage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Clipboard className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
-              <span className="text-sm text-[hsl(var(--foreground))]">
+              {/* A `<label htmlFor>`, like both controls above it. It was a bare
+                  `<span>`, which names nothing: the input was announced as an
+                  unlabelled spin button (axe: `label`, CRITICAL) even though the
+                  text sat right beside it. */}
+              <label
+                htmlFor="clipboard-clear-timeout"
+                className="text-sm text-[hsl(var(--foreground))]"
+              >
                 Clipboard clear (seconds)
-              </span>
+              </label>
             </div>
             <input
+              id="clipboard-clear-timeout"
               type="number"
               min={CLIPBOARD_CLEAR_MIN_SECONDS}
               max={CLIPBOARD_CLEAR_MAX_SECONDS}

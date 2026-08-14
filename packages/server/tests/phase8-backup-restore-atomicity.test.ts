@@ -427,25 +427,22 @@ describe('Backup restore — audit log skip reasons', () => {
 
     expect(res.status).toBe(200);
 
-    const audit = await AuditLog.findOne({
+    const audits = await AuditLog.find({
       userId: user.id,
       action: 'backup_restored',
-    })
-      .sort({ timestamp: -1 })
-      .lean();
+    }).lean();
 
-    expect(audit).toBeDefined();
-    const meta = audit!.metadata as Record<string, unknown>;
-    expect(meta.itemsSkipped).toBe(1);
-    expect(meta.foldersSkipped).toBe(1);
-
-    const itemReasons = meta.itemSkipReasons as { itemId: string; reason: string }[];
-    expect(itemReasons).toContainEqual({ itemId: badItemId, reason: 'invalid_item_type' });
-
-    const folderReasons = meta.folderSkipReasons as { folderId: string; reason: string }[];
-    expect(folderReasons).toContainEqual({
-      folderId: existingFolderId,
-      reason: 'conflict_skipped',
+    // One row, and its metadata is the exhaustive record of the partial
+    // restore: nothing written, both rows skipped, each named with its reason.
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.metadata).toEqual({
+      itemsRestored: 0,
+      itemsSkipped: 1,
+      foldersRestored: 0,
+      foldersSkipped: 1,
+      conflictStrategy: 'skip',
+      itemSkipReasons: [{ itemId: badItemId, reason: 'invalid_item_type' }],
+      folderSkipReasons: [{ folderId: existingFolderId, reason: 'conflict_skipped' }],
     });
   });
 });
@@ -689,17 +686,22 @@ describe('Backup restore — trashed_auto_restored skip reason', () => {
 
     expect(res.status).toBe(200);
 
-    const audit = await AuditLog.findOne({
+    const audits = await AuditLog.find({
       userId: user.id,
       action: 'backup_restored',
-    })
-      .sort({ timestamp: -1 })
-      .lean();
+    }).lean();
 
-    expect(audit).toBeDefined();
-    const meta = audit!.metadata as Record<string, unknown>;
-    const reasons = meta.itemSkipReasons as { itemId: string; reason: string }[];
-    expect(reasons).toContainEqual({ itemId, reason: 'trashed_auto_restored' });
+    // A trashed row is revived rather than skipped, so it counts as restored
+    // AND is reported with the reason that explains the auto-untrash.
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.metadata).toMatchObject({
+      itemsRestored: 1,
+      itemsSkipped: 0,
+      conflictStrategy: 'skip',
+      itemSkipReasons: [{ itemId, reason: 'trashed_auto_restored' }],
+    });
+    const revived = await VaultItem.findById(itemId).lean();
+    expect(revived?.deletedAt).toBeUndefined();
   });
 });
 
@@ -1247,17 +1249,20 @@ describe('Backup restore — malformed item data is skipped, not fatal', () => {
 
     expect(res.status).toBe(200);
 
-    const audit = await AuditLog.findOne({
+    const audits = await AuditLog.find({
       userId: user.id,
       action: 'backup_restored',
-    })
-      .sort({ timestamp: -1 })
-      .lean();
+    }).lean();
 
-    expect(audit).toBeDefined();
-    const meta = audit!.metadata as Record<string, unknown>;
-    const reasons = meta.itemSkipReasons as { itemId: string; reason: string }[];
-    expect(reasons).toContainEqual({ itemId: badId, reason: 'invalid_item_data' });
+    // The oversized row is rejected before any write: nothing restored, the
+    // row named with its reason, and no partial row left in the vault.
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.metadata).toMatchObject({
+      itemsRestored: 0,
+      itemsSkipped: 1,
+      itemSkipReasons: [{ itemId: badId, reason: 'invalid_item_data' }],
+    });
+    await expect(VaultItem.countDocuments({ userId: user.id })).resolves.toBe(0);
   });
 
   it('skips an item whose passwordHistory has an un-castable date without aborting (CastError path)', async () => {
@@ -1392,16 +1397,15 @@ describe('Backup restore — malformed folder data is skipped/sanitized, not fat
     const missing = await Folder.findById(missingFieldFolderId).lean();
     expect(missing).toBeNull();
 
-    // The audit log carries the folder skip reason.
-    const audit = await AuditLog.findOne({ userId: user.id, action: 'backup_restored' })
-      .sort({ timestamp: -1 })
-      .lean();
-    expect(audit).toBeDefined();
-    const meta = audit!.metadata as Record<string, unknown>;
-    const folderReasons = meta.folderSkipReasons as { folderId: string; reason: string }[];
-    expect(folderReasons).toContainEqual({
-      folderId: missingFieldFolderId,
-      reason: 'invalid_folder_data',
+    // The audit log carries the folder skip reason, and only that one: the
+    // two valid folders and the item are recorded as restored.
+    const audits = await AuditLog.find({ userId: user.id, action: 'backup_restored' }).lean();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.metadata).toMatchObject({
+      foldersSkipped: 1,
+      folderSkipReasons: [{ folderId: missingFieldFolderId, reason: 'invalid_folder_data' }],
+      itemsRestored: 1,
+      itemsSkipped: 0,
     });
   });
 

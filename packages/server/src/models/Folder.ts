@@ -1,4 +1,4 @@
-import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import mongoose, { Schema, type Model, type Types } from 'mongoose';
 
 // ----- Interface -----
 
@@ -24,8 +24,6 @@ export interface IFolder {
   createdAt: Date;
   updatedAt: Date;
 }
-
-export type FolderDocument = HydratedDocument<IFolder>;
 
 // ----- Schema -----
 

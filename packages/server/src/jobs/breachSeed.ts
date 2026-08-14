@@ -1,12 +1,12 @@
 import cron, { type ScheduledTask } from 'node-cron';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { PwnedRangeCache } from '../models/PwnedRangeCache.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { seedBreachCorpus } from '../utils/breachSeed.js';
 
-const logger = createLogger({ moduleName: 'jobs/breach-seed' });
+const logger = createModuleLogger('jobs/breach-seed');
 
 /** Shared job-lock name for BOTH the CLI seed and the optional refresh cron. */
 export const BREACH_SEED_LOCK_NAME = 'breach-seed';

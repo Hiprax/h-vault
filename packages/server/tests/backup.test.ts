@@ -562,16 +562,21 @@ describe('Backup routes', () => {
           newBwkSalt: 'new-bwk-salt-value',
         });
 
-      const auditEntry = await AuditLog.findOne({
+      // The rejected attempt is audited exactly once and names the endpoint
+      // that rejected it. `toEqual` is deliberate: the row must carry the
+      // endpoint and nothing else (no password, no BWK material).
+      const failures = await AuditLog.find({
         userId: user.id,
         action: 'password_verification_failed',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect((auditEntry!.metadata as Record<string, unknown>).endpoint).toBe(
-        'change_backup_password',
-      );
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.metadata).toEqual({ endpoint: 'change_backup_password' });
+
+      // ...and the backup password was NOT changed by the rejected attempt.
+      await expect(
+        AuditLog.countDocuments({ userId: user.id, action: 'backup_password_changed' }),
+      ).resolves.toBe(0);
     });
 
     it('should return 401 without auth token', async () => {
@@ -797,16 +802,24 @@ describe('Backup routes', () => {
         .set('Cookie', csrfCookie)
         .send({ data: backupData });
 
-      const audit = await AuditLog.findOne({
+      const restores = await AuditLog.find({
         userId: user.id,
         action: 'backup_restored',
       })
         .sort({ timestamp: -1 })
         .lean();
 
-      expect(audit).toBeDefined();
-      const meta = audit!.metadata as Record<string, unknown>;
-      expect(meta).not.toHaveProperty('vaultKeyAdopted');
+      // Exactly one restore row, carrying the counts and the strategy. The
+      // exhaustive `toEqual` is what proves `vaultKeyAdopted` is absent: a
+      // `not.toHaveProperty` check passes just as happily on a missing row.
+      expect(restores).toHaveLength(1);
+      expect(restores[0]?.metadata).toEqual({
+        itemsRestored: 0,
+        itemsSkipped: 0,
+        foldersRestored: 0,
+        foldersSkipped: 0,
+        conflictStrategy: 'skip',
+      });
     });
   });
 
@@ -917,13 +930,20 @@ describe('Backup routes', () => {
     it('should create audit log on backup setup', async () => {
       await setupBackupForUser(agent, user.accessToken);
 
-      const auditEntry = await AuditLog.findOne({
+      const setups = await AuditLog.find({
         userId: user.id,
         action: 'backup_setup',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
+      // Exactly one row, owned by this user, carrying NO metadata: the setup
+      // request contains the wrapped BWK and the auth hash, and none of it may
+      // be echoed into the audit trail.
+      expect(setups).toHaveLength(1);
+      expect(setups[0]?.userId?.toString()).toBe(user.id);
+      expect(setups[0]?.metadata).toBeUndefined();
+      // ...and it carries the request context `getRequestContext` truncates.
+      expect(setups[0]?.ipAddress).toMatch(/127\.0\.0\.1$/);
+      expect(setups[0]?.userAgent).toBe('unknown');
     });
 
     it('should create audit log on backup settings update', async () => {
@@ -940,15 +960,17 @@ describe('Backup routes', () => {
         .send({ enabled: true, scheduleHour: 8 })
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const updates = await AuditLog.find({
         userId: user.id,
         action: 'backup_settings_update',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).updatedFields).toBeDefined();
+      // One row naming exactly the two fields this request changed: a handler
+      // that logged every settable field, or none, would fail here.
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.metadata).toEqual({
+        updatedFields: ['settings.backup.enabled', 'settings.backup.scheduleHour'],
+      });
     });
 
     it('should create audit log on backup download', async () => {
@@ -959,15 +981,18 @@ describe('Backup routes', () => {
         .set('Authorization', authHeader(user.accessToken))
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const downloads = await AuditLog.find({
         userId: user.id,
         action: 'backup_download',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect((auditEntry!.metadata as Record<string, unknown>).fileSizeBytes).toBeDefined();
+      expect(downloads).toHaveLength(1);
+      const downloadMeta = downloads[0]?.metadata as Record<string, unknown> | undefined;
+      // The row records what was served: the item count must agree with the
+      // vault, and the size must be the real payload size, not a placeholder.
+      expect(Object.keys(downloadMeta ?? {}).sort()).toEqual(['fileSizeBytes', 'itemCount']);
+      expect(downloadMeta?.itemCount).toBe(await VaultItem.countDocuments({ userId: user.id }));
+      expect(downloadMeta?.fileSizeBytes).toBeGreaterThan(0);
     });
 
     it('should create audit log on backup trigger', async () => {
@@ -982,16 +1007,24 @@ describe('Backup routes', () => {
         .send()
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const triggers = await AuditLog.find({
         userId: user.id,
         action: 'backup_triggered',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      expect(typeof (auditEntry!.metadata as Record<string, unknown>).itemCount).toBe('number');
-      expect(typeof (auditEntry!.metadata as Record<string, unknown>).fileSizeBytes).toBe('number');
+      expect(triggers).toHaveLength(1);
+      const triggerMeta = triggers[0]?.metadata as Record<string, unknown> | undefined;
+      // No SMTP is configured in the test environment and this user has no
+      // backup recipients, so the delivery counters must all read zero: an
+      // `emailSent: true` here would mean the trigger claimed a delivery that
+      // never happened.
+      expect(triggerMeta).toMatchObject({
+        itemCount: await VaultItem.countDocuments({ userId: user.id }),
+        emailSent: false,
+        emailsSent: 0,
+        emailsFailed: 0,
+      });
+      expect(triggerMeta?.fileSizeBytes).toBeGreaterThan(0);
     });
 
     it('should create audit log on backup restore', async () => {
@@ -1015,18 +1048,22 @@ describe('Backup routes', () => {
         .send({ conflictStrategy: 'skip', data: backupData })
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const restores = await AuditLog.find({
         userId: user.id,
         action: 'backup_restored',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
-      expect(auditEntry!.metadata).toBeDefined();
-      const meta = auditEntry!.metadata as Record<string, unknown>;
-      expect(meta.itemsRestored).toBe(1);
-      expect(meta.foldersRestored).toBe(0);
-      expect(meta.conflictStrategy).toBe('skip');
+      // One row, and its counts are the exhaustive record of what the restore
+      // did: one item in, nothing skipped, no folders touched.
+      expect(restores).toHaveLength(1);
+      expect(restores[0]?.metadata).toEqual({
+        itemsRestored: 1,
+        itemsSkipped: 0,
+        foldersRestored: 0,
+        foldersSkipped: 0,
+        conflictStrategy: 'skip',
+      });
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
     });
 
     it('should create audit log on backup password change', async () => {
@@ -1048,13 +1085,21 @@ describe('Backup routes', () => {
         })
         .expect(200);
 
-      const auditEntry = await AuditLog.findOne({
+      const changes = await AuditLog.find({
         userId: user.id,
         action: 'backup_password_changed',
-      });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      expect(auditEntry!.userId!.toString()).toBe(user.id);
+      // One row, owned by this user, carrying no metadata: the request body
+      // holds the new BWK and the current password, and none of it may reach
+      // the audit trail.
+      expect(changes).toHaveLength(1);
+      expect(changes[0]?.userId?.toString()).toBe(user.id);
+      expect(changes[0]?.metadata).toBeUndefined();
+      // ...and no failure was recorded for a request that succeeded.
+      await expect(
+        AuditLog.countDocuments({ userId: user.id, action: 'password_verification_failed' }),
+      ).resolves.toBe(0);
     });
   });
 
@@ -1516,12 +1561,14 @@ describe('Backup routes', () => {
       expect(res.body.data.itemsRestored).toBe(1);
       expect(res.body.data.itemsSkipped).toBe(0);
 
-      // The item should no longer be in trash (deletedAt cleared)
-      const item = await VaultItem.findById(itemId);
-      expect(item).toBeDefined();
-      expect(item!.deletedAt).toBeUndefined();
-      // Data should be updated from the backup
-      expect(item!.encryptedName).toBe('restored-from-backup');
+      // The trashed row is revived in place: same `_id`, still owned by this
+      // user, out of the trash, and carrying the backup's ciphertext.
+      const item = await VaultItem.findById(itemId).lean();
+      expect(item?.userId?.toString()).toBe(user.id);
+      expect(item?.deletedAt).toBeUndefined();
+      expect(item?.encryptedName).toBe('restored-from-backup');
+      // ...and it was revived, not duplicated.
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
     });
 
     it('should skip existing items with skip conflict strategy and report skip reason', async () => {
@@ -1763,21 +1810,24 @@ describe('Backup routes', () => {
 
       expect(res.status).toBe(200);
 
-      const auditLog = await AuditLog.findOne({
+      const restores = await AuditLog.find({
         userId: user.id,
         action: 'backup_restored',
-      })
-        .sort({ timestamp: -1 })
-        .lean();
+      }).lean();
 
-      expect(auditLog).toBeDefined();
-      expect(auditLog!.metadata).toBeDefined();
-
-      const metadata = auditLog!.metadata as Record<string, unknown>;
-      expect(metadata.itemsSkipped).toBe(1);
-
-      const itemSkipReasons = metadata.itemSkipReasons as Record<string, string>[];
-      expect(itemSkipReasons).toEqual([{ itemId: badItemId, reason: 'invalid_item_type' }]);
+      // One row, and its metadata is the whole story: nothing restored, the
+      // one bad row skipped, and the reason named against its id.
+      expect(restores).toHaveLength(1);
+      expect(restores[0]?.metadata).toEqual({
+        itemsRestored: 0,
+        itemsSkipped: 1,
+        foldersRestored: 0,
+        foldersSkipped: 0,
+        conflictStrategy: 'skip',
+        itemSkipReasons: [{ itemId: badItemId, reason: 'invalid_item_type' }],
+      });
+      // ...and the rejected row was not written to the vault.
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
 
     it('should not include skip reasons in audit log when no items are skipped', async () => {
@@ -1798,18 +1848,22 @@ describe('Backup routes', () => {
 
       expect(res.status).toBe(200);
 
-      const auditLog = await AuditLog.findOne({
+      const restores = await AuditLog.find({
         userId: user.id,
         action: 'backup_restored',
-      })
-        .sort({ timestamp: -1 })
-        .lean();
+      }).lean();
 
-      expect(auditLog).toBeDefined();
-
-      const metadata = auditLog!.metadata as Record<string, unknown>;
-      expect(metadata.itemSkipReasons).toBeUndefined();
-      expect(metadata.folderSkipReasons).toBeUndefined();
+      // The exhaustive `toEqual` is the assertion: both skip-reason keys are
+      // absent because the metadata contains exactly these five keys and no
+      // others. Checking each key for `undefined` passes on a missing row too.
+      expect(restores).toHaveLength(1);
+      expect(restores[0]?.metadata).toEqual({
+        itemsRestored: 1,
+        itemsSkipped: 0,
+        foldersRestored: 0,
+        foldersSkipped: 0,
+        conflictStrategy: 'skip',
+      });
     });
   });
 
@@ -1836,15 +1890,34 @@ describe('Backup routes', () => {
           .set('Cookie', csrfCookie)
           .send({ conflictStrategy: strategy, data: backupData });
 
-        const auditEntry = await AuditLog.findOne({
+        // Selected by the strategy itself rather than by "most recent": three
+        // restores inside one test can share a millisecond, which makes a
+        // `sort({ timestamp: -1 })` pick between them arbitrarily.
+        const forStrategy = await AuditLog.find({
           userId: user.id,
           action: 'backup_restored',
-        }).sort({ timestamp: -1 });
+          'metadata.conflictStrategy': strategy,
+        }).lean();
 
-        expect(auditEntry).toBeDefined();
-        const metadata = auditEntry!.metadata as Record<string, unknown>;
-        expect(metadata.conflictStrategy).toBe(strategy);
+        expect(forStrategy).toHaveLength(1);
+        expect(forStrategy[0]?.metadata).toEqual({
+          itemsRestored: 1,
+          itemsSkipped: 0,
+          foldersRestored: 0,
+          foldersSkipped: 0,
+          conflictStrategy: strategy,
+        });
       }
+
+      // One row per strategy and no extras: a handler that logged twice, or
+      // recorded a default in place of the requested strategy, fails here.
+      const allRestores = await AuditLog.find({
+        userId: user.id,
+        action: 'backup_restored',
+      }).lean();
+      expect(
+        allRestores.map((row) => (row.metadata as Record<string, unknown>).conflictStrategy).sort(),
+      ).toEqual(['keep_both', 'overwrite', 'skip']);
     });
 
     it('should default to skip conflict strategy when none specified', async () => {
@@ -1862,14 +1935,21 @@ describe('Backup routes', () => {
         .set('Cookie', csrfCookie)
         .send({ data: backupData });
 
-      const auditEntry = await AuditLog.findOne({
+      const restores = await AuditLog.find({
         userId: user.id,
         action: 'backup_restored',
-      }).sort({ timestamp: -1 });
+      }).lean();
 
-      expect(auditEntry).toBeDefined();
-      const metadata = auditEntry!.metadata as Record<string, unknown>;
-      expect(metadata.conflictStrategy).toBe('skip');
+      // A request that named no strategy is recorded as `skip`, the safe
+      // default: nothing existing may be overwritten by omission.
+      expect(restores).toHaveLength(1);
+      expect(restores[0]?.metadata).toEqual({
+        itemsRestored: 1,
+        itemsSkipped: 0,
+        foldersRestored: 0,
+        foldersSkipped: 0,
+        conflictStrategy: 'skip',
+      });
     });
   });
 

@@ -851,9 +851,17 @@ describe('PasswordGenerator', () => {
         unmountFn();
       });
 
-      expect(() => {
+      // Every pending timer the component owned was cleared on unmount, so a
+      // full minute of virtual time fires nothing: no callback runs against
+      // the torn-down tree (which React reports as a console error).
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
         vi.advanceTimersByTime(60000);
-      }).not.toThrow();
+        expect(vi.getTimerCount()).toBe(0);
+        expect(consoleError).not.toHaveBeenCalled();
+      } finally {
+        consoleError.mockRestore();
+      }
 
       // The shared scheduler outlives the component: the password is wiped.
       expect(mockWriteText).toHaveBeenCalledTimes(2);

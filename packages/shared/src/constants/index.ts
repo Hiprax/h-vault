@@ -124,8 +124,13 @@ export const MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH = 20_000;
 export const MAX_LOGIN_USERNAME_LENGTH = 500;
 export const MAX_LOGIN_PASSWORD_LENGTH = 10_000;
 export const MAX_LOGIN_TOTP_LENGTH = 500;
-// Measured PRE-transform: `uriEntrySchema` caps the input and only then prepends
-// a scheme, which is why `clampUri` exists (see itemBuilders.ts).
+// Measured POST-transform, on the value that is actually STORED: `uriEntrySchema`
+// prepends a scheme to a bare domain and only then applies this bound, through the
+// exported `isValidUriLength` that `VaultItemForm` calls too. It used to be measured
+// on the input, so a bare domain of exactly this length parsed into a value eight
+// characters longer that the same schema then rejected on read-back — an item the
+// editor could open and never save again. `clampUri` (itemBuilders.ts) has always
+// computed the bound this way and is now simply in agreement with the schema.
 export const MAX_URI_LENGTH = 2_048;
 export const MAX_URIS_PER_ITEM = 100;
 export const MAX_CUSTOM_FIELD_NAME_LENGTH = 500;
@@ -133,6 +138,18 @@ export const MAX_CUSTOM_FIELDS_PER_ITEM = 100;
 export const MAX_SECRET_DESCRIPTION_LENGTH = 10_000;
 export const MAX_CARD_CARDHOLDER_NAME_LENGTH = 300;
 export const MAX_CARD_BRAND_LENGTH = 50;
+// The four card scalars that were still inline literals in `cardDataSchema`. They
+// are named now because a third consumer arrived: the import's `clampNotesAndFields`
+// bounds each of them, and a clamp that disagrees with the schema by one character
+// is exactly the drift that discards a whole card at validation. The values are the
+// literals the schema already carried, so nothing about validation changes. They are
+// deliberately far wider than the item form's own rules (13-19 digits, `01`-`12`, a
+// four-digit year, 3-4 CVV digits), because an IMPORTED card is not required to be
+// well formed — the vault's job there is to store what the source file held.
+export const MAX_CARD_NUMBER_LENGTH = 30;
+export const MAX_CARD_EXP_MONTH_LENGTH = 2;
+export const MAX_CARD_EXP_YEAR_LENGTH = 4;
+export const MAX_CARD_CVV_LENGTH = 4;
 // Shared by an identity's `firstName` and `lastName`, which hold the same kind of
 // value and could only drift as two numbers.
 export const MAX_IDENTITY_NAME_LENGTH = 200;

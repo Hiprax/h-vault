@@ -155,12 +155,16 @@ test.describe('Vault import — external formats (zero-knowledge, end-to-end)', 
     // real browser is the only place the constant can be checked against the row
     // it describes; let it drift and the virtualized branch (>50 items) spaces
     // its rows wrongly. Measure the row card itself, not its list wrapper.
-    const rowBox = await page
-      .getByRole('listitem')
-      .first()
-      .getByRole('button')
-      .first()
-      .boundingBox();
+    //
+    // Located by TEST ID rather than by role, and the difference is not cosmetic:
+    // this used to reach the card through `getByRole('button')`, because the card
+    // WAS the button. It is not any more — the selection checkbox used to sit
+    // inside that button, which made it invisible to a screen reader, so the
+    // activator is now a child of the card. A role-based locator therefore
+    // measures the activator (44px, a plausible-looking number) instead of the
+    // row, which is the wrong subject for this assertion. The height itself is
+    // unchanged and still pinned at 78.
+    const rowBox = await page.getByTestId('vault-item-row').first().boundingBox();
     expect(rowBox?.height).toBe(78);
   });
 

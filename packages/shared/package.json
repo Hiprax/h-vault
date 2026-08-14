@@ -16,6 +16,8 @@
     "build": "node scripts/inject-version.js && tsc",
     "dev": "tsc --watch",
     "test": "vitest run --coverage",
+    "test:flake": "vitest run --config vitest.flake.config.ts",
+    "test:property": "vitest run --config vitest.property.config.ts",
     "type-check": "tsc --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {
@@ -24,6 +26,7 @@
   "devDependencies": {
     "@types/node": "^24.13.3",
     "@vitest/coverage-v8": "^4.0.18",
+    "fast-check": "^4.9.0",
     "vitest": "^4.0.18"
   }
 }

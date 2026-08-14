@@ -1,0 +1,824 @@
+{
+  "items": [
+    {
+      "type": 1,
+      "name": "too many of everything",
+      "login": {
+        "username": "u",
+        "password": "pw",
+        "uris": [
+          {
+            "uri": "https://a0.example"
+          },
+          {
+            "uri": "https://a1.example"
+          },
+          {
+            "uri": "https://a2.example"
+          },
+          {
+            "uri": "https://a3.example"
+          },
+          {
+            "uri": "https://a4.example"
+          },
+          {
+            "uri": "https://a5.example"
+          },
+          {
+            "uri": "https://a6.example"
+          },
+          {
+            "uri": "https://a7.example"
+          },
+          {
+            "uri": "https://a8.example"
+          },
+          {
+            "uri": "https://a9.example"
+          },
+          {
+            "uri": "https://a10.example"
+          },
+          {
+            "uri": "https://a11.example"
+          },
+          {
+            "uri": "https://a12.example"
+          },
+          {
+            "uri": "https://a13.example"
+          },
+          {
+            "uri": "https://a14.example"
+          },
+          {
+            "uri": "https://a15.example"
+          },
+          {
+            "uri": "https://a16.example"
+          },
+          {
+            "uri": "https://a17.example"
+          },
+          {
+            "uri": "https://a18.example"
+          },
+          {
+            "uri": "https://a19.example"
+          },
+          {
+            "uri": "https://a20.example"
+          },
+          {
+            "uri": "https://a21.example"
+          },
+          {
+            "uri": "https://a22.example"
+          },
+          {
+            "uri": "https://a23.example"
+          },
+          {
+            "uri": "https://a24.example"
+          },
+          {
+            "uri": "https://a25.example"
+          },
+          {
+            "uri": "https://a26.example"
+          },
+          {
+            "uri": "https://a27.example"
+          },
+          {
+            "uri": "https://a28.example"
+          },
+          {
+            "uri": "https://a29.example"
+          },
+          {
+            "uri": "https://a30.example"
+          },
+          {
+            "uri": "https://a31.example"
+          },
+          {
+            "uri": "https://a32.example"
+          },
+          {
+            "uri": "https://a33.example"
+          },
+          {
+            "uri": "https://a34.example"
+          },
+          {
+            "uri": "https://a35.example"
+          },
+          {
+            "uri": "https://a36.example"
+          },
+          {
+            "uri": "https://a37.example"
+          },
+          {
+            "uri": "https://a38.example"
+          },
+          {
+            "uri": "https://a39.example"
+          },
+          {
+            "uri": "https://a40.example"
+          },
+          {
+            "uri": "https://a41.example"
+          },
+          {
+            "uri": "https://a42.example"
+          },
+          {
+            "uri": "https://a43.example"
+          },
+          {
+            "uri": "https://a44.example"
+          },
+          {
+            "uri": "https://a45.example"
+          },
+          {
+            "uri": "https://a46.example"
+          },
+          {
+            "uri": "https://a47.example"
+          },
+          {
+            "uri": "https://a48.example"
+          },
+          {
+            "uri": "https://a49.example"
+          },
+          {
+            "uri": "https://a50.example"
+          },
+          {
+            "uri": "https://a51.example"
+          },
+          {
+            "uri": "https://a52.example"
+          },
+          {
+            "uri": "https://a53.example"
+          },
+          {
+            "uri": "https://a54.example"
+          },
+          {
+            "uri": "https://a55.example"
+          },
+          {
+            "uri": "https://a56.example"
+          },
+          {
+            "uri": "https://a57.example"
+          },
+          {
+            "uri": "https://a58.example"
+          },
+          {
+            "uri": "https://a59.example"
+          },
+          {
+            "uri": "https://a60.example"
+          },
+          {
+            "uri": "https://a61.example"
+          },
+          {
+            "uri": "https://a62.example"
+          },
+          {
+            "uri": "https://a63.example"
+          },
+          {
+            "uri": "https://a64.example"
+          },
+          {
+            "uri": "https://a65.example"
+          },
+          {
+            "uri": "https://a66.example"
+          },
+          {
+            "uri": "https://a67.example"
+          },
+          {
+            "uri": "https://a68.example"
+          },
+          {
+            "uri": "https://a69.example"
+          },
+          {
+            "uri": "https://a70.example"
+          },
+          {
+            "uri": "https://a71.example"
+          },
+          {
+            "uri": "https://a72.example"
+          },
+          {
+            "uri": "https://a73.example"
+          },
+          {
+            "uri": "https://a74.example"
+          },
+          {
+            "uri": "https://a75.example"
+          },
+          {
+            "uri": "https://a76.example"
+          },
+          {
+            "uri": "https://a77.example"
+          },
+          {
+            "uri": "https://a78.example"
+          },
+          {
+            "uri": "https://a79.example"
+          },
+          {
+            "uri": "https://a80.example"
+          },
+          {
+            "uri": "https://a81.example"
+          },
+          {
+            "uri": "https://a82.example"
+          },
+          {
+            "uri": "https://a83.example"
+          },
+          {
+            "uri": "https://a84.example"
+          },
+          {
+            "uri": "https://a85.example"
+          },
+          {
+            "uri": "https://a86.example"
+          },
+          {
+            "uri": "https://a87.example"
+          },
+          {
+            "uri": "https://a88.example"
+          },
+          {
+            "uri": "https://a89.example"
+          },
+          {
+            "uri": "https://a90.example"
+          },
+          {
+            "uri": "https://a91.example"
+          },
+          {
+            "uri": "https://a92.example"
+          },
+          {
+            "uri": "https://a93.example"
+          },
+          {
+            "uri": "https://a94.example"
+          },
+          {
+            "uri": "https://a95.example"
+          },
+          {
+            "uri": "https://a96.example"
+          },
+          {
+            "uri": "https://a97.example"
+          },
+          {
+            "uri": "https://a98.example"
+          },
+          {
+            "uri": "https://a99.example"
+          },
+          {
+            "uri": "https://a100.example"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "name": "f0",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f1",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f2",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f3",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f4",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f5",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f6",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f7",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f8",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f9",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f10",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f11",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f12",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f13",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f14",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f15",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f16",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f17",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f18",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f19",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f20",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f21",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f22",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f23",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f24",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f25",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f26",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f27",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f28",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f29",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f30",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f31",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f32",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f33",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f34",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f35",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f36",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f37",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f38",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f39",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f40",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f41",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f42",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f43",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f44",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f45",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f46",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f47",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f48",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f49",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f50",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f51",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f52",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f53",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f54",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f55",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f56",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f57",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f58",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f59",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f60",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f61",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f62",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f63",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f64",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f65",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f66",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f67",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f68",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f69",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f70",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f71",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f72",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f73",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f74",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f75",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f76",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f77",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f78",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f79",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f80",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f81",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f82",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f83",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f84",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f85",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f86",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f87",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f88",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f89",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f90",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f91",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f92",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f93",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f94",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f95",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f96",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f97",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f98",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f99",
+          "value": "v",
+          "type": 0
+        },
+        {
+          "name": "f100",
+          "value": "v",
+          "type": 0
+        }
+      ]
+    }
+  ]
+}

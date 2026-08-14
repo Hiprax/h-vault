@@ -4,6 +4,10 @@ import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { AuditLog } from '../src/models/AuditLog.js';
+import { User } from '../src/models/User.js';
+import mongoose from 'mongoose';
+import { useReplicaSetConnection } from './mongoHarness.js';
+import { supportsTransactions } from '../src/utils/transactionSupport.js';
 import {
   createTestUser,
   authHeader,
@@ -14,7 +18,18 @@ import {
 } from './helpers.js';
 
 // ---------------------------------------------------------------------------
-// Phase 7 — Task 7.3: Cross-User Isolation Edge Case Tests
+// Cross-User Isolation Edge Cases
+//
+// Everything here names a foreign id in a place the route table cannot classify
+// — in a request BODY (`bulk-delete`'s ids, `bulk-move`'s and `createItem`'s
+// `folderId`, a folder's `parentId`, a rotation's `items[].id`) or in a QUERY
+// STRING the server must ignore — or asserts a property of a response body
+// rather than of a URL.
+//
+// The one case that WAS expressible, "should not allow updating sort order of
+// another user folder", now runs from the table in `authz-matrix.test.ts`
+// (PUT /api/v1/folders/:id/sort), together with the byte-identical check it did
+// not make.
 // ---------------------------------------------------------------------------
 
 describe('Cross-User Isolation Edge Cases', () => {
@@ -318,7 +333,8 @@ describe('Cross-User Isolation Edge Cases', () => {
 
   describe('Vault key rotation cross-user isolation', () => {
     it('should not allow rotating items belonging to another user', async () => {
-      const itemA = await createItemFor(userA.accessToken);
+      const itemA = await createItemFor(userA.accessToken, { encryptedName: 'a-item' });
+      const before = await VaultItem.findById(itemA).lean();
 
       // User B tries to re-encrypt User A's item
       const agent = request.agent(app);
@@ -347,40 +363,157 @@ describe('Cross-User Isolation Edge Cases', () => {
           newVaultKeyTag: 'hacked-vk-tag',
         });
 
-      // The rotation should either fail or not modify User A's item
-      if (res.status === 200) {
-        // If it succeeded, User A's item should NOT have been modified
-        const item = await VaultItem.findById(itemA).lean();
-        expect(item?.encryptedName).not.toBe('hacked-name');
-        expect(item?.userId.toString()).toBe(userA.id);
-      } else {
-        // Expected: 404 (item not found for User B) or 400/409
-        expect(res.status).toBeLessThan(500);
-      }
+      // On a standalone mongod the sequential path resolves every requested id
+      // against `{ _id, userId }` BEFORE its first write, so a foreign id
+      // aborts the whole rotation with a 409 naming the counts, and the vault
+      // key is not changed. Pinned exactly: the previous assertion accepted any
+      // status under 500 on one branch and only checked one field on the other,
+      // so it stayed green even if the rotation had partially succeeded.
+      expect(res.status).toBe(409);
+      expect(String(res.body.message)).toMatch(
+        /1 item\(s\) and 0 folder\(s\) could not be updated/,
+      );
+      expect(String(res.body.message)).toMatch(/vault key was not changed/i);
+
+      // User A's ciphertext is byte-identical…
+      const after = await VaultItem.findById(itemA).lean();
+      expect(after).toEqual(before);
+      expect(after?.encryptedName).toBe('a-item');
+
+      // …and user B's own vault key was not rotated to the one it proposed.
+      const intruder = await User.findById(userB.id).lean();
+      expect(intruder?.encryptedVaultKey).not.toBe('hacked-vault-key');
+      expect(intruder?.rotationInProgress).not.toBe(true);
     });
   });
+});
 
-  // ── Folder sort order cross-user isolation ─────────────────────────
+// ---------------------------------------------------------------------------
+// The same attack against the branch PRODUCTION actually runs.
+//
+// `bulkReEncrypt` has two paths, and `supportsTransactions()` picks between
+// them. The suite's default mongod is a STANDALONE, so every other test in this
+// file exercises the sequential fallback — while the deployed stack is a
+// replica set (`rs0`), where the transaction branch is what executes. Its
+// ownership filters are `VaultItem.updateOne({ _id: item.id, userId })` and the
+// matching one for folders, and until this block existed nothing presented them
+// with a FOREIGN-BUT-EXISTING id: the only test on that branch uses an id that
+// belongs to nobody, which fails on `_id` alone and would still pass with
+// `userId` deleted from the filter.
+//
+// Its own top-level describe because `useReplicaSetConnection()` swaps the
+// process-wide mongoose connection for the block and hands it back afterwards.
+// ---------------------------------------------------------------------------
+describe('Vault key rotation cross-user isolation (transaction branch)', () => {
+  useReplicaSetConnection();
 
-  describe('Folder sort order cross-user isolation', () => {
-    it('should not allow updating sort order of another user folder', async () => {
-      const folderA = await createFolderFor(userA.accessToken, { sortOrder: 0 });
+  let owner: TestUser;
+  let intruder: TestUser;
 
-      // User B tries to update User A's folder sort order
-      const agent = request.agent(app);
-      const csrf = await getCsrf(agent);
-      const res = await agent
-        .put(`/api/v1/folders/${folderA}/sort`)
-        .set('Authorization', authHeader(userB.accessToken))
-        .set('Cookie', csrf.cookie)
-        .set('x-csrf-token', csrf.token)
-        .send({ sortOrder: 999 });
+  beforeEach(async () => {
+    owner = await createTestUser({ email: 'rs-owner@example.com' });
+    intruder = await createTestUser({ email: 'rs-intruder@example.com' });
+  });
 
-      expect(res.status).toBe(404);
+  it('runs against a topology where transactions are actually available', () => {
+    // Without this the block could silently fall through to the sequential path
+    // and report the fallback's behaviour as the transaction branch's — the
+    // exact substitution this whole block exists to stop.
+    expect(supportsTransactions(mongoose.connection)).toBe(true);
+  });
 
-      // Verify sort order was NOT changed
-      const folder = await Folder.findById(folderA).lean();
-      expect(folder?.sortOrder).toBe(0);
+  it("refuses a rotation naming another user's item and leaves it byte-identical", async () => {
+    const target = await VaultItem.create({
+      userId: owner.id,
+      ...sampleVaultItem({ encryptedName: 'owner-ciphertext' }),
     });
+    const targetId = String(target._id);
+    const before = await VaultItem.findById(targetId).lean();
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent);
+    const res = await agent
+      .post('/api/v1/vault/items/bulk-reencrypt')
+      .set('Authorization', authHeader(intruder.accessToken))
+      .set('Cookie', csrf.cookie)
+      .set('x-csrf-token', csrf.token)
+      .send({
+        authHash: intruder.rawPassword,
+        items: [
+          {
+            id: targetId,
+            encryptedName: 'hacked-name',
+            nameIv: 'hacked-iv',
+            nameTag: 'hacked-tag',
+            encryptedData: 'hacked-data',
+            dataIv: 'hacked-data-iv',
+            dataTag: 'hacked-data-tag',
+          },
+        ],
+        folders: [],
+        newEncryptedVaultKey: 'hacked-vault-key',
+        newVaultKeyIv: 'hacked-vk-iv',
+        newVaultKeyTag: 'hacked-vk-tag',
+      });
+
+    // 404 is the transaction branch's discriminator; the sequential fallback
+    // answers 409 for the same input. Asserting the status therefore also
+    // asserts which branch ran.
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.success).toBe(false);
+
+    const after = await VaultItem.findById(targetId).lean();
+    expect(after).toEqual(before);
+    expect(after?.encryptedName).toBe('owner-ciphertext');
+
+    // The intruder's own vault key is untouched and its rotation fence is down,
+    // so a refused rotation leaves no state behind that would block the next one.
+    const attacker = await User.findById(intruder.id).lean();
+    expect(attacker?.encryptedVaultKey).not.toBe('hacked-vault-key');
+    expect(attacker?.rotationInProgress).not.toBe(true);
+  });
+
+  it("refuses a rotation naming another user's folder and leaves it byte-identical", async () => {
+    // The folder loop is a second, separately-filtered write inside the same
+    // transaction; deleting `userId` from it alone would leave the item case
+    // above green.
+    const target = await Folder.create({
+      userId: owner.id,
+      ...sampleFolder({ encryptedName: 'owner-folder-ciphertext' }),
+    });
+    const targetId = String(target._id);
+    const before = await Folder.findById(targetId).lean();
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent);
+    const res = await agent
+      .post('/api/v1/vault/items/bulk-reencrypt')
+      .set('Authorization', authHeader(intruder.accessToken))
+      .set('Cookie', csrf.cookie)
+      .set('x-csrf-token', csrf.token)
+      .send({
+        authHash: intruder.rawPassword,
+        items: [],
+        folders: [
+          {
+            id: targetId,
+            encryptedName: 'hacked-folder',
+            nameIv: 'hacked-iv',
+            nameTag: 'hacked-tag',
+          },
+        ],
+        newEncryptedVaultKey: 'hacked-vault-key',
+        newVaultKeyIv: 'hacked-vk-iv',
+        newVaultKeyTag: 'hacked-vk-tag',
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+
+    const after = await Folder.findById(targetId).lean();
+    expect(after).toEqual(before);
+    expect(after?.encryptedName).toBe('owner-folder-ciphertext');
+
+    const attacker = await User.findById(intruder.id).lean();
+    expect(attacker?.encryptedVaultKey).not.toBe('hacked-vault-key');
   });
 });

@@ -1,7 +1,6 @@
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import mongoose from 'mongoose';
 import crypto from 'node:crypto';
-import { MongoMemoryReplSet } from 'mongodb-memory-server';
 
 /**
  * Coverage-driven suite for the cascade-delete util and the three cron jobs.
@@ -88,6 +87,7 @@ import { startTokenCleanupJob } from '../src/jobs/tokenCleanup.js';
 import { startTrashCleanupJob } from '../src/jobs/trashCleanup.js';
 import { sendEmail } from '../src/utils/email.js';
 import { createTestUser, sampleVaultItem, sampleFolder } from './helpers.js';
+import { useReplicaSetConnection } from './mongoHarness.js';
 
 const mockedSchedule = vi.mocked(cron.schedule);
 const mockedSendEmail = vi.mocked(sendEmail);
@@ -522,30 +522,19 @@ describe('trashCleanup — multi-batch purge', () => {
 
 // ─── cascadeDelete: the REAL transactional branch (replica set) ──────────────
 //
-// Declared last on purpose: its beforeAll swaps the process-wide mongoose
-// connection from the standalone in-memory server (tests/setup.ts) to a
-// single-node replica set, which is the only topology where
-// `supportsTransactions()` is true and `withTransaction` actually runs.
+// `useReplicaSetConnection()` points the process-wide mongoose connection at a
+// single-node replica set — the only topology where `supportsTransactions()` is
+// true and `withTransaction` actually runs — and hands it back to the standalone
+// server (tests/setup.ts) afterwards, so this block no longer has to be declared
+// last and `sequence.shuffle` can place it anywhere.
 
 describe('cascadeDeleteUser — transactional branch (replica set)', () => {
-  let replSet: MongoMemoryReplSet;
+  useReplicaSetConnection({ timeoutMs: 90_000 });
 
-  beforeAll(async () => {
-    await mongoose.disconnect();
-    replSet = await MongoMemoryReplSet.create({
-      replSet: { count: 1, storageEngine: 'wiredTiger' },
-    });
-    await mongoose.connect(replSet.getUri());
-    await Promise.all(Object.values(mongoose.models).map((m) => m.createIndexes()));
-
+  beforeAll(() => {
     // Sanity guard: without this the suite would silently assert the sequential
     // fallback and prove nothing about the transactional path.
     expect(supportsTransactions()).toBe(true);
-  }, 90_000);
-
-  afterAll(async () => {
-    await mongoose.disconnect();
-    await replSet.stop();
   });
 
   it('erases every collection atomically and leaves other users untouched', async () => {

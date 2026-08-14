@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { User } from '../models/User.js';
@@ -37,7 +37,7 @@ import type {
   IFolderSkipReason,
 } from '@hvault/shared';
 
-const logger = createLogger({ moduleName: 'backup-controller' });
+const logger = createModuleLogger('backup-controller');
 
 /** TTL for the per-user backup trigger lock (5 minutes). */
 const BACKUP_TRIGGER_LOCK_TTL_MS = 5 * 60 * 1000;

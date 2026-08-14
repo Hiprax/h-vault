@@ -72,9 +72,10 @@ import {
   MAX_NOTE_CONTENT_LENGTH,
   MAX_SECRET_DESCRIPTION_LENGTH,
   MAX_TAGS_PER_ITEM,
-  MAX_URI_LENGTH,
+  URI_TOO_LONG_MESSAGE,
   isValidIdentityEmail,
   isValidIdentityPhone,
+  isValidUriLength,
   normalizeUri,
 } from '@hvault/shared';
 import type { ItemType } from '@hvault/shared';
@@ -131,13 +132,24 @@ function boundedField(max: number, label: string) {
 
 const uriEntrySchema = z
   .object({
-    uri: z.string().max(MAX_URI_LENGTH, 'URI too long').optional().default(''),
+    // Unbounded here, then bounded by the SHARED `isValidUriLength` after the
+    // transform, exactly as the stored schema does. Bounding the input at
+    // `MAX_URI_LENGTH` was a real defect rather than a cosmetic mismatch: the
+    // transform prepends `https://` to a bare domain, so a 2041-2048 character one
+    // passed this control, was stored eight characters longer, and every later save
+    // of that item was refused by the write pre-flight with "Too big" on
+    // `uris.0.uri` — an item the editor could open and never save again.
+    uri: z.string().optional().default(''),
     match: z.enum(['domain', 'exact', 'startsWith', 'regex']).default('domain'),
   })
   .transform((entry) => ({
     ...entry,
     uri: entry.match === 'regex' ? entry.uri : normalizeUri(entry.uri),
   }))
+  .refine((entry) => isValidUriLength(entry.uri, entry.match), {
+    message: URI_TOO_LONG_MESSAGE,
+    path: ['uri'],
+  })
   .refine(
     (entry) => {
       if (entry.match === 'regex') return true;
@@ -483,13 +495,20 @@ function pad(value: number, width: number): string {
   return String(value).padStart(width, '0');
 }
 
-/** `YYYY-MM-DD` for the LOCAL calendar date of `instant`. */
-function localDateValue(instant: Date): string {
+/**
+ * `YYYY-MM-DD` for the LOCAL calendar date of `instant`.
+ *
+ * Exported for the property suite, which has to build the two control values the
+ * way {@link getDefaultValues} builds them — a test that recomputed them from its
+ * own copy of this formatting would be asserting against itself rather than
+ * against the composition that actually runs.
+ */
+export function localDateValue(instant: Date): string {
   return `${pad(instant.getFullYear(), 4)}-${pad(instant.getMonth() + 1, 2)}-${pad(instant.getDate(), 2)}`;
 }
 
-/** `HH:MM` for the LOCAL wall-clock time of `instant`. */
-function localTimeValue(instant: Date): string {
+/** `HH:MM` for the LOCAL wall-clock time of `instant`. Exported with {@link localDateValue}. */
+export function localTimeValue(instant: Date): string {
   return `${pad(instant.getHours(), 2)}:${pad(instant.getMinutes(), 2)}`;
 }
 
@@ -503,8 +522,12 @@ function localTimeValue(instant: Date): string {
  * never reaches here. The pattern check below is therefore the empty-string gate plus
  * defense in depth — deliberately not removed, because it is what keeps a caller that
  * bypasses the form from producing an Invalid Date.
+ *
+ * Exported for the property suite: the repeated-hour case this function exists
+ * for is reachable only in a DST-observing zone, and driving it through a
+ * rendered form for hundreds of generated instants is not.
  */
-function combineExpiry(date: string, time: string, stored: string): string | undefined {
+export function combineExpiry(date: string, time: string, stored: string): string | undefined {
   const dateParts = EXPIRY_DATE_PATTERN.exec(date);
   if (!dateParts) return undefined;
   const timeParts = EXPIRY_TIME_PATTERN.exec(time);
@@ -1277,8 +1300,13 @@ function CustomFieldsSection({
                     aria-invalid={rowError ? true : undefined}
                   />
                 )}
+                {/* Named per row, because several rows carry an identical
+                    control: a bare `<select>` has no implicit label and axe
+                    grades a nameless one CRITICAL — a screen-reader user hears
+                    "combo box, Text" with nothing saying which field it types. */}
                 <select
                   {...register(`customFields.${String(idx)}.type`)}
+                  aria-label={`Custom field ${String(idx + 1)} type`}
                   className={cn(inputClass, 'w-24')}
                 >
                   <option value="text">Text</option>
@@ -1880,8 +1908,12 @@ export function VaultItemForm({
                         className={cn(inputClass, 'flex-1')}
                         aria-invalid={uriError ? true : undefined}
                       />
+                      {/* Named per row, for the reason the custom-field type
+                          select records: one of several identical controls, and
+                          a `<select>` takes no implicit label from anything. */}
                       <select
                         {...register(`uris.${idx}.match` as const)}
+                        aria-label={`URI ${String(idx + 1)} match type`}
                         className={cn(inputClass, 'w-28')}
                       >
                         <option value="domain">Domain</option>
@@ -2033,7 +2065,13 @@ export function VaultItemForm({
       {itemType === 'note' && (
         <div className="space-y-4">
           <div className="flex items-center gap-2">
-            <select {...register('format')} className={cn(inputClass, 'w-36')}>
+            {/* The only control on the note form with no visible label beside
+                it: without a name it is announced as an unlabelled combo box. */}
+            <select
+              {...register('format')}
+              aria-label="Note format"
+              className={cn(inputClass, 'w-36')}
+            >
               <option value="markdown">Markdown</option>
               <option value="plaintext">Plain Text</option>
             </select>

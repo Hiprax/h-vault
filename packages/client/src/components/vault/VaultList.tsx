@@ -254,29 +254,38 @@ const VaultListItem = memo(function VaultListItem({
   }, [multiSelectMode, item.id, navigate, onToggleSelect]);
 
   return (
+    /*
+      The CARD is a plain container and the row-sized activator is the CHILD
+      below, which is not how this started: the card itself carried
+      `role="button"`, with the selection checkbox inside it. ARIA gives a
+      `button` PRESENTATIONAL CHILDREN, so that checkbox was stripped from the
+      accessibility tree entirely — multi-select was unreachable for a screen
+      reader while looking perfectly fine to a mouse (axe: `nested-interactive`,
+      serious). The activator still spans everything from the icon to the date,
+      so the row remains one large pointer target, and the checkbox no longer
+      needs to stop the click it used to share with it. The row still holds TWO
+      tab stops, as it always did — the checkbox is `sr-only`, which clips rather
+      than removes, so it stays focusable — but they are now siblings in reading
+      order rather than one nested inside the other. The only pointer behaviour
+      that changes is the card's own 16px of padding, which is no longer part of
+      the target.
+    */
     <div
-      role="button"
-      tabIndex={0}
-      onClick={handleClick}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          handleClick();
-        }
-      }}
+      // The element whose rendered height must equal `ITEM_HEIGHT`, which
+      // react-window uses as a FIXED row height and cannot measure. Named
+      // explicitly because the card no longer carries a role: an E2E assertion
+      // that reached it through `getByRole('button')` silently started measuring
+      // the inner activator instead, and 44px is a plausible-looking number.
+      data-testid="vault-item-row"
       className={cn(
-        'flex items-center gap-4 rounded-lg border bg-[hsl(var(--card))] p-4 transition-colors cursor-pointer',
+        'flex items-center gap-4 rounded-lg border bg-[hsl(var(--card))] p-4 transition-colors',
         isSelected
           ? 'border-[hsl(var(--primary))] bg-[hsl(var(--primary)/0.05)]'
           : 'border-[hsl(var(--border))] hover:bg-[hsl(var(--accent))]',
       )}
-      aria-current={isSelected ? 'true' : undefined}
     >
-      {/* Checkbox */}
-      <label
-        className="shrink-0 relative flex items-center cursor-pointer"
-        onClick={(e) => e.stopPropagation()}
-      >
+      {/* Checkbox — a SIBLING of the activator, never a descendant of it. */}
+      <label className="shrink-0 relative flex items-center cursor-pointer">
         <input
           type="checkbox"
           checked={isSelected}
@@ -289,52 +298,66 @@ const VaultListItem = memo(function VaultListItem({
         </span>
       </label>
 
-      {/* Icon */}
       <div
-        className={cn(
-          'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
-          TYPE_BADGE_COLORS[item.itemType],
-        )}
+        role="button"
+        tabIndex={0}
+        onClick={handleClick}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleClick();
+          }
+        }}
+        className="flex min-w-0 flex-1 items-center gap-4 cursor-pointer"
+        aria-current={isSelected ? 'true' : undefined}
       >
-        <Icon className="h-5 w-5" />
-      </div>
-
-      {/* Name, then the type badge and the distinguishing subtitle sharing one line */}
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <span
-          data-testid="vault-item-name"
-          className="truncate text-sm font-medium text-[hsl(var(--card-foreground))]"
-        >
-          {item.name || 'Unnamed item'}
-        </span>
-        <div className="flex min-w-0 items-center gap-2">
-          <span
-            className={cn(
-              'inline-flex shrink-0 rounded-full px-2 py-0.5 text-xs font-medium',
-              TYPE_BADGE_COLORS[item.itemType],
-            )}
-          >
-            {TYPE_LABELS[item.itemType]}
-          </span>
-          {subtitle && (
-            <span
-              data-testid="vault-item-subtitle"
-              title={subtitle}
-              className="truncate text-xs text-[hsl(var(--muted-foreground))]"
-            >
-              {subtitle}
-            </span>
+        {/* Icon */}
+        <div
+          className={cn(
+            'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
+            TYPE_BADGE_COLORS[item.itemType],
           )}
+        >
+          <Icon className="h-5 w-5" />
         </div>
+
+        {/* Name, then the type badge and the distinguishing subtitle sharing one line */}
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <span
+            data-testid="vault-item-name"
+            className="truncate text-sm font-medium text-[hsl(var(--card-foreground))]"
+          >
+            {item.name || 'Unnamed item'}
+          </span>
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className={cn(
+                'inline-flex shrink-0 rounded-full px-2 py-0.5 text-xs font-medium',
+                TYPE_BADGE_COLORS[item.itemType],
+              )}
+            >
+              {TYPE_LABELS[item.itemType]}
+            </span>
+            {subtitle && (
+              <span
+                data-testid="vault-item-subtitle"
+                title={subtitle}
+                className="truncate text-xs text-[hsl(var(--muted-foreground))]"
+              >
+                {subtitle}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Favorite star */}
+        {item.favorite && <Star className="h-4 w-4 shrink-0 fill-yellow-400 text-yellow-400" />}
+
+        {/* Last modified */}
+        <span className="hidden shrink-0 text-xs text-[hsl(var(--muted-foreground))] sm:block">
+          {lastModified}
+        </span>
       </div>
-
-      {/* Favorite star */}
-      {item.favorite && <Star className="h-4 w-4 shrink-0 fill-yellow-400 text-yellow-400" />}
-
-      {/* Last modified */}
-      <span className="hidden shrink-0 text-xs text-[hsl(var(--muted-foreground))] sm:block">
-        {lastModified}
-      </span>
     </div>
   );
 });

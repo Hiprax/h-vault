@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { CryptoService } from '../src/services/crypto/cryptoService';
+import { expectGcmAuthFailure, expectVaultKeyDecryptFailure } from './cryptoFailure.js';
 
 let crypto: CryptoService;
 
@@ -121,9 +122,10 @@ describe('getAuthHash', () => {
     const hash = crypto.getAuthHash(authKey);
 
     expect(typeof hash).toBe('string');
-    expect(hash.length).toBeGreaterThan(0);
-    // Validate base64 format
-    expect(() => atob(hash)).not.toThrow();
+    // Standard base64 of the 32-byte auth key: decodable, and exactly 32 bytes
+    // once decoded. "does not throw" would also pass on an empty string.
+    expect(hash).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+    expect(atob(hash)).toHaveLength(32);
   });
 });
 
@@ -171,9 +173,12 @@ describe('encryptVaultKey / decryptVaultKey', () => {
 
     const { encrypted, iv, tag } = await crypto.encryptVaultKey(vk, mek);
 
-    expect(() => atob(encrypted)).not.toThrow();
-    expect(() => atob(iv)).not.toThrow();
-    expect(() => atob(tag)).not.toThrow();
+    // Each component decodes, and to the exact size the format fixes: a
+    // 32-byte vault key, a 12-byte IV and a 16-byte GCM tag, with the tag
+    // split off the ciphertext rather than left appended to it.
+    expect(atob(encrypted)).toHaveLength(32);
+    expect(atob(iv)).toHaveLength(12);
+    expect(atob(tag)).toHaveLength(16);
 
     // IV should be 12 bytes
     expect(atob(iv).length).toBe(12);
@@ -201,7 +206,9 @@ describe('encryptVaultKey / decryptVaultKey', () => {
 
     const { encrypted, iv, tag } = await crypto.encryptVaultKey(vk, mek1);
 
-    await expect(crypto.decryptVaultKey(encrypted, iv, tag, mek2)).rejects.toThrow();
+    // The wrong master password is reported with the same non-committal
+    // message as corrupted key material: no oracle distinguishes them.
+    await expectVaultKeyDecryptFailure(crypto.decryptVaultKey(encrypted, iv, tag, mek2));
   });
 
   it('throws a user-friendly error when decryption fails with wrong MEK', async () => {
@@ -373,7 +380,7 @@ describe('encryptData / decryptData', () => {
     const otherKey = await crypto.importVaultKey(rawOtherKey);
     const { encrypted, iv, tag } = await crypto.encryptData('secret', vaultKey);
 
-    await expect(crypto.decryptData(encrypted, iv, tag, otherKey)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptData(encrypted, iv, tag, otherKey));
   });
 
   it('fails to decrypt with tampered ciphertext', async () => {
@@ -384,7 +391,16 @@ describe('encryptData / decryptData', () => {
     tamperedBytes[0]! ^= 0xff;
     const tampered = crypto.arrayBufferToBase64(tamperedBytes.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptData(tampered, iv, tag, vaultKey)).rejects.toThrow();
+    // Identical to the wrong-key failure, byte for byte in the message: the
+    // caller cannot learn that it was the CIPHERTEXT that was altered.
+    const tamperedError = await expectGcmAuthFailure(
+      crypto.decryptData(tampered, iv, tag, vaultKey),
+    );
+    const unrelatedKey = await crypto.importVaultKey(crypto.generateVaultKey());
+    const wrongKeyError = await expectGcmAuthFailure(
+      crypto.decryptData(encrypted, iv, tag, unrelatedKey),
+    );
+    expect(tamperedError.message).toBe(wrongKeyError.message);
   });
 
   it('fails to decrypt with tampered tag', async () => {
@@ -394,7 +410,7 @@ describe('encryptData / decryptData', () => {
     tamperedTagBytes[0]! ^= 0xff;
     const tamperedTag = crypto.arrayBufferToBase64(tamperedTagBytes.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptData(encrypted, iv, tamperedTag, vaultKey)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptData(encrypted, iv, tamperedTag, vaultKey));
   });
 });
 
@@ -503,13 +519,13 @@ describe('backup key derivation', () => {
       combined.set(ciphertext, 0);
       combined.set(tagBytes, ciphertext.length);
 
-      await expect(
+      await expectGcmAuthFailure(
         globalThis.crypto.subtle.decrypt(
           { name: 'AES-GCM', iv: ivBytes, tagLength: 128 },
           bek2,
           combined.buffer as ArrayBuffer,
         ),
-      ).rejects.toThrow();
+      );
     });
   });
 
@@ -559,9 +575,11 @@ describe('backup key derivation', () => {
 
       const { encrypted, iv, tag } = await crypto.encryptBWK(bwk, bek);
 
-      expect(() => atob(encrypted)).not.toThrow();
-      expect(() => atob(iv)).not.toThrow();
-      expect(() => atob(tag)).not.toThrow();
+      // Decodable AND the exact sizes the wrapped-key format fixes: a 32-byte
+      // BWK, a 12-byte IV, a 16-byte tag held separately from the ciphertext.
+      expect(atob(encrypted)).toHaveLength(32);
+      expect(atob(iv)).toHaveLength(12);
+      expect(atob(tag)).toHaveLength(16);
     });
   });
 
@@ -584,9 +602,9 @@ describe('backup key derivation', () => {
 
       const { encrypted, iv, tag } = await crypto.encryptVaultKeyWithBWK(vk, bwk);
 
-      expect(() => atob(encrypted)).not.toThrow();
-      expect(() => atob(iv)).not.toThrow();
-      expect(() => atob(tag)).not.toThrow();
+      expect(atob(encrypted)).toHaveLength(32);
+      expect(atob(iv)).toHaveLength(12);
+      expect(atob(tag)).toHaveLength(16);
 
       // IV should be 12 bytes
       expect(atob(iv).length).toBe(12);
@@ -614,7 +632,9 @@ describe('backup key derivation', () => {
 
       const { encrypted, iv, tag } = await crypto.encryptVaultKeyWithBWK(vk, bwk1);
 
-      await expect(crypto.decryptVaultKeyWithBWK(encrypted, iv, tag, bwk2)).rejects.toThrow();
+      // Raw-BWK unwrapping is NOT the MEK path: it does not wrap the failure,
+      // so WebCrypto's OperationError surfaces unchanged.
+      await expectGcmAuthFailure(crypto.decryptVaultKeyWithBWK(encrypted, iv, tag, bwk2));
     });
 
     it('fails to decrypt with tampered ciphertext', async () => {
@@ -628,7 +648,7 @@ describe('backup key derivation', () => {
       tamperedBytes[0]! ^= 0xff;
       const tampered = crypto.arrayBufferToBase64(tamperedBytes.buffer as ArrayBuffer);
 
-      await expect(crypto.decryptVaultKeyWithBWK(tampered, iv, tag, bwk)).rejects.toThrow();
+      await expectGcmAuthFailure(crypto.decryptVaultKeyWithBWK(tampered, iv, tag, bwk));
     });
 
     it('fails to decrypt with tampered tag', async () => {
@@ -642,9 +662,7 @@ describe('backup key derivation', () => {
       tamperedTagBytes[0]! ^= 0xff;
       const tamperedTag = crypto.arrayBufferToBase64(tamperedTagBytes.buffer as ArrayBuffer);
 
-      await expect(
-        crypto.decryptVaultKeyWithBWK(encrypted, iv, tamperedTag, bwk),
-      ).rejects.toThrow();
+      await expectGcmAuthFailure(crypto.decryptVaultKeyWithBWK(encrypted, iv, tamperedTag, bwk));
     });
 
     it('decrypted vault key has the correct byte length (32 bytes)', async () => {
@@ -709,7 +727,13 @@ describe('clearKey', () => {
 
   it('works on an empty buffer (no-op)', () => {
     const buf = new ArrayBuffer(0);
-    expect(() => crypto.clearKey(buf)).not.toThrow();
+
+    // Completes and leaves the buffer exactly as it was. A bare "does not
+    // throw" would also pass on an implementation that silently reallocated
+    // or detached it.
+    expect(crypto.clearKey(buf)).toBeUndefined();
+    expect(buf.byteLength).toBe(0);
+    expect(new Uint8Array(buf)).toEqual(new Uint8Array(0));
   });
 });
 
@@ -861,9 +885,9 @@ describe('end-to-end flow', () => {
     expect(new Uint8Array(verifyRawVK)).toEqual(new Uint8Array(rawVaultKey));
 
     // Old MEK should NOT decrypt new encrypted VK
-    await expect(
+    await expectVaultKeyDecryptFailure(
       crypto.decryptVaultKey(newEncVK.encrypted, newEncVK.iv, newEncVK.tag, oldMek),
-    ).rejects.toThrow();
+    );
 
     // Auth key changed
     expect(crypto.getAuthHash(newAuthKey).length).toBeGreaterThan(0);
@@ -907,9 +931,9 @@ describe('end-to-end flow', () => {
     expect(finalDecrypt).toBe(plaintext);
 
     // Old VK should NOT decrypt re-encrypted data
-    await expect(
+    await expectGcmAuthFailure(
       crypto.decryptData(reEncData.encrypted, reEncData.iv, reEncData.tag, oldVK),
-    ).rejects.toThrow();
+    );
 
     // Clean up
     crypto.clearKey(rawOldVK);
@@ -1034,7 +1058,7 @@ describe('IV uniqueness', () => {
     const enc = await crypto.encryptData('test', vk);
 
     // IV should be valid base64
-    expect(() => crypto.base64ToArrayBuffer(enc.iv)).not.toThrow();
+    expect(enc.iv).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
 
     // AES-GCM IV should be 12 bytes
     const ivBytes = crypto.base64ToArrayBuffer(enc.iv);
@@ -1104,9 +1128,9 @@ describe('passwordHistory re-encryption during vault key rotation', () => {
 
     // Verify re-encrypted entries CANNOT be decrypted with old vault key
     for (const entry of reEncryptedHistory) {
-      await expect(
+      await expectGcmAuthFailure(
         crypto.decryptData(entry.encryptedPassword, entry.iv, entry.tag, oldVk),
-      ).rejects.toThrow();
+      );
     }
   });
 

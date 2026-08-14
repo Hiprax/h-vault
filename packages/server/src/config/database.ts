@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { config } from './index.js';
 
 // Import models so schema index definitions are registered before the check
@@ -13,7 +13,7 @@ import '../models/BackupLog.js';
 import '../models/JobLock.js';
 import '../models/PwnedRangeCache.js';
 
-const logger = createLogger({ moduleName: 'database' });
+const logger = createModuleLogger('database');
 
 const MAX_RETRY_ATTEMPTS = 5;
 const RETRY_DELAY_MS = 5000;

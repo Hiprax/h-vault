@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "_comment": [
+    "Configuration for scripts/ci/integrity-scan.mjs.",
+    "",
+    "`gateFiles` is a TIGHTENING: it names the files where a forbidden pattern",
+    "means a defeated gate rather than ordinary code, so no ledger entry can",
+    "excuse one. scripts/ci/** is this repository's pipeline - local-ci.mjs,",
+    "secret-scan.mjs, docker-gate.mjs, sast-gate.mjs and the ratchet all DEFINE",
+    "gates, so a `|| true` or a `--no-verify` in any of them is exactly the",
+    "class the doctrine refuses to let anyone write down and move on from.",
+    ".husky/** is where those gates are bound to git.",
+    "",
+    "`exclude` is deliberately EMPTY and should stay that way. An operator-added",
+    "exclude applies only to ledgerable rules (it can never hide a forbidden",
+    "marker), and every glob added here becomes a SCAN-EXCLUDE marker that needs",
+    "its own dated ledger entry pinned to that exact glob - because one line of",
+    "config would otherwise void the whole scan with nothing to review."
+  ],
+  "gateFiles": ["scripts/ci/**", ".husky/**"],
+  "exclude": []
+}

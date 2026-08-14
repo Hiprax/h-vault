@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import dotenv from 'dotenv';
 import { z } from 'zod';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 
 // Resolve .env from the monorepo root (4 levels up from packages/server/src/config/).
 // When using npm workspaces, process.cwd() points to the package directory, not the
@@ -26,7 +26,7 @@ if (fs.existsSync(rootEnvPath)) {
 // raises a structured error when a required value is missing, so an
 // unmaintained dependency on the boot path is no longer needed.
 
-const logger = createLogger({ moduleName: 'config' });
+const logger = createModuleLogger('config');
 
 /**
  * Upper bound for a numeric `TRUST_PROXY` hop count. Express treats a numeric

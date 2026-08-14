@@ -1,6 +1,7 @@
 import net from 'node:net';
 import mongoose from 'mongoose';
-import { createLogger, shutdownAllLoggers } from '@hiprax/logger';
+import { shutdownAllLoggers } from '@hiprax/logger';
+import { createModuleLogger } from './utils/logger.js';
 import { config } from './config/index.js';
 import { connectDatabase } from './config/database.js';
 import app from './app.js';
@@ -13,7 +14,7 @@ import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
 import { createGracefulShutdown } from './utils/gracefulShutdown.js';
 
-const logger = createLogger({ moduleName: 'server' });
+const logger = createModuleLogger('server');
 
 // Defensive listener-limit margin. @hiprax/logger v1's crash-capture coordinator
 // installs a single process-wide uncaughtException/unhandledRejection listener pair

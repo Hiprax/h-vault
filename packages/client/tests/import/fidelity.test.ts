@@ -199,6 +199,50 @@ describe('import fidelity clamp — cards, identities and notes', () => {
     assertRoundTrips('identity', item.data);
   });
 
+  it('drops a custom field whose name is not a string rather than coercing it', () => {
+    // `{ name: 123 }` is what a hand-edited or machine-generated export produces.
+    // Coercing it (`String(rec.name)`) would invent a field called "123" that the
+    // user never wrote; the entry is dropped instead, and the item survives.
+    const item = makeItem('identity', 'Jane', {
+      firstName: 'Jane',
+      customFields: [
+        { name: 123, value: 'x' },
+        { name: 'real', value: 'y' },
+      ],
+    });
+    const fields = item.data.customFields as { name: string }[];
+    expect(fields).toHaveLength(1);
+    expect(fields[0]!.name).toBe('real');
+    assertRoundTrips('identity', item.data);
+  });
+
+  it('empties a custom-field value that is neither a string nor a number, keeping the field', () => {
+    // `customFieldSchema.value` is a string, so a boolean or an object reaching it
+    // fails `vaultItemDataSchemas` and `validateImportItems` discards the WHOLE
+    // item — every other field with it. The value is emptied instead: the field's
+    // NAME is what the user recognises, and a coerced "true" or "[object Object]"
+    // would be a value the source file never contained.
+    const item = makeItem('identity', 'Jane', {
+      firstName: 'Jane',
+      customFields: [
+        { name: 'consented', value: true },
+        { name: 'meta', value: { nested: 1 } },
+        { name: 'count', value: 42 },
+        { name: 'plain', value: 'text' },
+      ],
+    });
+    const fields = item.data.customFields as { name: string; value: string }[];
+    expect(fields.map((field) => [field.name, field.value])).toEqual([
+      ['consented', ''],
+      ['meta', ''],
+      // A number IS coerced — it is a lossless rendering of the source value,
+      // which a boolean and an object are not.
+      ['count', '42'],
+      ['plain', 'text'],
+    ]);
+    assertRoundTrips('identity', item.data);
+  });
+
   it('clamps an over-long secure-note content to the schema bound', () => {
     const item = buildNote({ name: 'Big', content: 'z'.repeat(60_000) });
     expect((item.data.content as string).length).toBe(50_000);
@@ -256,6 +300,32 @@ describe('import fidelity clamp — cards, identities and notes', () => {
     // Absent fields are filled with '', matching the shared schema's own defaults.
     expect(billing.street2).toBe('');
     assertRoundTrips('card', item.data);
+  });
+
+  it('bounds a scalar by the table for the item type it was given, not by its key name', () => {
+    // `clampNotesAndFields` takes the item TYPE as a parameter and looks the bounds
+    // up per type, because a key name alone does not identify a field: `number` on
+    // a card is a PAN bounded at 30, and on anything else it is an ordinary value
+    // this module has no business truncating. A note also exercises the empty-table
+    // path, since only `card` and `identity` declare scalar bounds at all.
+    //
+    // Red the moment the lookup stops being per type — a fall back to another
+    // type's list, or a key-keyed table — because `number` would come back
+    // truncated to 30 with a "Card number truncated" line invented in `notes`.
+    const number = '9'.repeat(120);
+    const card = makeItem('card', 'Visa', { number });
+    expect(card.data.number).toHaveLength(30);
+    expect(String(card.data.notes)).toContain('Card number truncated');
+
+    const note = makeItem('note', 'Recovery kit', {
+      content: 'keep me',
+      number,
+      cvv: '9'.repeat(9),
+    });
+    expect(note.data.number).toBe(number);
+    expect(note.data.cvv).toHaveLength(9);
+    expect(note.data.content).toBe('keep me');
+    expect(note.data.notes).toBeUndefined();
   });
 
   it('leaves a within-bounds address untouched and adds no notes', () => {

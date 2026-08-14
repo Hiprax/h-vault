@@ -559,15 +559,22 @@ describe('API Client', () => {
 
       const { clearCsrfToken } = await import('../src/services/api/client');
 
-      // Temporarily break localStorage
-      const originalSetItem = localStorage.setItem;
-      localStorage.setItem = () => {
+      // Spied on the PROTOTYPE, not by assigning `localStorage.setItem = fn`:
+      // jsdom's Storage is a Proxy that turns a property assignment into
+      // `setItem('setItem', fn)`, so the assignment form stores an item and
+      // leaves the real method in place — the failure path was never entered.
+      const failingSetItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
         throw new Error('localStorage disabled');
-      };
+      });
 
-      expect(() => clearCsrfToken()).not.toThrow();
-
-      localStorage.setItem = originalSetItem;
+      try {
+        // The cross-tab broadcast is attempted and its failure absorbed: the
+        // caller clearing its own token must not inherit a storage error.
+        clearCsrfToken();
+        expect(failingSetItem).toHaveBeenCalledWith('__hv_csrf_invalidated', expect.any(String));
+      } finally {
+        failingSetItem.mockRestore();
+      }
     });
   });
 
@@ -1295,8 +1302,11 @@ describe('encryptedStorage', () => {
       expect(stored).toBeTruthy();
       // The stored value should be base64-encoded (not the plaintext)
       expect(stored).not.toBe('hello world');
-      // Base64 string should be decodable
-      expect(() => atob(stored!)).not.toThrow();
+      // Base64, and long enough to hold the 12-byte IV plus ciphertext: the
+      // adapter refuses anything shorter as truncated.
+      expect(stored).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+      expect(atob(stored!).length).toBeGreaterThan(12);
+      expect(atob(stored!)).not.toContain('hello world');
     });
 
     it('should decrypt stored data back to original value (round-trip)', async () => {
@@ -1343,8 +1353,10 @@ describe('encryptedStorage', () => {
 
       const sessionKey = sessionStorage.getItem('hvault_storage_key');
       expect(sessionKey).toBeTruthy();
-      // Should be a base64 string (AES-256 = 32 bytes raw)
-      expect(() => atob(sessionKey!)).not.toThrow();
+      // Base64 of a full AES-256 key: exactly 32 bytes once decoded. A
+      // shorter key would still decode, so the length is the real assertion.
+      expect(sessionKey).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+      expect(atob(sessionKey!)).toHaveLength(32);
       const raw = atob(sessionKey!);
       expect(raw.length).toBe(32); // 256 bits = 32 bytes
     });
@@ -1440,7 +1452,14 @@ describe('encryptedStorage', () => {
     it('should not throw when removing nonexistent key', async () => {
       const { encryptedStorage } = await import('../src/stores/encryptedStorage');
 
-      expect(() => encryptedStorage.removeItem('nonexistent')).not.toThrow();
+      localStorage.setItem('bystander', 'keep-me');
+
+      // Removing a key that was never written completes quietly and touches
+      // nothing else — a `clear()`-style implementation would fail here.
+      encryptedStorage.removeItem('nonexistent');
+
+      expect(localStorage.getItem('nonexistent')).toBeNull();
+      expect(localStorage.getItem('bystander')).toBe('keep-me');
     });
   });
 

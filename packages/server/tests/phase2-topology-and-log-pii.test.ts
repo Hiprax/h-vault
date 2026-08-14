@@ -20,8 +20,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import mongoose from 'mongoose';
 import request from 'supertest';
-import * as hipraxLogger from '@hiprax/logger';
 import app from '../src/app.js';
+import { createModuleLogger } from '../src/utils/logger.js';
 import { verifyTopology } from '../src/config/database.js';
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,17 @@ function installCapture(): Capture {
   ];
 
   for (const moduleName of knownModules) {
-    const logger = hipraxLogger.createLogger({ moduleName }) as unknown as Record<string, unknown>;
+    // Through the APPLICATION's factory, never `hipraxLogger.createLogger`
+    // directly. @hiprax/logger caches on `moduleName` + `logDirectory`, so for a
+    // module that has already built its logger either call returns the same
+    // instance — but for one that has NOT (several names here belong to modules
+    // this file never imports) the bare call takes the library's defaults, which
+    // attach two rotating file transports and create `<cwd>/logs` as a side
+    // effect. That is the write the repo-write guard now blocks and the defect
+    // `src/utils/logger.ts` exists to remove; going through the same factory the
+    // server uses also means this capture patches exactly the loggers production
+    // builds, rather than look-alikes built with different options.
+    const logger = createModuleLogger(moduleName) as unknown as Record<string, unknown>;
     for (const level of levels) {
       const orig = logger[level];
       if (typeof orig !== 'function') continue;

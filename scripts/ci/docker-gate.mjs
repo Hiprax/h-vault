@@ -200,6 +200,41 @@ if (!nativeTrivy) {
   note(`no trivy binary on PATH — using ${TRIVY_IMAGE} (cache: volume ${TRIVY_CACHE_VOLUME})`);
 }
 
+/**
+ * Where the Docker daemon's socket actually is on THIS host.
+ *
+ * Containerised Trivy inspects the local image store, so it needs the daemon
+ * socket. `/var/run/docker.sock` is only the rootful default: under **rootless
+ * Docker** the socket is `$XDG_RUNTIME_DIR/docker.sock` and nothing is mounted
+ * at `/var/run/docker.sock` at all, so the hard-coded mount silently handed
+ * Trivy a non-existent path. It then failed over to pulling the image from Docker
+ * Hub, which does not have it, and the gate reported
+ *
+ *   trivy could not scan hvault-app:local-ci (exit 1)
+ *
+ * — a message that reads like a broken image rather than a missing socket.
+ *
+ * Docker itself is the authority here, because `DOCKER_HOST` overrides the
+ * active context and only the CLI resolves that precedence correctly. The
+ * container-side path stays `/var/run/docker.sock`, which is where Trivy looks.
+ *
+ * A non-unix endpoint (`npipe://` on Windows, a remote `tcp://`) has no socket to
+ * bind, so the rootful default is kept: there is nothing better to try, and the
+ * scan failing loudly is the honest outcome.
+ */
+function daemonSocketMount() {
+  const endpoint = captureExe('docker', [
+    'context',
+    'inspect',
+    '--format',
+    '{{.Endpoints.docker.Host}}',
+  ]);
+  const unixSocket = endpoint.ok ? /^unix:\/\/(\/.*)$/.exec(endpoint.stdout.trim()) : null;
+  const hostPath = unixSocket ? unixSocket[1] : '/var/run/docker.sock';
+  if (hostPath !== '/var/run/docker.sock') note(`daemon socket: ${hostPath}`);
+  return `${hostPath}:/var/run/docker.sock`;
+}
+
 // `--exit-code 0` is deliberate: Trivy reports, this gate DECIDES. The verdict
 // has to be taken after the baseline in `trivy-baseline.json` is applied, and a
 // non-zero exit here would fail the push before that could happen. A scan that
@@ -209,6 +244,10 @@ if (!nativeTrivy) {
 // `--format json` rather than `table` for the same reason: an accepted finding
 // can only be matched on (id, image, package, path) if those fields survive as
 // data. The human-readable table is re-rendered from the JSON.
+// Resolved once, not per image: three scans would otherwise print the note three
+// times and shell out to `docker context inspect` for an answer that cannot change.
+const socketMount = nativeTrivy ? '' : daemonSocketMount();
+
 const scanArgs = [
   'image',
   '--severity',
@@ -304,7 +343,7 @@ for (const image of IMAGES.filter((candidate) => candidate.scan)) {
   } else {
     const scan = runContainer([
       '-v',
-      '/var/run/docker.sock:/var/run/docker.sock',
+      socketMount,
       '-v',
       `${TRIVY_CACHE_VOLUME}:/root/.cache`,
       TRIVY_IMAGE,

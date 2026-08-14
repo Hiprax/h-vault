@@ -615,43 +615,44 @@ start** rather than run misconfigured.
 <details open>
 <summary><b>Application variables</b></summary>
 
-| Variable                      | Required | Default                            | Notes                                                                                                                                                                     |
-| ----------------------------- | -------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JWT_ACCESS_SECRET`           | **Yes**  | —                                  | Min 32 chars                                                                                                                                                              |
-| `JWT_REFRESH_SECRET`          | **Yes**  | —                                  | Min 32 chars. Use a different value from the access secret                                                                                                                |
-| `SESSION_SECRET`              | **Yes**  | —                                  | Min 32 chars. Signs the CSRF token; also the 2FA key fallback                                                                                                             |
-| `PORT`                        | No       | `5000`                             | 1–65535                                                                                                                                                                   |
-| `NODE_ENV`                    | No       | `development`                      | `development` · `production` · `test`                                                                                                                                     |
-| `APP_URL`                     | No       | `http://localhost:5000`            | Public base URL used in emailed links. Must be `http://` or `https://`                                                                                                    |
-| `APP_NAME`                    | No       | `H-Vault`                          | Used in email subjects and the TOTP issuer                                                                                                                                |
-| `MONGODB_URI`                 | No       | `mongodb://localhost:27017/hvault` | Overridden inside the Docker stack                                                                                                                                        |
-| `JWT_ACCESS_EXPIRY`           | No       | `5m`                               | Access token lifetime                                                                                                                                                     |
-| `REFRESH_TOKEN_DAYS`          | No       | `7`                                | Standard refresh-token (session) lifetime, in whole days. 1–90                                                                                                            |
-| `REFRESH_TOKEN_REMEMBER_DAYS` | No       | `30`                               | "Remember me" session lifetime, in whole days. 1–365, and must be ≥ `REFRESH_TOKEN_DAYS`                                                                                  |
-| `TRUSTED_DEVICE_DAYS`         | No       | `30`                               | How long a device may skip the 2FA step, in whole days. 1–365, and must be ≥ `REFRESH_TOKEN_REMEMBER_DAYS`                                                                |
-| `CORS_ORIGIN`                 | No       | `http://localhost:5173`            | **Must be HTTPS in production** or the app will not boot                                                                                                                  |
-| `TWO_FACTOR_ENCRYPTION_KEY`   | No       | falls back to `SESSION_SECRET`     | Min 32 chars. An empty assignment is treated as unset                                                                                                                     |
-| `BCRYPT_ROUNDS`               | No       | `12`                               | 4–31                                                                                                                                                                      |
-| `EMAIL_PROVIDER`              | No       | `smtp`                             | `smtp` or `gmail`                                                                                                                                                         |
-| `SMTP_HOST` / `USER` / `PASS` | No       | —                                  | All three together, or none. Partial config is a startup error in production                                                                                              |
-| `SMTP_PORT`                   | No       | `587`                              | —                                                                                                                                                                         |
-| `SMTP_SECURE`                 | No       | auto                               | Auto-detected from the port (`true` for 465)                                                                                                                              |
-| `SMTP_FROM`                   | No       | —                                  | Unset, the From address is derived: `APP_NAME <noreply@SMTP_HOST>`, or `APP_NAME <noreply@hvault.local>`                                                                  |
-| `GMAIL_USERNAME` / `PASSWORD` | No       | —                                  | Both or neither. Use an [App Password](https://myaccount.google.com/apppasswords)                                                                                         |
-| `BACKUP_MAX_SIZE_MB`          | No       | `25`                               | 1–100                                                                                                                                                                     |
-| `BACKUP_RETENTION_DAYS`       | No       | `30`                               | 1–365                                                                                                                                                                     |
-| `EXPORT_MAX_SIZE_MB`          | No       | `25`                               | 1–100                                                                                                                                                                     |
-| `FILE_ENCRYPTION_MAX_SIZE_MB` | No       | `100`                              | 1–1024. A client-side guardrail advertised via `GET /config` — the file is never uploaded, so it cannot be enforced server-side                                           |
-| `AUDIT_LOG_RETENTION_DAYS`    | No       | `365`                              | 1–3650                                                                                                                                                                    |
-| `BREACH_CACHE_TTL_DAYS`       | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries; seed-imported entries are TTL-exempt                                                               |
-| `BREACH_SEED_AUTO`            | No       | `false`                            | When `true`, the refresh cron may fetch missing/stale ranges from HIBP (tens of GB over a full corpus). Off by default                                                    |
-| `BREACH_SEED_REFRESH_CRON`    | No       | —                                  | Cron expression (UTC) for the breach-range refresh job. Unset disables it. Requires `BREACH_SEED_AUTO=true` to fetch                                                      |
-| `HIBP_CACHE_MAX_BYTES`        | No       | `67108864`                         | ≥ 1048576 (1 MiB). Byte ceiling for the in-memory HIBP range cache, per worker process (a real range is ~36 KB); the binding memory bound, alongside the 10,000-entry cap |
-| `MONGO_MAX_POOL_SIZE`         | No       | `10`                               | 1–100, and must be ≥ the min pool size                                                                                                                                    |
-| `MONGO_MIN_POOL_SIZE`         | No       | `2`                                | 0–50                                                                                                                                                                      |
-| `TRUST_PROXY`                 | No       | `false`                            | `false` · `true` · `1` · a named range · a subnet list · a hop count (0–10)                                                                                               |
-| `ENABLE_SWAGGER`              | No       | `false`                            | Serves **unauthenticated** API docs in production when on. Always on in dev/test                                                                                          |
-| `METRICS_TOKEN`               | No       | —                                  | Min 16 chars. Enables `GET /api/v1/metrics`; unset, that endpoint 404s                                                                                                    |
+| Variable                      | Required | Default                            | Notes                                                                                                                                                                         |
+| ----------------------------- | -------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JWT_ACCESS_SECRET`           | **Yes**  | —                                  | Min 32 chars                                                                                                                                                                  |
+| `JWT_REFRESH_SECRET`          | **Yes**  | —                                  | Min 32 chars. Use a different value from the access secret                                                                                                                    |
+| `SESSION_SECRET`              | **Yes**  | —                                  | Min 32 chars. Signs the CSRF token; also the 2FA key fallback                                                                                                                 |
+| `PORT`                        | No       | `5000`                             | 1–65535                                                                                                                                                                       |
+| `NODE_ENV`                    | No       | `development`                      | `development` · `production` · `test`                                                                                                                                         |
+| `APP_URL`                     | No       | `http://localhost:5000`            | Public base URL used in emailed links. Must be `http://` or `https://`                                                                                                        |
+| `APP_NAME`                    | No       | `H-Vault`                          | Used in email subjects and the TOTP issuer                                                                                                                                    |
+| `MONGODB_URI`                 | No       | `mongodb://localhost:27017/hvault` | Overridden inside the Docker stack                                                                                                                                            |
+| `JWT_ACCESS_EXPIRY`           | No       | `5m`                               | Access token lifetime                                                                                                                                                         |
+| `REFRESH_TOKEN_DAYS`          | No       | `7`                                | Standard refresh-token (session) lifetime, in whole days. 1–90                                                                                                                |
+| `REFRESH_TOKEN_REMEMBER_DAYS` | No       | `30`                               | "Remember me" session lifetime, in whole days. 1–365, and must be ≥ `REFRESH_TOKEN_DAYS`                                                                                      |
+| `TRUSTED_DEVICE_DAYS`         | No       | `30`                               | How long a device may skip the 2FA step, in whole days. 1–365, and must be ≥ `REFRESH_TOKEN_REMEMBER_DAYS`                                                                    |
+| `CORS_ORIGIN`                 | No       | `http://localhost:5173`            | **Must be HTTPS in production** or the app will not boot                                                                                                                      |
+| `TWO_FACTOR_ENCRYPTION_KEY`   | No       | falls back to `SESSION_SECRET`     | Min 32 chars. An empty assignment is treated as unset                                                                                                                         |
+| `BCRYPT_ROUNDS`               | No       | `12`                               | 4–31                                                                                                                                                                          |
+| `EMAIL_PROVIDER`              | No       | `smtp`                             | `smtp` or `gmail`                                                                                                                                                             |
+| `SMTP_HOST` / `USER` / `PASS` | No       | —                                  | All three together, or none. Partial config is a startup error in production                                                                                                  |
+| `SMTP_PORT`                   | No       | `587`                              | —                                                                                                                                                                             |
+| `SMTP_SECURE`                 | No       | auto                               | Auto-detected from the port (`true` for 465)                                                                                                                                  |
+| `SMTP_FROM`                   | No       | —                                  | Unset, the From address is derived: `APP_NAME <noreply@SMTP_HOST>`, or `APP_NAME <noreply@hvault.local>`                                                                      |
+| `GMAIL_USERNAME` / `PASSWORD` | No       | —                                  | Both or neither. Use an [App Password](https://myaccount.google.com/apppasswords)                                                                                             |
+| `BACKUP_MAX_SIZE_MB`          | No       | `25`                               | 1–100                                                                                                                                                                         |
+| `BACKUP_RETENTION_DAYS`       | No       | `30`                               | 1–365                                                                                                                                                                         |
+| `EXPORT_MAX_SIZE_MB`          | No       | `25`                               | 1–100                                                                                                                                                                         |
+| `FILE_ENCRYPTION_MAX_SIZE_MB` | No       | `100`                              | 1–1024. A client-side guardrail advertised via `GET /config` — the file is never uploaded, so it cannot be enforced server-side                                               |
+| `AUDIT_LOG_RETENTION_DAYS`    | No       | `365`                              | 1–3650                                                                                                                                                                        |
+| `LOG_DIRECTORY`               | No       | `<cwd>/logs`                       | Where the rotating log files go. Relative values resolve against the process's working directory; a blank value is treated as unset. No file transports under `NODE_ENV=test` |
+| `BREACH_CACHE_TTL_DAYS`       | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries; seed-imported entries are TTL-exempt                                                                   |
+| `BREACH_SEED_AUTO`            | No       | `false`                            | When `true`, the refresh cron may fetch missing/stale ranges from HIBP (tens of GB over a full corpus). Off by default                                                        |
+| `BREACH_SEED_REFRESH_CRON`    | No       | —                                  | Cron expression (UTC) for the breach-range refresh job. Unset disables it. Requires `BREACH_SEED_AUTO=true` to fetch                                                          |
+| `HIBP_CACHE_MAX_BYTES`        | No       | `67108864`                         | ≥ 1048576 (1 MiB). Byte ceiling for the in-memory HIBP range cache, per worker process (a real range is ~36 KB); the binding memory bound, alongside the 10,000-entry cap     |
+| `MONGO_MAX_POOL_SIZE`         | No       | `10`                               | 1–100, and must be ≥ the min pool size                                                                                                                                        |
+| `MONGO_MIN_POOL_SIZE`         | No       | `2`                                | 0–50                                                                                                                                                                          |
+| `TRUST_PROXY`                 | No       | `false`                            | `false` · `true` · `1` · a named range · a subnet list · a hop count (0–10)                                                                                                   |
+| `ENABLE_SWAGGER`              | No       | `false`                            | Serves **unauthenticated** API docs in production when on. Always on in dev/test                                                                                              |
+| `METRICS_TOKEN`               | No       | —                                  | Min 16 chars. Enables `GET /api/v1/metrics`; unset, that endpoint 404s                                                                                                        |
 
 </details>
 
@@ -999,26 +1000,159 @@ runs on your machine, in the `pre-push` hook, before the commits leave it — so
 longer appear on a push that was already broken when it left your laptop, and no repository
 minutes are spent discovering it.
 
+There are three entry points, one per tier, and **tiers are cumulative**: `verify` is a superset of
+`verify:fast`, and `verify:full` a superset of both. A gate therefore cannot be quietly demoted out
+of the push gate by moving it down a tier.
+
 ```bash
-npm run ci                      # every gate — exactly what pre-push runs
-npm run ci -- --list            # what each gate is, and which CI job it replaces
+npm run verify:fast             # the fast tier (T0) — cheap enough to run constantly
+npm run ci                      # T0 + T1 — exactly what pre-push runs
+npm run verify:full             # T0 + T1 + T2 — the above plus the release tier
+npm run ci -- --list            # what each gate is, its tier, and which CI job it replaces
 npm run ci -- --only=lint,test  # a subset, while iterating
-npm run ci -- --continue        # don't stop at the first failure
+npm run ci -- --bail            # stop at the first failure instead of running them all
+npm run ci -- --json            # one JSON document describing the run
 ```
 
-| Gate         | What it runs                                                                                                                           | Replaces                   |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| `engines`    | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                 | the CI Node matrix's floor |
-| `secrets`    | Every **tracked** file scanned for credential patterns                                                                                 | _new_                      |
-| `build`      | `npm run build` (shared → server → client)                                                                                             | `ci` job                   |
-| `lint`       | ESLint + `eslint-plugin-security`, `--max-warnings=0`                                                                                  | `ci` job                   |
-| `format`     | `prettier --check .`                                                                                                                   | _new_                      |
-| `type-check` | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                              | `ci` job                   |
-| `test`       | The full Vitest suite + the coverage thresholds                                                                                        | `ci` job                   |
-| `audit`      | `npm audit --audit-level=moderate --omit=dev`                                                                                          | `ci` job                   |
-| `e2e`        | Playwright (Chromium) against an auto-started stack                                                                                    | `e2e` job                  |
-| `docker`     | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below) | `docker-build` job         |
-| `sast`       | CodeQL `security-and-quality` suite                                                                                                    | `sast` job                 |
+Each tier has a stated time budget on the reference machine:
+
+| Tier   | Entry point           | Budget        | Why that number                                                                                                                                                 |
+| ------ | --------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **T0** | `npm run verify:fast` | **90 s**      | It is meant to be run without thinking about it. Measured at ~82 s, and those eight seconds of headroom are why a gate is not added to T0 without re-measuring. |
+| **T1** | `npm run ci`          | **12 min**    | The server suite alone is ~150 s and Playwright is ~6 minutes. Twelve rather than a rounder ten, because a budget nobody meets is a budget nobody respects.     |
+| **T2** | `npm run verify:full` | **unbounded** | `mutation` re-runs the whole suite once per mutant. Any number written here would be fiction.                                                                   |
+
+The budgets are **design budgets, not gates**, and both halves of that are deliberate. They are not
+gates because the wall clock of the machine you happen to be on is not a property of this
+repository, and failing a push over it would only teach people to reach for `--no-verify`. They are
+not decoration either: every run records `budgetSeconds` beside its own `durationMs` in
+`summary.json` and prints the comparison, so "T0 is still cheap enough to run constantly" is a
+measurement you can check rather than a claim from the day it was written. They live in
+`scripts/ci/lib/tiers.mjs`, and `docs-sync.test.ts` fails if this table and that file disagree.
+
+| Gate               | Tier | What it runs                                                                                                                                                  | Replaces                   |
+| ------------------ | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `engines`          | T0   | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                                        | the CI Node matrix's floor |
+| `secrets`          | T0   | Every tracked **and untracked-not-ignored** file scanned for credential patterns                                                                              | _new_                      |
+| `lint`             | T0   | ESLint + `eslint-plugin-security`, `--max-warnings=0`, emitting SARIF                                                                                         | `ci` job                   |
+| `format`           | T0   | `prettier --check .`                                                                                                                                          | _new_                      |
+| `type-check`       | T0   | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                                                     | `ci` job                   |
+| `integrity`        | T0   | Every marker that weakens a check, against the suppression ledger                                                                                             | _new_                      |
+| `ratchet`          | T0   | The cheap numbers: suppression counts, the scan's own fingerprints, the registered task list                                                                  | _new_                      |
+| `build`            | T1   | `npm run build` (shared → server → client)                                                                                                                    | `ci` job                   |
+| `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                                               | `ci` job                   |
+| `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                                                     | `ci` job                   |
+| `security`         | T1   | The cross-user authorization matrix over the whole route table                                                                                                | _new_                      |
+| `observability`    | T1   | Log, audit-row and error-body redaction                                                                                                                       | _new_                      |
+| `property`         | T1   | The generated-input invariants, run in two timezones                                                                                                          | _new_                      |
+| `snapshot`         | T1   | The three export formats against their verified goldens, and the export/import round trip                                                                     | _new_                      |
+| `smoke`            | T1   | Boots the **built artifact** in production mode and completes one vault journey against it                                                                    | _new_                      |
+| `audit`            | T1   | `npm audit --audit-level=moderate --omit=dev`                                                                                                                 | `ci` job                   |
+| `licenses`         | T1   | Every production dependency against the committed licence allowlist; any copyleft fails                                                                       | _new_                      |
+| `secrets-full`     | T1   | The working tree **plus every blob in git history** scanned for credential patterns                                                                           | _new_                      |
+| `deadcode`         | T1   | `knip` (unused files, exports, types, dependencies) + `jscpd` duplication against a committed ceiling                                                         | _new_                      |
+| `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                    | _new_                      |
+| `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit             | _new_                      |
+| `e2e`              | T1   | Playwright (Chromium) against an auto-started stack                                                                                                           | `e2e` job                  |
+| `a11y`             | T1   | axe-core over fifteen primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                | _new_                      |
+| `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                        | `docker-build` job         |
+| `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import              | _new_                      |
+| `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline      | _new_                      |
+| `resource`         | T2   | Volume and memory budgets over a 10,000-item vault: streaming backup collection, a full-vault key rotation, a 25 MiB restore, the cleanup sweeps' query plans | _new_                      |
+| `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a journey through it, data across a restart, an idempotent redeploy                 | _new_                      |
+| `upgrade`          | T2   | A vault and a `.env` written by the PREVIOUS release, read by this one: every item still decrypts and parses to what that release parsed it to                | _new_                      |
+| `recovery`         | T2   | A backup restored into a second, empty database, and a real process SIGKILLed mid-rotation and mid-import                                                     | _new_                      |
+| `dst`              | T2   | The whole suite again in a DST-observing zone, so an assertion that is right only because local time and UTC agree fails here rather than on a user's machine | _new_                      |
+| `flake`            | T2   | Ten complete runs of every suite in ten different shuffled orders, plus the Playwright suite three times over with retries off                                | _new_                      |
+| `mutation`         | T2   | The oracle: Stryker mutates every file in the declared scope and the suite must kill the recorded share of them, per package and per core module              | _new_                      |
+| `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                                           | `sast` job                 |
+| `coverage`         | T1   | Each package against its recorded line/branch/function coverage, and 100% of the production lines the change touched                                          | _new_                      |
+| `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                                      | _new_                      |
+
+Eight gates sit in **T2** — `fuzz`, `resource`, `upgrade`, `recovery`, `dst`, `deploy`, `flake` and
+`mutation` — so they run in `npm run verify:full` and before a release rather than on every push. Each
+parking is deliberate rather than a quiet retirement: the fuzz, upgrade, recovery and DST suites all
+run inside the ordinary test gates on every push, so only the separately-reported, deadline-bounded
+run waits; the deployment drill's fast sibling `smoke` covers the built artifact on every push; and
+the volume budgets measure wall-clock time and peak memory while building ten-thousand-item vaults,
+which takes a minute and is only meaningful in a process running nothing else, so measuring them
+beside three other workers would turn a budget into a coin toss. The last two are the long ones:
+`flake` runs the whole suite ten times, which is about an hour, and `mutation` re-runs it once per
+mutant, which is hours. One more command sits outside the tiers entirely:
+
+```bash
+npm run ci:local                # a temporary worktree at HEAD + `npm ci` + verify:full
+```
+
+`ci:local` is the clean room. It distrusts this machine: a `node_modules` carried over from another
+platform, a tool cache that no longer matches the pinned version, a file mode inherited from the
+checkout. Uncommitted work is not in it — the subject is the commit — and it says so before it starts.
+
+Gates run in the order above and the runner **aggregates**: every selected gate runs and every
+failure is reported, rather than the run stopping at the first one. Exit `0` is a pass, `1` means
+a gate failed, and `2` means a gate **could not run** — a missing prerequisite, a misconfiguration,
+or a gate that passed without writing the report it declares.
+
+Each gate leaves a machine-readable report in `.testfortress/reports/`: JUnit XML from every suite
+and from Playwright, Cobertura coverage beside the existing lcov, SARIF from ESLint, JSON from the
+secret scan, `summary.json` for the run, and each gate's own transcript. `.testfortress/verify.json`
+is the registry the pipeline validates itself against on every run. Nothing there is uploaded
+anywhere, and nothing there is committed.
+
+#### Keeping the gates honest
+
+A green run only means something if the definition of green cannot be edited to reach it, so three
+things guard the gates themselves.
+
+**`.testfortress/suppressions.json` is the complete, honest list of everything exempt from a gate.**
+The `integrity` gate scans every tracked and untracked file for the markers that weaken a check — a
+skipped or focused test, a silenced type checker or linter, an inline coverage pragma, a swallowed
+error, a retry that hides a race, a `sleep` used as synchronisation — and fails unless each one is
+either gone or written down with an owner, a reason, an expiry and the exact rule it excuses. Some
+patterns cannot be written down at all: a neutered exit code, a committed test filter, a strictness
+downgrade, a tautological assertion or a hook bypass **inside a file that defines a gate** is a
+defect, not a debt. Outside gate files the same pattern needs an entry pinned to the exact
+occurrence. Documentation is exempt, so this README can describe the patterns it forbids.
+
+**What an entry costs, before you reach for one.** A ledger entry is not a free pass; it is a debt
+recorded against four separate limits, and the limits are the point:
+
+- **It expires.** Every entry carries an `expires` date, at most **90 days** out (**30** for a
+  type-checker or linter suppression). The day it lapses, `integrity` fails — so an entry buys time,
+  never permission. Renewing one means re-arguing it, in writing.
+- **It is pinned to one occurrence.** An entry names the exact rule id — never the looser `kind`,
+  because several rules share a kind and kind-matching would let one entry excuse every other marker
+  in the same file — plus the file and a `symbol` anchor, and covers at most **3** occurrences.
+  Move the code and the anchor stops matching, which is a failure, not a silent renewal.
+- **The totals only go down.** `suppressions.count` and `suppressions.totalHits` are ratcheted
+  fields. Adding an entry today lowers the ceiling you may hold tomorrow: once the count falls it
+  cannot rise again without an explicit, reasoned `--accept`. There is a ceiling of **26** on top of
+  that, and the sanctioned escape valves (`DEFERRED-ROW`, `EQUIV-MUTANT`, `BASELINE-REDUCTION`,
+  `COV-DIFF-EXEMPT`) are exempt from it only so the ceiling cannot block the mechanism that lowers it.
+- **Five families cannot be written down at all**, inside a file that defines a gate: a neutered exit
+  code, a narrowed gate, a strictness downgrade, a tautological assertion and a swallowed failure.
+  Those are defects. Coverage and mutation **scope** is not ledgerable anywhere — it is policed by
+  the ratchet's absolute denominators and measured file sets instead.
+
+**`.testfortress/baseline.json` records the current high-water mark of every gated number**, and the
+`ratchet` gates compare against it. Each field declares a direction — coverage and test counts may
+only rise, warnings and suppressions may only fall — and an unlisted field is a hard error rather
+than an unchecked one. A number can be moved only by
+`node scripts/ci/ratchet-check.mjs --accept --reason "..."`, which moves each field in its improving
+direction only and refuses while anything is failing or unmeasured; there is no flag that worsens a
+number. The baseline records absolute denominators (`linesTotal`) and the **measured file set**
+beside every percentage, because a percentage whose denominator can shrink is not a gate: dropping a
+file from coverage raises the number while covering less code. A field that is absent from the
+baseline has no gate at all — which is the quieter half of the same mistake, so the baseline's own
+sorted field list is pinned too, and deleting a field is itself a regression.
+
+**`npm run verify:selftest` proves every registered gate can still fail.** It copies the working
+tree to a temporary directory, plants exactly one defect per registered gate — an explicit `any` for
+lint, a false assertion for the test suites, a broken Nginx directive for the container gate, a
+dependency with a known advisory for the audit — and requires each gate to return non-zero for a
+reason its own report can be shown to attribute to that defect. A gate registered with no
+defect-injection case is a hard error naming it. It is the release tier, not the push gate, because
+it runs the whole pipeline once per gate.
 
 **A full run takes 15–30 minutes.** That is the deliberate trade: time spent before the push
 instead of minutes billed after it. Two escape hatches exist:
@@ -1030,8 +1164,9 @@ git push --no-verify                    # skip the hook entirely
 
 **Two gates need tools the repository cannot ship, and they behave differently on purpose:**
 
-- **Docker** must be running for the `docker` gate. If it is not, the gate **fails** — with the
-  command to skip it — rather than pretending it passed. Container hardening is not optional here.
+- **Docker** must be running for the `docker` gate. If it is not, the gate reports **COULD NOT RUN**
+  (exit 2) — with the command to skip it — rather than pretending it passed. Container hardening is not
+  optional here.
 - **CodeQL** is optional: without the CLI the `sast` gate reports **SKIPPED** (never "passed"), and
   ESLint's security rules remain the static-analysis baseline. To enable the real thing, unpack the
   bundle into `.cache/codeql` (gitignored):
@@ -1053,14 +1188,16 @@ git push --no-verify                    # skip the hook entirely
 - **Trivy** scans the three application images and fails the gate only on findings that have a fix,
   so an unpatched upstream CRITICAL cannot wall off the repository — a gate nobody can satisfy gets
   bypassed, and then it protects nothing. `scripts/ci/trivy-baseline.json` extends that to the case
-  where a fix exists for the _library_ but not in anything installable here. One finding is currently
-  accepted under it: a denial-of-service advisory against `brace-expansion` inside **npm's own
-  bundled dependency tree** in the `hvault-bootstrap` image, which no lockfile or `overrides` entry
-  of this project can reach, and for which no npm release yet exists. It is a one-shot container that
-  runs the index script with fixed arguments, takes no untrusted input and publishes no port. An
-  entry accepts a finding only when the CVE, the image, the package **and** the path all match, so
-  the same CVE appearing in this project's own dependencies still fails the gate; the file records
-  why each exception holds and what removes it.
+  where a fix exists for the _library_ but not in anything installable here. **Nothing is currently
+  accepted under it**: its `findings` list is empty. It held one entry — a denial-of-service
+  advisory against `brace-expansion` inside **npm's own bundled dependency tree** in the
+  `hvault-bootstrap` image, which no lockfile or `overrides` entry of this project can reach — and
+  that entry named its own removal condition, which has now been met: the bootstrap image stopped
+  shipping npm. It runs one script, so it invokes that script directly instead of through a package
+  manager, and four advisories in npm's vendored tree went with it. An entry accepts a finding only
+  when the CVE, the image, the package **and** the path all match, so the same CVE appearing in this
+  project's own dependencies still fails the gate; the file keeps a `history` of what was accepted,
+  why, and what retired it.
 
 **Known gap, stated plainly:** the old CI ran the unit tests on a Node 22 + 24 matrix. The local
 pipeline runs them on your Node only. The project pins Node 24 everywhere that matters (`.nvmrc`,
@@ -1069,46 +1206,71 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ### Scripts
 
-| Command                        | Description                                   |
-| ------------------------------ | --------------------------------------------- |
-| `npm run dev`                  | Server + client together, hot-reloading       |
-| `npm run build`                | Build all packages (shared → server → client) |
-| `npm run start`                | Start the production server                   |
-| `npm run test`                 | Every workspace's tests                       |
-| `npm run test:e2e`             | Playwright E2E tests                          |
-| `npm run lint`                 | ESLint, warnings are errors                   |
-| `npm run type-check`           | Type-check all packages, tests and `e2e/`     |
-| `npm run format`               | Prettier — write                              |
-| `npm run format:check`         | Prettier — verify only                        |
-| `npm run ci`                   | The whole pipeline (what `pre-push` runs)     |
-| `npm run ci:list`              | List the pipeline's gates                     |
-| `npm run ci:docker`            | The container gate on its own                 |
-| `npm run ci:sast`              | The CodeQL gate on its own                    |
-| `npm run secret-scan`          | Scan every tracked file for committed secrets |
-| `npm run audit:prod`           | Dependency audit, production deps only        |
-| `npm run release:next-version` | Compute the next release tag                  |
-| `npm run clean`                | Remove `dist/`, `node_modules/` and `logs/`   |
+| Command                        | Description                                     |
+| ------------------------------ | ----------------------------------------------- |
+| `npm run dev`                  | Server + client together, hot-reloading         |
+| `npm run build`                | Build all packages (shared → server → client)   |
+| `npm run start`                | Start the production server                     |
+| `npm run test`                 | Every workspace's tests                         |
+| `npm run test:unit`            | The hermetic suites (shared, client)            |
+| `npm run test:integration`     | The server suite, against a real `mongod`       |
+| `npm run test:e2e`             | Playwright E2E tests                            |
+| `npm run lint`                 | ESLint, warnings are errors                     |
+| `npm run type-check`           | Type-check all packages, tests and `e2e/`       |
+| `npm run format`               | Prettier — write                                |
+| `npm run format:check`         | Prettier — verify only                          |
+| `npm run ci`                   | The whole pipeline (what `pre-push` runs)       |
+| `npm run verify:fast`          | The fast tier only (~80 s)                      |
+| `npm run verify:full`          | The whole pipeline plus the release tier        |
+| `npm run ci:list`              | List the pipeline's gates and their tiers       |
+| `npm run ci:docker`            | The container gate on its own                   |
+| `npm run ci:sast`              | The CodeQL gate on its own                      |
+| `npm run audit:bundle`         | The client bundle size budgets on their own     |
+| `npm run test:resource`        | The volume and memory budgets on their own      |
+| `npm run test:upgrade`         | The previous release's vault and `.env`, read   |
+| `npm run test:recovery`        | The backup-restore and crash-consistency drills |
+| `npm run test:dst`             | The whole suite again, in a DST-observing zone  |
+| `npm run test:flake`           | Ten shuffled runs, plus E2E three times over    |
+| `npm run report`               | Collect the gates' warning counts               |
+| `npm run verify:selftest`      | Prove every registered gate can still fail      |
+| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger  |
+| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline   |
+| `npm run audit:ratchet:full`   | Every gated number, against the baseline        |
+| `npm run secret-scan`          | Scan every tracked file for committed secrets   |
+| `npm run audit:prod`           | Dependency audit, production deps only          |
+| `npm run release:next-version` | Compute the next release tag                    |
+| `npm run clean`                | Remove `dist/`, `node_modules/` and `logs/`     |
 
 ---
 
 ## Releases
 
-`.github/workflows/release.yml` is the only workflow in the repository. On every push to `main` it
-tags the commit and publishes a GitHub Release with generated notes. It is **gated on nothing** —
-the pipeline already ran, locally, before the push.
+`.github/workflows/release.yml` is the only workflow in the repository, and it has two jobs.
 
-The tag is chosen by `scripts/ci/next-version.mjs`: the highest existing `vX.Y.Z` with its patch
-bumped, unless `package.json`'s version is higher, which is how a minor or major release is cut.
+The first runs `npm run ci` — the same T0 + T1 gates the pre-push hook runs, not a narrower set —
+on a clean checkout. The second tags the commit and publishes the Release, and runs only if the
+first passed. The pipeline having already run locally is not a substitute: the hook has documented
+escape hatches (see below), so an unverified commit can reach `main`, and re-running the gauntlet
+on a hosted runner costs nothing on a public repository.
+
+**A release happens when the version says so.** `package.json` is the version of truth —
+`scripts/inject-version.js` compiles it into `APP_VERSION`, which `/health` and the OpenAPI
+document both serve — so the tag follows it and never leads it:
 
 ```text
-v0.1.0 → v0.1.1 → v0.1.2          # ordinary pushes
-                                  # set package.json to 0.2.0, then:
-             → v0.2.0 → v0.2.1
+push to main, version unchanged     → nothing published; the workflow says so and exits green
+bump package.json to 0.2.0, push    → v0.2.0 tagged and released
+tags ahead of package.json          → refused, rather than releasing a version nothing reports
 ```
 
+To cut a release: bump the version everywhere it appears, rename `## [Unreleased]` in
+[CHANGELOG.md](CHANGELOG.md) to `## [X.Y.Z] - <date>`, and push. The Release body is that section,
+verbatim; a release whose section is missing or empty fails rather than publishing empty notes.
+
 Tags are ordered numerically, not lexically (`v1.10.0` is above `v1.9.0`). If HEAD is already
-tagged, nothing new is minted, so a re-run is idempotent. The workflow never commits back to the
-repository, and it cannot trigger itself.
+tagged, no second tag is minted but the Release is still reconciled, so a run interrupted between
+the two heals on the retry. The workflow never commits back to the repository, and it cannot
+trigger itself.
 
 Every user-visible change is recorded in the **[changelog](CHANGELOG.md)**
 ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/), [SemVer](https://semver.org/)).

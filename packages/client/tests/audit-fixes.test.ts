@@ -170,6 +170,15 @@ function emptyOkResponse(): AxiosResponse<ApiResponse<null>> {
 describe('Task 1.2: Vault store cleared on lock/logout', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `vi.clearAllMocks()` clears CALL HISTORY, not implementations. Three tests
+    // in this file install ASSERTING implementations of `clearCryptoKey` (each
+    // pinning the state that must already be visible mid-teardown), and those
+    // implementations outlive the test that installed them. A later `logout()`
+    // then ran an assertion written for `lock()` — `isLocked` is true after a lock
+    // and false after a logout — and threw from inside production code. Declaration
+    // order hid it; `sequence.shuffle` does not. Re-establish the inert default so
+    // this block never inherits another test's contract.
+    vi.mocked(cryptoService.clearCryptoKey).mockReset().mockResolvedValue(undefined);
 
     // Reset auth store to authenticated state
     useAuthStore.setState({
@@ -232,6 +241,13 @@ describe('Task 1.2: Vault store cleared on lock/logout', () => {
 // ==========================================================================
 
 describe('Task 2.2: lock() race condition fix', () => {
+  // This block installs implementations of `clearCryptoKey` that ASSERT. Reset it
+  // here so the contract it encodes cannot leak into a test with different
+  // expectations (a lock's `isLocked: true` versus a logout's `false`).
+  afterEach(() => {
+    vi.mocked(cryptoService.clearCryptoKey).mockReset().mockResolvedValue(undefined);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
 
@@ -413,6 +429,13 @@ describe('vaultStore.clearStore', () => {
 // ==========================================================================
 
 describe('Logout race condition fix: state cleared before key zeroing', () => {
+  // This block installs implementations of `clearCryptoKey` that ASSERT. Reset it
+  // here so the contract it encodes cannot leak into a test with different
+  // expectations (a lock's `isLocked: true` versus a logout's `false`).
+  afterEach(() => {
+    vi.mocked(cryptoService.clearCryptoKey).mockReset().mockResolvedValue(undefined);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
 

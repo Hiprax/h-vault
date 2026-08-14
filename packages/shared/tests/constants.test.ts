@@ -68,6 +68,10 @@ import {
   MAX_SECRET_DESCRIPTION_LENGTH,
   MAX_CARD_CARDHOLDER_NAME_LENGTH,
   MAX_CARD_BRAND_LENGTH,
+  MAX_CARD_CVV_LENGTH,
+  MAX_CARD_EXP_MONTH_LENGTH,
+  MAX_CARD_EXP_YEAR_LENGTH,
+  MAX_CARD_NUMBER_LENGTH,
   MAX_IDENTITY_NAME_LENGTH,
   MAX_IDENTITY_EMAIL_LENGTH,
   MAX_IDENTITY_PHONE_LENGTH,
@@ -551,6 +555,15 @@ describe('Per-field item-data bounds', () => {
   it.each([
     ['cardholderName', MAX_CARD_CARDHOLDER_NAME_LENGTH],
     ['brand', MAX_CARD_BRAND_LENGTH],
+    // The four that were inline literals in `cardDataSchema` until the import's
+    // scalar clamp became their third consumer. They belong here for this file's
+    // own stated reason: a constant nothing enforces is a comfortable lie, and a
+    // clamp that disagrees with its schema by one character is exactly what
+    // discards a whole card at validation.
+    ['number', MAX_CARD_NUMBER_LENGTH],
+    ['expMonth', MAX_CARD_EXP_MONTH_LENGTH],
+    ['expYear', MAX_CARD_EXP_YEAR_LENGTH],
+    ['cvv', MAX_CARD_CVV_LENGTH],
   ])('bounds cardDataSchema.%s at its named constant', (field, max) => {
     expect(cardDataSchema.safeParse({ [field]: 'a'.repeat(max) }).success).toBe(true);
     expect(cardDataSchema.safeParse({ [field]: 'a'.repeat(max + 1) }).success).toBe(false);

@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import { TOTP, Secret } from 'otpauth';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { config, isProduction, isTest, twoFactorEncryptionKey } from '../config/index.js';
 import { REFRESH_COOKIE_NAME, TRUSTED_DEVICE_COOKIE_NAME } from '../constants/index.js';
 import { User } from '../models/User.js';
@@ -50,7 +50,7 @@ import type {
   VerifyUnlockInput,
 } from '@hvault/shared';
 
-const logger = createLogger({ moduleName: 'auth' });
+const logger = createModuleLogger('auth');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LOCKOUT_DURATION_MS = LOCKOUT_DURATION_MINUTES * 60 * 1000;

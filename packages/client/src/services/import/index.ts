@@ -16,21 +16,10 @@ export type {
   ParseResult,
   ResolvableImportItem,
 } from './types';
-export { MAX_IMPORT_WARNINGS, sealImportItem, validateImportItems } from './encrypt';
-export type { SealImportResult, SealedImportItem, ValidationResult } from './encrypt';
+export { MAX_IMPORT_WARNINGS, validateImportItems } from './encrypt';
 export { IMPORT_BATCH_MAX_BYTES, chunkBySize, chunkImportOperations } from './batch';
-export type { ImportOperationBatch } from './batch';
 export { buildImportOperations } from './operations';
-export type { BuiltImportOperations, ImportUpdateTarget } from './operations';
 export { resolveImport } from './resolve';
-export type {
-  ConflictStrategy,
-  IdentityFields,
-  ImportResolution,
-  ResolvableExistingItem,
-  ResolvedUpdate,
-} from './resolve';
-export { computeContentKey, computeItemIdentity, computeItemKeys } from './identity';
 
 /** Thrown when a source file cannot be parsed into vault items. */
 export class ImportParseError extends Error {

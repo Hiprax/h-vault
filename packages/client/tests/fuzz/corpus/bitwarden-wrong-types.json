@@ -1,0 +1,88 @@
+{
+  "folders": [
+    {
+      "id": 7,
+      "name": 42
+    },
+    {
+      "id": "f",
+      "name": "Work"
+    }
+  ],
+  "items": [
+    {
+      "type": "1",
+      "name": [
+        "array"
+      ],
+      "login": "not-an-object"
+    },
+    {
+      "type": 1,
+      "name": 12345,
+      "folderId": "f",
+      "login": {
+        "username": 99,
+        "password": null,
+        "uris": "nope",
+        "totp": {}
+      },
+      "fields": "not-an-array"
+    },
+    {
+      "type": 1,
+      "name": "numeric fields",
+      "login": {
+        "username": "u"
+      },
+      "fields": [
+        {
+          "name": "n",
+          "value": 7,
+          "type": "2"
+        },
+        {
+          "name": "  ",
+          "value": "dropped"
+        },
+        null
+      ]
+    },
+    {
+      "type": 3,
+      "name": "card with array number",
+      "card": {
+        "number": [
+          1,
+          2
+        ],
+        "code": {},
+        "expMonth": true
+      }
+    },
+    {
+      "type": 4,
+      "name": "identity with object address",
+      "identity": {
+        "firstName": {},
+        "postalCode": 90210,
+        "email": "not an email",
+        "phone": "no digits here"
+      }
+    },
+    {
+      "type": 99,
+      "name": "unknown type",
+      "notes": "falls through to a note"
+    },
+    {
+      "type": 5,
+      "name": "ssh",
+      "sshKey": {
+        "privateKey": "k",
+        "publicKey": "p",
+        "keyFingerprint": "f"
+      }
+    }
+  ]
+}

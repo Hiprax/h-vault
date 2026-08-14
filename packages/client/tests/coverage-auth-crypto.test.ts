@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, type Mock } from 'vitest';
+import { expectGcmAuthFailure } from './cryptoFailure.js';
 import { renderHook, act } from '@testing-library/react';
 import axios, { type AxiosAdapter, type AxiosResponse } from 'axios';
 
@@ -146,6 +147,7 @@ import { api, clearCsrfToken } from '../src/services/api/client.js';
 import { useAutoLock } from '../src/hooks/useAutoLock.js';
 import { useConnectionStatus } from '../src/hooks/useConnectionStatus.js';
 import type { CryptoService as CryptoServiceType } from '../src/services/crypto/cryptoService.js';
+import { advanceClockBy } from './clock.js';
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -196,7 +198,15 @@ const successful2faResponse = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useAuthStore.setState({ ...authInitialState });
+  // `getInitialState()` is the store as `create()` built it, so it carries the
+  // real ACTIONS; `authInitialState` above is data-only. Resetting with data
+  // alone left any action a describe had stubbed installed for the rest of the
+  // FILE: the two `useAutoLock` blocks replace `lock` with a mock that only sets
+  // `isLocked` (`lock: mockLock`), and `vi.clearAllMocks()` clears call history
+  // but not implementations. A later test that called the real `lock()` then got
+  // the stub instead, saw `vaultKey` survive, and failed — visibly only once
+  // `sequence.shuffle` stopped keeping those blocks last.
+  useAuthStore.setState({ ...useAuthStore.getInitialState(), ...authInitialState });
 
   vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
     masterEncryptionKey: mockMek,
@@ -582,7 +592,10 @@ describe('cryptoService — BWK decryption and vault-key encryption failure', ()
 
     const { encrypted, iv, tag } = await crypto.encryptBWK(bwk, bek);
 
-    await expect(crypto.decryptBWK(encrypted, iv, tag, wrongBek)).rejects.toThrow();
+    // The wrong backup password is an authentication failure and nothing more
+    // specific: `decryptBWK` does not wrap it, so the caller sees WebCrypto's
+    // OperationError, identical to the tampered-tag case below.
+    await expectGcmAuthFailure(crypto.decryptBWK(encrypted, iv, tag, wrongBek));
   });
 
   it('decryptBWK rejects a tampered auth tag rather than returning garbage key bytes', async () => {
@@ -595,7 +608,7 @@ describe('cryptoService — BWK decryption and vault-key encryption failure', ()
     tagBytes[0]! ^= 0xff;
     const tamperedTag = crypto.arrayBufferToBase64(tagBytes.buffer as ArrayBuffer);
 
-    await expect(crypto.decryptBWK(encrypted, iv, tamperedTag, bek)).rejects.toThrow();
+    await expectGcmAuthFailure(crypto.decryptBWK(encrypted, iv, tamperedTag, bek));
   });
 
   it('encryptVaultKey surfaces a user-facing error when the vault key cannot be exported', async () => {
@@ -875,7 +888,7 @@ describe('useAutoLock — hidden-tab locking is opt-in', () => {
 
     // Model a suspend: 30 minutes of wall clock pass with no timer allowed to run.
     act(() => {
-      vi.setSystemTime(Date.now() + 30 * MINUTE);
+      advanceClockBy(30 * MINUTE);
     });
     expect(mockLock).not.toHaveBeenCalled();
 
@@ -894,7 +907,7 @@ describe('useAutoLock — hidden-tab locking is opt-in', () => {
 
     hide();
     act(() => {
-      vi.setSystemTime(Date.now() + 2 * MINUTE);
+      advanceClockBy(2 * MINUTE);
     });
     reveal();
 
@@ -989,7 +1002,13 @@ describe('useAutoLock — deadlines are wall-clock, not elapsed-timer', () => {
   afterEach(() => {
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     vi.useRealTimers();
-    useAuthStore.setState({ ...authInitialState });
+    // Restore the real `lock` action alongside the data: this block replaced it
+    // with `mockLock`, and `authInitialState` carries no actions, so without this
+    // the stub outlives the block.
+    useAuthStore.setState({
+      ...authInitialState,
+      lock: useAuthStore.getInitialState().lock,
+    });
   });
 
   it('locks the moment the tab regains focus after the deadline passed unobserved', () => {
@@ -1000,7 +1019,7 @@ describe('useAutoLock — deadlines are wall-clock, not elapsed-timer', () => {
     // `setSystemTime` moves only the clock, which is what a resumed machine looks
     // like to the page.
     act(() => {
-      vi.setSystemTime(Date.now() + 20 * MINUTE);
+      advanceClockBy(20 * MINUTE);
     });
     expect(mockLock).not.toHaveBeenCalled();
 
@@ -1015,7 +1034,7 @@ describe('useAutoLock — deadlines are wall-clock, not elapsed-timer', () => {
     renderHook(() => useAutoLock());
 
     act(() => {
-      vi.setSystemTime(Date.now() + 20 * MINUTE);
+      advanceClockBy(20 * MINUTE);
       // A single poll tick is enough; the check is a Date.now() comparison, not a
       // count of elapsed timer time.
       vi.advanceTimersByTime(20_000);

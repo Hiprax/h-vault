@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Copy-paste detection over the three source trees, run by the `deadcode` gate",
+    "(scripts/ci/deadcode-gate.mjs).",
+    "",
+    "`threshold` is the MEASURED duplication of this repository on the day the gate",
+    "was wired (2.89% of 52,852 lines, 132 clones), not an aspiration. jscpd fails",
+    "when duplication exceeds it, and .testfortress/baseline.json records the same",
+    "number with a lower-is-better direction, so the ceiling can only ever come down.",
+    "Raising it is the exact move the ratchet exists to catch.",
+    "",
+    "`minLines`/`minTokens` are jscpd's defaults. They are stated rather than",
+    "inherited because lowering the sensitivity would shrink the measured",
+    "duplication without removing a single duplicated line, which is a narrowed gate",
+    "wearing the costume of a config tweak.",
+    "",
+    "Only `packages/*/src` is scanned: tests repeat themselves by nature (arrange",
+    "blocks, fixtures) and a duplication budget over them would push toward clever",
+    "shared helpers, which is the opposite of what a readable test needs."
+  ],
+  "path": ["packages/shared/src", "packages/server/src", "packages/client/src"],
+  "format": ["typescript", "tsx", "javascript", "jsx"],
+  "minLines": 5,
+  "minTokens": 50,
+  "threshold": 2.89,
+  "absolute": false,
+  "gitignore": true,
+  "reporters": ["json"],
+  "output": ".testfortress/reports/jscpd"
+}

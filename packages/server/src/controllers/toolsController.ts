@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 import { VaultItem } from '../models/VaultItem.js';
@@ -33,7 +33,7 @@ import type {
   ExportInput,
 } from '@hvault/shared';
 
-const logger = createLogger({ moduleName: 'tools-controller' });
+const logger = createModuleLogger('tools-controller');
 
 // ── HIBP response cache ─────────────────────────────────────────────
 // Bounded per-process cache keyed by 5-char hash prefix, with 1-hour TTL
@@ -101,7 +101,7 @@ export function __setHibpCacheMaxBytes(bytes: number): void {
  * enough that a batch of cache-miss prefixes resolves quickly. Cache hits never
  * count against it (they are served without an outbound call).
  */
-export const HIBP_FANOUT_CONCURRENCY = 8;
+const HIBP_FANOUT_CONCURRENCY = 8;
 
 export const hibpCache = new Map<string, HibpCacheEntry>();
 

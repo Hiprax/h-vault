@@ -20,7 +20,13 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import { computeNextTag } from '../../../scripts/ci/lib/version.mjs';
+import {
+  computeNextTag,
+  majorBumpAccountsForBreaking,
+  majorOf,
+  planRelease,
+} from '../../../scripts/ci/lib/version.mjs';
+import { extractRelease } from '../../../scripts/ci/changelog-extract.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
@@ -42,7 +48,14 @@ interface ReleaseWorkflow {
     {
       needs?: string[];
       'timeout-minutes'?: number;
-      steps: { name?: string; uses?: string; with?: Record<string, unknown>; run?: string }[];
+      steps: {
+        name?: string;
+        id?: string;
+        if?: string;
+        uses?: string;
+        with?: Record<string, unknown>;
+        run?: string;
+      }[];
     }
   >;
 }
@@ -68,22 +81,20 @@ describe('GitHub Actions billing surface', () => {
 
   it('never uploads artifacts or populates a cache', () => {
     // Both are billed storage, metered by peak usage per hour, and charges
-    // already accrued are not refunded when the artifact is deleted.
+    // already accrued are not refunded when the artifact is deleted. The gate
+    // transcripts are printed into the job log instead, so a red run is still
+    // diagnosable without them. `setup-node`'s own `cache: npm` is a different
+    // thing and is deliberately kept: it is managed by the action, and it is
+    // what keeps a 40-minute verification job from spending a minute of it
+    // re-downloading a lockfile's worth of packages.
     expect(releaseYaml).not.toMatch(/actions\/upload-artifact/);
     expect(releaseYaml).not.toMatch(/actions\/cache/);
   });
 
-  it('runs one job, so it is billed one rounded-up minute per push', () => {
-    expect(Object.keys(release.jobs)).toHaveLength(1);
-  });
-
-  it('bounds the job with a timeout', () => {
-    const job = Object.values(release.jobs)[0];
-    expect(job?.['timeout-minutes']).toBeGreaterThan(0);
-  });
-
-  it('does not install dependencies or build anything', () => {
-    expect(releaseYaml).not.toMatch(/npm ci|npm install|npm run build/);
+  it('bounds every job with a timeout', () => {
+    for (const [name, job] of Object.entries(release.jobs)) {
+      expect(job['timeout-minutes'], `job ${name}`).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -117,26 +128,113 @@ describe('release workflow', () => {
     expect(release.concurrency['cancel-in-progress']).toBe(false);
   });
 
-  it('is gated on nothing', () => {
-    // The whole point: the release is never blocked by a check, because the
-    // checks already ran locally before the push.
-    const job = Object.values(release.jobs)[0];
-    expect(job?.needs).toBeUndefined();
+  it('runs the whole gauntlet before it will tag anything', () => {
+    // This assertion is the REVERSE of the one it replaces ("is gated on
+    // nothing"), and the reversal is deliberate. That test encoded an argument
+    // the repository has since outgrown on both of its premises:
+    //
+    //   1. "a commit that reaches `main` has already passed all of it" — but
+    //      CONTRIBUTING.md's "Escape hatches" table documents three supported
+    //      ways past the pre-push hook, so an unverified commit reaching `main`
+    //      is a supported operation, and the release published it with nothing
+    //      having run anywhere.
+    //   2. "re-running them on a hosted runner would spend money" — this
+    //      repository is PUBLIC, where GitHub-hosted runners are free and
+    //      uncapped. The saving was zero.
+    //
+    // So the gauntlet runs, and the tag is created only after it passes.
+    expect(release.jobs['verify']).toBeDefined();
+    expect(release.jobs['release']?.needs).toContain('verify');
   });
 
-  it('checks out full history, so tag computation can see every tag', () => {
-    const job = Object.values(release.jobs)[0];
-    const checkout = job?.steps.find((step) => step.uses?.startsWith('actions/checkout'));
-    expect(checkout?.with?.['fetch-depth']).toBe(0);
+  it('verifies with the same command the pre-push hook runs, and no narrower one', () => {
+    // `npm run ci` is the T0+T1 tier surface. Pinning the COMMAND rather than a
+    // list of steps is what stops this job from drifting into checking less than
+    // the hook does: a gate added to the manifest joins both at once.
+    const steps = release.jobs['verify']?.steps ?? [];
+    const gauntlet = steps.filter((step) => /npm run ci\b/.test(step.run ?? ''));
+    expect(gauntlet).toHaveLength(1);
+    expect(steps.some((step) => step.run === 'npm ci')).toBe(true);
+
+    // EXACTLY `npm run ci`, with no arguments. A substring match is satisfied by
+    // `npm run ci -- --only=lint`, which is a committed test filter wearing the
+    // full gauntlet's name — the job would look verified and check one gate.
+    expect(gauntlet[0]?.run?.trim()).toBe('npm run ci');
+  });
+
+  it('never skips a gate through the environment', () => {
+    // The other half of the same hole. `local-ci.mjs` honours HVAULT_SKIP_GATES
+    // from the environment, so a job-level or step-level `env:` entry shrinks the
+    // run without touching the command the assertion above pins. Both halves are
+    // needed; either one alone leaves the job able to check less than it claims.
+    expect(releaseYaml).not.toMatch(/HVAULT_SKIP_GATES/);
+    expect(releaseYaml).not.toMatch(/HUSKY/);
+  });
+
+  it('installs every gate prerequisite, so no gate can report "could not run"', () => {
+    // `local-ci.mjs` declares host binaries per gate and reports a missing one
+    // as exit 2 rather than as a pass. A prerequisite left uninstalled here does
+    // not silently shrink the job — it turns it red — but naming them keeps the
+    // two lists together, since the failure would otherwise be diagnosed on a
+    // runner rather than here.
+    const install = (release.jobs['verify']?.steps ?? []).map((step) => step.run ?? '').join('\n');
+    for (const binary of ['actionlint', 'hadolint', 'oasdiff', 'diff-cover']) {
+      expect(install, `prerequisite ${binary}`).toContain(binary);
+    }
+  });
+
+  it('checks out full history in both jobs', () => {
+    // The release job derives the tag from every tag that exists; the verify job
+    // needs it too, because the secret scan reads every blob ever committed and
+    // the coverage gate diffs against `main`. A shallow clone breaks all three.
+    for (const [name, job] of Object.entries(release.jobs)) {
+      const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout'));
+      expect(checkout?.with?.['fetch-depth'], `job ${name}`).toBe(0);
+    }
   });
 
   it('passes --verify-tag when publishing the release', () => {
     // Without it, `gh release create` given a missing tag does not fail: it
     // creates the tag from the tip of the default branch, publishing a release
     // that points at a different commit than the one this run built.
-    const job = Object.values(release.jobs)[0];
-    const publish = job?.steps.find((step) => step.run?.includes('gh release create'));
+    const publish = release.jobs['release']?.steps.find((step) =>
+      step.run?.includes('gh release create'),
+    );
     expect(publish?.run).toMatch(/--verify-tag/);
+  });
+
+  it('publishes the curated changelog section, never a generated commit list', () => {
+    // `--generate-notes` threw away the one artifact this project treats as a
+    // blocking requirement of every change, at the only place users read it.
+    //
+    // Asserted over the steps' `run` scripts rather than over the file text: the
+    // workflow's own comments NAME the flag they explain the absence of, and a
+    // whole-file match cannot tell a comment from a command.
+    const scripts = Object.values(release.jobs)
+      .flatMap((job) => job.steps)
+      .map((step) => step.run ?? '')
+      .join('\n');
+    expect(scripts).not.toMatch(/--generate-notes/);
+    const publish = release.jobs['release']?.steps.find((step) =>
+      step.run?.includes('gh release create'),
+    );
+    expect(publish?.run).toMatch(/--notes-file/);
+    expect(releaseYaml).toMatch(/changelog-extract\.mjs/);
+  });
+
+  it('refuses to publish without deciding the release from package.json', () => {
+    // The guard: `next-version.mjs` exits non-zero when the tag it would create
+    // disagrees with the version of truth, and every publishing step is gated on
+    // its `should_release` output rather than running unconditionally.
+    const steps = release.jobs['release']?.steps ?? [];
+    const decide = steps.find((step) => step.run?.includes('next-version.mjs'));
+    expect(decide?.id).toBe('version');
+    for (const stepName of ['gh release create', 'git tag -a']) {
+      const step = steps.find((s) => s.run?.includes(stepName));
+      expect(step?.if, `step running ${stepName}`).toMatch(
+        /steps\.version\.outputs\.should_release == 'true'/,
+      );
+    }
   });
 });
 
@@ -148,13 +246,29 @@ describe('local pipeline covers every job the deleted CI workflow ran', () => {
     ['build', 'ci job · Build'],
     ['lint', 'ci job · Lint'],
     ['type-check', 'ci job · Type check'],
-    ['test', 'ci job · Test'],
+    // The old `Test` job ran every workspace in one step. It is now two gates,
+    // because they belong to different tiers: `test` is the hermetic half
+    // (shared + client) and `test-integration` spawns a real mongod. BOTH must
+    // exist, or half the CI job's coverage disappears with nothing to notice.
+    ['test', 'ci job · Test (shared + client)'],
+    ['test-integration', 'ci job · Test (server)'],
     ['audit', 'ci job · npm audit'],
     ['e2e', 'e2e job'],
     ['docker', 'docker-build job (images, nginx -t, compose config, Trivy)'],
     ['sast', 'sast job (CodeQL)'],
   ])('gate "%s" stands in for the %s', (gate) => {
     expect(gateIds).toContain(gate);
+  });
+
+  it('runs every workspace suite between the two test gates', () => {
+    // Splitting the job is only safe while the two halves still add up to all
+    // three workspaces; dropping one would leave a package untested with every
+    // gate green.
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    const covered = `${pkg.scripts['test:unit']} ${pkg.scripts['test:integration']}`;
+    for (const workspace of ['packages/shared', 'packages/client', 'packages/server']) {
+      expect(covered).toContain(workspace);
+    }
   });
 
   it('adds the checks the hosted pipeline never ran', () => {
@@ -220,6 +334,7 @@ describe('local pipeline covers every job the deleted CI workflow ran', () => {
       'format',
       'type-check',
       'test',
+      'test-integration',
       'audit',
       'e2e',
       'docker',
@@ -240,6 +355,16 @@ describe('local pipeline covers every job the deleted CI workflow ran', () => {
     // Warnings were invisible in CI (`eslint .` exits 0 on them). Running
     // locally, they are cheap enough to forbid outright.
     expect(pkg.scripts['lint']).toMatch(/--max-warnings=0/);
+  });
+
+  it('exposes each tier as its own entry point', () => {
+    // `verify:fast` is the T0 subset that fits a pre-commit budget; `ci` is the
+    // T0+T1 push gate; `verify:full` adds T2. A tier with no command is a tier
+    // nobody runs.
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    expect(pkg.scripts['verify:fast']).toMatch(/--tier=0\b/);
+    expect(pkg.scripts['verify:full']).toMatch(/--tier=full\b/);
+    expect(pkg.scripts['ci']).not.toMatch(/--tier=/);
   });
 });
 
@@ -327,5 +452,203 @@ describe('computeNextTag', () => {
     expect(() => computeNextTag({ tags: [], headTags: [], pkgVersion: 'not-a-version' })).toThrow(
       /not semver/,
     );
+  });
+});
+
+describe('planRelease: the tag may never disagree with the version of truth', () => {
+  // `package.json` is what `scripts/inject-version.js` compiles into
+  // APP_VERSION, which `/health` and the OpenAPI document both serve. A release
+  // tagged v0.9.1 whose artifact reports 0.8.0 is the defect this guards.
+
+  it('releases when the version has never been tagged and the series agrees', () => {
+    expect(planRelease({ tags: ['v0.8.0'], headTags: [], pkgVersion: '0.9.0' })).toMatchObject({
+      tag: 'v0.9.0',
+      shouldRelease: true,
+      createTag: true,
+      mismatch: false,
+    });
+  });
+
+  it('cuts the first release when no tag exists at all', () => {
+    expect(planRelease({ tags: [], headTags: [], pkgVersion: '0.1.0' })).toMatchObject({
+      tag: 'v0.1.0',
+      shouldRelease: true,
+      createTag: true,
+      mismatch: false,
+    });
+  });
+
+  it('publishes nothing on an ordinary push that bumped no version', () => {
+    // The common case, and emphatically NOT a failure: the version on this
+    // commit was released already, so there is nothing new to publish. The old
+    // behaviour minted v0.8.1 here — a release nobody wrote notes for, whose
+    // own /health endpoint reported 0.8.0.
+    const plan = planRelease({ tags: ['v0.8.0'], headTags: [], pkgVersion: '0.8.0' });
+    expect(plan).toMatchObject({ shouldRelease: false, createTag: false, mismatch: false });
+    expect(plan.reason).toMatch(/already released/);
+  });
+
+  it('still reconciles the Release when HEAD already carries its tag', () => {
+    // A run interrupted between pushing the tag and publishing the Release, or
+    // a workflow_dispatch re-run. The tag must not be created twice, but the
+    // Release still has to appear, which is what makes the workflow idempotent.
+    expect(
+      planRelease({ tags: ['v0.8.0'], headTags: ['v0.8.0'], pkgVersion: '0.8.0' }),
+    ).toMatchObject({ tag: 'v0.8.0', shouldRelease: true, createTag: false, mismatch: false });
+  });
+
+  it('REFUSES when the tag series has run ahead of package.json', () => {
+    // The guard firing. Tags reached v0.9.0 while package.json stayed at 0.8.0,
+    // so the series would mint v0.9.1 for an artifact that reports 0.8.0.
+    const plan = planRelease({
+      tags: ['v0.8.0', 'v0.9.0'],
+      headTags: [],
+      pkgVersion: '0.8.1',
+    });
+    expect(plan.mismatch).toBe(true);
+    expect(plan.shouldRelease).toBe(false);
+    expect(plan.createTag).toBe(false);
+    expect(plan.tag).not.toBe('v0.8.1');
+    expect(plan.reason).toMatch(/package\.json says 0\.8\.1/);
+  });
+
+  it('REFUSES to release a bumped version from a commit already tagged as another', () => {
+    // package.json says 0.9.0 but HEAD is already released as v0.8.0. Tagging
+    // the same commit twice would publish two releases of identical code under
+    // two version numbers, only one of which the artifact reports.
+    expect(
+      planRelease({ tags: ['v0.8.0'], headTags: ['v0.8.0'], pkgVersion: '0.9.0' }),
+    ).toMatchObject({ mismatch: true, shouldRelease: false });
+  });
+
+  it('REFUSES a version no vX.Y.Z tag can name', () => {
+    // `1.2.3-beta.1` would be truncated to v1.2.3 — a tag naming a different
+    // version than the one the artifact reports, which is the same defect
+    // arriving through the front door.
+    const plan = planRelease({ tags: [], headTags: [], pkgVersion: '1.2.3-beta.1' });
+    expect(plan.mismatch).toBe(true);
+    expect(plan.shouldRelease).toBe(false);
+    expect(plan.reason).toMatch(/plain X\.Y\.Z/);
+  });
+
+  it('agrees with the repository as it stands right now', () => {
+    // Not a tautology: it reads the real package.json and asserts the plan is
+    // one of the two states a well-formed repository can be in, never a
+    // mismatch. A version field edited into a shape no tag can name fails here.
+    const version = (JSON.parse(read('package.json')) as { version: string }).version;
+    const plan = planRelease({ tags: [`v${version}`], headTags: [], pkgVersion: version });
+    expect(plan.mismatch).toBe(false);
+    expect(plan.versionTag).toBe(`v${version}`);
+  });
+});
+
+describe('majorOf', () => {
+  it('reads the MAJOR component, and refuses a non-version', () => {
+    expect(majorOf('0.8.0')).toBe(0);
+    expect(majorOf('1.0.0')).toBe(1);
+    expect(majorOf('10.2.3')).toBe(10);
+    expect(majorOf('not-a-version')).toBeNull();
+  });
+});
+
+describe('the OpenAPI breaking-change exemption expires with the release that earned it', () => {
+  // `audit:openapi` lets a breaking API change through only when a MAJOR bump
+  // accounts for it. The exemption is granted against a COMMITTED snapshot that
+  // may lag, which is what makes the obvious test wrong.
+
+  it('grants the exemption to the release that is the bump', () => {
+    expect(majorBumpAccountsForBreaking('0.8.0', '1.0.0')).toBe(true);
+    expect(majorBumpAccountsForBreaking('1.4.2', '2.0.0')).toBe(true);
+  });
+
+  it('does NOT keep granting it for the rest of that major line', () => {
+    // The hole this closes. Once 1.0.0 ships a breaking change without the
+    // snapshot being refreshed, the snapshot describes 0.8.0 forever — and
+    // `major(current) > major(snapshot)` is then true for every 1.x release, so
+    // the gate would wave through unversioned breaking changes indefinitely
+    // while still reporting that it checked.
+    expect(majorBumpAccountsForBreaking('0.8.0', '1.1.0')).toBe(false);
+    expect(majorBumpAccountsForBreaking('0.8.0', '1.0.1')).toBe(false);
+    expect(majorBumpAccountsForBreaking('0.8.0', '1.9.9')).toBe(false);
+  });
+
+  it('refuses a bump that skips a major, so a two-major-stale snapshot cannot be leaned on', () => {
+    expect(majorBumpAccountsForBreaking('0.8.0', '2.0.0')).toBe(false);
+  });
+
+  it('refuses when nothing was bumped, or when the version went backwards', () => {
+    expect(majorBumpAccountsForBreaking('0.8.0', '0.9.0')).toBe(false);
+    expect(majorBumpAccountsForBreaking('0.8.0', '0.8.0')).toBe(false);
+    expect(majorBumpAccountsForBreaking('2.0.0', '1.0.0')).toBe(false);
+  });
+
+  it('refuses rather than throwing on a version it cannot read', () => {
+    expect(majorBumpAccountsForBreaking('', '1.0.0')).toBe(false);
+    expect(majorBumpAccountsForBreaking('0.8.0', 'not-a-version')).toBe(false);
+  });
+});
+
+describe('changelog extraction: the release body is the curated entry', () => {
+  const changelog = read('CHANGELOG.md');
+
+  it('extracts a real section from the real CHANGELOG.md', () => {
+    // Against the committed file, not a fixture: a format the extractor cannot
+    // read is a release with no notes, and the file it must read is this one.
+    const section = extractRelease(changelog, '0.8.0');
+    expect(section).not.toBeNull();
+    expect(section).toMatch(/^### /m);
+    // It stops at the next release's heading.
+    expect(section).not.toMatch(/^## \[0\.7\.0\]/m);
+    expect(section).not.toMatch(/^## \[/m);
+  });
+
+  it('extracts every released version the file documents', () => {
+    // Every `## [X.Y.Z]` heading must be extractable, or some future release
+    // publishes empty notes. Derived from the file rather than hard-coded, so a
+    // new release section is covered the day it is written.
+    const versions = [...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\]/gm)].map((m) => m[1]!);
+    expect(versions.length).toBeGreaterThan(5);
+    for (const version of versions) {
+      expect(extractRelease(changelog, version), `section ${version}`).not.toBeNull();
+    }
+  });
+
+  it('excludes the link-reference block from the oldest section', () => {
+    // Keep a Changelog puts `[0.1.0]: https://…` at the foot of the file with no
+    // heading between it and the oldest release, so "read to the next heading or
+    // EOF" appends the entire link table to those notes.
+    const oldest = extractRelease(changelog, '0.1.0');
+    expect(oldest).not.toBeNull();
+    expect(oldest).not.toMatch(/compare\/v/);
+    expect(oldest).not.toMatch(/^\[Unreleased\]:/m);
+  });
+
+  it('never answers a version with the Unreleased section', () => {
+    // Cutting a release means renaming that heading. Falling back to it would
+    // publish the pending section under a version it does not describe — and
+    // then publish the same text again under the next one.
+    const unreleased = extractRelease(changelog, '9.9.9');
+    expect(unreleased).toBeNull();
+  });
+
+  it('treats a heading with no content as missing', () => {
+    // An empty body is indistinguishable from notes that were silently dropped.
+    expect(
+      extractRelease('## [1.0.0] - 2026-01-01\n\n## [0.9.0] - 2025-12-01\n\n- old\n', '1.0.0'),
+    ).toBeNull();
+  });
+
+  it('does not let a version match a longer one that starts with it', () => {
+    const markdown = '## [0.1.10] - 2026-01-02\n\n- ten\n\n## [0.1.1] - 2026-01-01\n\n- one\n';
+    expect(extractRelease(markdown, '0.1.1')).toBe('- one');
+    expect(extractRelease(markdown, '0.1.10')).toBe('- ten');
+  });
+
+  it('keeps the subheadings inside a section', () => {
+    const markdown = '## [1.0.0] - 2026-01-01\n\n### Added\n\n- a thing\n\n### Fixed\n\n- a bug\n';
+    const section = extractRelease(markdown, '1.0.0');
+    expect(section).toContain('### Added');
+    expect(section).toContain('### Fixed');
+    expect(section).toContain('- a bug');
   });
 });

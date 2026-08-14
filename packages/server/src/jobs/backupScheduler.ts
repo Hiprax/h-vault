@@ -1,5 +1,5 @@
 import cron, { type ScheduledTask } from 'node-cron';
-import { createLogger } from '@hiprax/logger';
+import { createModuleLogger } from '../utils/logger.js';
 import { User } from '../models/User.js';
 import { VaultItem } from '../models/VaultItem.js';
 import { Folder } from '../models/Folder.js';
@@ -11,7 +11,7 @@ import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 
-const logger = createLogger({ moduleName: 'jobs/backup' });
+const logger = createModuleLogger('jobs/backup');
 
 interface BackupPayload {
   version: string;

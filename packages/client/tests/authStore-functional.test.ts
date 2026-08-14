@@ -710,7 +710,9 @@ describe('authStore.verify2fa', () => {
     const mockTimeoutId = setTimeout(() => {}, 300_000);
     useAuthStore.setState({ _2faTimeoutId: mockTimeoutId });
 
-    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toThrow();
+    // The original Axios rejection is re-thrown unchanged, so the caller can
+    // read the status and code it needs to decide what to show.
+    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toBe(axiosError);
 
     // MEK should be cleared immediately
     expect(useAuthStore.getState().mek).toBeNull();
@@ -733,7 +735,7 @@ describe('authStore.verify2fa', () => {
     });
     vi.mocked(login2faApi).mockRejectedValue(axiosError);
 
-    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toThrow();
+    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toBe(axiosError);
 
     expect(useAuthStore.getState().mek).toBeNull();
     expect(useAuthStore.getState().twoFactorRequired).toBe(false);
@@ -750,7 +752,7 @@ describe('authStore.verify2fa', () => {
     });
     vi.mocked(login2faApi).mockRejectedValue(axiosError);
 
-    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toThrow();
+    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toBe(axiosError);
 
     // MEK should still be available for retry
     expect(useAuthStore.getState().mek).toBe(mockMek);
@@ -804,7 +806,12 @@ describe('authStore.verify2fa', () => {
       },
     } as never);
 
-    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toThrow();
+    // A malformed access token is reported as the store's generic
+    // 'Authentication error', never as a raw parse/decode error: the JWT is
+    // untrusted input and its shape must not reach the UI.
+    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toThrow(
+      new Error('Authentication error'),
+    );
 
     const state = useAuthStore.getState();
     expect(state.mek).toBeNull();

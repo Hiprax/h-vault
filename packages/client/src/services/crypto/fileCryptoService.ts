@@ -214,7 +214,7 @@ export async function decryptFile(
 }
 
 /** Discriminated classification of a file-crypto failure for UI messaging. */
-export type FileCryptoErrorKind =
+type FileCryptoErrorKind =
   | 'not-a-file'
   | 'wrong-password-or-corrupt'
   | 'integrity'

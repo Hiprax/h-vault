@@ -1,4 +1,4 @@
-import mongoose, { Schema, type Model, type HydratedDocument, type Types } from 'mongoose';
+import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import { BACKUP_STATUSES } from '@hvault/shared';
 import type { BackupStatus } from '@hvault/shared';
 import { config } from '../config/index.js';
@@ -15,8 +15,6 @@ export interface IBackupLog {
   sentTo: string[];
   timestamp: Date;
 }
-
-export type BackupLogDocument = HydratedDocument<IBackupLog>;
 
 // ----- Schema -----
 
