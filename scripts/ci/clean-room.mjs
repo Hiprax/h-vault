@@ -72,7 +72,14 @@
  *     is therefore never called from inside the block that owns the worktree —
  *     it does not run `finally` handlers.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { captureExe, repoRoot, runNpm } from './lib/proc.mjs';
@@ -201,12 +208,28 @@ try {
     // gates later as "tsc: not found".
     const shim = process.platform === 'win32' ? 'tsc.cmd' : 'tsc';
     const tsc = path.join(worktree, 'node_modules', '.bin', shim);
+    // RUNNABLE, not merely present. The defect this names is a Windows
+    // `node_modules` carried onto Linux, where every `.bin` shim EXISTS and none
+    // of them is executable — so `existsSync` returned true and the probe passed
+    // on exactly the tree it was written to catch. `accessSync(X_OK)` asks the
+    // question the message claims to answer. On win32 the execute bit is not a
+    // filesystem concept, so presence is all there is to test there.
+    let runnable = existsSync(tsc);
+    if (runnable && process.platform !== 'win32') {
+      try {
+        accessSync(tsc, fsConstants.X_OK);
+      } catch {
+        runnable = false;
+      }
+    }
     record(
       'toolchain',
-      existsSync(tsc),
-      existsSync(tsc)
-        ? 'the installed tree carries its executables'
-        : `no runnable ${shim} in node_modules/.bin`,
+      runnable,
+      runnable
+        ? 'the installed tree carries its executables, and they are runnable'
+        : existsSync(tsc)
+          ? `${shim} is in node_modules/.bin but is not executable — a node_modules built on another platform`
+          : `no runnable ${shim} in node_modules/.bin`,
     );
 
     // -----------------------------------------------------------------------

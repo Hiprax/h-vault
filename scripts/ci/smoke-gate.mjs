@@ -168,7 +168,18 @@ const stop = async () => {
       });
     });
   }
-  if (mongo) await mongo.stop();
+  // A teardown failure must not destroy the run's evidence. `mongo.stop()`
+  // rejecting here escaped before `writeJsonReport`, so the runner reported the
+  // gate as failed AND as having written no report — losing the transcript of
+  // whatever it had just proved. The failure is recorded instead, which is both
+  // visible and survivable.
+  if (mongo) {
+    try {
+      await mongo.stop();
+    } catch (error) {
+      record('teardown', false, `mongod did not stop cleanly: ${String(error)}`);
+    }
+  }
   rmSync(workspace, { recursive: true, force: true });
 };
 
@@ -223,7 +234,24 @@ try {
     else if (signal) bootLog.push(`\n[artifact terminated by ${signal}]`);
   });
 
-  const health = await waitForHealth(baseUrl, { deadlineMs: BOOT_DEADLINE_MS, intervalMs: 500 });
+  // A dead process cannot become healthy, so stop waiting for it. The single
+  // most likely thing this gate catches — the production config validation
+  // refusing to boot — exits in about a second, and polling the full deadline
+  // afterwards spent 45 s proving nothing. `waitForHealth` still owns the
+  // timeout for a process that is merely slow.
+  const health = await Promise.race([
+    waitForHealth(baseUrl, { deadlineMs: BOOT_DEADLINE_MS, intervalMs: 500 }),
+    new Promise((resolve) => {
+      child.once('exit', (code, signal) =>
+        resolve({
+          ok: false,
+          attempts: 0,
+          waitedMs: Date.now() - started,
+          detail: `the artifact exited before serving a health response (${signal ? `signal ${signal}` : `code ${String(code)}`})`,
+        }),
+      );
+    }),
+  ]);
   const booted = record(
     'boot',
     health.ok,

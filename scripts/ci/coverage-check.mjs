@@ -162,6 +162,24 @@ for (const artifact of artifacts) {
     measured.add(posix(path.join(artifact.package, rel)));
   }
   const floors = baseline.packages?.[artifact.package]?.coverage ?? {};
+  // A metric with no recorded floor is not checked at all — the loop below
+  // `continue`s past it — so deleting `branch` from one package's baseline block
+  // would silently remove that gate while this one still printed "every package
+  // floor held". Every metric is named individually rather than asking whether
+  // ALL THREE are missing, because the partial case is the likelier edit and the
+  // one that reads as intact. That is not a failing gate, it is an ABSENT one,
+  // which is what exit 2 is for.
+  const withoutFloor = ['line', 'branch', 'function'].filter(
+    (metric) => typeof floors[metric] !== 'number',
+  );
+  if (withoutFloor.length > 0) {
+    cannotRun(
+      `${artifact.package} has a coverage report but no recorded floor for ` +
+        `${withoutFloor.join(', ')} in .testfortress/baseline.json ` +
+        `(packages["${artifact.package}"].coverage). ` +
+        'A metric whose floor is missing is not being held to one.',
+    );
+  }
   const breached = [];
   for (const metric of ['line', 'branch', 'function']) {
     const floor = floors[metric];
@@ -210,7 +228,34 @@ if (!base) {
 if (!git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])) {
   cannotRun('HEAD does not resolve to a commit, so there is nothing to diff');
 }
-const mergeBase = git(['merge-base', base, 'HEAD']) ?? base;
+const rawMergeBase = git(['merge-base', base, 'HEAD']) ?? base;
+const headSha = git(['rev-parse', 'HEAD']);
+/**
+ * A build ON the trunk has no diff against the trunk, and "no changed lines" is
+ * reported as 100% patch coverage — so this gate checked NOTHING for exactly the
+ * run that matters most: `release.yml` builds a push to `main`, where `main` and
+ * `HEAD` are the same commit. Anyone committing straight to `main` locally got
+ * the same free pass.
+ *
+ * The last commit is the honest subject there: on the trunk, "this change" IS
+ * `HEAD^..HEAD`. A repository whose HEAD has no parent keeps the empty diff,
+ * because there is genuinely nothing before it to compare with.
+ */
+const onTrunk = headSha !== null && rawMergeBase === headSha;
+const firstParent = onTrunk ? git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}~1']) : null;
+// A trunk build whose HEAD has no parent is one of two very different things: a
+// genuine root commit (there is nothing before it, and an empty diff is honest),
+// or a SHALLOW clone whose graft boundary is HEAD (the history exists and this
+// machine cannot see it, so an empty diff is a lie that reads as 100%). They are
+// indistinguishable from the rev alone, so ask git which one this is.
+if (onTrunk && firstParent === null && git(['rev-parse', '--is-shallow-repository']) === 'true') {
+  cannotRun(
+    'this is a shallow clone of the trunk, so the commit before HEAD is not present and ' +
+      '"the lines this change touched" cannot be identified. Fetch the history (fetch-depth: 0) ' +
+      'and re-run.',
+  );
+}
+const mergeBase = firstParent ?? rawMergeBase;
 
 // ---------------------------------------------------------------------------
 // the changed production files: committed, staged, unstaged and untracked
@@ -257,8 +302,12 @@ const diffJson = path.join(TF, 'reports', 'diff-cover.json');
 rmSync(diffJson, { force: true });
 const diffCover = captureExe('diff-cover', [
   ...artifacts.map((artifact) => artifact.cobertura),
+  // The RESOLVED base, not the ref: on a branch the two are the same answer
+  // (`diff-cover` resolves `main...HEAD` to this very commit), and on the trunk
+  // — where `main` IS `HEAD` — passing the ref means diffing a commit against
+  // itself and reporting 100% over zero lines. See `mergeBase` above.
   '--compare-branch',
-  base,
+  mergeBase,
   '--include-untracked',
   '--format',
   `json:${diffJson}`,
@@ -348,9 +397,18 @@ const measuredPercent = totalLines === 0 ? 100 : (diff.total_percent_covered ?? 
  * `coverage.diff` is pinned at 100, so reporting the raw percentage would mean a
  * dated, approved, judge-signed exemption turned this gate green and
  * `audit:ratchet:full` red — an escape valve blocked by a second gate nobody
- * routed it through. The debt does not vanish: the entry it needs counts against
- * `suppressions.count`, which ratchets DOWN, so the pressure lands where the
- * ledger can actually discharge it. The raw number is reported beside it.
+ * routed it through.
+ *
+ * What bounds the debt is the ledger entry itself, and it is worth stating
+ * exactly, because an earlier version of this comment claimed the entry counts
+ * against `suppressions.count` and it does not: `COV-DIFF-EXEMPT` is in the
+ * ledger's `exemptFromTotal`, precisely so a sanctioned escape valve is not
+ * blocked by the ceiling it exists to lower. It is bounded instead by the three
+ * things every entry carries — an expiry no more than 90 days out, at most
+ * `maxHitsPerEntry` occurrences, and a named approver (`policy.requireApproval`,
+ * which the scanner enforces as a non-empty `approvedBy`) — plus the raw
+ * percentage reported beside this one, so the uncovered line is visible in the
+ * artifact even while it is excused.
  */
 const effectivePercent =
   totalLines === 0 ? 100 : +(((totalLines - unexcusedLines) / totalLines) * 100).toFixed(2);
@@ -364,6 +422,10 @@ writeJsonReport('coverage.json', {
   diff: {
     base,
     mergeBase,
+    // True when this build IS the trunk, so the subject is `HEAD~1..HEAD` rather
+    // than a branch's whole diff. Recorded because it changes what the number
+    // below describes.
+    onTrunk,
     describedAs: diff.diff_name,
     totalLines,
     coveredPercent: measuredPercent,
@@ -387,7 +449,10 @@ if (problems.length > 0) {
 }
 
 note(
-  `coverage.json — ${String(totalLines)} changed production line(s) vs ${base}, ` +
+  // The EFFECTIVE base, not the ref: on the trunk they differ, and a line that
+  // says "vs main" while the subject was `HEAD~1` describes a comparison nobody
+  // made.
+  `coverage.json — ${String(totalLines)} changed production line(s) vs ${onTrunk ? `${base} (HEAD~1)` : base}, ` +
     `${String(measuredPercent)}% covered${exemptedLines > 0 ? ` (${String(exemptedLines)} ledgered)` : ''}, ` +
     `${String(changedProduction.length)} changed file(s) all measured, every package floor held`,
 );

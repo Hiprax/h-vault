@@ -307,25 +307,34 @@ export function renderEnvFile(values) {
  * the PROJECT directory (the first `-f` file's directory), not against the
  * override that declares them, so a relative path here would silently resolve
  * inside the repository.
+ *
+ * `!override` REPLACES the base `env_file` list rather than extending it, and
+ * that tag is what makes this a clean room. Compose merges sequences by
+ * APPENDING, so without it a developer whose checkout has a root `.env` runs the
+ * drill with their own configuration loaded underneath the throwaway one: the
+ * pinned topology in `environment:` still wins for the keys it names, but every
+ * key it does not — `METRICS_TOKEN`, `ENABLE_SWAGGER`, `SMTP_*`, `LOG_DIRECTORY`,
+ * `BREACH_SEED_AUTO` — reaches the containers. A gate that inherits the desk it
+ * runs on is measuring something other than "this stack comes up from nothing".
  */
 export function renderOverride(envFileAbsolutePath) {
   if (!envFileAbsolutePath.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(envFileAbsolutePath)) {
     throw new Error(`the drill env file path must be absolute, got: ${envFileAbsolutePath}`);
   }
-  // Written as JSON, which every YAML parser accepts and which cannot be broken
-  // by a Windows path's backslashes the way a bare YAML scalar can.
-  return `${JSON.stringify(
-    {
-      services: Object.fromEntries(
-        ['hvault-app', 'hvault-bootstrap'].map((service) => [
-          service,
-          { env_file: [{ path: envFileAbsolutePath, required: true }] },
-        ]),
-      ),
-    },
-    null,
-    2,
-  )}\n`;
+  // YAML rather than JSON, because a JSON document cannot carry the `!override`
+  // tag. The path is still JSON-encoded: a YAML double-quoted scalar uses JSON's
+  // own escaping rules, so a Windows path's backslashes survive it intact — the
+  // property the JSON form was chosen for in the first place.
+  const services = ['hvault-app', 'hvault-bootstrap']
+    .map(
+      (service) =>
+        `  ${service}:\n` +
+        `    env_file: !override\n` +
+        `      - path: ${JSON.stringify(envFileAbsolutePath)}\n` +
+        `        required: true\n`,
+    )
+    .join('');
+  return `services:\n${services}`;
 }
 
 /**

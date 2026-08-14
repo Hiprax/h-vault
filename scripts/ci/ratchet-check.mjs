@@ -158,6 +158,7 @@ const DIRECTION = {
   'coverage.statement': 'higher',
   'coverage.diff': 'higher',
   'coverage.linesTotal': 'higher',
+  'coverage.branchesTotal': 'higher',
   'coverage.filesMeasured': 'superset',
   'coverage.scopeGlobs': 'info',
   'mutation.overall': 'higher',
@@ -198,6 +199,12 @@ const DIRECTION = {
   // written reason, which is exactly the friction that decision deserves.
   'openapi.snapshotPaths': 'higher',
   'openapi.snapshotOperations': 'higher',
+  // The snapshot's own bytes. `pin`, not `higher`: the size fields catch a base
+  // that shrank, and this catches the regeneration that keeps it the same size —
+  // a response property deleted from `swagger.ts` and the snapshot refreshed in
+  // the same commit, which oasdiff then compares against a base that already
+  // agrees with it. Refreshing the base now costs a written `--accept` reason.
+  'openapi.snapshotHash': 'pin',
   // Accessibility. The two impacts that FAIL the gate are ratcheted at zero, so
   // the number cannot creep; `viewsScanned` is higher-is-better because an axe
   // run over nothing reports zero violations exactly like an axe run over a
@@ -461,6 +468,11 @@ function fromLcov(text) {
     'coverage.branch': totals.branch,
     'coverage.function': totals.function,
     'coverage.linesTotal': totals.linesTotal,
+    // The branch DENOMINATOR, beside the line one. Without it `coverage.branch`
+    // was a percentage with nothing behind it: deleting branches raises the ratio
+    // and the ratchet reads an improvement. `filesMeasured` catches a whole file
+    // leaving the measured set; it cannot see branches collapsing inside one.
+    'coverage.branchesTotal': totals.branchesTotal,
     'coverage.filesMeasured': totals.filesMeasured,
   };
 }
@@ -534,6 +546,15 @@ const fromFlakeJson = (json) => {
   const out = {};
   if (typeof json.runs === 'number') out['flake.runs'] = json.runs;
   if (typeof json.failures === 'number') out['flake.failures'] = json.failures;
+  // The SIZE of the end-to-end sample. Declared `higher` in DIRECTIONS and named
+  // in FLAKE_REQUIRED_FIELDS, and it was never extracted here — so the field that
+  // exists precisely to stop the e2e leg being dropped (which would LOWER
+  // `failures`, look like an improvement, and leave `runs` at ten) could only
+  // ever be reported UNMEASURED once a baseline recorded it. `flake.json` has
+  // carried `e2eExecutions` since the gate was written; this reads it.
+  if (typeof json.e2eExecutions === 'number') {
+    out['flake.e2eExecutions'] = json.e2eExecutions;
+  }
   return out;
 };
 
@@ -621,8 +642,15 @@ function collect() {
       base === 'config.sarif' ||
       base === 'openapi-compat.json' ||
       base === 'a11y.json' ||
-      base.includes('mutation') ||
-      base.includes('flake');
+      // EXACT names, never a substring. `test:flake` and `test:dst` both leave
+      // `junit-flake-<pkg>.xml` behind — undeclared artifacts this gate does not
+      // read — and a substring match made them KNOWN, so the freshness rule
+      // reported three STALE reports on every push after a tier-2 run and turned
+      // `audit:ratchet:full` red for a reason that had nothing to do with the
+      // code. The cheapest exit from that is deleting the staleness check, which
+      // is the one defence that stops a report describing a different tree.
+      base === 'mutation.json' ||
+      base === 'flake.json';
     if (!known) continue;
     // A deferrable report is checked for freshness WITHOUT being recorded as
     // stale: its gate did not run in this invocation, so "older than the newest
@@ -678,6 +706,7 @@ function collect() {
       if (typeof snap.operations === 'number') {
         got['openapi.snapshotOperations'] = snap.operations;
       }
+      if (typeof snap.hash === 'string') got['openapi.snapshotHash'] = snap.hash;
     } else if (base === 'a11y.json') {
       // Only the two gated impacts and the size of the scanned surface. The
       // gate's own report carries the rest.

@@ -48,7 +48,7 @@ import { color, note, warn } from './lib/ui.mjs';
 import { ensureReportDir, reportPath, writeJsonReport } from './lib/reports.mjs';
 
 /** Mirrors `A11Y_BLOCKING_IMPACTS` in e2e/a11yViews.ts. */
-const BLOCKING_IMPACTS = ['serious', 'critical'];
+const BLOCKING_IMPACTS = ['serious', 'critical', 'unknown'];
 
 /**
  * Mirrors `A11Y_SUITE` in playwright.a11y.config.ts.
@@ -154,6 +154,10 @@ const payload = {
     serious: byImpact['serious'] ?? 0,
     moderate: byImpact['moderate'] ?? 0,
     minor: byImpact['minor'] ?? 0,
+    // A violation axe could not grade. Blocking, and published here too — it
+    // used to be counted into `byImpact` and then dropped from the payload, so a
+    // finding of unknown severity appeared in no number this gate reports.
+    unknown: byImpact['unknown'] ?? 0,
   },
   problems,
   blocking,

@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-08-13",
-  "commit": "9b0fb50",
+  "recordedAt": "2026-08-14",
+  "commit": "224d125",
   "tests": {
-    "count": 7632
+    "count": 7695
   },
   "coverage": {
     "diff": 100
@@ -20,8 +20,8 @@
     "viewsScanned": 15
   },
   "suppressions": {
-    "count": 24,
-    "totalHits": 33
+    "count": 20,
+    "totalHits": 27
   },
   "packages": {
     "packages/shared": {
@@ -29,7 +29,8 @@
         "line": 100,
         "branch": 98.83,
         "function": 100,
-        "linesTotal": 540,
+        "linesTotal": 548,
+        "branchesTotal": 343,
         "filesMeasured": [
           "src/constants/index.ts",
           "src/index.ts",
@@ -44,7 +45,7 @@
         ]
       },
       "tests": {
-        "count": 990
+        "count": 996
       }
     },
     "packages/server": {
@@ -53,6 +54,7 @@
         "branch": 91.39,
         "function": 97.34,
         "linesTotal": 3085,
+        "branchesTotal": 1556,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/seedBreachesArgs.ts",
@@ -120,15 +122,16 @@
         ]
       },
       "tests": {
-        "count": 2963
+        "count": 3000
       }
     },
     "packages/client": {
       "coverage": {
-        "line": 98.69,
-        "branch": 92.45,
+        "line": 98.71,
+        "branch": 92.48,
         "function": 97.95,
-        "linesTotal": 7041,
+        "linesTotal": 7050,
+        "branchesTotal": 4961,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -253,7 +256,7 @@
         ]
       },
       "tests": {
-        "count": 3476
+        "count": 3496
       }
     },
     "e2e": {
@@ -284,7 +287,9 @@
     "lint",
     "test:a11y",
     "test:deploy",
+    "test:dst",
     "test:e2e",
+    "test:flake",
     "test:fuzz",
     "test:integration",
     "test:mutation",
@@ -355,26 +360,33 @@
       "duplication.percentage",
       "duplication.sources",
       "duplication.totalLines",
+      "flake.e2eExecutions",
+      "flake.failures",
+      "flake.runs",
       "integrity.excludeHash",
       "integrity.gateFilesHash",
       "integrity.gitignoreHash",
       "integrity.selfHash",
+      "openapi.snapshotHash",
       "openapi.snapshotOperations",
       "openapi.snapshotPaths",
       "packages.e2e.tests.count",
       "packages.packages/client.coverage.branch",
+      "packages.packages/client.coverage.branchesTotal",
       "packages.packages/client.coverage.filesMeasured",
       "packages.packages/client.coverage.function",
       "packages.packages/client.coverage.line",
       "packages.packages/client.coverage.linesTotal",
       "packages.packages/client.tests.count",
       "packages.packages/server.coverage.branch",
+      "packages.packages/server.coverage.branchesTotal",
       "packages.packages/server.coverage.filesMeasured",
       "packages.packages/server.coverage.function",
       "packages.packages/server.coverage.line",
       "packages.packages/server.coverage.linesTotal",
       "packages.packages/server.tests.count",
       "packages.packages/shared.coverage.branch",
+      "packages.packages/shared.coverage.branchesTotal",
       "packages.packages/shared.coverage.filesMeasured",
       "packages.packages/shared.coverage.function",
       "packages.packages/shared.coverage.line",
@@ -408,7 +420,7 @@
     ]
   },
   "duplication": {
-    "percentage": 2.87,
+    "percentage": 2.86,
     "clones": 132,
     "duplicatedLines": 1525,
     "totalLines": 52849,
@@ -444,7 +456,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 18: pin the OpenAPI contract snapshot's own size (openapi.snapshotPaths/snapshotOperations) so a shrunken base cannot make audit:openapi vacuous, and record the tests added for the tightened MAJOR-bump exemption.",
+  "reason": "Validation pass over phases 11-20: the client branch-coverage regression repaired with three behavioural tests (92.45 -> 92.48), the first measured flake sample (10 shuffled runs, 609 e2e executions, 0 failures), the branch denominators and the OpenAPI snapshot fingerprint recorded, and test:dst/test:flake added to the registered task list.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -493,6 +505,12 @@
   },
   "openapi": {
     "snapshotPaths": 47,
-    "snapshotOperations": 53
+    "snapshotOperations": 53,
+    "snapshotHash": "420463078294a964"
+  },
+  "flake": {
+    "runs": 10,
+    "failures": 0,
+    "e2eExecutions": 609
   }
 }

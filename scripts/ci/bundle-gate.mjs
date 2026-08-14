@@ -53,6 +53,7 @@ import {
   DEFAULT_CHUNK_BUDGET_KB,
   HTML_SHELL_BUDGET_KB,
   INITIAL_PAYLOAD_BUDGET_KB,
+  chunkBaseName,
 } from './lib/bundle-budgets.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -60,19 +61,6 @@ const distDir = path.join(repoRoot, 'packages', 'client', 'dist');
 const indexHtml = path.join(distDir, 'index.html');
 
 const kb = (bytes) => Number((bytes / 1024).toFixed(2));
-
-/**
- * `main-4aSwR9SA.js` → `main`. The trailing segment is the content hash.
- *
- * EXACTLY eight characters, not "eight or more". Rolldown's hash alphabet is
- * base64url, so it contains `-` and `_` — `vendor-core-1-AcZIh1.js` has a hash of
- * `1-AcZIh1` — and a `{8,}` quantifier over a class containing `-` swallows the
- * chunk name too, reducing both `vendor-core` and `vendor-react` to `vendor`.
- * Measured: it did, and the two then shared one budget.
- */
-export function chunkBaseName(fileName) {
-  return fileName.replace(/\.(?:js|css)$/, '').replace(/-[A-Za-z0-9_-]{8}$/, '');
-}
 
 if (!existsSync(indexHtml)) {
   console.error(

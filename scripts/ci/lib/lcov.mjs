@@ -22,7 +22,7 @@ export const pct = (hit, total) => (total ? +((hit / total) * 100).toFixed(2) : 
  * @param {string} text        the contents of an `lcov.info`
  * @param {(p: string) => string} [normalize]  applied to every `SF:` path
  * @returns {{line?: number, branch?: number, function?: number,
- *            linesTotal?: number, filesMeasured?: string[]}}
+ *            linesTotal?: number, branchesTotal?: number, filesMeasured?: string[]}}
  */
 export function parseLcov(text, normalize = (p) => p) {
   const files = [...text.matchAll(/^SF:(.+)$/gm)].map((m) => normalize(m[1]));
@@ -38,6 +38,13 @@ export function parseLcov(text, normalize = (p) => p) {
     branch: pct(brh, brf),
     function: pct(fnh, fnf),
     linesTotal: lf || undefined,
+    // The BRANCH denominator, returned for the same reason `linesTotal` is: a
+    // percentage whose denominator can shrink is not a gate. It was computed here
+    // and thrown away, so `branch` was the one headline number in this file with
+    // no committed denominator behind it — and branch coverage is the thin metric
+    // on two of the three packages, which makes it the one most likely to be
+    // "improved" by removing branches.
+    branchesTotal: brf || undefined,
     filesMeasured: files.length ? [...new Set(files)].sort() : undefined,
   };
 }

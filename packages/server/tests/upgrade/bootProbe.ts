@@ -115,7 +115,24 @@ export async function bootWithEnvFile(envFile: string): Promise<BootResult> {
       recursive: true,
     },
   );
-  symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(root, 'node_modules'), 'dir');
+  // A JUNCTION rather than a copy, because the tree is hundreds of megabytes —
+  // but Windows refuses `symlink` without Developer Mode or an elevated shell,
+  // and the failure would surface as `EPERM` out of THIS call, in the parent,
+  // with a message about symlinks rather than about configuration. The catch
+  // around the child spawn below anticipates that error and cannot see it from
+  // here, so it is handled where it happens: a JUNCTION needs no elevation on
+  // Windows and the type argument is ignored on POSIX, and a refusal even of that
+  // is reported as the harness fault it is rather than as a configuration one.
+  try {
+    symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(root, 'node_modules'), 'junction');
+  } catch (error) {
+    throw new Error(
+      `the boot probe could not link ${REPO_ROOT}/node_modules into its temporary root: ` +
+        `${String(error)}. This is a harness failure, not a configuration one — the probe ` +
+        'never ran. (A copy is not an acceptable fallback here: the tree is hundreds of ' +
+        'megabytes and every case in this suite creates its own root.)',
+    );
+  }
   // The manifest that governs how the copied sources are resolved. Without it
   // the server's modules would be interpreted under a different module regime
   // than the one they actually run in — which is a divergence in the very thing

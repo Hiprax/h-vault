@@ -30,7 +30,10 @@ const RATCHET = path.join(repoRoot, 'scripts', 'ci', 'ratchet-check.mjs');
 
 interface RatchetResult {
   exitCode: number;
-  regressions: { path: string; detail: string }[];
+  // `want`/`got`/`dir` are on every regression the script emits; they are typed
+  // here because a case that asserts WHICH direction failed is stronger than one
+  // asserting only that something did.
+  regressions: { path: string; detail: string; want?: unknown; got?: unknown; dir?: string }[];
   missing: { path: string }[];
   absent: { path: string }[];
   undeclared: string[];
@@ -46,11 +49,14 @@ afterAll(() => {
 });
 
 /** LCOV with exactly the counters the extractor reads. */
-function lcov(files: { name: string; lines: number; hit: number }[]): string {
+function lcov(
+  files: { name: string; lines: number; hit: number; branches?: number; branchHit?: number }[],
+): string {
   return files
     .map(
       (f) =>
-        `TN:\nSF:${f.name}\nFNF:0\nFNH:0\nBRF:0\nBRH:0\nLF:${f.lines}\nLH:${f.hit}\nend_of_record\n`,
+        `TN:\nSF:${f.name}\nFNF:0\nFNH:0\nBRF:${f.branches ?? 0}\nBRH:${f.branchHit ?? 0}\n` +
+        `LF:${f.lines}\nLH:${f.hit}\nend_of_record\n`,
     )
     .join('');
 }
@@ -386,6 +392,97 @@ describe('audit:ratchet', () => {
       'packages.packages/app.coverage.filesMeasured',
     );
     expect(result.exitCode).toBe(1);
+  });
+
+  it('fails when the BRANCH percentage rises while the branch denominator falls', () => {
+    // The same cheat as the line case above, on the metric that has the least
+    // headroom in this repository — and it was invisible until the denominator
+    // was recorded: `parseLcov` computed BRF and threw it away, so `coverage.branch`
+    // was the one percentage in the baseline with nothing behind it. Here twelve
+    // branches are deleted, all of them uncovered, and the ratio climbs from 80%
+    // to 100% while four fewer branches are exercised than before.
+    const before = {
+      ...HEALTHY_BASELINE,
+      packages: {
+        'packages/app': {
+          ...HEALTHY_BASELINE.packages['packages/app'],
+          coverage: {
+            ...HEALTHY_BASELINE.packages['packages/app'].coverage,
+            branch: 80,
+            branchesTotal: 20,
+          },
+        },
+      },
+      meta: {
+        fields: [
+          ...HEALTHY_BASELINE.meta.fields,
+          'packages.packages/app.coverage.branch',
+          'packages.packages/app.coverage.branchesTotal',
+        ].sort(),
+      },
+    };
+    const result = ratchet({
+      baseline: before,
+      reports: {
+        ...HEALTHY_REPORTS,
+        'packages/app/coverage/lcov.info': lcov([
+          { name: 'src/index.ts', lines: 60, hit: 54, branches: 8, branchHit: 8 },
+          { name: 'src/other.ts', lines: 40, hit: 36, branches: 0, branchHit: 0 },
+        ]),
+      },
+    });
+    expect(result.improvements.map((i) => i.path)).toContain(
+      'packages.packages/app.coverage.branch',
+    );
+    expect(result.regressions.map((r) => r.path)).toContain(
+      'packages.packages/app.coverage.branchesTotal',
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
+  it('pins the committed OpenAPI snapshot by content, so a same-version refresh is a regression', () => {
+    // The path/operation counts catch a snapshot that SHRANK. They cannot catch
+    // the regeneration that keeps its shape: delete a response property from the
+    // served contract and refresh the snapshot in the same commit, and oasdiff
+    // compares the new document against a base that already agrees with it —
+    // zero findings, unchanged counts, a breaking change shipped under a version
+    // that promises none.
+    const baseline = {
+      ...HEALTHY_BASELINE,
+      openapi: { snapshotPaths: 47, snapshotOperations: 53, snapshotHash: 'abcdef0123456789' },
+      meta: {
+        fields: [
+          ...HEALTHY_BASELINE.meta.fields,
+          'openapi.snapshotHash',
+          'openapi.snapshotOperations',
+          'openapi.snapshotPaths',
+        ].sort(),
+      },
+    };
+    const report = (hash: string): string =>
+      JSON.stringify({ snapshot: { paths: 47, operations: 53, hash } });
+
+    const unchanged = ratchet({
+      baseline,
+      reports: {
+        ...HEALTHY_REPORTS,
+        '.testfortress/reports/openapi-compat.json': report('abcdef0123456789'),
+      },
+    });
+    expect(unchanged.regressions).toEqual([]);
+    expect(unchanged.exitCode).toBe(0);
+
+    const refreshed = ratchet({
+      baseline,
+      reports: {
+        ...HEALTHY_REPORTS,
+        // Same 47 paths, same 53 operations, different bytes.
+        '.testfortress/reports/openapi-compat.json': report('0000000000000000'),
+      },
+    });
+    const pinned = refreshed.regressions.find((r) => r.path === 'openapi.snapshotHash');
+    expect(pinned?.dir).toBe('pin');
+    expect(refreshed.exitCode).toBe(1);
   });
 
   describe('patch coverage, which is measured by a gate rather than by a suite', () => {
@@ -780,6 +877,112 @@ describe('audit:ratchet', () => {
       expect(after.reason).toBe('added property tests');
       expect(after.meta.fields).toContain('tests.count');
     });
+  });
+
+  describe('the flake sample, whose SIZE is as gated as its failure count', () => {
+    /** A baseline carrying the flake trio, and a manifest that registers the gate. */
+    const flakeBaseline = (over: Record<string, number> = {}) => ({
+      ...HEALTHY_BASELINE,
+      flake: { runs: 10, failures: 0, e2eExecutions: 600, ...over },
+      meta: {
+        fields: [
+          ...HEALTHY_BASELINE.meta.fields,
+          'flake.e2eExecutions',
+          'flake.failures',
+          'flake.runs',
+        ].sort(),
+      },
+    });
+    const flakeManifest = {
+      ...MANIFEST,
+      tasks: {
+        ...MANIFEST.tasks,
+        'test:flake': {
+          cmd: 'node scripts/ci/flake-run.mjs',
+          tier: 2,
+          gate: 'ten shuffled runs and the e2e suite, zero failures',
+          report: 'flake.json',
+        },
+      },
+    };
+    const flakeReport = (over: Record<string, number> = {}) =>
+      JSON.stringify({ runs: 10, failures: 0, e2eExecutions: 600, ...over });
+
+    it('measures the end-to-end sample size, and does not merely declare it', () => {
+      // `flake.e2eExecutions` exists because dropping the end-to-end leg LOWERS
+      // `failures` — an apparent improvement — while leaving `runs` at ten. The
+      // field was declared `higher` and named in the required set, and the
+      // extractor never read it: a baseline carrying it would have reported it
+      // UNMEASURED on the one run that produces the report, which is a red gate
+      // rather than a defence.
+      const result = ratchet({
+        baseline: flakeBaseline(),
+        manifest: flakeManifest,
+        reports: { ...HEALTHY_REPORTS, '.testfortress/reports/flake.json': flakeReport() },
+      });
+      expect(result.missing.map((m) => m.path)).not.toContain('flake.e2eExecutions');
+      expect(result.deferred.map((d) => d.path)).not.toContain('flake.e2eExecutions');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('fails a run that kept its ten shuffled passes and quietly shrank the e2e leg', () => {
+      const result = ratchet({
+        baseline: flakeBaseline(),
+        manifest: flakeManifest,
+        reports: {
+          ...HEALTHY_REPORTS,
+          // Ten clean runs, zero failures — and a third of the end-to-end
+          // executions. Nothing else in the report moves.
+          '.testfortress/reports/flake.json': flakeReport({ e2eExecutions: 200 }),
+        },
+      });
+      const shrunk = result.regressions.find((r) => r.path === 'flake.e2eExecutions');
+      expect(shrunk).toBeDefined();
+      expect(shrunk?.got).toBe(200);
+      expect(shrunk?.dir).toBe('higher');
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('defers all three when the tier-2 gate did not run, rather than reporting them unmeasured', () => {
+      const result = ratchet({
+        baseline: flakeBaseline(),
+        manifest: flakeManifest,
+        reports: HEALTHY_REPORTS,
+      });
+      expect(result.deferred.map((d) => d.path).sort()).toEqual([
+        'flake.e2eExecutions',
+        'flake.failures',
+        'flake.runs',
+      ]);
+      expect(result.missing.map((m) => m.path)).not.toContain('flake.runs');
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
+  it('ignores the undeclared JUnit files a tier-2 gate leaves behind', () => {
+    // `test:flake` and `test:dst` both write `junit-flake-<pkg>.xml` beside the
+    // report they declare. Nothing here reads them — the headcount comes from the
+    // DECLARED artifacts — but a substring match on "flake" made them known, so
+    // the freshness rule reported three STALE reports on the next push and failed
+    // a gate over an artifact from a run that had already passed. The cure for a
+    // gate that is red for the wrong reason is usually deleting the check.
+    const result = ratchet({
+      baseline: HEALTHY_BASELINE,
+      reports: {
+        ...HEALTHY_REPORTS,
+        '.testfortress/reports/junit-flake-shared.xml': junit(996),
+        '.testfortress/reports/junit-flake-server.xml': junit(2994),
+      },
+      stale: [
+        '.testfortress/reports/junit-flake-shared.xml',
+        '.testfortress/reports/junit-flake-server.xml',
+      ],
+    });
+    expect(result.staleReports).toEqual([]);
+    expect(result.exitCode).toBe(0);
+    // And the headcount still comes from the DECLARED report alone, so those
+    // 3,990 tests cannot inflate it.
+    expect(result.improvements.map((i) => i.path)).not.toContain('tests.count');
   });
 
   describe('the cheap tier', () => {

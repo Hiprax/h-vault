@@ -51,6 +51,7 @@
  *     says "oasdiff is not on PATH" before the gate runs; the check here is the
  *     backstop for anyone invoking this script directly.
  */
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { captureExe, repoRoot } from './lib/proc.mjs';
@@ -213,6 +214,27 @@ const snapshotOperations = snapshotPaths.reduce(
   0,
 );
 
+/**
+ * A fingerprint of the committed snapshot, pinned in `baseline.json`.
+ *
+ * The size ratchet above catches a snapshot that SHRANK. It cannot catch the
+ * other regeneration: delete a response property from `swagger.ts` and refresh
+ * the snapshot in the same commit at the same version, and oasdiff compares the
+ * new contract against a base that already agrees with it — zero findings, the
+ * path and operation counts unchanged, and a breaking change ships under a
+ * version that promises none. That is the golden-file regeneration the doctrine
+ * forbids, and nothing here could see it.
+ *
+ * Direction `pin`, so ANY edit to the snapshot — refresh, truncation, hand
+ * edit — fails `audit:ratchet:full` until it is accepted with a written reason,
+ * exactly like the integrity fingerprints. Refreshing the base becomes a
+ * deliberate, recorded act rather than a silent one.
+ */
+const snapshotHash = createHash('sha256')
+  .update(readFileSync(snapshotPath, 'utf8'))
+  .digest('hex')
+  .slice(0, 16);
+
 writeJsonReport('openapi-compat.json', {
   version: 1,
   checkedAt: new Date().toISOString(),
@@ -224,6 +246,7 @@ writeJsonReport('openapi-compat.json', {
     major: snapshotMajor,
     paths: snapshotPaths.length,
     operations: snapshotOperations,
+    hash: snapshotHash,
   },
   current: { version: currentVersion, major: currentMajor },
   majorBumped,

@@ -22,9 +22,9 @@
  *
  *  a. THE BUDGETS LIVE IN `lib/resource-budgets.mjs`, NOT HERE. The scenarios
  *     assert against them, this gate restates the verdict, and
- *     `gate-surface.test.ts` compares them with `.testfortress/baseline.json`.
- *     Three readers, one definition: a ceiling cannot be raised in one place and
- *     stay green in another.
+ *     `ratchet-check.mjs` reads them out of that module into its own comparison
+ *     with direction `lower`. Three readers, one definition: a ceiling cannot be
+ *     raised in one place and stay green in another.
  *
  *  b. A SCENARIO THAT WRITES NO REPORT IS A FAILURE, not an absence. That is the
  *     shape a silently narrowed suite produces — a bad `include`, a renamed file,
@@ -44,10 +44,11 @@
  *     `npm run ci` — so a ratchet on the MEASURED values would be both flaky and
  *     permanently unmeasured on every push (the rule `fuzz-gate.mjs` records
  *     about declared reports). What IS pinned, on every push, is the ceiling
- *     itself: `baseline.json` records each budget and `gate-surface.test.ts`
- *     fails when the committed constants and the recorded ones disagree, so
- *     raising a ceiling is a visible edit in two files rather than a quiet one in
- *     the suite that enforces it.
+ *     itself: `baseline.json` records each budget, `ratchet-check.mjs` injects
+ *     the committed constants into the comparison as `lower`-is-better fields,
+ *     and `audit:ratchet:full` fails when a ceiling has been raised — so raising
+ *     one is a visible edit in two files rather than a quiet one in the suite
+ *     that enforces it.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';

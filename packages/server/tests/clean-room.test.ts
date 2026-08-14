@@ -22,6 +22,9 @@
  *     — and the usual repair for that is deleting the check.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   SERVICE_EXPECTATIONS,
   hostBindingOf,
@@ -42,6 +45,9 @@ import {
   parseSetCookie,
   waitForHealth,
 } from '../../../scripts/ci/lib/vault-flow.mjs';
+
+/** Anchored on this module's own URL, never on `process.cwd()`. */
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
 /** A `docker compose ps --format json` row, as Compose emits it. */
 const row = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -120,6 +126,32 @@ describe('service health verdicts', () => {
   it('reports a service the stack grew that nothing in the table examines', () => {
     const grown = [...healthyStack(), row({ Service: 'hvault-redis' })];
     expect(serviceVerdicts(grown).unexpected).toEqual(['hvault-redis']);
+  });
+
+  it('names exactly the services docker-compose.yml declares, so the drill cannot examine a stale set', () => {
+    // `SERVICE_EXPECTATIONS` is what every check in the drill iterates: states,
+    // ports, networks. A service added to the stack and not to this table is
+    // examined by nothing, and `docker compose up --wait` waits only for
+    // `running|healthy`, so one without a healthcheck satisfies the wait by
+    // merely having started. The drill now FAILS on an unexamined service at run
+    // time; this is the other half, at push time — a table that has fallen behind
+    // the compose file it stands for is caught before anyone spends five minutes
+    // on the drill to find out.
+    const compose = readFileSync(path.join(repoRoot, 'docker-compose.yml'), 'utf8');
+    const servicesAt = compose.search(/^services:$/m);
+    expect(servicesAt).toBeGreaterThan(-1);
+    // Only the `services:` block — the file also declares `networks:` and
+    // `volumes:` at the top level, whose children would otherwise read as
+    // services and make this assertion permanently, confusingly red.
+    const afterServices = compose.slice(servicesAt + 'services:'.length);
+    const nextTopLevel = afterServices.search(/^[a-zA-Z]/m);
+    const servicesBlock =
+      nextTopLevel === -1 ? afterServices : afterServices.slice(0, nextTopLevel);
+    const declared = [...servicesBlock.matchAll(/^ {2}([a-zA-Z0-9_-]+):$/gm)].map(
+      (match) => match[1]!,
+    );
+    expect(declared.length).toBeGreaterThan(0);
+    expect(declared.sort()).toEqual(Object.keys(SERVICE_EXPECTATIONS).sort());
   });
 
   it('finds every expected service missing when the stack never started', () => {
@@ -251,14 +283,42 @@ describe('the throwaway deployment configuration', () => {
   });
 
   it('gives both configured services the absolute path to the env file', () => {
-    const override = JSON.parse(renderOverride('/tmp/drill/drill.env')) as {
-      services: Record<string, { env_file: { path: string; required: boolean }[] }>;
-    };
-    expect(Object.keys(override.services).sort()).toEqual(['hvault-app', 'hvault-bootstrap']);
-    for (const service of Object.values(override.services)) {
-      expect(service.env_file[0]!.path).toBe('/tmp/drill/drill.env');
-      expect(service.env_file[0]!.required).toBe(true);
-    }
+    // The EXACT document, not three substrings. The override used to be JSON,
+    // which validated itself — a malformed emission threw in `JSON.parse`. YAML
+    // does not: with `- path:` indented to the wrong column every `toContain`
+    // still passes and Compose rejects the file at run time, five minutes into a
+    // gate. This is the assertion that replaces the parser.
+    expect(renderOverride('/tmp/drill/drill.env')).toBe(
+      'services:\n' +
+        '  hvault-app:\n' +
+        '    env_file: !override\n' +
+        '      - path: "/tmp/drill/drill.env"\n' +
+        '        required: true\n' +
+        '  hvault-bootstrap:\n' +
+        '    env_file: !override\n' +
+        '      - path: "/tmp/drill/drill.env"\n' +
+        '        required: true\n',
+    );
+  });
+
+  it('REPLACES the base env_file list rather than extending it', () => {
+    // Compose merges sequences by appending, so an override without `!override`
+    // loads the operator's root `.env` underneath the drill's throwaway one: the
+    // pinned `environment:` block still wins for the keys it names, and every key
+    // it does not — METRICS_TOKEN, ENABLE_SWAGGER, SMTP_*, LOG_DIRECTORY — reaches
+    // the containers. A clean room that inherits the desk it runs on is measuring
+    // something other than "this stack comes up from nothing".
+    const override = renderOverride('/tmp/drill/drill.env');
+    expect(override.match(/env_file:/g)).toHaveLength(2);
+    expect(override.match(/env_file: !override/g)).toHaveLength(2);
+  });
+
+  it('keeps a Windows path intact through the YAML it emits', () => {
+    // The override used to be JSON precisely because a bare YAML scalar mangles
+    // backslashes; a YAML double-quoted scalar uses JSON's own escaping, so the
+    // path is still JSON-encoded now that the document must carry a tag.
+    const override = renderOverride('D:\\hv drill\\drill.env');
+    expect(override).toContain('- path: "D:\\\\hv drill\\\\drill.env"');
   });
 
   it('refuses a relative env-file path', () => {

@@ -47,7 +47,12 @@ import upgradeVitestConfig, { UPGRADE_SUITE } from '../vitest.upgrade.config';
 import recoveryVitestConfig, { RECOVERY_SUITE } from '../vitest.recovery.config';
 import clientUpgradeConfig, { CLIENT_UPGRADE_SUITE } from '../../client/vitest.upgrade.config';
 import { RESOURCE_SCENARIOS } from '../../../scripts/ci/lib/resource-budgets.mjs';
-import { chunkBaseName } from '../../../scripts/ci/bundle-gate.mjs';
+// From the LIBRARY, never from `bundle-gate.mjs`: that file is a gate SCRIPT
+// with module-scope side effects (it reads the built client, writes
+// `bundle.json` and `process.exit(2)`s when `packages/client/dist` is absent),
+// so importing it here killed this whole suite on any tree without a client
+// build — measured: `Test Files 1 failed`, `Tests no tests`, dying at the import.
+import { chunkBaseName } from '../../../scripts/ci/lib/bundle-budgets.mjs';
 import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest.snapshot.config';
 import sharedMutationConfig from '../../shared/vitest.mutation.config';
 import serverMutationConfig from '../vitest.mutation.config';
@@ -780,6 +785,83 @@ describe('machine-readable reports', () => {
     expect(chunkBaseName('index-Tp2RFl97.css')).toBe('index');
   });
 
+  it('imports no gate SCRIPT from a test, unless that script guards its entry point', () => {
+    // A gate script runs its gate at module scope: `bundle-gate.mjs` reads the
+    // built client, writes `bundle.json` and `process.exit(2)`s when
+    // `packages/client/dist` is absent. ESM evaluates a module on import, so a
+    // test that reaches into one for a helper runs the whole gate inside a vitest
+    // worker — measured, when this file imported `chunkBaseName` from there: on a
+    // tree with no client build the worker died at the import (`Test Files 1
+    // failed`, `Tests no tests`), which is the state of a fresh clone running the
+    // documented `npm run test -w packages/server`; with a build present, every
+    // server-suite run silently rewrote another task's declared report, and a
+    // chunk over budget failed THIS suite instead of the gate that owns that
+    // verdict.
+    //
+    // Two ways to be safe, and the test accepts both: put the helper in
+    // `scripts/ci/lib/` (pure modules, no side effects), or guard the script's
+    // body with the `isEntryPoint()` check `changelog-extract.mjs` already uses.
+    // EVERY TypeScript file under `tests/`, not only `*.test.ts`: a helper, a
+    // fixture or a harness importing a gate script has identical side effects,
+    // because the import happens in the same worker either way.
+    const suiteFiles: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(entry.name)) suiteFiles.push(full);
+      }
+    };
+    for (const pkg of ['shared', 'server', 'client']) {
+      walk(path.join(repoRoot, 'packages', pkg, 'tests'));
+    }
+    // The shared harness and the E2E tree, for the same reason and a sharper one:
+    // every package's `setup.ts` imports from `tests/harness/**`, so a gate-script
+    // import THERE would evaluate in every worker of every suite rather than in
+    // one file.
+    walk(path.join(repoRoot, 'tests'));
+    walk(path.join(repoRoot, 'e2e'));
+    // The sweep is only as good as its reach: a walker that silently found
+    // nothing would make every assertion below vacuous. The suite is ~250 files.
+    expect(suiteFiles.length).toBeGreaterThan(240);
+
+    // `scripts/ci/lib/**` is scanned too, from the other end: a test may import a
+    // library module, so a library module that re-exports from a gate SCRIPT
+    // would carry the side effect in through a door this check had left open.
+    const libDir = path.join(repoRoot, 'scripts', 'ci', 'lib');
+    const libFiles = readdirSync(libDir)
+      .filter((name) => name.endsWith('.mjs'))
+      .map((name) => path.join(libDir, name));
+    expect(libFiles.length).toBeGreaterThan(10);
+
+    const offenders: string[] = [];
+    for (const file of [...suiteFiles, ...libFiles]) {
+      const source = readFileSync(file, 'utf8');
+      // Every relative `.mjs` specifier, RESOLVED against the importing file —
+      // which covers the `../../../scripts/ci/x.mjs` a test writes and the
+      // `../x.mjs` a library module inside `scripts/ci/lib` would.
+      for (const match of source.matchAll(/['"](\.{1,2}\/[\w./-]+\.mjs)['"]/g)) {
+        const target = path
+          .relative(repoRoot, path.resolve(path.dirname(file), match[1]!))
+          .split(path.sep)
+          .join('/');
+        if (!target.startsWith('scripts/ci/')) continue;
+        if (target.startsWith('scripts/ci/lib/')) continue;
+        const script = readFileSync(path.join(repoRoot, target), 'utf8');
+        // A PRESENCE proxy, and it is worth being honest about the limit: this
+        // asserts the script declares the guard `changelog-extract.mjs` uses, not
+        // that its whole body sits inside one. The only sound check is importing
+        // the module in a sandbox and observing no side effect, which is a
+        // different tier of test; this one catches the case that actually
+        // happened.
+        if (!script.includes('isEntryPoint(')) {
+          offenders.push(`${path.relative(repoRoot, file)} → ${target}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it('mutates every core module the plan names, and nothing has fallen out of the tree', () => {
     // A core module is a PATH PREFIX matched against the measured file set, and
     // a typo in one is SILENT in both directions that matter: the gate never
@@ -1168,7 +1250,20 @@ describe('machine-readable reports', () => {
     // The threshold is the gate. Widening it to `moderate` would be a stricter
     // gate; narrowing it to `critical` alone would silently drop colour contrast,
     // missing labels and broken ARIA relationships, which are all `serious`.
-    expect([...A11Y_BLOCKING_IMPACTS]).toEqual(['serious', 'critical']);
+    // `unknown` is the nullable-impact case `scanA11y` maps: blocking, because a
+    // violation axe could not grade is not thereby a minor one, and dropping it
+    // left a finding that appeared in no number the gate publishes.
+    expect([...A11Y_BLOCKING_IMPACTS]).toEqual(['serious', 'critical', 'unknown']);
+    // The gate is a plain `.mjs` and cannot import the TypeScript constant, so it
+    // RESTATES the list — and its docblock claimed this test held the two
+    // together, which it did not: only `A11Y_SUITE` was pinned. A narrowed copy
+    // in the runner would not have produced a false pass (the spec's own
+    // assertion uses the constant above), but it would have silently changed
+    // which findings the gate's REPORT calls blocking.
+    const a11yGate = readFileSync(path.join(repoRoot, 'scripts/ci/a11y-gate.mjs'), 'utf8');
+    expect(a11yGate).toContain(
+      `const BLOCKING_IMPACTS = [${A11Y_BLOCKING_IMPACTS.map((i) => `'${i}'`).join(', ')}];`,
+    );
   });
 
   it('keeps every re-run subset out of the test headcount, because its files run twice elsewhere', () => {

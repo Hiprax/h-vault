@@ -8,9 +8,10 @@
  *     which assert against them — this is where the gate actually fails;
  *   • `scripts/ci/resource-gate.mjs`, which checks that every scenario reported
  *     and restates the verdict in `resource.json`;
- *   • `packages/server/tests/gate-surface.test.ts`, which asserts these numbers
- *     match what `.testfortress/baseline.json` records, so a ceiling cannot be
- *     raised in code without the raise being visible in the baseline diff.
+ *   • `scripts/ci/ratchet-check.mjs`, which reads these constants FROM THIS FILE
+ *     into the comparison and declares them `lower`-is-better, so raising a
+ *     ceiling here is a regression on the `audit:ratchet:full` gate that runs on
+ *     every push, and `--accept` cannot move it upward.
  *
  * The TypeScript suites import this file directly (`allowJs` is on in
  * `packages/server/tsconfig.test.json`, and `gate-surface.test.ts` already

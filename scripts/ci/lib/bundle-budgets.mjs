@@ -64,3 +64,24 @@ export const INITIAL_PAYLOAD_BUDGET_KB = 700;
 
 /** `index.html` itself: a shell, not an asset store. Measured at ~1 KiB. */
 export const HTML_SHELL_BUDGET_KB = 8;
+
+/**
+ * `main-4aSwR9SA.js` → `main`. The trailing segment is the content hash.
+ *
+ * EXACTLY eight characters, not "eight or more". Rolldown's hash alphabet is
+ * base64url, so it contains `-` and `_` — `vendor-core-1-AcZIh1.js` has a hash of
+ * `1-AcZIh1` — and a `{8,}` quantifier over a class containing `-` swallows the
+ * chunk name too, reducing both `vendor-core` and `vendor-react` to `vendor`.
+ * Measured: it did, and the two then shared one budget.
+ *
+ * It lives HERE, beside the budgets it resolves keys for, rather than in
+ * `bundle-gate.mjs`, because `gate-surface.test.ts` pins the strip and a gate
+ * SCRIPT is not importable: `bundle-gate.mjs` reads the built client at module
+ * scope and `process.exit(2)`s when it is absent, so importing it from a test
+ * killed the whole server suite on any tree without `packages/client/dist`
+ * (measured: `Test Files 1 failed`, `Tests no tests`, dying at the import), and
+ * rewrote another task's report on every run that did have one.
+ */
+export function chunkBaseName(fileName) {
+  return fileName.replace(/\.(?:js|css)$/, '').replace(/-[A-Za-z0-9_-]{8}$/, '');
+}

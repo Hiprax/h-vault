@@ -251,7 +251,29 @@ async function teardown() {
     warn(`its configuration is at ${envFile} — delete it when you are done`);
     return;
   }
-  await composeStreamed(['down', '-v', '--remove-orphans']);
+  // Recorded, not discarded. A teardown that fails leaves five containers and
+  // two volumes on the host, and the only thing that would ever notice is the
+  // NEXT run's `down -v` — which happens before this run's port differential is
+  // read, so the leak is invisible in every report. It is not fatal (the drill's
+  // verdict is about the stack it brought up), but it must be visible.
+  const down = await composeStreamed(['down', '-v', '--remove-orphans']);
+  if (down !== 0) {
+    // RECORDED, and deliberately not a failure of this gate. The subject is
+    // whether the deployment comes up, serves, survives a restart and redeploys
+    // idempotently; a volume that will not detach is a fault in the DISPOSAL of
+    // that subject, and this pipeline draws that line sharply elsewhere (exit 1 =
+    // a gate failed, exit 2 = a gate could not run). The leak is not unowned
+    // either: the NEXT run opens with the same `down -v` and fails hard on it
+    // (`clean-room` below), which is the moment it genuinely makes the drill
+    // unrunnable. What was wrong before was that it went into no artifact at all.
+    record(
+      'teardown',
+      true,
+      `docker compose down -v exited ${String(down)} — containers or volumes may still exist ` +
+        `for project ${STACK_NAME}; the next run's clean-room step will fail on them`,
+    );
+    warn(`teardown did not complete cleanly for project ${STACK_NAME}`);
+  }
   rmSync(workspace, { recursive: true, force: true });
 }
 
@@ -341,9 +363,24 @@ try {
         { verdicts },
       );
     }
-    for (const service of unexpected) {
-      warn(`the stack contains an unexamined service: ${service}`);
-    }
+    // A service this table does not name is a FAILURE, not a warning, and the
+    // difference is the whole value of the check. `docker compose up --wait`
+    // waits for `running|healthy`, so a sidecar added without a `healthcheck`
+    // satisfies it by merely having started — and every check in this drill
+    // iterates SERVICE_EXPECTATIONS, so the new container is examined by nothing:
+    // not its state, not its ports, not its network. Warning about it left the
+    // drill reporting "13 checks passed" over a stack it had not looked at,
+    // which is the same shrinking-surface hole `A11Y_VIEWS` is triple-pinned
+    // against. Adding a service is therefore a deliberate act: name it here,
+    // with the state it must reach.
+    record(
+      'service-surface',
+      unexpected.length === 0,
+      unexpected.length === 0
+        ? `no service outside the expected set of ${String(expectedCount)}`
+        : `unexamined service(s) in the stack: ${unexpected.join(', ')} — add each to SERVICE_EXPECTATIONS with the state it must reach`,
+      { unexpected },
+    );
 
     // -----------------------------------------------------------------------
     // 4. Exactly one published port, bound to loopback
@@ -383,27 +420,32 @@ try {
         : `no healthy response within ${String(HEALTH_DEADLINE_MS)}ms — ${health.detail}`,
     );
 
-    // A DEEP LINK, not `/`. Every HTML document is proxied to Express precisely
-    // so helmet can attach the CSP with its per-request nonce, and the handler
-    // that injects that nonce into the document is the SPA fallback — `/` is
-    // answered by `express.static` from the file on disk. A nonce-less response
-    // here means Nginx served a copy of index.html from its own root instead of
-    // proxying, which is the header-free version of the app the image build
-    // deliberately deletes.
-    const shell = await fetch(new URL('/vault', baseUrl));
-    const html = await shell.text();
-    const csp = shell.headers.get('content-security-policy') ?? '';
-    const shellOk =
-      shell.status === 200 && /<script[^>]+nonce="/i.test(html) && /'nonce-/.test(csp);
-    record(
-      'spa-shell',
-      shellOk,
-      shellOk
-        ? 'a deep-linked route is proxied to Express and served with a matching CSP nonce'
-        : `GET /vault returned ${String(shell.status)}; script nonce=${String(/<script[^>]+nonce="/i.test(html))}, CSP nonce=${String(/'nonce-/.test(csp))}`,
-    );
-
     if (health.ok) {
+      // A DEEP LINK, not `/`. Every HTML document is proxied to Express precisely
+      // so helmet can attach the CSP with its per-request nonce, and the handler
+      // that injects that nonce into the document is the SPA fallback — `/` is
+      // answered by `express.static` from the file on disk. A nonce-less response
+      // here means Nginx served a copy of index.html from its own root instead of
+      // proxying, which is the header-free version of the app the image build
+      // deliberately deletes.
+      //
+      // INSIDE the health guard: on a stack that never became healthy this
+      // `fetch` rejects with ECONNREFUSED into the outer catch, and the drill's
+      // headline failure becomes an unattributed `drill: fetch failed` instead of
+      // the `health` step that actually explains it.
+      const shell = await fetch(new URL('/vault', baseUrl));
+      const html = await shell.text();
+      const csp = shell.headers.get('content-security-policy') ?? '';
+      const shellOk =
+        shell.status === 200 && /<script[^>]+nonce="/i.test(html) && /'nonce-/.test(csp);
+      record(
+        'spa-shell',
+        shellOk,
+        shellOk
+          ? 'a deep-linked route is proxied to Express and served with a matching CSP nonce'
+          : `GET /vault returned ${String(shell.status)}; script nonce=${String(/<script[^>]+nonce="/i.test(html))}, CSP nonce=${String(/'nonce-/.test(csp))}`,
+      );
+
       // ---------------------------------------------------------------------
       // 7. One real user journey, entirely through the published port
       // ---------------------------------------------------------------------

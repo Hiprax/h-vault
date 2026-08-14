@@ -70,9 +70,16 @@ export const A11Y_VIEW_IDS: readonly string[] = A11Y_VIEWS.map((view) => view.id
  * Impacts that fail the gate.
  *
  * axe grades every violation `minor`, `moderate`, `serious` or `critical`. The
- * gate is the top two, and the other two are RECORDED rather than ignored, so
+ * gate is the top two (plus the ungraded case below), and the other two are
+ * RECORDED rather than ignored, so
  * the report says what was found without a moderate finding blocking a push.
  * Both halves matter: a gate that failed on `minor` would be turned off within a
  * week, and one that recorded nothing could never show the debt moving.
+ *
+ * `unknown` is here for the third case: axe types `impact` as nullable, and
+ * `scanA11y` maps a null one to `'unknown'`. Left out, an unclassified violation
+ * was neither blocking NOR published in the gate's own counts — a finding that
+ * appeared nowhere at all. It fails closed instead, because "axe could not grade
+ * this" is not evidence that it is minor.
  */
-export const A11Y_BLOCKING_IMPACTS: readonly string[] = ['serious', 'critical'];
+export const A11Y_BLOCKING_IMPACTS: readonly string[] = ['serious', 'critical', 'unknown'];

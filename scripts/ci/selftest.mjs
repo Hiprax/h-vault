@@ -53,7 +53,9 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -172,6 +174,41 @@ function trackedAndUntracked() {
     .filter(Boolean);
 }
 
+/**
+ * The gate surface's own artifacts, which are gitignored and so are not in the
+ * `git ls-files` enumeration — yet several gates COMPARE against them
+ * (`audit:ratchet` reads the integrity report, `audit:ratchet:full` reads
+ * coverage and JUnit, `coverage:check` reads the LCOV and Cobertura documents).
+ * A workspace without them fails those gates for a reason that has nothing to do
+ * with the planted defect, which is the opposite of what this harness proves.
+ *
+ * Refreshed BEFORE EVERY CASE, not once at setup, and that is the fix for a
+ * measured hole rather than caution: all the cases share one workspace, and a
+ * case whose gate RUNS A SUITE rewrites the coverage directories inside it —
+ * when that suite fails on its own planted defect, vitest can leave them empty.
+ * `coverage:check` ran several cases later, found no Cobertura document, and
+ * exited 2 ("could not run") in 221 ms, which the harness correctly refuses to
+ * count as proof. Measured: `--only=coverage:check` proven, the same case inside
+ * a full sweep unproven — a gate reported unprovable because of the order the
+ * prover happened to use.
+ *
+ * Copied LAST within a case's setup so they are the newest files in the tree,
+ * which is what the ratchet's freshness rule requires of a report.
+ */
+function refreshArtifacts(dir) {
+  for (const rel of [
+    '.testfortress/reports',
+    'packages/shared/coverage',
+    'packages/server/coverage',
+    'packages/client/coverage',
+  ]) {
+    const from = join(ROOT, rel);
+    if (!existsSync(from)) continue;
+    rmSync(join(dir, rel), { recursive: true, force: true });
+    cpSync(from, join(dir, rel), { recursive: true });
+  }
+}
+
 function prepareWorkspace() {
   const dir = mkdtempSync(join(tmpdir(), 'hvault-selftest-'));
   for (const rel of trackedAndUntracked()) {
@@ -211,22 +248,7 @@ function prepareWorkspace() {
     const from = join(ROOT, rel);
     if (existsSync(from)) cpSync(from, join(dir, rel), { recursive: true });
   }
-  // The gate surface's own artifacts are gitignored, so the enumeration above
-  // does not carry them — and two gates COMPARE against them (`audit:ratchet`
-  // reads the integrity report, `audit:ratchet:full` reads coverage and JUnit).
-  // A workspace without them would fail both for a reason that has nothing to
-  // do with the planted defect, which is the opposite of what this proves.
-  // Copied LAST so they are the newest files in the tree, which is what the
-  // ratchet's freshness rule requires of a report.
-  for (const rel of [
-    '.testfortress/reports',
-    'packages/shared/coverage',
-    'packages/server/coverage',
-    'packages/client/coverage',
-  ]) {
-    const from = join(ROOT, rel);
-    if (existsSync(from)) cpSync(from, join(dir, rel), { recursive: true });
-  }
+  refreshArtifacts(dir);
   // A repository, because two gates enumerate through git and one of them reads
   // the INDEX (`secret-scan` scans tracked files), so the copy needs one.
   //
@@ -294,13 +316,35 @@ for (const task of selected) {
     continue;
   }
 
+  // Every case starts from the same artifacts, whatever the case before it did
+  // to them — see `refreshArtifacts`.
+  refreshArtifacts(workspace);
+
   // plant
   const saved = new Map();
   const created = [];
+  /**
+   * The mtimes the planted files had before this case touched them.
+   *
+   * Restoring by rewriting the original CONTENT leaves the original mtime
+   * behind, and one gate reads mtimes as evidence: `coverage:check` refuses to
+   * run (exit 2) when a measured source is newer than the coverage report that
+   * describes it, because a stale report would grade today's diff against
+   * yesterday's execution data. Every case shares ONE workspace, so a case that
+   * mutates a real production file was leaving that file permanently "newer than
+   * the reports" for every case after it — and `coverage:check`, several cases
+   * later, refused for a reason that had nothing to do with its own planted
+   * defect. Measured: proven when run alone, unproven in a full sweep. A harness
+   * that plants and restores must leave NO trace, timestamps included.
+   */
+  const savedTimes = new Map();
   for (const [rel, contents] of Object.entries(defect.create ?? {})) {
     const p = join(workspace, rel);
-    if (existsSync(p)) saved.set(rel, readFileSync(p, 'utf8'));
-    else created.push(rel);
+    if (existsSync(p)) {
+      saved.set(rel, readFileSync(p, 'utf8'));
+      const st = statSync(p);
+      savedTimes.set(rel, [st.atime, st.mtime]);
+    } else created.push(rel);
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, contents, 'utf8');
   }
@@ -317,7 +361,9 @@ for (const task of selected) {
       continue;
     }
     const original = readFileSync(p, 'utf8');
+    const st = statSync(p);
     saved.set(rel, original);
+    savedTimes.set(rel, [st.atime, st.mtime]);
     writeFileSync(p, mutate(original), 'utf8');
   }
 
@@ -401,8 +447,13 @@ for (const task of selected) {
   const code = run.status ?? 1;
   const output = `${run.stdout ?? ''}\n${run.stderr ?? ''}${reportText(workspace, task)}`;
 
-  // restore, always, before judging
-  for (const [rel, contents] of saved) writeFileSync(join(workspace, rel), contents, 'utf8');
+  // restore, always, before judging — CONTENT and TIMESTAMPS both, see `savedTimes`
+  for (const [rel, contents] of saved) {
+    const p = join(workspace, rel);
+    writeFileSync(p, contents, 'utf8');
+    const times = savedTimes.get(rel);
+    if (times) utimesSync(p, times[0], times[1]);
+  }
   for (const rel of created) rmSync(join(workspace, rel), { force: true });
   try {
     execFileSync('git', ['add', '-A'], { cwd: workspace, stdio: 'ignore' });
@@ -431,6 +482,14 @@ for (const task of selected) {
     detail,
   });
   log(`  ${status === 'proven' ? '✔' : '✖'} ${task.name} — ${detail}`);
+  // An unproven case that shows nothing is a claim without a transcript, which is
+  // the one thing this whole layer exists to refuse. The gate's own tail is what
+  // tells you WHY it could not be attributed — a "could not run" from a missing
+  // artifact reads identically to a gate that has stopped working, and the two
+  // need opposite responses.
+  if (status !== 'proven') {
+    for (const line of output.trim().split('\n').slice(-25)) log(`      ${line}`);
+  }
 }
 
 rmSync(workspace, { recursive: true, force: true });
