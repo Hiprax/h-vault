@@ -315,7 +315,62 @@
       "canSkip": true
     }
   },
-  "gaps": [],
+  "gaps": [
+    {
+      "area": "the mutation oracle's floor",
+      "detail": "`test:mutation` is registered but has no `mutation` block in baseline.json, so it holds no floor, exits 1 by design, and `npm run verify:full` does not pass. The tier-0 and tier-1 surface that the pre-push hook and the release workflow run is unaffected. Two of three legs are measured but unbanked, because they ran while another project saturated the machine and a CPU-starved timeout is recorded as a kill.",
+      "ledger": ["SUP-0044"],
+      "review": "2026-11-11"
+    },
+    {
+      "area": "cross-browser end-to-end",
+      "detail": "playwright.config.ts declares a single `chromium` project, so every browser assertion in this repository is an assertion about one engine. The subsystem this understates most is the clipboard guard, whose refusal-retry state machine exists for the Firefox/Safari transient-activation rule and is verified only by unit tests with simulated refusals.",
+      "ledger": ["SUP-0042"],
+      "review": "2026-10-13"
+    },
+    {
+      "area": "non-functional load and performance",
+      "detail": "No benchmark, load, stress, spike or soak testing. `test:resource` holds four volume scenarios over a 10,000-item vault to committed time and memory ceilings, but its noise band is 11-50 percent (SUP-0027), so it sees a step change and nothing smaller. There is no concurrent-user SLO for a single-tenant self-hosted deployment to test against.",
+      "ledger": ["SUP-0032", "SUP-0033", "SUP-0034", "SUP-0035", "SUP-0036", "SUP-0039"],
+      "review": "2026-11-11"
+    },
+    {
+      "area": "dynamic application security testing",
+      "detail": "No DAST pass. The classes a baseline scan finds are covered statically and by direct assertion \u2014 security headers and CSP per response, the cross-user authorization matrix over every id-taking route, a CSRF suite, and the CodeQL security-and-quality suite over the source \u2014 but nothing probes the running stack from outside. The target already exists: `test:deploy` stands the whole Compose stack up.",
+      "ledger": ["SUP-0041"],
+      "review": "2026-11-11"
+    },
+    {
+      "area": "supply-chain provenance",
+      "detail": "No SBOM is produced or published. The dependency surface is gated three ways (`audit:deps` advisories, `audit:licenses` allowlist, Trivy over all three images), but none of them emits a bill of materials a downstream consumer could read.",
+      "ledger": ["SUP-0030"],
+      "review": "2026-11-11"
+    },
+    {
+      "area": "rendered-output and degraded-network testing",
+      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over fifteen views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
+      "ledger": ["SUP-0031", "SUP-0037"],
+      "review": "2026-11-11"
+    },
+    {
+      "area": "fault injection beyond process death",
+      "detail": "No chaos testing. The topology offers little surface \u2014 one datastore, no service mesh, no inter-service RPC to sever \u2014 and the failure modes that do exist are driven directly by `test:recovery`, which SIGKILLs a real process at five injection points.",
+      "ledger": ["SUP-0038"],
+      "review": "2026-11-11"
+    },
+    {
+      "area": "platform matrix",
+      "detail": "Node 24 is pinned in .nvmrc, in engines.node and in every image, so no supported matrix exists to test across; the dropped Node 22 leg is recorded in the README as a known gap on the same grounds. The Windows leg cannot run on the maintainer's machine.",
+      "ledger": ["SUP-0040"],
+      "review": "2026-11-11"
+    },
+    {
+      "area": "accessibility below the blocking threshold",
+      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported and ratcheted but do not fail the gate, and 20 are currently open across the fifteen scanned views (landmark-one-main, page-has-heading-one, region, landmark-unique, heading-order). The scan also runs in the light theme only.",
+      "ledger": [],
+      "review": "2026-11-11"
+    }
+  ],
   "deferred": {
     "test:api": "No separable command exists today. Every supertest suite lives beside the unit suites in packages/server/tests/*.test.ts, so the only ways to register it would be a committed test filter (a non-ledgerable TEST-FILTER under the integrity doctrine) or a second, duplicate invocation of the 125-second server suite that would report false independence. test:integration runs those suites today. Register test:api once the API suites move under their own directory."
   }

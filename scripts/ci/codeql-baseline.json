@@ -3,6 +3,16 @@
   "suite": "codeql/javascript-queries:codeql-suites/javascript-security-and-quality.qls",
   "findings": [
     {
+      "fingerprint": "js/invalid-prototype-value::packages/client/tests/fuzz/parsers.fuzz.test.ts::16452b68b5cb9aaa:1",
+      "rule": "js/invalid-prototype-value",
+      "file": "packages/client/tests/fuzz/parsers.fuzz.test.ts"
+    },
+    {
+      "fingerprint": "js/invalid-prototype-value::packages/client/tests/fuzz/parsers.fuzz.test.ts::ee7bce2e710dca77:1",
+      "rule": "js/invalid-prototype-value",
+      "file": "packages/client/tests/fuzz/parsers.fuzz.test.ts"
+    },
+    {
       "fingerprint": "js/sql-injection::packages/server/src/controllers/authController.ts::a88598472695f57d:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/authController.ts"

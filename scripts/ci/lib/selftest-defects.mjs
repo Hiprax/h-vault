@@ -857,11 +857,32 @@ export const DEFECTS = {
   'audit:sast': {
     requires: ['codeql'],
     title: 'add a server module that concatenates a request value into a shell command',
+    // THE VALUE MUST COME FROM A REQUEST, AND THE HANDLER MUST BE REGISTERED ON A
+    // ROUTER. The first version of this probe took a bare exported parameter
+    // (`probe = (input: string) => execSync(`echo ${input}`)`), which is not the
+    // defect the title claims and not one CodeQL can report: `js/command-line-injection`
+    // is a TAINT-FLOW query, so it needs an externally controlled SOURCE reaching
+    // the sink, and an arbitrary function parameter is not one in an
+    // application-mode database. The gate therefore exited 0 with the defect
+    // planted, and the self-test recorded `audit:sast` as unable to fail — which
+    // went unnoticed for as long as it did only because a broken CodeQL install
+    // was reporting the case BLOCKED before it ever got far enough to be run.
+    //
+    // `express.Router()` plus `.get()` is what makes CodeQL model the callback as
+    // a route handler and `req.query` as a remote flow source; a bare function
+    // annotated `Request` is not reliably recognised as one. The sink is
+    // `execSync` with an interpolated command string, which is
+    // `js/command-line-injection` at problem.severity ERROR (9.8) — and error
+    // severity is what this gate fails on, so a warning-level cousin such as
+    // `js/indirect-command-line-injection` (6.3) would not do.
     create: {
       'packages/server/src/__selftest_probe.ts':
-        "import { execSync } from 'node:child_process';\n\n" +
-        'export const probe = (input: string): string =>\n' +
-        '  execSync(`echo ${input}`).toString();\n',
+        "import { execSync } from 'node:child_process';\n" +
+        "import express from 'express';\n\n" +
+        'export const probeRouter = express.Router();\n\n' +
+        "probeRouter.get('/__selftest_probe', (req, res) => {\n" +
+        '  res.send(execSync(`ping -c 1 ${String(req.query.host)}`).toString());\n' +
+        '});\n',
     },
     evidence: (text) => /__selftest_probe/.test(text),
   },

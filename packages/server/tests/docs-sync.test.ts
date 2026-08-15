@@ -46,6 +46,34 @@ describe('README documentation sync', () => {
     expect(readme).toContain(`${String(AUDIT_ACTIONS.length)} distinct operations`);
   });
 
+  /**
+   * SECURITY.md's supported-versions table is the one line in that document a
+   * reader consults before deciding whether their deployment still receives
+   * security fixes, and it is prose, so nothing moved it: it still said `0.1.x`
+   * at 0.8.0, seven minor releases later. Every other place the version appears
+   * is already pinned to `package.json` by a test — the README's Compose cell
+   * above, the three image tags in `docker-hardening.test.ts` — and this one was
+   * simply missed. Pinning it makes the table a release step that cannot be
+   * forgotten rather than one that has to be remembered.
+   *
+   * Only MAJOR.MINOR is asserted. The row names a supported LINE (`0.9.x`), so a
+   * patch release must not be required to edit it, and "only the latest release
+   * receives security fixes" is the sentence above it rather than something this
+   * can check.
+   */
+  it('the SECURITY.md supported-versions row names the current MAJOR.MINOR line', () => {
+    const security = readFileSync(path.resolve(repoRoot, 'SECURITY.md'), 'utf-8');
+    const { version } = JSON.parse(
+      readFileSync(path.resolve(repoRoot, 'package.json'), 'utf-8'),
+    ) as { version: string };
+    const [major, minor] = version.split('.');
+    const line = `${String(major)}.${String(minor)}`;
+
+    // The supported row, and the unsupported row that must move with it.
+    expect(security).toMatch(new RegExp(`^\\|\\s*${line}\\.x\\s*\\|\\s*Yes\\s*\\|`, 'm'));
+    expect(security).toMatch(new RegExp(`^\\|\\s*<\\s*${line}\\s*\\|\\s*No\\s*\\|`, 'm'));
+  });
+
   it('the Heavy Ops rate-limit row reflects the real targets, not "password generation"', () => {
     const heavyOpsRow = readme.split('\n').find((line) => line.includes('Heavy Ops'));
     expect(heavyOpsRow).toBeDefined();

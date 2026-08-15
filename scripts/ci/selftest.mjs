@@ -220,11 +220,25 @@ function prepareWorkspace() {
   }
   // Dependencies are shared by symlink; they are large and nothing here writes
   // to them. Build OUTPUT is copied instead, because `build` writes into it.
+  //
+  // `.cache/codeql` is on this list for a reason worth stating, because leaving
+  // it off produced a gate that could not fail and said nothing about it.
+  // `sast-gate.mjs` resolves the CLI relative to ITS OWN repo root, which in a
+  // workspace is this temp directory — so without the bundle here the gate found
+  // no CodeQL, fell back to Semgrep CE / OpenGrep exactly as designed, and that
+  // engine's rule corpus does not report the planted command injection at error
+  // severity. The gate therefore exited 0 with a genuine vulnerability in the
+  // tree, and `verify:selftest` recorded `audit:sast` as unable to fail. The
+  // prerequisite check (`requires: ['codeql']`) did not catch it either, because
+  // it looks for the bundle in the REAL checkout, where it exists. The bundle is
+  // ~2 GB unpacked and nothing writes to it, which is the same argument that
+  // puts `node_modules` here.
   for (const rel of [
     'node_modules',
     'packages/shared/node_modules',
     'packages/server/node_modules',
     'packages/client/node_modules',
+    join('.cache', 'codeql'),
   ]) {
     const from = join(ROOT, rel);
     if (existsSync(from) && !existsSync(join(dir, rel))) {

@@ -44,8 +44,8 @@ long-term support branches.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | Yes       |
-| < 0.1   | No        |
+| 0.9.x   | Yes       |
+| < 0.9   | No        |
 
 ## Threat model
 
@@ -346,19 +346,23 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 
 - Every push runs `npm run ci` locally through the `pre-push` hook — twenty-eight gates,
   including a dependency audit at moderate and above over the production tree, ESLint with
-  `eslint-plugin-security`, CodeQL, container builds scanned with Trivy (zero fixable
-  CRITICAL/HIGH), a secret scan over every tracked file **and every blob in git history**,
-  the cross-user authorization matrix over the whole route table, and a redaction suite
-  that asserts no request value, audit row or production error body carries a secret.
-  Eight further gates run before a release, among them a fuzz run over the seven import
-  parsers, a crash-consistency drill that SIGKILLs a real process mid-write, and the
-  deployment clean room.
+  `eslint-plugin-security`, static analysis (CodeQL where the CLI is installed, otherwise
+  Semgrep CE or OpenGrep, and the gate reports which engine answered), container builds
+  scanned with Trivy (zero fixable CRITICAL/HIGH), a secret scan over every tracked file
+  **and every blob in git history**, the cross-user authorization matrix over the whole
+  route table, and a redaction suite that asserts no request value, audit row or production
+  error body carries a secret. Eight further gates run before a release, among them a fuzz
+  run over the seven import parsers, a crash-consistency drill that SIGKILLs a real process
+  mid-write, the mutation oracle, and the deployment clean room.
 - The gates are themselves guarded, because a security gate that can be edited to pass is
   not a control. Every marker that weakens a check — a skipped test, a silenced analyzer, a
   swallowed error — must be absent or written down in `.testfortress/suppressions.json`
   with an owner, a reason and an expiry; every gated number is ratcheted in one direction
   only against `.testfortress/baseline.json`; and `npm run verify:selftest` plants one
-  defect per registered gate and requires each to go red.
+  defect per registered gate and requires each to go red for a reason its own report
+  attributes to that defect. A gate whose prerequisite is missing on the machine — an
+  absent CodeQL CLI, a stopped Docker daemon — is reported BLOCKED and counted separately,
+  never as proven.
 - Production images run non-root on read-only root filesystems, drop all Linux
   capabilities, and set `no-new-privileges`. The Compose stack publishes exactly one
   loopback-bound port; the database has no published port and no route to the internet.

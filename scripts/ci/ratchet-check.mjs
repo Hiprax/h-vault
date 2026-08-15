@@ -884,8 +884,26 @@ for (const req of requiredFields) {
 
 for (const [path, want] of Object.entries(base)) {
   if (skipMeta(path)) continue;
+  // `[^./]`, NOT `[^.]`. The class has to exclude the separator the group
+  // already consumes, or the two overlap and a key carrying many slashes with no
+  // LATER dot has exponentially many parses that the failed match walks in turn
+  // (CodeQL `js/redos`). Measured on `[^.]` in isolation: 16 ms at 20 slashes,
+  // 252 ms at 24, 1.0 s at 26 — a clean doubling per character.
+  //
+  // It is UNREACHABLE from here, and deliberately fixed anyway. `flatten` above
+  // emits a `packages.`-prefixed key only by recursing into a package's metrics
+  // OBJECT, so every path this sees has the form `packages.<pkg>.<leaf>` and
+  // always carries a dot after the package id — which means the first greedy
+  // attempt always succeeds and the expression never backtracks. There is
+  // therefore NO input that distinguishes the two expressions, and no honest
+  // test can be written for this change: one was written, and it passed against
+  // both, which is the definition of decoration. The repair is kept because it
+  // costs one character, removes a real error-severity finding rather than
+  // baselining it, and stops being free the day `flatten` changes shape. The
+  // language is unchanged: every `/` the class used to be able to eat is eaten
+  // by `(?:\/…)*` instead.
   const lookup = path.startsWith('packages.')
-    ? path.replace(/^packages\.[^.]*(?:\/[^.]*)*\./, '')
+    ? path.replace(/^packages\.[^./]*(?:\/[^./]*)*\./, '')
     : path;
   const dir = directionFor(lookup, undeclared);
   if (!dir || dir === 'info') continue;

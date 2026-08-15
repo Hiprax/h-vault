@@ -679,7 +679,7 @@ start** rather than run misconfigured.
 | --------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
 | `HVAULT_HTTP_PORT`    | `8080`            | The one host port published, always bound to `127.0.0.1`                                 |
 | `HVAULT_STACK_NAME`   | `hvault`          | Namespaces the project, containers, networks and volumes                                 |
-| `HVAULT_VERSION`      | `0.8.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
+| `HVAULT_VERSION`      | `0.9.0`           | Image tag for the three first-party images. Keep it equal to `package.json`              |
 | `HVAULT_EDGE_SUBNET`  | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                       |
 | `HVAULT_DATA_SUBNET`  | `172.31.241.0/24` | App ↔ MongoDB. Internal: no published port, no route out                                 |
 | `TRUST_PROXY_HOPS`    | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                              |
@@ -978,7 +978,7 @@ npm run test:e2e                # Playwright
 | **Server** | 105   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
 | **Client** | 106   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                    |
 | **Shared** | 7     | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                          |
-| **E2E**    | 15    | Playwright (Chromium): 195 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys                                                                                                                                                                               |
+| **E2E**    | 15    | Playwright (Chromium): 203 tests — full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys                                                                                                                                                                               |
 
 **Coverage** is measured with `@vitest/coverage-v8` and enforced as a build gate — a regression
 fails the push rather than being quietly absorbed. `server` and `client` must clear **90%** on all
@@ -1065,7 +1065,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `dst`              | T2   | The whole suite again in a DST-observing zone, so an assertion that is right only because local time and UTC agree fails here rather than on a user's machine | _new_                      |
 | `flake`            | T2   | Ten complete runs of every suite in ten different shuffled orders, plus the Playwright suite three times over with retries off                                | _new_                      |
 | `mutation`         | T2   | The oracle: Stryker mutates every file in the declared scope and the suite must kill the recorded share of them, per package and per core module              | _new_                      |
-| `sast`             | T1   | CodeQL `security-and-quality` suite                                                                                                                           | `sast` job                 |
+| `sast`             | T1   | CodeQL `security-and-quality` suite, or Semgrep CE / OpenGrep when the CodeQL CLI is absent — the gate names the engine that answered                         | `sast` job                 |
 | `coverage`         | T1   | Each package against its recorded line/branch/function coverage, and 100% of the production lines the change touched                                          | _new_                      |
 | `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                                      | _new_                      |
 
@@ -1151,8 +1151,11 @@ tree to a temporary directory, plants exactly one defect per registered gate —
 lint, a false assertion for the test suites, a broken Nginx directive for the container gate, a
 dependency with a known advisory for the audit — and requires each gate to return non-zero for a
 reason its own report can be shown to attribute to that defect. A gate registered with no
-defect-injection case is a hard error naming it. It is the release tier, not the push gate, because
-it runs the whole pipeline once per gate.
+defect-injection case is a hard error naming it. A gate whose prerequisite is missing on this
+machine — an absent CodeQL CLI, a stopped Docker daemon — is reported **BLOCKED** and counted on its
+own line, never folded into the proven total: the run says how many gates it actually proved, so a
+missing tool cannot read as a clean sheet. It is the release tier, not the push gate, because it
+runs the whole pipeline once per gate.
 
 **A full run takes 15–30 minutes.** That is the deliberate trade: time spent before the push
 instead of minutes billed after it. Two escape hatches exist:
@@ -1167,23 +1170,46 @@ git push --no-verify                    # skip the hook entirely
 - **Docker** must be running for the `docker` gate. If it is not, the gate reports **COULD NOT RUN**
   (exit 2) — with the command to skip it — rather than pretending it passed. Container hardening is not
   optional here.
-- **CodeQL** is optional: without the CLI the `sast` gate reports **SKIPPED** (never "passed"), and
-  ESLint's security rules remain the static-analysis baseline. To enable the real thing, unpack the
-  bundle into `.cache/codeql` (gitignored):
+- **CodeQL** is optional, and the `sast` gate degrades in stated steps rather than silently. With a
+  usable CLI it runs the `security-and-quality` suite. Without one it falls back to Semgrep CE or
+  OpenGrep and **says so in its report** — a different engine and rule corpus, explicitly not a
+  CodeQL equivalent — and it reports **SKIPPED** only when no analyser is available at all, naming
+  each one it looked for. Read the gate's first lines to see which engine answered; a run that
+  passed on the fallback has not exercised the CodeQL baseline below. To install the real thing,
+  unpack the bundle into `.cache/codeql` (gitignored):
 
   ```bash
   gh release download -R github/codeql-action <latest-tag> \
-    -p 'codeql-bundle-<platform>.tar.gz' -D .cache/codeql
-  tar -xzf .cache/codeql/codeql-bundle-<platform>.tar.gz -C .cache/codeql
+    -p 'codeql-bundle-linux64.tar.gz' -D .cache/codeql
+  tar -xzf .cache/codeql/codeql-bundle-linux64.tar.gz -C .cache/codeql
+  .cache/codeql/codeql/codeql version --format=terse   # probe it before trusting it
   ```
 
-  CodeQL currently reports 20 pre-existing error-severity findings: 19 `js/sql-injection` — request
-  values reaching a Mongoose query, which it flags because it cannot see the Zod schema, the
-  `$`-stripping middleware or the field allowlist standing in front of them — and one
-  `js/user-controlled-bypass` on the trusted-device 2FA skip, where the real authorization is the
-  server-side hashed-token lookup rather than the cookie's presence. They are recorded in
-  `scripts/ci/codeql-baseline.json`, keyed by content hash, so the gate fails only on **new**
-  findings. Refresh it with `npm run ci:sast -- --update-baseline`.
+  **Match the asset to the machine** — `linux64`, `osx64` or `win64`. A bundle for another platform
+  extracts without complaint and only fails at first use, because the launcher resolves a JRE under
+  `tools/<platform>/java` that the archive never contained. Separately, an extraction that dropped
+  the execute bit leaves the launcher unrunnable; `chmod +x .cache/codeql/codeql/codeql` fixes that
+  one. The gate distinguishes the two and prints the applicable fix rather than a bare exit code.
+
+  CodeQL currently reports 22 accepted error-severity findings, every one of them reviewed:
+
+  - 19 `js/sql-injection` — request values reaching a Mongoose query, which it flags because it
+    cannot see the Zod schema, the `$`-stripping middleware or the field allowlist standing in
+    front of them.
+  - 1 `js/user-controlled-bypass` on the trusted-device 2FA skip, where the real authorization is
+    the server-side hashed-token lookup rather than the cookie's presence.
+  - 2 `js/invalid-prototype-value` in `packages/client/tests/fuzz/parsers.fuzz.test.ts`, where the
+    fixture writes `{ ['__proto__']: 'name' }`. The query does not distinguish the COMPUTED key
+    from the literal one, and the distinction is the whole point of the fixture: a computed
+    `['__proto__']` creates an ordinary own data property (`Reflect.ownKeys` returns
+    `['__proto__']`) and never reaches the prototype setter, which is exactly the shape a user's
+    CSV header can produce and the one `parseGenericCsv` has to survive. Nothing is used as a
+    prototype, so there is no defect to fix — rewriting correct, commented test code to satisfy a
+    query that mis-models the computed form would cost more than it buys.
+
+  They are recorded in `scripts/ci/codeql-baseline.json`, keyed by content hash, so the gate fails
+  only on **new** findings. Refresh it with `npm run ci:sast -- --update-baseline`, and review what
+  it adds — the refresh accepts everything currently reported.
 
 - **Trivy** scans the three application images and fails the gate only on findings that have a fix,
   so an unpatched upstream CRITICAL cannot wall off the repository — a gate nobody can satisfy gets
@@ -1224,7 +1250,7 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 | `npm run verify:full`          | The whole pipeline plus the release tier        |
 | `npm run ci:list`              | List the pipeline's gates and their tiers       |
 | `npm run ci:docker`            | The container gate on its own                   |
-| `npm run ci:sast`              | The CodeQL gate on its own                      |
+| `npm run ci:sast`              | The static-analysis gate on its own             |
 | `npm run audit:bundle`         | The client bundle size budgets on their own     |
 | `npm run test:resource`        | The volume and memory budgets on their own      |
 | `npm run test:upgrade`         | The previous release's vault and `.env`, read   |

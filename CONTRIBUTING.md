@@ -43,8 +43,9 @@ WSL2 / Docker claim dynamic ranges); list them with
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
 pipeline locally — twenty-eight gates including the full test suite, the export-format
 goldens, patch coverage on the lines you changed, a smoke run of the built artifact, the
-browser bundle's size budgets, container builds with Trivy scanning, and CodeQL — and
-refuses the push if any of them fail. A
+browser bundle's size budgets, container builds with Trivy scanning, and a static-analysis
+pass (CodeQL where its CLI is installed, otherwise Semgrep CE or OpenGrep, with the gate
+naming the engine that answered) — and refuses the push if any of them fail. A
 commit that reaches `main` has already passed everything. Eight further gates sit in the
 release tier: `fuzz`, whose suites still run inside the ordinary test gates on every push
 so that only the separately-reported, deadline-bounded run is held back; `resource`, the
@@ -119,7 +120,7 @@ because the obvious way past each of them is the wrong one.
   touches**. The package percentages are an average over thousands of lines, so a new
   module with no tests at all barely moves them; this is the gate that notices. Three
   things are worth knowing before you meet it. First, **branch coverage is the thin
-  metric** — server sits at 91.39% and client at 92.45%, so a handful of uncovered
+  metric** — server sits at 91.39% and client at 92.48%, so a handful of uncovered
   `if`/`??`/`?.`/default-parameter arms in one new module will fail the run. Budget branch
   tests, not just line tests. Second, a changed production file that appears in **no**
   coverage report fails the gate by name, because a file nothing measured is otherwise
@@ -248,7 +249,10 @@ Three gates enforce it rather than trusting it:
   `node scripts/ci/ratchet-check.mjs --accept --reason "..."`, which moves each field only
   in its improving direction and refuses while anything is failing or unmeasured.
 - **`npm run verify:selftest`** plants one defect per registered gate in a throw-away copy
-  of the tree and requires every gate to go red. **Adding a gate obliges you to add its
+  of the tree and requires every gate to go red — for a reason its own report attributes to
+  that defect, so a gate that fails for an unrelated reason is reported `unproven` rather
+  than counted. A gate whose prerequisite is missing on your machine is reported `blocked`
+  and counted separately, never as proven. **Adding a gate obliges you to add its
   defect-injection case** to `scripts/ci/lib/selftest-defects.mjs` in the same change; a
   registered gate without one is a hard error naming it.
 
