@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **A step-by-step operator guide for running the whole gauntlet on a remote machine**, in `README.md`. It covers what to install on a prepared server (Node 24, a full clone, the Playwright browser that no gate checks for, `actionlint`/`hadolint`/`oasdiff`/`diff-cover` at the versions the release workflow pins, Docker, the optional CodeQL bundle), the disk and `TMPDIR` budget a full pass actually needs, how to start a detached run that survives a lost connection and how to check on it from anywhere, how to tell a finished run from a killed one, how to read `summary.json` and the per-gate transcripts, why the first `verify:full` fails on `mutation` until its baseline block is recorded, how to re-run only the gates that failed, a troubleshooting playbook for the failure modes a remote box produces, and how to bring the results home by copy or by push.
+
 ## [0.9.0] - 2026-08-14
 
 ### Added

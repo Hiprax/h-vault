@@ -50,6 +50,7 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 - [Project structure](#project-structure)
 - [Testing](#testing)
 - [The pipeline runs locally](#the-pipeline-runs-locally)
+- [Running the whole gauntlet on a remote machine](#running-the-whole-gauntlet-on-a-remote-machine)
 - [Releases](#releases)
 - [Contributing](#contributing)
 - [License](#license)
@@ -1266,6 +1267,633 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 | `npm run audit:prod`           | Dependency audit, production deps only          |
 | `npm run release:next-version` | Compute the next release tag                    |
 | `npm run clean`                | Remove `dist/`, `node_modules/` and `logs/`     |
+
+---
+
+## Running the whole gauntlet on a remote machine
+
+The push gate is twenty-one minutes. The release tier is a working day, and most of
+that day is one gate: `mutation` re-runs the entire test suite once per mutant. That
+is not something to run on the machine you are working on, so the full gauntlet
+usually belongs on a spare box you can start and walk away from.
+
+Nothing about it is cloud-specific and nothing about it needs a runner. Every gate is
+one local command against locally installed tooling, so "run it elsewhere" means
+exactly what it sounds like: SSH in, start it detached, log out, come back.
+
+This section assumes the machine already exists and you can SSH to it. Everything
+below is what to install **on** it, how to start a run that outlives your connection,
+how to tell from the other side of the world whether it is working or wedged, and what
+to do with the answer.
+
+### What you are signing up for
+
+Measured on the reference machine, from the reports each run leaves behind:
+
+| Command               | Gates | Measured   | What dominates it                                                                      |
+| --------------------- | ----- | ---------- | -------------------------------------------------------------------------------------- |
+| `npm run verify:fast` | 7     | **82 s**   | the type check and ESLint                                                              |
+| `npm run ci`          | 28    | **21 min** | Playwright at 6m44s, then CodeQL, the server suite and the client suite at ~3 min each |
+| `npm run verify:full` | 36    | **hours**  | `flake` at 64 min, then `mutation`, which has no honest estimate                       |
+
+`verify:full` is cumulative — it is `npm run ci` plus the eight release-tier gates —
+so the twenty-one minutes above are inside the number, not beside it. Of the release
+tier, seven gates come to about seventy minutes between them and `mutation` is the
+rest. Budget a day, start it in the morning, and do not plan around a finish time.
+
+Two commands are **not registered gates**, so `verify:full` does not run them, and both are worth
+knowing about before you plan the day. `npm run verify:selftest` proves every gate can still fail,
+by planting one defect per gate into a temporary copy of the tree. `npm run ci:local` is the clean
+room, and it is not a quick extra: its body **is** `verify:full`, run inside a fresh worktree after
+its own `npm ci`, so it costs a whole second run plus an install. Run either separately, and budget
+for it separately.
+
+### Provision the machine, once
+
+**Node 24 and a full clone.** `engines.node` is `>=24.0.0` and `.nvmrc` pins 24; the
+`engines` gate fails the run on anything older. Clone with history — **not**
+`--depth 1`. Two gates read history, and they fail in opposite directions. `coverage`
+computes patch coverage against `main` or `origin/main`, detects a shallow clone
+outright and stops with the fix in the message. `secrets-full` is the quiet one, and
+therefore the worse one: `git rev-list --objects --all` succeeds in a shallow clone and
+returns a single commit's objects, so the gate **passes** having scanned almost nothing.
+If your trunk ref is neither `main` nor `origin/main` — a feature branch cut from a
+fork, say — set `HVAULT_DIFF_BASE` to the ref this branch forked from.
+
+```bash
+git clone https://github.com/Hiprax/h-vault.git
+cd h-vault
+npm ci                     # all three workspaces
+npm run build:shared       # T0 excludes `build`, so verify:fast consumes shared/dist
+```
+
+**Playwright's browser is the one prerequisite nothing checks.** Every other external
+tool is declared per gate and reports **could not run** when it is absent. The browser
+is not: `e2e`, `a11y` and the E2E leg of `flake` simply fail with Playwright's own
+"Executable doesn't exist" message, which reads like a code defect and is not one.
+Only the `chromium` project is declared, so one browser is enough:
+
+```bash
+npx playwright install --with-deps chromium
+```
+
+> **Neither half of that takes `sudo`.** `--with-deps` elevates its own `apt-get` call
+> and prompts you. Prefixing the whole command with `sudo` puts the browser in
+> **root's** cache where the gate cannot see it, and on a machine whose Node comes from
+> a version manager it usually does not get that far: `sudo` replaces `PATH` with
+> `secure_path` from `/etc/sudoers`, the `#!/usr/bin/env node` shebang cannot find
+> Node, and the error names neither Playwright nor the cause —
+> `env: 'node': no such file or directory`. Do not "fix" that by symlinking Node into
+> `/usr/local/bin`; a version manager's path is specific to the installed version and
+> the symlink dangles the next time it changes.
+
+**Four binaries on `PATH`, pinned to the versions the release workflow installs.**
+Pin them rather than taking the newest: several gates ratchet counts that a different
+scanner version reports differently, which reads as a regression no code caused.
+
+| Tool         | Version | Gate it feeds | Install                                                         |
+| ------------ | ------- | ------------- | --------------------------------------------------------------- |
+| `actionlint` | 1.7.12  | `config`      | [release archive](https://github.com/rhysd/actionlint/releases) |
+| `hadolint`   | 2.14.0  | `config`      | [release binary](https://github.com/hadolint/hadolint/releases) |
+| `oasdiff`    | 1.28.0  | `openapi`     | [release archive](https://github.com/oasdiff/oasdiff/releases)  |
+| `diff-cover` | current | `coverage`    | `uv tool install diff-cover`, or `pipx install diff-cover`      |
+
+`~/.local/bin` is enough for all four; none of them needs root. If you append that
+directory to `PATH` in a shell profile, **start the run from a fresh login shell** —
+launched from the shell that appended the line without re-reading it, the tools are
+invisible and the run collects four "could not run" verdicts several minutes in.
+
+**Docker, for two gates and no fallback.** `docker` (push tier) builds all four images
+and Trivy-scans three of them — the database image is built and deliberately not scanned;
+`deploy` (release tier) stands the whole Compose stack up from nothing.
+Both declare the daemon as a prerequisite and report **could not run** without it,
+which is exit 2 and not a pass. Trivy is optional: absent from `PATH`, the container
+gate runs `aquasec/trivy:latest` against a named cache volume instead, which needs the
+daemon socket — under rootless Docker that is `$XDG_RUNTIME_DIR/docker.sock`, not
+`/var/run/docker.sock`.
+
+**CodeQL is optional and degrades in stated steps**, so an unequipped machine still
+gets an answer, just a smaller one. Install the bundle into `.cache/codeql` per
+[Keeping the gates honest](#keeping-the-gates-honest) above, or point at an existing
+one with `HVAULT_CODEQL=/path/to/codeql`. Without it the `sast` gate falls back to
+Semgrep CE or OpenGrep and says so in its report; with no analyser at all it reports
+**SKIPPED**, the one gate allowed to.
+
+**Budget about 20 GB on the filesystem holding the checkout.** A full pass grows the
+working directory to roughly **13 GB**, and almost none of it is the project: the
+mutation gate's Stryker sandboxes land in `.stryker-tmp/` inside the repository and
+measured **8.9 GB** after one run, the CodeQL bundle and the database it builds put
+**3.3 GB** in `.cache/`, `node_modules` is 723 MB and a release-tier run's reports come
+to about 15 MB. All four are gitignored and all four are disposable, but they have to fit
+while the run is happening.
+
+**Then give the run a `TMPDIR` on a real disk, and check it rather than assuming.** Two
+more large things go to `os.tmpdir()` instead: the clean room's worktree with its
+~600 MB of `node_modules`, and the data path of every `mongod` the test harness spawns,
+at roughly 200 MB each. On many hosts `/tmp` is a **tmpfs sized at half of RAM**, so
+that is a RAM budget wearing a disk's clothes, and it fails late and in disguise: the
+datastore suites die at their first index build, which the runner reports as ordinary
+test failures rather than as a machine that ran out of room.
+
+```bash
+df -h /tmp .              # a small tmpfs on /tmp means redirect it
+free -m                   # `shared` counts anything already living in that tmpfs
+mkdir -p ~/hvault-tmp     # on the real disk; the launch command below exports it
+```
+
+Scratch on a real disk is slower than on a tmpfs. That is the right trade: the
+datastore gates take longer, and they run.
+
+**Free ports 27017 and 5000.** The E2E harness binds an in-memory MongoDB to 27017 and
+the API to 5000 — two of the three ports `docker-compose.dev.yml` publishes on loopback.
+If something is already on 27017 the harness **adopts it** rather than failing —
+`port 27017 is busy — assuming a real MongoDB is running` — and writes into that server's
+`hvault` database, which on a box that also runs the dev stack is a live database rather
+than a fixture. Stop the dev stack before starting a run. The client's 5173 is the
+exception and is reusable on purpose: Playwright reuses a dev server that is already
+listening, which is why the gate deliberately does not set `CI`. `VITE_PORT` moves that
+port and Playwright's base URL together; the Mongo port is fixed, so free it.
+
+**The first run needs outbound network.** The unit tier blocks egress on purpose, with
+exactly one hole punched: `mongodb-memory-server` fetching the `mongod` binary on a
+machine that has not cached it yet. Beyond that first fetch the run needs the network
+for `npm ci`, the Playwright download, `npm audit`, Trivy's vulnerability database and
+the Docker base images. After those are cached the gauntlet is offline apart from the
+dependency audit.
+
+### Confirm the machine before spending a day on it
+
+A missing prerequisite is reported honestly, but it is reported **when the run reaches
+the gate that declares it**, and for the container and coverage gates that is deep into
+the run. Ask everything up front instead. Keep the check outside the repository: both
+the secret scan and the integrity scan enumerate untracked-but-not-ignored files, so a
+helper left in the working tree is itself a finding.
+
+```bash
+cat > ~/hvault-preflight.sh <<'EOF'
+#!/bin/sh
+for probe in "node --version" "npm --version" "docker version" \
+             "actionlint -version" "hadolint --version" \
+             "oasdiff --version" "diff-cover --version"; do
+  if $probe >/dev/null 2>&1; then echo "  ok       $probe"
+  else echo "  MISSING  $probe"; fi
+done
+loc=$(npx playwright install --dry-run chromium 2>/dev/null | awk '/Install location/ {print $3; exit}')
+[ -d "$loc" ] && echo "  ok       playwright chromium" || echo "  MISSING  playwright chromium"
+echo; df -h /tmp "$HOME"; echo; free -m
+EOF
+sh ~/hvault-preflight.sh
+```
+
+Then run the real thing once, because eighty-two seconds of truth beats any probe:
+
+```bash
+npm run verify:fast
+```
+
+If that is green, the machine can build, lint, type-check and read its own ledger. What
+it has not yet proved is Docker, Playwright and the datastore, and the launch below
+will.
+
+### Start it so a lost connection cannot kill it
+
+`nohup` is enough for the common case, and it has one real weakness worth naming
+rather than hiding: it gives you no terminal back, so the log file is your only view.
+Start with it anyway — the run is entirely non-interactive and every result is written
+to disk — and reach for the alternatives further down when the machine calls for them.
+
+Write the launcher into a run directory outside the repository, so each run keeps its
+own log, PID and verdict, and so nothing you create is scanned by a gate:
+
+```bash
+RUN="$HOME/hvault-runs/$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$RUN" "$HOME/hvault-tmp"
+
+cat > "$RUN/run.sh" <<EOF
+#!/bin/sh
+echo \$\$ > "$RUN/run.pid"
+cd "$PWD" || { echo 2 > "$RUN/exit-code"; exit 2; }
+export TMPDIR="$HOME/hvault-tmp"
+export NO_COLOR=1
+npm run verify:full
+echo \$? > "$RUN/exit-code"
+EOF
+chmod +x "$RUN/run.sh"
+
+setsid --fork nohup "$RUN/run.sh" > "$RUN/run.log" 2>&1 < /dev/null &
+sleep 1 && echo "started: $RUN (pid $(cat "$RUN/run.pid"))"
+```
+
+Five details in there are load-bearing, and each one is a way runs get lost:
+
+- **`echo $? > exit-code` is the only thing that records the verdict**, and the failing
+  `cd` writes it too. A background job that ends while nobody is waiting on it discards
+  its exit status, so without this file there is no way, afterwards, to tell a run that
+  failed from a run that was killed. An early exit that skipped the file would be
+  reported as a kill, which is the exact misdiagnosis the file exists to prevent.
+- **`setsid --fork` gives the run its own session and process group**, so it is not a
+  child of your login shell and you can later signal the whole tree rather than one
+  process. `--fork` is not decoration: bare `setsid` forks only when it is _already_ a
+  process-group leader, which is true under an interactive shell's job control and false
+  inside a script, so the plain form behaves differently depending on how you launched it.
+- **The wrapper records its own `$$`; the launching shell must not record `$!`.** With
+  the fork, `$!` names the `setsid` parent, which exits immediately — probe it later and
+  you learn nothing, or worse, you learn about whatever recycled that PID. Written from
+  the inside, the pidfile names the session leader, which is what you signal and probe.
+  It is written by the run rather than by the launcher, hence the one-second pause before
+  reading it back.
+- **`< /dev/null` detaches stdin.** Anything that decides to prompt gets EOF and fails
+  fast instead of blocking forever against a terminal that no longer exists.
+- **`TMPDIR` is exported for the whole run, not one gate**, because the gates that need
+  the space are spread across it.
+
+`NO_COLOR=1` is comfort rather than correctness: the runner already strips ANSI from
+the per-gate transcripts it writes, but not from this top-level log.
+
+**Then verify it is actually detached before you log out**, because discovering
+otherwise costs a day:
+
+```bash
+ps -o pid,pgid,sid,tty,cmd -p "$(cat "$RUN/run.pid")"   # TTY should read `?`
+tail -f "$RUN/run.log"                                  # Ctrl-C stops watching, not the run
+```
+
+**Two situations where `nohup` alone is the wrong tool:**
+
+- **You want to watch it, scroll back, and re-attach later.** Use tmux. It costs one
+  line and solves the thing `nohup` cannot: `tmux new -s verify`, run the command
+  normally inside it, detach with `Ctrl-b d`, and `tmux attach -t verify` from any
+  later connection. Keep the `exit-code` file anyway — a pane you scrolled past is not
+  a record.
+- **The host kills user processes at logout.** Some systems set
+  `KillUserProcesses=yes` in `logind.conf`, and there `nohup`, `setsid` and tmux all
+  die when your session ends. Either allow your user to keep processes after logout
+  with `loginctl enable-linger "$USER"`, or start the run as a transient user unit,
+  which is managed by systemd rather than by your session:
+
+  ```bash
+  systemd-run --user --unit=hvault-verify --same-dir --collect \
+    --setenv=TMPDIR="$HOME/hvault-tmp" sh -c 'npm run verify:full; echo $? > ~/hvault-exit-code'
+  journalctl --user -u hvault-verify -f
+  ```
+
+**If the "spare machine" is a laptop, stop it sleeping.** A closing lid suspends the host
+rather than killing the run, and which deadlines that breaks is not obvious. The per-gate
+leg deadlines in the table below are Node timers on a **monotonic** clock, which stops
+while the machine is asleep, so none of them is charged for the nap. Three things are
+measured with `Date.now()` and are: the deployment drill's 120-second health and restart
+waits, the `smoke` gate's 45-second boot deadline, and every budget in `resource`. A
+suspend inside one of those fails a healthy run, and it does not even fail as a hang — it
+reports "no healthy response within 120000ms", or a blown volume budget, for a reason that
+is nowhere in the code. Run it under
+`systemd-inhibit --what=handle-lid-switch:sleep:idle`, or disable suspend for the
+duration.
+
+### Watch it from anywhere
+
+The runner streams. It prints a `[n/36]` step line for each gate as it starts, the
+gate's own output beneath it, and a pass or fail line with a duration when it ends. A
+boxed summary table and the tier budget comparison come last.
+
+```bash
+tail -f "$RUN/run.log"                                       # live
+grep -oE '^\[[0-9]+/[0-9]+\]' "$RUN/run.log" | tail -1       # which gate it is on
+grep -cE 'passed in|failed after' "$RUN/run.log"             # how many have finished
+ls -lt .testfortress/reports/ | head -20                     # what has been written
+```
+
+That last one is a progress bar by accident and a reliable one: every selected gate's
+reports are **deleted before the run starts**, so a file's presence means the gate that
+declares it has at least begun.
+
+**`summary.json` is the exception, and do not use its existence as a finish signal.** It
+is declared by the tier entry points rather than by any gate, so nothing clears it, and on
+a machine that has run before it is sitting there from the last run for the whole of this
+one. Read its `startedAt` — or its mtime — before believing it. The `exit-code` file from
+the launcher is the only unambiguous signal that this run is over.
+
+**The step counter is not a clock either.** Gates run in the order `npm run ci -- --list`
+prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the two
+longest gates in the repository sit at positions 32 and 33 of 36. A `verify:full` that has
+been on `[33/36]` for four hours is not stuck; it is doing the thing you asked for. The
+same run reaching `[31/36]` in half an hour is likewise normal, and tells you almost
+nothing about how much is left.
+
+**Distinguishing slow from stuck** needs one number: how long the gate named on the
+last step line is expected to take. Only these exceed half a minute; everything else
+in the run is seconds.
+
+| Gate               | Measured | Its own deadline, if it has one              |
+| ------------------ | -------- | -------------------------------------------- |
+| `mutation`         | hours    | none, deliberately                           |
+| `flake`            | 64 min   | 30 min per suite leg, 90 min for the E2E leg |
+| `e2e`              | 6m 44s   | 180 s just to boot the stack                 |
+| `dst`              | 3m 54s   | 15 min per leg                               |
+| `sast`             | 3m 23s   | none                                         |
+| `test-integration` | 3m 22s   | none                                         |
+| `test`             | 3m 1s    | none                                         |
+| `type-check`       | 57s      | none                                         |
+| `deploy`           | 54s      | 120 s per health wait                        |
+| `lint`             | 47s      | none                                         |
+| `resource`         | 42s      | 15 min                                       |
+| `a11y`             | 38s      | none                                         |
+| `fuzz`             | 34s      | 5 min per leg                                |
+| `docker`           | 32s      | none                                         |
+
+A gate that owns a deadline enforces it itself: exceeding it is a **SIGKILL and a
+failure**, reported as _a hang, not a slow machine_, never as a skip. A gate with no
+deadline can only be judged by whether the log is still growing:
+
+```bash
+stat -c '%y  %n' "$RUN/run.log"      # last write; compare against `date`
+```
+
+If the log has not moved in materially longer than the figure above for the gate it is
+on, it is wedged rather than slow. On a shared or heavily loaded box the two blur, so
+run the gauntlet on a machine doing nothing else — the volume budgets in `resource`
+measure wall-clock time and peak memory, and measuring those beside three other
+workers turns a budget into a coin toss.
+
+### Tell "finished" from "died"
+
+The exit-code file is the authority. A PID is not: the pidfile outlives the run, and a
+recycled PID will happily report a stranger's process as your job.
+
+```bash
+if [ -f "$RUN/exit-code" ]; then
+  echo "finished, exit $(cat "$RUN/exit-code")"
+elif pgrep -g "$(cat "$RUN/run.pid")" >/dev/null 2>&1; then
+  echo "still running"
+else
+  echo "killed: no verdict was written"
+fi
+```
+
+**If it was killed**, the run itself left no explanation, so look outside it. The two
+answers that cover almost every case:
+
+```bash
+sudo dmesg -T | tail -40             # the OOM killer names the process it chose
+journalctl -k --since '-1 day' | grep -i -e oom -e killed
+journalctl --user --since '-1 day' | grep -i 'stopping user manager'
+```
+
+`dmesg` needs `sudo` wherever `kernel.dmesg_restrict` is on, which is most
+distributions now; `journalctl -k` reads the same ring buffer and usually does not.
+
+An OOM kill means the box needs more RAM or fewer concurrent workers; a user-manager
+stop at the moment your session ended means `KillUserProcesses`, and the fix is the
+transient unit or `enable-linger` above.
+
+**If it finished, the exit code carries meaning and all three values matter:**
+
+- **`0`** — every selected gate passed, or legitimately skipped.
+- **`1`** — a gate **failed**. The code is broken, and that is definite.
+- **`2`** — nothing failed, but a gate **could not run**: a missing prerequisite, a
+  manifest that disagrees with the runner, or a gate that passed without writing the
+  report it declares. The verdict is unknown, which is a different problem from a
+  known-bad one. Never read a `2` as a soft pass.
+
+Two codes you will see inside gate output rather than as the run's own: **78**, which
+only `sast` may emit and which means SKIPPED, and **124**, a wall-clock deadline kill,
+which is always a failure.
+
+### Read the verdict
+
+`.testfortress/reports/summary.json` is the machine-readable form of the whole run —
+every task's status, duration, gate criterion, declared reports and a one-line summary.
+The same document goes to stdout if you add `--json` to the command.
+
+```bash
+node -e '
+const s = require("./.testfortress/reports/summary.json");
+console.log("exit", s.exitCode, JSON.stringify(s.counts),
+            "in", Math.round(s.durationMs / 60000) + " min");
+for (const t of s.tasks.filter((t) => t.status !== "pass"))
+  console.log(`${t.status.padEnd(6)} ${t.id.padEnd(18)} ${t.summary}\n       ${t.report.join(" ")}`);
+'
+```
+
+Every gate also tees its own full transcript into `.testfortress/reports/<gate>.log`,
+with two exceptions to that naming: `type-check` writes `tsc.log` and `audit` writes
+`deps.log`. `npm run report` re-derives `warnings.json` from the artifacts already on
+disk, without running anything again.
+
+Read `ratchet-full` last and read it properly. It runs after every other gate because
+it grades what they measured against `.testfortress/baseline.json`, and it is the gate
+that turns "green" into "green and not by having measured less".
+
+### The first full run will fail on `mutation`, and that is correct
+
+`mutation`'s floor is `.testfortress/baseline.json`, not a threshold inside the tool.
+When that file carries no `mutation` block — which is its state until someone records
+one — the gate mutates the whole declared scope, writes `mutation.json`, and then
+**fails**, because a gate that passes while holding no floor is not a gate. It fails
+rather than refusing to start precisely so that the report you need in order to record
+the first floor exists by the time you read the failure.
+
+Record it from the machine that measured it, once the rest of the run is clean:
+
+```bash
+npm run audit:ratchet:full
+node scripts/ci/ratchet-check.mjs --accept --reason "first mutation baseline, measured on <host> at <sha>"
+```
+
+`--accept` moves every field in its improving direction only, refuses without a
+`--reason`, and refuses while anything is failing or unmeasured — so it can only ever
+be run from a tree that has just gone green. It also **refuses a `--tier` argument**:
+accepting demands the full comparison, because a partial one would write a floor from
+numbers it never looked at. Read the baseline back afterwards and confirm the block is
+there; if it is not, nothing was armed and the next run holds no floor either.
+
+> **`.testfortress/baseline.json` is the one file a run produces that belongs in git.**
+> Commit and push it from the machine that measured it, never after copying reports
+> between hosts.
+
+### Re-running only what failed
+
+Three failures out of thirty-six should not cost another day. The runner takes an
+explicit gate list, and it **overrides the tier filter** rather than intersecting with
+it, so a release-tier gate can be re-run on its own:
+
+```bash
+npm run ci -- --only=fuzz,recovery       # exactly these, whatever tier they live in
+npm run ci -- --skip=docker,e2e          # everything else in the tier
+HVAULT_SKIP_GATES=docker,e2e npm run ci  # the same thing, from the environment
+```
+
+Three things to know before leaning on it:
+
+- **A subset run is triage, not verification.** The verdict of record is a full run.
+  Re-run the failures until they are understood and fixed, then re-run everything.
+- **`--only` brings no dependencies with it.** `--only=e2e` does not run `build`, and
+  the gate declares a built `packages/shared/dist` as a prerequisite; without one it
+  reports could not run. Run `npm run build` first, or name `build` in the list.
+- **A subset run rewrites `summary.json` to describe the subset.** Copy the full run's
+  summary somewhere first if you want to keep it.
+
+`--bail` stops at the first failure. It is the wrong flag for an unattended run: the
+runner aggregates by default precisely so that one overnight run tells you about every
+broken gate rather than the first one.
+
+### What to do when it goes wrong
+
+**Your connection dropped.** Nothing happened to the run. Reconnect, and read
+`"$RUN/run.log"`; the launch above deliberately gives the run its own session so your
+terminal is not part of it.
+
+**The gate says COULD NOT RUN.** A tool it declared is not on `PATH`, and the runner
+prints which one and how to install it. Install it and re-run that gate alone with
+`--only`. This is exit 2, and it is never a pass — the whole point of the distinction
+is that "we did not check" and "we checked and it is fine" must not look the same.
+
+**`e2e` fails with "Executable doesn't exist".** The browser was never installed, or
+was installed as root. `npx playwright install --with-deps chromium`, without `sudo`,
+as the user who will run the gauntlet.
+
+**`e2e` or `a11y` fail inside setup code** — a rejected TOTP code, an empty CSRF
+response — rather than on an assertion. Suspect resource contention before suspecting a
+regression. Playwright runs single-worker with **retries off**, so a starved server
+surfaces as a hard failure rather than a flake. Re-run it alone with nothing else
+competing.
+
+**Scratch space is full, or the datastore gates die for no stated reason.** A killed run
+strands its `mongod` data paths: `mongodb-memory-server` deliberately keeps them "for
+investigation" when a start fails, and after a `SIGKILL` nothing is left that can reach
+them. Each is roughly 200 MB, and on a tmpfs each is 200 MB of RAM. They live under
+`os.tmpdir()`, so they follow the `TMPDIR` the launcher exported — look there, not
+reflexively in `/tmp`:
+
+```bash
+T="${TMPDIR:-/tmp}"
+df -h "$T"; free -m
+ls -d "$T"/mongo-mem-* 2>/dev/null | wc -l
+du -sh --total "$T"/mongo-mem-* 2>/dev/null | tail -1
+pgrep -a mongod                     # must be empty before you delete anything
+rm -rf "$T"/mongo-mem-*
+```
+
+Do not automate that sweep. Concurrent Vitest runs are supported deliberately — they get
+disjoint mongod port bands and separate coverage directories via `VITEST_COVERAGE_DIR` —
+so a blind sweep can delete a live sibling's database.
+
+**A gate was SIGKILLed at its deadline (exit 124).** The message says to treat it as a
+hang rather than a slow machine, and on a dedicated box that is right — the deadlines
+carry an order of magnitude of headroom. On a shared box, check what else was running
+before believing it.
+
+**Port 27017 was already answering.** The harness adopted it instead of starting its
+own, and wrote into that server's `hvault` database. Stop the other MongoDB, or move
+the gauntlet to a machine that is not also a database host.
+
+**The Docker daemon is unreachable.** The `docker` and `deploy` gates report could not
+run. Start it; if you cannot, and you accept a smaller answer,
+`HVAULT_SKIP_GATES=docker,deploy` skips them by name and prints the skip in the
+summary. A skip is visible; a silent pass would not be.
+
+**The deployment drill left containers behind.** It runs under its own Compose project
+name, so cleanup is scoped by label and cannot touch a real deployment. Prefer the
+label form over `docker compose -p hvault-drill down -v`: the latter has to interpolate
+`docker-compose.yml`, which refuses to parse without `MONGO_ROOT_PASSWORD` set.
+
+```bash
+docker ps -aq  --filter label=com.docker.compose.project=hvault-drill | xargs -r docker rm -f
+docker volume ls -q --filter label=com.docker.compose.project=hvault-drill | xargs -r docker volume rm
+docker network ls -q --filter label=com.docker.compose.project=hvault-drill | xargs -r docker network rm
+```
+
+**A killed `mutation` left `.stryker-tmp`.** It holds Stryker's sandbox copies of the
+whole checkout — **8.9 GB** after one measured run — and nothing reclaims it on the next
+run. `rm -rf .stryker-tmp`.
+
+**A killed `ci:local` left a registered worktree.** `git worktree list` shows it;
+`git worktree prune` clears the bookkeeping and `git worktree remove --force <path>`
+removes the tree.
+
+**A killed `verify:selftest` left a copy of the tree.** It plants its defects into a
+temporary copy under `$TMPDIR/hvault-selftest-*` rather than into the working tree, so a
+kill costs disk rather than a dirty checkout. Delete the copy. Running `git status`
+before you copy or commit anything after any abnormal end is still worth the two seconds.
+
+**Two runs at once.** Do not. Two gauntlets collide on `.testfortress/reports/`, on port
+27017 and on the Docker stack names. The realistic version of this is not two gauntlets —
+it is someone running `git commit` on that checkout mid-run and firing the `pre-commit`
+hook into the same tree. Treat the checkout as frozen for the duration: no commit, no
+checkout, no pull, no push until the run ends.
+
+### Bring the results home
+
+Only one file a run produces is version-controlled, and it is the real deliverable:
+**`.testfortress/baseline.json`**. Everything under `.testfortress/reports/` is
+gitignored and exists only on that host.
+
+**Copying the evidence** is a plain file transfer; a release-tier run's reports come to
+roughly 15 MB, dominated by `dst.log` at 3.3 MB and the flake JUnit documents at 3.2 MB
+between them:
+
+```bash
+# on the remote box
+tar -czf ~/hvault-reports-$(date -u +%Y%m%d).tgz -C /path/to/h-vault .testfortress/reports
+
+# from your machine
+scp user@host:hvault-reports-*.tgz .
+rsync -avz --delete user@host:/path/to/h-vault/.testfortress/reports/ ./reports/
+```
+
+> **Read them before you forward them.** The transcripts carry absolute home paths,
+> the machine's environment, dependency inventories and the secret scan's own findings.
+> They are diagnostic output, not a publishable artifact, and sharing them is a
+> decision rather than a formality. They are also **not** input to another run: never
+> `git add -f` them, and never copy them onto a second machine and accept a baseline
+> there.
+
+**Pushing** is the other half, and one thing about it will surprise you. `git push`
+from that box fires the `pre-push` hook, which runs the whole T0+T1 gauntlet — twenty
+minutes during which git holds a single SSH connection open and idle, having already
+taken the ref advertisement and not yet sent the pack. Many servers close it. The
+symptom is a gate that passes, an exit that looks unremarkable and a branch still
+sitting ahead; `git ls-remote` and `--dry-run` both succeed, because neither leaves a
+gap, which makes it read like a permissions problem it is not. Add a keepalive to
+`~/.ssh/config` on that machine:
+
+```text
+Host github.com
+  ServerAliveInterval 30
+```
+
+or use `GIT_SSH_COMMAND='ssh -o ServerAliveInterval=30' git push` for one push. HTTPS
+remotes are unaffected: they open a separate request for the transfer, so the hook's
+duration never spans a connection.
+
+Pushing with `--no-verify` skips the hook and the twenty minutes with it. That is
+defensible on exactly one occasion — the same commit has just passed `npm run ci` on
+that box, minutes earlier — and it is worth saying what it costs the rest of the time:
+nothing is checked, and `.github/workflows/release.yml` re-running the gauntlet on the
+hosted runner is what catches it.
+
+### When it is over
+
+Aborting a run means signalling the **process group**, not the shell that started it,
+so nothing survives as an orphan:
+
+```bash
+kill -TERM -"$(cat "$RUN/run.pid")"
+```
+
+Then, once no run is in flight, reclaim the space. A full pass leaves twelve gigabytes
+or so across four places, none of them tracked:
+
+```bash
+rm -rf .stryker-tmp        # mutation sandboxes — 8.9 GB measured
+rm -rf .cache/codeql-db    # the CodeQL database, rebuilt on demand
+rm -rf ~/hvault-tmp/*      # clean-room worktrees and mongod data paths
+git worktree prune         # bookkeeping a killed clean room leaves behind
+git status --short         # must be clean before you commit anything
+```
+
+Then the drill's containers, volumes and networks, with the three label-scoped commands
+above. Keep the run directories themselves; they are kilobytes, and `run.log` plus
+`exit-code` are the only durable record that a given commit was measured on a given day.
 
 ---
 
