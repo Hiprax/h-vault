@@ -1027,6 +1027,25 @@ describe('Docker deployment', () => {
       expect(webStage).toMatch(/USER root[\s\S]*RUN apk upgrade --no-cache[\s\S]*USER 101/);
     });
 
+    it('patches the Node base image OS packages that Trivy flags as fixable HIGH', () => {
+      // Same class of finding as the Nginx stage above, and the same remedy. The
+      // node:24-alpine base is rebuilt on NODE releases rather than on Alpine
+      // security releases, so it ships openssl behind its own branch and the image
+      // gate goes red in `app` AND `bootstrap` at once. The upgrade lives in `base`
+      // so both runtime images inherit it from one instruction; dropping it reopens
+      // both, which is why it is asserted rather than merely commented.
+      const baseStage = dockerfile.slice(
+        dockerfile.indexOf('FROM node:24-alpine'),
+        dockerfile.indexOf('FROM base AS development'),
+      );
+      expect(baseStage).toMatch(/RUN apk upgrade --no-cache/);
+      // NEGATIVE: never a pinned apk revision in its place. `apk add libssl3=3.5.8-r0`
+      // fixes today and breaks every build the day Alpine drops that revision from
+      // the mirror, turning an unrelated gate red for a reason no reader would
+      // connect to this line.
+      expect(baseStage).not.toMatch(/apk add[^\n]*=\d/);
+    });
+
     it('gives every config file it copies an explicit mode, so the host checkout cannot decide it', () => {
       // Docker COPY PRESERVES the source file's mode. The nginx config files are
       // copied from the build context, so on a checkout whose files are 0600 —

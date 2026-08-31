@@ -29,6 +29,27 @@
 # holds. Revisit when the Alpine 3.24+ musl regression is resolved upstream.
 FROM node:24-alpine3.23 AS base
 WORKDIR /app
+# Patch the base image's OS packages before anything is built on top of them, for
+# the same reason and by the same means as the `web` stage below.
+#
+# node:24-alpine is rebuilt when NODE releases, not when Alpine publishes a
+# security release, so it lags its own branch: it shipped openssl 3.5.7-r0 while
+# Alpine v3.23/main carried 3.5.8-r0, and Trivy flagged libcrypto3/libssl3 as a
+# fixable HIGH (CVE-2026-14456, an unbounded pending-connection queue in the QUIC
+# listener) in BOTH `app` and `bootstrap`. Nothing here is a QUIC server, and
+# Node's prebuilt musl binary bundles its own OpenSSL — these two packages are
+# present because the Alpine rootfs itself needs them — but the fix is one apk
+# transaction away, so it is taken rather than argued about.
+#
+# It lives in `base` so every derived image inherits it from ONE instruction. It
+# cannot cross Alpine releases: /etc/apk/repositories in this base points at the
+# v3.23 branch, so the upgrade stays inside 3.23 and the 3.24 musl that SIGSEGVs
+# npm under WSL2 (see the tag pin above) is never pulled. Deliberately NOT
+# `apk add --upgrade <pkg>=<version>`: hadolint DL3018 would demand the pinned
+# revision, and a pinned apk revision breaks every build on the day Alpine
+# publishes the next one — a red gate for a reason that has nothing to do with
+# this repository.
+RUN apk upgrade --no-cache
 # mongodb-memory-server (a server devDependency) downloads a ~150 MB mongod
 # binary in its postinstall. Nothing in any image runs it — the unit tests do,
 # and they never run in a container — so skip the download entirely.
