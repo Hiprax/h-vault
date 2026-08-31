@@ -58,6 +58,21 @@ import {
   // Schemas — config
   publicConfigDataSchema,
   publicConfigResponseSchema,
+  // Schemas — document
+  documentMetaSchema,
+  initDocumentUploadSchema,
+  completeDocumentUploadSchema,
+  updateDocumentSchema,
+  listDocumentsSchema,
+  listDocumentTrashSchema,
+  documentPartParamsSchema,
+  documentSegmentParamsSchema,
+  documentResponseSchema,
+  documentUploadResponseSchema,
+  initDocumentUploadResponseSchema,
+  documentUsageResponseSchema,
+  documentChunkCountFor,
+  documentMetaJsonByteLength,
   // Constants
   APP_NAME,
   APP_VERSION,
@@ -180,6 +195,30 @@ describe('barrel exports (src/index.ts)', () => {
   it('exports config schemas', () => {
     expect(publicConfigDataSchema).toBeDefined();
     expect(publicConfigResponseSchema).toBeDefined();
+  });
+
+  it('exports the document schemas and the framing helpers', () => {
+    // The package publishes only the "." subpath, so a schema the barrel does not
+    // re-export is unreachable from the server and the client no matter what
+    // `schemas/document.ts` exports — and the document store's whole point is that
+    // both sides read ONE definition of every bound.
+    expect(documentMetaSchema).toBeDefined();
+    expect(initDocumentUploadSchema).toBeDefined();
+    expect(completeDocumentUploadSchema).toBeDefined();
+    expect(updateDocumentSchema).toBeDefined();
+    expect(listDocumentsSchema).toBeDefined();
+    expect(listDocumentTrashSchema).toBeDefined();
+    expect(documentPartParamsSchema).toBeDefined();
+    expect(documentSegmentParamsSchema).toBeDefined();
+    expect(documentResponseSchema).toBeDefined();
+    expect(documentUploadResponseSchema).toBeDefined();
+    expect(initDocumentUploadResponseSchema).toBeDefined();
+    expect(documentUsageResponseSchema).toBeDefined();
+    // Reached through the barrel, not through a relative path: the browser computes
+    // `declaredChunkCount` with this exact function before it seals a byte, and the
+    // schema that validates the number calls the same one.
+    expect(documentChunkCountFor(0, 1024)).toBe(1);
+    expect(documentMetaJsonByteLength({ a: 'b' })).toBe(9);
   });
 
   it('exports constants', () => {

@@ -96,6 +96,8 @@ import {
   MAX_DOCUMENT_EXT_LENGTH,
   MAX_DOCUMENT_NOTE_LENGTH,
   MAX_DOCUMENT_TAGS,
+  MAX_DOCUMENT_TIMESTAMP_LENGTH,
+  MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH,
   MAX_DOCUMENT_META_JSON_BYTES,
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
   MAX_FORMATTABLE_SIZE_BYTES,
@@ -374,6 +376,8 @@ describe('Document-store constants', () => {
     ['MAX_DOCUMENT_EXT_LENGTH', MAX_DOCUMENT_EXT_LENGTH, 32],
     ['MAX_DOCUMENT_NOTE_LENGTH', MAX_DOCUMENT_NOTE_LENGTH, 10_000],
     ['MAX_DOCUMENT_TAGS', MAX_DOCUMENT_TAGS, 20],
+    ['MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH', MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH, 64],
+    ['MAX_DOCUMENT_TIMESTAMP_LENGTH', MAX_DOCUMENT_TIMESTAMP_LENGTH, 40],
     ['MAX_DOCUMENT_META_JSON_BYTES', MAX_DOCUMENT_META_JSON_BYTES, 36_864],
     ['MAX_ENCRYPTED_DOCUMENT_META_LENGTH', MAX_ENCRYPTED_DOCUMENT_META_LENGTH, 49_152],
     ['MAX_FORMATTABLE_SIZE_BYTES', MAX_FORMATTABLE_SIZE_BYTES, 5_242_880],
@@ -451,8 +455,11 @@ describe('Document-store constants', () => {
     expect(worstCaseTextBytes).toBe(codeUnitBudget * 3);
     // Plus the hex digest, and an allowance for the JSON keys, the numbers, the
     // timestamp and the transform record. 2 KiB is far above what eleven short keys
-    // and a handful of integers cost, so a budget that clears this clears the shape
-    // Phase 2 will define.
+    // and a handful of integers cost. The shape is no longer hypothetical: with
+    // `documentMetaSchema` defined, the same worst case measured against the real
+    // field set is 35_472 bytes, and `document-schema.test.ts` asserts THAT
+    // directly. This case stays because it is the arithmetic reason the budget is
+    // what it is, and it fails if a field bound is raised without the budget.
     const structureAllowance = 2_048;
     expect(worstCaseTextBytes + 64 + structureAllowance).toBeLessThanOrEqual(
       MAX_DOCUMENT_META_JSON_BYTES,

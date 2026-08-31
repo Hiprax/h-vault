@@ -5,6 +5,7 @@ export * from './schemas/vault.js';
 export * from './schemas/folder.js';
 export * from './schemas/user.js';
 export * from './schemas/config.js';
+export * from './schemas/document.js';
 
 // Types
 export * from './types/index.js';

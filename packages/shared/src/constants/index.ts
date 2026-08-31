@@ -322,6 +322,29 @@ export const MAX_DOCUMENT_NOTE_LENGTH = 10_000;
 // same way. Each tag is bounded by MAX_TAG_LENGTH, which is the one definition of
 // how long a tag may be anywhere in this application.
 export const MAX_DOCUMENT_TAGS = 20;
+// The provenance labels the upload panel's optional transforms record inside the
+// metadata blob: `transform.tool` (the package that rewrote the bytes) and
+// `transform.toolVersion` (its exact version). ONE bound for both, because they
+// are the same kind of value and a package name and a semver are both short; 64
+// units is generous against `prettier`/`jsonrepair` and a version string, and
+// narrow enough that the pair costs at most 384 of the metadata budget's bytes
+// (measured: the whole worst-case blob is 35_472 bytes of the 36_864 below).
+// They are the only two free-text fields in the blob that no user types, so the
+// bound exists to keep a hostile or buggy writer from spending the budget here
+// rather than to accommodate anyone.
+export const MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH = 64;
+// The metadata blob's `capturedAt`, an ISO 8601 instant in UTC.
+//
+// A bound is needed here even though the field also carries an ISO format check,
+// because ISO 8601's fractional-second component is one-or-more digits with no
+// upper bound: measured, a bare datetime check accepts a 30,021-character instant,
+// and a blob whose every other field is minimal would then have most of the byte
+// budget available to spend on one timestamp. 40 units holds the longest instant
+// anyone can legitimately produce with room to spare — `Date.prototype.toISOString`
+// emits 24 (`2026-08-31T12:34:56.789Z`) and nanosecond precision reaches 30 — while
+// being far too short to be worth abusing. Only a `Z` instant is accepted, so no
+// allowance is made for a `+HH:MM` offset.
+export const MAX_DOCUMENT_TIMESTAMP_LENGTH = 40;
 // The metadata blob is bounded in TWO named steps, because the two sides measure
 // different things and only one of them is a byte count.
 //
@@ -332,11 +355,19 @@ export const MAX_DOCUMENT_TAGS = 20;
 // so the worst case a real user can write is three times the code-unit budget:
 // (255 + 255 + 32 + 10_000 + 20 * 50) * 3 = 34_626 bytes, plus the 64-character
 // hex digest and the JSON structure itself. 36 KiB covers 34_626 + 64 and leaves
-// about 2.1 KiB for the keys, the numbers, the timestamp and the transform record,
-// which is several times what eleven short keys and a handful of integers cost. It deliberately does NOT cover a
-// note made of control characters, which `JSON.stringify` escapes to `\u0007` at
-// six bytes per unit: sizing for that would nearly triple every stored blob to
-// serve input no human wrote, and the refusal is loud rather than lossy.
+// about 2.1 KiB for the keys, the numbers, the timestamp and the transform record.
+// MEASURED against the real schema rather than estimated: every string field at its
+// bound in 3-byte characters, both hex digests, an ISO instant, the three framing
+// numbers and the transform record serialize to 35_472 bytes, so 1_392 bytes are
+// spare and the budget provably admits a metadata object whose every field is
+// individually legal (`document-schema.test.ts` builds that object and asserts it,
+// which is what turns a new field or a raised field bound into a red test rather
+// than a document that refuses to seal). It deliberately does NOT cover a value
+// made of code units `JSON.stringify` ESCAPES, each of which costs six bytes: a
+// control character (`\u0007`) or a lone surrogate (`\ud800`, which is how a name
+// truncated mid-surrogate-pair by an upstream tool arrives). Sizing for those
+// would nearly triple every stored blob to serve input no human wrote, and the
+// refusal is loud rather than lossy.
 //
 // MAX_ENCRYPTED_DOCUMENT_META_LENGTH bounds the STORED string, which is base64 of
 // the ciphertext and therefore pure ASCII. AES-GCM ciphertext is exactly as long

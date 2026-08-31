@@ -53,6 +53,20 @@ import type {
   regenerateBackupCodesSchema,
   deleteAccountSchema,
 } from '../schemas/user.js';
+import type {
+  completeDocumentUploadSchema,
+  documentMetaSchema,
+  documentPartParamsSchema,
+  documentResponseSchema,
+  documentSegmentParamsSchema,
+  documentUploadResponseSchema,
+  documentUsageResponseSchema,
+  initDocumentUploadResponseSchema,
+  initDocumentUploadSchema,
+  listDocumentTrashSchema,
+  listDocumentsSchema,
+  updateDocumentSchema,
+} from '../schemas/document.js';
 import type { paginationSchema } from '../schemas/common.js';
 import type { ItemType, AuditAction, BackupStatus, ErrorCode, Theme } from '../constants/index.js';
 
@@ -107,6 +121,25 @@ export type ImportInsertItem = z.infer<typeof importInsertItemSchema>;
 export type ImportUpdateItem = z.infer<typeof importUpdateItemSchema>;
 export type ImportOperations = z.infer<typeof importOperationsSchema>;
 export type PaginationInput = z.infer<typeof paginationSchema>;
+
+// Document store types.
+//
+// Every one of these is the schema's OUTPUT type, which is the shape a controller
+// or a store holds after `safeParse` has succeeded — note that the two params
+// types therefore carry `partNumber` and `index` as NUMBERS, because the path
+// schemas parse the string the router hands them.
+export type DocumentMeta = z.infer<typeof documentMetaSchema>;
+export type InitDocumentUploadInput = z.infer<typeof initDocumentUploadSchema>;
+export type CompleteDocumentUploadInput = z.infer<typeof completeDocumentUploadSchema>;
+export type UpdateDocumentInput = z.infer<typeof updateDocumentSchema>;
+export type ListDocumentsInput = z.infer<typeof listDocumentsSchema>;
+export type ListDocumentTrashInput = z.infer<typeof listDocumentTrashSchema>;
+export type DocumentPartParams = z.infer<typeof documentPartParamsSchema>;
+export type DocumentSegmentParams = z.infer<typeof documentSegmentParamsSchema>;
+export type DocumentResponse = z.infer<typeof documentResponseSchema>;
+export type DocumentUploadResponse = z.infer<typeof documentUploadResponseSchema>;
+export type InitDocumentUploadResponse = z.infer<typeof initDocumentUploadResponseSchema>;
+export type DocumentUsageResponse = z.infer<typeof documentUsageResponseSchema>;
 
 // API response types
 export type ApiResponse<T> =
@@ -480,10 +513,31 @@ export type IIdentityAddress = NonNullable<IIdentityData['address']>;
 
 // Public (unauthenticated) server configuration surfaced via GET /config.
 // Contains only non-sensitive, operator-tunable values the client needs before
-// authentication — currently the File Encryption tool's client-side size cap.
+// authentication: the File Encryption tool's client-side size cap, and whether
+// the document store is available at all.
+//
+// Mirrors `publicConfigDataSchema`, which is the runtime half of this contract.
 export interface PublicConfig {
   fileEncryption: {
     maxSizeMB: number;
+  };
+  /**
+   * The document store's advertisement, in three states the client must tell
+   * apart: ABSENT (a server older than the feature), present with
+   * `enabled: false` (this server, no object storage configured), or present with
+   * `enabled: true` and the numbers.
+   *
+   * Optional on purpose. A current client must still be able to read an older
+   * server's config, which is the N-1 compatibility the `upgrade` gate checks.
+   */
+  documents?: {
+    enabled: boolean;
+    maxSizeMB?: number;
+    chunkPlaintextBytes?: number;
+    maxDocuments?: number;
+    quotaMB?: number;
+    /** Advisory only — the server sees ciphertext and cannot enforce it. */
+    allowedExtensions?: string[];
   };
 }
 
