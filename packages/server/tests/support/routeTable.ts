@@ -59,7 +59,14 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
  * seeding scenario, and a row naming a resource with no scenario fails there.
  */
 export type OwnedResource =
-  'vaultItem' | 'trashedVaultItem' | 'folder' | 'session' | 'trustedDevice';
+  | 'vaultItem'
+  | 'trashedVaultItem'
+  | 'folder'
+  | 'session'
+  | 'trustedDevice'
+  | 'document'
+  | 'trashedDocument'
+  | 'documentUpload';
 
 /**
  * When a route is mounted at all.
@@ -98,6 +105,7 @@ export const ROUTER_MOUNTS = [
   '/api/v1/user',
   '/api/v1/tools',
   '/api/v1/backup',
+  '/api/v1/documents',
   // Last: `healthRoutes` and `configRoutes` mount here, and a longer prefix
   // must be preferred when both would match. `collectAppRoutes` requires the
   // matched span to equal the candidate, so order is not load-bearing — but
@@ -683,6 +691,54 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     owned: null,
     when: 'always',
     note: 'The 30 MB body parser ahead of the limiter is not a limiter.',
+  },
+
+  // ── /api/v1/documents (router-level `authenticate`, then `requireStorage`) ──
+  //
+  // `requireStorage` is router-level and answers 503 where the operator has
+  // configured no object storage, so it is not a limiter and does not appear in
+  // the column below. It sits AHEAD of every route-level limiter here, which is
+  // why an unconfigured deployment spends no rate-limit budget.
+  {
+    method: 'get',
+    path: '/api/v1/documents/uploads',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'post',
+    path: '/api/v1/documents/uploads',
+    auth: 'required',
+    csrf: 'required',
+    // `documentUploadLimiter`, deliberately NOT `heavyOpLimiter`: init, complete
+    // and abort are three requests per transfer, and the IP-keyed heavy-op budget
+    // of 10 per 15 minutes is shared with export, backup and every bulk vault
+    // operation.
+    limiters: ['documentUploadLimiter'],
+    owned: null,
+    when: 'always',
+    note: 'Takes an owned folderId in the BODY, which this table does not model; covered by document-uploads.test.ts.',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/uploads/:id',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'documentUpload' },
+    when: 'always',
+  },
+  {
+    method: 'delete',
+    path: '/api/v1/documents/uploads/:id',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['documentUploadLimiter'],
+    owned: { param: 'id', resource: 'documentUpload' },
+    when: 'always',
   },
 
   // ── /api/v1 (health, config) ──────────────────────────────────────────

@@ -46,14 +46,45 @@
  * cases (a LIST endpoint returning only the caller's rows), which are an
  * invariant about a response body rather than about an id.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import mongoose from 'mongoose';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES } from '@hvault/shared';
+
+/**
+ * Turn the document store ON for this file's module graph.
+ *
+ * Every document route sits behind `requireStorage`, which answers 503 unless the
+ * four `S3_*` connection variables are set — and `vitest.config.ts` pins them
+ * EMPTY on purpose, so that a developer's root `.env` cannot change the shape of
+ * the application under test. Without this the matrix would observe 503 on every
+ * document row and prove nothing about ownership.
+ *
+ * A HOISTED `vi.mock`, never `vi.resetModules()` + `vi.doMock`: resetting the
+ * registry re-evaluates `models/User.ts` against the externalised mongoose
+ * singleton, which throws `OverwriteModelError`. `coverage-rate-limiter.test.ts`
+ * forces `isProduction` the same way.
+ *
+ * Only `storageConfigured` is overridden. `resolveStorageOptions` still finds no
+ * credentials, so `getStorage()` would throw — which is exactly the right
+ * behaviour here: the two document rows in the table are seeded WITHOUT an
+ * engine-side multipart upload, so no handler they exercise reaches storage, and
+ * one that started to would fail loudly rather than silently talking to nothing.
+ */
+vi.mock('../src/config/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config/index.js')>();
+  return { ...actual, storageConfigured: true };
+});
+
 import app from '../src/app.js';
+import { DocumentUpload } from '../src/models/DocumentUpload.js';
+import { Document } from '../src/models/Document.js';
 import { Folder } from '../src/models/Folder.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { hashToken } from '../src/utils/token.js';
+import { buildObjectKey } from '../src/utils/documentObjects.js';
 import {
   ROUTE_TABLE,
   isMountedUnderTest,
@@ -162,6 +193,41 @@ interface Scenario {
 const readDoc = async (query: { lean: () => unknown }): Promise<Record<string, unknown> | null> =>
   (await query.lean()) as Record<string, unknown> | null;
 
+/**
+ * The ciphertext columns every document row and staging row carries.
+ *
+ * Opaque strings rather than real ciphertext: this suite asks who may address a
+ * row, never what the bytes decrypt to, and a real seal here would tie an
+ * ownership test to the crypto service.
+ */
+const MATRIX_DOCUMENT_CRYPTO = {
+  encryptedDek: 'matrix-dek-ciphertext',
+  dekIv: 'matrix-dek-iv',
+  dekTag: 'matrix-dek-tag',
+  streamSalt: 'matrix-stream-salt',
+  noncePrefix: 'matrix-prefix',
+};
+
+/** A committed document row for `ownerId`, active or trashed. */
+async function seedDocument(ownerId: string, overrides: Record<string, unknown>): Promise<string> {
+  const documentId = new mongoose.Types.ObjectId();
+  const document = await Document.create({
+    _id: documentId,
+    userId: ownerId,
+    objectKey: buildObjectKey(ownerId, documentId.toHexString()),
+    ...MATRIX_DOCUMENT_CRYPTO,
+    encryptedMeta: 'matrix-meta-ciphertext',
+    metaIv: 'matrix-meta-iv',
+    metaTag: 'matrix-meta-tag',
+    chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+    chunkCount: 1,
+    ciphertextBytes: 1024 + DOCUMENT_TAG_BYTES,
+    plaintextBytes: 1024,
+    ...overrides,
+  });
+  return String(document._id);
+}
+
 const RESOURCES: Record<OwnedResource, Pick<Scenario, 'seed' | 'read' | 'count'>> = {
   vaultItem: {
     seed: async (ownerId) => {
@@ -227,6 +293,41 @@ const RESOURCES: Record<OwnedResource, Pick<Scenario, 'seed' | 'read' | 'count'>
     read: (id) => readDoc(TrustedDevice.findById(id)),
     count: (userId) => TrustedDevice.countDocuments({ userId }),
   },
+  document: {
+    seed: (ownerId) => seedDocument(ownerId, {}),
+    read: (id) => readDoc(Document.findById(id)),
+    count: (userId) => Document.countDocuments({ userId }),
+  },
+  trashedDocument: {
+    seed: (ownerId) => seedDocument(ownerId, { deletedAt: new Date() }),
+    read: (id) => readDoc(Document.findById(id)),
+    count: (userId) => Document.countDocuments({ userId }),
+  },
+  documentUpload: {
+    // Deliberately WITHOUT an `s3UploadId`. The row then describes a
+    // single-segment transfer, which has no engine-side multipart upload, so
+    // `DELETE /uploads/:id` completes without reaching object storage — and this
+    // file mocks only `storageConfigured`, not the storage provider. A handler
+    // that started to call the engine here would fail loudly instead of quietly
+    // passing.
+    seed: async (ownerId) => {
+      const uploadId = new mongoose.Types.ObjectId();
+      const upload = await DocumentUpload.create({
+        _id: uploadId,
+        userId: ownerId,
+        objectKey: buildObjectKey(ownerId, uploadId.toHexString()),
+        ...MATRIX_DOCUMENT_CRYPTO,
+        declaredPlaintextBytes: 1024,
+        declaredChunkCount: 1,
+        chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+        vaultKeyVersion: 0,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      });
+      return String(upload._id);
+    },
+    read: (id) => readDoc(DocumentUpload.findById(id)),
+    count: (userId) => DocumentUpload.countDocuments({ userId }),
+  },
 };
 
 /**
@@ -256,6 +357,12 @@ const CALLS: Record<string, Pick<Scenario, 'query' | 'body' | 'ownerStatus' | 'o
   },
   'DELETE /api/v1/user/sessions/:id': { ownerStatus: 200, ownerMutates: true },
   'DELETE /api/v1/user/trusted-devices/:id': { ownerStatus: 200, ownerMutates: true },
+  // Only the two owned document routes THIS release mounts. `CALLS` is keyed by
+  // route, so an entry written ahead of the route it names is an orphan and the
+  // "names no scenario for a route the table does not declare" case above fails
+  // by design.
+  'GET /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: false },
+  'DELETE /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: true },
 };
 
 type OwnedRow = RouteRow & { owned: NonNullable<RouteRow['owned']> };
@@ -289,7 +396,7 @@ describe('the matrix covers the table', () => {
     expect(orphaned, 'scenario(s) whose route is no longer in the table').toEqual([]);
   });
 
-  it('runs the matrix over all ten id-taking routes', () => {
+  it('runs the matrix over all twelve id-taking routes', () => {
     // A pinned count, because the cheapest way to silence a failing IDOR case
     // is to change its row's `owned` to null: route-table.test.ts would still
     // pass (it only forces `owned` non-null for paths carrying a parameter, and
@@ -301,7 +408,7 @@ describe('the matrix covers the table', () => {
     // exercised-row count agree. Both are filters of the same array, so that
     // comparison is n === n and cannot fail.
     expect(OWNED_ROWS.map(rowKey).sort()).toEqual(Object.keys(CALLS).sort());
-    expect(OWNED_ROWS).toHaveLength(10);
+    expect(OWNED_ROWS).toHaveLength(12);
   });
 });
 

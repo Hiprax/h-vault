@@ -790,6 +790,23 @@ authoritative.
 </details>
 
 <details>
+<summary><b>Documents</b> — <code>/api/v1/documents</code></summary>
+
+Available only where object storage is configured; every route answers **503** otherwise, and
+`GET /config` says which it is so the app can hide the feature rather than probe for it. A document
+is encrypted in the browser before a byte leaves it: the server stores ciphertext, a wrapped key and
+sizes, and never sees a filename, a type, a tag or a note.
+
+| Method | Endpoint                 | Description                                                        |
+| ------ | ------------------------ | ------------------------------------------------------------------ |
+| GET    | `/documents/uploads`     | Transfers in progress, with the parts already received             |
+| POST   | `/documents/uploads`     | Open a transfer; returns the id the browser encrypts against       |
+| GET    | `/documents/uploads/:id` | One transfer and its part ledger, so an interrupted upload resumes |
+| DELETE | `/documents/uploads/:id` | Cancel a transfer and release what the storage engine holds        |
+
+</details>
+
+<details>
 <summary><b>Tools and backup</b> — <code>/api/v1/tools</code>, <code>/api/v1/backup</code></summary>
 
 | Method | Endpoint                             | Description                                            |
@@ -857,7 +874,7 @@ are replaced with the generic status text, so an internal failure cannot leak it
 
 ## Rate limiting
 
-Fourteen tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-keyed limiters collapse
+Seventeen tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-keyed limiters collapse
 an IPv6 address to its `/64` prefix, so rotating the source address inside one allocation does not
 buy an attacker a fresh bucket.
 
@@ -875,22 +892,25 @@ Two rules govern where a limiter goes, and both were learned the hard way:
   precisely because the auth tier bounds the IP on the same route regardless. The refresh tier has no
   such companion, so it keys on the address alone.
 
-| Tier            | Limit      | Window | Applied to                                                                                                                                                                  |
-| --------------- | ---------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth            | 20 / IP    | 15 min | register, login, 2FA login, forgot-password, resend-verification — credential attempts only                                                                                 |
-| Account         | 20 / email | 15 min | login (stacked on top of the auth tier)                                                                                                                                     |
-| Token verify    | 20 / IP    | 15 min | verify-email, reset-password, unlock-account, 2FA login, 2FA setup verification                                                                                             |
-| Refresh         | 200 / IP   | 15 min | token refresh — keyed by IP alone (the one identity an unauthenticated caller cannot forge), so it is shared by everyone behind one egress address; sized for ~60 open tabs |
-| Unlock          | 5 / user   | 5 min  | vault unlock verification                                                                                                                                                   |
-| Password verify | 5 / user   | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password                    |
-| Breach check    | 30 / user  | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                                      |
-| Breach batch    | 300 / user | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                                      |
-| General auth    | 60 / user  | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, backup settings and history, lock, logout, logout-all                                                 |
-| Heavy Ops       | 10 / IP    | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                                                |
-| Import          | 60 / user  | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                      |
-| CSRF            | 100 / IP   | 15 min | the CSRF token endpoint — every token refresh invalidates the token in every open tab, so re-fetches are routine                                                            |
-| Health          | 60 / IP    | 1 min  | health and public config — counted **in memory**, per process (see below)                                                                                                   |
-| Metrics         | 60 / IP    | 1 min  | the metrics endpoint — counted **in memory**, per process (see below)                                                                                                       |
+| Tier            | Limit      | Window | Applied to                                                                                                                                                                                                                                                                                               |
+| --------------- | ---------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth            | 20 / IP    | 15 min | register, login, 2FA login, forgot-password, resend-verification — credential attempts only                                                                                                                                                                                                              |
+| Account         | 20 / email | 15 min | login (stacked on top of the auth tier)                                                                                                                                                                                                                                                                  |
+| Token verify    | 20 / IP    | 15 min | verify-email, reset-password, unlock-account, 2FA login, 2FA setup verification                                                                                                                                                                                                                          |
+| Refresh         | 200 / IP   | 15 min | token refresh — keyed by IP alone (the one identity an unauthenticated caller cannot forge), so it is shared by everyone behind one egress address; sized for ~60 open tabs                                                                                                                              |
+| Unlock          | 5 / user   | 5 min  | vault unlock verification                                                                                                                                                                                                                                                                                |
+| Password verify | 5 / user   | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password                                                                                                                                                 |
+| Breach check    | 30 / user  | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                                                                                                                                                                   |
+| Breach batch    | 300 / user | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                                                                                                                                                                   |
+| General auth    | 60 / user  | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, backup settings and history, lock, logout, logout-all                                                                                                                                                                              |
+| Heavy Ops       | 10 / IP    | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                                                                                                                                                                             |
+| Import          | 60 / user  | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                                                                                                                                                   |
+| Document upload | 120 / user | 15 min | opening, completing and cancelling a document transfer — three requests per document whatever its size                                                                                                                                                                                                   |
+| Document part   | derived    | 15 min | one sealed segment per request. Sized from the operator's own `MAX_DOCUMENT_SIZE_MB`: parts per document x 3 concurrent transfers x 4 attempts, floored at 120 (156 at the default 100 MB cap). A budget that ignored the concurrency or the retries would refuse a legitimate transfer part-way through |
+| Document read   | derived    | 15 min | one segment per request on the way back, at twice the part budget because a document is read more often than it is written (floor 240; 312 at the default cap)                                                                                                                                           |
+| CSRF            | 100 / IP   | 15 min | the CSRF token endpoint — every token refresh invalidates the token in every open tab, so re-fetches are routine                                                                                                                                                                                         |
+| Health          | 60 / IP    | 1 min  | health and public config — counted **in memory**, per process (see below)                                                                                                                                                                                                                                |
+| Metrics         | 60 / IP    | 1 min  | the metrics endpoint — counted **in memory**, per process (see below)                                                                                                                                                                                                                                    |
 
 Exceeding a limit returns **429** with a JSON body. Responses carry the IETF standard headers —
 `RateLimit-Policy`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After`

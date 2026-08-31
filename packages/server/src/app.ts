@@ -25,6 +25,7 @@ import './middleware/auth.js';
 // Import routes
 import authRoutes from './routes/auth.js';
 import vaultRoutes from './routes/vault.js';
+import documentRoutes from './routes/documents.js';
 import folderRoutes from './routes/folders.js';
 import userRoutes from './routes/user.js';
 import toolsRoutes from './routes/tools.js';
@@ -201,6 +202,11 @@ app.use(
       'currentAuthHash',
       'newEncryptedVaultKey',
       'encryptedBWK',
+      // The wrapped document key. It crosses the wire TWICE — at upload init and
+      // again at completion, which is what makes a stale-vault-key 409
+      // recoverable without re-sending the file — so it is the one new secret
+      // this feature puts in a request body, and it is logged nowhere.
+      'encryptedDek',
     ],
     skip: (req) => {
       // Skip request logging for health probes. The logger's LoggableRequest
@@ -236,6 +242,7 @@ if (config.NODE_ENV !== 'production' || config.ENABLE_SWAGGER) {
 // API routes
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/vault', vaultRoutes);
+app.use('/api/v1/documents', documentRoutes);
 app.use('/api/v1/folders', folderRoutes);
 app.use('/api/v1/user', userRoutes);
 app.use('/api/v1/tools', toolsRoutes);

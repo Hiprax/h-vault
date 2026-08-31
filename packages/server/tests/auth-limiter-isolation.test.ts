@@ -48,11 +48,19 @@ import { LOGIN_RATE_LIMIT_MAX_PER_IP } from '@hvault/shared';
  */
 vi.mock('../src/config/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/config/index.js')>();
-  return { ...actual, isProduction: true };
+  // `storageConfigured` too, because the document router's `requireStorage` guard
+  // runs AHEAD of its route-level limiters: with storage off the requests below
+  // would be refused with 503 before a counter was ever written, and the
+  // isolation assertions would pass without observing anything.
+  return { ...actual, isProduction: true, storageConfigured: true };
 });
 
 import authRouter from '../src/routes/auth.js';
-import { REFRESH_RATE_LIMIT_MAX } from '../src/middleware/rateLimiter.js';
+import documentRouter from '../src/routes/documents.js';
+import {
+  DOCUMENT_UPLOAD_RATE_LIMIT_MAX,
+  REFRESH_RATE_LIMIT_MAX,
+} from '../src/middleware/rateLimiter.js';
 import { RATE_LIMIT_COLLECTION } from '../src/middleware/rateLimitStore.js';
 import mongoose from 'mongoose';
 import { createTestUser, authHeader } from './helpers.js';
@@ -77,9 +85,43 @@ function createAuthApp() {
   return app;
 }
 
+/**
+ * The real document router, with no CSRF middleware, for the same reason
+ * {@link createAuthApp} omits it.
+ *
+ * Mounted beside the auth router on ONE app on purpose: the question these cases
+ * ask is whether two budgets on the same deployment are separate, and answering
+ * it on two apps would have proved only that two processes do not share memory.
+ */
+function createDocumentApp() {
+  const app = express();
+  app.set('trust proxy', 1);
+  app.use(express.json());
+  app.use(cookieParser());
+  app.use('/api/v1/auth', authRouter);
+  app.use('/api/v1/documents', documentRouter);
+  app.use(createErrorMiddleware({ exposeServerErrors: false }));
+  return app;
+}
+
 /** Counters persist in Mongo across requests; clear them between tests. */
 async function clearRateLimits(): Promise<void> {
   await mongoose.connection.db!.collection(RATE_LIMIT_COLLECTION).deleteMany({});
+}
+
+/**
+ * Every counter key the store currently holds.
+ *
+ * The store keys counters by `_id` (see `MongoRateLimitStore.increment`), so the
+ * key IS the document id — which makes "which budgets did this request spend?" a
+ * question about a projection rather than about a 429.
+ */
+async function rateLimitKeys(): Promise<string[]> {
+  const docs = await mongoose.connection
+    .db!.collection(RATE_LIMIT_COLLECTION)
+    .find({}, { projection: { _id: 1 } })
+    .toArray();
+  return (docs as unknown as { _id: string }[]).map((doc) => doc._id);
 }
 
 /**
@@ -235,12 +277,7 @@ describe('the buckets the auth router actually writes', () => {
       .set('Authorization', authHeader(user.accessToken))
       .send({ authHash: user.rawPassword });
 
-    const docs = await mongoose.connection
-      .db!.collection(RATE_LIMIT_COLLECTION)
-      .find({}, { projection: { _id: 1 } })
-      .toArray();
-    // The store keys counters by `_id` (see `MongoRateLimitStore.increment`).
-    const keys = (docs as unknown as { _id: string }[]).map((d) => d._id);
+    const keys = await rateLimitKeys();
 
     expect(keys.some((k) => k.startsWith('auth:'))).toBe(false);
     expect(keys.some((k) => k.startsWith('refresh:'))).toBe(true);
@@ -256,13 +293,112 @@ describe('the buckets the auth router actually writes', () => {
       .set('x-forwarded-for', ip)
       .send({ email: 'control@example.com', authHash: 'wrong-hash' });
 
-    const docs = await mongoose.connection
-      .db!.collection(RATE_LIMIT_COLLECTION)
-      .find({}, { projection: { _id: 1 } })
-      .toArray();
-    // The store keys counters by `_id` (see `MongoRateLimitStore.increment`).
-    const keys = (docs as unknown as { _id: string }[]).map((d) => d._id);
+    const keys = await rateLimitKeys();
 
     expect(keys).toContain(`auth:${ip}`);
+  });
+});
+
+describe('the document store draws on its own budgets', () => {
+  beforeEach(async () => {
+    await clearRateLimits();
+  });
+
+  it('writes a docUpload: counter and never an auth: one', async () => {
+    // Structural, like the auth-router case above: a document upload is not a
+    // credential attempt, and the day someone mounts `authLimiter` on an upload
+    // route this fails with a message that says so, rather than surfacing as a
+    // user who cannot sign in after uploading files.
+    const app = createDocumentApp();
+    const user = await createTestUser();
+
+    const res = await request(app)
+      .post('/api/v1/documents/uploads')
+      .set('x-forwarded-for', '203.0.113.210')
+      .set('Authorization', authHeader(user.accessToken))
+      .send({});
+
+    // The body is empty, so the Zod validator refuses it — AFTER the limiter has
+    // counted the request, which is the whole point. What must not happen is a
+    // 429, a 503 (the storage guard is mocked on) or a 401.
+    expect(res.status).toBe(400);
+
+    const keys = await rateLimitKeys();
+    expect(keys.some((key) => key.startsWith(`docUpload:${user.id}`))).toBe(true);
+    expect(keys.some((key) => key.startsWith('auth:'))).toBe(false);
+    expect(keys.some((key) => key.startsWith('account:'))).toBe(false);
+  });
+
+  it('keys the upload budget by USER, so two accounts behind one address are separate', async () => {
+    // The property that makes a user-keyed budget worth having: a shared egress
+    // address (an office, a VPN, a household) must not let one user's uploads
+    // exhaust another's.
+    const app = createDocumentApp();
+    const alice = await createTestUser();
+    const bob = await createTestUser();
+    const sharedIp = '203.0.113.211';
+
+    for (const user of [alice, bob]) {
+      await request(app)
+        .post('/api/v1/documents/uploads')
+        .set('x-forwarded-for', sharedIp)
+        .set('Authorization', authHeader(user.accessToken))
+        .send({});
+    }
+
+    const keys = await rateLimitKeys();
+    expect(keys).toContain(`docUpload:${alice.id}`);
+    expect(keys).toContain(`docUpload:${bob.id}`);
+    // …and nothing keyed on the address they share, which would have merged them.
+    expect(keys).not.toContain(`docUpload:${sharedIp}`);
+  });
+
+  it('exhausting the login budget does NOT rate-limit a document upload', async () => {
+    const app = createDocumentApp();
+    const ip = '203.0.113.212';
+    const user = await createTestUser();
+
+    const statuses = await spendCredentialBudget(app, ip, AUTH_LIMIT + 1);
+    expect(statuses[AUTH_LIMIT]).toBe(429);
+
+    const upload = await request(app)
+      .post('/api/v1/documents/uploads')
+      .set('x-forwarded-for', ip)
+      .set('Authorization', authHeader(user.accessToken))
+      .send({});
+
+    expect(upload.status).not.toBe(429);
+    expect(upload.status).toBe(400);
+  });
+
+  it('spending the document budget does NOT rate-limit a login', async () => {
+    // The other direction, which is the one that actually locks a user out of
+    // their vault: uploading files must never cost a sign-in.
+    const app = createDocumentApp();
+    const ip = '203.0.113.213';
+    const user = await createTestUser();
+
+    for (let i = 0; i < DOCUMENT_UPLOAD_RATE_LIMIT_MAX; i++) {
+      const res = await request(app)
+        .post('/api/v1/documents/uploads')
+        .set('x-forwarded-for', ip)
+        .set('Authorization', authHeader(user.accessToken))
+        .send({});
+      expect(res.status).toBe(400);
+    }
+    const blocked = await request(app)
+      .post('/api/v1/documents/uploads')
+      .set('x-forwarded-for', ip)
+      .set('Authorization', authHeader(user.accessToken))
+      .send({});
+    expect(blocked.status).toBe(429);
+
+    const login = await request(app)
+      .post('/api/v1/auth/login')
+      .set('x-forwarded-for', ip)
+      .send({ email: user.email, authHash: user.rawPassword });
+
+    expect(login.status).not.toBe(429);
+    expect(login.status).toBe(200);
   });
 });

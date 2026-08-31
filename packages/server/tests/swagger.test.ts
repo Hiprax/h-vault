@@ -44,6 +44,7 @@ describe('API Documentation', () => {
       expect(tagNames).toContain('User');
       expect(tagNames).toContain('Tools');
       expect(tagNames).toContain('Backup');
+      expect(tagNames).toContain('Documents');
     });
 
     it('should include security schemes', async () => {
@@ -69,6 +70,8 @@ describe('API Documentation', () => {
       expect(paths).toContain('/user/profile');
       expect(paths).toContain('/tools/check-password-breach');
       expect(paths).toContain('/backup/setup');
+      expect(paths).toContain('/documents/uploads');
+      expect(paths).toContain('/documents/uploads/{id}');
     });
   });
 
@@ -95,6 +98,7 @@ describe('API Documentation', () => {
       expect(responses.NotFound).toBeDefined();
       expect(responses.RateLimited).toBeDefined();
       expect(responses.ValidationError).toBeDefined();
+      expect(responses.StorageUnavailable).toBeDefined();
     });
 
     it('should have the API server defined', () => {

@@ -1,5 +1,10 @@
 import type { JsonObject } from 'swagger-ui-express';
-import { APP_VERSION, HIBP_BATCH_MAX_PREFIXES } from '@hvault/shared';
+import {
+  APP_VERSION,
+  DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
+  DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+  HIBP_BATCH_MAX_PREFIXES,
+} from '@hvault/shared';
 
 /**
  * OpenAPI 3.0.3 specification for the H-Vault REST API.
@@ -39,6 +44,11 @@ export const swaggerSpec: JsonObject = {
     { name: 'User', description: 'User profile, settings, 2FA, and session management' },
     { name: 'Tools', description: 'Password generation, breach checking, import/export' },
     { name: 'Backup', description: 'Encrypted backup management' },
+    {
+      name: 'Documents',
+      description:
+        'Encrypted document store. Present on every server; usable only where the operator has configured object storage, which GET /config advertises.',
+    },
   ],
 
   // ---------------------------------------------------------------------------
@@ -798,6 +808,136 @@ export const swaggerSpec: JsonObject = {
         },
       },
 
+      // -- Document store --
+      //
+      // Only the two upload shapes this release mounts. The document row itself
+      // crosses the wire from the read endpoints and is documented with them.
+      InitDocumentUploadRequest: {
+        type: 'object',
+        description:
+          'Opens a transfer. The document key (DEK) is already wrapped under a key derived from the vault key and bound to the upload id; the salt and nonce prefix are the plaintext framing parameters of the stored container. chunkPlaintextBytes, vaultKeyVersion and the storage key are assigned by the server and are rejected here.',
+        required: [
+          'encryptedDek',
+          'dekIv',
+          'dekTag',
+          'streamSalt',
+          'noncePrefix',
+          'declaredPlaintextBytes',
+          'declaredChunkCount',
+        ],
+        properties: {
+          encryptedDek: {
+            type: 'string',
+            maxLength: 200,
+            description: 'The 256-bit document key, AES-256-GCM wrapped, base64.',
+            example: 'ZGVrLWNpcGhlcnRleHQtYmFzZTY0',
+          },
+          dekIv: { type: 'string', maxLength: 24, example: 'ZGVrLWl2LWJhc2U2NA==' },
+          dekTag: { type: 'string', maxLength: 32, example: 'ZGVrLXRhZy1iYXNlNjQ=' },
+          streamSalt: {
+            type: 'string',
+            description:
+              'HKDF salt for the stream and metadata keys: 32 random bytes, padded base64.',
+            example: 'c3RyZWFtLXNhbHQtZXhhY3RseS0zMi1ieXRlcy0hIQ==',
+          },
+          noncePrefix: {
+            type: 'string',
+            description:
+              'First 7 bytes of every segment nonce, padded base64. The remaining 5 bytes are the segment index and the last-segment flag.',
+            example: 'AQIDBAUGBw==',
+          },
+          declaredPlaintextBytes: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              'Plaintext size the client intends to send. Refused above the operator size cap.',
+            example: DOCUMENT_PLAINTEXT_CHUNK_BYTES + 1,
+          },
+          declaredChunkCount: {
+            type: 'integer',
+            minimum: 1,
+            description:
+              'Must equal ceil(declaredPlaintextBytes / the server chunk size), and at least 1 — a zero-byte document is still one segment.',
+            example: 2,
+          },
+          folderId: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+        },
+      },
+      InitDocumentUploadResponse: {
+        type: 'object',
+        required: ['uploadId', 'vaultKeyVersion', 'chunkPlaintextBytes'],
+        properties: {
+          uploadId: {
+            type: 'string',
+            description:
+              'The FUTURE document id, minted here because it is bound into the key derivation before the first byte is sealed.',
+            example: '66c0f1a2b3c4d5e6f7a8b9c0',
+          },
+          vaultKeyVersion: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              "The caller's vault-key version at init. Completion is refused with 409 when it no longer matches, which is what stops a rotation mid-transfer from committing a key nothing can unwrap.",
+            example: 0,
+          },
+          chunkPlaintextBytes: {
+            type: 'integer',
+            description:
+              'Plaintext one segment holds. Server-chosen; the client frames its segments to it.',
+            example: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+          },
+        },
+      },
+      DocumentUploadResponse: {
+        type: 'object',
+        description:
+          'A transfer in progress. It deliberately carries no wrapped key, no storage key and no engine handle: the client holds the document key in memory for the life of the upload.',
+        required: [
+          '_id',
+          'streamSalt',
+          'noncePrefix',
+          'declaredPlaintextBytes',
+          'declaredChunkCount',
+          'chunkPlaintextBytes',
+          'vaultKeyVersion',
+          'parts',
+          'receivedBytes',
+          'createdAt',
+          'expiresAt',
+        ],
+        properties: {
+          _id: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+          folderId: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c1' },
+          streamSalt: { type: 'string', example: 'c3RyZWFtLXNhbHQtZXhhY3RseS0zMi1ieXRlcy0hIQ==' },
+          noncePrefix: { type: 'string', example: 'AQIDBAUGBw==' },
+          declaredPlaintextBytes: { type: 'integer', example: DOCUMENT_PLAINTEXT_CHUNK_BYTES + 1 },
+          declaredChunkCount: { type: 'integer', example: 2 },
+          chunkPlaintextBytes: { type: 'integer', example: DOCUMENT_PLAINTEXT_CHUNK_BYTES },
+          vaultKeyVersion: { type: 'integer', example: 0 },
+          parts: {
+            type: 'array',
+            description:
+              'The parts the server already holds, so a resumed transfer sends only what is missing.',
+            items: {
+              type: 'object',
+              required: ['partNumber', 'bytes'],
+              properties: {
+                partNumber: { type: 'integer', minimum: 1, example: 1 },
+                bytes: { type: 'integer', example: DOCUMENT_CIPHERTEXT_CHUNK_BYTES },
+              },
+            },
+          },
+          receivedBytes: { type: 'integer', example: DOCUMENT_CIPHERTEXT_CHUNK_BYTES },
+          createdAt: { type: 'string', format: 'date-time' },
+          expiresAt: {
+            type: 'string',
+            format: 'date-time',
+            description:
+              'Set once at init and never slid forward. Past it the transfer can no longer accept a part, and the staging row is removed by a TTL index — which deletes the row ONLY, not the stored parts.',
+          },
+        },
+      },
+
       // -- Health --
       HealthResponse: {
         type: 'object',
@@ -855,6 +995,23 @@ export const swaggerSpec: JsonObject = {
           },
         },
       },
+      Acknowledged: {
+        description: 'The operation succeeded and returns no payload beyond the acknowledgement',
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/SuccessResponse' },
+          },
+        },
+      },
+      StorageUnavailable: {
+        description:
+          'The document store is not available on this deployment because no object storage is configured. In production the body is redacted to its status text, so a client determines availability from GET /config rather than from this response.',
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/ErrorResponse' },
+          },
+        },
+      },
     },
   },
 
@@ -862,6 +1019,140 @@ export const swaggerSpec: JsonObject = {
   // Paths
   // ---------------------------------------------------------------------------
   paths: {
+    // -- Documents --
+    //
+    // Every route here sits behind `authenticate` AND a storage guard that answers
+    // 503 where the operator has configured no object storage, so 503 is a
+    // documented outcome of all four rather than an error condition.
+    '/documents/uploads': {
+      get: {
+        operationId: 'listDocumentUploads',
+        tags: ['Documents'],
+        summary: 'List transfers in progress',
+        description:
+          "The caller's own staging uploads, newest first, each with the parts the server already holds. Expired rows are included on purpose: they can no longer accept a part, and listing them is how a user finds one to cancel.",
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: {
+            description: 'Transfers in progress',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/DocumentUploadResponse' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+      post: {
+        operationId: 'initDocumentUpload',
+        tags: ['Documents'],
+        summary: 'Open a transfer',
+        description:
+          'Reserves an upload id, records the wrapped document key and the framing, and opens an engine-side multipart upload when more than one segment is declared. The id it returns is the future document id: the browser binds its key derivation to it before sealing the first byte, so it can never be reassigned without re-encrypting the file. Refused with 400 when the declared size exceeds the operator cap, the document count or concurrent-transfer cap is reached, or the storage quota would be exceeded, and with 409 while a vault-key rotation is running.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/InitDocumentUploadRequest' },
+            },
+          },
+        },
+        responses: {
+          201: {
+            description: 'Transfer opened',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: { $ref: '#/components/schemas/InitDocumentUploadResponse' },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          409: {
+            description: 'A vault-key rotation is in progress; retry when it finishes',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/ErrorResponse' },
+              },
+            },
+          },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+    '/documents/uploads/{id}': {
+      get: {
+        operationId: 'getDocumentUpload',
+        tags: ['Documents'],
+        summary: 'Get one transfer',
+        description:
+          'One staging upload with its part ledger, which is what makes a resume possible: the client compares the ledger with the segments it has sealed and sends only the missing ones. An id belonging to another account is indistinguishable from one that never existed.',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'The transfer',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: { $ref: '#/components/schemas/DocumentUploadResponse' },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+      delete: {
+        operationId: 'abortDocumentUpload',
+        tags: ['Documents'],
+        summary: 'Cancel a transfer',
+        description:
+          'Aborts the engine-side multipart upload, then deletes the staging row — in that order, so a crash between the two leaves a row that still names the upload rather than an upload nothing names. No document is created and no committed document is affected.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { $ref: '#/components/responses/Acknowledged' },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+
     // -- Health --
     '/health': {
       get: {

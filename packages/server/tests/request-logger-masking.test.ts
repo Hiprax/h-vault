@@ -136,7 +136,7 @@ describe('Request Logger Sensitive Field Masking', () => {
   });
 
   it('configures the app to mask all documented sensitive fields', () => {
-    expect(captured.maskBodyKeys.length).toBeGreaterThanOrEqual(11);
+    expect(captured.maskBodyKeys.length).toBeGreaterThanOrEqual(12);
     for (const expected of [
       'password',
       'authHash',
@@ -149,6 +149,11 @@ describe('Request Logger Sensitive Field Masking', () => {
       'currentAuthHash',
       'newEncryptedVaultKey',
       'encryptedBWK',
+      // The wrapped document key. It crosses the wire twice per upload — at init
+      // and again at completion, which is what makes a stale-vault-key 409
+      // recoverable without re-sending the file — so it is in more request bodies
+      // than any other ciphertext field this feature introduces.
+      'encryptedDek',
     ]) {
       expect(captured.maskBodyKeys).toContain(expected);
     }
@@ -156,7 +161,7 @@ describe('Request Logger Sensitive Field Masking', () => {
 
   it('redacts every configured secret value in the logged body while keeping benign fields', () => {
     const maskBodyKeys = captured.maskBodyKeys;
-    expect(maskBodyKeys.length).toBeGreaterThanOrEqual(11);
+    expect(maskBodyKeys.length).toBeGreaterThanOrEqual(12);
 
     // Give each configured key a UNIQUE plaintext value plus one benign field.
     const body: Record<string, string> = { benignField: 'KEEP_THIS_PLAINTEXT' };
