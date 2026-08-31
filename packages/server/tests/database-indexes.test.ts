@@ -8,6 +8,9 @@ import { Folder } from '../src/models/Folder.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
 import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
+import { Document } from '../src/models/Document.js';
+import { DocumentUpload } from '../src/models/DocumentUpload.js';
+import { buildObjectKey } from '../src/utils/documentObjects.js';
 
 // ---- Helpers for explain()-based index-usage assertions ----
 // A query may be served by an index (IXSCAN) or a full collection scan
@@ -517,6 +520,182 @@ describe('Database indexes', () => {
       );
 
       expect(ttlIndex).toBeDefined();
+    });
+  });
+
+  describe('Document model indexes', () => {
+    /** A committed document row for `userId`, with a fresh id and object key. */
+    const makeRow = (userId: mongoose.Types.ObjectId, overrides: Record<string, unknown> = {}) => {
+      const documentId = new mongoose.Types.ObjectId();
+      return {
+        _id: documentId,
+        userId,
+        objectKey: buildObjectKey(userId.toString(), documentId.toString()),
+        encryptedDek: 'x',
+        dekIv: 'x',
+        dekTag: 'x',
+        streamSalt: 'x',
+        noncePrefix: 'x',
+        encryptedMeta: 'x',
+        metaIv: 'x',
+        metaTag: 'x',
+        chunkPlaintextBytes: 1024,
+        chunkCount: 1,
+        ciphertextBytes: 16,
+        plaintextBytes: 0,
+        ...overrides,
+      };
+    };
+
+    it('should have a compound index on (userId, deletedAt, updatedAt desc) for the list query', async () => {
+      await Document.ensureIndexes();
+      const indexes = (await Document.collection.indexes()) as {
+        key: Record<string, number>;
+        [k: string]: unknown;
+      }[];
+
+      const index = indexes.find(
+        (idx) =>
+          idx.key['userId'] === 1 && idx.key['deletedAt'] === 1 && idx.key['updatedAt'] === -1,
+      );
+
+      expect(index).toBeDefined();
+    });
+
+    it('should have compound indexes on (userId, folderId) and (userId, favorite)', async () => {
+      await Document.ensureIndexes();
+      const indexes = (await Document.collection.indexes()) as {
+        key: Record<string, number>;
+        [k: string]: unknown;
+      }[];
+
+      expect(
+        indexes.find((idx) => idx.key['userId'] === 1 && idx.key['folderId'] === 1),
+      ).toBeDefined();
+      expect(
+        indexes.find((idx) => idx.key['userId'] === 1 && idx.key['favorite'] === 1),
+      ).toBeDefined();
+    });
+
+    it('should have a UNIQUE index on objectKey', async () => {
+      await Document.ensureIndexes();
+      const indexes = (await Document.collection.indexes()) as {
+        key: Record<string, number>;
+        unique?: boolean;
+        [k: string]: unknown;
+      }[];
+
+      const index = indexes.find((idx) => idx.key['objectKey'] === 1);
+
+      expect(index).toBeDefined();
+      // Two rows pointing at one object is the shape in which a permanent purge
+      // deletes an object another live row still needs. The constraint makes it
+      // unrepresentable rather than merely unlikely.
+      expect(index!.unique).toBe(true);
+    });
+
+    it('should have sparse standalone indexes on deletedAt and purgePending', async () => {
+      await Document.ensureIndexes();
+      const indexes = (await Document.collection.indexes()) as {
+        key: Record<string, number>;
+        sparse?: boolean;
+        partialFilterExpression?: Record<string, unknown>;
+        [k: string]: unknown;
+      }[];
+
+      const deleted = indexes.find(
+        (idx) => idx.key['deletedAt'] === 1 && idx.key['userId'] === undefined,
+      );
+      expect(deleted).toBeDefined();
+      expect(deleted!.sparse).toBe(true);
+      // Sparse and NOT partial: MongoDB will not use a `{ $exists: true }` partial
+      // index for the `$lte` RANGE predicate the cross-user purge scan issues, so a
+      // partial index here would be built and never chosen.
+      expect(deleted!.partialFilterExpression).toBeUndefined();
+
+      const purge = indexes.find((idx) => idx.key['purgePending'] === 1);
+      expect(purge).toBeDefined();
+      expect(purge!.sparse).toBe(true);
+    });
+
+    it('trash auto-purge query (deletedAt $lte) uses an index, not a COLLSCAN', async () => {
+      await Document.ensureIndexes();
+
+      const userId = new mongoose.Types.ObjectId();
+      const oldDate = new Date('2000-01-01T00:00:00.000Z');
+      // The same skew the VaultItem case uses: a large active majority carrying no
+      // `deletedAt` at all (and therefore absent from the sparse index) with a
+      // small soft-deleted minority, so the planner clearly prefers the index.
+      await Document.insertMany([
+        ...Array.from({ length: 120 }, () => makeRow(userId)),
+        ...Array.from({ length: 12 }, () => makeRow(userId, { deletedAt: oldDate })),
+      ]);
+
+      const explain = (await Document.find({ deletedAt: { $lte: new Date() } })
+        .select('_id userId objectKey')
+        .limit(500)
+        .explain('queryPlanner')) as unknown as ExplainResult;
+
+      const stages = collectStages(explain.queryPlanner.winningPlan);
+      expect(stages).toContain('IXSCAN');
+      expect(stages).not.toContain('COLLSCAN');
+      // The standalone sparse index, not the (userId, deletedAt, updatedAt)
+      // compound — which cannot seek a query with no userId predicate.
+      const ixscan = findStageNode(explain.queryPlanner.winningPlan, 'IXSCAN');
+      expect(ixscan?.['indexName']).toBe('deletedAt_1');
+    });
+
+    it('garbage-collection query (purgePending: true) uses an index, not a COLLSCAN', async () => {
+      await Document.ensureIndexes();
+
+      const userId = new mongoose.Types.ObjectId();
+      await Document.insertMany([
+        ...Array.from({ length: 120 }, () => makeRow(userId)),
+        ...Array.from({ length: 6 }, () => makeRow(userId, { purgePending: true })),
+      ]);
+
+      const explain = (await Document.find({ purgePending: true })
+        .lean()
+        .explain('queryPlanner')) as unknown as ExplainResult;
+
+      const stages = collectStages(explain.queryPlanner.winningPlan);
+      expect(stages).toContain('IXSCAN');
+      expect(stages).not.toContain('COLLSCAN');
+      const ixscan = findStageNode(explain.queryPlanner.winningPlan, 'IXSCAN');
+      expect(ixscan?.['indexName']).toBe('purgePending_1');
+    });
+  });
+
+  describe('DocumentUpload model indexes', () => {
+    it('should have a TTL index on expiresAt (expireAfterSeconds: 0)', async () => {
+      await DocumentUpload.ensureIndexes();
+      const indexes = (await DocumentUpload.collection.indexes()) as {
+        key: Record<string, number>;
+        expireAfterSeconds?: number;
+        [k: string]: unknown;
+      }[];
+
+      const ttlIndex = indexes.find(
+        (idx) => idx.key['expiresAt'] === 1 && idx.expireAfterSeconds === 0,
+      );
+
+      expect(ttlIndex).toBeDefined();
+      // Reminder, because a TTL index looks like cleanup and is not: this reaps the
+      // ROW only. The stored parts and the engine-side multipart upload it named
+      // are reclaimed by `jobs/documentCleanup.ts`, an hour later, from the
+      // engine's own listing.
+    });
+
+    it('should have a compound index on (userId, createdAt desc)', async () => {
+      await DocumentUpload.ensureIndexes();
+      const indexes = (await DocumentUpload.collection.indexes()) as {
+        key: Record<string, number>;
+        [k: string]: unknown;
+      }[];
+
+      const index = indexes.find((idx) => idx.key['userId'] === 1 && idx.key['createdAt'] === -1);
+
+      expect(index).toBeDefined();
     });
   });
 

@@ -2,7 +2,15 @@ import mongoose from 'mongoose';
 import { createModuleLogger } from '../utils/logger.js';
 import { config } from './index.js';
 
-// Import models so schema index definitions are registered before the check
+// Import models so schema index definitions are registered before the check.
+//
+// This list must name EVERY model in `scripts/indexedModels.ts`, and
+// `tests/model-registration-drift.test.ts` asserts that it does. The two lists
+// answer different questions about the same set: `indexedModels` is what the
+// production `create-indexes` pass BUILDS, and this one is what `verifyIndexes`
+// below can SEE. A model missing here is a model whose absent indexes production
+// never warns about, because `mongoose.modelNames()` only returns what something
+// has imported.
 import '../models/User.js';
 import '../models/VaultItem.js';
 import '../models/Folder.js';
@@ -12,6 +20,9 @@ import '../models/AuditLog.js';
 import '../models/BackupLog.js';
 import '../models/JobLock.js';
 import '../models/PwnedRangeCache.js';
+import '../models/Migration.js';
+import '../models/Document.js';
+import '../models/DocumentUpload.js';
 
 const logger = createModuleLogger('database');
 

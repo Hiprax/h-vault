@@ -80,6 +80,27 @@ export interface IUser {
   pendingVaultKeyIv?: string | undefined;
   pendingVaultKeyTag?: string | undefined;
   lastTotpTimestamp?: number | undefined;
+  /**
+   * How many times this account's vault key has been rotated.
+   *
+   * Incremented ONLY by a successful `bulkReEncrypt`, in the same update document
+   * that `$set`s the new vault key, so the two can never disagree. A document
+   * upload records the version its DEK was wrapped under at init and completion
+   * refuses with 409 when it no longer matches — which is what stops a rotation
+   * that ran mid-transfer from committing a DEK nothing can unwrap. A password
+   * change must NOT touch it: that flow re-wraps the SAME vault key under a new
+   * MEK, so an upload spanning a password change is still valid.
+   *
+   * OPTIONAL in this interface even though the schema defaults it to 0, and the
+   * asymmetry is the point. A hydrated read applies the default on the way out,
+   * so `User.findById()` always yields a number — but a `.lean()` read or a raw
+   * collection read of an account created BEFORE this field existed yields
+   * `undefined`, and those reads are what the hot paths use. Declaring it
+   * required would type that `undefined` as a `number` and hand every consumer a
+   * silent `NaN` the first time it did arithmetic on an older account. Read it as
+   * `?? 0`.
+   */
+  vaultKeyVersion?: number | undefined;
   deletionPending?: boolean | undefined;
   passwordChangedAt: Date;
   settings: IUserSettings;
@@ -213,6 +234,14 @@ const userSchema = new Schema<IUser>(
     pendingVaultKeyIv: { type: String, maxlength: 24, default: undefined },
     pendingVaultKeyTag: { type: String, maxlength: 32, default: undefined },
     lastTotpTimestamp: { type: Number, default: undefined },
+    // `default: 0` rather than `default: undefined`, so a freshly created account
+    // starts at a definite version and the very first upload has something to
+    // compare against. Existing accounts have no such value written for them:
+    // there is no backfill migration, because the only consumer treats a missing
+    // value as 0 and MongoDB's `$inc` does the same, so a legacy account is
+    // indistinguishable from one that has never rotated — which is exactly what it
+    // is. See the field's docblock on `IUser` for why it is typed optional anyway.
+    vaultKeyVersion: { type: Number, default: 0 },
     deletionPending: { type: Boolean, default: undefined },
     passwordChangedAt: { type: Date, required: true, default: () => new Date(0) },
     settings: { type: userSettingsSchema, default: () => ({}) },
