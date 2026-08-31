@@ -20,8 +20,13 @@ import {
  * the engine's own `ListParts` (count, order and size) and DERIVES the committed
  * row's `chunkCount`, `ciphertextBytes` and `plaintextBytes` from it rather than
  * from anything the client sent.
+ *
+ * NOT exported: it is referenced only by `IDocumentUpload` and by the sub-schema
+ * below, both in this file, and the dead-code gate reports an export nothing
+ * outside its own module reads. The handler that consumes the ledger arrives with
+ * the completion endpoint and will export it then, with an importer.
  */
-export interface IDocumentUploadPart {
+interface IDocumentUploadPart {
   /** 1-based, because S3 part numbers are. Segment indices are 0-based; they differ by one. */
   partNumber: number;
   /** The engine's opaque receipt for the stored part, handed back verbatim at completion. */

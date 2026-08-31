@@ -7,8 +7,8 @@ import { propertyJunitReport } from '../../tests/harness/propertyReport.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * This package's leg of the `test:property` suite: the crypto round-trip and the
- * three pure-logic properties.
+ * This package's leg of the `test:property` suite: the vault's crypto round-trip,
+ * the document container's, and the three pure-logic properties.
  *
  * Every file here also runs under `test:unit`, which is the whole client suite —
  * so this narrows NOTHING. It exists for the same two reasons `test:security`
@@ -30,6 +30,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 export const CLIENT_PROPERTY_SUITE = [
   'tests/property/crypto.property.test.ts',
+  'tests/property/document-crypto.property.test.ts',
   'tests/property/expiry.property.test.ts',
   'tests/property/entropy.property.test.ts',
   'tests/property/address.property.test.ts',
