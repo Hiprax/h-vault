@@ -187,6 +187,18 @@ export default defineConfig({
       SMTP_USER: '',
       SMTP_PASS: '',
       SMTP_FROM: '',
+      // Pinned EMPTY for exactly the reason METRICS_TOKEN above is: these four
+      // decide the SHAPE of the application, not just a value. They are validated
+      // all-or-none, so a developer whose root .env points at a real bucket (which
+      // is the ordinary state once the document store exists) turns the feature ON
+      // for the whole suite, and a HALF-filled .env makes `loadConfig` throw in
+      // every production-mode test. `config/index.ts` maps '' to undefined inside a
+      // `z.preprocess`, so the empty pin leaves the feature off rather than failing
+      // the `.min(8)` / `.min(16)` bounds.
+      S3_ENDPOINT: '',
+      S3_BUCKET: '',
+      S3_ACCESS_KEY_ID: '',
+      S3_SECRET_ACCESS_KEY: '',
     },
   },
 });

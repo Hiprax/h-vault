@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import {
   APP_NAME,
@@ -78,6 +81,27 @@ import {
   MAX_IDENTITY_COMPANY_LENGTH,
   MAX_IDENTITY_SSN_LENGTH,
   MAX_IDENTITY_PASSPORT_LENGTH,
+  MAX_TAG_LENGTH,
+  DOCUMENT_TAG_BYTES,
+  DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
+  DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+  DOCUMENT_STREAM_SALT_BYTES,
+  DOCUMENT_NONCE_PREFIX_BYTES,
+  MAX_DOCUMENTS_PER_USER,
+  MAX_DOCUMENT_CHUNK_COUNT,
+  MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
+  MAX_IN_FLIGHT_PART_UPLOADS,
+  MAX_DOCUMENT_NAME_LENGTH,
+  MAX_DOCUMENT_MIME_LENGTH,
+  MAX_DOCUMENT_EXT_LENGTH,
+  MAX_DOCUMENT_NOTE_LENGTH,
+  MAX_DOCUMENT_TAGS,
+  MAX_DOCUMENT_META_JSON_BYTES,
+  MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
+  MAX_FORMATTABLE_SIZE_BYTES,
+  DOCUMENT_STREAM_INFO_PREFIX,
+  DOCUMENT_META_INFO_PREFIX,
+  DOCUMENT_DEK_WRAP_INFO_PREFIX,
 } from '../src/constants/index.js';
 import {
   cardDataSchema,
@@ -322,6 +346,232 @@ describe('File Encryption constants', () => {
 
   it('FILE_ENCRYPTION_FILE_EXTENSION is .enc', () => {
     expect(FILE_ENCRYPTION_FILE_EXTENSION).toBe('.enc');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Document-store constants
+//
+// The three relationships below are pinned as DERIVATIONS rather than as their
+// own literals, because the failure they exist to catch is someone "rounding"
+// the plaintext chunk to a whole 8 MiB. That edit looks tidy, passes every
+// per-field bound, and silently makes each non-final uploaded part 8 MiB plus 16
+// bytes: the parts stop being uniform, and every segment boundary after the first
+// is off by a growing multiple of 16 bytes, so the file uploads and then fails to
+// decrypt from segment 1 onwards.
+// ---------------------------------------------------------------------------
+describe('Document-store constants', () => {
+  it.each([
+    ['DOCUMENT_TAG_BYTES', DOCUMENT_TAG_BYTES, 16],
+    ['DOCUMENT_STREAM_SALT_BYTES', DOCUMENT_STREAM_SALT_BYTES, 32],
+    ['DOCUMENT_NONCE_PREFIX_BYTES', DOCUMENT_NONCE_PREFIX_BYTES, 7],
+    ['MAX_DOCUMENTS_PER_USER', MAX_DOCUMENTS_PER_USER, 5_000],
+    ['MAX_DOCUMENT_CHUNK_COUNT', MAX_DOCUMENT_CHUNK_COUNT, 10_000],
+    ['MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER', MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER, 3],
+    ['MAX_IN_FLIGHT_PART_UPLOADS', MAX_IN_FLIGHT_PART_UPLOADS, 4],
+    ['MAX_DOCUMENT_NAME_LENGTH', MAX_DOCUMENT_NAME_LENGTH, 255],
+    ['MAX_DOCUMENT_MIME_LENGTH', MAX_DOCUMENT_MIME_LENGTH, 255],
+    ['MAX_DOCUMENT_EXT_LENGTH', MAX_DOCUMENT_EXT_LENGTH, 32],
+    ['MAX_DOCUMENT_NOTE_LENGTH', MAX_DOCUMENT_NOTE_LENGTH, 10_000],
+    ['MAX_DOCUMENT_TAGS', MAX_DOCUMENT_TAGS, 20],
+    ['MAX_DOCUMENT_META_JSON_BYTES', MAX_DOCUMENT_META_JSON_BYTES, 36_864],
+    ['MAX_ENCRYPTED_DOCUMENT_META_LENGTH', MAX_ENCRYPTED_DOCUMENT_META_LENGTH, 49_152],
+    ['MAX_FORMATTABLE_SIZE_BYTES', MAX_FORMATTABLE_SIZE_BYTES, 5_242_880],
+  ])('%s is %i', (_name, actual, expected) => {
+    expect(actual).toBe(expected);
+  });
+
+  it('derives the plaintext chunk as the ciphertext chunk minus exactly one tag', () => {
+    expect(DOCUMENT_PLAINTEXT_CHUNK_BYTES).toBe(
+      DOCUMENT_CIPHERTEXT_CHUNK_BYTES - DOCUMENT_TAG_BYTES,
+    );
+    // The negative that names the actual mistake: the plaintext chunk is NOT the
+    // round power of two, and one segment of plaintext never fills a whole part.
+    expect(DOCUMENT_PLAINTEXT_CHUNK_BYTES).not.toBe(DOCUMENT_CIPHERTEXT_CHUNK_BYTES);
+    expect(DOCUMENT_PLAINTEXT_CHUNK_BYTES % (1024 * 1024)).not.toBe(0);
+  });
+
+  it('keeps a non-final part an exact multiple of 1 MiB and above the S3 floor', () => {
+    // Engines re-serialise an object's block list per block, and several (R2 among
+    // them) require every part but the last to be identical in size, so the part
+    // size has to be a whole number of mebibytes. S3's own floor for a non-final
+    // part is 5 MiB.
+    expect(DOCUMENT_CIPHERTEXT_CHUNK_BYTES % (1024 * 1024)).toBe(0);
+    expect(DOCUMENT_CIPHERTEXT_CHUNK_BYTES).toBeGreaterThanOrEqual(5 * 1024 * 1024);
+    // Written as the relation rather than as the decimal byte count, so that this
+    // file holds no copy of the number the scan below forbids duplicating: one part
+    // is exactly one storage block at the committed `block_size = "8M"`.
+    expect(DOCUMENT_CIPHERTEXT_CHUNK_BYTES).toBe(8 * 1024 * 1024);
+  });
+
+  it('leaves the size cap, not the segment ceiling, as the binding limit', () => {
+    // MAX_DOCUMENT_SIZE_MB is bounded at 1024 by the server's own schema, so the
+    // segment ceiling must cover more than a maximally configured document: if it
+    // did not, an operator raising the size cap would get uploads refused for a
+    // reason no message mentions.
+    expect(MAX_DOCUMENT_CHUNK_COUNT * DOCUMENT_PLAINTEXT_CHUNK_BYTES).toBeGreaterThan(
+      1024 * 1024 * 1024,
+    );
+    expect(MAX_DOCUMENT_CHUNK_COUNT).toBe(10_000);
+  });
+
+  it('fills a 12-byte GCM nonce exactly: prefix, segment index, last-segment flag', () => {
+    // iv(i, isLast) = noncePrefix(7) || u32be(i) || (isLast ? 0x01 : 0x00). A prefix
+    // changed without rethinking that layout either overruns the nonce or leaves a
+    // constant zero byte where the counter should be, and AES-GCM nonce reuse under
+    // one stream key is a total break rather than a degradation.
+    expect(DOCUMENT_NONCE_PREFIX_BYTES + 4 + 1).toBe(IV_BYTES);
+  });
+
+  it('derives the stored metadata bound as the exact base64 expansion of the byte budget', () => {
+    // AES-GCM ciphertext is exactly as long as its plaintext and the tag is stored
+    // in its own column, so the stored base64 string is the byte budget grown by
+    // 4/3 and nothing else. Pinned as the derivation because moving either number
+    // alone is what refuses a document whose every field is legal: too small a
+    // stored bound rejects a blob the browser was allowed to build, too large a one
+    // is a bound nothing enforces.
+    expect(MAX_ENCRYPTED_DOCUMENT_META_LENGTH).toBe((MAX_DOCUMENT_META_JSON_BYTES / 3) * 4);
+    // Divisible by 3, so the expansion is exact rather than padded.
+    expect(MAX_DOCUMENT_META_JSON_BYTES % 3).toBe(0);
+  });
+
+  it('fits metadata whose every text field is maximal CJK, not merely maximal ASCII', () => {
+    // The field bounds are UTF-16 CODE UNITS (that is what a Zod `.max()` counts),
+    // and the byte budget is BYTES, so the two are only equal for ASCII. Measured
+    // with a real encoder rather than a multiplier, on a real string: a 10,000
+    // character note in a non-Latin script is a document any user may write, and it
+    // is 3 bytes per character on the wire.
+    const codeUnitBudget =
+      MAX_DOCUMENT_NAME_LENGTH +
+      MAX_DOCUMENT_MIME_LENGTH +
+      MAX_DOCUMENT_EXT_LENGTH +
+      MAX_DOCUMENT_NOTE_LENGTH +
+      MAX_DOCUMENT_TAGS * MAX_TAG_LENGTH;
+    const worstCaseTextBytes = new TextEncoder().encode('\u6587'.repeat(codeUnitBudget)).length;
+    expect(worstCaseTextBytes).toBe(codeUnitBudget * 3);
+    // Plus the hex digest, and an allowance for the JSON keys, the numbers, the
+    // timestamp and the transform record. 2 KiB is far above what eleven short keys
+    // and a handful of integers cost, so a budget that clears this clears the shape
+    // Phase 2 will define.
+    const structureAllowance = 2_048;
+    expect(worstCaseTextBytes + 64 + structureAllowance).toBeLessThanOrEqual(
+      MAX_DOCUMENT_META_JSON_BYTES,
+    );
+    // The negative, stated the way round that can actually fail: a budget sized for
+    // ASCII would NOT have held this, which is the mistake this test exists to stop
+    // anyone repeating.
+    expect(worstCaseTextBytes).toBeGreaterThan(codeUnitBudget + 64 + structureAllowance);
+  });
+
+  it('gives each derived key its own info prefix, separated by a character hex cannot hold', () => {
+    const prefixes = [
+      DOCUMENT_STREAM_INFO_PREFIX,
+      DOCUMENT_META_INFO_PREFIX,
+      DOCUMENT_DEK_WRAP_INFO_PREFIX,
+    ];
+    // The exact strings, because they are FORMAT constants: a rename makes every
+    // document already stored under the old value undecryptable, so it has to be a
+    // visible edit here as well as in the known-answer vector a later phase commits.
+    expect(DOCUMENT_STREAM_INFO_PREFIX).toBe('hvault/doc/stream/v1|');
+    expect(DOCUMENT_META_INFO_PREFIX).toBe('hvault/doc/meta/v1|');
+    expect(DOCUMENT_DEK_WRAP_INFO_PREFIX).toBe('hvault/doc/dek-wrap/v1|');
+    // Distinctness is the whole point: two purposes sharing an info string derive
+    // the SAME key, and a metadata blob would then open under the stream key.
+    expect(new Set(prefixes).size).toBe(prefixes.length);
+    for (const prefix of prefixes) {
+      expect(prefix.startsWith('hvault/doc/')).toBe(true);
+      expect(prefix.endsWith('|')).toBe(true);
+      // The separator appears ONCE, at the end. A prefix carrying a second `|`
+      // (`'hvault/doc|stream/v1|'`) would let two different (prefix, documentId)
+      // pairs concatenate to the same info string, and `|` cannot appear in the 24
+      // hex characters of an ObjectId, so the last one is unambiguous.
+      expect(prefix.indexOf('|')).toBe(prefix.length - 1);
+    }
+  });
+
+  it('does not restate either chunk size as an inline decimal literal in any source file', () => {
+    // A second copy of either byte count is how the two sides of the framing drift
+    // apart: the constant is changed, the copy is not, and the mismatch surfaces as
+    // a stored document that will not decrypt rather than as a failing build. The
+    // scan covers comments as well as code, because a comment that restates a
+    // number drifts exactly as silently as an assignment does.
+    //
+    // The roots are an INCLUDE list, not the whole tree minus an exclude list: an
+    // exclude list has to name every build directory, coverage directory, mutation
+    // sandbox and local cache that happens to exist on the machine running this,
+    // and a missing entry either fails on somebody else's checkout or reads a
+    // 100,000-file cache. Everything this rule governs lives under one of these.
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+    const roots = [
+      path.join('packages', 'shared', 'src'),
+      path.join('packages', 'shared', 'tests'),
+      path.join('packages', 'shared', 'scripts'),
+      path.join('packages', 'server', 'src'),
+      path.join('packages', 'server', 'tests'),
+      path.join('packages', 'server', 'scripts'),
+      path.join('packages', 'client', 'src'),
+      path.join('packages', 'client', 'tests'),
+      path.join('packages', 'client', 'scripts'),
+      'scripts',
+      'e2e',
+      'docker',
+      'tests',
+    ];
+    // Build output can still appear INSIDE a scanned root.
+    const skippedDirectories = new Set(['node_modules', 'dist', 'coverage', 'build']);
+    const scannedExtensions = new Set(['.ts', '.tsx', '.mjs', '.cjs', '.js']);
+    // The one file allowed to hold them: their definition.
+    const definition = path.join('packages', 'shared', 'src', 'constants', 'index.ts');
+
+    /**
+     * Matches the value written with or without numeric separators, and only when
+     * it is the WHOLE number, so an occurrence inside a longer digit run (a hash, a
+     * timestamp) is not a false positive. Arithmetic spellings (`8 * 1024 * 1024`)
+     * are deliberately out of scope: they state the relationship rather than
+     * restating the number, which is what this test is asking for.
+     */
+    const literalPattern = (value: number): RegExp =>
+      new RegExp(`(?<![\\d_.])${String(value).split('').join('_?')}(?![\\d_])`);
+    const ciphertextNeedle = literalPattern(DOCUMENT_CIPHERTEXT_CHUNK_BYTES);
+    const plaintextNeedle = literalPattern(DOCUMENT_PLAINTEXT_CHUNK_BYTES);
+
+    const scanned: string[] = [];
+    const offenders: string[] = [];
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          if (!skippedDirectories.has(entry.name)) walk(path.join(directory, entry.name));
+          continue;
+        }
+        if (!entry.isFile() || !scannedExtensions.has(path.extname(entry.name))) continue;
+        const absolute = path.join(directory, entry.name);
+        const relative = path.relative(repoRoot, absolute);
+        scanned.push(relative);
+        if (relative === definition) continue;
+        const contents = readFileSync(absolute, 'utf-8');
+        // The ciphertext chunk size COLLIDES with MAX_IMPORT_FILE_SIZE_BYTES, which
+        // holds the same 8 MiB value for an entirely unrelated reason. A file that
+        // names that constant and no document constant is talking about the import
+        // ceiling, and failing it here would send the next reader hunting through
+        // document chunking for a bug that is not there. Nothing exercises this
+        // exemption today (both definitions live in the one file the scan skips): it
+        // exists so the first test that pins the import ceiling by its literal fails
+        // for its own reason rather than for this one.
+        const aboutTheImportCeiling =
+          contents.includes('MAX_IMPORT_FILE_SIZE_BYTES') && !contents.includes('DOCUMENT_');
+        if (plaintextNeedle.test(contents)) offenders.push(relative);
+        else if (!aboutTheImportCeiling && ciphertextNeedle.test(contents))
+          offenders.push(relative);
+      }
+    };
+    for (const root of roots) walk(path.join(repoRoot, root));
+
+    expect(offenders).toEqual([]);
+    // ...and the WALK really enumerated this repository, so a broken traversal or a
+    // root that has been renamed cannot pass by finding nothing. The denominator is
+    // asserted for the same reason the pipeline's own scans assert theirs.
+    expect(scanned).toContain(definition);
+    expect(scanned.length).toBeGreaterThan(300);
   });
 });
 

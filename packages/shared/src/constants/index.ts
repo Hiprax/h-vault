@@ -221,6 +221,151 @@ export const MAX_FILE_ENCRYPTION_SIZE_MB = 100;
 // download-name suffix.
 export const FILE_ENCRYPTION_FILE_EXTENSION = '.enc';
 
+// ---------------------------------------------------------------------------
+// Document store
+//
+// Bounds for the encrypted document store. Every one of them has THREE readers
+// that have to agree: the browser that seals a document, the server that
+// validates and stores the ciphertext, and the test that pins the boundary. They
+// are named here rather than written inline in a schema or a controller because
+// the server never sees a document's name, type, tags or bytes, so a
+// disagreement between the two sides cannot be diagnosed later by looking at the
+// stored data: it presents as a file that uploaded and will not open.
+// ---------------------------------------------------------------------------
+
+// The AES-GCM tag length of one document segment, and of the sealed metadata
+// blob. Deliberately its own constant rather than an alias of AUTH_TAG_BYTES:
+// this one is a parameter of the STORED container format, frozen for the life of
+// every document already in a bucket, whereas AUTH_TAG_BYTES describes the
+// account cryptography and is free to move if that ever changes cipher. They
+// hold the same value today because both are AES-256-GCM.
+export const DOCUMENT_TAG_BYTES = 16;
+// One crypto segment is one uploaded part is one downloaded range: the three
+// chunkings are the same number, so there is no mapping table between them that
+// could be wrong. 8 MiB satisfies three independent constraints at once: it is
+// above S3's 5 MiB floor for a non-final multipart part; it is an exact multiple
+// of 1 MiB, which engines that re-serialise an object's block list per block
+// need, and it is uniform, which engines such as Cloudflare R2 require; and it
+// keeps one buffered part small enough that MAX_IN_FLIGHT_PART_UPLOADS of them
+// fit inside a modest container memory limit.
+export const DOCUMENT_CIPHERTEXT_CHUNK_BYTES = 8_388_608;
+// The plaintext one segment holds: the ciphertext chunk MINUS one tag, which is
+// what makes every non-final uploaded part exactly DOCUMENT_CIPHERTEXT_CHUNK_BYTES
+// and segment `i` start at `i * DOCUMENT_CIPHERTEXT_CHUNK_BYTES`. It must never be
+// "rounded" up to a whole 8 MiB: that makes each non-final part 8 MiB plus 16
+// bytes, the parts stop being uniform, and every segment boundary after the first
+// is off by a growing multiple of 16 bytes. A test pins it as this subtraction
+// rather than as its own literal for exactly that reason. Decryption reads
+// `chunkPlaintextBytes` from the stored row and never from this constant, so
+// changing it later cannot mis-frame a document that already exists.
+export const DOCUMENT_PLAINTEXT_CHUNK_BYTES = 8_388_592;
+// Per-stream HKDF salt, 32 bytes like SALT_BYTES, and the 7-byte nonce prefix
+// that precedes the 4-byte big-endian segment index and the 1-byte last-segment
+// flag inside each 12-byte GCM IV. Both are stored in PLAINTEXT on the row (a
+// salt is not a secret), and both are covered by the segment's own
+// authentication: substituting either one makes the segment fail to decrypt.
+export const DOCUMENT_STREAM_SALT_BYTES = 32;
+export const DOCUMENT_NONCE_PREFIX_BYTES = 7;
+
+// Per-user ceiling on stored documents, trashed ones included. Half of
+// MAX_ITEMS_PER_USER on purpose: a document row is far heavier than a vault item
+// (it owns an object in the bucket and a metadata blob), and the binding limit an
+// operator actually tunes is the byte quota, not the count. This one exists so a
+// runaway client cannot mint rows without bound.
+export const MAX_DOCUMENTS_PER_USER = 5_000;
+// Ceiling on the segments of ONE document, which also bounds the part ledger the
+// server keeps for an upload and the number of range reads a download costs. At
+// DOCUMENT_PLAINTEXT_CHUNK_BYTES per segment this is far above the largest
+// configurable document, so the size cap binds first in every real
+// configuration; this is the structural guard that keeps a hostile
+// `declaredChunkCount` from asking the server to hold an unbounded ledger.
+export const MAX_DOCUMENT_CHUNK_COUNT = 10_000;
+// How many staging uploads one user may hold open at once. Three is enough for a
+// person dragging in a handful of files while one large transfer runs, and low
+// enough that the quota arithmetic (committed bytes plus in-flight declared
+// bytes) cannot be inflated by opening uploads that are never completed.
+export const MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER = 3;
+// Parts the SERVER buffers concurrently, PER WORKER PROCESS, across all users:
+// the semaphore the part handler takes before its body parser runs. Four parts at
+// DOCUMENT_CIPHERTEXT_CHUNK_BYTES is 32 MiB of buffered ciphertext per process,
+// which fits the Docker deployment's single node process inside its 1 GB memory
+// limit. A pm2 deployment runs two instances and has no memory limit of its own,
+// so its ceiling is 64 MiB across the pair. Raising this raises that product, so
+// it is a memory budget before it is a throughput knob.
+export const MAX_IN_FLIGHT_PART_UPLOADS = 4;
+
+// Plaintext metadata bounds. These live inside the ENCRYPTED metadata blob, so
+// they are enforced by a shared schema that runs in both directions (on the
+// browser's write pre-flight and again on read), never by the server, which sees
+// only the sealed bytes.
+//
+// 255 for the name and the MIME type, measured in UTF-16 code units, because that
+// is what a Zod `.max()` counts. 255 units is exactly NTFS's own filename limit;
+// ext4 bounds a filename at 255 BYTES instead, so a name of 255 multi-byte
+// characters is legal here and may still be shortened by the browser when it
+// writes the download to such a filesystem. That is the right trade for a store
+// whose names are ciphertext to the server: the bound protects the metadata blob,
+// and the filesystem gets the last word on its own directory entry. The longest
+// registered MIME type is comfortably shorter than this.
+export const MAX_DOCUMENT_NAME_LENGTH = 255;
+export const MAX_DOCUMENT_MIME_LENGTH = 255;
+// The lowercased segment after the last dot of the name. 32 is generous against
+// every real extension (`markdown`, `properties`, `sqlite3`) without admitting a
+// second filename in disguise.
+export const MAX_DOCUMENT_EXT_LENGTH = 32;
+// The user's own note about a document. Five times shorter than
+// MAX_NOTE_CONTENT_LENGTH because it annotates a file rather than being the
+// content itself, and because it is sealed into a blob whose own bound is
+// MAX_ENCRYPTED_DOCUMENT_META_LENGTH below.
+export const MAX_DOCUMENT_NOTE_LENGTH = 10_000;
+// Tags per document, matching MAX_TAGS_PER_ITEM so the two tag pickers behave the
+// same way. Each tag is bounded by MAX_TAG_LENGTH, which is the one definition of
+// how long a tag may be anywhere in this application.
+export const MAX_DOCUMENT_TAGS = 20;
+// The metadata blob is bounded in TWO named steps, because the two sides measure
+// different things and only one of them is a byte count.
+//
+// MAX_DOCUMENT_META_JSON_BYTES bounds the UTF-8 BYTES of the serialized metadata
+// JSON, which is what the browser actually seals. Every field bound above is a Zod
+// `.max()` over UTF-16 CODE UNITS, and one code unit costs up to 3 UTF-8 bytes
+// (Cyrillic 2, CJK 3; an astral character is 2 units and 4 bytes, so 2 per unit),
+// so the worst case a real user can write is three times the code-unit budget:
+// (255 + 255 + 32 + 10_000 + 20 * 50) * 3 = 34_626 bytes, plus the 64-character
+// hex digest and the JSON structure itself. 36 KiB covers 34_626 + 64 and leaves
+// about 2.1 KiB for the keys, the numbers, the timestamp and the transform record,
+// which is several times what eleven short keys and a handful of integers cost. It deliberately does NOT cover a
+// note made of control characters, which `JSON.stringify` escapes to `\u0007` at
+// six bytes per unit: sizing for that would nearly triple every stored blob to
+// serve input no human wrote, and the refusal is loud rather than lossy.
+//
+// MAX_ENCRYPTED_DOCUMENT_META_LENGTH bounds the STORED string, which is base64 of
+// the ciphertext and therefore pure ASCII. AES-GCM ciphertext is exactly as long
+// as its plaintext, and the tag lives in its own column, so this is exactly the
+// base64 expansion of the byte budget: 36_864 / 3 * 4. A test pins that
+// derivation, because a stored bound that is merely "about right" is what refuses
+// a document whose every field is individually legal, on the write pre-flight,
+// with the file already chosen. A CODE-UNIT count is the wrong shape for either
+// number, which is why neither of them is one.
+export const MAX_DOCUMENT_META_JSON_BYTES = 36_864;
+export const MAX_ENCRYPTED_DOCUMENT_META_LENGTH = 49_152;
+
+// Ceiling past which the upload panel's optional format and repair transforms are
+// unavailable. Both run in the browser and hold the whole document plus its
+// reformatted copy in memory, and a formatter is superlinear on pathological
+// input, so this is a responsiveness budget rather than a correctness one: past
+// it the file still uploads, untransformed.
+export const MAX_FORMATTABLE_SIZE_BYTES = 5_242_880;
+
+// HKDF `info` prefixes, concatenated with the document id to bind every derived
+// key to ONE document: the stream key, the metadata key and the DEK wrapping key.
+// The trailing `|` is a separator that cannot appear in a 24-character hex
+// ObjectId, so no two (prefix, id) pairs can produce the same info string. These
+// are FORMAT constants: changing one makes every document already stored under it
+// undecryptable, which is why a committed known-answer vector pins them.
+export const DOCUMENT_STREAM_INFO_PREFIX = 'hvault/doc/stream/v1|';
+export const DOCUMENT_META_INFO_PREFIX = 'hvault/doc/meta/v1|';
+export const DOCUMENT_DEK_WRAP_INFO_PREFIX = 'hvault/doc/dek-wrap/v1|';
+
 export const ITEM_TYPES = ['login', 'secret', 'note', 'card', 'identity'] as const;
 export type ItemType = (typeof ITEM_TYPES)[number];
 

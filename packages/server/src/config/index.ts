@@ -38,6 +38,77 @@ const logger = createModuleLogger('config');
  */
 const MAX_TRUST_PROXY_HOPS = 10;
 
+/**
+ * Whether `hostname` names a host that ciphertext and bucket credentials can
+ * reach without crossing a network in the clear: a loopback address, an RFC 1918
+ * private address, or a single DNS label, which in practice is a container or
+ * service name resolved by the deployment's own DNS (`hvault-s3`). A dotted
+ * public name is none of those, and on a plain `http://` endpoint it would put
+ * every byte of a document and the credentials that fetch it on the wire.
+ *
+ * `localhost` is admitted by the single-label rule rather than by a case of its
+ * own; `::1` needs one, because its colons are not a DNS label.
+ */
+function isLocalOrPrivateStorageHost(hostname: string): boolean {
+  // `new URL('http://[::1]:3900').hostname` keeps the brackets.
+  const host = hostname.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  if (host === '::1') return true;
+  // 127.0.0.0/8, 10.0.0.0/8, 192.168.0.0/16.
+  if (/^127\.\d+\.\d+\.\d+$/.test(host)) return true;
+  if (/^10\.\d+\.\d+\.\d+$/.test(host)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(host)) return true;
+  // 172.16.0.0/12 is 172.16 THROUGH 172.31 only: 172.32.x.x is public address
+  // space, and treating the whole of 172.x as private is the classic version of
+  // this mistake.
+  const secondOctet = /^172\.(\d{1,3})\.\d+\.\d+$/.exec(host)?.[1];
+  if (secondOctet !== undefined) {
+    const octet = Number(secondOctet);
+    if (octet >= 16 && octet <= 31) return true;
+  }
+  // A single label has no dot, so it cannot be a public name. The underscore is
+  // admitted deliberately: it is not legal in a DNS hostname, but Compose service
+  // names may contain one and the engine's embedded DNS resolves them, so refusing
+  // it would contradict the message this rule prints. Written as ONE quantifier
+  // plus an explicit final-character check rather than the tidier
+  // `^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$`: a quantifier nested inside an optional
+  // group is the shape `security/detect-unsafe-regex` rejects, and this one is
+  // linear by construction.
+  return /^[a-z0-9][a-z0-9_-]*$/.test(host) && !host.endsWith('-');
+}
+
+/**
+ * The hostname of `value`, or undefined when it is not a parseable URL. A string
+ * that fails `z.url()` still reaches the cross-field refines (Zod runs them on
+ * the partially validated object), and `new URL('http://')` throws, so the
+ * production endpoint rule has to survive input the field check has already
+ * rejected.
+ */
+function urlHostname(value: string): string | undefined {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether an `S3_ENDPOINT` is acceptable for a PRODUCTION deployment. `https://`
+ * always is. A plain `http://` one is accepted only for a host the traffic never
+ * leaves (see `isLocalOrPrivateStorageHost`), which is what makes the in-stack
+ * `http://hvault-s3:3900` work without asking an operator to terminate TLS
+ * between two containers on an internal network.
+ *
+ * An unparseable value ABSTAINS rather than failing here: the field's own URL
+ * check already reports it, and a second issue about schemes would only obscure
+ * the first.
+ */
+function isProductionStorageEndpoint(endpoint: string): boolean {
+  if (/^https:\/\//i.test(endpoint)) return true;
+  const hostname = urlHostname(endpoint);
+  if (hostname === undefined) return true;
+  return isLocalOrPrivateStorageHost(hostname);
+}
+
 const envSchema = z
   .object({
     PORT: z.coerce.number().int().min(1).max(65535).default(5000),
@@ -170,6 +241,90 @@ const envSchema = z
     // memory-bound, so 100 MB is a desktop-safe default.
     FILE_ENCRYPTION_MAX_SIZE_MB: z.coerce.number().int().min(1).max(1024).default(100),
 
+    // Document store (optional object storage)
+    //
+    // The four CONNECTION variables are validated ALL-OR-NONE in `loadConfig`
+    // below, beside the SMTP check and for the same reason: all four set enables
+    // the document store, none set disables it, and a partial set is refused in
+    // production. Each one normalises an empty assignment to undefined BEFORE its
+    // length check, because `.env.example` ships the two credentials empty (a
+    // placeholder access key would be a working credential for the in-stack
+    // bucket), so `S3_ACCESS_KEY_ID=` has to read as "unset" rather than fail
+    // `.min(8)` and abort boot.
+    //
+    // `S3_RPC_SECRET` is deliberately NOT declared here. It is the storage
+    // engine's own cluster RPC secret, read by the storage container and never by
+    // this process, so declaring it would be exactly the inert configuration this
+    // schema deleted `RATE_LIMIT_MAX` for. It lives in `.env.example` and the
+    // README's Compose table instead.
+    S3_ENDPOINT: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z
+        .url()
+        .refine((u) => /^https?:\/\//i.test(u), {
+          message: 'S3_ENDPOINT must use http:// or https://',
+        })
+        .optional(),
+    ),
+    // Matches the region the committed storage configuration serves, so the
+    // default works untouched against the in-stack engine.
+    S3_REGION: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z.string().min(1).default('us-east-1'),
+    ),
+    S3_BUCKET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+    // min(8) is MEASURED against the storage engine, not guessed: an access key id
+    // shorter than 8 characters makes it refuse to boot, with a message no
+    // operator would connect back to their `.env`. Failing here instead names the
+    // variable.
+    S3_ACCESS_KEY_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(8).optional()),
+    S3_SECRET_ACCESS_KEY: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z.string().min(16).optional(),
+    ),
+    // Path-style addressing, and it defaults to TRUE unlike the other boolean
+    // flags in this schema: virtual-host style puts the bucket in the hostname,
+    // which needs DNS the in-stack service does not have. Only the explicit string
+    // `false` turns it off, so an empty assignment reads as unset and keeps the
+    // default.
+    S3_FORCE_PATH_STYLE: z
+      .enum(['true', 'false', ''])
+      .optional()
+      .transform((val) => val !== 'false'),
+    // Largest document a client may upload, in MB. Bounded 1..1024 rather than
+    // left open: nothing tests a multi-gigabyte transfer, a value above the
+    // per-user quota below can never be accepted anyway, and each document costs
+    // one part per 8 MiB, so a four-figure part budget is not a size this design
+    // is prepared to stand behind.
+    MAX_DOCUMENT_SIZE_MB: z.coerce.number().int().min(1).max(1024).default(100),
+    // Per-user storage quota, in MB, counted over committed documents plus the
+    // declared size of uploads still in flight. The refine below requires it to be
+    // at least MAX_DOCUMENT_SIZE_MB, so a configuration cannot advertise a size cap
+    // it must always reject.
+    DOCUMENT_STORAGE_QUOTA_MB_PER_USER: z.coerce.number().int().min(1).max(1_048_576).default(2048),
+    // How long a staging upload row survives before its TTL index removes it.
+    // Bounded at a week: the row pins quota against the user's budget, and the
+    // stored object and the engine-side multipart upload are only reclaimed after
+    // it expires.
+    DOCUMENT_UPLOAD_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    // Comma-separated extension allowlist for uploads, empty meaning every type is
+    // allowed. It is ADVISORY and enforced in the browser: the server receives
+    // ciphertext and cannot see a filename, so it could not enforce this even if it
+    // wanted to. Normalised here (trimmed, lowercased, leading dots removed,
+    // blanks dropped, duplicates collapsed) so `GET /config` publishes one shape
+    // and the client never has to parse the operator's punctuation.
+    DOCUMENT_ALLOWED_EXTENSIONS: z
+      .string()
+      .optional()
+      .transform((v) => [
+        ...new Set(
+          (v ?? '')
+            .split(',')
+            .map((ext) => ext.trim().toLowerCase().replace(/^\.+/, ''))
+            .filter((ext) => ext.length > 0),
+        ),
+      ]),
+
     // Audit
     AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
 
@@ -254,7 +409,28 @@ const envSchema = z
     // The 2FA-skip window must not outlive the remembered session it exists to serve.
     message: 'TRUSTED_DEVICE_DAYS cannot be less than REFRESH_TOKEN_REMEMBER_DAYS',
     path: ['TRUSTED_DEVICE_DAYS'],
-  });
+  })
+  .refine((data) => data.DOCUMENT_STORAGE_QUOTA_MB_PER_USER >= data.MAX_DOCUMENT_SIZE_MB, {
+    // A quota below the size cap accepts an upload at the door and refuses it at
+    // the quota check, every time, for every user.
+    message: 'DOCUMENT_STORAGE_QUOTA_MB_PER_USER cannot be less than MAX_DOCUMENT_SIZE_MB',
+    path: ['DOCUMENT_STORAGE_QUOTA_MB_PER_USER'],
+  })
+  .refine(
+    (data) =>
+      data.NODE_ENV !== 'production' ||
+      data.S3_ENDPOINT === undefined ||
+      isProductionStorageEndpoint(data.S3_ENDPOINT),
+    {
+      // Documents are ciphertext, but the credentials that fetch them and the
+      // object keys that name them are not, so a public endpoint on plain HTTP is
+      // refused. An in-stack service name, a loopback address and an RFC 1918
+      // address are all accepted, because that traffic never leaves the host.
+      message:
+        'S3_ENDPOINT must use https:// in production unless it points at a loopback address, an RFC 1918 private address or a single-label host (an in-stack service name)',
+      path: ['S3_ENDPOINT'],
+    },
+  );
 
 type EnvConfig = z.infer<typeof envSchema>;
 
@@ -341,6 +517,40 @@ function loadConfig(): EnvConfig {
     }
   }
 
+  // Validate the object-storage fields are either all set or all empty. The
+  // document store is an OPTIONAL feature, exactly like SMTP: with none of these
+  // set it is simply off, and an existing deployment upgrades without configuring
+  // anything. A PARTIAL set is the dangerous case, because it LOOKS configured:
+  // the feature would advertise itself through GET /config, the client would show
+  // the section, and every upload would fail at the first storage call. So it
+  // throws in production and normalises to unconfigured in development.
+  //
+  // There is deliberately no "storage not configured" warning to match the SMTP
+  // one: email is effectively required, documents are not, and a warning on every
+  // boot of a deployment that does not want them is noise that trains an operator
+  // to ignore the log.
+  const storageFields = [
+    data.S3_ENDPOINT,
+    data.S3_BUCKET,
+    data.S3_ACCESS_KEY_ID,
+    data.S3_SECRET_ACCESS_KEY,
+  ];
+  const storageSet = storageFields.filter(Boolean).length;
+  if (storageSet > 0 && storageSet < storageFields.length) {
+    if (data.NODE_ENV === 'production') {
+      throw new Error(
+        'Object storage configuration is incomplete. Set all of S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY or none.',
+      );
+    }
+    logger.warn(
+      'Object storage configuration is incomplete. Set all of S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY or none. The document store will be disabled.',
+    );
+    data.S3_ENDPOINT = undefined;
+    data.S3_BUCKET = undefined;
+    data.S3_ACCESS_KEY_ID = undefined;
+    data.S3_SECRET_ACCESS_KEY = undefined;
+  }
+
   // Warn when CORS allows non-HTTPS origin but MongoDB points to a non-localhost host.
   // This likely means the developer is connecting to a remote database over an
   // insecure network, which is a significant security risk.
@@ -382,6 +592,19 @@ export const smtpConfigured =
   Boolean(config.SMTP_HOST) && Boolean(config.SMTP_USER) && Boolean(config.SMTP_PASS);
 
 export const gmailConfigured = Boolean(config.GMAIL_USERNAME) && Boolean(config.GMAIL_PASSWORD);
+
+/**
+ * Whether the optional document store is configured, and therefore whether the
+ * feature is on. All four connection variables are required together, so this is
+ * false when nothing is set AND when only some of it is: the group check above
+ * normalises a partial set to none, because a half-configured storage must never
+ * half-enable a feature whose availability the client learns from GET /config.
+ */
+export const storageConfigured =
+  Boolean(config.S3_ENDPOINT) &&
+  Boolean(config.S3_BUCKET) &&
+  Boolean(config.S3_ACCESS_KEY_ID) &&
+  Boolean(config.S3_SECRET_ACCESS_KEY);
 
 /** Whether any email provider is properly configured and ready to send. */
 export const emailConfigured = config.EMAIL_PROVIDER === 'gmail' ? gmailConfigured : smtpConfigured;

@@ -502,6 +502,369 @@ describe('Server Config Validation', () => {
   // APP_URL transformation
   // ---------------------------------------------------------------------------
 
+  // ---------------------------------------------------------------------------
+  // Object storage / document store
+  //
+  // The four connection variables are all-or-none, exactly like SMTP, because the
+  // document store is optional: unconfigured means OFF, and a PARTIAL
+  // configuration is the dangerous state, since it looks configured to everything
+  // downstream and fails at the first storage call. The endpoint rule and the
+  // access-key minimum are both MEASURED behaviours of the storage engine rather
+  // than preferences, so the assertions below are what keeps them from being
+  // "simplified" later.
+  // ---------------------------------------------------------------------------
+
+  describe('Object storage configuration', () => {
+    // All four connection variables, valid, for tests that need the feature ON.
+    const storageEnv = {
+      S3_ENDPOINT: 'http://hvault-s3:3900',
+      S3_BUCKET: 'hvault-documents',
+      S3_ACCESS_KEY_ID: 'GKtestaccesskeyidnotreal01',
+      S3_SECRET_ACCESS_KEY: 'test-secret-access-key-not-a-real-credential',
+    };
+    // A production base that passes every OTHER production rule, so a failure here
+    // is always about storage.
+    const productionEnv = {
+      NODE_ENV: 'production',
+      JWT_ACCESS_SECRET: 'prod-access-secret-very-secure-and-long-enough!!',
+      JWT_REFRESH_SECRET: 'prod-refresh-secret-very-secure-and-long-enough!!',
+      SESSION_SECRET: 'ProdSessionSecretVerySecure!!1234',
+      CORS_ORIGIN: 'https://hvault.example.com',
+    };
+    const connectionKeys = [
+      'S3_ENDPOINT',
+      'S3_BUCKET',
+      'S3_ACCESS_KEY_ID',
+      'S3_SECRET_ACCESS_KEY',
+    ] as const;
+
+    it('leaves the document store off when nothing is configured', async () => {
+      const { config, storageConfigured } = await loadConfigWithEnv({});
+      expect(storageConfigured).toBe(false);
+      expect(config.S3_ENDPOINT).toBeUndefined();
+      expect(config.S3_BUCKET).toBeUndefined();
+      expect(config.S3_ACCESS_KEY_ID).toBeUndefined();
+      expect(config.S3_SECRET_ACCESS_KEY).toBeUndefined();
+    });
+
+    it('does not warn about unconfigured storage, unlike unconfigured email', async () => {
+      // Email is effectively required, documents are not. A warning on every boot
+      // of a deployment that does not want them trains an operator to ignore the
+      // log, so the absence of this line is deliberate and asserted.
+      mockWarn.mockClear();
+      await loadConfigWithEnv(productionEnv);
+      expect(mockWarn).not.toHaveBeenCalledWith(expect.stringContaining('Object storage'));
+      expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining('SMTP not configured'));
+    });
+
+    it('enables the store when all four connection variables are set', async () => {
+      const { config, storageConfigured } = await loadConfigWithEnv(storageEnv);
+      expect(storageConfigured).toBe(true);
+      expect(config.S3_ENDPOINT).toBe(storageEnv.S3_ENDPOINT);
+      expect(config.S3_BUCKET).toBe(storageEnv.S3_BUCKET);
+      expect(config.S3_ACCESS_KEY_ID).toBe(storageEnv.S3_ACCESS_KEY_ID);
+      expect(config.S3_SECRET_ACCESS_KEY).toBe(storageEnv.S3_SECRET_ACCESS_KEY);
+    });
+
+    it('enables the store in production too, with an in-stack endpoint', async () => {
+      const { config, storageConfigured } = await loadConfigWithEnv({
+        ...productionEnv,
+        ...storageEnv,
+      });
+      expect(storageConfigured).toBe(true);
+      expect(config.S3_ENDPOINT).toBe('http://hvault-s3:3900');
+    });
+
+    it.each(connectionKeys)(
+      'a partial configuration missing %s throws in production',
+      async (missing) => {
+        await expect(
+          loadConfigWithEnv({ ...productionEnv, ...storageEnv, [missing]: undefined }),
+        ).rejects.toThrow('Object storage configuration is incomplete');
+      },
+    );
+
+    it.each(connectionKeys)(
+      'a partial configuration missing %s warns and disables the store in development',
+      async (missing) => {
+        mockWarn.mockClear();
+        const { config, storageConfigured } = await loadConfigWithEnv({
+          NODE_ENV: 'development',
+          ...storageEnv,
+          [missing]: undefined,
+        });
+        expect(mockWarn).toHaveBeenCalledWith(
+          expect.stringContaining('Object storage configuration is incomplete'),
+        );
+        // The negative that matters: a partial configuration must not HALF-enable
+        // the feature. Every field is normalised away, not just the missing one,
+        // so nothing downstream can build a client from what survived.
+        expect(storageConfigured).toBe(false);
+        expect(config.S3_ENDPOINT).toBeUndefined();
+        expect(config.S3_BUCKET).toBeUndefined();
+        expect(config.S3_ACCESS_KEY_ID).toBeUndefined();
+        expect(config.S3_SECRET_ACCESS_KEY).toBeUndefined();
+      },
+    );
+
+    it('treats an empty assignment as unset rather than as a too-short value', async () => {
+      // `.env.example` ships the two credentials empty, so `S3_ACCESS_KEY_ID=` must
+      // read as "unset" and not fail `.min(8)` and abort boot. The normalisation has
+      // to run BEFORE the length check, which is why these use `z.preprocess`.
+      const { config, storageConfigured } = await loadConfigWithEnv({
+        S3_ENDPOINT: '',
+        S3_BUCKET: '',
+        S3_ACCESS_KEY_ID: '',
+        S3_SECRET_ACCESS_KEY: '',
+      });
+      expect(storageConfigured).toBe(false);
+      expect(config.S3_ACCESS_KEY_ID).toBeUndefined();
+      expect(config.S3_SECRET_ACCESS_KEY).toBeUndefined();
+    });
+
+    // Each of these loads the config ONCE: the module is only reset between tests,
+    // so a second `loadConfigWithEnv` inside one test would return the first
+    // instance from the module cache and assert nothing.
+    it('accepts an access key id of exactly 8 characters', async () => {
+      const { config } = await loadConfigWithEnv({
+        ...storageEnv,
+        S3_ACCESS_KEY_ID: 'a'.repeat(8),
+      });
+      expect(config.S3_ACCESS_KEY_ID).toBe('a'.repeat(8));
+    });
+
+    it('rejects an access key id of 7 characters, one below the measured minimum', async () => {
+      // MEASURED against the storage engine: it refuses to boot with an access key
+      // id shorter than 8, with a message no operator would trace back to `.env`.
+      await expect(
+        loadConfigWithEnv({ ...storageEnv, S3_ACCESS_KEY_ID: 'a'.repeat(7) }),
+      ).rejects.toThrow('S3_ACCESS_KEY_ID');
+    });
+
+    it('accepts a secret access key of exactly 16 characters', async () => {
+      const { config } = await loadConfigWithEnv({
+        ...storageEnv,
+        S3_SECRET_ACCESS_KEY: 'b'.repeat(16),
+      });
+      expect(config.S3_SECRET_ACCESS_KEY).toBe('b'.repeat(16));
+    });
+
+    it('rejects a secret access key of 15 characters', async () => {
+      await expect(
+        loadConfigWithEnv({ ...storageEnv, S3_SECRET_ACCESS_KEY: 'b'.repeat(15) }),
+      ).rejects.toThrow('S3_SECRET_ACCESS_KEY');
+    });
+
+    it.each([
+      ['unset', undefined, 'us-east-1'],
+      ['an empty assignment', '', 'us-east-1'],
+      ['an explicit value', 'garage', 'garage'],
+    ])('S3_REGION with %s resolves to %s', async (_label, value, expected) => {
+      const { config } = await loadConfigWithEnv({ S3_REGION: value });
+      expect(config.S3_REGION).toBe(expected);
+    });
+
+    it.each([
+      [undefined, true],
+      ['', true],
+      ['true', true],
+      ['false', false],
+    ])(
+      'S3_FORCE_PATH_STYLE=%s resolves to %s (it defaults ON, unlike the other flags)',
+      async (value, expected) => {
+        // Virtual-host addressing puts the bucket in the hostname, which needs DNS
+        // the in-stack service does not have, so ONLY the explicit string `false`
+        // turns path style off.
+        const { config } = await loadConfigWithEnv({ S3_FORCE_PATH_STYLE: value });
+        expect(config.S3_FORCE_PATH_STYLE).toBe(expected);
+      },
+    );
+
+    it('refuses an S3_FORCE_PATH_STYLE value that is neither true nor false', async () => {
+      // The enum is the validation: `1` is not a synonym for `true` here, and
+      // silently reading it as one would flip addressing modes on a typo.
+      await expect(loadConfigWithEnv({ S3_FORCE_PATH_STYLE: '1' })).rejects.toThrow(
+        'S3_FORCE_PATH_STYLE',
+      );
+    });
+
+    // -------------------------------------------------------------------------
+    // The production endpoint rule
+    // -------------------------------------------------------------------------
+
+    it.each([
+      ['an in-stack service name', 'http://hvault-s3:3900'],
+      // Not a legal DNS label, but a legal Compose service name that the engine's
+      // own DNS resolves, and the refusal message promises a single-label host.
+      ['an in-stack service name with an underscore', 'http://hvault_s3:3900'],
+      ['localhost', 'http://localhost:3900'],
+      ['IPv4 loopback', 'http://127.0.0.1:3900'],
+      ['IPv6 loopback', 'http://[::1]:3900'],
+      ['RFC 1918 10/8', 'http://10.1.2.3:3900'],
+      ['RFC 1918 192.168/16', 'http://192.168.1.9:3900'],
+      ['RFC 1918 172.16/12, low edge', 'http://172.16.0.5:3900'],
+      ['RFC 1918 172.16/12, high edge', 'http://172.31.255.254:3900'],
+      ['a public name over HTTPS', 'https://storage.example.com'],
+      // The URL parser normalises a numeric host to its dotted quad, so these ARE
+      // loopback and 192.168/16 respectively by the time the rule sees them. Pinned
+      // so the normalisation is a known property rather than a lucky one.
+      ['a decimal IPv4 loopback', 'http://2130706433'],
+      ['a hexadecimal IPv4 loopback', 'http://0x7f000001'],
+      ['an octal octet inside RFC 1918', 'http://172.031.0.1:3900'],
+    ])('accepts %s as an S3_ENDPOINT in production', async (_label, endpoint) => {
+      const { config } = await loadConfigWithEnv({
+        ...productionEnv,
+        ...storageEnv,
+        S3_ENDPOINT: endpoint,
+      });
+      expect(config.S3_ENDPOINT).toBe(endpoint);
+    });
+
+    it.each([
+      ['a public name', 'http://storage.example.com'],
+      ['a public name with a port', 'http://storage.example.com:9000'],
+      ['a hosted S3 endpoint', 'http://s3.amazonaws.com'],
+      // Both sides of every range, because a one-sided table lets the comparison be
+      // widened without a single test noticing. Deleting `octet >= 16` from the
+      // 172.16/12 check would otherwise accept 172.0.0.1, which is public space, on
+      // plain HTTP in production.
+      ['172.32/16, just above RFC 1918', 'http://172.32.0.1:3900'],
+      ['172.15/16, just below RFC 1918', 'http://172.15.255.254:3900'],
+      ['172.0/8, public space below the window', 'http://172.0.0.1:3900'],
+      ['192.169/16, just outside RFC 1918', 'http://192.169.1.1:3900'],
+      ['192.167/16, just below it', 'http://192.167.1.1:3900'],
+      ['11/8, which is public space', 'http://11.0.0.1:3900'],
+      ['128/8, one past the loopback block', 'http://128.0.0.1:3900'],
+      ['126/8, one before it', 'http://126.0.0.1:3900'],
+      ['a label that is not a legal DNS label', 'http://hvault-s3-:3900'],
+      // Everything below is a host that could be mistaken for a private one. Each
+      // must fail CLOSED, which is what makes the rule worth having: `.hostname`
+      // discards the userinfo, so a credential-looking prefix cannot smuggle a
+      // public host past it, and an address family the rule does not model is
+      // refused rather than assumed to be local.
+      ['userinfo that only looks like a private host', 'http://hvault-s3@evil.example.com'],
+      ['a fully qualified name with a trailing dot', 'http://storage.example.com.'],
+      ['an IPv4-mapped IPv6 loopback, which the rule does not model', 'http://[::ffff:127.0.0.1]'],
+      ['an IPv6 unique-local address, which the rule does not model', 'http://[fc00::1]'],
+      ['the unspecified address', 'http://0.0.0.0:3900'],
+    ])('rejects %s as a plain-HTTP S3_ENDPOINT in production', async (_label, endpoint) => {
+      await expect(
+        loadConfigWithEnv({ ...productionEnv, ...storageEnv, S3_ENDPOINT: endpoint }),
+      ).rejects.toThrow('S3_ENDPOINT must use https:// in production');
+    });
+
+    it('applies the endpoint rule only in production', async () => {
+      // A developer pointing at a remote bucket over plain HTTP is their own call;
+      // the rule exists to stop a PRODUCTION deployment shipping credentials in the
+      // clear.
+      const { config, storageConfigured } = await loadConfigWithEnv({
+        ...storageEnv,
+        S3_ENDPOINT: 'http://storage.example.com',
+      });
+      expect(config.S3_ENDPOINT).toBe('http://storage.example.com');
+      expect(storageConfigured).toBe(true);
+    });
+
+    it('rejects an S3_ENDPOINT with a scheme that is neither http nor https', async () => {
+      await expect(
+        loadConfigWithEnv({ ...storageEnv, S3_ENDPOINT: 'ftp://storage.example.com/' }),
+      ).rejects.toThrow('S3_ENDPOINT must use http:// or https://');
+    });
+
+    it('reports an unparseable S3_ENDPOINT once, as a URL error, not as a scheme rule', async () => {
+      // The production rule ABSTAINS on a value the field check has already
+      // rejected: a second issue about https would only obscure the first. Both
+      // halves are asserted, because the abstain branch is invisible otherwise.
+      const attempt = loadConfigWithEnv({
+        ...productionEnv,
+        ...storageEnv,
+        S3_ENDPOINT: 'not-a-url',
+      });
+      await expect(attempt).rejects.toThrow('S3_ENDPOINT');
+      await expect(attempt).rejects.not.toThrow('S3_ENDPOINT must use https:// in production');
+    });
+
+    // -------------------------------------------------------------------------
+    // The document-store knobs
+    // -------------------------------------------------------------------------
+
+    it('defaults the document-store knobs', async () => {
+      const { config } = await loadConfigWithEnv({});
+      expect(config.MAX_DOCUMENT_SIZE_MB).toBe(100);
+      expect(config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER).toBe(2048);
+      expect(config.DOCUMENT_UPLOAD_TTL_HOURS).toBe(24);
+      expect(config.DOCUMENT_ALLOWED_EXTENSIONS).toEqual([]);
+    });
+
+    it.each([
+      ['MAX_DOCUMENT_SIZE_MB', '1', 1],
+      ['MAX_DOCUMENT_SIZE_MB', '1024', 1024],
+      ['DOCUMENT_UPLOAD_TTL_HOURS', '1', 1],
+      ['DOCUMENT_UPLOAD_TTL_HOURS', '168', 168],
+      ['DOCUMENT_STORAGE_QUOTA_MB_PER_USER', '1048576', 1_048_576],
+    ])('%s accepts its boundary value %s', async (key, value, expected) => {
+      const { config } = await loadConfigWithEnv({ [key]: value });
+      expect(config[key as 'MAX_DOCUMENT_SIZE_MB']).toBe(expected);
+    });
+
+    it.each([
+      ['MAX_DOCUMENT_SIZE_MB', '0'],
+      ['MAX_DOCUMENT_SIZE_MB', '1025'],
+      ['MAX_DOCUMENT_SIZE_MB', '1.5'],
+      ['DOCUMENT_UPLOAD_TTL_HOURS', '0'],
+      ['DOCUMENT_UPLOAD_TTL_HOURS', '169'],
+      ['DOCUMENT_UPLOAD_TTL_HOURS', '2.5'],
+      ['DOCUMENT_STORAGE_QUOTA_MB_PER_USER', '0'],
+      ['DOCUMENT_STORAGE_QUOTA_MB_PER_USER', '1048577'],
+      ['DOCUMENT_STORAGE_QUOTA_MB_PER_USER', '2048.5'],
+    ])('%s rejects %s, which is past its bound or not a whole number', async (key, value) => {
+      await expect(loadConfigWithEnv({ [key]: value })).rejects.toThrow(key);
+    });
+
+    it('accepts the smallest quota that still covers the size cap', async () => {
+      const { config } = await loadConfigWithEnv({
+        MAX_DOCUMENT_SIZE_MB: '1',
+        DOCUMENT_STORAGE_QUOTA_MB_PER_USER: '1',
+      });
+      expect(config.MAX_DOCUMENT_SIZE_MB).toBe(1);
+      expect(config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER).toBe(1);
+    });
+
+    it('refuses a size cap larger than the per-user quota', async () => {
+      // Otherwise every upload of a legal size is accepted at the door and refused
+      // at the quota check, for every user, forever.
+      await expect(
+        loadConfigWithEnv({
+          MAX_DOCUMENT_SIZE_MB: '200',
+          DOCUMENT_STORAGE_QUOTA_MB_PER_USER: '100',
+        }),
+      ).rejects.toThrow(
+        'DOCUMENT_STORAGE_QUOTA_MB_PER_USER cannot be less than MAX_DOCUMENT_SIZE_MB',
+      );
+    });
+
+    it('accepts a quota exactly equal to the size cap', async () => {
+      const { config } = await loadConfigWithEnv({
+        MAX_DOCUMENT_SIZE_MB: '100',
+        DOCUMENT_STORAGE_QUOTA_MB_PER_USER: '100',
+      });
+      expect(config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER).toBe(100);
+    });
+
+    it.each([
+      ['an empty value', '', []],
+      ['one extension', 'pdf', ['pdf']],
+      ['leading dots, case and padding', ' .PDF , Md ', ['pdf', 'md']],
+      ['duplicates, however written', 'pdf,.pdf,PDF', ['pdf']],
+      ['stray separators', ',,pdf,,md,', ['pdf', 'md']],
+    ])('normalises DOCUMENT_ALLOWED_EXTENSIONS with %s', async (_label, value, expected) => {
+      // The client compares a filename's last segment against this list, so the
+      // operator's punctuation is normalised ONCE here rather than in every reader.
+      const { config } = await loadConfigWithEnv({ DOCUMENT_ALLOWED_EXTENSIONS: value });
+      expect(config.DOCUMENT_ALLOWED_EXTENSIONS).toEqual(expected);
+    });
+  });
+
   describe('APP_URL transformation', () => {
     it('trailing slashes are stripped from APP_URL', async () => {
       const { config } = await loadConfigWithEnv({
