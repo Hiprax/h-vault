@@ -115,6 +115,29 @@ export function documentChunkCountFor(plaintextBytes: number, chunkPlaintextByte
 }
 
 /**
+ * `plaintextBytes = ciphertextBytes - DOCUMENT_TAG_BYTES * chunkCount` — the size
+ * identity of the container format, in ONE place.
+ *
+ * Every segment is its plaintext sealed under AES-256-GCM, so the stored object is
+ * the file plus exactly one authentication tag per segment and nothing else. That
+ * one sentence is the whole conversion, which is precisely why it must not be
+ * written twice: the completion endpoint derives a document's `plaintextBytes` from
+ * the part ledger with it, and {@link documentResponseSchema} re-checks the same
+ * relationship on every row a client reads. Written out in both places, a change to
+ * the framing would be applied to one of them and the disagreement would surface as
+ * a document that uploaded and will not open.
+ *
+ * Stated in this direction rather than as `ciphertextBytes = plaintextBytes + …`
+ * because that is the direction both callers need: the object's length is what the
+ * storage engine reports, and the file's length is what has to be derived from it.
+ * The forward conversion has no caller yet; `utils/documentObjects.ts` records where
+ * it should live when one appears.
+ */
+export function documentPlaintextBytesFor(ciphertextBytes: number, chunkCount: number): number {
+  return ciphertextBytes - DOCUMENT_TAG_BYTES * chunkCount;
+}
+
+/**
  * The UTF-8 byte length of the serialized metadata blob — the quantity that is
  * actually sealed, and the one `MAX_DOCUMENT_META_JSON_BYTES` bounds.
  *
@@ -490,7 +513,7 @@ export const documentResponseSchema = z
     path: ['chunkCount'],
   })
   .refine(
-    (row) => row.ciphertextBytes === row.plaintextBytes + DOCUMENT_TAG_BYTES * row.chunkCount,
+    (row) => row.plaintextBytes === documentPlaintextBytesFor(row.ciphertextBytes, row.chunkCount),
     { message: DOCUMENT_CIPHERTEXT_SIZE_MISMATCH_MESSAGE, path: ['ciphertextBytes'] },
   );
 

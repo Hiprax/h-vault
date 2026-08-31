@@ -494,21 +494,36 @@ describe('refusing a part', () => {
   });
 
   it.each([
-    ['0, which confuses a segment index with a part number', '0'],
-    ['a decimal with a leading zero', '01'],
-    ['hexadecimal', '0x2'],
-    ['exponential notation', '1e1'],
-    ['not a number at all', 'two'],
-  ])('refuses a part number given as %s', async (_label, partNumber) => {
+    // `0` matches the decimal pattern and is refused by the RANGE instead: part
+    // numbers are one-based because S3's are, while segment indices are zero-based,
+    // and confusing the two is the likeliest way to address the wrong part.
+    ['0, which confuses a segment index with a part number', '0', /to be >=1/],
+    ['a decimal with a leading zero', '01', /decimal integer/i],
+    ['hexadecimal', '0x2', /decimal integer/i],
+    ['exponential notation', '1e1', /decimal integer/i],
+    ['not a number at all', 'two', /decimal integer/i],
+  ])('refuses a part number given as %s', async (_label, partNumber, refusal) => {
     // `documentPartParamsSchema` uses a strict decimal pattern rather than
     // `z.coerce.number()`, which would read `0x10` as 16, `1e3` as 1000 and an
     // empty string as 0 — four ways to address a part other than the one the URL
     // appears to name.
+    //
+    // The REFUSAL is asserted, not just the status, and that is what makes each of
+    // these able to fail. Under a coercing schema most of these values become a
+    // part number the handler then rejects for a different reason — the wrong size
+    // for a non-final part, or a number past the declared count — so a bare
+    // `toBe(400)` would stay green while the URL was being read as a number nobody
+    // wrote. It also lets the body stay small: the refusal is decided from the URL
+    // before the 411 guard, the semaphore and the parser run (deliberately, so a
+    // bad part number costs no memory), so the server answers while the client is
+    // still writing, and a full chunk in flight is destroyed with the socket and
+    // surfaces as EPIPE in the client rather than as a fact about the handler.
     const seeded = await seedUpload(user, { chunks: 2 });
 
-    const res = await putPart(user, seeded.id, partNumber, { body: fullPart() });
+    const res = await putPart(user, seeded.id, partNumber);
 
     expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(String(res.body.message)).toMatch(refusal);
     expect(await stateOf(seeded)).toEqual(UNTOUCHED);
   });
 

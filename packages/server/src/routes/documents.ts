@@ -13,9 +13,14 @@ import {
   parsePartUploadBody,
   requirePartContentLength,
 } from '../middleware/documentPartBody.js';
-import { documentPartParamsSchema, initDocumentUploadSchema } from '@hvault/shared';
+import {
+  completeDocumentUploadSchema,
+  documentPartParamsSchema,
+  initDocumentUploadSchema,
+} from '@hvault/shared';
 import {
   abortUpload,
+  completeUpload,
   getUpload,
   initUpload,
   listUploads,
@@ -81,6 +86,22 @@ router.put(
   holdPartUploadSlot,
   parsePartUploadBody,
   uploadPart,
+);
+
+// Turn a finished transfer into a document.
+//
+// `documentUploadLimiter` rather than a budget of its own, because init, complete
+// and abort are the three requests of ONE transfer and belong to one budget; the
+// part route is the volume one and has its own, derived from the operator's size
+// cap. The body is JSON again here — the sealed metadata blob and the wrapped
+// document key — so the global parser handles it and no route-level parser is
+// mounted, unlike the octet-stream route above.
+router.post(
+  '/uploads/:id/complete',
+  documentUploadLimiter,
+  validateObjectId(),
+  validate(completeDocumentUploadSchema, 'body'),
+  completeUpload,
 );
 
 export default router;

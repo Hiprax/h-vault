@@ -144,6 +144,44 @@ export function vaultImportLockName(userId: string): string {
 }
 
 /**
+ * The distributed-lock name one document completion holds, mirroring
+ * {@link vaultImportLockName} — but keyed by the UPLOAD, not by the user.
+ *
+ * That difference is the design. Completing a transfer touches exactly one
+ * staging row, one stored object and one `documents` row, all named by this id,
+ * so two completions of DIFFERENT uploads cannot interfere and must not queue
+ * behind each other: a user may legitimately run
+ * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` transfers and finish them at the
+ * same moment.
+ *
+ * What it does exclude is a completion racing ITSELF — a client retry after a
+ * timeout, or a double-clicked button. The unique `_id` on `documents` already
+ * makes a second ROW impossible, so this lock is not what guarantees that; what
+ * it prevents is the second run getting half-way (aborting a multipart upload the
+ * first is completing, deleting a staging row out from under it, re-charging the
+ * quota) before the primary key stops it. The two completions of one upload are
+ * therefore serialized, and the loser reports the winner's row rather than a
+ * conflict whenever that row already exists.
+ *
+ * Note what this lock deliberately does NOT overlap: the per-user
+ * {@link vaultRotationLockName}. The two are disjoint, which is exactly why
+ * completion needs {@link assertVaultNotRotating} as well as its vault-key
+ * version check — holding this lock says nothing at all about whether a rotation
+ * is running.
+ *
+ * The name carries the OWNER as well as the upload, even though an upload id is
+ * already globally unique and adding the owner changes nothing for the account that
+ * holds it. It closes a small oracle: the lock is taken before ownership is read, so
+ * an unscoped name would let a caller who somehow knew another account's upload id
+ * observe a "completion in progress" conflict where an unknown id answers "not
+ * found" — and this codebase's standing rule is that a foreign id and an id that
+ * never existed must be indistinguishable.
+ */
+export function documentCompleteLockName(userId: string, uploadId: string): string {
+  return `document-complete:${userId}:${uploadId}`;
+}
+
+/**
  * True while a vault-key rotation is ACTIVELY processing for `userId`.
  *
  * `bulkReEncrypt` acquires the {@link vaultRotationLockName} JobLock BEFORE it

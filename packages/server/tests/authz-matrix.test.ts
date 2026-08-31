@@ -217,6 +217,19 @@ interface Scenario {
   read: (id: string) => Promise<Record<string, unknown> | null>;
   /** How many documents of this kind `userId` owns — the "B gained nothing" check. */
   count: (userId: string) => Promise<number>;
+  /**
+   * Extra setup ONE route needs on top of its shared resource, run right after
+   * `seed` and before the snapshot every case compares against.
+   *
+   * `POST /uploads/:id/complete` is the reason it exists. The `documentUpload`
+   * resource is a live staging row with an EMPTY part ledger, which is what three
+   * of its four routes want; completion additionally needs the transfer's one part
+   * to have been delivered. Moving that into the shared `seed` would quietly
+   * disarm the part route's own control: a re-sent identical part leaves the row
+   * byte-identical, so `ownerMutates` there would stop meaning anything. A
+   * per-route addition to a shared resource is exactly what `CALLS` is for.
+   */
+  prepare?: (id: string) => Promise<void>;
   /** Appended to the path (a query string), when the route needs one. */
   query?: string;
   /**
@@ -415,7 +428,10 @@ const RESOURCES: Record<OwnedResource, Pick<Scenario, 'seed' | 'read' | 'count'>
  */
 const CALLS: Record<
   string,
-  Pick<Scenario, 'query' | 'params' | 'body' | 'raw' | 'headers' | 'ownerStatus' | 'ownerMutates'>
+  Pick<
+    Scenario,
+    'prepare' | 'query' | 'params' | 'body' | 'raw' | 'headers' | 'ownerStatus' | 'ownerMutates'
+  >
 > = {
   'GET /api/v1/vault/items/:id': { ownerStatus: 200, ownerMutates: false },
   'PUT /api/v1/vault/items/:id': {
@@ -445,6 +461,41 @@ const CALLS: Record<
   // by design.
   'GET /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: false },
   'DELETE /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: true },
+  'POST /api/v1/documents/uploads/:id/complete': {
+    ownerStatus: 201,
+    // The staging row is consumed: a successful completion deletes it and inserts
+    // the `documents` row in its place, so `read` finds nothing afterwards. That is
+    // the strongest possible form of "the call really acts", and it is what makes
+    // the refusal cases below mean something.
+    ownerMutates: true,
+    // The shared `documentUpload` seed is a live transfer with an EMPTY ledger, and
+    // completion is the one route that needs its part actually delivered. Stored
+    // through the double and recorded in the ledger exactly as `uploadPart` would
+    // have: one part of `MATRIX_PART_BODY`, which is 1024 plaintext bytes plus one
+    // authentication tag, matching the row's `declaredPlaintextBytes` of 1024.
+    prepare: async (id) => {
+      const upload = await DocumentUpload.findById(id).lean();
+      await storageRef.current!.putObject(upload!.objectKey, MATRIX_PART_BODY);
+      await DocumentUpload.updateOne(
+        { _id: id },
+        {
+          $set: {
+            parts: [{ partNumber: 1, bytes: MATRIX_PART_BODY.byteLength }],
+            receivedBytes: MATRIX_PART_BODY.byteLength,
+          },
+        },
+      );
+    },
+    body: {
+      encryptedMeta: 'matrix-meta-ciphertext',
+      metaIv: 'matrix-meta-iv',
+      metaTag: 'matrix-meta-tag',
+      encryptedDek: 'matrix-dek-ciphertext',
+      dekIv: 'matrix-dek-iv',
+      dekTag: 'matrix-dek-tag',
+      vaultKeyVersion: 0,
+    },
+  },
   'PUT /api/v1/documents/uploads/:id/parts/:partNumber': {
     ownerStatus: 200,
     // The ledger grows and `receivedBytes` moves, which is what makes the refusal
@@ -508,7 +559,7 @@ describe('the matrix covers the table', () => {
     expect(orphaned, 'scenario(s) whose route is no longer in the table').toEqual([]);
   });
 
-  it('runs the matrix over all thirteen id-taking routes', () => {
+  it('runs the matrix over all fourteen id-taking routes', () => {
     // A pinned count, because the cheapest way to silence a failing IDOR case
     // is to change its row's `owned` to null: route-table.test.ts would still
     // pass (it only forces `owned` non-null for paths carrying a parameter, and
@@ -520,7 +571,7 @@ describe('the matrix covers the table', () => {
     // exercised-row count agree. Both are filters of the same array, so that
     // comparison is n === n and cannot fail.
     expect(OWNED_ROWS.map(rowKey).sort()).toEqual(Object.keys(CALLS).sort());
-    expect(OWNED_ROWS).toHaveLength(13);
+    expect(OWNED_ROWS).toHaveLength(14);
   });
 });
 
@@ -539,6 +590,7 @@ describe('cross-user isolation, per id-taking route', () => {
 
     it('lets the owner through, and the call really acts', async () => {
       const id = await scenario.seed(userA.id);
+      await scenario.prepare?.(id);
       const before = await scenario.read(id);
 
       const res = await send({
@@ -568,6 +620,7 @@ describe('cross-user isolation, per id-taking route', () => {
 
     it("refuses user B and leaves user A's document byte-identical", async () => {
       const id = await scenario.seed(userA.id);
+      await scenario.prepare?.(id);
       const before = await scenario.read(id);
       expect(before, 'the fixture must exist before the attempt').not.toBeNull();
       // B's own holdings, so the check below is "B's side is unchanged" rather
@@ -605,6 +658,7 @@ describe('cross-user isolation, per id-taking route', () => {
 
     it('answers an unauthenticated caller with 401 and touches nothing', async () => {
       const id = await scenario.seed(userA.id);
+      await scenario.prepare?.(id);
       const before = await scenario.read(id);
 
       const res = await send({
@@ -639,6 +693,7 @@ describe('cross-user isolation, per id-taking route', () => {
       // different status for "exists but is not yours" than for "does not
       // exist" enumerates other users' ids one request at a time.
       const foreignId = await scenario.seed(userA.id);
+      await scenario.prepare?.(foreignId);
 
       const foreign = await send({
         method: row.method,

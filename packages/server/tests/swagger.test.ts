@@ -73,6 +73,7 @@ describe('API Documentation', () => {
       expect(paths).toContain('/documents/uploads');
       expect(paths).toContain('/documents/uploads/{id}');
       expect(paths).toContain('/documents/uploads/{id}/parts/{partNumber}');
+      expect(paths).toContain('/documents/uploads/{id}/complete');
     });
   });
 

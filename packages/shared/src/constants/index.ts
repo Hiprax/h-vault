@@ -454,6 +454,17 @@ export const AUDIT_ACTIONS = [
   'trusted_device_grant',
   'trusted_device_revoke',
   'trusted_device_rejected',
+  // The document store's five mutations, and deliberately only five. There is no
+  // download action: no read is audited anywhere in this codebase, and one
+  // download is many segment requests, so auditing it would bury every other row
+  // in the log a user actually reads. The trash auto-purge cron reuses
+  // `trash_auto_purge` rather than adding a sixth, because it is the same
+  // scheduled operation reaching a second collection.
+  'document_create',
+  'document_update',
+  'document_delete',
+  'document_restore',
+  'document_purge',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

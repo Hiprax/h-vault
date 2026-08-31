@@ -756,6 +756,18 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     when: 'always',
     note: 'Takes a second path parameter, :partNumber, which authz-matrix.test.ts supplies through its scenario.',
   },
+  {
+    method: 'post',
+    path: '/api/v1/documents/uploads/:id/complete',
+    auth: 'required',
+    csrf: 'required',
+    // The third request of one transfer, so it shares that transfer's budget with
+    // init and abort rather than carrying one of its own.
+    limiters: ['documentUploadLimiter'],
+    owned: { param: 'id', resource: 'documentUpload' },
+    when: 'always',
+    note: 'The only route that creates a documents row; a repeat completion is reported as the row the first one committed.',
+  },
 
   // ── /api/v1 (health, config) ──────────────────────────────────────────
   {

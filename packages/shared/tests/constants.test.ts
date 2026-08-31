@@ -702,11 +702,11 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 41 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 46 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("41 distinct operations"). If a new audit action is added, bump both
+    // ("46 distinct operations"). If a new audit action is added, bump both
     // this assertion and the README number together.
-    expect(AUDIT_ACTIONS.length).toBe(41);
+    expect(AUDIT_ACTIONS.length).toBe(46);
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
   });
 
@@ -718,6 +718,21 @@ describe('Enum arrays', () => {
 
   it('includes the export_plaintext action for browser-side portable exports', () => {
     expect(AUDIT_ACTIONS).toContain('export_plaintext');
+  });
+
+  it('audits the five document mutations, and audits no document READ', () => {
+    // The five are one per mutation the document store performs. The negative is
+    // the load-bearing half: no read is audited anywhere in this codebase, and one
+    // download is one request per segment, so a `document_download` action would
+    // put thousands of rows in front of the ones a user opens the log to find.
+    expect(AUDIT_ACTIONS).toContain('document_create');
+    expect(AUDIT_ACTIONS).toContain('document_update');
+    expect(AUDIT_ACTIONS).toContain('document_delete');
+    expect(AUDIT_ACTIONS).toContain('document_restore');
+    expect(AUDIT_ACTIONS).toContain('document_purge');
+    expect(AUDIT_ACTIONS.filter((action) => action.startsWith('document_'))).toHaveLength(5);
+    expect(AUDIT_ACTIONS).not.toContain('document_download');
+    expect(AUDIT_ACTIONS).not.toContain('document_read');
   });
 });
 

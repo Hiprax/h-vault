@@ -4,6 +4,7 @@ import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   HIBP_BATCH_MAX_PREFIXES,
+  MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
 } from '@hvault/shared';
 
 /**
@@ -810,8 +811,9 @@ export const swaggerSpec: JsonObject = {
 
       // -- Document store --
       //
-      // Only the two upload shapes this release mounts. The document row itself
-      // crosses the wire from the read endpoints and is documented with them.
+      // The upload shapes, plus the committed document row — which first crosses
+      // the wire from the completion endpoint, so it is documented here rather
+      // than waiting for the read endpoints that also return it.
       InitDocumentUploadRequest: {
         type: 'object',
         description:
@@ -935,6 +937,101 @@ export const swaggerSpec: JsonObject = {
             description:
               'Set once at init and never slid forward. Past it the transfer can no longer accept a part, and the staging row is removed by a TTL index — which deletes the row ONLY, not the stored parts.',
           },
+        },
+      },
+
+      CompleteDocumentUploadRequest: {
+        type: 'object',
+        description:
+          'Turns a finished transfer into a document. The wrapped document key is sent a SECOND time here, and that is what makes a mid-transfer vault-key rotation cost one request instead of the whole file: on a 409 the browser rewraps the key it still holds and retries this request alone. The sizes of the document are NOT in this body — the server derives them from the parts the storage engine reports and refuses anything the client claims about them.',
+        required: [
+          'encryptedMeta',
+          'metaIv',
+          'metaTag',
+          'encryptedDek',
+          'dekIv',
+          'dekTag',
+          'vaultKeyVersion',
+        ],
+        properties: {
+          encryptedMeta: {
+            type: 'string',
+            maxLength: MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
+            description:
+              'The sealed metadata blob: filename, MIME type, extension, size, content digest, tags and note, encrypted under a key derived from the document key. The server never sees any of it.',
+            example: 'ZG9jdW1lbnQtbWV0YWRhdGEtY2lwaGVydGV4dA==',
+          },
+          metaIv: { type: 'string', maxLength: 24, example: 'bWV0YS1pdi1iYXNlNjQ=' },
+          metaTag: { type: 'string', maxLength: 32, example: 'bWV0YS10YWctYmFzZTY0' },
+          encryptedDek: {
+            type: 'string',
+            maxLength: 200,
+            description:
+              'The wrapped document key, under the vault key named by vaultKeyVersion. Taken from HERE rather than from the copy recorded at init.',
+            example: 'ZGVrLWNpcGhlcnRleHQtYmFzZTY0',
+          },
+          dekIv: { type: 'string', maxLength: 24, example: 'ZGVrLWl2LWJhc2U2NA==' },
+          dekTag: { type: 'string', maxLength: 32, example: 'ZGVrLXRhZy1iYXNlNjQ=' },
+          vaultKeyVersion: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              "The vault-key version the wrapped key above was produced under. Refused with 409 when it is no longer the account's current version.",
+            example: 0,
+          },
+        },
+      },
+      DocumentResponse: {
+        type: 'object',
+        description:
+          'A committed document. Everything the server can read about it is here; the filename, type, tags, note and content digest are inside encryptedMeta. The storage key and the owner are stripped from every response. The three sizes are derived server-side from the parts the storage engine reported and satisfy two identities the client re-checks: chunkCount is ceil(plaintextBytes / chunkPlaintextBytes) and at least 1, and ciphertextBytes is plaintextBytes plus one authentication tag per segment.',
+        required: [
+          '_id',
+          'favorite',
+          'encryptedDek',
+          'dekIv',
+          'dekTag',
+          'streamSalt',
+          'noncePrefix',
+          'encryptedMeta',
+          'metaIv',
+          'metaTag',
+          'chunkPlaintextBytes',
+          'chunkCount',
+          'ciphertextBytes',
+          'plaintextBytes',
+          'createdAt',
+          'updatedAt',
+        ],
+        properties: {
+          _id: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+          folderId: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c1' },
+          favorite: { type: 'boolean', example: false },
+          encryptedDek: { type: 'string', example: 'ZGVrLWNpcGhlcnRleHQtYmFzZTY0' },
+          dekIv: { type: 'string', example: 'ZGVrLWl2LWJhc2U2NA==' },
+          dekTag: { type: 'string', example: 'ZGVrLXRhZy1iYXNlNjQ=' },
+          streamSalt: { type: 'string', example: 'c3RyZWFtLXNhbHQtZXhhY3RseS0zMi1ieXRlcy0hIQ==' },
+          noncePrefix: { type: 'string', example: 'AQIDBAUGBw==' },
+          encryptedMeta: { type: 'string', example: 'ZG9jdW1lbnQtbWV0YWRhdGEtY2lwaGVydGV4dA==' },
+          metaIv: { type: 'string', example: 'bWV0YS1pdi1iYXNlNjQ=' },
+          metaTag: { type: 'string', example: 'bWV0YS10YWctYmFzZTY0' },
+          chunkPlaintextBytes: {
+            type: 'integer',
+            description:
+              'Read from the ROW and never from the server constant, so changing that constant cannot re-frame a document that already exists.',
+            example: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+          },
+          chunkCount: { type: 'integer', minimum: 1, example: 2 },
+          ciphertextBytes: { type: 'integer', example: DOCUMENT_PLAINTEXT_CHUNK_BYTES + 33 },
+          plaintextBytes: { type: 'integer', example: DOCUMENT_PLAINTEXT_CHUNK_BYTES + 1 },
+          purgePending: {
+            type: 'boolean',
+            description:
+              'Present only between the object delete and the row delete of a permanent purge, so a crash between the two leaves a marker the collector finishes.',
+          },
+          deletedAt: { type: 'string', format: 'date-time' },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' },
         },
       },
 
@@ -1237,6 +1334,70 @@ export const swaggerSpec: JsonObject = {
             content: {
               'application/json': {
                 schema: { $ref: '#/components/schemas/ErrorResponse' },
+              },
+            },
+          },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+
+    '/documents/uploads/{id}/complete': {
+      post: {
+        operationId: 'completeDocumentUpload',
+        tags: ['Documents'],
+        summary: 'Turn a finished transfer into a document',
+        description:
+          "Verifies every part against the storage engine's own ledger, DERIVES the document's chunk count and its ciphertext and plaintext sizes from that ledger rather than from this request, re-checks the storage quota against the bytes actually received, and commits the document row. Nothing the client says about the size of its own file is believed. Refused with 400 when a part is missing, when the engine and the server disagree about a part, or when the parts cannot frame a document (a final segment holding only its authentication tag is the case that looks valid and is not); with 409 while a vault-key rotation is running, when the wrapped key was produced under a superseded vault key, or when another completion of the same transfer is already in flight. A repeat completion returns the document the first one committed, so a client that retried after a timeout cannot tell whether its first attempt landed.",
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/CompleteDocumentUploadRequest' },
+            },
+          },
+        },
+        responses: {
+          201: {
+            description: 'The document, committed',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: { $ref: '#/components/schemas/DocumentResponse' },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          409: {
+            description:
+              'The completion cannot proceed yet. A stale vaultKeyVersion carries the current one in `data`, so the client rewraps the document key it still holds and retries this request alone rather than re-sending the file; a rotation in progress or a completion already in flight carry no data and are retried unchanged.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: false },
+                    message: { type: 'string' },
+                    data: {
+                      type: 'object',
+                      description: 'Present only for a superseded vault key.',
+                      properties: {
+                        vaultKeyVersion: { type: 'integer', minimum: 0, example: 1 },
+                      },
+                    },
+                  },
+                },
               },
             },
           },

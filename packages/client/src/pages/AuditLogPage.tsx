@@ -58,6 +58,11 @@ const ACTION_LABELS: Record<string, string> = {
   trusted_device_grant: 'Trusted Device Added',
   trusted_device_revoke: 'Trusted Device Revoked',
   trusted_device_rejected: 'Trusted Device Rejected',
+  document_create: 'Document Uploaded',
+  document_update: 'Document Updated',
+  document_delete: 'Document Trashed',
+  document_restore: 'Document Restored',
+  document_purge: 'Document Deleted Permanently',
 };
 
 // ---------------------------------------------------------------------------
