@@ -1153,6 +1153,99 @@ export const swaggerSpec: JsonObject = {
       },
     },
 
+    '/documents/uploads/{id}/parts/{partNumber}': {
+      put: {
+        operationId: 'uploadDocumentPart',
+        tags: ['Documents'],
+        summary: 'Store one sealed segment',
+        description:
+          'Stores one part of a transfer. The body is the raw sealed segment as application/octet-stream, `Content-Length` is required (411 without it), and `x-hv-part-sha256` carries the SHA-256 the server recomputes over the bytes it received. Every part except the LAST must be exactly the ciphertext chunk size: the storage engine accepts a short middle part, and one would shift every later segment boundary and leave the document permanently undecryptable, so the server is what refuses it. Re-sending a part number replaces its ledger entry rather than adding a second one, which is what makes a retried part safe.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          {
+            name: 'partNumber',
+            in: 'path',
+            required: true,
+            description: 'One-based, as S3 numbers parts; segment indices are zero-based.',
+            schema: { type: 'integer', minimum: 1, example: 1 },
+          },
+          {
+            name: 'x-hv-part-sha256',
+            in: 'header',
+            required: true,
+            description: 'SHA-256 of the sealed segment, 64 lowercase hexadecimal characters.',
+            schema: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/octet-stream': {
+              schema: { type: 'string', format: 'binary' },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'Part stored',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: {
+                      type: 'object',
+                      properties: {
+                        partNumber: { type: 'integer', example: 1 },
+                        bytes: { type: 'integer', example: DOCUMENT_CIPHERTEXT_CHUNK_BYTES },
+                        receivedBytes: {
+                          type: 'integer',
+                          description: 'The sum of every part stored so far.',
+                          example: DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          411: {
+            description: 'The request declared no Content-Length',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/ErrorResponse' },
+              },
+            },
+          },
+          413: {
+            description: 'The body is larger than one sealed segment',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/ErrorResponse' },
+              },
+            },
+          },
+          415: {
+            description: 'The body was not sent as unencoded application/octet-stream',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/ErrorResponse' },
+              },
+            },
+          },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+
     // -- Health --
     '/health': {
       get: {

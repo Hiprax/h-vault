@@ -740,6 +740,22 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     owned: { param: 'id', resource: 'documentUpload' },
     when: 'always',
   },
+  {
+    method: 'put',
+    path: '/api/v1/documents/uploads/:id/parts/:partNumber',
+    auth: 'required',
+    csrf: 'required',
+    // The ONLY route in this application whose body is not JSON. It carries a
+    // route-level `express.raw` for `application/octet-stream`, and two
+    // middlewares ahead of it that are not limiters and so do not appear in the
+    // column: a 411 guard, and the process-wide part semaphore — which has to be
+    // AHEAD of the parser, because a slot taken after the body is buffered bounds
+    // no memory at all.
+    limiters: ['documentPartLimiter'],
+    owned: { param: 'id', resource: 'documentUpload' },
+    when: 'always',
+    note: 'Takes a second path parameter, :partNumber, which authz-matrix.test.ts supplies through its scenario.',
+  },
 
   // ── /api/v1 (health, config) ──────────────────────────────────────────
   {

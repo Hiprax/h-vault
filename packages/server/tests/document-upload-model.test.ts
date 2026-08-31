@@ -196,7 +196,7 @@ describe('DocumentUpload model', () => {
       expect(error?.errors['parts.0.bytes']?.kind).toBe(kind);
     });
 
-    it('bounds partNumber between 1 and MAX_DOCUMENT_CHUNK_COUNT, and requires an etag', async () => {
+    it('bounds partNumber between 1 and MAX_DOCUMENT_CHUNK_COUNT', async () => {
       // S3 part numbers are 1-based while segment indices are 0-based, so a part
       // numbered 0 is a caller that has confused the two.
       expect(
@@ -208,10 +208,24 @@ describe('DocumentUpload model', () => {
         (await validationErrorFor({ parts: [part({ partNumber: MAX_DOCUMENT_CHUNK_COUNT + 1 })] }))
           ?.errors['parts.0.partNumber']?.kind,
       ).toBe('max');
-      expect(
-        (await validationErrorFor({ parts: [part({ etag: undefined })] }))?.errors['parts.0.etag']
-          ?.kind,
-      ).toBe('required');
+    });
+
+    it('accepts a part with NO etag, because a single-segment transfer has no receipt', async () => {
+      // This assertion used to be its opposite, and the change is a specification
+      // correction rather than a relaxation. A one-segment transfer is stored with
+      // `PutObject`, whose port signature returns `Promise<void>` and whose S3
+      // response declares `ETag` OPTIONAL, so there is no receipt in existence to
+      // record; requiring one meant either inventing a value or failing a valid
+      // upload on a conforming engine that answers tersely, for a field the
+      // completion step does not read (it takes the etags it hands back to the
+      // engine from `ListParts`).
+      //
+      // What replaces the invariant is stronger than what it was: `required: true`
+      // could only ever catch a TOTALLY ABSENT etag, whereas
+      // `document-parts.test.ts` pins the real rule behaviourally — the multipart
+      // path stores the engine's own etag VERBATIM, and the single-segment path
+      // stores no `etag` key at all.
+      expect(await validationErrorFor({ parts: [part({ etag: undefined })] })).toBeUndefined();
     });
   });
 
@@ -263,6 +277,27 @@ describe('DocumentUpload model', () => {
       expect(raw).not.toBeNull();
       expect(raw!.parts).toHaveLength(1);
       expect(Object.keys(raw!.parts[0]!).sort()).toEqual(['bytes', 'etag', 'partNumber']);
+    });
+
+    it('leaves the etag key genuinely absent when a part carries none', async () => {
+      // Read raw for the same reason `s3UploadId` is read raw above: a hydrated
+      // read cannot tell an absent field from a defaulted one, and the difference
+      // matters. `default: undefined` is what keeps the key out of the document
+      // entirely; a `default: ''` or a `default: null` would write a receipt that
+      // no engine issued, and completion would have no way to tell that value
+      // from one it could hand back.
+      const created = await DocumentUpload.create(
+        makeUpload({
+          parts: [{ partNumber: 1, bytes: DOCUMENT_TAG_BYTES }],
+          receivedBytes: DOCUMENT_TAG_BYTES,
+        }),
+      );
+
+      const raw = (await DocumentUpload.collection.findOne({ _id: created._id })) as {
+        parts: Record<string, unknown>[];
+      } | null;
+      expect(raw).not.toBeNull();
+      expect(Object.keys(raw!.parts[0]!).sort()).toEqual(['bytes', 'partNumber']);
     });
 
     it('stamps createdAt and deliberately no updatedAt', async () => {

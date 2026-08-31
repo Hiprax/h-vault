@@ -797,12 +797,13 @@ Available only where object storage is configured; every route answers **503** o
 is encrypted in the browser before a byte leaves it: the server stores ciphertext, a wrapped key and
 sizes, and never sees a filename, a type, a tag or a note.
 
-| Method | Endpoint                 | Description                                                        |
-| ------ | ------------------------ | ------------------------------------------------------------------ |
-| GET    | `/documents/uploads`     | Transfers in progress, with the parts already received             |
-| POST   | `/documents/uploads`     | Open a transfer; returns the id the browser encrypts against       |
-| GET    | `/documents/uploads/:id` | One transfer and its part ledger, so an interrupted upload resumes |
-| DELETE | `/documents/uploads/:id` | Cancel a transfer and release what the storage engine holds        |
+| Method | Endpoint                                   | Description                                                                                                   |
+| ------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| GET    | `/documents/uploads`                       | Transfers in progress, with the parts already received                                                        |
+| POST   | `/documents/uploads`                       | Open a transfer; returns the id the browser encrypts against                                                  |
+| GET    | `/documents/uploads/:id`                   | One transfer and its part ledger, so an interrupted upload resumes                                            |
+| DELETE | `/documents/uploads/:id`                   | Cancel a transfer and release what the storage engine holds                                                   |
+| PUT    | `/documents/uploads/:id/parts/:partNumber` | Store one sealed segment (`application/octet-stream`, `Content-Length` required, `x-hv-part-sha256` verified) |
 
 </details>
 

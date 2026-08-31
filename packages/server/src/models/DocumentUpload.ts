@@ -19,7 +19,9 @@ import {
  * The ledger is what completion is checked against: the handler compares it with
  * the engine's own `ListParts` (count, order and size) and DERIVES the committed
  * row's `chunkCount`, `ciphertextBytes` and `plaintextBytes` from it rather than
- * from anything the client sent.
+ * from anything the client sent. The etags it hands back to the engine come from
+ * that same `ListParts` read rather than from this array, so this array's copy is
+ * a record of what the engine acknowledged and not an input to the completion call.
  *
  * NOT exported: it is referenced only by `IDocumentUpload` and by the sub-schema
  * below, both in this file, and the dead-code gate reports an export nothing
@@ -29,8 +31,25 @@ import {
 interface IDocumentUploadPart {
   /** 1-based, because S3 part numbers are. Segment indices are 0-based; they differ by one. */
   partNumber: number;
-  /** The engine's opaque receipt for the stored part, handed back verbatim at completion. */
-  etag: string;
+  /**
+   * The engine's opaque receipt for the stored part, as `UploadPart` returned it.
+   *
+   * ABSENT for a single-segment transfer, and that absence is meaningful rather
+   * than missing data: one segment is stored with `PutObject`, whose S3 response
+   * declares `ETag` OPTIONAL and whose port signature therefore returns nothing at
+   * all, so there is no receipt in existence to record. Requiring one here would
+   * mean either inventing a value or making a valid single-file upload fail on a
+   * conforming engine that answers tersely, and all for a field the completion
+   * step does not read.
+   *
+   * The invariant that a MULTIPART part always carries one is upheld where the
+   * value is produced: `StorageProvider.uploadPart` returns a `StoragePart` whose
+   * `etag` is non-optional, and the S3 provider throws before returning if the SDK
+   * ever omits it. `document-parts.test.ts` pins both halves behaviourally — the
+   * multipart path stores the engine's etag verbatim, the single-segment path
+   * stores no `etag` key at all.
+   */
+  etag?: string | undefined;
   /** The stored size of the part, which is one sealed segment. */
   bytes: number;
 }
@@ -103,7 +122,10 @@ const documentUploadPartSchema = new Schema<IDocumentUploadPart>(
     // deliberately NOT a tight fit — this value is not ours to shape, and a bound
     // narrow enough to bind would refuse a legitimate engine and break the
     // "any S3 service works through configuration alone" promise.
-    etag: { type: String, required: true, maxlength: 256 },
+    // NOT `required`, and NOT defaulted: see `IDocumentUploadPart.etag`. A
+    // single-segment transfer is stored with `PutObject`, which returns no receipt,
+    // so the key is simply absent on that row — the same way `s3UploadId` is.
+    etag: { type: String, maxlength: 256, default: undefined },
     // One stored part is one sealed segment: at least a bare authentication tag
     // (a zero-byte final segment) and at most a full ciphertext chunk. Both ends
     // are the framing constants rather than round numbers, and they are the same

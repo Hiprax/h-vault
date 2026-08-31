@@ -1,12 +1,15 @@
+import { createHash } from 'node:crypto';
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import {
+  DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+  DOCUMENT_TAG_BYTES,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
   MAX_DOCUMENTS_PER_USER,
 } from '@hvault/shared';
-import type { InitDocumentUploadInput } from '@hvault/shared';
+import type { DocumentPartParams, InitDocumentUploadInput } from '@hvault/shared';
 import { config } from '../config/index.js';
 import { createModuleLogger } from '../utils/logger.js';
 import { Document } from '../models/Document.js';
@@ -70,6 +73,21 @@ const ALLOWED_INIT_FIELDS = new Set([
  * is lean, so this projection is the control rather than a second line of defense.
  */
 const UPLOAD_PROJECTION = '-userId -objectKey -s3UploadId -encryptedDek -dekIv -dekTag -parts.etag';
+
+/**
+ * The header carrying the client's SHA-256 of the sealed segment it is sending.
+ *
+ * Lower-case because Node lower-cases every incoming header name, and `req.headers`
+ * is keyed by the lower-cased form.
+ */
+export const PART_DIGEST_HEADER = 'x-hv-part-sha256';
+
+/**
+ * 64 lowercase hexadecimal characters, the same shape `sha256Schema` pins for the
+ * digests inside the encrypted metadata blob, so a client formats one digest one
+ * way everywhere.
+ */
+const PART_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -320,4 +338,260 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
   logger.info('Document upload aborted', { userId, uploadId: id });
 
   res.json({ success: true, message: 'Upload cancelled' });
+});
+
+/**
+ * `PUT /documents/uploads/:id/parts/:partNumber` — store one sealed segment.
+ *
+ * One crypto segment is one uploaded part is one downloaded range, so this handler
+ * is the only place the server ever sees a document's bytes, and it sees them as
+ * ciphertext it cannot read. What it CAN do is refuse a part that would make the
+ * finished object undecryptable, and that is its whole job.
+ *
+ * The rule that matters most is the one the storage engine itself does not enforce:
+ * **a non-final part must be exactly `DOCUMENT_CIPHERTEXT_CHUNK_BYTES`.** Garage was
+ * measured accepting a short middle part, and S3's own contract only requires the
+ * LAST part to be allowed to be short. A short middle part shifts every later
+ * segment boundary by the shortfall, so segment `i` no longer starts at
+ * `i * DOCUMENT_CIPHERTEXT_CHUNK_BYTES`, every subsequent ranged read returns the
+ * wrong bytes, and the failure surfaces in the browser as a tag mismatch that looks
+ * like corruption. The server is the only thing standing between that and a
+ * document nobody can ever open.
+ *
+ * NOT rotation-fenced, unlike init and completion, and that is deliberate rather
+ * than an omission. `assertVaultNotRotating` guards the writes that create
+ * ciphertext under the caller's VAULT key; a part carries no wrapped key and no
+ * vault-key-derived material at all. The DEK was wrapped at init (fenced there) and
+ * is sent again at completion (fenced there, and version-checked), so a rotation
+ * that runs mid-transfer is caught at the only two points where it can do harm.
+ * Refusing parts as well would abort an 800 MB transfer for a rotation the
+ * completion step can already recover from with a single retried request.
+ *
+ * The quota is not re-checked here either, and the honest reason is a BOUND rather
+ * than an equality. A part number is bounded by `declaredChunkCount`, each part by
+ * one segment, and a re-sent part replaces its ledger entry rather than adding one,
+ * so the received total cannot exceed `declaredChunkCount` whole chunks. That is
+ * not the same as the size init reserved: a transfer declaring one plaintext byte
+ * gets a `declaredChunkCount` of 1 and may then legally send a full 8 MiB final
+ * part. The overshoot is at most one chunk per transfer, times
+ * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER`, and completion re-checks the quota
+ * against the bytes actually received before anything is committed — so the
+ * transient over-reservation is bounded and never becomes a stored document.
+ */
+export const uploadPart = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { id, partNumber } = req.params as unknown as DocumentPartParams;
+  const body: unknown = req.body;
+
+  // `express.raw` only parses `application/octet-stream`; for anything else it
+  // leaves whatever the global JSON parser produced, or nothing. A part is raw
+  // bytes, and there is no second representation of one.
+  //
+  // `instanceof Buffer` rather than `Buffer.isBuffer`, and the difference is not
+  // style: this is the TYPE TEST that everything below depends on. `.length` is
+  // precisely the operation that behaves differently for a string, an array and a
+  // Buffer, so a guard that a reader (or a static analyzer) cannot recognise as a
+  // type test is a guard that does not obviously cover the comparisons it protects.
+  // There is one realm in this process and `express.raw` builds the value with
+  // `Buffer.concat`, so the cross-realm case `Buffer.isBuffer` additionally covers
+  // cannot arise here.
+  if (!(body instanceof Buffer)) {
+    throw httpErrors.unsupportedMediaType(
+      'A document part must be sent as application/octet-stream',
+    );
+  }
+
+  // The size of this part, read ONCE, immediately behind that guard. Every rule
+  // below is a statement about this number — the declared-length check, the
+  // exact-size rule, the final-part window, the ledger entry and the response — and
+  // reading `.length` off the buffer at each of them invites one of them to be read
+  // off something else after an edit.
+  const partBytes: number = body.length;
+
+  // Projected, not the whole row: `parts` can hold one entry per segment, and this
+  // handler needs none of them — the ledger is rewritten server-side by the pipeline
+  // below rather than read, merged and written back.
+  const upload = await DocumentUpload.findOne({ _id: id, userId })
+    .select('objectKey s3UploadId declaredChunkCount expiresAt')
+    .lean();
+  // A foreign id and an id that never existed are the same answer, so neither
+  // enumerates another account's transfers.
+  if (!upload) {
+    throw httpErrors.notFound('Upload not found');
+  }
+  // The TTL index deletes an expired row within the minute, not at the instant it
+  // expires, so a part can still arrive against one. It is refused with the same
+  // 404 the deleted row would have produced: a transfer past its deadline can never
+  // be completed, and the two cases must be indistinguishable or the response
+  // becomes a clock oracle.
+  if (upload.expiresAt.getTime() <= Date.now()) {
+    throw httpErrors.notFound('Upload not found');
+  }
+
+  if (partNumber > upload.declaredChunkCount) {
+    throw httpErrors.badRequest(
+      `This transfer has ${String(upload.declaredChunkCount)} part(s); part ${String(partNumber)} is outside it.`,
+    );
+  }
+
+  // The bytes the parser handed over must be the bytes the client declared.
+  //
+  // Node's HTTP server enforces this today — it delivers exactly `Content-Length`
+  // bytes and answers 400 itself when the client sends fewer or more — and
+  // `raw-body` checks it a second time. This is the third check, and it is the one
+  // that belongs to this handler, because the ledger entry, `receivedBytes` and the
+  // quota are all computed from a length: if a future parser, a proxy or a
+  // transfer coding ever broke that correspondence, everything downstream would be
+  // wrong in a way nothing else would notice. `Number(undefined)` is `NaN`, which
+  // is never equal to a length, so a missing header is refused here as well as by
+  // the 411 guard ahead of the parser.
+  const declaredBytes = Number(req.headers['content-length']);
+  if (declaredBytes !== partBytes) {
+    throw httpErrors.badRequest(
+      `Part ${String(partNumber)} declared ${String(req.headers['content-length'])} byte(s) and delivered ${String(partBytes)}.`,
+    );
+  }
+
+  const isFinalPart = partNumber === upload.declaredChunkCount;
+  if (!isFinalPart && partBytes !== DOCUMENT_CIPHERTEXT_CHUNK_BYTES) {
+    throw httpErrors.badRequest(
+      `Part ${String(partNumber)} is not the last part of this transfer and must be exactly ` +
+        `${String(DOCUMENT_CIPHERTEXT_CHUNK_BYTES)} bytes; it was ${String(partBytes)}.`,
+    );
+  }
+  // The final part is the only one allowed to be short, and it still cannot be
+  // empty: the smallest sealed segment is a bare authentication tag.
+  if (
+    isFinalPart &&
+    (partBytes < DOCUMENT_TAG_BYTES || partBytes > DOCUMENT_CIPHERTEXT_CHUNK_BYTES)
+  ) {
+    throw httpErrors.badRequest(
+      `The last part of this transfer must be between ${String(DOCUMENT_TAG_BYTES)} and ` +
+        `${String(DOCUMENT_CIPHERTEXT_CHUNK_BYTES)} bytes; it was ${String(partBytes)}.`,
+    );
+  }
+
+  // The digest the client computed over the sealed segment, checked against one the
+  // server computes itself. It proves the bytes survived the network and every
+  // middleware between the socket and here; it proves nothing about the plaintext,
+  // which the server never sees. A plain comparison rather than a constant-time one
+  // on purpose: both operands are the client's own values and neither is a secret,
+  // so there is no secret for a timing side channel to leak.
+  const declaredDigest = req.headers[PART_DIGEST_HEADER];
+  if (typeof declaredDigest !== 'string' || !PART_DIGEST_PATTERN.test(declaredDigest)) {
+    throw httpErrors.badRequest(
+      `${PART_DIGEST_HEADER} must be 64 lowercase hexadecimal characters`,
+    );
+  }
+  const actualDigest = createHash('sha256').update(body).digest('hex');
+  if (actualDigest !== declaredDigest) {
+    throw httpErrors.badRequest(`Part ${String(partNumber)} does not match its declared digest.`);
+  }
+
+  // Stored BEFORE the ledger is written. A part in the bucket that no ledger names
+  // is reclaimed by the collector or overwritten by a retry; a ledger entry naming
+  // bytes that were never stored would be counted at completion and produce a
+  // document with a hole in it.
+  let etag: string | undefined;
+  if (upload.declaredChunkCount === 1) {
+    // One segment is one whole object: `PutObject`, no multipart handle, no
+    // engine receipt to record.
+    await getStorage().putObject(upload.objectKey, body);
+  } else if (upload.s3UploadId === undefined) {
+    // A row claiming several segments while naming no engine-side upload cannot be
+    // produced by `initUpload`, which opens one before it writes the row and aborts
+    // it if the write fails. Reaching this means the row was corrupted or written
+    // by something else, and falling through to `putObject` would store one part as
+    // the WHOLE object and destroy every other part of the transfer.
+    logger.error('A multi-segment staging row names no engine-side upload', {
+      userId,
+      uploadId: id,
+      declaredChunkCount: upload.declaredChunkCount,
+    });
+    throw httpErrors.internalServerError('This transfer is no longer in a usable state');
+  } else {
+    ({ etag } = await getStorage().uploadPart(
+      upload.objectKey,
+      upload.s3UploadId,
+      partNumber,
+      body,
+    ));
+  }
+
+  // One atomic update that REPLACES any existing entry for this part number and
+  // recomputes `receivedBytes` from the array it just produced.
+  //
+  // An aggregation pipeline rather than `$push`, and that is what makes a re-sent
+  // part idempotent by construction: `$push` plus a separate `$inc` would double
+  // count the moment a client retried a part it had already delivered, and a
+  // `$pull` followed by a `$push` is two updates with a window between them. Here
+  // the filter drops the old entry, the concat appends the new one, and the second
+  // stage sums the result, so `receivedBytes` is DERIVED from the ledger rather
+  // than tracked alongside it and cannot drift from it.
+  //
+  // A pipeline update bypasses Mongoose's casting and validators, so the sub-schema's
+  // bounds do NOT run on this write. That is safe because every one of them has
+  // already been checked above by something stricter: `partNumber` by the param
+  // schema and the declared-count check, `bytes` by the exact-size rules. The one
+  // bound with no equivalent here is `etag`'s `maxlength`, which is therefore
+  // ADVISORY on this path rather than enforced. That is acceptable, and only
+  // because the value is engine-produced rather than caller-supplied:
+  // `StorageProvider.uploadPart` returns it, the S3 provider throws before
+  // returning if the SDK omits it, and nothing a client sends can reach it.
+  const entry = {
+    partNumber,
+    bytes: partBytes,
+    ...(etag === undefined ? {} : { etag }),
+  };
+  const updated = await DocumentUpload.findOneAndUpdate(
+    { _id: id, userId },
+    [
+      {
+        $set: {
+          parts: {
+            $concatArrays: [
+              {
+                $filter: {
+                  input: '$parts',
+                  as: 'part',
+                  cond: { $ne: ['$$part.partNumber', partNumber] },
+                },
+              },
+              // `$literal`, because everything inside a pipeline update is an
+              // aggregation EXPRESSION: a string beginning with `$` would be
+              // resolved as a field path and the value silently dropped or
+              // substituted. No client-controlled string reaches this object and a
+              // real S3 ETag is quoted hex, so it is not reachable today — but the
+              // wrapper costs nothing and removes the class outright.
+              [{ $literal: entry }],
+            ],
+          },
+        },
+      },
+      { $set: { receivedBytes: { $sum: '$parts.bytes' } } },
+    ],
+    // `updatePipeline: true` is REQUIRED by Mongoose 9 to pass an aggregation
+    // pipeline as the update: without it the array is refused outright rather
+    // than being sent to the server as a pipeline, which is the failure mode a
+    // reader would otherwise mistake for a MongoDB version problem.
+    // `returnDocument: 'after'`, never the legacy `new: true`, which Mongoose 9
+    // deprecates with a process warning — and this project's lint and gate surface
+    // run at zero warnings.
+    { returnDocument: 'after', projection: 'receivedBytes', updatePipeline: true },
+  ).lean();
+
+  if (!updated) {
+    // The staging row was removed while this part was being stored — its TTL fired,
+    // or the caller cancelled the transfer from another tab. The bytes are already
+    // in the bucket and are left there for the collector's orphan sweep rather than
+    // deleted here, because a completion committing the very same key may be in
+    // flight; what must NOT happen is recreating the row this update would have
+    // resurrected, which `findOneAndUpdate` without an upsert guarantees.
+    throw httpErrors.notFound('Upload not found');
+  }
+
+  res.json({
+    success: true,
+    data: { partNumber, bytes: partBytes, receivedBytes: updated.receivedBytes },
+  });
 });

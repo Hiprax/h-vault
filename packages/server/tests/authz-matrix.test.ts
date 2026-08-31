@@ -18,10 +18,11 @@
  *
  * Seam: the real Express app through supertest against the real mongod
  * `tests/setup.ts` starts, with two real accounts from `tests/helpers.ts`.
- * Nothing is mocked — not the datastore, not the middleware, not the clock.
  * Ownership here is enforced by the `{ _id, userId }` filter in each
  * controller's query, which is a database behaviour, so a faked datastore
- * would test nothing at all.
+ * would test nothing at all — the datastore, the middleware and the clock are
+ * all real. Exactly two things are replaced, both EXTERNAL to the application:
+ * the storage feature flag (see the two mocks below) and object storage itself.
  *
  * ---------------------------------------------------------------------------
  * THE CHAIN THAT MAKES A NEW ROUTE FAIL UNTIL IT IS CLASSIFIED
@@ -46,6 +47,7 @@
  * cases (a LIST endpoint returning only the caller's rows), which are an
  * invariant about a response body rather than about an id.
  */
+import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
@@ -64,16 +66,42 @@ import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES } from '@hvault/shar
  * registry re-evaluates `models/User.ts` against the externalised mongoose
  * singleton, which throws `OverwriteModelError`. `coverage-rate-limiter.test.ts`
  * forces `isProduction` the same way.
- *
- * Only `storageConfigured` is overridden. `resolveStorageOptions` still finds no
- * credentials, so `getStorage()` would throw — which is exactly the right
- * behaviour here: the two document rows in the table are seeded WITHOUT an
- * engine-side multipart upload, so no handler they exercise reaches storage, and
- * one that started to would fail loudly rather than silently talking to nothing.
  */
 vi.mock('../src/config/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/config/index.js')>();
   return { ...actual, storageConfigured: true };
+});
+
+/**
+ * …and give it somewhere to put bytes.
+ *
+ * This file used to override `storageConfigured` ALONE, on the argument that no
+ * document route the table declared could reach object storage. That stopped being
+ * true with `PUT /uploads/:id/parts/:partNumber`: a legitimate call from the owner
+ * stores a part, and the matrix's owner case asserts that the call really acts. So
+ * the in-memory double is installed here, exactly as `document-uploads.test.ts`
+ * installs it, and a fresh one per test keeps one row's bytes out of the next.
+ *
+ * It is a DOUBLE and not a stub of the controller: object storage is an external
+ * service in the same class as SMTP, the datastore this suite is really asking
+ * about is Mongo, and Mongo stays real — ownership is decided by a `{_id, userId}`
+ * filter, which is a database behaviour.
+ */
+const { storageRef } = vi.hoisted(() => ({
+  storageRef: { current: undefined as ReturnType<typeof createInMemoryStorage> | undefined },
+}));
+
+vi.mock('../src/services/storage/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/storage/index.js')>();
+  return {
+    ...actual,
+    getStorage: () => {
+      if (storageRef.current === undefined) {
+        throw new Error('the in-memory storage double was not installed for this test');
+      }
+      return storageRef.current;
+    },
+  };
 });
 
 import app from '../src/app.js';
@@ -84,7 +112,9 @@ import { RefreshToken } from '../src/models/RefreshToken.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { hashToken } from '../src/utils/token.js';
+import { PART_DIGEST_HEADER } from '../src/controllers/documentController.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
+import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
 import {
   ROUTE_TABLE,
   isMountedUnderTest,
@@ -126,6 +156,17 @@ interface SendOptions {
   /** Omit to send the request with no `x-csrf-token` at all. */
   csrf?: boolean;
   body?: Record<string, unknown> | undefined;
+  /**
+   * A NON-JSON body, with the content type it is sent as.
+   *
+   * One route in the table takes one: `PUT /uploads/:id/parts/:partNumber` carries
+   * a sealed segment as `application/octet-stream`. Sending it as JSON instead
+   * would be refused with 415 before ownership was ever consulted, and every case
+   * in the matrix would then pass while proving nothing.
+   */
+  raw?: { body: Buffer; contentType: string } | undefined;
+  /** Extra headers a legitimate call carries, such as a part's digest. */
+  headers?: Record<string, string> | undefined;
 }
 
 /**
@@ -141,6 +182,8 @@ async function send({
   bearer,
   csrf = true,
   body,
+  raw,
+  headers,
 }: SendOptions): Promise<request.Response> {
   const agent: Agent = request.agent(app);
   const pending = agent[method](path);
@@ -149,7 +192,15 @@ async function send({
     const pair = await getCsrf(agent);
     pending.set('Cookie', pair.cookie).set('x-csrf-token', pair.token);
   }
-  if (body !== undefined) pending.send(body);
+  for (const [name, value] of Object.entries(headers ?? {})) pending.set(name, value);
+  // A raw body wins over the JSON one. The `auth`/`csrf` block below calls every
+  // row with `body: {}` and no scenario, and both of those refusals happen before
+  // any parser runs, so a JSON body on the octet-stream route is harmless there.
+  if (raw !== undefined) {
+    pending.type(raw.contentType).send(raw.body);
+  } else if (body !== undefined) {
+    pending.send(body);
+  }
   return pending;
 }
 
@@ -168,8 +219,21 @@ interface Scenario {
   count: (userId: string) => Promise<number>;
   /** Appended to the path (a query string), when the route needs one. */
   query?: string;
+  /**
+   * Path parameters OTHER than `:id`.
+   *
+   * `:id` is the one the matrix owns — it is the value ownership is decided by, so
+   * it is supplied per case (the owner's, an orphan's, a malformed one). Any other
+   * parameter is part of addressing the resource rather than owning it, so it comes
+   * from here.
+   */
+  params?: Record<string, string>;
   /** The body a legitimate call carries. */
   body?: Record<string, unknown>;
+  /** A non-JSON body, for the one route that takes one. */
+  raw?: { body: Buffer; contentType: string };
+  /** Extra headers a legitimate call carries. */
+  headers?: Record<string, string>;
   /** What the OWNER receives. */
   ownerStatus: number;
   /**
@@ -207,6 +271,17 @@ const MATRIX_DOCUMENT_CRYPTO = {
   streamSalt: 'matrix-stream-salt',
   noncePrefix: 'matrix-prefix',
 };
+
+/**
+ * The one sealed segment this suite uploads, and the digest that goes with it.
+ *
+ * Deterministic bytes and a digest computed FROM them rather than written out, so
+ * the pair cannot drift: a hard-coded digest beside a changed body would fail every
+ * case in this row for the wrong reason, and a test that then "fixed" the body to
+ * match would be pinning nothing.
+ */
+const MATRIX_PART_BODY = Buffer.alloc(1024 + DOCUMENT_TAG_BYTES, 0x5a);
+const MATRIX_PART_DIGEST = createHash('sha256').update(MATRIX_PART_BODY).digest('hex');
 
 /** A committed document row for `ownerId`, active or trashed. */
 async function seedDocument(ownerId: string, overrides: Record<string, unknown>): Promise<string> {
@@ -304,12 +379,16 @@ const RESOURCES: Record<OwnedResource, Pick<Scenario, 'seed' | 'read' | 'count'>
     count: (userId) => Document.countDocuments({ userId }),
   },
   documentUpload: {
-    // Deliberately WITHOUT an `s3UploadId`. The row then describes a
-    // single-segment transfer, which has no engine-side multipart upload, so
-    // `DELETE /uploads/:id` completes without reaching object storage — and this
-    // file mocks only `storageConfigured`, not the storage provider. A handler
-    // that started to call the engine here would fail loudly instead of quietly
-    // passing.
+    // Deliberately WITHOUT an `s3UploadId`, which makes it a SINGLE-SEGMENT
+    // transfer. Two routes depend on that: `DELETE /uploads/:id` has no
+    // engine-side multipart upload to abort, and `PUT .../parts/1` addresses the
+    // one and only part, so it is the FINAL part and may be short — which is what
+    // lets the owner case send a plausible sealed segment of 1024 bytes plus a tag
+    // rather than a full 8 MiB chunk.
+    //
+    // (This file used to add "and no handler here reaches storage"; that stopped
+    // being true when the part route arrived, and the in-memory double at the top
+    // of the file is what replaced it.)
     seed: async (ownerId) => {
       const uploadId = new mongoose.Types.ObjectId();
       const upload = await DocumentUpload.create({
@@ -334,7 +413,10 @@ const RESOURCES: Record<OwnedResource, Pick<Scenario, 'seed' | 'read' | 'count'>
  * Per-route additions to its resource: the body a legitimate call carries and
  * the status its owner gets back.
  */
-const CALLS: Record<string, Pick<Scenario, 'query' | 'body' | 'ownerStatus' | 'ownerMutates'>> = {
+const CALLS: Record<
+  string,
+  Pick<Scenario, 'query' | 'params' | 'body' | 'raw' | 'headers' | 'ownerStatus' | 'ownerMutates'>
+> = {
   'GET /api/v1/vault/items/:id': { ownerStatus: 200, ownerMutates: false },
   'PUT /api/v1/vault/items/:id': {
     ownerStatus: 200,
@@ -363,6 +445,19 @@ const CALLS: Record<string, Pick<Scenario, 'query' | 'body' | 'ownerStatus' | 'o
   // by design.
   'GET /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: false },
   'DELETE /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: true },
+  'PUT /api/v1/documents/uploads/:id/parts/:partNumber': {
+    ownerStatus: 200,
+    // The ledger grows and `receivedBytes` moves, which is what makes the refusal
+    // cases below mean something: they assert the row is byte-identical afterwards,
+    // and that is only evidence if a legitimate call would have changed it.
+    ownerMutates: true,
+    // Part 1 of a one-part transfer, so it is the FINAL part and may be short. The
+    // `documentUpload` scenario declares one segment of 1024 plaintext bytes; one
+    // sealed segment of that is the plaintext plus a single authentication tag.
+    params: { partNumber: '1' },
+    raw: { body: MATRIX_PART_BODY, contentType: 'application/octet-stream' },
+    headers: { [PART_DIGEST_HEADER]: MATRIX_PART_DIGEST },
+  },
 };
 
 type OwnedRow = RouteRow & { owned: NonNullable<RouteRow['owned']> };
@@ -377,9 +472,26 @@ const scenarioFor = (row: OwnedRow): Scenario => ({
   ...CALLS[rowKey(row)]!,
 });
 
-/** The concrete URL a call to `row` uses for `id`. */
-const urlFor = (row: RouteRow, id: string, query = ''): string =>
-  `${row.path.replace(':id', id)}${query}`;
+/**
+ * A stand-in for a path parameter no scenario named.
+ *
+ * The `auth`/`csrf` block below walks EVERY row with no scenario at all, and a URL
+ * still carrying a literal `:partNumber` would be a URL whose 401 or 403 might
+ * really be a routing miss. `1` is a legal value for every non-`:id` parameter the
+ * table declares, so those two observations stay about the middleware they name.
+ */
+const PLACEHOLDER_PARAM = '1';
+
+/** The concrete URL a call to `row` uses: `:id`, then every other parameter. */
+const urlFor = (
+  row: RouteRow,
+  id: string,
+  query = '',
+  params: Record<string, string> = {},
+): string =>
+  `${row.path.replace(/:([A-Za-z][A-Za-z0-9_]*)/g, (_match, name: string) =>
+    name === 'id' ? id : (params[name] ?? PLACEHOLDER_PARAM),
+  )}${query}`;
 
 describe('the matrix covers the table', () => {
   it('has a scenario for every id-taking route', () => {
@@ -396,7 +508,7 @@ describe('the matrix covers the table', () => {
     expect(orphaned, 'scenario(s) whose route is no longer in the table').toEqual([]);
   });
 
-  it('runs the matrix over all twelve id-taking routes', () => {
+  it('runs the matrix over all thirteen id-taking routes', () => {
     // A pinned count, because the cheapest way to silence a failing IDOR case
     // is to change its row's `owned` to null: route-table.test.ts would still
     // pass (it only forces `owned` non-null for paths carrying a parameter, and
@@ -408,7 +520,7 @@ describe('the matrix covers the table', () => {
     // exercised-row count agree. Both are filters of the same array, so that
     // comparison is n === n and cannot fail.
     expect(OWNED_ROWS.map(rowKey).sort()).toEqual(Object.keys(CALLS).sort());
-    expect(OWNED_ROWS).toHaveLength(12);
+    expect(OWNED_ROWS).toHaveLength(13);
   });
 });
 
@@ -417,6 +529,7 @@ describe('cross-user isolation, per id-taking route', () => {
   let userB: TestUser;
 
   beforeEach(async () => {
+    storageRef.current = createInMemoryStorage();
     userA = await createTestUser({ email: 'matrix-owner@example.com' });
     userB = await createTestUser({ email: 'matrix-intruder@example.com' });
   });
@@ -430,9 +543,11 @@ describe('cross-user isolation, per id-taking route', () => {
 
       const res = await send({
         method: row.method,
-        path: urlFor(row, id, scenario.query),
+        path: urlFor(row, id, scenario.query, scenario.params),
         bearer: userA.accessToken,
         body: scenario.body,
+        raw: scenario.raw,
+        headers: scenario.headers,
       });
 
       expect(res.status, JSON.stringify(res.body)).toBe(scenario.ownerStatus);
@@ -462,9 +577,11 @@ describe('cross-user isolation, per id-taking route', () => {
 
       const res = await send({
         method: row.method,
-        path: urlFor(row, id, scenario.query),
+        path: urlFor(row, id, scenario.query, scenario.params),
         bearer: userB.accessToken,
         body: scenario.body,
+        raw: scenario.raw,
+        headers: scenario.headers,
       });
 
       // 404 (the row does not exist FOR B) or 403. Never a 2xx, and never a 5xx
@@ -492,8 +609,10 @@ describe('cross-user isolation, per id-taking route', () => {
 
       const res = await send({
         method: row.method,
-        path: urlFor(row, id, scenario.query),
+        path: urlFor(row, id, scenario.query, scenario.params),
         body: scenario.body,
+        raw: scenario.raw,
+        headers: scenario.headers,
       });
 
       expect(res.status).toBe(401);
@@ -504,9 +623,11 @@ describe('cross-user isolation, per id-taking route', () => {
     it('rejects a malformed ObjectId with 400', async () => {
       const res = await send({
         method: row.method,
-        path: urlFor(row, MALFORMED_ID, scenario.query),
+        path: urlFor(row, MALFORMED_ID, scenario.query, scenario.params),
         bearer: userB.accessToken,
         body: scenario.body,
+        raw: scenario.raw,
+        headers: scenario.headers,
       });
 
       expect(res.status, JSON.stringify(res.body)).toBe(400);
@@ -521,15 +642,19 @@ describe('cross-user isolation, per id-taking route', () => {
 
       const foreign = await send({
         method: row.method,
-        path: urlFor(row, foreignId, scenario.query),
+        path: urlFor(row, foreignId, scenario.query, scenario.params),
         bearer: userB.accessToken,
         body: scenario.body,
+        raw: scenario.raw,
+        headers: scenario.headers,
       });
       const absent = await send({
         method: row.method,
-        path: urlFor(row, ORPHAN_ID, scenario.query),
+        path: urlFor(row, ORPHAN_ID, scenario.query, scenario.params),
         bearer: userB.accessToken,
         body: scenario.body,
+        raw: scenario.raw,
+        headers: scenario.headers,
       });
 
       expect(foreign.status).toBe(absent.status);
