@@ -257,6 +257,14 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
     // purge that has not finished is the one legitimate cause of this shortfall.
     expect(String(res.body.message)).toMatch(/documents: 1 supplied, 2 stored/);
     expect(String(res.body.message)).toMatch(/awaiting permanent deletion/);
+    // And it names the OTHER cause of a documents shortfall, which is the one a
+    // client cannot recover from by retrying: this count is unconditional while
+    // every document route sits behind `requireStorage`, so an operator who
+    // removed the storage configuration from a server that still holds document
+    // rows leaves an account that can never rotate. Refusing is correct — nobody
+    // can rewrap a key they cannot read — but "re-read the vault and retry" is
+    // advice that can never work, and the action that does work is naming here.
+    expect(String(res.body.message)).toMatch(/no object storage configured/);
 
     expect(await vaultKeyOf(user.id)).toBe(ORIGINAL_KEY);
     // Neither wrap moved: the DEK the missed document still holds is the one the

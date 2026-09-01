@@ -74,8 +74,6 @@ import {
   DOCUMENT_NONCE_PREFIX_BYTES,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   DOCUMENT_STREAM_SALT_BYTES,
-  MAX_DOCUMENTS_PER_USER,
-  PAGINATION_DEFAULTS,
   documentChunkCountFor,
   documentExtension,
   documentMetaSchema,
@@ -91,6 +89,8 @@ import type {
   UpdateDocumentInput,
 } from '@hvault/shared';
 import {
+  DOCUMENT_PAGE_SIZE,
+  MAX_DOCUMENT_PAGES,
   abortDocumentUploadApi,
   completeDocumentUploadApi,
   deleteDocumentApi,
@@ -312,21 +312,6 @@ interface DocumentsState {
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
-
-/**
- * One page of documents. The server's `paginationSchema` caps `limit` at
- * `PAGINATION_DEFAULTS.MAX_LIMIT`, so asking for more would be refused rather than
- * clamped.
- */
-const PAGE_SIZE = PAGINATION_DEFAULTS.MAX_LIMIT;
-
-/**
- * Hard ceiling on pages per fetch, derived from the two numbers that bound it
- * rather than written as a literal: a user cannot hold more than
- * `MAX_DOCUMENTS_PER_USER` documents, so a loop that ran past this is following an
- * inflated `totalPages` rather than reading real rows.
- */
-const MAX_PAGES = Math.ceil(MAX_DOCUMENTS_PER_USER / PAGE_SIZE);
 
 /**
  * The waits before each retry of one part, in order.
@@ -623,7 +608,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
         const vaultKey = getVaultKey();
         set({ documentsLoading: true, documents: [], degradedCount: 0, invalidCount: 0 });
         const opened = await fetchAllPages(
-          (page) => listDocumentsApi({ page, limit: PAGE_SIZE }),
+          (page) => listDocumentsApi({ page, limit: DOCUMENT_PAGE_SIZE }),
           vaultKey,
         );
         // A lock, a logout or a newer fetch superseded this run while its pages
@@ -657,7 +642,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
         const vaultKey = getVaultKey();
         set({ trashLoading: true, trashDocuments: [] });
         const opened = await fetchAllPages(
-          (page) => listDocumentTrashApi({ page, limit: PAGE_SIZE }),
+          (page) => listDocumentTrashApi({ page, limit: DOCUMENT_PAGE_SIZE }),
           vaultKey,
         );
         if (myGeneration !== fetchTrashGeneration) return;
@@ -1141,7 +1126,7 @@ async function fetchAllPages(
   do {
     const body = (await request(page)).data;
     if (!body.success) throw new Error('Failed to list documents');
-    totalPages = Math.min(body.pagination.totalPages, MAX_PAGES);
+    totalPages = Math.min(body.pagination.totalPages, MAX_DOCUMENT_PAGES);
     const opened = await mapWithConcurrency(body.data, DECRYPTION_CONCURRENCY, (raw) =>
       openDocumentRow(raw, vaultKey),
     );

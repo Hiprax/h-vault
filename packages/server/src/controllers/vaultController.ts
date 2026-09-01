@@ -670,7 +670,8 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           `was enumerated` +
           (documentsShort
             ? ', or a document is awaiting permanent deletion and stays counted until the hourly ' +
-              'cleanup finishes it'
+              'cleanup finishes it, or this server has no object storage configured, in which ' +
+              'case its documents cannot be enumerated or re-keyed until it has'
             : '') +
           `. The vault key was not changed. Please re-read the vault and retry.`,
       );

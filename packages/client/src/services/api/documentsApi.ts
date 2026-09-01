@@ -28,6 +28,7 @@
  */
 
 import { isAxiosError, type AxiosProgressEvent, type AxiosResponse } from 'axios';
+import { MAX_DOCUMENTS_PER_USER, PAGINATION_DEFAULTS } from '@hvault/shared';
 import type {
   ApiResponse,
   CompleteDocumentUploadInput,
@@ -40,6 +41,32 @@ import type {
   UpdateDocumentInput,
 } from '@hvault/shared';
 import { api } from './client.js';
+
+// ---------------------------------------------------------------------------
+// How a document list is paged
+// ---------------------------------------------------------------------------
+
+/**
+ * One page of documents, for any caller that walks the whole list.
+ *
+ * The server's `paginationSchema` caps `limit` at `PAGINATION_DEFAULTS.MAX_LIMIT`,
+ * so asking for more is refused rather than clamped.
+ *
+ * It lives beside the two list wrappers rather than inside one caller because two
+ * callers now walk the same lists for different reasons — the store, which opens
+ * every row it reads, and the vault-key rotation, which reads the same rows and
+ * decrypts nothing at all — and a page size that drifted between them would be a
+ * paging bug in whichever one was not being looked at.
+ */
+export const DOCUMENT_PAGE_SIZE = PAGINATION_DEFAULTS.MAX_LIMIT;
+
+/**
+ * Hard ceiling on the pages one walk may read, derived from the two numbers that
+ * bound it rather than written as a literal: an account cannot hold more than
+ * `MAX_DOCUMENTS_PER_USER` documents, so a loop that ran past this is following an
+ * inflated `totalPages` rather than reading real rows.
+ */
+export const MAX_DOCUMENT_PAGES = Math.ceil(MAX_DOCUMENTS_PER_USER / DOCUMENT_PAGE_SIZE);
 
 // ---------------------------------------------------------------------------
 // Query parameter types

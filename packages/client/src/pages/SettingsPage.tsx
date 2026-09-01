@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { isAxiosError } from 'axios';
 import { Link, useNavigate } from 'react-router';
 import {
   Settings,
@@ -69,7 +70,28 @@ import {
   MAX_TAGS_PER_ITEM,
   PASSWORD_HISTORY_MAX,
 } from '@hvault/shared';
-import type { IPasswordHistoryEntry, ItemType, IUserProfile } from '@hvault/shared';
+import type {
+  BulkReEncryptInput,
+  DocumentResponse,
+  IPasswordHistoryEntry,
+  ItemType,
+  IUserProfile,
+  PaginatedResponse,
+} from '@hvault/shared';
+import {
+  DOCUMENT_PAGE_SIZE,
+  MAX_DOCUMENT_PAGES,
+  listDocumentTrashApi,
+  listDocumentsApi,
+} from '../services/api/documentsApi';
+import { getDocumentsConfig } from '../services/api/configApi';
+import {
+  deriveWrapKey,
+  unwrapDek,
+  wrapDek,
+  zeroDek,
+  type DocumentBytes,
+} from '../services/crypto/documentCryptoService';
 import { clearSettingsCache } from '../hooks/useUserSettings';
 import { copySecretToClipboard } from '../services/clipboard/clipboardService';
 import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
@@ -324,6 +346,47 @@ interface ImportConfirmSummary {
   updateCount: number;
   insertCount: number;
   passwordChanges: number;
+}
+
+// ---------------------------------------------------------------------------
+// Vault-key rotation: the document leg
+// ---------------------------------------------------------------------------
+
+/**
+ * Every row of one paginated document list, straight off the wire.
+ *
+ * Deliberately NOT `documentsStore`'s `fetchAllPages`, and the difference is the
+ * whole point of this function rather than a duplication of it. That one exists to
+ * DISPLAY documents: it opens each row's metadata blob, and it drops a row it
+ * cannot validate so that one bad document does not cost the user the other 4,999.
+ * A rotation needs the exact opposite of both. It decrypts no metadata at all — the
+ * blob is sealed under a key derived from the document's own DEK, which a rotation
+ * only rewraps, so opening it would be reading user plaintext for no reason — and it
+ * must never silently drop a row, because a document left out of the payload is a
+ * document left sealed under a vault key that is about to stop existing.
+ *
+ * So every row this returns is carried into the rewrap loop, and anything wrong with
+ * one surfaces there as an abort rather than here as a smaller list.
+ */
+async function enumerateDocumentRows(
+  request: (page: number) => Promise<{ data: PaginatedResponse<DocumentResponse> }>,
+): Promise<DocumentResponse[]> {
+  const rows: DocumentResponse[] = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const body = (await request(page)).data;
+    if (!body.success) throw new Error('Failed to fetch documents');
+    // Clamped for the same reason the store clamps it: an account cannot hold more
+    // than `MAX_DOCUMENTS_PER_USER` documents, so a `totalPages` past the ceiling is
+    // an inflated number rather than more rows to read.
+    totalPages = Math.min(body.pagination.totalPages, MAX_DOCUMENT_PAGES);
+    rows.push(...body.data);
+    page += 1;
+  } while (page <= totalPages);
+
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -1329,8 +1392,78 @@ export default function SettingsPage() {
         }
       }
 
-      // Phase 2: All re-encryptions succeeded — commit atomically to the server
+      // Phase 1c: Rewrap every document's key.
+      //
+      // This leg reads no file and touches no stored object: it unwraps the
+      // 32-byte DEK each document is sealed under and wraps it again under the new
+      // vault key. That is the whole reason the document store uses envelope
+      // encryption — rotating an account holding gigabytes costs 32 bytes per
+      // document rather than a re-upload of every one of them.
+      //
+      // TRASHED documents are enumerated alongside active ones, exactly as trashed
+      // items are above: a trashed document is sealed under the same vault key, it
+      // can still be restored, and one left out of the payload would come back
+      // permanently unreadable. The server counts both, so omitting either is a
+      // refusal rather than a silent loss.
       setRotationProgress(60);
+      const reWrappedDocuments: BulkReEncryptInput['documents'] = [];
+
+      // Whether this server has a document store at all is read from `GET /config`,
+      // never inferred from an error: every document route sits behind
+      // `requireStorage`, whose 503 is redacted to its status text in production
+      // and so carries nothing to parse. A server without one holds no documents,
+      // the payload's `documents` leg is empty, and the completeness check the
+      // server runs against its own count agrees.
+      const documentsConfig = await getDocumentsConfig();
+      if (documentsConfig.enabled) {
+        const documentRows = [
+          ...(await enumerateDocumentRows((page) =>
+            listDocumentsApi({ page, limit: DOCUMENT_PAGE_SIZE }),
+          )),
+          ...(await enumerateDocumentRows((page) =>
+            listDocumentTrashApi({ page, limit: DOCUMENT_PAGE_SIZE }),
+          )),
+        ];
+
+        for (const [i, row] of documentRows.entries()) {
+          let dek: DocumentBytes | null = null;
+          try {
+            // Both wrapping keys are bound to THIS document's id, so a row whose
+            // wrapped key was moved from another document fails here rather than
+            // being carried forward under the new vault key.
+            const oldWrapKey = await deriveWrapKey(oldVaultKey, row._id);
+            dek = await unwrapDek(row, oldWrapKey);
+            const newWrapKey = await deriveWrapKey(newVaultKey, row._id);
+            const rewrapped = await wrapDek(dek, newWrapKey);
+            // Exactly four fields, built rather than spread off the row: the
+            // framing, the sizes and the sealed metadata are not a rotation's to
+            // send, and `PUT /documents/:id` cannot reach the wrapped key either.
+            reWrappedDocuments.push({ id: row._id, ...rewrapped });
+          } catch {
+            // One document that will not unwrap aborts the WHOLE rotation, before
+            // a single request is sent. Committing a partial payload would replace
+            // the vault key while leaving this document sealed under one the
+            // account no longer stores, which is unrecoverable — unlike stopping
+            // here, which changes nothing at all.
+            await cryptoService.clearCryptoKey(newVaultKey);
+            toast({
+              title: `Rotation aborted: failed to re-wrap document ${i + 1} of ${documentRows.length}`,
+              type: 'error',
+            });
+            return;
+          } finally {
+            // The DEK is user-plaintext-capable material and this loop may hold
+            // thousands of them in turn; each one is zeroed as soon as it has been
+            // rewrapped, on the failure path as well as the success one.
+            if (dek) zeroDek(dek);
+          }
+
+          setRotationProgress(60 + Math.round(((i + 1) / documentRows.length) * 30));
+        }
+      }
+
+      // Phase 2: All re-encryptions succeeded — commit atomically to the server
+      setRotationProgress(95);
       const idempotencyKey = crypto.randomUUID();
       await bulkReEncryptApi({
         authHash,
@@ -1343,7 +1476,7 @@ export default function SettingsPage() {
         // Every leg is sent explicitly. A rotation must name every row the
         // account holds, so an omitted leg is refused outright rather than
         // leaving those rows sealed under the key being replaced.
-        documents: [],
+        documents: reWrappedDocuments,
         newEncryptedVaultKey: encrypted,
         newVaultKeyIv: iv,
         newVaultKeyTag: tag,
@@ -1423,8 +1556,23 @@ export default function SettingsPage() {
       setShowRotateConfirm(false);
       setRotationPassword('');
       setRotationBackupPassword('');
-    } catch {
-      toast({ title: 'Failed to rotate vault key', type: 'error' });
+    } catch (err) {
+      // A 4xx refusal is shown VERBATIM, and only a 4xx.
+      //
+      // `app.ts` mounts `createErrorMiddleware({ exposeServerErrors: false })`,
+      // which redacts a 5xx to its status text in production and leaves 4xx alone —
+      // so a 4xx message was written for this user and a 5xx one says nothing but
+      // "Internal Server Error". The refusal that matters here is the completeness
+      // check's 409: it names which leg fell short and, for documents, says that a
+      // permanent deletion still awaiting the hourly cleanup keeps its row counted.
+      // Collapsing that into a flat "Failed to rotate vault key" leaves a user
+      // retrying forever with no way to learn that the answer is to wait.
+      const status = isAxiosError(err) ? err.response?.status : undefined;
+      const title =
+        status !== undefined && status >= 400 && status < 500
+          ? getApiErrorMessage(err, 'Failed to rotate vault key')
+          : 'Failed to rotate vault key';
+      toast({ title, type: 'error' });
     } finally {
       setRotatingVaultKey(false);
       setRotationProgress(0);
