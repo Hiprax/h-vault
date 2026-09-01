@@ -1,0 +1,8 @@
+base: &anchor
+  key: value
+derived:
+  <<: *anchor
+  extra: |
+    a multi-line
+    literal block
+list: [1, 2, 3]

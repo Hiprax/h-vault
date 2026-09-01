@@ -387,6 +387,62 @@ export const MAX_ENCRYPTED_DOCUMENT_META_LENGTH = 49_152;
 // it the file still uploads, untransformed.
 export const MAX_FORMATTABLE_SIZE_BYTES = 5_242_880;
 
+// The vocabulary of the two in-browser transforms: which extensions each one
+// understands, and which of them REPAIR can be offered for.
+//
+// It sits here, beside PREVIEW_MODES and shaped like it, because the same
+// question is asked by two different programs and their answers have to agree.
+// The application asks it to decide whether a checkbox is offered at all and, if
+// not, which reason to show; the isolated sandbox document asks it to pick a
+// Prettier parser and a plugin set. Two copies would diverge the day someone
+// teaches one of them about a new extension, and the symptom would be a checkbox
+// that is offered and then fails, or a file that could have been formatted and
+// silently was not.
+//
+// The KEY is what `documentExtension` returns: the lowercased segment after the
+// LAST dot. The VALUE is the SYNTAX rather than the extension, because that is
+// what actually decides handling: `.json`, `.jsonc` and `.json5` differ only in
+// which Prettier parser reads them, while `.jsonl` and `.ndjson` are a different
+// shape entirely (one document PER LINE, repaired and formatted line by line, so
+// a record may never be broken across lines).
+export const TRANSFORM_SYNTAX_NAMES = ['json', 'jsonl', 'markdown', 'yaml'] as const;
+export type TransformSyntax = (typeof TRANSFORM_SYNTAX_NAMES)[number];
+
+export const TRANSFORM_SYNTAXES: Readonly<Record<string, TransformSyntax>> = Object.freeze({
+  json: 'json',
+  jsonc: 'json',
+  json5: 'json',
+  jsonl: 'jsonl',
+  ndjson: 'jsonl',
+  md: 'markdown',
+  markdown: 'markdown',
+  yaml: 'yaml',
+  yml: 'yaml',
+});
+
+// Repair is the JSON family and NOTHING else, and the omissions are decisions
+// rather than gaps. A heuristic that guessed at YAML indentation would change
+// meaning silently, which is the one failure mode a repair tool must never have;
+// and Markdown has no parse failure to repair, because every byte of it is
+// already valid Markdown. Both still get a PARSE CHECK through the formatter, so
+// a broken YAML is reported rather than uploaded blindly.
+export const REPAIRABLE_TRANSFORM_SYNTAXES: readonly TransformSyntax[] = Object.freeze([
+  'json',
+  'jsonl',
+]);
+
+// The two free-text fields a transform FAILURE carries across the port. Both are
+// built by the frame from the document's own bytes, so both are bounded: they are
+// displayed by the application's chrome, and an unbounded string chosen by the
+// least-trusted component in the system is a denial-of-service on the very panel
+// that has to explain what went wrong.
+//
+// The message is a formatter's or a repairer's own wording (Prettier's syntax
+// errors run to several lines with a source snippet); the excerpt is ONE line of
+// the offending document, which is what makes "line 4, column 12" actionable.
+export const MAX_TRANSFORM_MESSAGE_LENGTH = 2_000;
+export const MAX_TRANSFORM_EXCERPT_LENGTH = 200;
+
 // HKDF `info` prefixes, concatenated with the document id to bind every derived
 // key to ONE document: the stream key, the metadata key and the DEK wrapping key.
 // The trailing `|` is a separator that cannot appear in a 24-character hex

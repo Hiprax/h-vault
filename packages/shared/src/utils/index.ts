@@ -1,4 +1,10 @@
-import { PREVIEW_MODES, type PreviewMode } from '../constants/index.js';
+import {
+  PREVIEW_MODES,
+  REPAIRABLE_TRANSFORM_SYNTAXES,
+  TRANSFORM_SYNTAXES,
+  type PreviewMode,
+  type TransformSyntax,
+} from '../constants/index.js';
 
 export function maskEmail(email: string): string {
   const atIndex = email.lastIndexOf('@');
@@ -114,4 +120,51 @@ export function previewModeForName(name: string): PreviewMode {
   const extension = documentExtension(name);
   if (extension === '') return 'none';
   return PREVIEW_MODES[extension] ?? 'none';
+}
+
+/**
+ * The syntax a decrypted document name resolves to for the in-browser
+ * transforms, or `null` when neither of them understands it.
+ *
+ * The counterpart of {@link previewModeForName}, and it answers `null` rather
+ * than a `'none'`-style member for a reason the preview map does not share:
+ * `none` is a real render mode with a real behaviour ("download to view"),
+ * whereas "not formattable" is the ABSENCE of a transform, and modelling it as a
+ * member would give every `switch` in the engine a branch that must not exist.
+ * The application turns the `null` into the sentence it shows beside the
+ * disabled checkbox; the engine never sees one, because the panel does not offer
+ * the checkbox that would produce it.
+ */
+export function transformSyntaxForName(name: string): TransformSyntax | null {
+  return transformSyntaxForExtension(documentExtension(name));
+}
+
+/**
+ * The same question asked with an extension already in hand.
+ *
+ * Both spellings exist because the two callers hold different things: the
+ * application holds the file's NAME, and the isolated document is told only the
+ * EXTENSION — it is never sent the name, because a renderer that cannot know
+ * what a file is called cannot leak it. One is defined in terms of the other so
+ * the map is read in exactly one place.
+ *
+ * An empty extension answers `null` without consulting the map: a name with no
+ * dot, and one whose only dot is leading, has no extension to look up.
+ */
+export function transformSyntaxForExtension(extension: string): TransformSyntax | null {
+  if (extension === '') return null;
+  return TRANSFORM_SYNTAXES[extension] ?? null;
+}
+
+/**
+ * May the REPAIR checkbox be offered for this syntax?
+ *
+ * A function over the list rather than the list read directly at each call site,
+ * because there are two call sites in two different programs — the panel that
+ * offers the checkbox and the engine that runs the repair — and `includes` on a
+ * shared array is exactly the kind of one-line rule that gets re-implemented
+ * with an inverted condition.
+ */
+export function canRepairSyntax(syntax: TransformSyntax): boolean {
+  return REPAIRABLE_TRANSFORM_SYNTAXES.includes(syntax);
 }

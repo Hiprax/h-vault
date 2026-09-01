@@ -6,15 +6,20 @@ import baseConfig from './vitest.config.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * This package's leg of the `test:fuzz` gate: the seven import parsers, driven
- * with arbitrary bytes, hostile documents and a committed corpus.
+ * This package's leg of the `test:fuzz` gate: the two places this application
+ * turns a file somebody else wrote into something it acts on.
+ *
+ *   - the seven IMPORT parsers, driven with arbitrary bytes, hostile documents
+ *     and a committed corpus;
+ *   - the in-browser FORMAT-AND-REPAIR engine, driven with a second committed
+ *     corpus through every combination of the two transforms a user can tick.
  *
  * Every file here also runs under `test:unit`, which is the whole client suite —
  * so this narrows NOTHING. It exists for the same reason `test:security` and
- * `test:property` do: "no import file, however hostile, crashes a parser, hangs
- * it, or produces an item its own schema rejects" is a claim someone has to be
- * able to point at when a parser is touched, and that claim needs a gate that
- * can fail on its own.
+ * `test:property` do: "no file, however hostile, crashes a parser, hangs it, or
+ * produces output its own schema rejects" is a claim someone has to be able to
+ * point at when a parser is touched, and that claim needs a gate that can fail
+ * on its own.
  *
  * The membership is declared HERE rather than as positional filters on the
  * command line: a config that names its files is a suite definition, whereas a
@@ -23,7 +28,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * exits non-zero only when the include set matches NOTHING — a list that has
  * gone stale in part would otherwise shrink this gate in silence.
  */
-export const CLIENT_FUZZ_SUITE = ['tests/fuzz/parsers.fuzz.test.ts'];
+export const CLIENT_FUZZ_SUITE = [
+  'tests/fuzz/parsers.fuzz.test.ts',
+  'tests/fuzz/format.fuzz.test.ts',
+];
 
 /**
  * Its OWN JUnit report. Pointed at `junit-client.xml` it would overwrite the

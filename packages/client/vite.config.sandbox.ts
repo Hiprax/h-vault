@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
-import { SANDBOX_ASSETS_DIR, SANDBOX_HTML } from './vite.config.helpers';
+import { SANDBOX_ASSETS_DIR, SANDBOX_HTML, sandboxManualChunks } from './vite.config.helpers';
 
 /**
  * The document sandbox's build — a SECOND build, not a second input.
@@ -115,6 +115,16 @@ export default defineConfig({
       // package directory by `scripts/build.mjs`, but a relative input would
       // silently resolve against `process.cwd()` if it ever were not.
       input: fileURLToPath(new URL(SANDBOX_HTML, import.meta.url)),
+      output: {
+        // `manualChunks` AND NOTHING ELSE. `entryFileNames`, `chunkFileNames`
+        // and `assetFileNames` are all DERIVED from `assetsDir` above, and
+        // setting any of them here — plausibly, to "match the app" — overrides
+        // that derivation and puts every JS chunk back in `dist/assets/`, which
+        // is served with no `Access-Control-Allow-Origin`. The frame's module
+        // fetch then fails and the document is silently blank in production
+        // only. `packages/client/tests/vite-config.test.ts` pins this key set.
+        manualChunks: sandboxManualChunks,
+      },
     },
   },
 });

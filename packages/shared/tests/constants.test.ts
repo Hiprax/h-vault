@@ -101,6 +101,11 @@ import {
   MAX_DOCUMENT_META_JSON_BYTES,
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
   MAX_FORMATTABLE_SIZE_BYTES,
+  MAX_TRANSFORM_EXCERPT_LENGTH,
+  MAX_TRANSFORM_MESSAGE_LENGTH,
+  REPAIRABLE_TRANSFORM_SYNTAXES,
+  TRANSFORM_SYNTAXES,
+  TRANSFORM_SYNTAX_NAMES,
   MAX_PREVIEW_BYTES,
   MAX_PREVIEW_TEXT_LINES,
   PREVIEW_MODES,
@@ -118,7 +123,12 @@ import {
   loginDataSchema,
   secretDataSchema,
 } from '../src/schemas/vault.js';
-import { previewModeForName } from '../src/utils/index.js';
+import {
+  canRepairSyntax,
+  previewModeForName,
+  transformSyntaxForExtension,
+  transformSyntaxForName,
+} from '../src/utils/index.js';
 
 // ---------------------------------------------------------------------------
 // Security constants
@@ -387,6 +397,8 @@ describe('Document-store constants', () => {
     ['MAX_DOCUMENT_META_JSON_BYTES', MAX_DOCUMENT_META_JSON_BYTES, 36_864],
     ['MAX_ENCRYPTED_DOCUMENT_META_LENGTH', MAX_ENCRYPTED_DOCUMENT_META_LENGTH, 49_152],
     ['MAX_FORMATTABLE_SIZE_BYTES', MAX_FORMATTABLE_SIZE_BYTES, 5_242_880],
+    ['MAX_TRANSFORM_MESSAGE_LENGTH', MAX_TRANSFORM_MESSAGE_LENGTH, 2_000],
+    ['MAX_TRANSFORM_EXCERPT_LENGTH', MAX_TRANSFORM_EXCERPT_LENGTH, 200],
   ])('%s is %i', (_name, actual, expected) => {
     expect(actual).toBe(expected);
   });
@@ -1034,6 +1046,106 @@ describe('PREVIEW_MODES and previewModeForName', () => {
       expect(PREVIEW_MODE_NAMES, `${extension} declares mode ${mode}`).toContain(mode);
     }
     expect(PREVIEW_MODE_NAMES).toHaveLength(7);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The in-browser transforms: which extensions they understand, and which of
+// them may be REPAIRED
+// ---------------------------------------------------------------------------
+// The same shape as the preview map above and, like it, asked by two programs
+// whose answers have to agree: the upload panel, deciding whether a checkbox is
+// offered at all and which sentence to show beside a disabled one, and the
+// isolated sandbox document, picking a Prettier parser and a plugin set. A
+// disagreement between them is a checkbox that is offered and then fails, or a
+// file that could have been formatted and silently was not — neither of which
+// looks like a bug in this map from where the user is standing.
+describe('TRANSFORM_SYNTAXES, transformSyntaxForName and canRepairSyntax', () => {
+  it.each([
+    ['strict JSON', 'package.json', 'json'],
+    ['JSON with comments', 'tsconfig.jsonc', 'json'],
+    ['JSON5', 'config.json5', 'json'],
+    ['JSON Lines', 'events.jsonl', 'jsonl'],
+    ['newline-delimited JSON', 'events.ndjson', 'jsonl'],
+    ['a README', 'README.md', 'markdown'],
+    ['long-form Markdown', 'notes.markdown', 'markdown'],
+    ['YAML', 'compose.yaml', 'yaml'],
+    ['YAML, short spelling', 'compose.yml', 'yaml'],
+  ])('resolves %s to its syntax', (_label, name, syntax) => {
+    expect(transformSyntaxForName(name)).toBe(syntax);
+  });
+
+  it('answers null for everything else, which is what disables the checkbox', () => {
+    // The negatives are the load-bearing half. A formatter offered for a type it
+    // cannot read is a checkbox the user ticks and then watches fail, after the
+    // file has been chosen.
+    for (const name of ['photo.png', 'archive.tar.gz', 'main.ts', 'notes.txt', 'report.pdf']) {
+      expect(transformSyntaxForName(name), name).toBeNull();
+    }
+    // No extension at all, a LEADING dot only, and a trailing dot — the same
+    // three shapes `previewModeForName` answers `'none'` for, under the same
+    // single derivation rule.
+    for (const name of ['Dockerfile', 'Makefile', '.bashrc', 'report.']) {
+      expect(transformSyntaxForName(name), name).toBeNull();
+    }
+    expect(transformSyntaxForExtension('')).toBeNull();
+  });
+
+  it('is case-insensitive through the extension rule, not a second lowercase entry', () => {
+    expect(transformSyntaxForName('PACKAGE.JSON')).toBe('json');
+    expect(transformSyntaxForName('Compose.YML')).toBe('yaml');
+    // …and the MAP itself is lowercase-only, so nothing looks up an upper-case
+    // key directly and finds one. That is what keeps the lowercasing in ONE
+    // place instead of two entries per extension.
+    expect(transformSyntaxForExtension('JSON')).toBeNull();
+  });
+
+  it('keys on the LAST segment, exactly as the preview map does', () => {
+    // Not a `yml`: `values.prod.yaml` is, and `bundle.yaml.gz` is not.
+    expect(transformSyntaxForName('values.prod.yaml')).toBe('yaml');
+    expect(transformSyntaxForName('bundle.yaml.gz')).toBeNull();
+  });
+
+  it('offers repair for the JSON family and NOTHING else', () => {
+    // A decision rather than a gap, and the reason is that the alternative is
+    // silent: guessing at YAML indentation changes what a document MEANS, and
+    // Markdown has no parse failure to repair. Both still get a parse check
+    // through the formatter, so a broken YAML is reported rather than uploaded
+    // blindly.
+    expect(canRepairSyntax('json')).toBe(true);
+    expect(canRepairSyntax('jsonl')).toBe(true);
+    expect(canRepairSyntax('markdown')).toBe(false);
+    expect(canRepairSyntax('yaml')).toBe(false);
+    expect([...REPAIRABLE_TRANSFORM_SYNTAXES].sort()).toEqual(['json', 'jsonl']);
+  });
+
+  it('gives every entry one of the four declared syntaxes, and every syntax an entry', () => {
+    // Both directions. A typo'd value would make an extension resolve to a
+    // syntax the engine has no branch for; a declared syntax no extension maps
+    // to would be a parser nothing can ever reach.
+    for (const [extension, syntax] of Object.entries(TRANSFORM_SYNTAXES)) {
+      expect(TRANSFORM_SYNTAX_NAMES, `${extension} declares syntax ${syntax}`).toContain(syntax);
+    }
+    expect(TRANSFORM_SYNTAX_NAMES).toHaveLength(4);
+    expect([...new Set(Object.values(TRANSFORM_SYNTAXES))].sort()).toEqual(
+      [...TRANSFORM_SYNTAX_NAMES].sort(),
+    );
+  });
+
+  it('is a STRICTER set than the preview map, never a wider one', () => {
+    // Every formattable extension must also be previewable, because the panel
+    // that offers a transform and the viewer that shows the result are two views
+    // of one file. The reverse does NOT hold — a `.png` previews and cannot be
+    // formatted — so this is asserted in one direction only, deliberately.
+    for (const extension of Object.keys(TRANSFORM_SYNTAXES)) {
+      expect(PREVIEW_MODES[extension], `${extension} is formattable`).toBeDefined();
+      expect(PREVIEW_MODES[extension], `${extension} is formattable`).not.toBe('none');
+    }
+  });
+
+  it('freezes both, so a caller cannot teach one program an extension the other lacks', () => {
+    expect(Object.isFrozen(TRANSFORM_SYNTAXES)).toBe(true);
+    expect(Object.isFrozen(REPAIRABLE_TRANSFORM_SYNTAXES)).toBe(true);
   });
 
   it('uses only lowercase, dotless extensions as keys', () => {

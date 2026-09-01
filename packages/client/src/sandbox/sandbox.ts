@@ -1,5 +1,5 @@
 import type { SandboxRenderRequest } from '@hvault/shared';
-import { frameMessage, parseRenderRequest } from './protocol';
+import { frameMessage, parseRenderRequest, parseTransformRequest } from './protocol';
 import { previewRefusal } from './sniff';
 import './sandbox.css';
 
@@ -30,6 +30,14 @@ import './sandbox.css';
  * whole point of the isolation, and it is why every renderer lives here rather
  * than in the page that holds the unlocked vault.
  *
+ * It does TWO jobs, for that one reason. It RENDERS a stored document, and it
+ * FORMATS or REPAIRS one on its way IN, before a byte of it is encrypted. The
+ * second could have been a Web Worker and must not be: a worker is same-origin,
+ * so a bug in Prettier or in the JSON repairer running inside one could `fetch`
+ * this application's own API with the httpOnly refresh cookie attached and read
+ * an access token out of the response. A worker has no DOM, but it has the
+ * origin, and the origin is what a token is bound to.
+ *
  * ---------------------------------------------------------------------------
  * TWO TRAPS THE POLICY SETS, WRITTEN DOWN WHERE A RENDERER AUTHOR WILL READ THEM
  * ---------------------------------------------------------------------------
@@ -57,6 +65,20 @@ import './sandbox.css';
  * document. What stops an arbitrary page from framing it and speaking to it is
  * `frame-ancestors 'self'` in its policy, not a check written here.
  */
+
+/**
+ * Which of the document's two jobs a port message is asking for.
+ *
+ * A one-field peek, deliberately: the full validation belongs to the parser for
+ * whichever kind this names, and a message whose `kind` is neither takes the
+ * render path and is refused there. That keeps ONE place where an unparseable
+ * message is answered, rather than two that could drift.
+ */
+function isTransformKind(data: unknown): boolean {
+  return (
+    typeof data === 'object' && data !== null && (data as { kind?: unknown }).kind === 'transform'
+  );
+}
 
 /**
  * The port the host transferred, or `null` before the handshake completes.
@@ -175,6 +197,50 @@ async function renderRequest(doc: Document, port: MessagePort, data: unknown): P
 }
 
 /**
+ * Run the format-and-repair engine over one document, and answer on the port.
+ *
+ * The SECOND job this document does, and it renders NOTHING: the frame that
+ * carries a transform is hidden, has no theme to apply and no target to fill, so
+ * this path deliberately touches neither `dataset.theme` nor the render target.
+ * Touching either would be harmless today and would be the first step towards a
+ * transform that draws something a user might read and act on.
+ *
+ * The engine's chunk is loaded on demand, like every renderer, and for the same
+ * reason: Prettier and the JSON repairer are around a megabyte between them, and
+ * nobody previewing a `.png` should download either.
+ *
+ * Every branch answers on the port, including the one where the request did not
+ * parse. Silence is the one thing this must never do — the host's own deadline
+ * is the only other outcome, and a swallowed error costs the user a transform
+ * and tells nobody why.
+ */
+async function transformRequest(port: MessagePort, data: unknown): Promise<void> {
+  const request = parseTransformRequest(data);
+  if (!request) {
+    port.postMessage(frameMessage.failed('The transform request was not understood.'));
+    return;
+  }
+  try {
+    const { runTransform } = await import('./transform/formatEngine');
+    port.postMessage(await runTransform(request));
+  } catch {
+    // A formatter that threw something the engine could not classify — a chunk
+    // that failed to load, an out-of-memory on a pathological document. The
+    // message carries NO detail from the error, exactly as the render path's
+    // does: it would be built from the document's own bytes.
+    port.postMessage(
+      frameMessage.transformFailed({
+        stage: 'format',
+        message: 'The document could not be formatted.',
+        line: null,
+        column: null,
+        excerpt: '',
+      }),
+    );
+  }
+}
+
+/**
  * Is this an ABSOLUTE URL — the only kind the host is ever asked to open?
  *
  * `new URL(href)` with no base throws for anything relative, which is exactly
@@ -273,11 +339,17 @@ export function startSandbox(win: Window): void {
     win.removeEventListener('message', onWindowMessage);
     channel = port;
     port.addEventListener('message', (message: MessageEvent) => {
-      // `void`, because `renderRequest` is async only so that it can load a
-      // renderer's chunk, and it resolves rather than rejects on every path —
-      // every failure inside it is answered ON THE PORT, which is the contract
-      // the host's ten-second timeout depends on.
-      void renderRequest(doc, port, message.data);
+      // DISPATCHED ON `kind` BEFORE either validator runs. Funnelling everything
+      // through the render parser would answer a perfectly good transform
+      // request with "the preview request was not understood", which is a
+      // transform that fails for a reason that is not true.
+      //
+      // `void`, because both handlers are async only so that they can load a
+      // chunk, and both resolve rather than reject on every path — every failure
+      // inside them is answered ON THE PORT, which is the contract the host's
+      // deadline depends on.
+      const kind = isTransformKind(message.data);
+      void (kind ? transformRequest(port, message.data) : renderRequest(doc, port, message.data));
     });
     port.start();
   };

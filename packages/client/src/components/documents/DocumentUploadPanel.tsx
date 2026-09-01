@@ -7,6 +7,18 @@ import {
   formatBytes,
 } from '@hvault/shared';
 import { cn, getApiErrorMessage } from '../../lib/utils';
+import {
+  DocumentTransformControls,
+  TransformFailurePanel,
+  TransformReviewPanel,
+  TransformRunning,
+  transformAvailability,
+} from './DocumentTransformControls';
+import {
+  transformDocument,
+  type TransformFailure,
+  type TransformReview,
+} from '../../services/documents/transform';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { useToast } from '../ui/Toast';
 import {
@@ -164,6 +176,20 @@ function reportFailure(
   };
 }
 
+/**
+ * Where the optional transforms have got to for the currently selected file.
+ *
+ * A state machine rather than three booleans, because the states are mutually
+ * exclusive and the one that matters most is the one that must never be
+ * skipped: while a review is open the Upload button is GONE, and the only ways
+ * forward are the two the review offers.
+ */
+type TransformPhase =
+  | { status: 'idle' }
+  | { status: 'running' }
+  | { status: 'ready'; review: TransformReview }
+  | { status: 'failed'; failure: TransformFailure };
+
 interface DocumentUploadPanelProps {
   /** The server's advertisement, already known to carry `enabled: true`. */
   config: DocumentsConfig;
@@ -202,6 +228,12 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
   const [file, setFile] = useState<File | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  // The two optional transforms, and whatever the last run of them produced.
+  // Both are reset by `select`, because a new file is a new question: a `.png`
+  // picked after a `.json` must not inherit a ticked Format box, and a review of
+  // the file before it must never be confirmable against the file after it.
+  const [transforms, setTransforms] = useState({ format: false, repair: false });
+  const [phase, setPhase] = useState<TransformPhase>({ status: 'idle' });
   // Bumped to remount the file input, which is how a file input is cleared: a
   // `value` prop is illegal on one, and without the reset, re-picking the SAME
   // file after an upload fires no `change` event at all because the control's
@@ -243,11 +275,15 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
   function select(candidate: File | null): void {
     setFile(candidate);
     setRefusal(candidate === null ? null : refusalFor(candidate));
+    setTransforms({ format: false, repair: false });
+    setPhase({ status: 'idle' });
   }
 
   function clearSelection(): void {
     setFile(null);
     setRefusal(null);
+    setTransforms({ format: false, repair: false });
+    setPhase({ status: 'idle' });
     setPickerGeneration((generation) => generation + 1);
   }
 
@@ -260,10 +296,67 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
    * call site, and a defensive re-check here would be a branch nothing could ever
    * take.
    */
-  function handleUpload(picked: File): void {
+  /**
+   * Send bytes, under the picked file's NAME.
+   *
+   * `source` and `name` are separate arguments to the store for exactly this
+   * reason: a transformed upload is a `Blob` held in memory, and the store
+   * deliberately never reads `File.name`, so a rewritten document cannot end up
+   * named after the file it no longer is. The MIME type comes from the picked
+   * file either way — a formatter changes a document's bytes, never its type.
+   */
+  function send(picked: File, source: Blob, transform?: TransformReview['transform']): void {
     clearSelection();
-    void startUpload({ source: picked, name: picked.name, mime: picked.type }).catch(
-      reportFailure('The upload could not be started.', toast),
+    void startUpload({
+      source,
+      name: picked.name,
+      mime: picked.type,
+      ...(transform === undefined ? {} : { transform }),
+    }).catch(reportFailure('The upload could not be started.', toast));
+  }
+
+  /**
+   * The Upload button.
+   *
+   * With no transform ticked this is the whole of it: the file goes as it is.
+   * With one ticked it does NOT upload — it runs the transform and shows the
+   * result, and the upload waits for a confirmation that names what changed.
+   * That ordering is the guarantee: nothing this panel rewrites is ever sent
+   * without the user having seen the difference.
+   */
+  function handleUpload(picked: File): void {
+    if (!transforms.format && !transforms.repair) {
+      send(picked, picked);
+      return;
+    }
+    setPhase({ status: 'running' });
+    void transformDocument(picked, {
+      ext: documentExtension(picked.name),
+      format: transforms.format,
+      repair: transforms.repair,
+    }).then(
+      (attempt) => {
+        setPhase(
+          attempt.status === 'ready'
+            ? { status: 'ready', review: attempt.review }
+            : { status: 'failed', failure: attempt.failure },
+        );
+      },
+      // `transformDocument` resolves on every failure it can name; a rejection
+      // here is something it could not — the file could not be read at all.
+      // Refusing to upload silently would be the one unacceptable outcome, so
+      // this lands in the same panel as every other failure.
+      () => {
+        setPhase({
+          status: 'failed',
+          failure: {
+            message: 'This file could not be read, so it was not changed or uploaded.',
+            line: null,
+            column: null,
+            excerpt: '',
+          },
+        });
+      },
     );
   }
 
@@ -383,31 +476,79 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
       )}
 
       {file !== null && refusal === null && (
-        <div className="flex items-center justify-between gap-3 rounded-md border border-[hsl(var(--border))] px-3 py-2">
-          <span className="min-w-0 truncate text-sm text-[hsl(var(--foreground))]">
-            {file.name} ({formatBytes(file.size)})
-          </span>
-          <div className="flex shrink-0 items-center gap-2">
-            <button
-              type="button"
-              onClick={clearSelection}
-              aria-label="Clear selected file"
-              className="rounded p-1 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))]"
-            >
-              <X className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                handleUpload(file);
-              }}
-              className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90"
-            >
-              <Upload className="h-4 w-4" />
-              Upload
-            </button>
+        <>
+          <div className="flex items-center justify-between gap-3 rounded-md border border-[hsl(var(--border))] px-3 py-2">
+            <span className="min-w-0 truncate text-sm text-[hsl(var(--foreground))]">
+              {file.name} ({formatBytes(file.size)})
+            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={clearSelection}
+                aria-label="Clear selected file"
+                className="rounded p-1 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+              {/*
+                The Upload button is ABSENT while a transform is running or its
+                result is unconfirmed, rather than merely disabled. A disabled
+                button beside an open review reads as "something else is wrong";
+                its absence reads as "answer this first", which is what the
+                review is for.
+              */}
+              {phase.status === 'idle' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleUpload(file);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90"
+                >
+                  <Upload className="h-4 w-4" />
+                  {transforms.format || transforms.repair ? 'Prepare and review' : 'Upload'}
+                </button>
+              )}
+            </div>
           </div>
-        </div>
+
+          <DocumentTransformControls
+            availability={transformAvailability(file.name, file.size)}
+            format={transforms.format}
+            repair={transforms.repair}
+            onChange={setTransforms}
+            locked={phase.status !== 'idle'}
+          />
+
+          {phase.status === 'running' && <TransformRunning />}
+
+          {phase.status === 'ready' && (
+            <TransformReviewPanel
+              review={phase.review}
+              onConfirm={() => {
+                send(file, phase.review.blob, phase.review.transform);
+              }}
+              onUploadOriginal={() => {
+                send(file, file);
+              }}
+              onCancel={() => {
+                setPhase({ status: 'idle' });
+              }}
+            />
+          )}
+
+          {phase.status === 'failed' && (
+            <TransformFailurePanel
+              failure={phase.failure}
+              onUploadOriginal={() => {
+                send(file, file);
+              }}
+              onCancel={() => {
+                setPhase({ status: 'idle' });
+              }}
+            />
+          )}
+        </>
       )}
 
       <p

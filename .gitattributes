@@ -19,7 +19,7 @@
 
 # Docker. LF is not cosmetic here: keyfile-entrypoint.sh runs as the MongoDB
 # container's ENTRYPOINT, and a CRLF line ending would make the kernel look for an
-# interpreter literally named "/usr/bin/env bash" — the container would never boot.
+# interpreter literally named "/usr/bin/env bash" — the container would never boot.
 Dockerfile text eol=lf
 *.Dockerfile text eol=lf
 .dockerignore text eol=lf
@@ -54,6 +54,8 @@ Dockerfile text eol=lf
 #     line ending would silently stop being pinned - and on a fresh clone they
 #     would differ from the serializer's real output and fail for the wrong
 #     reason;
+#   - the format-and-repair corpus carries CRLF-terminated JSON Lines and a
+#     UTF-16LE document, both of which the blanket rule would destroy;
 #   - the fuzz corpus carries a deliberate mixture of CRLF, LF and bare CR,
 #     plus a UTF-8 BOM, precisely to prove the CSV tokenizer handles all of
 #     them. Normalizing it deletes the test.
@@ -62,6 +64,7 @@ Dockerfile text eol=lf
 # touch these bytes in either direction.
 packages/client/tests/export/goldens/** -text
 packages/client/tests/fuzz/corpus/** -text
+packages/client/tests/fuzz/format-corpus/** -text
 
 # Lockfiles - exact (no diff noise)
 package-lock.json -diff linguist-generated=true

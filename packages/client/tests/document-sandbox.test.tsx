@@ -647,6 +647,108 @@ describe('the frame’s program', () => {
     document.body.innerHTML = '';
   });
 
+  it('runs a transform and answers with the engine’s own reply', async () => {
+    const { host } = await bootFrame();
+    // Cleared explicitly: `documentElement` outlives a test, so an earlier
+    // RENDER in this file would otherwise leave a theme here and the assertion
+    // below would be about that test rather than this one.
+    document.documentElement.removeAttribute('data-theme');
+    const reply = nextReply(host);
+    host.postMessage({
+      kind: 'transform',
+      text: '{"a":1,}',
+      ext: 'json',
+      format: true,
+      repair: false,
+    });
+
+    await expect(reply).resolves.toEqual({
+      kind: 'transformed',
+      text: '{ "a": 1 }\n',
+      formatted: true,
+      repaired: false,
+      tool: 'prettier',
+      toolVersion: '3.9.5',
+    });
+    // The transform frame is HIDDEN and renders nothing: it must touch neither
+    // the render target nor the theme, both of which belong to the other job.
+    // Drawing anything here would be harmless today and the first step towards a
+    // transform that puts something on screen for a user to act on.
+    expect(document.getElementById('root')?.textContent).toBe('');
+    expect(document.documentElement.dataset['theme']).toBeUndefined();
+  });
+
+  it('dispatches on the message kind BEFORE either validator runs', async () => {
+    // Funnelling everything through the render parser would answer a perfectly
+    // good transform request with "the preview request was not understood" — a
+    // transform that fails for a reason that is not true.
+    const { host } = await bootFrame();
+    const reply = nextReply(host);
+    host.postMessage({ kind: 'transform', text: '{}', ext: 'json', format: true, repair: false });
+    await expect(reply).resolves.toMatchObject({ kind: 'transformed' });
+  });
+
+  it('refuses a transform request it cannot parse, on the port', async () => {
+    const { host } = await bootFrame();
+    const reply = nextReply(host);
+    // Neither transform asked for. Nothing in the application produces this, so
+    // it is a bug or a message from somebody else, and answering "here is your
+    // text back" would attach a provenance record to a transform that never ran.
+    host.postMessage({ kind: 'transform', text: '{}', ext: 'json', format: false, repair: false });
+
+    await expect(reply).resolves.toEqual({
+      kind: 'failed',
+      reason: 'The transform request was not understood.',
+    });
+  });
+
+  it('answers ON THE PORT even when the engine itself throws', async () => {
+    // The one branch that cannot be reached with real input: a chunk that fails
+    // to load, or an out-of-memory on a pathological document. SILENCE is the
+    // failure being defended against — the host has a thirty-second deadline and
+    // nothing else, so a swallowed error costs the user half a minute and tells
+    // them nothing. The engine is stubbed rather than the frame, which is the
+    // unit under test here.
+    document.body.innerHTML = '<div id="root"></div>';
+    const ready = vi.fn();
+    vi.spyOn(window, 'postMessage').mockImplementation(ready as never);
+    vi.resetModules();
+    vi.doMock('../src/sandbox/transform/formatEngine', () => ({
+      runTransform: () => {
+        throw new Error('the chunk did not load');
+      },
+    }));
+    try {
+      await import('../src/sandbox/sandbox');
+      const channel = new MessageChannel();
+      const event = new MessageEvent('message', { data: { kind: 'channel' } });
+      Object.defineProperty(event, 'ports', { configurable: true, get: () => [channel.port2] });
+      window.dispatchEvent(event);
+      channel.port1.start();
+
+      const reply = nextReply(channel.port1);
+      channel.port1.postMessage({
+        kind: 'transform',
+        text: '{}',
+        ext: 'json',
+        format: true,
+        repair: false,
+      });
+
+      await expect(reply).resolves.toEqual({
+        kind: 'transformFailed',
+        stage: 'format',
+        message: 'The document could not be formatted.',
+        line: null,
+        column: null,
+        excerpt: '',
+      });
+    } finally {
+      vi.doUnmock('../src/sandbox/transform/formatEngine');
+      vi.resetModules();
+    }
+  });
+
   it('renders a text document and reports it', async () => {
     const { host } = await bootFrame();
     const reply = nextReply(host);

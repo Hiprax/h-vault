@@ -89,6 +89,15 @@
  *     'prompt'` keeps installed clients on the old service worker, so a
  *     precached `sandbox.html` naming un-precached hashed URLs would hand every
  *     returning user a 404 and a dead viewer after a deploy.
+ *
+ *  i. `/api/` MUST BE `NetworkOnly`, AND THAT ONE CAN FAIL TODAY. It is the
+ *     difference between "the server stores ciphertext" and "the browser also
+ *     keeps a durable unencrypted copy": any caching strategy on `/api/` would
+ *     write every downloaded document segment into the Cache API, where it
+ *     survives a lock, a logout and the browser being closed. It is one word in
+ *     `vite.config.ts` and changing it reads as a performance improvement, which
+ *     is exactly why it is asserted against the GENERATED worker rather than
+ *     against the config that asks for it.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -299,16 +308,45 @@ if (existsSync(sandboxDir)) {
   }
 }
 
-// (g) The precache canary.
+// (g) The precache canary, and (i) the one thing about the service worker that
+// is NOT a canary.
 const serviceWorker = path.join(distDir, 'sw.js');
 if (!existsSync(serviceWorker)) {
   problems.push('the build output has no sw.js, so the precache manifest cannot be checked');
 } else {
   const manifest = readFileSync(serviceWorker, 'utf8');
-  for (const forbidden of ['sandbox.html', 'sandbox-assets/']) {
+  // `vendor-prettier-` joins the canary rather than forming a second check.
+  // Those four chunks are emitted by the SANDBOX build, so they are excluded by
+  // the same thing that excludes everything else it emits — the build layout,
+  // not a glob — and this fires only if the two builds are merged. Naming them
+  // explicitly is worth a line anyway, because they are the largest thing that
+  // would arrive in the precache if they ever were: about a megabyte pushed into
+  // the install-time download of every user, including everyone who never ticks
+  // a checkbox.
+  for (const forbidden of ['sandbox.html', 'sandbox-assets/', 'vendor-prettier-']) {
     if (!manifest.includes(forbidden)) continue;
     problems.push(
       `the service worker precaches ${forbidden}, which means the two builds have been merged`,
+    );
+  }
+  // (i) `/api/` IS `NetworkOnly`, and this one CAN fail today.
+  //
+  // It is what keeps a document's segment ciphertext out of the Cache API: a
+  // caching strategy on `/api/` would write every downloaded segment into a
+  // durable, unencrypted store that survives a lock, a logout and the browser
+  // being closed. The strategy is one word in `vite.config.ts`'s
+  // `runtimeCaching`, and changing it is the kind of edit that reads as a
+  // performance improvement.
+  //
+  // Asserted against the GENERATED worker rather than the config, because the
+  // config is an instruction and this is the artifact that ships. Both halves
+  // are required: the route must exist, and it must be bound to `NetworkOnly`.
+  const apiRoute = /registerRoute\(\s*\/\^https\?:[^,]*api[^,]*,\s*new\s+\w+\.NetworkOnly/.test(
+    manifest,
+  );
+  if (!apiRoute) {
+    problems.push(
+      'the service worker does not register /api/ as NetworkOnly, so API responses — including document segment ciphertext — could enter the Cache API',
     );
   }
 }

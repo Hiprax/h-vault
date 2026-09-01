@@ -468,6 +468,38 @@ describe('rendering text and code', () => {
     expect(rendered.querySelector('.hv-lines code')?.textContent).toBe(original);
   });
 
+  it('raises the line-cap notice against the FORMATTED text, not the source', async () => {
+    // The case the notice exists for, and the one an intuition gets backwards:
+    // this document is ONE line as stored and cannot trip a line cap, while
+    // pretty-printing it produces four lines per element. Measuring the raw view
+    // instead would cut a 60,000-line formatted document silently while the view
+    // one click away reported nothing missing.
+    // A flat array of numbers: compact it is ONE line, and pretty-printed it is
+    // one line per element plus the two brackets — so the cap is crossed by
+    // exactly five lines, which is the smallest input that reaches this branch.
+    const source = JSON.stringify(
+      Array.from({ length: MAX_PREVIEW_TEXT_LINES + 3 }, (_, index) => index),
+    );
+    expect(source.split('\n')).toHaveLength(1);
+
+    const rendered = await renderText(document, bytesOf(source), 'json');
+    const notice = rendered.querySelector('.hv-notice');
+    expect(notice?.textContent).toContain('formatted lines');
+    expect(notice?.textContent).toContain(String(MAX_PREVIEW_TEXT_LINES));
+    expect(notice?.textContent).toContain('Download the file');
+    // Cut exactly at the cap, and the notice is about the view being shown.
+    expect(rendered.querySelector('.hv-lines code')?.textContent?.split('\n')).toHaveLength(
+      MAX_PREVIEW_TEXT_LINES,
+    );
+  });
+
+  it('says nothing about truncation for a JSON document whose formatted form fits', async () => {
+    // The negative, without which the assertion above passes on a renderer that
+    // shows the notice unconditionally.
+    const rendered = await renderText(document, bytesOf('{"a":1}'), 'json');
+    expect(rendered.querySelector('.hv-notice')).toBeNull();
+  });
+
   it('pretty-prints one JSON document per line for JSONL', async () => {
     const rendered = await renderText(document, bytesOf('{"a":1}\n{"b":2}\n'), 'jsonl');
     expect(rendered.querySelector('.hv-lines code')?.textContent).toBe(

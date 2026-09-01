@@ -95,6 +95,35 @@ export const CHUNK_BUDGETS_KB = {
   html: 200,
   /** The sanitize/highlight/to-DOM tail both markup renderers share. Measured at ~28 KiB. */
   pipeline: 48,
+
+  // -------------------------------------------------------------------------
+  // Prettier, inside the sandbox, ONE CHUNK PER SYNTAX
+  // -------------------------------------------------------------------------
+  //
+  // The upload panel's optional format-and-repair transforms run in the same
+  // isolated document, which is why Prettier is here and not in a Web Worker: a
+  // worker is same-origin, so a parser bug inside one could `fetch` this
+  // application's API with the httpOnly refresh cookie attached.
+  //
+  // FOUR chunks rather than one, and these four numbers are what keeps it that
+  // way. `sandboxManualChunks` in `packages/client/vite.config.helpers.ts`
+  // splits them and the per-type dynamic imports in
+  // `src/sandbox/transform/formatEngine.ts` are what makes each one load on
+  // demand: formatting a README fetches the core and the Markdown plugin and
+  // neither of the other two. Collapse the split — one plugin list, one static
+  // import — and a single chunk of ~1 MB appears in place of all four, which is
+  // exactly the step change these ceilings exist to catch.
+  //
+  // Every number MEASURED from a real build, then given headroom.
+
+  /** `prettier/standalone` plus the `estree` printer, needed by every syntax. Measured at ~285 KiB. */
+  'vendor-prettier-core': 320,
+  /** The `babel` parser, which reads the whole JSON family. Measured at ~309 KiB. */
+  'vendor-prettier-json': 344,
+  /** The Markdown plugin. Measured at ~266 KiB. */
+  'vendor-prettier-markdown': 300,
+  /** The YAML plugin. Measured at ~138 KiB. */
+  'vendor-prettier-yaml': 160,
 };
 
 /**

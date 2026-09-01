@@ -104,6 +104,68 @@ export function manualChunks(id: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Rollup `manualChunks` strategy for the DOCUMENT SANDBOX's build.
+ *
+ * A SECOND function rather than a branch inside {@link manualChunks}, and the
+ * separation is the point: the application build must never carry naming rules
+ * for a package it must never contain. If it did, the day somebody statically
+ * imported the format engine from an application module, Rollup would emit the
+ * app's own copy of Prettier under the same chunk names as the sandbox's — and
+ * `scripts/ci/bundle-gate.mjs` reports a base name that carries an explicit
+ * budget and is emitted into BOTH asset directories, so the two copies would
+ * share one ceiling that could be raised for either.
+ *
+ * As it stands, that mistake fails the gate on SIZE instead: the app's copies
+ * take Rollup's default names (`standalone`, `babel`, `estree`, …) and each is
+ * measured against `DEFAULT_CHUNK_BUDGET_KB`, which three of them breach on
+ * their own. Either way it is caught; this way the two builds' budgets stay
+ * independent. The assertion that actually fires FIRST, and reads as what it is,
+ * is `packages/client/tests/sandbox-boundary.test.ts`: no module outside
+ * `src/sandbox/` may reach into it at runtime.
+ *
+ * FOUR Prettier chunks, not one, because the per-type dynamic imports in
+ * `src/sandbox/transform/formatEngine.ts` are what makes formatting a README
+ * cost 288 KB instead of a megabyte:
+ *
+ *   - `vendor-prettier-core`   `standalone` + `estree`, needed by every syntax
+ *   - `vendor-prettier-json`   the `babel` parser, for the JSON family
+ *   - `vendor-prettier-markdown`
+ *   - `vendor-prettier-yaml`
+ *
+ * Everything else — the renderers, `lowlight`, `jsonrepair` — returns
+ * `undefined` and keeps Vite's per-dynamic-import chunking, which is what put
+ * each renderer in its own chunk in the first place. A blanket `node_modules`
+ * catch-all must never be added here for the same reason it must never be added
+ * to the application's: it would collapse every on-demand chunk into one eager
+ * download, and in this build that download happens inside a frame that opens
+ * for a `.png`.
+ *
+ * `id` is an absolute on-disk path in OS-native separators, so it is normalised
+ * to forward slashes before matching, exactly as the application's is.
+ */
+export function sandboxManualChunks(id: string): string | undefined {
+  const path = id.replace(/\\/g, '/');
+
+  if (!path.includes('/node_modules/prettier/')) {
+    // First-party source and every other dependency use Vite's default
+    // per-dynamic-import chunking.
+    return undefined;
+  }
+
+  // Anchored on the FILE each plugin is, not on a directory: Prettier ships its
+  // plugins as `plugins/<name>.mjs`, so the trailing dot is what stops
+  // `markdown.` from also matching a hypothetical `markdown-extra.mjs`.
+  if (path.includes('/prettier/plugins/babel.')) return 'vendor-prettier-json';
+  if (path.includes('/prettier/plugins/markdown.')) return 'vendor-prettier-markdown';
+  if (path.includes('/prettier/plugins/yaml.')) return 'vendor-prettier-yaml';
+  // `standalone` and `estree` and anything else Prettier pulls in. `estree` is
+  // the PRINTER for what the `babel` parser produces and is equally needed by
+  // Markdown and YAML runs that never load `babel`, so it belongs with the core
+  // rather than with the JSON parser.
+  return 'vendor-prettier-core';
+}
+
 // ---------------------------------------------------------------------------
 // The document sandbox's output layout, and the service worker's view of it
 // ---------------------------------------------------------------------------

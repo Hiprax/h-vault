@@ -32,6 +32,25 @@
  * On a transferred `MessagePort`, everything else. A port dies with the document
  * that held it, so a frame that navigates itself away loses the channel instead
  * of continuing as a trusted peer.
+ *
+ * ---------------------------------------------------------------------------
+ * TWO JOBS, TWO REQUEST KINDS, TWO DISJOINT REPLY SETS
+ * ---------------------------------------------------------------------------
+ *
+ * The same isolated document does both of the things this application must never
+ * do in its own origin: it RENDERS a stored file, and it FORMATS or REPAIRS one
+ * before it is encrypted. They share the document for one reason — a Web Worker
+ * would have been the obvious home for the second, and a worker is SAME-ORIGIN,
+ * so a bug in Prettier or in the repairer could `fetch` this application's own
+ * API with the httpOnly refresh cookie attached and read an access token out of
+ * the response. A worker has no DOM, but it has the origin, and the origin is
+ * what matters here.
+ *
+ * Each job has its own request kind and its own replies, and the two reply sets
+ * are DISJOINT apart from `failed`, which either job may answer with. That is a
+ * containment property rather than a naming convention: each host validates only
+ * the replies ITS request can produce, so a frame answering a render request with
+ * a transform result is a frame that has gone wrong, and it is torn down.
  */
 import type { PreviewMode } from '../constants/index.js';
 
@@ -102,11 +121,108 @@ export interface SandboxLinkMessage {
 }
 
 /**
- * Everything the frame may say on the port.
+ * Everything the frame may say IN ANSWER TO A RENDER REQUEST.
  *
  * A message outside this union — including one shaped like the window handshake,
- * which is how a compromised renderer would try to obtain a second channel —
- * tears the frame down and falls back to "download to view".
+ * which is how a compromised renderer would try to obtain a second channel, and
+ * including a transform reply, which this request did not ask for — tears the
+ * frame down and falls back to "download to view".
  */
 export type SandboxFrameMessage =
   SandboxRenderedMessage | SandboxFailedMessage | SandboxLinkMessage;
+
+/**
+ * Host to frame: run the optional in-browser transforms over this text.
+ *
+ * FIVE fields, and what is absent matters as much as what is here. It carries no
+ * key, no token, no document id and no file name — the document does not exist
+ * yet, because this runs BEFORE anything is encrypted or uploaded.
+ *
+ * `text`, not bytes. The host decodes the file itself, and refuses the transform
+ * outright unless the decoded string re-encodes to the ORIGINAL bytes exactly, so
+ * that the string posted here and the digest recorded in
+ * `transform.originalSha256` provably describe the same file. Decoding is a
+ * browser primitive rather than one of the parsers this design keeps out of the
+ * application's origin (Markdown, HTML, the highlighter, Prettier, the JSON
+ * repairer), and the host has to hold the original anyway: it computes the diff
+ * the user confirms from its OWN copy, never from a summary the frame chose.
+ *
+ * At least one of `format` and `repair` is true. A request asking for neither is
+ * a bug in the host — nothing offers that path — and the frame refuses it rather
+ * than answering "here is your text back", because a provenance record naming no
+ * transform records nothing.
+ */
+export interface SandboxTransformRequest {
+  readonly kind: 'transform';
+  readonly text: string;
+  /** The lowercased extension, which decides the syntax and therefore the parser. */
+  readonly ext: string;
+  readonly format: boolean;
+  readonly repair: boolean;
+}
+
+/**
+ * Frame to host: the transforms ran, and this is the result.
+ *
+ * `formatted` and `repaired` report which transforms RAN. On this message they
+ * necessarily equal what was asked for, and that is a property of the design
+ * rather than a coincidence: the engine never silently drops half a request. A
+ * repair asked for on a syntax with no repairer is a FAILURE, not a document
+ * quietly formatted alone, because a provenance record that overstated or
+ * understated what happened to the bytes would be worse than no record. What the
+ * two flags do NOT claim is that anything changed: a repair of already-valid
+ * JSON is byte-identical and still reports `repaired: true`, which is why the
+ * host shows the user a diff instead of these booleans. They, and the tool
+ * labels beside them, become the `transform` block of the encrypted metadata.
+ *
+ * `text` is DATA and is treated as such by everything downstream: it is encoded,
+ * hashed, encrypted and uploaded, and it is never rendered as markup. The host
+ * does not trust it to describe itself either — the byte delta and the diff the
+ * user confirms are computed by the host from its own original and this text.
+ */
+export interface SandboxTransformedMessage {
+  readonly kind: 'transformed';
+  readonly text: string;
+  readonly formatted: boolean;
+  readonly repaired: boolean;
+  /** The package that rewrote the bytes, e.g. `prettier` or `jsonrepair+prettier`. */
+  readonly tool: string;
+  readonly toolVersion: string;
+}
+
+/**
+ * Frame to host: the document could not be repaired or formatted, and where.
+ *
+ * A structured failure rather than a sentence, because the panel has to name the
+ * line, the column and the offending text: "the upload STOPS and says where" is
+ * the behaviour this feature is specified by, and a host that received only a
+ * message could not offer it.
+ *
+ * `line` and `column` are 1-BASED and `null` when the underlying tool reported no
+ * position — the JSON repairer reports a character OFFSET, which the frame
+ * converts, and Prettier reports a `loc`, but neither is guaranteed for every
+ * error. `excerpt` is the offending source line, bounded, and empty when there is
+ * no line to quote. Every one of them is built from the document's own bytes, so
+ * the application displays them as text and never interprets them.
+ */
+export interface SandboxTransformFailedMessage {
+  readonly kind: 'transformFailed';
+  /** Which half stopped: the repairer, or the formatter that ran after it. */
+  readonly stage: 'repair' | 'format';
+  readonly message: string;
+  readonly line: number | null;
+  readonly column: number | null;
+  readonly excerpt: string;
+}
+
+/**
+ * Everything the frame may say IN ANSWER TO A TRANSFORM REQUEST.
+ *
+ * `SandboxFailedMessage` is a member of BOTH unions, and deliberately: it is the
+ * answer to a request the frame could not even parse, which is a state that
+ * belongs to the protocol rather than to either job. The host treats it the way
+ * it treats every other failure here — the upload falls back to the original,
+ * untransformed bytes.
+ */
+export type SandboxTransformReply =
+  SandboxTransformedMessage | SandboxTransformFailedMessage | SandboxFailedMessage;

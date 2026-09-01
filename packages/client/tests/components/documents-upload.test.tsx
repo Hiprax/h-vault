@@ -27,10 +27,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
-import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, MAX_FORMATTABLE_SIZE_BYTES } from '@hvault/shared';
 import type { DocumentResponse, DocumentUsageResponse } from '@hvault/shared';
 
 /* -------------------------------------------------------------------------- */
@@ -57,6 +57,17 @@ const harness = vi.hoisted(() => ({
    * guard has no other way to be reached from a test.
    */
   extraVirtualRows: 0,
+  /**
+   * The isolated document's driver, stubbed at THIS tier and only at this tier.
+   *
+   * The panel's job is the state machine around a transform — when the Upload
+   * button is offered, what a review blocks, what a failure falls back to — and
+   * driving a real hidden iframe through jsdom would test none of it. The driver
+   * itself has a suite that runs every line of it (`document-transform.test.ts`),
+   * and the engine has one that runs the real Prettier and the real repairer
+   * (`document-format.test.ts`), so nothing here is the only cover for anything.
+   */
+  transformDocument: vi.fn(),
 }));
 
 /* -------------------------------------------------------------------------- */
@@ -81,6 +92,10 @@ vi.mock('../../src/services/api/configApi', () => ({
 
 vi.mock('../../src/hooks/useUserSettings', () => ({
   useUserSettings: () => harness.settings,
+}));
+
+vi.mock('../../src/services/documents/transform', () => ({
+  transformDocument: harness.transformDocument,
 }));
 
 vi.mock('../../src/hooks/useConnectionStatus', () => ({
@@ -1121,5 +1136,414 @@ describe('DocumentUploadPanel — the auto-lock warning', () => {
 
     expect(screen.getByTestId('upload-refusal')).toBeInTheDocument();
     expect(screen.queryByTestId('upload-lock-warning')).not.toBeInTheDocument();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  The optional in-browser transforms                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The two checkboxes, and the promise the panel makes around them: NOTHING this
+ * panel rewrites is uploaded without the user having seen what changed.
+ *
+ * The assertions that matter most here are negatives. A transform that has run
+ * and not been confirmed must leave `startUpload` untouched; a transform that
+ * FAILED must leave it untouched too, and must not quietly fall back to sending
+ * the original as though the checkbox had never been ticked.
+ */
+describe('DocumentUploadPanel — format and repair', () => {
+  let startUpload = vi.fn().mockResolvedValue('up-1');
+
+  beforeEach(() => {
+    startUpload = vi.fn().mockResolvedValue('up-1');
+    useDocumentsStore.setState({ startUpload });
+  });
+
+  /** A review the driver would return for a formatted JSON document. */
+  function reviewOf(text: string, bytesBefore = 7) {
+    return {
+      status: 'ready' as const,
+      review: {
+        blob: new Blob([text]),
+        transform: {
+          formatted: true,
+          repaired: false,
+          tool: 'prettier',
+          toolVersion: '3.9.5',
+          originalSha256: '0'.repeat(64),
+        },
+        diff: {
+          identical: false,
+          linesBefore: 1,
+          linesAfter: 2,
+          linesAdded: 2,
+          linesRemoved: 1,
+          hunks: [
+            {
+              beforeStart: 1,
+              beforeCount: 1,
+              afterStart: 1,
+              afterCount: 2,
+              lines: [
+                { kind: 'removed' as const, text: '{"a":1}' },
+                { kind: 'added' as const, text: '{ "a": 1 }' },
+              ],
+            },
+          ],
+        },
+        bytesBefore,
+        bytesAfter: new Blob([text]).size,
+      },
+    };
+  }
+
+  it('offers both transforms for a JSON file', () => {
+    renderPanel();
+    pick('config.json', 500);
+
+    expect(screen.getByTestId('transform-controls')).toBeInTheDocument();
+    expect(screen.getByLabelText(/Format this document/)).toBeEnabled();
+    expect(screen.getByLabelText(/Repair syntax errors/)).toBeEnabled();
+  });
+
+  it('keeps both disabled, with the reason shown, for a type neither supports', () => {
+    renderPanel();
+    pick('report.pdf', 500);
+
+    const format = screen.getByLabelText(/Format this document/);
+    const repair = screen.getByLabelText(/Repair syntax errors/);
+    expect(format).toBeDisabled();
+    expect(repair).toBeDisabled();
+    // A disabled control with no explanation is indistinguishable from a broken
+    // one, and the reason is wired to the control rather than merely printed
+    // near it.
+    const reason = document.getElementById(String(format.getAttribute('aria-describedby')));
+    expect(reason).toHaveTextContent(/JSON, JSON Lines, Markdown and YAML/);
+    expect(
+      document.getElementById(String(repair.getAttribute('aria-describedby'))),
+    ).toHaveTextContent(/JSON family only/);
+  });
+
+  it('offers formatting but not repair for Markdown, and says why', () => {
+    renderPanel();
+    pick('README.md', 500);
+
+    expect(screen.getByLabelText(/Format this document/)).toBeEnabled();
+    const repair = screen.getByLabelText(/Repair syntax errors/);
+    expect(repair).toBeDisabled();
+    expect(
+      document.getElementById(String(repair.getAttribute('aria-describedby'))),
+    ).toHaveTextContent(/Markdown has no syntax error to repair/);
+  });
+
+  it('disables both past the size ceiling, naming the ceiling rather than the type', () => {
+    renderPanel();
+    // Comfortably over MAX_FORMATTABLE_SIZE_BYTES (5 MiB) and comfortably under
+    // the server's own 100 MB cap, so the ONLY refusal in play is this one.
+    pick('huge.json', 6 * 1024 * 1024);
+
+    const format = screen.getByLabelText(/Format this document/);
+    expect(format).toBeDisabled();
+    expect(
+      document.getElementById(String(format.getAttribute('aria-describedby'))),
+    ).toHaveTextContent(/files up to/);
+    // The file itself is still perfectly uploadable.
+    expect(screen.queryByTestId('upload-refusal')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeInTheDocument();
+  });
+
+  it('draws the size ceiling AT the bound, not near it', () => {
+    // n and n+1. The comparison is `size > MAX_FORMATTABLE_SIZE_BYTES`, so a
+    // file of exactly the ceiling must still be offered both transforms and one
+    // byte more must be offered neither — the pair of cases an off-by-one lives
+    // in, and the one a "comfortably over" test cannot see.
+    const { unmount } = renderPanel();
+    pick('exactly.json', MAX_FORMATTABLE_SIZE_BYTES);
+    expect(screen.getByLabelText(/Format this document/)).toBeEnabled();
+    expect(screen.getByLabelText(/Repair syntax errors/)).toBeEnabled();
+    unmount();
+
+    renderPanel();
+    pick('one-over.json', MAX_FORMATTABLE_SIZE_BYTES + 1);
+    expect(screen.getByLabelText(/Format this document/)).toBeDisabled();
+    expect(screen.getByLabelText(/Repair syntax errors/)).toBeDisabled();
+  });
+
+  it('uploads straight away, with no provenance, when neither box is ticked', async () => {
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    expect(harness.transformDocument).not.toHaveBeenCalled();
+    const [input] = startUpload.mock.calls[0] as [Record<string, unknown>];
+    expect(input.name).toBe('config.json');
+    expect(input).not.toHaveProperty('transform');
+  });
+
+  it('does NOT start an upload while a transform is unconfirmed', async () => {
+    harness.transformDocument.mockResolvedValue(reviewOf('{ "a": 1 }\n'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+
+    // The button says what it will do, and what it does is NOT upload.
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    const review = await screen.findByTestId('transform-review');
+    expect(startUpload).not.toHaveBeenCalled();
+    // And the Upload button is GONE while the review is open, rather than
+    // sitting disabled beside it looking like a second way forward.
+    expect(screen.queryByRole('button', { name: /Prepare and review/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Upload$/ })).not.toBeInTheDocument();
+
+    // The comparison is shown before anything is sent.
+    expect(within(review).getByTestId('transform-summary')).toHaveTextContent(
+      /2 lines added, 1 removed/,
+    );
+    expect(within(review).getByTestId('transform-summary')).toHaveTextContent(/prettier 3.9.5/);
+  });
+
+  it('uploads the transformed bytes, under the original name, once confirmed', async () => {
+    harness.transformDocument.mockResolvedValue(reviewOf('{ "a": 1 }\n'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    await screen.findByTestId('transform-review');
+
+    fireEvent.click(screen.getByRole('button', { name: /Upload the formatted file/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    const [input] = startUpload.mock.calls[0] as [Record<string, unknown>];
+    // The transformed BLOB, but the picked file's NAME: the store deliberately
+    // never reads `File.name`, so a rewritten document cannot end up named after
+    // the file it no longer is.
+    expect(input.source).toBeInstanceOf(Blob);
+    expect(input.source).not.toBeInstanceOf(File);
+    expect(input.name).toBe('config.json');
+    expect(input.transform).toEqual({
+      formatted: true,
+      repaired: false,
+      tool: 'prettier',
+      toolVersion: '3.9.5',
+      originalSha256: '0'.repeat(64),
+    });
+  });
+
+  it('lets the user take the original instead, and records no provenance for it', async () => {
+    harness.transformDocument.mockResolvedValue(reviewOf('{ "a": 1 }\n'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Repair syntax errors/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    await screen.findByTestId('transform-review');
+
+    fireEvent.click(screen.getByRole('button', { name: /Upload the original unchanged/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    const [input] = startUpload.mock.calls[0] as [Record<string, unknown>];
+    expect(input.source).toBeInstanceOf(File);
+    // A file that was NOT transformed must carry no record saying it was.
+    expect(input).not.toHaveProperty('transform');
+  });
+
+  it('stops the upload on a failure, naming the line, the column and the offending text', async () => {
+    harness.transformDocument.mockResolvedValue({
+      status: 'failed',
+      failure: {
+        message: 'Unexpected character "{" at position 7',
+        line: 1,
+        column: 8,
+        excerpt: '{"a":1}{"b":2}',
+      },
+    });
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Repair syntax errors/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    const failure = await screen.findByTestId('transform-failure');
+    expect(startUpload).not.toHaveBeenCalled();
+    expect(within(failure).getByTestId('transform-failure-message')).toHaveTextContent(
+      'Unexpected character "{" at position 7',
+    );
+    expect(within(failure).getByTestId('transform-failure-position')).toHaveTextContent(
+      'Line 1, column 8',
+    );
+    expect(within(failure).getByTestId('transform-failure-excerpt')).toHaveTextContent(
+      '{"a":1}{"b":2}',
+    );
+    // It is an alert, because the upload the user asked for did not happen.
+    expect(failure).toHaveAttribute('role', 'alert');
+
+    // …and the one way forward from here still works.
+    fireEvent.click(screen.getByRole('button', { name: /Upload the original unchanged/ }));
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    expect((startUpload.mock.calls[0] as [Record<string, unknown>])[0]).not.toHaveProperty(
+      'transform',
+    );
+  });
+
+  it('lets the user back out of a failure without uploading anything at all', async () => {
+    // The OTHER way out of the failure panel, and the one that must upload
+    // nothing: Cancel returns the panel to the state it was in before the
+    // transform ran, with the file still selected and the Upload button back.
+    // Without it a failed transform would be a dead end offering only "upload
+    // the original", which is a choice the user has not been left.
+    harness.transformDocument.mockResolvedValue({
+      status: 'failed',
+      failure: { message: 'Flow sequence never closed', line: 3, column: 1, excerpt: 'b: [1, 2' },
+    });
+    renderPanel();
+    pick('compose.yaml', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    const failure = await screen.findByTestId('transform-failure');
+    fireEvent.click(within(failure).getByRole('button', { name: /^Cancel$/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('transform-failure')).not.toBeInTheDocument();
+    });
+    // Back to idle: the file is still chosen, the checkbox is usable again, and
+    // the button reads as a transform run rather than a plain upload because the
+    // tick survived.
+    expect(screen.getByText(/compose\.yaml/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Format this document/)).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Prepare and review/ })).toBeInTheDocument();
+    // And the negative that is the whole point of a Cancel.
+    expect(startUpload).not.toHaveBeenCalled();
+  });
+
+  it('reports a driver that rejected outright rather than uploading in silence', async () => {
+    // `transformDocument` resolves on every failure it can name; a rejection is
+    // one it could not — the file could not be read at all. Sending the original
+    // anyway would be a rewrite the user asked for, silently not happening.
+    harness.transformDocument.mockRejectedValue(new Error('unreadable'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    const failure = await screen.findByTestId('transform-failure');
+    expect(within(failure).getByTestId('transform-failure-message')).toHaveTextContent(
+      /could not be read/,
+    );
+    expect(startUpload).not.toHaveBeenCalled();
+  });
+
+  it('passes the extension and both flags to the driver, and nothing else', async () => {
+    harness.transformDocument.mockResolvedValue(reviewOf('x'));
+    renderPanel();
+    pick('data.NDJSON', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByLabelText(/Repair syntax errors/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    await screen.findByTestId('transform-review');
+
+    expect(harness.transformDocument).toHaveBeenCalledTimes(1);
+    const [source, options] = harness.transformDocument.mock.calls[0] as [File, unknown];
+    expect(source.name).toBe('data.NDJSON');
+    // Lowercased, because that is the key every extension table in this
+    // application is looked up by.
+    expect(options).toEqual({ ext: 'ndjson', format: true, repair: true });
+  });
+
+  it('forgets a review when a different file is picked', async () => {
+    harness.transformDocument.mockResolvedValue(reviewOf('{ "a": 1 }\n'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    await screen.findByTestId('transform-review');
+
+    // A review of the file before must never be confirmable against the file
+    // after, and a `.png` must not inherit a ticked Format box.
+    pick('picture.png', 500);
+    expect(screen.queryByTestId('transform-review')).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Format this document/)).not.toBeChecked();
+    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeInTheDocument();
+  });
+
+  it('locks the checkboxes while a review is open, so the reviewed run cannot be edited', async () => {
+    harness.transformDocument.mockResolvedValue(reviewOf('{ "a": 1 }\n'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    await screen.findByTestId('transform-review');
+
+    expect(screen.getByLabelText(/Format this document/)).toBeDisabled();
+    expect(screen.getByLabelText(/Repair syntax errors/)).toBeDisabled();
+
+    // Cancelling returns the panel to where it started, with the file still picked.
+    fireEvent.click(screen.getByRole('button', { name: /^Cancel$/ }));
+    expect(screen.queryByTestId('transform-review')).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Format this document/)).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Prepare and review/ })).toBeInTheDocument();
+  });
+
+  it('says so plainly when a transform changed nothing at all', async () => {
+    const identical = reviewOf('{"a":1}');
+    harness.transformDocument.mockResolvedValue({
+      status: 'ready',
+      review: {
+        ...identical.review,
+        diff: {
+          identical: true,
+          linesBefore: 1,
+          linesAfter: 1,
+          linesAdded: 0,
+          linesRemoved: 0,
+          hunks: [],
+        },
+      },
+    });
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Repair syntax errors/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    const review = await screen.findByTestId('transform-review');
+    expect(review).toHaveTextContent(/Nothing changed/);
+    // No diff to open when there is nothing to show.
+    expect(within(review).queryByText(/Show what changed/)).not.toBeInTheDocument();
+  });
+
+  it('says the line-by-line comparison was skipped rather than showing an empty one', async () => {
+    const base = reviewOf('x');
+    harness.transformDocument.mockResolvedValue({
+      status: 'ready',
+      review: {
+        ...base.review,
+        diff: {
+          identical: false,
+          linesBefore: 2000,
+          linesAfter: 2000,
+          linesAdded: 2000,
+          linesRemoved: 2000,
+          hunks: null,
+        },
+      },
+    });
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    const review = await screen.findByTestId('transform-review');
+    fireEvent.click(within(review).getByText(/Show what changed/));
+    expect(review).toHaveTextContent(/too large to compare line by line/);
+    expect(within(review).queryByTestId('transform-diff')).not.toBeInTheDocument();
   });
 });

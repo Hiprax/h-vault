@@ -12,6 +12,7 @@ import {
   manualChunks,
   resolveDevHost,
   resolveDevPort,
+  sandboxManualChunks,
 } from '../vite.config.helpers';
 
 // T31 — the Vite dev-server host must be overridable via VITE_HOST so the dev
@@ -133,8 +134,9 @@ describe('manualChunks (T30 — vendor splitting)', () => {
     // (`react-markdown` makes the same point and is already asserted above.)
     expect(manualChunks('/repo/node_modules/react-window/dist/index.js')).toBeUndefined();
     // The router's own transitive dependency is not hoisted into an eager chunk.
-    // This is not idle: CLAUDE.md records "a blanket node_modules catch-all must
-    // never be added", and this is the assertion that would catch one.
+    // This is not idle: the project's chunking rules state that a blanket
+    // `node_modules` catch-all must never be added, and this is the assertion
+    // that would catch one.
     expect(manualChunks('/repo/node_modules/cookie-es/dist/index.mjs')).toBeUndefined();
   });
 
@@ -159,6 +161,124 @@ describe('manualChunks (T30 — vendor splitting)', () => {
   it('leaves application source to default chunking', () => {
     expect(manualChunks('/repo/packages/client/src/stores/authStore.ts')).toBeUndefined();
     expect(manualChunks('/repo/packages/client/src/components/ui/Button.tsx')).toBeUndefined();
+  });
+});
+
+// The SANDBOX build's own strategy. Prettier is the only thing it groups, and
+// the four groups are what make formatting a README cost one plugin rather than
+// all of them: the per-type dynamic imports in
+// `src/sandbox/transform/formatEngine.ts` create the chunk boundaries, and these
+// names are what `scripts/ci/lib/bundle-budgets.mjs` puts a ceiling on.
+describe('sandboxManualChunks (the document sandbox build)', () => {
+  it('splits Prettier into one chunk per syntax, plus a shared core', () => {
+    expect(sandboxManualChunks('/repo/node_modules/prettier/standalone.mjs')).toBe(
+      'vendor-prettier-core',
+    );
+    // `estree` is the PRINTER for what `babel` parses and is equally needed by a
+    // Markdown or YAML run that never loads `babel`, so it belongs with the core.
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/estree.mjs')).toBe(
+      'vendor-prettier-core',
+    );
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/babel.mjs')).toBe(
+      'vendor-prettier-json',
+    );
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/markdown.mjs')).toBe(
+      'vendor-prettier-markdown',
+    );
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/yaml.mjs')).toBe(
+      'vendor-prettier-yaml',
+    );
+  });
+
+  it('matches Windows (backslash) module paths too', () => {
+    expect(sandboxManualChunks('C:\\repo\\node_modules\\prettier\\plugins\\yaml.mjs')).toBe(
+      'vendor-prettier-yaml',
+    );
+    expect(sandboxManualChunks('C:\\repo\\node_modules\\prettier\\standalone.mjs')).toBe(
+      'vendor-prettier-core',
+    );
+  });
+
+  it('anchors each plugin on its own FILE, not on a name it is a prefix of', () => {
+    // Prettier ships plugins as `plugins/<name>.mjs`, so the trailing dot is
+    // what stops `markdown.` also matching a `markdown-extra.mjs` — the same
+    // widening the application's `\/` anchors guard against.
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/markdown-extra.mjs')).toBe(
+      'vendor-prettier-core',
+    );
+  });
+
+  it('groups nothing else at all', () => {
+    // The renderers, the markdown substrate, `lowlight` and `jsonrepair` all keep
+    // Vite's per-dynamic-import chunking, which is what put each renderer in its
+    // own chunk. A blanket `node_modules` catch-all here would collapse the lot
+    // into a single eager download inside a frame that opens for a `.png`.
+    expect(sandboxManualChunks('/repo/node_modules/jsonrepair/lib/esm/index.js')).toBeUndefined();
+    expect(sandboxManualChunks('/repo/node_modules/lowlight/index.js')).toBeUndefined();
+    expect(sandboxManualChunks('/repo/node_modules/rehype-sanitize/index.js')).toBeUndefined();
+    expect(sandboxManualChunks('/repo/packages/client/src/sandbox/sandbox.ts')).toBeUndefined();
+    expect(
+      sandboxManualChunks('/repo/packages/client/src/sandbox/transform/formatEngine.ts'),
+    ).toBeUndefined();
+  });
+
+  it("is a SECOND function, so neither build carries the other's naming rules", () => {
+    // The application build must never name a Prettier chunk: if it did, the day
+    // an application module reached the format engine, both builds would emit
+    // chunks under the same budgeted base name and `bundle-gate.mjs` would have
+    // one ceiling covering two unrelated chunks.
+    expect(manualChunks('/repo/node_modules/prettier/standalone.mjs')).toBeUndefined();
+    expect(manualChunks('/repo/node_modules/prettier/plugins/babel.mjs')).toBeUndefined();
+    // And the sandbox's does not carry the application's.
+    expect(sandboxManualChunks('/repo/node_modules/react/index.js')).toBeUndefined();
+    expect(sandboxManualChunks('/repo/node_modules/zod/index.js')).toBeUndefined();
+  });
+
+  it('emits only names the bundle gate has a ceiling for, and every one of them', async () => {
+    const { CHUNK_BUDGETS_KB } = await import('../../../scripts/ci/lib/bundle-budgets.mjs');
+
+    // Both directions, over the FUNCTION'S OWN RETURN VALUES rather than over a
+    // list restated here, which is what makes this able to fail on the two
+    // mistakes that matter. A fifth branch returning an unbudgeted name would be
+    // measured against `DEFAULT_CHUNK_BUDGET_KB` (128 KiB) and break the build
+    // for a reason that reads as "a chunk is too big"; a budget key no branch
+    // ever returns is a ceiling that can never be exceeded and therefore a gate
+    // that can never fire.
+    const modules = [
+      'standalone.mjs',
+      'index.mjs',
+      'doc.mjs',
+      'plugins/babel.mjs',
+      'plugins/estree.mjs',
+      'plugins/markdown.mjs',
+      'plugins/yaml.mjs',
+      'plugins/acorn.mjs',
+      'plugins/glimmer.mjs',
+      'plugins/postcss.mjs',
+      'plugins/typescript.mjs',
+    ];
+    const emitted = new Set(
+      modules
+        .map((file) => sandboxManualChunks(`/repo/node_modules/prettier/${file}`))
+        .filter((name): name is string => name !== undefined),
+    );
+
+    expect([...emitted].sort()).toEqual([
+      'vendor-prettier-core',
+      'vendor-prettier-json',
+      'vendor-prettier-markdown',
+      'vendor-prettier-yaml',
+    ]);
+    const budgets: Record<string, number | undefined> = CHUNK_BUDGETS_KB;
+    for (const name of emitted) {
+      expect(budgets[name], `${name} has no budget`).toBeGreaterThan(0);
+    }
+    // And no budgeted `vendor-prettier-*` key is orphaned: every one of them is
+    // a name this function actually produces.
+    const budgeted = Object.keys(CHUNK_BUDGETS_KB).filter((key) =>
+      key.startsWith('vendor-prettier-'),
+    );
+    expect(budgeted.sort()).toEqual([...emitted].sort());
   });
 });
 
@@ -234,7 +354,21 @@ describe('the document sandbox build', () => {
     // "match the app") overrides that derivation and puts every JS chunk back in
     // `dist/assets/`, where it is served with no ACAO — a frame that is blank in
     // production only, with every header assertion elsewhere still green.
-    expect(config.build?.rollupOptions?.output).toBeUndefined();
+    //
+    // This was `output === undefined` until the build gained its own
+    // `manualChunks`, which lives at exactly that path. NARROWED rather than
+    // dropped: the concern was never "no output options", it was "no FILENAME
+    // option", so the key set is pinned exhaustively and the three names that
+    // would defeat `assetsDir` are named individually. A new key here is a
+    // deliberate edit, not something that arrives with a config tweak.
+    const output = config.build?.rollupOptions?.output as Record<string, unknown> | undefined;
+    expect(output).toBeDefined();
+    expect(Object.keys(output ?? {})).toEqual(['manualChunks']);
+    expect(output?.chunkFileNames).toBeUndefined();
+    expect(output?.entryFileNames).toBeUndefined();
+    expect(output?.assetFileNames).toBeUndefined();
+    // Identity, so the tested function is provably the one the build was handed.
+    expect(output?.manualChunks).toBe(sandboxManualChunks);
   });
 
   it('sets its size advisory to the ceiling the gate actually enforces', async () => {

@@ -329,6 +329,10 @@
       "bundle.budgetKb.pipeline",
       "bundle.budgetKb.sandbox",
       "bundle.budgetKb.vendor-core",
+      "bundle.budgetKb.vendor-prettier-core",
+      "bundle.budgetKb.vendor-prettier-json",
+      "bundle.budgetKb.vendor-prettier-markdown",
+      "bundle.budgetKb.vendor-prettier-yaml",
       "bundle.budgetKb.vendor-react",
       "bundle.defaultChunkBudgetKb",
       "bundle.htmlShellBudgetKb",
@@ -461,7 +465,7 @@
       "spectral": 1
     }
   },
-  "reason": "Validation pass over phases 11-20: the client branch-coverage regression repaired with three behavioural tests (92.45 -> 92.48), the first measured flake sample (10 shuffled runs, 609 e2e executions, 0 failures), the branch denominators and the OpenAPI snapshot fingerprint recorded, and test:dst/test:flake added to the registered task list.",
+  "reason": "Validation pass over phases 11-20: the client branch-coverage regression repaired with three behavioural tests (92.45 -> 92.48), the first measured flake sample (10 shuffled runs, 609 e2e executions, 0 failures), the branch denominators and the OpenAPI snapshot fingerprint recorded, and test:dst/test:flake added to the registered task list, and the four vendor-prettier-* chunk ceilings seeded by hand for Phase 20 (measured 285.04/309.12/265.94/138.15 KiB against 320/344/300/160) together with their meta.fields entries, without which a later deletion of one would leave its ceiling freely raisable; bundle.measured refreshed by hand because that block is declared 'info' and --accept records none of it.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -474,16 +478,20 @@
       "pipeline": 48,
       "sandbox": 24,
       "vendor-core": 220,
+      "vendor-prettier-core": 320,
+      "vendor-prettier-json": 344,
+      "vendor-prettier-markdown": 300,
+      "vendor-prettier-yaml": 160,
       "vendor-react": 280
     },
     "defaultChunkBudgetKb": 128,
     "initialPayloadBudgetKb": 700,
     "htmlShellBudgetKb": 8,
     "measured": {
-      "chunkCount": 80,
+      "chunkCount": 86,
       "htmlShellKb": 3.03,
-      "initialPayloadKb": 589.66,
-      "totalJsKb": 4340.4
+      "initialPayloadKb": 591.52,
+      "totalJsKb": 5372.45
     }
   },
   "resource": {
