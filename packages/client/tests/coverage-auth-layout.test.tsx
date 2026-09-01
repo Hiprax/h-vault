@@ -31,6 +31,7 @@ const {
   mockZxcvbn,
   mockDecryptFile,
   mockGetMaxBytes,
+  mockGetDocumentsConfig,
   mockIsStorageDegraded,
 } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
@@ -38,6 +39,7 @@ const {
   mockZxcvbn: vi.fn(),
   mockDecryptFile: vi.fn(),
   mockGetMaxBytes: vi.fn(),
+  mockGetDocumentsConfig: vi.fn(),
   mockIsStorageDegraded: vi.fn(() => false),
 }));
 
@@ -103,6 +105,9 @@ vi.mock('../src/components/layout/OnboardingGuide', () => ({ OnboardingGuide: ()
 
 vi.mock('../src/services/api/configApi', () => ({
   getFileEncryptionMaxBytes: mockGetMaxBytes,
+  // AppLayout asks this before it can decide whether the Documents entry exists.
+  // It never rejects in production, and the stub keeps that contract.
+  getDocumentsConfig: mockGetDocumentsConfig,
 }));
 
 vi.mock('../src/services/crypto/fileCryptoService', async (importOriginal) => {
@@ -117,7 +122,7 @@ vi.mock('../src/services/crypto/fileCryptoService', async (importOriginal) => {
 import { UnlockScreen } from '../src/components/auth/UnlockScreen';
 import { LoginPage } from '../src/components/auth/LoginPage';
 import { RegisterPage } from '../src/components/auth/RegisterPage';
-import { AppLayout } from '../src/components/layout/AppLayout';
+import { AppLayout, isNavItemActive, navItemsFor } from '../src/components/layout/AppLayout';
 import { FileDecryptPanel } from '../src/components/tools/FileDecryptPanel';
 import { useAuthStore } from '../src/stores/authStore';
 import { useVaultStore } from '../src/stores/vaultStore';
@@ -172,6 +177,11 @@ beforeEach(() => {
   vaultState = {};
   installStores();
   mockZxcvbn.mockReturnValue(zxcvbnResult(4));
+  // Pending by default, which is the state every render starts in. Only the
+  // navigation tests below want an ANSWER, and they say so and await it — left
+  // resolving here, every other AppLayout test would take an un-awaited state
+  // update after its assertions and React would (rightly) complain about it.
+  mockGetDocumentsConfig.mockReturnValue(new Promise(() => undefined));
 });
 
 afterEach(() => {
@@ -494,8 +504,12 @@ describe('RegisterPage — strength feedback and visibility toggles', () => {
     expect(screen.getByText('Avoid repeated words and characters.')).toBeInTheDocument();
   });
 
-  it('toggles each password field independently', () => {
+  it('toggles each password field independently', async () => {
     renderRouted(<RegisterPage />);
+    // The lazily-imported strength scorer resolves in a microtask and sets state
+    // when it lands. Settling it here keeps that update inside the test rather
+    // than after it, where React reports it as an un-acted update.
+    await act(async () => undefined);
 
     const master = screen.getByLabelText('Master Password');
     const confirm = screen.getByLabelText('Confirm Master Password');
@@ -669,6 +683,81 @@ describe('AppLayout — decryption-failure banner and reconnect sync', () => {
 });
 
 /* ========================================================================== */
+/*  AppLayout — the Documents navigation entry                                 */
+/* ========================================================================== */
+
+describe('AppLayout — the Documents entry is gated on what the server advertises', () => {
+  function renderNav(pathname = '/vault') {
+    authState = {
+      user: { userId: 'u1', email: 'test@example.com' },
+      logout: vi.fn(),
+      lock: vi.fn(),
+      isLocked: false,
+    };
+    vaultState = { fetchItems: vi.fn(), fetchFolders: vi.fn() };
+    installStores();
+    return render(
+      <MemoryRouter initialEntries={[pathname]}>
+        <Routes>
+          <Route element={<AppLayout />}>
+            <Route path="*" element={<div>Page</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it('does not show the entry while the server has not answered yet', () => {
+    renderNav();
+
+    expect(screen.queryByRole('link', { name: 'Documents' })).not.toBeInTheDocument();
+    // The rest of the navigation is unaffected by the pending answer.
+    expect(screen.getByRole('link', { name: 'Vault' })).toBeInTheDocument();
+  });
+
+  it('does not show the entry on a server with no document store', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: false });
+    renderNav();
+
+    // Wait for the answer to have been applied, so the absence below is the
+    // answered state rather than the pending one.
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'Vault' })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('link', { name: 'Documents' })).not.toBeInTheDocument();
+  });
+
+  it('shows the entry, linking to /documents, when the server offers one', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: true, maxSizeMB: 100 });
+    renderNav();
+
+    const link = await screen.findByRole('link', { name: 'Documents' });
+    expect(link).toHaveAttribute('href', '/documents');
+  });
+
+  it('marks the entry current on /documents and on a document page, and nowhere else', () => {
+    const documentsItem = navItemsFor(true).find((item) => item.to === '/documents');
+    expect(documentsItem).toBeDefined();
+
+    expect(isNavItemActive(documentsItem!, '/documents')).toBe(true);
+    expect(isNavItemActive(documentsItem!, '/documents/abc123')).toBe(true);
+    expect(isNavItemActive(documentsItem!, '/vault')).toBe(false);
+    // And the entry it sits beside must not light up on the documents section.
+    const vaultItem = navItemsFor(true)[0]!;
+    expect(vaultItem.to).toBe('/vault');
+    expect(isNavItemActive(vaultItem, '/documents')).toBe(false);
+  });
+
+  it('inserts the entry after Vault rather than appending it, and adds nothing else', () => {
+    const without = navItemsFor(false).map((item) => item.label);
+    const withDocuments = navItemsFor(true).map((item) => item.label);
+
+    expect(without).not.toContain('Documents');
+    expect(withDocuments).toEqual(['Vault', 'Documents', ...without.slice(1)]);
+  });
+});
+
+/* ========================================================================== */
 /*  FileDecryptPanel                                                           */
 /* ========================================================================== */
 
@@ -723,8 +812,11 @@ describe('FileDecryptPanel — keyboard submit and error classification', () => 
     });
   });
 
-  it('ignores Enter while the form is not submittable', () => {
+  it('ignores Enter while the form is not submittable', async () => {
     render(<FileDecryptPanel />);
+    // The size cap is fetched on mount; settle it before asserting, so its
+    // arrival is not an un-acted update after the test has finished.
+    await act(async () => undefined);
     selectFile();
     // No password typed => canSubmit is false.
     pressEnterInPassword();

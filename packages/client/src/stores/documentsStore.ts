@@ -202,6 +202,25 @@ export interface DocumentUploadProgress {
  * it would be a field that cannot lie about anything.
  */
 
+/**
+ * Whether a transfer is still moving bytes.
+ *
+ * The ONE definition of the question, because two readers ask it for decisions
+ * that must never disagree: the unload guard uses it to decide whether closing
+ * the tab costs anything, and the upload panel uses it to decide whether to say
+ * so. A failed transfer holds no socket and is reading nothing from its file —
+ * its parts are already stored and a retry re-sends only what the server does
+ * not hold — so closing the tab on one costs nothing a confirmation would save.
+ *
+ * A predicate rather than two `!== 'failed'` comparisons, so a fourth status
+ * cannot be added in a way that leaves the guard and the panel answering
+ * differently. {@link DocumentUploadStatus} stays unexported deliberately, which
+ * is why this is the shape the answer travels in.
+ */
+export function isLiveTransfer(transfer: DocumentUploadProgress): boolean {
+  return transfer.status !== 'failed';
+}
+
 /** The handles, key material and inputs one transfer needs, kept out of the state tree. */
 interface UploadSession {
   controller: AbortController;

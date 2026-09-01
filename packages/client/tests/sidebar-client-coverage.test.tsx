@@ -104,6 +104,16 @@ vi.mock('../src/services/api/userApi', () => ({
   updateSettingsApi: vi.fn(),
 }));
 
+// AppLayout asks the public config whether this server has a document store
+// before it can decide whether the Documents entry exists. Left PENDING here:
+// none of these tests is about that entry, and an answer arriving after a
+// synchronous assertion is an un-awaited state update React rightly complains
+// about. `getFileEncryptionMaxBytes` keeps its real contract of never rejecting.
+vi.mock('../src/services/api/configApi', () => ({
+  getFileEncryptionMaxBytes: vi.fn().mockResolvedValue(100 * 1024 * 1024),
+  getDocumentsConfig: vi.fn(() => new Promise(() => undefined)),
+}));
+
 vi.mock('../src/services/offlineCache', () => ({
   offlineCache: {
     cacheItems: vi.fn().mockResolvedValue(undefined),

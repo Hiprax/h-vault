@@ -98,6 +98,16 @@ vi.mock('../src/services/api/userApi', () => ({
   updateSettingsApi: vi.fn(),
 }));
 
+// AppLayout asks the public config whether this server has a document store
+// before it can decide whether the Documents entry exists. Left PENDING here:
+// none of these tests is about that entry, and an answer arriving after a
+// synchronous assertion is an un-awaited state update React rightly complains
+// about. `getFileEncryptionMaxBytes` keeps its real contract of never rejecting.
+vi.mock('../src/services/api/configApi', () => ({
+  getFileEncryptionMaxBytes: vi.fn().mockResolvedValue(100 * 1024 * 1024),
+  getDocumentsConfig: vi.fn(() => new Promise(() => undefined)),
+}));
+
 vi.mock('../src/services/offlineCache', () => ({
   offlineCache: {
     setUser: vi.fn().mockResolvedValue(undefined),
@@ -135,6 +145,15 @@ vi.mock('../src/hooks/useUserSettings', () => ({
 
 vi.mock('../src/hooks/useAutoLock', () => ({
   useAutoLock: vi.fn(),
+}));
+
+// The real hook probes `/api/v1/health` on mount and applies the result
+// asynchronously, which lands as an un-acted state update after every
+// synchronous assertion below. It has its own suite
+// (`tests/useConnectionStatus.test.tsx`); here it is a fixed input, as it
+// already is in the other layout suites.
+vi.mock('../src/hooks/useConnectionStatus', () => ({
+  useConnectionStatus: () => ({ isOnline: true }),
 }));
 
 vi.mock('../src/hooks/useKeyboardShortcuts', () => ({
