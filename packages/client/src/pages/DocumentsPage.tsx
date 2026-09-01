@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, FileWarning, Loader2, WifiOff } from 'lucide-react';
+import { AlertTriangle, Loader2, WifiOff } from 'lucide-react';
 import { formatBytes } from '@hvault/shared';
 import type { DocumentUsageResponse } from '@hvault/shared';
 import { getApiErrorMessage } from '../lib/utils';
@@ -8,6 +8,7 @@ import { useDocumentsConfig } from '../hooks/useDocumentsConfig';
 import { useDocumentsStore } from '../stores/documentsStore';
 import { DocumentList } from '../components/documents/DocumentList';
 import { DocumentUploadPanel } from '../components/documents/DocumentUploadPanel';
+import { StorageUnavailable } from '../components/documents/StorageUnavailable';
 import type { DocumentsConfig } from '../services/api/configApi';
 
 // ---------------------------------------------------------------------------
@@ -76,34 +77,6 @@ function ConfigPending() {
   return (
     <div className="flex items-center justify-center py-20" role="status" aria-label="Loading">
       <Loader2 className="h-6 w-6 animate-spin text-[hsl(var(--muted-foreground))]" />
-    </div>
-  );
-}
-
-/**
- * What a user sees when they reach this route on a server with no object storage
- * configured, or on one older than the feature.
- *
- * Nothing is fetched in this state, deliberately. The endpoints answer 503 and,
- * because the error middleware redacts every 5xx body in production, that answer
- * carries no explanation at all — so the honest source for "this is unavailable"
- * is the public configuration the client already read, and probing for a
- * redacted refusal would produce a worse message and a wasted request.
- */
-function StorageUnavailable() {
-  return (
-    <div
-      data-testid="documents-unavailable"
-      className="mx-auto max-w-xl rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-6 text-center"
-    >
-      <FileWarning className="mx-auto h-8 w-8 text-[hsl(var(--muted-foreground))]" />
-      <h1 className="mt-3 text-lg font-semibold text-[hsl(var(--foreground))]">
-        Documents are not available on this server
-      </h1>
-      <p className="mt-1 text-sm text-[hsl(var(--muted-foreground))]">
-        The document store needs object storage, which the operator of this server has not
-        configured. Nothing else about your vault is affected.
-      </p>
     </div>
   );
 }

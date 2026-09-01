@@ -528,9 +528,18 @@ export async function encryptMeta(
  * Three ways this refuses, all of them loud: the tag does not verify (a foreign
  * key, a tampered blob, or the stream key, which does not open it either); the
  * plaintext is not well-formed UTF-8; or the JSON does not satisfy the shared
- * schema. A document whose metadata will not open is rendered as undecodable,
- * with rename, move, favorite, delete and restore still offered — never as a
- * document with a guessed name.
+ * schema.
+ *
+ * A document whose metadata will not open is rendered as undecodable, offering
+ * move, favorite, trash, restore and permanent delete — never a document with a
+ * guessed name, and never a RENAME. That last part is where a document differs
+ * from an undecodable vault item, whose name is a separate ciphertext field it
+ * can be given back: a document's name, type, size, tags, note and whole-file
+ * checksum all live inside this one blob, so there is nothing to rewrite and no
+ * key to rewrite it with. Sealing a fresh blob would be worse than refusing —
+ * its framing could only be copied off the very row a reader is required to
+ * check it against, which would make that check a tautology for this document
+ * for ever, and its checksum would have to be invented.
  */
 export async function decryptMeta(
   metaKey: CryptoKey,
