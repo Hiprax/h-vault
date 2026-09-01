@@ -252,11 +252,17 @@ describe('DocumentDetail — what a document says about itself', () => {
     expect(screen.getByText('Unknown')).toBeInTheDocument();
   });
 
-  it('offers download-to-view, with the reason, for every document that opens', () => {
+  it('declines to preview a PDF, says it is a decision, and still offers the download', () => {
+    // The default fixture is a PDF, which this project has DECIDED not to
+    // render rather than merely failing to recognise — so the copy has to say
+    // which of those it is. (Before Phase 19 this panel was the answer for
+    // EVERY document and its text said the application never opens one; that is
+    // no longer true, and asserting it would now pin the opposite of the
+    // behaviour.)
     renderDetail(makeDocument());
 
     const panel = screen.getByTestId('document-download-to-view');
-    expect(panel).toHaveTextContent(/does not open a document inside the app/i);
+    expect(panel).toHaveTextContent(/PDFs are download-only here/i);
     expect(screen.getByRole('button', { name: /download/i })).toBeInTheDocument();
   });
 });
@@ -266,15 +272,16 @@ describe('DocumentDetail — what a document says about itself', () => {
 /* ========================================================================== */
 
 describe('DocumentDetail — no document content is rendered in this origin', () => {
-  it('renders no element that could fetch or display a document', () => {
-    const { container } = renderDetail(
-      makeDocument({ meta: makeMeta({ name: 'photo.png', mime: 'image/png' }) }),
-    );
+  it('renders no element that could fetch or display a document it has declined', () => {
+    // The document is a PDF, which is download-only. A parser running HERE would
+    // run beside the unlocked vault key, which is the single thing this
+    // feature's design exists to prevent — so a declined document must produce
+    // no element capable of fetching or displaying anything, not even a hidden
+    // one. (What a document the app DOES preview produces is asserted in
+    // `DocumentDetail.preview.test.tsx`, where it is a frame with an opaque
+    // origin rather than a renderer in this page.)
+    const { container } = renderDetail(makeDocument());
 
-    // Phase 16 ships no renderer. A preview belongs inside the isolated document
-    // of Phase 18, whose opaque origin holds no key; one added HERE would run a
-    // parser beside the unlocked vault key, which is the single thing this
-    // feature's design exists to prevent.
     expect(container.querySelectorAll('iframe, embed, object, video, audio, img')).toHaveLength(0);
   });
 

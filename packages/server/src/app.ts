@@ -14,7 +14,11 @@ import { createErrorMiddleware } from '@hiprax/errors';
 import { createRequestLogger } from '@hiprax/logger';
 import { createModuleLogger } from './utils/logger.js';
 import { config } from './config/index.js';
-import { applySandboxAssetHeaders, createSandboxDocumentHandler } from './config/sandboxCsp.js';
+import {
+  applySandboxAssetHeaders,
+  createSandboxDocumentHandler,
+  requireBuildArtifact,
+} from './config/sandboxCsp.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
 import swaggerUi from 'swagger-ui-express';
@@ -279,20 +283,14 @@ if (config.NODE_ENV === 'production') {
   // build missing either of them fails loudly at boot rather than 404ing one
   // route in production. `sandbox.html` is emitted by its own Vite build
   // (`packages/client/vite.config.sandbox.ts`), which runs after the app build.
-  let indexHtml: string;
-  let sandboxHtml: string;
-  try {
-    indexHtml = readFileSync(path.join(publicPath, 'index.html'), 'utf-8');
-  } catch {
-    throw new Error('Production build missing client dist. Run: npm run build:client');
-  }
-  try {
-    sandboxHtml = readFileSync(path.join(publicPath, 'sandbox.html'), 'utf-8');
-  } catch {
-    throw new Error(
-      'Production build missing the document sandbox (sandbox.html). Run: npm run build:client',
-    );
-  }
+  const indexHtml = requireBuildArtifact(
+    () => readFileSync(path.join(publicPath, 'index.html'), 'utf-8'),
+    'Production build missing client dist. Run: npm run build:client',
+  );
+  const sandboxHtml = requireBuildArtifact(
+    () => readFileSync(path.join(publicPath, 'sandbox.html'), 'utf-8'),
+    'Production build missing the document sandbox (sandbox.html). Run: npm run build:client',
+  );
 
   // The isolated render document, mounted BEFORE `express.static` and therefore
   // before the SPA fallback.

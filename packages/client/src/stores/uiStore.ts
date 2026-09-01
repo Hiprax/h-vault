@@ -37,8 +37,14 @@ interface UIState {
 /**
  * Resolve the effective theme (light or dark) taking into account the
  * operating system preference when the user has chosen "system".
+ *
+ * Exported because the document sandbox needs the RESOLVED value and cannot
+ * derive it: it is a separate document with an opaque origin, it is told the
+ * theme over a message port, and it must not resolve `'system'` for itself in
+ * some way this application would disagree with — a preview that disagreed with
+ * the chrome around it would look broken rather than themed.
  */
-function resolveEffectiveTheme(theme: ThemeValue): 'light' | 'dark' {
+export function resolveEffectiveTheme(theme: ThemeValue): 'light' | 'dark' {
   if (theme !== 'system') {
     return theme;
   }

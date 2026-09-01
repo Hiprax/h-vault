@@ -320,9 +320,14 @@
       "a11y.serious",
       "a11y.viewsScanned",
       "bundle.budgetKb.VaultItemForm",
+      "bundle.budgetKb.html",
       "bundle.budgetKb.index_esm",
+      "bundle.budgetKb.lowlight",
       "bundle.budgetKb.main",
+      "bundle.budgetKb.markdown",
       "bundle.budgetKb.passwordStrength_worker",
+      "bundle.budgetKb.pipeline",
+      "bundle.budgetKb.sandbox",
       "bundle.budgetKb.vendor-core",
       "bundle.budgetKb.vendor-react",
       "bundle.defaultChunkBudgetKb",
@@ -460,9 +465,14 @@
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
+      "html": 200,
       "index_esm": 280,
+      "lowlight": 960,
       "main": 850,
+      "markdown": 300,
       "passwordStrength_worker": 850,
+      "pipeline": 48,
+      "sandbox": 24,
       "vendor-core": 220,
       "vendor-react": 280
     },
@@ -470,10 +480,10 @@
     "initialPayloadBudgetKb": 700,
     "htmlShellBudgetKb": 8,
     "measured": {
-      "chunkCount": 65,
-      "htmlShellKb": 2.95,
-      "initialPayloadKb": 608.8,
-      "totalJsKb": 2963.9
+      "chunkCount": 80,
+      "htmlShellKb": 3.03,
+      "initialPayloadKb": 589.66,
+      "totalJsKb": 4340.4
     }
   },
   "resource": {

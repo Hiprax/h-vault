@@ -214,3 +214,39 @@ export function createSandboxDocumentHandler(
     res.send(html);
   };
 }
+
+/**
+ * Turn a failed read of a required build artifact into a message that names it.
+ *
+ * ONE definition for both documents `app.ts` needs at boot, and it lives here
+ * for the same reason everything else in this file does: the block that calls it
+ * is inside `if (config.NODE_ENV === 'production')`, so anything written inline
+ * there is production code that no assertion in this tier can reach.
+ *
+ * The failure is a THROW at module evaluation rather than a route that 404s. A
+ * server that started without its client, or without the isolated render
+ * document, would look healthy and be broken — and the sandbox case is the worse
+ * of the two, because the document that fails to load is the one the whole
+ * preview isolation depends on.
+ *
+ * `missing` is supplied by the caller rather than derived, because the two
+ * documents come out of two separate Vite builds: telling an operator WHICH
+ * artifact is absent is the difference between an actionable message and "run
+ * the build again and hope".
+ *
+ * It takes a THUNK rather than a path, and that is not indirection for its own
+ * sake. `eslint-plugin-security`'s `detect-non-literal-fs-filename` accepts
+ * `path.join(variable, 'literal')` and refuses `path.join(variable, variable)`,
+ * so a helper that joined the name itself would have to be silenced — and an
+ * analyzer suppression is exactly what this project refuses to add. Leaving the
+ * read at the call site, with its filename written out, keeps the check
+ * meaningful and puts only the error mapping here, which is the part worth
+ * sharing anyway.
+ */
+export function requireBuildArtifact(read: () => string, missing: string): string {
+  try {
+    return read();
+  } catch {
+    throw new Error(missing);
+  }
+}

@@ -53,6 +53,42 @@
  *     can never fail. The same applies to the HTML shell: there are two
  *     documents now, each is a shell rather than an asset store, and each is
  *     held to the same per-document budget.
+ *
+ *  f. THE TWO GRAPHS ARE CHECKED FOR CROSS-REFERENCES, IN BOTH DIRECTIONS.
+ *     `index.html` must name nothing from `sandbox-assets/`, and `sandbox.html`
+ *     nothing from `assets/`. Each direction catches a different way the
+ *     separation rots: the first is the application picking up a chunk that is
+ *     served with permissive CORS headers, the second is the sandbox depending
+ *     on one served with none — and the second is silent, because the frame goes
+ *     blank in production while every header assertion elsewhere still passes.
+ *     The check is phrased against the DIRECTORIES rather than against "the
+ *     sandbox graph", because a module shared between the two would land in
+ *     neither and an assertion about graphs would quietly mean nothing.
+ *
+ *  h. THE SANDBOX'S CHUNKS MUST CONTAIN NO NETWORK PRIMITIVE. The isolated
+ *     render document is served under `connect-src 'none'` and its own source
+ *     states in two places that it issues no request of any kind. That claim was
+ *     briefly FALSE of the built artifact and true of the source: Vite injects a
+ *     modulepreload polyfill into every entry by default, and it carries a
+ *     `fetch()` and a document-wide `MutationObserver`. It was inert (no preload
+ *     links, and it early-returns on any modern engine), which is exactly why
+ *     nothing noticed. `build.modulePreload: { polyfill: false }` removed it;
+ *     this check is what stops it, or anything like it, coming back. A string
+ *     scan of minified output is a blunt instrument, and it is the right one
+ *     here: the claim is about the BYTES that reach an opaque origin, and the
+ *     honest subject of a claim about bytes is the bytes.
+ *
+ *  g. THE SERVICE WORKER'S PRECACHE MANIFEST IS A CANARY, NOT A PROOF. It must
+ *     name no `sandbox.html` and nothing under `sandbox-assets/`. Under the
+ *     current layout it CANNOT: the PWA plugin runs only in the application
+ *     build and workbox globs `dist` before the sandbox build has written
+ *     anything, so the `globIgnores` in `vite.config.helpers.ts` match nothing
+ *     and this assertion is one that cannot fail today. It is here for the day
+ *     the two builds are merged, which is the change that would make it fire —
+ *     and the failure it guards is invisible otherwise, because `registerType:
+ *     'prompt'` keeps installed clients on the old service worker, so a
+ *     precached `sandbox.html` naming un-precached hashed URLs would hand every
+ *     returning user a 404 and a dead viewer after a deploy.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -78,7 +114,8 @@ const indexHtml = path.join(distDir, 'index.html');
  * "could not run" rather than a pass over half the output.
  */
 const HTML_SHELLS = ['index.html', 'sandbox.html'];
-const ASSET_DIRS = ['assets', 'sandbox-assets'];
+const SANDBOX_ASSETS_DIR = 'sandbox-assets';
+const ASSET_DIRS = ['assets', SANDBOX_ASSETS_DIR];
 
 const kb = (bytes) => Number((bytes / 1024).toFixed(2));
 
@@ -199,13 +236,25 @@ if (chunks.length === 0) {
   problems.push('the build output contains no chunks at all');
 }
 
-// Budgets are keyed by chunk BASE NAME, and there are now two directories, so a
-// name occurring in both would share one ceiling between two unrelated chunks.
-// Raising it to fit the sandbox's copy would silently raise the application's by
-// the same amount, and `bundle.budgetKb.*`'s `lower` ratchet cannot see that,
-// because it is one key. Refused rather than accommodated: the two graphs are
-// separate by construction, so a collision means a chunk was named after
-// something it should not have been, and renaming it is a one-line fix.
+// AN EXPLICIT BUDGET KEY MUST COVER EXACTLY ONE CHUNK.
+//
+// Budgets are keyed by chunk BASE NAME and there are two directories, so a name
+// occurring in both shares one ceiling between two unrelated chunks. That is the
+// hazard: raising the key to fit the sandbox's copy would silently raise the
+// application's by the same amount, and `bundle.budgetKb.*`'s `lower` ratchet
+// cannot see it, because it is one key. A sandbox chunk that arrived named
+// `main` would inherit the application's 850 KiB ceiling instead of the 128 KiB
+// default, and nothing would say so.
+//
+// The rule is scoped to names with an EXPLICIT entry, and that scoping is a
+// correction rather than a relaxation. Rolldown emits its own runtime shim as a
+// chunk in EVERY graph that code-splits, so `rolldown-runtime` appears in both
+// directories the moment the sandbox gains its per-mode dynamic imports — which
+// is the design, not a naming mistake, and no rename is available for a chunk
+// the bundler names itself. Two unlisted chunks share nothing that can be
+// quietly raised: they both fall under `DEFAULT_CHUNK_BUDGET_KB`, which every
+// unlisted chunk in both directories already shares. The dangerous case — a
+// collision on a name that carries its own ceiling — is still refused outright.
 const dirsByBase = new Map();
 for (const chunk of chunks) {
   const seen = dirsByBase.get(chunk.base) ?? new Set();
@@ -214,9 +263,54 @@ for (const chunk of chunks) {
 }
 for (const [base, dirs] of dirsByBase) {
   if (dirs.size < 2) continue;
+  if (!(base in CHUNK_BUDGETS_KB)) continue;
   problems.push(
-    `chunk name ${base} is emitted into ${[...dirs].sort().join(' and ')}, so both would share one budget key`,
+    `chunk name ${base} carries an explicit budget and is emitted into ${[...dirs].sort().join(' and ')}, so one ceiling would cover two unrelated chunks`,
   );
+}
+
+// (f) Neither document may reach into the other's asset directory.
+for (const shell of HTML_SHELLS) {
+  const forbidden = shell === 'sandbox.html' ? 'assets' : 'sandbox-assets';
+  for (const href of referencedAssets(readFileSync(path.join(distDir, shell), 'utf8'))) {
+    // `/assets/` is a prefix of nothing else, but `/sandbox-assets/` starts with
+    // neither, so each is matched on its own leading segment rather than by
+    // `includes`, which would report `/assets/x.js` for the sandbox's own
+    // directory and never fire for the application's.
+    if (!href.replace(/^\//, '').startsWith(`${forbidden}/`)) continue;
+    problems.push(`${shell} references ${href}, which belongs to the other build's ${forbidden}/`);
+  }
+}
+
+// (h) The isolated document issues no request of any kind, checked against what
+// was actually emitted rather than against what its source says.
+const NETWORK_PRIMITIVES = ['fetch(', 'XMLHttpRequest', 'navigator.sendBeacon', 'EventSource'];
+const sandboxDir = path.join(distDir, SANDBOX_ASSETS_DIR);
+if (existsSync(sandboxDir)) {
+  for (const entry of readdirSync(sandboxDir).sort()) {
+    if (!entry.endsWith('.js')) continue;
+    const source = readFileSync(path.join(sandboxDir, entry), 'utf8');
+    for (const primitive of NETWORK_PRIMITIVES) {
+      if (!source.includes(primitive)) continue;
+      problems.push(
+        `${SANDBOX_ASSETS_DIR}/${entry} contains ${primitive}, but the sandbox is served under a policy that forbids every network request`,
+      );
+    }
+  }
+}
+
+// (g) The precache canary.
+const serviceWorker = path.join(distDir, 'sw.js');
+if (!existsSync(serviceWorker)) {
+  problems.push('the build output has no sw.js, so the precache manifest cannot be checked');
+} else {
+  const manifest = readFileSync(serviceWorker, 'utf8');
+  for (const forbidden of ['sandbox.html', 'sandbox-assets/']) {
+    if (!manifest.includes(forbidden)) continue;
+    problems.push(
+      `the service worker precaches ${forbidden}, which means the two builds have been merged`,
+    );
+  }
 }
 if (kb(initialPayloadBytes) > INITIAL_PAYLOAD_BUDGET_KB) {
   problems.push(

@@ -575,17 +575,47 @@ export const PREVIEW_MODES: Readonly<Record<string, PreviewMode>> = Object.freez
 });
 
 /**
- * One leading-byte signature: the bytes a format starts with, and the offset
- * they start AT.
+ * One leading-byte signature: the bytes a format begins with, with `null` for
+ * "any byte here".
  *
- * The offset is not decoration. Several of the formats here put their signature
- * after a container header — `ftyp` is at byte 4 of an MP4, and WebP is `RIFF`
- * at 0 followed by `WEBP` at 8 — so a leading-bytes-only model would either miss
- * them or match the wrong thing.
+ * ---------------------------------------------------------------------------
+ * WHY A WILDCARD AND NOT AN OFFSET
+ * ---------------------------------------------------------------------------
+ *
+ * This interface used to carry an `offset` instead, so that `ftyp` could be
+ * declared "at byte 4 of an MP4". That shape could not express the format it was
+ * written for. WebP is `RIFF`, then a four-byte length, then `WEBP` — a
+ * CONJUNCTION of two constraints — while a GIF is `GIF87a` OR `GIF89a`, an
+ * ALTERNATION. A flat list of `{offset, bytes}` has exactly one operator, and
+ * whichever one is chosen the other format is handled wrongly: read as
+ * alternatives, every RIFF container matches both `webp` and `wav`, so the
+ * sniffer cannot answer "what does this file actually look like" for either;
+ * read as a conjunction, no GIF is ever recognised, because no file is both
+ * GIF87a and GIF89a.
+ *
+ * A wildcard collapses that to one operator. Every value below is a list of
+ * ALTERNATIVES, each of which is a run of bytes anchored at byte 0, and a
+ * "signature at byte 4" is written as four wildcards followed by the marker.
+ * That is also the notation this feature's design uses for it (`RIFF....WEBP`).
+ *
+ * The change pays for itself immediately on the ISO base-media family. Written
+ * with an offset, `ftyp` at byte 4 is four printable ASCII bytes and nothing
+ * constrains the first four; written from byte 0, the leading byte is the top
+ * octet of the box's big-endian size, which is `0x00` for every conformant file
+ * (an `ftyp` box is tens of bytes, and both special sizes — 0 for
+ * "to end of file" and 1 for "64-bit size follows" — also start `0x00`). Pinning
+ * it costs nothing and is what stops a CSV whose first cells are `col,ftyp`
+ * being reported as a video.
  */
 export interface PreviewSignature {
-  readonly offset: number;
-  readonly bytes: readonly number[];
+  /**
+   * The bytes, from byte 0. `null` matches any byte at that position.
+   *
+   * A signature must not begin or end with a wildcard: a leading one is an
+   * offset written the long way, and a trailing one constrains nothing at all.
+   * `packages/shared/tests/constants.test.ts` asserts both.
+   */
+  readonly bytes: readonly (number | null)[];
 }
 
 // What a file's first bytes must look like for its extension's claim to be
@@ -593,56 +623,105 @@ export interface PreviewSignature {
 // refuses the preview and says what the file actually looks like.
 //
 // Deliberately PARTIAL, and its keys are a strict SUBSET of PREVIEW_MODES's: a
-// signature registered for a type the map does not offer to preview would be
-// dead weight, and a check can only exist for a format that HAS an unambiguous
-// magic number. Text, markdown, HTML, source code, SVG and INI have none, and
-// inventing one for them would refuse legitimate files.
+// check can only exist for a format that HAS an unambiguous magic number. Text,
+// markdown, HTML, source code, SVG and INI have none, and inventing one for them
+// would refuse legitimate files.
 //
-// Every entry is a LIST of alternatives, because a format may have more than one
-// legal opening (GIF87a and GIF89a; an MP3 with an ID3 tag and one without).
+// THE TABLE IS READ IN TWO DIRECTIONS, and the second is why `pdf` has a row
+// despite being a `none` mode that is never previewed. Forwards, it CONFIRMS a
+// claim: a `.png` whose bytes are not a PNG is refused. Backwards, it IDENTIFIES
+// an impostor: bytes that positively match some other format's signature are how
+// a PDF renamed `.md` is refused instead of being handed to the markdown parser.
+// A row here is therefore not dead weight merely because its own mode is never
+// rendered — it is the vocabulary the sniffer answers "what IS this" in.
+//
+// Every value is a list of ALTERNATIVES: a format may have more than one legal
+// opening (GIF87a and GIF89a; an MP3 with an ID3 tag and one without). Within an
+// alternative, every non-wildcard byte must match.
 export const PREVIEW_MAGIC_BYTES: Readonly<Record<string, readonly PreviewSignature[]>> =
   Object.freeze({
-    png: [{ offset: 0, bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] }],
-    jpg: [{ offset: 0, bytes: [0xff, 0xd8, 0xff] }],
-    jpeg: [{ offset: 0, bytes: [0xff, 0xd8, 0xff] }],
+    png: [{ bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] }],
+    jpg: [{ bytes: [0xff, 0xd8, 0xff] }],
+    jpeg: [{ bytes: [0xff, 0xd8, 0xff] }],
     // 'GIF87a' and 'GIF89a'.
     gif: [
-      { offset: 0, bytes: [0x47, 0x49, 0x46, 0x38, 0x37, 0x61] },
-      { offset: 0, bytes: [0x47, 0x49, 0x46, 0x38, 0x39, 0x61] },
+      { bytes: [0x47, 0x49, 0x46, 0x38, 0x37, 0x61] },
+      { bytes: [0x47, 0x49, 0x46, 0x38, 0x39, 0x61] },
     ],
-    // 'RIFF' at 0 then 'WEBP' at 8 — the pair, because 'RIFF' alone is also a
-    // WAV, an AVI and half a dozen other containers.
+    // 'RIFF', a four-byte little-endian length, then 'WEBP'. The length is the
+    // wildcard run, and the pair is ONE alternative: 'RIFF' alone is also a WAV,
+    // an AVI and half a dozen other containers.
     webp: [
-      { offset: 0, bytes: [0x52, 0x49, 0x46, 0x46] },
-      { offset: 8, bytes: [0x57, 0x45, 0x42, 0x50] },
+      {
+        bytes: [0x52, 0x49, 0x46, 0x46, null, null, null, null, 0x57, 0x45, 0x42, 0x50],
+      },
     ],
-    bmp: [{ offset: 0, bytes: [0x42, 0x4d] }],
-    ico: [{ offset: 0, bytes: [0x00, 0x00, 0x01, 0x00] }],
-    // 'ftypavif' at 4.
-    avif: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66] }],
-    // 'ftyp' at 4, common to the whole ISO base-media family.
-    mp4: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70] }],
-    m4v: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70] }],
-    m4a: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70] }],
+    bmp: [{ bytes: [0x42, 0x4d] }],
+    ico: [{ bytes: [0x00, 0x00, 0x01, 0x00] }],
+    // ISO base media: a big-endian box size, then 'ftyp', then the major brand.
+    // The leading 0x00 is the size's top octet — see PreviewSignature above for
+    // why it is safe to pin and what it buys.
+    //
+    // THREE brands, because requiring exactly 'avif' refuses real files: 'avis'
+    // is the major brand of an AVIF image sequence, and 'mif1' is the MIAF
+    // compatibility brand that encoders in the wild emit for still AVIF. Being
+    // wrong in this direction refuses a picture the browser would have shown, so
+    // the list errs towards admitting; a file that is admitted and then will not
+    // decode is reported by the renderer, which is a better answer than a
+    // refusal that names the wrong reason.
+    avif: [
+      { bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66] },
+      { bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x73] },
+      { bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x69, 0x66, 0x31] },
+    ],
+    mp4: [{ bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70] }],
+    m4v: [{ bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70] }],
+    m4a: [{ bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70] }],
     // Matroska/WebM EBML header.
-    webm: [{ offset: 0, bytes: [0x1a, 0x45, 0xdf, 0xa3] }],
+    webm: [{ bytes: [0x1a, 0x45, 0xdf, 0xa3] }],
     // 'OggS'.
-    ogg: [{ offset: 0, bytes: [0x4f, 0x67, 0x67, 0x53] }],
-    oga: [{ offset: 0, bytes: [0x4f, 0x67, 0x67, 0x53] }],
-    ogv: [{ offset: 0, bytes: [0x4f, 0x67, 0x67, 0x53] }],
-    opus: [{ offset: 0, bytes: [0x4f, 0x67, 0x67, 0x53] }],
-    // 'ID3' for a tagged file, or a bare MPEG frame sync.
+    ogg: [{ bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    oga: [{ bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    ogv: [{ bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    opus: [{ bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    // 'ID3' for a tagged file, or a bare MPEG audio frame sync.
+    //
+    // The sync is eleven set bits: 0xFF, then a byte whose top three bits are
+    // set, whose next two encode the MPEG version and whose next two encode the
+    // layer. Only the SIX Layer III combinations are listed — MPEG-1 (0xFA,
+    // 0xFB), MPEG-2 (0xF2, 0xF3) and MPEG-2.5 (0xE2, 0xE3), with the low bit
+    // being the CRC flag. Listing only 0xFB, as this table did, refuses every
+    // untagged MPEG-2 file and every CRC-protected one.
+    //
+    // Do NOT "simplify" this to "0xFF followed by anything >= 0xE0". That admits
+    // 0xFF 0xFE, which is the UTF-16LE byte-order mark Windows PowerShell writes
+    // at the head of every redirected .log and .txt, and a genuine text file
+    // would then be reported as an MP3.
     mp3: [
-      { offset: 0, bytes: [0x49, 0x44, 0x33] },
-      { offset: 0, bytes: [0xff, 0xfb] },
+      { bytes: [0x49, 0x44, 0x33] },
+      { bytes: [0xff, 0xfb] },
+      { bytes: [0xff, 0xfa] },
+      { bytes: [0xff, 0xf3] },
+      { bytes: [0xff, 0xf2] },
+      { bytes: [0xff, 0xe3] },
+      { bytes: [0xff, 0xe2] },
     ],
-    // 'RIFF' then 'WAVE', for the same reason as WebP.
+    // 'RIFF', a four-byte little-endian length, then 'WAVE' — the same shape as
+    // WebP and for the same reason.
     wav: [
-      { offset: 0, bytes: [0x52, 0x49, 0x46, 0x46] },
-      { offset: 8, bytes: [0x57, 0x41, 0x56, 0x45] },
+      {
+        bytes: [0x52, 0x49, 0x46, 0x46, null, null, null, null, 0x57, 0x41, 0x56, 0x45],
+      },
     ],
-    // 'fLaC'.
-    flac: [{ offset: 0, bytes: [0x66, 0x4c, 0x61, 0x43] }],
+    // 'fLaC'. A file that some Windows taggers produce carries an ID3v2 header in
+    // front of this, and is refused: that is a DECISION rather than an oversight,
+    // because such a file is not conformant and browsers do not decode it either,
+    // so admitting it would trade a clear refusal for a silent failure to play.
+    flac: [{ bytes: [0x66, 0x4c, 0x61, 0x43] }],
+    // '%PDF-'. Never previewed — `pdf` is a `none` mode — and present for the
+    // BACKWARDS direction described above: this row is what lets a PDF renamed
+    // `.md` be refused by name.
+    pdf: [{ bytes: [0x25, 0x50, 0x44, 0x46, 0x2d] }],
   });
 
 export const ITEM_TYPES = ['login', 'secret', 'note', 'card', 'identity'] as const;

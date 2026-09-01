@@ -1,5 +1,7 @@
+import type { SandboxRenderRequest } from '@hvault/shared';
 import { frameMessage, parseRenderRequest } from './protocol';
-import { renderText } from './renderers/text';
+import { previewRefusal } from './sniff';
+import './sandbox.css';
 
 /**
  * The document sandbox's entry point — the frame side of the render protocol.
@@ -80,6 +82,52 @@ function renderTarget(doc: Document): HTMLElement {
 }
 
 /**
+ * Load the renderer for one mode and build its DOM.
+ *
+ * Every branch is a DYNAMIC import, and that is a build instruction as much as a
+ * runtime one: Rollup emits a separate chunk at a dynamic-import boundary and
+ * nowhere else, so a static import here would put the markdown pipeline and the
+ * syntax highlighter into the chunk that a plain `.txt` preview downloads. The
+ * per-chunk ceilings in `scripts/ci/lib/bundle-budgets.mjs` are keyed to the
+ * split this switch produces.
+ *
+ * `text` and `code` share a renderer because the difference between them is
+ * which extensions each carries, not how a file is put on screen.
+ *
+ * The `default` branch answers `none` — the modes this project has DECIDED not
+ * to render, PDF among them — and any mode string the host might send that this
+ * document does not know. Both deserve the same answer, which is why the frame
+ * never needs the list of valid modes at runtime.
+ */
+async function renderFor(doc: Document, request: SandboxRenderRequest): Promise<Node | null> {
+  switch (request.mode) {
+    case 'text':
+    case 'code': {
+      const { renderText } = await import('./renderers/text');
+      return renderText(doc, request.bytes, request.ext);
+    }
+    case 'markdown': {
+      const { renderMarkdown } = await import('./renderers/markdown');
+      return renderMarkdown(doc, request.bytes);
+    }
+    case 'html': {
+      const { renderHtml } = await import('./renderers/html');
+      return renderHtml(doc, request.bytes);
+    }
+    case 'image': {
+      const { renderImage } = await import('./renderers/image');
+      return renderImage(doc, request.bytes, request.ext);
+    }
+    case 'media': {
+      const { renderMedia } = await import('./renderers/media');
+      return renderMedia(doc, request.bytes, request.ext);
+    }
+    default:
+      return null;
+  }
+}
+
+/**
  * Render one request, or say why it could not be rendered.
  *
  * Every branch answers on the port. Silence is the one thing this must never
@@ -87,7 +135,7 @@ function renderTarget(doc: Document): HTMLElement {
  * "download to view", so a swallowed error costs the user a working preview and
  * tells nobody why.
  */
-function renderRequest(doc: Document, port: MessagePort, data: unknown): void {
+async function renderRequest(doc: Document, port: MessagePort, data: unknown): Promise<void> {
   const request = parseRenderRequest(data);
   if (!request) {
     port.postMessage(frameMessage.failed('The preview request was not understood.'));
@@ -100,19 +148,22 @@ function renderRequest(doc: Document, port: MessagePort, data: unknown): void {
 
   const target = renderTarget(doc);
   try {
-    switch (request.mode) {
-      case 'text':
-        target.replaceChildren(renderText(doc, request.bytes));
-        port.postMessage(frameMessage.rendered());
-        return;
-      default:
-        // 19.1-19.3 add the rest. An unrecognised mode and an unimplemented one
-        // take the SAME branch on purpose, which is why the frame never needs
-        // the list of valid modes at runtime.
-        target.replaceChildren();
-        port.postMessage(frameMessage.failed('No renderer for this document type.'));
-        return;
+    // BEFORE a renderer is chosen, so a file whose bytes disagree with its name
+    // never reaches a parser that was picked on the strength of that name.
+    const refusal = previewRefusal(request.mode, request.ext, request.bytes);
+    if (refusal !== null) {
+      target.replaceChildren();
+      port.postMessage(frameMessage.failed(refusal));
+      return;
     }
+    const rendered = await renderFor(doc, request);
+    if (rendered === null) {
+      target.replaceChildren();
+      port.postMessage(frameMessage.failed('No renderer for this document type.'));
+      return;
+    }
+    target.replaceChildren(rendered);
+    port.postMessage(frameMessage.rendered());
   } catch {
     // A renderer that threw has left the target in an unknown state, so it is
     // emptied before the host is told. The message carries NO detail from the
@@ -124,13 +175,61 @@ function renderRequest(doc: Document, port: MessagePort, data: unknown): void {
 }
 
 /**
+ * Is this an ABSOLUTE URL — the only kind the host is ever asked to open?
+ *
+ * `new URL(href)` with no base throws for anything relative, which is exactly
+ * the question being asked and is why there is no regular expression here.
+ */
+function isAbsoluteUrl(href: string): boolean {
+  try {
+    new URL(href);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Scroll to a same-document target, resolving the id the SANITIZER wrote.
+ *
+ * `hast-util-sanitize`'s default schema clobbers every `id` and `name` with the
+ * prefix `user-content-`, and it does NOT rewrite the hrefs that point at them.
+ * So a heading anchor written `#intro` has to be looked up as
+ * `user-content-intro`, and a GFM footnote reference is prefixed TWICE — once by
+ * `remark-rehype`, which already emits `user-content-fn-1`, and once by the
+ * sanitizer, which makes the element's id `user-content-user-content-fn-1` while
+ * the link still says `#user-content-fn-1`. Trying the literal id first and the
+ * prefixed one second resolves both without either being a special case.
+ *
+ * A fragment that resolves to nothing scrolls nowhere and is not reported. That
+ * is the honest outcome for a link into a document that has no such anchor.
+ */
+function scrollToFragment(doc: Document, fragment: string): void {
+  const id = decodeURIComponent(fragment);
+  const target = doc.getElementById(id) ?? doc.getElementById(`user-content-${id}`);
+  target?.scrollIntoView();
+}
+
+/**
  * A click on a link inside a rendered document, delegated from the root.
  *
- * The frame opens NOTHING itself — `allow-popups` and `allow-top-navigation` are
- * both withheld, so it could not — and instead reports the href as a capability
- * request. The host validates the scheme at the message boundary and asks the
- * user before opening anything. Reported rather than silently dropped, because a
- * link in a README that does nothing at all reads as a broken viewer.
+ * Three outcomes, and the split matters.
+ *
+ * A SAME-DOCUMENT FRAGMENT — a heading anchor, a table-of-contents entry, a GFM
+ * footnote — is handled entirely in here. Posting it to the host would be worse
+ * than useless: the host validates with `isSafeUrl`, which admits http, https
+ * and mailto only, so every fragment would be silently dropped and heading and
+ * footnote navigation would simply stop working with nothing to explain it.
+ *
+ * An ABSOLUTE URL is reported as a capability request. The frame opens NOTHING
+ * itself — `allow-popups` and `allow-top-navigation` are both withheld, so it
+ * could not — and the host validates the scheme at the message boundary and asks
+ * the user before opening anything. Reported rather than silently dropped,
+ * because a link in a README that does nothing at all reads as a broken viewer.
+ *
+ * Anything else — a relative path — resolves to nothing meaningful for a file
+ * that was stored on its own, and is dropped. `preventDefault` runs first in
+ * every case, so no branch can leave the frame following a link.
  */
 function onRootClick(event: MouseEvent): void {
   const target = event.target;
@@ -140,6 +239,11 @@ function onRootClick(event: MouseEvent): void {
   event.preventDefault();
   const href = anchor.getAttribute('href');
   if (href === null || href === '') return;
+  if (href.startsWith('#')) {
+    scrollToFragment(anchor.ownerDocument, href.slice(1));
+    return;
+  }
+  if (!isAbsoluteUrl(href)) return;
   channel?.postMessage(frameMessage.link(href));
 }
 
@@ -169,7 +273,11 @@ export function startSandbox(win: Window): void {
     win.removeEventListener('message', onWindowMessage);
     channel = port;
     port.addEventListener('message', (message: MessageEvent) => {
-      renderRequest(doc, port, message.data);
+      // `void`, because `renderRequest` is async only so that it can load a
+      // renderer's chunk, and it resolves rather than rejects on every path —
+      // every failure inside it is answered ON THE PORT, which is the contract
+      // the host's ten-second timeout depends on.
+      void renderRequest(doc, port, message.data);
     });
     port.start();
   };

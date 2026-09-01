@@ -3,10 +3,15 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_DEV_PORT,
+  NAVIGATE_FALLBACK_DENYLIST,
+  SANDBOX_ASSETS_DIR,
+  SANDBOX_HTML,
+  WORKBOX_GLOB_IGNORES,
+  WORKBOX_GLOB_PATTERNS,
   manualChunks,
   resolveDevHost,
   resolveDevPort,
-  DEFAULT_DEV_PORT,
 } from '../vite.config.helpers';
 
 // T31 — the Vite dev-server host must be overridable via VITE_HOST so the dev
@@ -209,7 +214,11 @@ describe('the document sandbox build', () => {
     // `dist/assets/`, which is served with no `Access-Control-Allow-Origin`, so
     // the opaque origin's module fetch fails and the frame is silently blank
     // while every header assertion elsewhere still passes.
-    expect(config.build?.assetsDir).toBe('sandbox-assets');
+    // Compared against the SHARED constant rather than the literal, because the
+    // service worker's ignore list is built from the same one. A literal here
+    // would let the build move its output while the exclusion kept naming the
+    // old directory, and a glob that matches nothing is a check that cannot fail.
+    expect(config.build?.assetsDir).toBe(SANDBOX_ASSETS_DIR);
     // MANDATORY. `resolveEmptyOutDir` returns true whenever `outDir` is inside
     // the project root, so the default would make this build delete the
     // application it was just told to sit beside — surfacing as a missing app,
@@ -218,7 +227,7 @@ describe('the document sandbox build', () => {
     // The app build already copied `public/`; Vite re-copies it on every build.
     expect(config.build?.copyPublicDir).toBe(false);
     expect(config.build?.outDir).toBe('dist');
-    expect(String(config.build?.rollupOptions?.input)).toMatch(/sandbox\.html$/);
+    expect(String(config.build?.rollupOptions?.input).endsWith(SANDBOX_HTML)).toBe(true);
     // The assertion that actually closes the failure the comment above
     // describes. `assetsDir` only decides the filenames Vite DERIVES; an
     // explicit `rollupOptions.output.chunkFileNames` (added, plausibly, to
@@ -226,6 +235,37 @@ describe('the document sandbox build', () => {
     // `dist/assets/`, where it is served with no ACAO — a frame that is blank in
     // production only, with every header assertion elsewhere still green.
     expect(config.build?.rollupOptions?.output).toBeUndefined();
+  });
+
+  it('sets its size advisory to the ceiling the gate actually enforces', async () => {
+    // The advisory and the gate must name ONE number. `bundle.budgetKb.lowlight`
+    // is ratcheted `lower`, so tightening it without this would leave the
+    // sandbox build printing no warning until well past the point the gate
+    // fails — an advisory that has silently stopped advising.
+    //
+    // Read from the gate's own module rather than restated, which is the same
+    // thing `gate-surface.test.ts` does with `chunkBaseName`.
+    // Imported without a cast on purpose: `packages/client/tsconfig.test.json`
+    // sets `allowJs`, so the key is resolved against the real table and renaming
+    // `lowlight` there fails THIS file at type-check. A `Record<string, number>`
+    // cast would instead hand back `undefined` and compare it to the advisory.
+    const { CHUNK_BUDGETS_KB } = await import('../../../scripts/ci/lib/bundle-budgets.mjs');
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as { build?: { chunkSizeWarningLimit?: unknown } };
+    expect(config.build?.chunkSizeWarningLimit).toBe(CHUNK_BUDGETS_KB.lowlight);
+  });
+
+  it('emits no modulepreload polyfill, so "this document fetches nothing" is structural', async () => {
+    // Vite injects that polyfill into every entry by default, and it carries a
+    // `fetch()` and a document-wide `MutationObserver`. It is inert here — no
+    // preload links, and it early-returns on any modern engine — but the
+    // sandbox's own source claims in two places that it makes no request of any
+    // kind, and a reader checking that against the built chunk would find a
+    // `fetch(` and be right to doubt it. `scripts/ci/bundle-gate.mjs` asserts the
+    // built output; this asserts the setting that produces it.
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as { build?: { modulePreload?: unknown } };
+    expect(config.build?.modulePreload).toEqual({ polyfill: false });
   });
 
   it('carries no plugin from the application build', async () => {
@@ -298,45 +338,70 @@ describe('the dev server answers the sandbox frame', () => {
     expect(list).not.toContain('*');
   });
 
-  it('keeps the service worker from answering the sandbox frame with the app shell', async () => {
+  it('keeps the service worker from answering the sandbox frame with the app shell', () => {
     // `vite-plugin-pwa` defaults `navigateFallback` to `index.html` and this
     // config sets none of its own, so a NavigationRoute covers every
     // navigation — and an iframe load IS a navigation. Without the denylist the
     // frame boots the application instead of the sandbox, never handshakes, and
     // the viewer degrades to "download to view" with no failing request
     // anywhere to explain it.
-    const source = await readFile(
-      fileURLToPath(new URL('../vite.config.ts', import.meta.url)),
-      'utf8',
-    );
-    const match = /navigateFallbackDenylist:\s*\[([^\]]*)\]/.exec(source);
-    expect(match, 'vite.config.ts declares no navigateFallbackDenylist').not.toBeNull();
-    // INSIDE the `workbox` block, which is where vite-plugin-pwa reads it.
-    // Hoisted one level up to the plugin's own options — a very plausible
-    // edit — the plugin ignores it entirely, and a text scan would still find
-    // it, reconstruct the regex, and pass while production regressed.
-    const workboxStart = source.indexOf('workbox: {');
-    const workboxEnd = source.indexOf('\n      },', workboxStart);
-    expect(workboxStart).toBeGreaterThan(-1);
-    expect(match!.index).toBeGreaterThan(workboxStart);
-    expect(match!.index).toBeLessThan(workboxEnd);
-    const patterns = match![1]!
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter(Boolean)
-      .map((entry) => new RegExp(entry.replace(/^\/|\/$/g, '')));
-    // Read back as real RegExps and EXERCISED, so a pattern that is present but
-    // does not match (a missing escape, a stray anchor) fails here rather than
-    // in production.
-    expect(patterns.some((pattern) => pattern.test('/sandbox.html'))).toBe(true);
+    //
+    // The patterns are EXERCISED rather than compared to a literal: a pattern
+    // that is present but does not match (a missing escape, a stray anchor) is
+    // the whole failure mode, and it would survive any equality assertion.
+    const matches = (url: string): boolean =>
+      NAVIGATE_FALLBACK_DENYLIST.some((pattern) => pattern.test(url));
+
+    expect(matches('/sandbox.html')).toBe(true);
     // Workbox tests a denylist entry against `pathname + search`, so a bare `$`
     // anchor stops matching the moment the frame's src gains a query string —
     // and the regression is invisible: installed clients only, after a deploy
     // only, as a viewer that silently degrades to "download to view".
-    expect(patterns.some((pattern) => pattern.test('/sandbox.html?theme=dark'))).toBe(true);
-    expect(patterns.some((pattern) => pattern.test('/vault'))).toBe(false);
-    expect(patterns.some((pattern) => pattern.test('/documents/abc'))).toBe(false);
-    // Not so loose that it swallows a real route that merely starts the same way.
-    expect(patterns.some((pattern) => pattern.test('/sandbox.html.bak'))).toBe(false);
+    expect(matches('/sandbox.html?theme=dark')).toBe(true);
+    // Not so loose that it swallows the application's own routes, which would
+    // take the whole offline experience out with it.
+    expect(matches('/vault')).toBe(false);
+    expect(matches('/documents/abc')).toBe(false);
+    expect(matches('/sandbox.html.bak')).toBe(false);
+  });
+
+  it('excludes the sandbox from the precache with patterns that would match it', () => {
+    // This exclusion CANNOT FIRE today and the constant says so: the PWA plugin
+    // runs only in the application build, and workbox globs `dist` at the end of
+    // that build — before the sandbox build has written anything — so there is
+    // nothing there for these patterns to match. What actually keeps the sandbox
+    // out of the precache is the two-build layout, and `scripts/ci/bundle-gate.mjs`
+    // asserts the generated manifest as a canary against the two being merged.
+    //
+    // What IS asserted here is that the list is not decorative: if the builds are
+    // ever merged, these patterns have to match the paths they name. A typo'd
+    // ignore would otherwise sit in the config looking like protection.
+    const ignores = WORKBOX_GLOB_IGNORES;
+    expect(ignores).toContain(SANDBOX_HTML);
+    expect(ignores).toContain(`${SANDBOX_ASSETS_DIR}/**`);
+    // And the precache patterns still cover the application's own output, which
+    // is what an over-eager ignore would take with it.
+    expect(WORKBOX_GLOB_PATTERNS).toEqual(['**/*.{js,css,html,ico,png,svg,woff2}']);
+  });
+
+  it('wires the shared constants into the real config rather than restating them', async () => {
+    // Identity, not equality: the whole reason these constants were extracted is
+    // that `vite.config.ts` pulls React, Tailwind and the PWA plugin, so its
+    // options cannot be read back out of the plugin — and asserting its SOURCE
+    // TEXT proves nothing about what Vite was handed. The sandbox config CAN be
+    // read back, so the wiring is pinned where it is observable, and the
+    // behaviour of the constants is pinned above where it is pure.
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as { build?: { assetsDir?: unknown } };
+    expect(config.build?.assetsDir).toBe(SANDBOX_ASSETS_DIR);
+    // A second literal `'sandbox-assets'` in `vite.config.ts` is exactly the
+    // drift this replaces; the app config imports the same binding.
+    const source = await readFile(
+      fileURLToPath(new URL('../vite.config.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(source).toContain('WORKBOX_GLOB_IGNORES');
+    expect(source).toContain('NAVIGATE_FALLBACK_DENYLIST');
+    expect(source).not.toContain("'sandbox-assets'");
   });
 });

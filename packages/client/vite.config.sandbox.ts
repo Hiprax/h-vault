@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
+import { SANDBOX_ASSETS_DIR, SANDBOX_HTML } from './vite.config.helpers';
 
 /**
  * The document sandbox's build — a SECOND build, not a second input.
@@ -65,6 +66,21 @@ export default defineConfig({
     // `public/` is copied by the app build. Vite re-copies it on every build, so
     // leaving this on would rewrite that copy for nothing.
     copyPublicDir: false,
+    // NO MODULEPRELOAD POLYFILL, and this is a security invariant rather than a
+    // size one — though it is both.
+    //
+    // Vite injects that polyfill into every entry by default, and it contains a
+    // `fetch()` call and a `MutationObserver` over the whole document. It early-
+    // returns on any browser that supports `modulepreload`, and `sandbox.html`
+    // declares no preload links, so it is dead in practice — but this document's
+    // own code says in two places that it fetches NOTHING, and a reader checking
+    // that claim against the built chunk would find a `fetch(` and be right to
+    // doubt it. Turning it off makes the claim structural instead of
+    // conditional, and reclaims ~700 bytes of a deliberately tight budget.
+    //
+    // Nothing is lost: the application build keeps its polyfill, and this
+    // document has one entry and no preload list for a polyfill to act on.
+    modulePreload: { polyfill: false },
     // ONE setting, and it is the whole of the routing. Vite derives
     // `entryFileNames`, `chunkFileNames` AND `assetFileNames` from `assetsDir`.
     // Setting only `assetFileNames` — the plausible mistake, because the
@@ -77,13 +93,28 @@ export default defineConfig({
     // module needs nor the CORP a no-cors stylesheet link needs. A viewer that
     // ships unstyled in production only is that symptom, and every header
     // assertion still passes, because they all look at the entry script.
-    assetsDir: 'sandbox-assets',
+    assetsDir: SANDBOX_ASSETS_DIR,
     sourcemap: process.env.NODE_ENV !== 'production',
+    // The highlight.js common language set, reached through `lowlight`, is
+    // measured at ~887 KiB and is the largest thing this document can load. It
+    // is deliberately lazy twice over — `renderers/text.ts` imports it only for
+    // an extension that maps to a real grammar, and the markdown pipeline only
+    // for a document that actually contains a fenced block with a declared
+    // language — so it never enters the entry chunk.
+    //
+    // The advisory is raised to the number the GATE already enforces
+    // (`bundle.budgetKb.lowlight` in `scripts/ci/lib/bundle-budgets.mjs`, which
+    // is ratcheted downward and can never be quietly loosened) rather than to
+    // whatever silences it. Vite's default 500 kB would print a warning on every
+    // build for a chunk whose size is a measured, bounded decision, and a
+    // warning nobody can act on is how a real one gets ignored. The application
+    // config does the same thing, for zxcvbn, for the same reason.
+    chunkSizeWarningLimit: 960,
     rollupOptions: {
       // Absolute, resolved from this file: the build is invoked from the
       // package directory by `scripts/build.mjs`, but a relative input would
       // silently resolve against `process.cwd()` if it ever were not.
-      input: fileURLToPath(new URL('sandbox.html', import.meta.url)),
+      input: fileURLToPath(new URL(SANDBOX_HTML, import.meta.url)),
     },
   },
 });

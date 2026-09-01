@@ -555,42 +555,20 @@ describe('the frame’s own validator', () => {
 });
 
 describe('the plain-text renderer', () => {
-  it('puts the file in a single text node and never in markup', () => {
-    const node = renderText(document, bytesOf('<script>alert(1)</script>\nplain'));
+  // The renderer itself is covered in depth by `sandbox-renderers.test.ts`
+  // (encoding, line numbers, truncation, highlighting, the tabular and JSON
+  // views). What is kept HERE is the one property this suite exists for: a
+  // document's own bytes reach the page as a TEXT NODE and never as markup.
+  it('puts the file in a single text node and never in markup', async () => {
+    const rendered = await renderText(document, bytesOf('<script>alert(1)</script>\nplain'), 'txt');
+    const code = rendered.querySelector('.hv-lines code');
 
-    expect(node.tagName).toBe('PRE');
-    // ONE text node, and the angle brackets are TEXT. The negative is the
-    // assertion: had this built a markup string, the file would have contributed
-    // an element to the tree.
-    expect(node.childNodes).toHaveLength(1);
-    expect(node.childNodes[0]?.nodeType).toBe(Node.TEXT_NODE);
-    expect(node.textContent).toBe('<script>alert(1)</script>\nplain');
-    expect(node.querySelector('script')).toBeNull();
-    expect(node.children).toHaveLength(0);
-  });
-
-  it('shows a nearly-UTF-8 file rather than refusing it', () => {
-    // `fatal: false` on purpose: a truncated multi-byte sequence should show the
-    // file with a replacement character where the damage is. Someone opening it
-    // wants to know what is in it. A file that is not text AT ALL is refused
-    // earlier, by the magic-byte check against its extension's claim.
-    const damaged = new Uint8Array([0x68, 0x69, 0xe2, 0x82]).buffer;
-    const node = renderText(document, damaged);
-    expect(node.textContent).toBe('hi�');
-  });
-
-  it('renders an empty file as an empty preview, not as a failure', () => {
-    const node = renderText(document, new ArrayBuffer(0));
-    expect(node.textContent).toBe('');
-    expect(node.tagName).toBe('PRE');
-  });
-
-  it('preserves whitespace in the element rather than in a stylesheet', () => {
-    // The whitespace semantics of a text file are part of its content, so they
-    // must not be something a missing stylesheet can lose.
-    const node = renderText(document, bytesOf('  indented\n\ttabbed'));
-    expect(node.tagName).toBe('PRE');
-    expect(node.textContent).toBe('  indented\n\ttabbed');
+    expect(code?.childNodes).toHaveLength(1);
+    expect(code?.childNodes[0]?.nodeType).toBe(Node.TEXT_NODE);
+    expect(code?.textContent).toBe('<script>alert(1)</script>\nplain');
+    // The negative is the assertion: had this built a markup string, the file
+    // would have contributed an element to the tree.
+    expect(rendered.querySelector('script')).toBeNull();
   });
 });
 
@@ -608,6 +586,28 @@ describe('the plain-text renderer', () => {
  * The module is re-imported per test so its one module-level piece of state (the
  * port) starts null, exactly as it does in a fresh document.
  */
+/**
+ * `URL.createObjectURL`, which jsdom does not implement.
+ *
+ * Installed as a PROPERTY on the real `URL` rather than through
+ * `vi.stubGlobal('URL', ...)`, and that is not a style preference: replacing the
+ * global with an object literal takes the CONSTRUCTOR with it, and the sandbox's
+ * own link handling calls `new URL(href)` to tell an absolute href from a
+ * relative one — which then fails with "URL is not a constructor", from a line
+ * nowhere near the stub.
+ */
+interface BlobUrlMinting {
+  createObjectURL?: (blob: Blob) => string;
+  revokeObjectURL?: (url: string) => void;
+}
+
+/** A buffer of exact bytes, for a fixture that has to satisfy a signature. */
+function rawBytesOf(values: readonly number[]): ArrayBuffer {
+  const buffer = new ArrayBuffer(values.length);
+  new Uint8Array(buffer).set(values);
+  return buffer;
+}
+
 describe('the frame’s program', () => {
   interface BootedFrame {
     host: MessagePort;
@@ -660,21 +660,30 @@ describe('the frame’s program', () => {
 
     await expect(reply).resolves.toEqual({ kind: 'rendered' });
     const root = document.getElementById('root')!;
-    expect(root.querySelector('pre')?.textContent).toBe('hello world');
+    // Scoped to the source column: 19.1 gave the text renderer a line-number
+    // gutter, which is a second `<pre>` and would otherwise be the one an
+    // unscoped `querySelector` found.
+    expect(root.querySelector('.hv-lines')?.textContent).toBe('hello world');
     // The resolved theme reaches the document element, never the user's
     // 'system' preference, which the frame could not resolve compatibly.
     expect(document.documentElement.dataset['theme']).toBe('light');
   });
 
   it('reports a mode it has no renderer for, and renders nothing', async () => {
+    // `none` is the mode this project has DECIDED not to render — PDF is its
+    // member — and it takes the same branch as a mode string the frame simply
+    // does not know, which is why the frame never needs the list of valid modes
+    // at runtime. (This case used to be spelled with `markdown`; Phase 19 gave
+    // markdown a renderer, so that spelling would now assert the opposite of
+    // what it says.)
     const { host } = await bootFrame();
     const reply = nextReply(host);
     host.postMessage({
       kind: 'render',
-      mode: 'markdown',
-      ext: 'md',
+      mode: 'none',
+      ext: 'pdf',
       theme: 'dark',
-      bytes: bytesOf('# heading'),
+      bytes: bytesOf('%PDF-1.7 not really'),
     });
 
     await expect(reply).resolves.toEqual({
@@ -682,8 +691,188 @@ describe('the frame’s program', () => {
       reason: 'No renderer for this document type.',
     });
     // Emptied, not left holding the previous document — and, in particular, the
-    // markdown was NOT rendered as text as a "helpful" fallback.
+    // PDF was NOT rendered as text as a "helpful" fallback.
     expect(document.getElementById('root')?.textContent).toBe('');
+  });
+
+  it('loads a renderer per mode, and each one gets the whole request', async () => {
+    // The mode switch is a DISPATCH TABLE, and it is the one place a renderer
+    // can be wired to the wrong mode — an image request answered by the markdown
+    // pipeline would produce a page of mojibake rather than an error. Each branch
+    // is driven through the real program, with the request its renderer needs,
+    // so a swapped `case` fails here rather than in a screenshot.
+    //
+    // Each is also a DYNAMIC import, which is what makes it its own chunk; a
+    // static one would put the markdown pipeline and the highlighter into the
+    // chunk a plain `.txt` preview downloads.
+    const objectUrls: string[] = [];
+    const urlGlobal = URL as unknown as BlobUrlMinting;
+    urlGlobal.createObjectURL = () => {
+      objectUrls.push('blob:test');
+      return 'blob:test';
+    };
+    urlGlobal.revokeObjectURL = () => undefined;
+    try {
+      const { host } = await bootFrame();
+
+      const markdown = nextReply(host);
+      host.postMessage({
+        kind: 'render',
+        mode: 'markdown',
+        ext: 'md',
+        theme: 'dark',
+        bytes: bytesOf('# Heading\n'),
+      });
+      await expect(markdown).resolves.toEqual({ kind: 'rendered' });
+      expect(document.querySelector('#root h1')?.textContent).toBe('Heading');
+
+      const html = nextReply(host);
+      host.postMessage({
+        kind: 'render',
+        mode: 'html',
+        ext: 'html',
+        theme: 'dark',
+        bytes: bytesOf('<h2>Stored</h2>'),
+      });
+      await expect(html).resolves.toEqual({ kind: 'rendered' });
+      expect(document.querySelector('#root h2')?.textContent).toBe('Stored');
+
+      const image = nextReply(host);
+      host.postMessage({
+        kind: 'render',
+        mode: 'image',
+        ext: 'png',
+        theme: 'dark',
+        // RAW bytes, not `bytesOf`: a PNG signature written as a string would
+        // be UTF-8 encoded on the way in, turning 0x89 into 0xC2 0x89 — and the
+        // sniffer would correctly refuse the result as not a PNG.
+        bytes: rawBytesOf([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      });
+      await expect(image).resolves.toEqual({ kind: 'rendered' });
+      expect(document.querySelector('#root img')).not.toBeNull();
+
+      const media = nextReply(host);
+      host.postMessage({
+        kind: 'render',
+        mode: 'media',
+        ext: 'webm',
+        theme: 'dark',
+        bytes: rawBytesOf([0x1a, 0x45, 0xdf, 0xa3, 0x00, 0x00, 0x00, 0x00]),
+      });
+      await expect(media).resolves.toEqual({ kind: 'rendered' });
+      expect(document.querySelector('#root video')).not.toBeNull();
+      // Each of the two media renderers minted its own blob URL, on THIS side of
+      // the channel: one made by the application would not resolve in an opaque
+      // origin.
+      expect(objectUrls).toHaveLength(2);
+    } finally {
+      delete urlGlobal.createObjectURL;
+      delete urlGlobal.revokeObjectURL;
+    }
+  });
+
+  it('refuses a document whose bytes disagree with its extension, before any renderer', async () => {
+    // The sniffer runs ahead of the mode switch, so a file that lies about what
+    // it is never reaches a parser chosen on the strength of that lie.
+    const { host } = await bootFrame();
+    const reply = nextReply(host);
+    host.postMessage({
+      kind: 'render',
+      mode: 'markdown',
+      ext: 'md',
+      theme: 'dark',
+      bytes: bytesOf('%PDF-1.7 and then some'),
+    });
+
+    const answer = (await reply) as { kind: string; reason: string };
+    expect(answer.kind).toBe('failed');
+    expect(answer.reason).toContain('PDF');
+    expect(document.getElementById('root')?.textContent).toBe('');
+  });
+
+  it('scrolls to a same-document fragment instead of posting it to the host', async () => {
+    // A heading anchor, a table-of-contents entry and a GFM footnote are all
+    // fragments, and the host validates with `isSafeUrl`, which admits http,
+    // https and mailto only — so posting one would drop it silently and stop
+    // footnote and heading navigation working with nothing to explain it.
+    //
+    // The id is resolved against what the SANITIZER wrote: its default schema
+    // clobbers every id with the prefix `user-content-` and does not rewrite the
+    // hrefs pointing at them, so a naive lookup finds nothing.
+    const { host } = await bootFrame();
+    const rendered = nextReply(host);
+    host.postMessage({
+      kind: 'render',
+      mode: 'text',
+      ext: 'txt',
+      theme: 'dark',
+      bytes: bytesOf('x'),
+    });
+    await rendered;
+
+    // jsdom implements no scrolling at all, so the method is installed for the
+    // duration of this test and its CALL is the observable outcome.
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+
+    const root = document.getElementById('root')!;
+    const target = document.createElement('h2');
+    target.id = 'user-content-intro';
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#intro');
+    anchor.textContent = 'to the intro';
+    root.append(target, anchor);
+
+    let posted = false;
+    host.addEventListener('message', () => {
+      posted = true;
+    });
+
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    anchor.dispatchEvent(click);
+    await Promise.resolve();
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(posted).toBe(false);
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it('posts nothing for a relative link, which resolves to nothing for a stored file', async () => {
+    const { host } = await bootFrame();
+    const rendered = nextReply(host);
+    host.postMessage({
+      kind: 'render',
+      mode: 'text',
+      ext: 'txt',
+      theme: 'dark',
+      bytes: bytesOf('x'),
+    });
+    await rendered;
+
+    const root = document.getElementById('root')!;
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '../sibling.md');
+    anchor.textContent = 'relative';
+    root.append(anchor);
+
+    let posted = false;
+    host.addEventListener('message', () => {
+      posted = true;
+    });
+
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    anchor.dispatchEvent(click);
+    await Promise.resolve();
+
+    // Prevented in every branch, so no branch can leave the frame following a
+    // link, and nothing was handed to the host for a URL it could not open.
+    expect(click.defaultPrevented).toBe(true);
+    expect(posted).toBe(false);
   });
 
   it('answers a malformed request rather than staying silent', async () => {

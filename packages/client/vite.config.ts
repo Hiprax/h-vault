@@ -2,7 +2,14 @@ import { defaultAllowedOrigins, defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import { manualChunks, resolveDevHost, resolveDevPort } from './vite.config.helpers';
+import {
+  NAVIGATE_FALLBACK_DENYLIST,
+  WORKBOX_GLOB_IGNORES,
+  WORKBOX_GLOB_PATTERNS,
+  manualChunks,
+  resolveDevHost,
+  resolveDevPort,
+} from './vite.config.helpers';
 
 export default defineConfig({
   plugins: [
@@ -34,34 +41,19 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        globPatterns: WORKBOX_GLOB_PATTERNS,
         cleanupOutdatedCaches: true,
-        // MANDATORY, not conditional. `vite-plugin-pwa` ships
-        // `defaultWorkbox = { …, navigateFallback: 'index.html' }` and this
-        // config sets none of its own, so a NavigationRoute covers every
-        // navigation — and an IFRAME LOAD IS A NAVIGATION. Without this the
-        // service worker answers `/sandbox.html` with the application shell:
-        // the frame boots the app instead of the sandbox, never completes a
-        // handshake, and the viewer degrades to "download to view" with no
-        // failing request anywhere to explain it.
-        //
-        // (The precache side is settled by the build layout rather than here.
-        // The PWA plugin runs only in the APP build, and workbox globs the
-        // output directory at the END of that build — before the sandbox build
-        // has written anything — so `sandbox.html` and `sandbox-assets/` cannot
-        // enter the manifest at all. That matters because `registerType:
-        // 'prompt'` keeps an installed client on the old service worker until
-        // the user accepts: a precached `sandbox.html` naming hashed asset URLs
-        // that were NOT precached would, after a deploy, give every returning
-        // user a 404 and a dead viewer. Under this layout that cannot happen;
-        // if the two builds are ever merged, it can.)
-        // Anchored with `(?:\?|$)` rather than a bare `$`, because workbox's
-        // NavigationRoute tests a denylist entry against `pathname + search`.
-        // A bare `$` stops matching the moment the frame's `src` gains a query
-        // string — a theme hint, a cache-buster — and the failure is invisible:
-        // only an INSTALLED client, only after a deploy, and only as a viewer
-        // that quietly degrades to "download to view".
-        navigateFallbackDenylist: [/^\/sandbox\.html(?:\?|$)/],
+        // Defence in depth that cannot currently fire, and the constant says so
+        // in full: the PWA plugin runs only in the APP build and workbox globs
+        // `dist` before the sandbox build has written anything, so there is
+        // nothing here for these patterns to match. What actually keeps the
+        // sandbox out of the precache is the two-build layout.
+        globIgnores: WORKBOX_GLOB_IGNORES,
+        // MANDATORY, not conditional: an iframe load IS a navigation, and
+        // without this the service worker answers `/sandbox.html` with the
+        // application shell. See the constant for the whole reason, including
+        // why the anchor is `(?:\?|$)` and not a bare `$`.
+        navigateFallbackDenylist: NAVIGATE_FALLBACK_DENYLIST,
         runtimeCaching: [
           {
             urlPattern: /^https?:\/\/.*\/api\//,

@@ -18,12 +18,15 @@ import {
   MAX_DOCUMENT_NAME_LENGTH,
   MAX_DOCUMENT_NOTE_LENGTH,
   MAX_DOCUMENT_TAGS,
+  MAX_PREVIEW_BYTES,
   MAX_TAG_LENGTH,
+  documentExtension,
   documentMetaJsonByteLength,
   formatBytes,
+  previewModeForName,
 } from '@hvault/shared';
-import type { DocumentMeta } from '@hvault/shared';
-import { cn, getApiErrorMessage } from '../../lib/utils';
+import type { DocumentMeta, PreviewMode } from '@hvault/shared';
+import { cn, getApiErrorMessage, isSafeUrl } from '../../lib/utils';
 import { useToast } from '../ui/Toast';
 import {
   Dialog,
@@ -40,10 +43,13 @@ import {
   DropdownMenuTrigger,
 } from '../ui/DropdownMenu';
 import { useVaultStore } from '../../stores/vaultStore';
+import { resolveEffectiveTheme, useUIStore } from '../../stores/uiStore';
+import { DocumentSandbox } from './DocumentSandbox';
 import { useDocumentsStore, type DecryptedDocument } from '../../stores/documentsStore';
 import {
   DocumentDownloadCancelledError,
   DocumentIntegrityError,
+  readDocumentPlaintext,
   saveDocument,
 } from '../../services/documents/download';
 
@@ -72,15 +78,36 @@ const UNDECODABLE_EDIT_HINT =
   'The name, tags and note of this document are sealed inside a blob that will not open, so there is nothing to edit and no key to re-seal it with.';
 
 /**
- * Why this application does not show a document's contents.
+ * Why a particular document is not shown, in the reader's own terms.
  *
- * Written as a positive statement of the guarantee rather than as an apology for
- * a missing feature, because it IS the guarantee: a stored document is arbitrary
- * input, and the origin that would parse it is the one holding the unlocked
- * vault key.
+ * Every branch of the decision below produces one of these, and the panel always
+ * shows one when it declines. "Download to view" with no reason reads as a
+ * missing feature; the same panel with the reason reads as a decision, which is
+ * what each of these is.
+ *
+ * Note the shape of the PDF sentence in particular. It is the only type this
+ * project has decided AGAINST rendering rather than merely not recognising, and
+ * the interface should say which of those it is.
  */
-const DOWNLOAD_TO_VIEW_REASON =
-  'H-Vault does not open a document inside the app. A stored file is arbitrary input, and the page that would render it is the page holding your unlocked vault key, so the file is decrypted here and handed straight to your computer instead. Download it and open it with the viewer you already trust.';
+const PREVIEW_DECLINED = {
+  pdf: 'PDFs are download-only here, deliberately. A PDF viewer is a large third-party parser, and the best-known one has a documented history of running a document\u2019s own JavaScript in the page that hosts it \u2014 which here would be the page holding your unlocked vault key. Download it and open it in the viewer your computer already has.',
+  unsupported: (extension: string) =>
+    extension === ''
+      ? 'This file has no extension, so there is nothing to work out how to display it from. Download it and open it with the application you would normally use.'
+      : `There is no viewer here for a .${extension} file. Download it and open it with the application you would normally use.`,
+  tooLarge: (bytes: number) =>
+    `This document is ${formatBytes(bytes)}, which is larger than the ${formatBytes(MAX_PREVIEW_BYTES)} a preview holds in memory. Download it instead \u2014 the whole file is still decrypted and checked on the way out.`,
+} as const;
+
+/**
+ * What the preview panel says about itself while it is doing the expensive part.
+ *
+ * The document is decrypted segment by segment, every segment's authentication
+ * tag is checked, and the whole file's SHA-256 is compared with the one sealed
+ * in its metadata. On a large file that is seconds of work, and a panel that
+ * said nothing would read as a preview that had failed.
+ */
+const PREVIEW_LOADING_LABEL = 'Decrypting and verifying\u2026';
 
 /** What both the folder trigger and the first menu item call "outside every folder". */
 const NO_FOLDER_LABEL = 'No folder';
@@ -170,53 +197,123 @@ function UndecodableDocumentNotice() {
   );
 }
 
-interface DownloadToViewProps {
+/**
+ * Why a preview is not being offered, or `null` when one is.
+ *
+ * Decided from the row's AUTHENTICATED METADATA ALONE, and decided BEFORE a
+ * single segment is requested. That ordering is the whole point: reversed, a
+ * multi-gigabyte document would be fetched, decrypted and verified in full and
+ * only then turned away at the size check.
+ */
+function previewRefusalFor(meta: DocumentMeta, mode: PreviewMode): string | null {
+  if (mode === 'none') {
+    const extension = documentExtension(meta.name);
+    return extension === 'pdf' ? PREVIEW_DECLINED.pdf : PREVIEW_DECLINED.unsupported(extension);
+  }
+  if (meta.plaintextBytes > MAX_PREVIEW_BYTES) {
+    return PREVIEW_DECLINED.tooLarge(meta.plaintextBytes);
+  }
+  return null;
+}
+
+interface DocumentContentProps {
   meta: DocumentMeta;
   downloading: boolean;
   onDownload: () => void;
+  /** The verified plaintext, or `null` while it is being read or not wanted. */
+  bytes: ArrayBuffer | null;
+  mode: PreviewMode;
+  loading: boolean;
+  /** Why no frame is being drawn, or `null` when one is. */
+  refusal: string | null;
+  onLink: (href: string) => void;
+  onUnavailable: (reason: string) => void;
 }
 
 /**
- * The content area for a document that opens: what it is, and the one way to see
- * it.
+ * The content area: the document's own chrome, and either a preview frame or the
+ * reason there is not one.
  *
- * This is a permanent state rather than a placeholder. Every byte of a stored
- * document is decrypted and verified here, and then it leaves — nothing in this
- * application parses or renders it, because a parser that runs in this page runs
- * beside the vault key. When a document CAN be shown, it will be shown inside an
- * isolated document with an opaque origin, and this panel remains the answer for
- * everything that one cannot render.
+ * THE TITLE AND THE DOWNLOAD BUTTON ARE DRAWN HERE, OUTSIDE THE FRAME, and that
+ * is a security property rather than a layout choice. Everything inside the
+ * rectangle is rendered by whatever the document turned out to be; a renderer
+ * that could draw the document's name, or a button labelled "Download", could
+ * draw a different name and a different destination. So the two things a reader
+ * would act on live in the application's own DOM, where no renderer can reach
+ * them.
+ *
+ * A view toggle for a CSV or a JSON document IS inside the frame, and that is
+ * not an exception to the rule: it switches between two renderings of the same
+ * bytes and has nothing to forge.
  */
-function DownloadToView({ meta, downloading, onDownload }: DownloadToViewProps) {
+function DocumentContent({
+  meta,
+  downloading,
+  onDownload,
+  bytes,
+  mode,
+  loading,
+  refusal,
+  onLink,
+  onUnavailable,
+}: DocumentContentProps) {
+  const theme = resolveEffectiveTheme(useUIStore((state) => state.theme));
+
   return (
     <section
       aria-labelledby="document-open-heading"
-      data-testid="document-download-to-view"
-      className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-6 text-center"
+      data-testid="document-content"
+      className="overflow-hidden rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]"
     >
-      <FileText className="mx-auto h-8 w-8 text-[hsl(var(--muted-foreground))]" />
-      <h2
-        id="document-open-heading"
-        className="mt-3 text-base font-semibold text-[hsl(var(--card-foreground))]"
-      >
-        Download to view
-      </h2>
-      <p className="mx-auto mt-1 max-w-md text-sm text-[hsl(var(--muted-foreground))]">
-        {DOWNLOAD_TO_VIEW_REASON}
-      </p>
-      <button
-        type="button"
-        onClick={onDownload}
-        disabled={downloading}
-        className="mt-4 inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] transition-opacity hover:opacity-90 disabled:opacity-50"
-      >
-        {downloading ? (
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[hsl(var(--border))] p-3">
+        <h2
+          id="document-open-heading"
+          className="min-w-0 flex-1 truncate text-sm font-semibold text-[hsl(var(--card-foreground))]"
+        >
+          {meta.name}
+        </h2>
+        <button
+          type="button"
+          onClick={onDownload}
+          disabled={downloading}
+          className="inline-flex shrink-0 items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-1.5 text-sm font-medium text-[hsl(var(--primary-foreground))] transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {downloading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Download className="h-4 w-4" />
+          )}
+          {downloading ? PREVIEW_LOADING_LABEL : `Download ${formatBytes(meta.plaintextBytes)}`}
+        </button>
+      </div>
+
+      {refusal !== null ? (
+        <div data-testid="document-download-to-view" className="p-6 text-center">
+          <FileText className="mx-auto h-8 w-8 text-[hsl(var(--muted-foreground))]" />
+          <p className="mx-auto mt-3 max-w-md text-sm text-[hsl(var(--muted-foreground))]">
+            {refusal}
+          </p>
+        </div>
+      ) : loading || bytes === null ? (
+        <div
+          className="flex items-center justify-center gap-2 p-10 text-sm text-[hsl(var(--muted-foreground))]"
+          role="status"
+        >
           <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Download className="h-4 w-4" />
-        )}
-        {downloading ? 'Decrypting and verifying…' : `Download ${formatBytes(meta.plaintextBytes)}`}
-      </button>
+          {PREVIEW_LOADING_LABEL}
+        </div>
+      ) : (
+        <DocumentSandbox
+          bytes={bytes}
+          mode={mode}
+          ext={documentExtension(meta.name)}
+          theme={theme}
+          onLink={onLink}
+          onUnavailable={onUnavailable}
+          title={`Preview of ${meta.name}`}
+          className="h-[70vh] w-full border-0 bg-[hsl(var(--background))]"
+        />
+      )}
     </section>
   );
 }
@@ -232,6 +329,26 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
       <div className="text-sm text-[hsl(var(--foreground))]">{children}</div>
     </div>
   );
+}
+
+/**
+ * The origin of a destination, for the confirmation dialog's prominent line.
+ *
+ * `mailto:` has no origin — `new URL('mailto:a@b').origin` is the string
+ * `"null"` — so it is answered with the address itself, which is the part a
+ * reader would check. Anything that will not parse falls back to the raw value
+ * rather than to an empty line: `isSafeUrl` has already admitted it, and showing
+ * nothing where the destination should be is the one outcome a confirmation
+ * dialog must never have.
+ */
+function linkOrigin(href: string | null): string {
+  if (href === null) return '';
+  try {
+    const url = new URL(href);
+    return url.protocol === 'mailto:' ? href : url.origin;
+  } catch {
+    return href;
+  }
 }
 
 /** A timestamp in the reader's own locale, the way the vault detail renders one. */
@@ -270,10 +387,21 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [restoreLoading, setRestoreLoading] = useState(false);
   const [favoriteLoading, setFavoriteLoading] = useState(false);
+  const [previewBytes, setPreviewBytes] = useState<ArrayBuffer | null>(null);
+  const [previewUnavailable, setPreviewUnavailable] = useState<string | null>(null);
+  const [pendingLink, setPendingLink] = useState<string | null>(null);
 
   const meta = doc.meta;
   const degraded = meta === null;
   const currentFolder = folders.find((folder) => folder.id === doc.folderId);
+
+  // Decided from the row's authenticated metadata alone, and decided BEFORE any
+  // segment is fetched. `previewUnavailable` is the fourth reason and the only
+  // one that is not knowable up front: the frame failed to start, or a renderer
+  // reported that it could not display the file.
+  const mode = meta === null ? 'none' : previewModeForName(meta.name);
+  const previewRefusal =
+    meta === null ? null : (previewUnavailable ?? previewRefusalFor(meta, mode));
 
   /**
    * Cancels a download in flight when this view goes away.
@@ -293,6 +421,99 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
     },
     [],
   );
+
+  /**
+   * Read the document once, for the preview, and only when one is being offered.
+   *
+   * Through `readDocumentPlaintext`, which is the SAME verified read the save
+   * paths use: it checks every segment's authentication tag, compares the
+   * framing on the row with the authenticated copy inside the metadata, and
+   * checks the whole file's SHA-256 at the end. A preview must never be fed
+   * bytes that read would have rejected, and a second read path here would be a
+   * second place for one of those checks to go missing.
+   *
+   * Keyed on the document ID, so opening another document reads that one; the
+   * abort in the cleanup is what stops the previous read finishing into a
+   * component that is now showing something else. It also ends the read on a
+   * lock, because `ProtectedRoute` swaps this whole subtree out.
+   */
+  // Per-document preview state, reset when the document changes.
+  //
+  // `DocumentPage` renders this component without a `key`, so React REUSES the
+  // instance across a detail-to-detail navigation and every piece of state below
+  // would otherwise follow the reader to the next document: a failure banner
+  // from the previous file, or a link dialog still offering the previous file's
+  // destination. `previewBytes` was already reset by the read effect; these two
+  // were not. Derived during render rather than in an effect (React's documented
+  // adjust-state-when-a-prop-changes pattern) so the stale banner is never
+  // painted even for one frame.
+  const [seenId, setSeenId] = useState(doc.id);
+  if (seenId !== doc.id) {
+    setSeenId(doc.id);
+    setPreviewBytes(null);
+    setPreviewUnavailable(null);
+    setPendingLink(null);
+  }
+
+  useEffect(() => {
+    // `degraded` rather than `meta === null`: a document whose blob will not
+    // open has NO refusal text — there is no name to read a mode from and no
+    // size to compare — so `previewRefusal` is null for it too, and this is the
+    // guard that tells the two apart.
+    if (previewRefusal !== null || degraded) return undefined;
+    const controller = new AbortController();
+    setPreviewBytes(null);
+    void readDocumentPlaintext(doc.id, { signal: controller.signal })
+      .then((plaintext) => {
+        if (controller.signal.aborted) return;
+        // A fresh buffer rather than the view's own, because the sandbox host
+        // treats buffer IDENTITY as "this is a different document" and remounts
+        // the frame on a change.
+        const copy = new ArrayBuffer(plaintext.bytes.byteLength);
+        new Uint8Array(copy).set(plaintext.bytes);
+        setPreviewBytes(copy);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || error instanceof DocumentDownloadCancelledError) return;
+        // Reported IN the panel rather than as a toast: a preview that failed is
+        // a state of this page, and the download button beside it still works.
+        setPreviewUnavailable(
+          getApiErrorMessage(error, 'This document could not be opened for preview.'),
+        );
+      });
+    return () => {
+      controller.abort();
+    };
+    // Depends on the document's IDENTITY and on the decision, never on the
+    // `meta` OBJECT. `updateDocumentMeta` builds a fresh `meta` for a rename, so
+    // a `meta` dependency made renaming a document re-download and re-decrypt up
+    // to 25 MiB of it — for a change to a field the preview does not read.
+    // `previewRefusal` already folds in everything about `meta` that decides
+    // whether a preview happens at all — the mode and the size — so together
+    // with `degraded` these three primitives are the complete and honest
+    // dependency set, and nothing in the body reads `meta` itself.
+  }, [doc.id, degraded, previewRefusal]);
+
+  /**
+   * A link the reader clicked INSIDE the frame.
+   *
+   * The scheme has already been checked, at the message boundary, by
+   * `DocumentSandbox` — which is where it has to happen, because an arrangement
+   * where the host forwarded a raw href and this layer decided would be the
+   * whole compromise in one message. It is checked AGAIN here, and that is not
+   * belt-and-braces for its own sake: this callback is a public prop, so the
+   * check that protects it belongs where the window is actually opened.
+   */
+  const handleLink = useCallback((href: string) => {
+    if (!isSafeUrl(href)) return;
+    setPendingLink(href);
+  }, []);
+
+  const handleOpenLink = useCallback(() => {
+    if (pendingLink === null || !isSafeUrl(pendingLink)) return;
+    window.open(pendingLink, '_blank', 'noopener,noreferrer');
+    setPendingLink(null);
+  }, [pendingLink]);
 
   const handleDownload = useCallback(() => {
     if (!meta) return;
@@ -594,13 +815,25 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
         )}
       </div>
 
-      {/* The content area, and the only place a document's own bytes are ever
-          spoken about. Today it holds an explanation and a button; it never
-          holds the file. */}
+      {/* The content area. A document that opens is rendered inside an isolated
+          frame with an opaque origin; one that cannot be, or must not be, keeps
+          the download affordance with the reason beside it. Either way the name
+          and the download button are drawn HERE, outside anything a renderer
+          controls. */}
       {degraded ? (
         <UndecodableDocumentNotice />
       ) : (
-        <DownloadToView meta={meta} downloading={downloading} onDownload={handleDownload} />
+        <DocumentContent
+          meta={meta}
+          downloading={downloading}
+          onDownload={handleDownload}
+          bytes={previewBytes}
+          mode={mode}
+          loading={previewBytes === null}
+          refusal={previewRefusal}
+          onLink={handleLink}
+          onUnavailable={setPreviewUnavailable}
+        />
       )}
 
       {!degraded && meta.tags.length > 0 && (
@@ -735,6 +968,62 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
             >
               {editLoading && <Loader2 className="h-4 w-4 animate-spin" />}
               Save
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* The link-confirmation dialog, on the APPLICATION side.
+          The href reaching here has already passed `isSafeUrl` at the message
+          boundary in `DocumentSandbox`, and passes it again in `handleOpenLink`
+          before anything is opened. What this dialog adds is the part a scheme
+          check cannot: the reader gets to see WHERE they are about to go, with
+          the ORIGIN shown on its own line, because a link in a document someone
+          else wrote is a link someone else chose. */}
+      <Dialog
+        open={pendingLink !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingLink(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Leave H-Vault?</DialogTitle>
+            <DialogDescription>
+              This link is inside the document you are viewing, and it was written by whoever made
+              the file. It opens in a new tab.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1">
+            <p className="text-xs text-[hsl(var(--muted-foreground))]">Destination</p>
+            {/* The ORIGIN first and prominently, then the rest in a quieter
+                weight. A long path with a lookalike host buried in it is the
+                oldest trick there is, and reading the whole URL as one string is
+                exactly how someone misses it. */}
+            <p
+              data-testid="document-link-origin"
+              className="break-all font-mono text-sm font-semibold text-[hsl(var(--foreground))]"
+            >
+              {linkOrigin(pendingLink)}
+            </p>
+            <p className="break-all font-mono text-xs text-[hsl(var(--muted-foreground))]">
+              {pendingLink}
+            </p>
+          </div>
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={() => setPendingLink(null)}
+              className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] transition-colors hover:bg-[hsl(var(--accent))]"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenLink}
+              className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] transition-opacity hover:opacity-90"
+            >
+              Open link
             </button>
           </DialogFooter>
         </DialogContent>

@@ -1048,35 +1048,118 @@ describe('PREVIEW_MODES and previewModeForName', () => {
   });
 
   it('registers a magic-byte signature only for a type it offers to preview', () => {
-    // A strict SUBSET. A signature for a type the map does not preview is dead
-    // weight the sniffer would never reach, and — worse — it reads as coverage
-    // that is not there.
+    // A strict SUBSET. A signature for a type the map does not name at all could
+    // never be reached from either direction: the sniffer looks a CLAIM up by
+    // extension, and it identifies an IMPOSTOR by the mode the matched
+    // extension carries, so an extension with no mode has no answer to give.
+    //
+    // `pdf` is the interesting member and the reason this is a subset rather
+    // than an intersection: its mode is `none`, so it is never previewed, and
+    // its signature exists purely so that a PDF wearing another extension can be
+    // named. That is the second direction, and it is what makes the row live
+    // rather than dead weight.
     const previewable = new Set(Object.keys(PREVIEW_MODES));
     for (const extension of Object.keys(PREVIEW_MAGIC_BYTES)) {
       expect(previewable, `${extension} has a signature but no mode`).toContain(extension);
     }
     expect(Object.keys(PREVIEW_MAGIC_BYTES).length).toBeLessThan(previewable.size);
+    expect(PREVIEW_MAGIC_BYTES['pdf'], 'a PDF must be identifiable by name').toBeDefined();
   });
 
-  it('declares every signature as real byte values at a real offset', () => {
-    // The offset is not decoration: `ftyp` is at byte 4 of an MP4 and WebP is
-    // `RIFF` at 0 followed by `WEBP` at 8, so a leading-bytes-only model would
-    // miss them or match the wrong container. A byte outside 0..255 or a
-    // negative offset is a transcription slip that would make the sniffer refuse
+  it('declares every signature as real byte values, anchored at byte 0', () => {
+    // Every signature is a run from byte 0, and a marker that sits after a
+    // container header is written as wildcards followed by the marker. A byte
+    // outside 0..255 is a transcription slip that would make the sniffer refuse
     // every file of that type.
-    for (const [extension, signatures] of Object.entries(PREVIEW_MAGIC_BYTES)) {
-      expect(signatures.length, `${extension} has no signature`).toBeGreaterThan(0);
-      for (const signature of signatures) {
-        expect(Number.isInteger(signature.offset)).toBe(true);
-        expect(signature.offset).toBeGreaterThanOrEqual(0);
-        expect(signature.bytes.length).toBeGreaterThan(0);
-        for (const byte of signature.bytes) {
+    //
+    // The two shape rules are what keep the wildcard from becoming a second way
+    // of writing an offset: a LEADING wildcard is an offset written the long
+    // way, and a TRAILING one constrains nothing, so both are refused. Every
+    // alternative must also constrain at least one byte, since an all-wildcard
+    // signature matches every file in existence.
+    for (const [extension, alternatives] of Object.entries(PREVIEW_MAGIC_BYTES)) {
+      expect(alternatives.length, `${extension} has no signature`).toBeGreaterThan(0);
+      for (const alternative of alternatives) {
+        const { bytes } = alternative;
+        expect(bytes.length, `${extension} has an empty signature`).toBeGreaterThan(0);
+        expect(bytes[0], `${extension} starts with a wildcard`).not.toBeNull();
+        expect(bytes[bytes.length - 1], `${extension} ends with a wildcard`).not.toBeNull();
+        for (const byte of bytes) {
+          if (byte === null) continue;
           expect(Number.isInteger(byte)).toBe(true);
           expect(byte).toBeGreaterThanOrEqual(0);
           expect(byte).toBeLessThanOrEqual(0xff);
         }
       }
     }
+  });
+
+  it('never leaves one file ambiguous between two formats that render differently', () => {
+    // THE invariant this table exists to hold, and the one whose absence let a
+    // self-contradictory encoding ship. Two alternatives are simultaneously
+    // satisfiable when every position both of them constrain agrees; when they
+    // belong to extensions with DIFFERENT preview modes, one file can then look
+    // like an image and like a video at once.
+    //
+    // That is tolerable only while it is RESOLVABLE, and the sniffer resolves it
+    // by specificity: the alternative that constrains more bytes wins. So what is
+    // forbidden here is a DRAW — two satisfiable alternatives, different modes,
+    // the same number of concrete bytes — because there is then no principled
+    // answer to "what does this file actually look like".
+    //
+    // This is exactly the shape the shipped table had: `webp` and `wav` both
+    // written as a bare `RIFF`, four concrete bytes each, `image` against
+    // `media`. Rewriting either of them that way again fails here.
+    //
+    // The pairs that ARE satisfiable today are all decisive: `ico` (4 bytes)
+    // against the ISO base-media family (5) and against `avif` (9), where the
+    // file that would satisfy both is an icon declaring 29,798 images.
+    const concrete = (bytes: readonly (number | null)[]): number =>
+      bytes.filter((byte) => byte !== null).length;
+    const satisfiable = (a: readonly (number | null)[], b: readonly (number | null)[]): boolean => {
+      const shared = Math.min(a.length, b.length);
+      for (let index = 0; index < shared; index += 1) {
+        const left = a[index];
+        const right = b[index];
+        if (left === null || left === undefined) continue;
+        if (right === null || right === undefined) continue;
+        if (left !== right) return false;
+      }
+      return true;
+    };
+
+    const entries = Object.entries(PREVIEW_MAGIC_BYTES);
+    for (const [extension, alternatives] of entries) {
+      for (const [other, otherAlternatives] of entries) {
+        if (other === extension) continue;
+        if (PREVIEW_MODES[extension] === PREVIEW_MODES[other]) continue;
+        for (const alternative of alternatives) {
+          for (const otherAlternative of otherAlternatives) {
+            if (!satisfiable(alternative.bytes, otherAlternative.bytes)) continue;
+            expect(
+              concrete(alternative.bytes),
+              `${extension} (${String(PREVIEW_MODES[extension])}) and ${other} (${String(PREVIEW_MODES[other])}) are satisfied by one file and constrain equally many bytes, so neither can win`,
+            ).not.toBe(concrete(otherAlternative.bytes));
+          }
+        }
+      }
+    }
+  });
+
+  it('keeps the MP3 frame sync away from the UTF-16LE byte-order mark', () => {
+    // The trap in widening the sync: eleven set bits is `0xFF` then a byte with
+    // its top three bits set, and the lazy spelling of that is "0xFF followed by
+    // anything >= 0xE0". That admits `0xFF 0xFE`, which is the UTF-16LE
+    // byte-order mark Windows PowerShell writes at the head of every redirected
+    // `.log` and `.txt` — so a genuine text file would be reported as an MP3.
+    // Only the six Layer III combinations are listed, and `0xFE` (Layer I) is
+    // not one of them.
+    const seconds = (PREVIEW_MAGIC_BYTES['mp3'] ?? [])
+      .filter((signature) => signature.bytes[0] === 0xff)
+      .map((signature) => signature.bytes[1]);
+    expect(seconds).toEqual(expect.arrayContaining([0xfb, 0xfa, 0xf3, 0xf2, 0xe3, 0xe2]));
+    expect(seconds).not.toContain(0xfe);
+    expect(seconds).not.toContain(0xff);
   });
 
   it('pins the two preview budgets both sides read', () => {

@@ -16,6 +16,13 @@
  * ONE definition, shared by `scripts/ci/bundle-gate.mjs` (which enforces them)
  * and `scripts/ci/ratchet-check.mjs` (which pins them, direction `lower`, so a
  * ceiling can be tightened but never quietly raised).
+ *
+ * Two TypeScript suites also import this file directly, which is why both
+ * package test configs set `allowJs`: `packages/client/tests/vite-config.test.ts`
+ * pins the sandbox build's `chunkSizeWarningLimit` to `lowlight`, and
+ * `packages/server/tests/gate-surface.test.ts` exercises `chunkBaseName`. They
+ * read the real keys, so renaming one fails at type-check instead of silently
+ * comparing an advisory against `undefined`.
  */
 
 /** Chunk names are `<base>-<hash>.js`; budgets are keyed by `<base>`. */
@@ -40,6 +47,54 @@ export const CHUNK_BUDGETS_KB = {
   VaultItemForm: 230,
   /** Axios, zod and the other shared runtime. Measured at ~154 KiB. */
   'vendor-core': 220,
+
+  // -------------------------------------------------------------------------
+  // The document sandbox (dist/sandbox-assets/), a SECOND build with its own
+  // module graph.
+  // -------------------------------------------------------------------------
+  //
+  // Its renderers are DYNAMICALLY IMPORTED PER MODE, which is what makes each
+  // one a chunk at all — Rollup splits at a dynamic-import boundary and nowhere
+  // else — and is also what the numbers below are protecting: a static import in
+  // `src/sandbox/sandbox.ts` would collapse the whole set into the entry, so
+  // opening a `.txt` would download the markdown pipeline and 890 KiB of syntax
+  // grammars. Every one of these was MEASURED from a real build.
+  //
+  // Only the chunks that need more than `DEFAULT_CHUNK_BUDGET_KB` have an entry,
+  // plus the entry chunk, which needs LESS. The rest — `decode`, `dom`, `image`,
+  // `media`, `text`, `rehype-highlight`, `hast-util-to-dom`, all measured under
+  // 20 KiB — sit under the default ceiling, which is itself far below anything
+  // that could arrive there by accident.
+
+  /**
+   * The sandbox's entry chunk: the protocol, the sniffer and the mode switch.
+   * Measured at ~8 KiB, and held DELIBERATELY TIGHT rather than at the default.
+   *
+   * This is the one number that catches the regression the split exists to
+   * prevent, at the moment it happens rather than after it has been shipped: a
+   * renderer imported statically instead of dynamically lands here, and the
+   * smallest of them would already breach this.
+   *
+   * It also covers `sandbox.css`, which shares the base name and is measured at
+   * ~5 KiB; the gate checks each file against the ceiling separately.
+   */
+  sandbox: 24,
+  /**
+   * highlight.js's common language set, reached through `lowlight`. Measured at
+   * ~887 KiB, and by a wide margin the largest thing this document can load.
+   *
+   * It is loaded ON DEMAND twice over: `renderers/text.ts` imports it only for an
+   * extension its table maps to a real grammar, and the markdown pipeline imports
+   * it only for a document that actually contains a fenced block with a declared
+   * language. A README with no code never fetches it.
+   */
+  lowlight: 960,
+  /** remark, micromark and the markdown-to-hast pipeline. Measured at ~264 KiB. */
+  markdown: 300,
+  /** `rehype-parse` (parse5), which reads a stored `.html` file. Measured at ~164 KiB. */
+  html: 200,
+  /** The sanitize/highlight/to-DOM tail both markup renderers share. Measured at ~28 KiB. */
+  pipeline: 48,
 };
 
 /**
