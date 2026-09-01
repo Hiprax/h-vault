@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router';
 import React from 'react';
 
@@ -1099,6 +1099,79 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
         type: 'success',
       });
     });
+  });
+
+  // =========================================================================
+  // The backup boundary: documents are not in a backup, and the user is told
+  // =========================================================================
+  //
+  // A restore that returns every item and folder looks complete. If the account
+  // it was taken from held documents, it is not — their bytes were never in the
+  // file, and no amount of restoring will bring them back. The server writes a
+  // `documentSummary` breadcrumb into the payload for exactly this moment, and
+  // these cases pin that the notice is raised from it, that it is raised
+  // ALONGSIDE the ordinary result rather than instead of it, and that it stays
+  // silent when there is nothing to say.
+
+  it('warns that the backup account held documents, alongside the ordinary success notice', async () => {
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      backupEncryption: FILE_ENCRYPTION_META,
+      documentSummary: { count: 3, totalBytes: 4096 },
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title:
+          'This backup was taken from an account holding 3 document(s); documents are not part of a backup.',
+        description: 'Re-upload them from the Documents page to restore them.',
+        type: 'warning',
+      });
+    });
+    // ALONGSIDE, not instead of: the restore itself still reports its outcome,
+    // so a user does not have to infer success from the absence of an error.
+    expect(mockToast).toHaveBeenCalledWith({
+      title: 'Backup restored successfully',
+      type: 'success',
+    });
+    // …and LAST, so it is the notice sitting on top of the stack rather than the
+    // one buried under a green success message.
+    const titles = mockToast.mock.calls.map((call) =>
+      String((call[0] as { title?: unknown }).title),
+    );
+    expect(titles.at(-1)).toContain('documents are not part of a backup');
+    // And the restore really happened.
+    expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('says nothing about documents when the summary is zero or absent', async () => {
+    // The two payload shapes that must stay quiet: a server that has the feature
+    // reporting an account with no documents, and a pre-0.10.0 server that has no
+    // field at all. Interrupting either would train users to dismiss the notice
+    // that matters.
+    for (const extra of [{ documentSummary: { count: 0, totalBytes: 0 } }, {}]) {
+      vi.clearAllMocks();
+      await performRestore({
+        items: [SAMPLE_ITEM],
+        folders: [],
+        backupEncryption: FILE_ENCRYPTION_META,
+        ...extra,
+      });
+
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith({
+          title: 'Backup restored successfully',
+          type: 'success',
+        });
+      });
+      expect(
+        mockToast.mock.calls.some((call) =>
+          String((call[0] as { title?: unknown }).title).includes('documents are not part of a'),
+        ),
+      ).toBe(false);
+      cleanup();
+    }
   });
 
   // =========================================================================

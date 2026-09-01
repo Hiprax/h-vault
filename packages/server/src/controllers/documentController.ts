@@ -2171,7 +2171,23 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
       // leave it alone would return to it for ever.
       lastId = row._id;
       try {
-        await Document.updateOne({ _id: row._id, userId }, { $set: { purgePending: true } });
+        // THE CLAIM, and it re-states the trash predicate rather than addressing
+        // the row by id alone. The page was read before this loop began, and in
+        // that gap another tab can restore this very document — `restoreDocument`
+        // succeeds while nothing has marked it. An unconditional marker would then
+        // send this loop after the object of a document that is live again, and
+        // the row holding its only wrapped key would go with it. Once the marker
+        // lands, a restore can no longer win, because `restoreDocument` requires
+        // `purgePending: null`.
+        const claim = await Document.updateOne(
+          { ...trashed, _id: row._id },
+          { $set: { purgePending: true } },
+        );
+        if (claim.matchedCount === 0) {
+          // Restored or already purged by whoever raced this request. Neither a
+          // deletion nor a failure: there is nothing here to destroy.
+          continue;
+        }
         await getStorage().deleteObject(row.objectKey);
         // The engine's own count, never a bare `+= 1`. A row purged by a
         // concurrent request between this page's read and this delete is removed

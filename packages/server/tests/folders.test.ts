@@ -5,6 +5,9 @@ import app from '../src/app.js';
 import { Folder } from '../src/models/Folder.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { AuditLog } from '../src/models/AuditLog.js';
+import { Document } from '../src/models/Document.js';
+import { buildObjectKey } from '../src/utils/documentObjects.js';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
 import {
   createTestUser,
   authHeader,
@@ -43,6 +46,38 @@ describe('Folder Routes', () => {
       .send(sampleFolder(overrides));
     expect(res.status).toBe(201);
     return res.body.data;
+  }
+
+  /**
+   * A committed document row for the signed-in user, optionally inside a folder.
+   *
+   * Seeded directly: the upload endpoints sit behind `requireStorage`, and this
+   * file configures no object storage because folder deletion never touches an
+   * object — it moves or trashes ROWS, which is exactly the property under test.
+   */
+  async function seedDocument(
+    overrides: Record<string, unknown> = {},
+  ): Promise<mongoose.Types.ObjectId> {
+    const documentId = new mongoose.Types.ObjectId();
+    await Document.create({
+      _id: documentId,
+      userId: user.id,
+      objectKey: buildObjectKey(user.id, documentId.toHexString()),
+      encryptedDek: 'dek-ciphertext',
+      dekIv: 'dek-iv',
+      dekTag: 'dek-tag',
+      streamSalt: Buffer.alloc(32, 7).toString('base64'),
+      noncePrefix: Buffer.alloc(7, 3).toString('base64'),
+      encryptedMeta: 'meta-ciphertext',
+      metaIv: 'meta-iv',
+      metaTag: 'meta-tag',
+      chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+      chunkCount: 1,
+      ciphertextBytes: 48,
+      plaintextBytes: 32,
+      ...overrides,
+    });
+    return documentId;
   }
 
   // ── 1. CRUD ────────────────────────────────────────────────────────
@@ -970,6 +1005,159 @@ describe('Folder Routes', () => {
       const audit = await AuditLog.findOne({ userId: user.id, action: 'folder_delete' }).lean();
       expect(audit, 'the delete must still be audited').not.toBeNull();
       expect(audit!.metadata).toMatchObject({ folderId: String(folder._id) });
+    });
+  });
+
+  // ── Documents are folder members too ───────────────────────────────
+  //
+  // A folder holds vault items AND documents, and deleting one must do the same
+  // thing to both. The handler expresses that by building ONE filter and ONE
+  // update and applying them to both collections, so what these cases actually
+  // guard is that the second application is still there — a change that touched
+  // only `VaultItem` would leave documents pointing at a folder that no longer
+  // exists, invisible in the UI's folder tree and unreachable from its trash.
+  //
+  // The other half of every case is what must NOT happen: a folder delete never
+  // touches a stored OBJECT. Trash is recoverable, so the bytes stay exactly
+  // where they are; this file configures no storage at all, and the fact that
+  // every case here passes without one is itself the assertion.
+  describe('Delete with documents in the folder', () => {
+    it('trashes the folder documents with action=delete and leaves an already-trashed one at its own timestamp', async () => {
+      const folder = await apiCreateFolder({ encryptedName: 'doc-holder' });
+      const other = await apiCreateFolder({ encryptedName: 'doc-bystander' });
+
+      const live = await seedDocument({ folderId: folder._id });
+      const alreadyTrashedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+      const trashed = await seedDocument({ folderId: folder._id, deletedAt: alreadyTrashedAt });
+      const elsewhere = await seedDocument({ folderId: other._id });
+      const unfiled = await seedDocument();
+
+      const res = await agent
+        .delete(`${BASE}/${folder._id}?action=delete`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('Cookie', csrf.cookie)
+        .set('x-csrf-token', csrf.token);
+
+      expect(res.status).toBe(200);
+
+      const trashedLive = await Document.findById(live).lean();
+      expect(
+        trashedLive!.deletedAt,
+        'a live document in the folder goes to the trash',
+      ).toBeInstanceOf(Date);
+      // It keeps its folderId, exactly as a trashed ITEM does: that is what the
+      // orphan sweep's `deletedAt: null` filter exists to preserve.
+      expect(String(trashedLive!.folderId)).toBe(String(folder._id));
+
+      const untouched = await Document.findById(trashed).lean();
+      expect(
+        untouched!.deletedAt!.getTime(),
+        'an already-trashed document keeps the moment it was trashed',
+      ).toBe(alreadyTrashedAt.getTime());
+
+      for (const id of [elsewhere, unfiled]) {
+        const bystander = await Document.findById(id).lean();
+        expect(
+          bystander!.deletedAt,
+          'a document outside the folder is not trashed',
+        ).toBeUndefined();
+      }
+    });
+
+    it('re-parents the folder documents to the parent with action=move', async () => {
+      const parent = await apiCreateFolder({ encryptedName: 'doc-parent' });
+      const child = await apiCreateFolder({ encryptedName: 'doc-child', parentId: parent._id });
+      const moved = await seedDocument({ folderId: child._id });
+
+      const res = await agent
+        .delete(`${BASE}/${child._id}?action=move`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('Cookie', csrf.cookie)
+        .set('x-csrf-token', csrf.token);
+
+      expect(res.status).toBe(200);
+
+      const after = await Document.findById(moved).lean();
+      expect(String(after!.folderId)).toBe(String(parent._id));
+      // Moved, not trashed. `action=move` losing that distinction for documents
+      // would silently hide them from the list it moved them into.
+      expect(after!.deletedAt).toBeUndefined();
+    });
+
+    it('unsets the folderId of the folder documents when a root folder is deleted with action=move', async () => {
+      const root = await apiCreateFolder({ encryptedName: 'doc-root' });
+      const orphanedToRoot = await seedDocument({ folderId: root._id });
+
+      const res = await agent
+        .delete(`${BASE}/${root._id}?action=move`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('Cookie', csrf.cookie)
+        .set('x-csrf-token', csrf.token);
+
+      expect(res.status).toBe(200);
+
+      const after = await Document.findById(orphanedToRoot).lean();
+      // ABSENT, not null: the handler `$unset`s rather than writing null, which
+      // is what keeps `folderId` queries and the `{userId, folderId}` index honest.
+      expect(after!.folderId).toBeUndefined();
+      expect(after!.deletedAt).toBeUndefined();
+    });
+
+    it('clears a document folderId the non-atomic delete left pointing at the deleted folder', async () => {
+      // The same window the item version of this case documents, on the other
+      // collection: on standalone MongoDB the member update and the folder delete
+      // are two writes, so a failure between them leaves a LIVE document pointing
+      // at a folder that is gone. Stubbing the handler's own move is the only way
+      // to reach the sweep, because every successful arm leaves nothing to sweep.
+      const folder = await apiCreateFolder({ encryptedName: 'doc-orphan-window' });
+      const live = await seedDocument({ folderId: folder._id });
+      const trashed = await seedDocument({ folderId: folder._id, deletedAt: new Date() });
+
+      const updateMany = vi.spyOn(Document, 'updateMany').mockReturnValueOnce(
+        Promise.resolve({
+          acknowledged: true,
+          matchedCount: 0,
+          modifiedCount: 0,
+          upsertedCount: 0,
+          upsertedId: null,
+        }) as never,
+      );
+
+      let res;
+      let updateManyCalls = 0;
+      try {
+        res = await agent
+          .delete(`${BASE}/${folder._id}?action=move`)
+          .set('Authorization', authHeader(user.accessToken))
+          .set('Cookie', csrf.cookie)
+          .set('x-csrf-token', csrf.token);
+      } finally {
+        // Read the count BEFORE restoring, for the reason the item version
+        // records: `mockRestore` clears the recorded calls too.
+        updateManyCalls = updateMany.mock.calls.length;
+        updateMany.mockRestore();
+      }
+
+      expect(res.status).toBe(200);
+      // Exactly two: the stubbed move, then the sweep. One would mean documents
+      // were dropped from the sweep; three would mean something else started
+      // writing to them on this path.
+      expect(updateManyCalls).toBe(2);
+
+      // Read back with no polling: the sweep completed before the caller was told
+      // the folder was gone.
+      const sweptLive = await Document.findById(live).lean();
+      expect(sweptLive, 'the live document must survive the folder delete').not.toBeNull();
+      expect(sweptLive!.folderId, 'the orphaned folderId must be cleared').toBeUndefined();
+      expect(sweptLive!.deletedAt, 'action=move must not trash the document').toBeUndefined();
+
+      const sweptTrashed = await Document.findById(trashed).lean();
+      expect(
+        String(sweptTrashed!.folderId),
+        'a trashed document keeps the folder it was trashed from',
+      ).toBe(String(folder._id));
+
+      expect(await Folder.findById(folder._id)).toBeNull();
     });
   });
 

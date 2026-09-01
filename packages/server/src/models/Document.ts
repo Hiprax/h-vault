@@ -173,6 +173,15 @@ documentSchema.index({ objectKey: 1 }, { unique: true });
  * across ALL users with no `userId` predicate, so none of the `userId`-prefixed
  * indexes above can seek it.
  *
+ * The cron pages that scan on `_id` (`{ deletedAt: { $lte: cutoff }, _id: { $gt:
+ * lastId } }` sorted by `_id` ascending), because a document whose stored object
+ * cannot be deleted is deliberately LEFT in the expired set and a loop re-reading
+ * its own predicate would return it for ever. The planner therefore has two
+ * candidates per page — this index with a sort stage, or `_id_` with `deletedAt`
+ * as a residual filter — and it is this one that keeps the work proportional to
+ * the TRASHED rows rather than to the collection, which is exactly what the
+ * sparseness below buys.
+ *
  * `sparse` rather than a `{ deletedAt: { $exists: true } }` partial filter, for the
  * reason spelled out at the same index on `VaultItem`: MongoDB will not use such a
  * partial index for a `$lte` RANGE predicate, so it would be built and never

@@ -88,8 +88,15 @@ export interface InMemoryStorageProvider extends StorageProvider {
   readObject(key: string): Buffer | undefined;
 }
 
-/** S3's own default page size for a listing, so pagination behaves the same way. */
-const DEFAULT_MAX_KEYS = 1_000;
+/**
+ * S3's own default page size for a listing, so pagination behaves the same way.
+ *
+ * Exported because a test that must cross the page boundary has to seed
+ * `DEFAULT_MAX_KEYS + 1` objects, and a test restating `1_000` for itself stops
+ * testing pagination the day this number changes — it would then seed a single
+ * page and pass while asserting nothing.
+ */
+export const DEFAULT_MAX_KEYS = 1_000;
 
 /** Quoted, as S3 returns it, because the provider passes an ETag through verbatim. */
 function etagFor(body: Buffer): string {

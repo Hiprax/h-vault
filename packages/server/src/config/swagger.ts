@@ -2517,7 +2517,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Folders'],
         summary: 'Delete folder',
         description:
-          'Deletes a folder. Use `action=move` (default) to move items to root, or `action=delete` to delete items with the folder.',
+          "Deletes a folder. Its members are the vault items AND the documents inside it, and both are treated the same way: `action=move` (default) re-parents them to the folder's parent, or to the root when it has none, while `action=delete` moves them to the trash alongside the folder. Trashing a document does not delete its stored bytes; the scheduled trash purge does that once it is `TRASH_AUTO_PURGE_DAYS` old.",
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [
           { name: 'id', in: 'path', required: true, schema: { type: 'string' } },

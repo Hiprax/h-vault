@@ -274,6 +274,36 @@ an unsaved form, so a cancelled edit cannot leave codes on disk with nothing in 
 and it takes a separate confirmation that states the file is unencrypted before anything is
 written. Delete it once you have stored the codes wherever you intended them to go.
 
+### Deleting a document, and why it cannot be undone
+
+A stored document is two things: an entry in the database and a file of ciphertext in object
+storage. The entry holds the only wrapped copy of the key that decrypts that file — the key
+exists nowhere else, not on the server, not in the browser once the vault is locked, and not
+in a backup, because **documents are deliberately not part of a backup** (their bytes cannot
+fit a backup file, and metadata without bytes would restore entries pointing at files that do
+not exist; a backup therefore carries only a count, so a restored account cannot quietly look
+complete). Deleting the entry is therefore the act that destroys the document. Any file that
+somehow survives it is ciphertext under a key that no longer exists anywhere.
+
+That shapes the order every deletion path uses, and it is worth stating because the two
+orders look interchangeable and are not:
+
+- **Deleting one document permanently** marks the entry, deletes the file, then deletes the
+  entry. A crash in the middle leaves a marker the hourly clean-up finishes; the reverse
+  order would leave a file that nothing is left to name. Emptying the document trash and the
+  nightly purge of documents trashed beyond `TRASH_AUTO_PURGE_DAYS` do exactly the same
+  thing, one document at a time, and a file the storage service refuses to delete leaves its
+  entry marked for the next run rather than removing an entry whose file is still there.
+- **Deleting an account** is the one path that runs the other way round: every entry is
+  removed with the rest of the account's data first, and only then are the account's files
+  swept from storage by prefix. Because the entries are already gone, a file the sweep cannot
+  reach is already unreadable rather than a document still standing. The erasure is reported
+  as complete in that case — it is — and the failure is logged for the operator, with the
+  remainder reclaimed by the scheduled clean-up. On a deployment with no document store
+  configured the sweep does nothing at all.
+
+Neither deletion is recoverable, and neither is undone by restoring a backup.
+
 ### Auto-lock
 
 The vault locks after `autoLockTimeout` minutes without interaction (1 to 1440, default 15).

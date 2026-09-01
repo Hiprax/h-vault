@@ -363,6 +363,7 @@ export default function BackupSettingsPage() {
           bwkVaultKeyIv?: string;
           bwkVaultKeyTag?: string;
         };
+        documentSummary?: { count?: number; totalBytes?: number };
         [key: string]: unknown;
       };
 
@@ -713,6 +714,26 @@ export default function BackupSettingsPage() {
         } else {
           toast({ title: 'Backup restored successfully', type: 'success' });
         }
+
+        // Documents are not part of a backup, so a restored account can look
+        // complete while every file the account held is missing. The breadcrumb
+        // the server writes into the payload is the only way to say so, and it is
+        // raised as its OWN notice rather than folded into the result toast above:
+        // it is true regardless of which of those three branches was taken. It is
+        // raised LAST so it is the notice sitting on top of the stack, because it
+        // is the one that tells the user they are not finished. Absent on a backup
+        // written by a server that predates the document store, and zero on one
+        // from an account that held none — neither says anything worth
+        // interrupting for.
+        const documentsLeftBehind = backupData.documentSummary?.count ?? 0;
+        if (documentsLeftBehind > 0) {
+          toast({
+            title: `This backup was taken from an account holding ${String(documentsLeftBehind)} document(s); documents are not part of a backup.`,
+            description: 'Re-upload them from the Documents page to restore them.',
+            type: 'warning',
+          });
+        }
+
         setShowRestore(false);
         setRestoreFile(null);
         setRestorePassword('');

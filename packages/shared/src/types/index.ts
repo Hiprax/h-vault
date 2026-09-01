@@ -421,6 +421,27 @@ export interface IBackupFile {
     itemCount: number;
     folderCount: number;
   };
+  /**
+   * How many documents the account held when the backup was taken, and their
+   * total plaintext size.
+   *
+   * Documents are deliberately NOT part of a backup: their bytes cannot fit a
+   * ~25 MiB JSON document, and metadata without bytes would restore rows pointing
+   * at objects that do not exist. This breadcrumb is what stops a restored account
+   * from silently looking complete — the restore surfaces it as "this backup was
+   * taken from an account holding N documents; documents are not part of a
+   * backup".
+   *
+   * OPTIONAL, and that is load-bearing in both directions: a backup written by a
+   * server that predates the document store has no such field and must still
+   * restore, and a client that predates it must still parse a payload that has
+   * one. Its ABSENCE means "written by an older server"; a zeroed summary means
+   * "written by a server that has the feature, from an account with no documents".
+   */
+  documentSummary?: {
+    count: number;
+    totalBytes: number;
+  };
   /** HMAC-SHA256 integrity signature computed client-side using BWK. Optional for backward compatibility with older backups. */
   integrity?: string;
 }

@@ -864,6 +864,48 @@ describe('the document mutation endpoints', () => {
       expect(storage.storedKeys()).toEqual([onlyRow.objectKey]);
     });
 
+    it('leaves a document alone when another tab restores it mid-walk', async () => {
+      // The page is read before the walk begins, so a document can be restored
+      // between the read and its turn — `POST /documents/:id/restore` succeeds
+      // while nothing has marked it. The marker write is therefore a CLAIM that
+      // re-states the trash predicate: it refuses a row that is live again, and
+      // once it lands a restore can no longer win, because the restore requires
+      // `purgePending: null`.
+      //
+      // Without that, this request would delete the object of a document the user
+      // had just recovered and then the row holding its only wrapped key. There is
+      // no recovery from that and no error anywhere to notice it by: the response
+      // would report a successful purge.
+      const restored = await seedDocument(owner, { deletedAt: new Date(), body: OBJECT_BODY });
+      const alsoTrashed = await seedDocument(owner, { deletedAt: new Date(), body: OBJECT_BODY });
+
+      // The concurrent restore lands inside the very call that would otherwise
+      // mark the row, so the REAL claim filter is what has to refuse it.
+      const realUpdateOne = Document.updateOne.bind(Document);
+      vi.spyOn(Document, 'updateOne').mockImplementationOnce(((...args: unknown[]) =>
+        realUpdateOne({ _id: restored.id }, { $unset: { deletedAt: 1 } }).then(() =>
+          (realUpdateOne as (...inner: unknown[]) => unknown)(...args),
+        )) as never);
+
+      const res = await send('delete', owner, '/api/v1/documents/trash/empty');
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      // Skipped, not purged and not failed — there was nothing left to destroy.
+      expect(res.body.data).toStrictEqual({ deletedCount: 1, failedCount: 0 });
+
+      const survivor = (await rawRow(restored.id))!;
+      expect(
+        survivor,
+        'the restored document must survive the empty-trash walk',
+      ).not.toBeUndefined();
+      expect(survivor.deletedAt, 'and it must still be out of the trash').toBeUndefined();
+      expect(survivor.purgePending, 'the claim was refused, so no marker').toBeUndefined();
+      // The negative that matters most: its bytes are untouched, while the row
+      // that really was trashed went as asked.
+      expect(storageRef.current!.storedKeys()).toEqual([restored.objectKey]);
+      expect(await rawRow(alsoTrashed.id)).toBeNull();
+    });
+
     it('succeeds on an empty trash without touching storage', async () => {
       const active = await seedDocument(owner, { body: OBJECT_BODY });
       const deleteSpy = vi.spyOn(storageRef.current!, 'deleteObject');

@@ -5,10 +5,38 @@
  * associated data: VaultItems, Folders, RefreshTokens, AuditLogs, BackupLogs.
  * Also covers: re-registration, password/2FA requirements, cross-user isolation.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import mongoose from 'mongoose';
+
+/**
+ * Counts every attempt to obtain a storage client, without changing what one is.
+ *
+ * This file configures NO object storage, which is the point of it: the document
+ * store is optional, so the cascade must erase a document row without one and must
+ * not so much as reach for a client it cannot have. `getStorage()` throws 503 when
+ * storage is unconfigured, and the cascade's sweep swallows its own failures, so a
+ * missing `storageConfigured` guard would be INVISIBLE in the outcome — the account
+ * would still be erased and the endpoint would still answer 200. Counting the call
+ * is what makes the guard observable, and it is why the unconfigured case is pinned
+ * here rather than by an assertion about the result.
+ */
+const { storageAccess } = vi.hoisted(() => ({ storageAccess: { count: 0 } }));
+
+vi.mock('../src/services/storage/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/storage/index.js')>();
+  return {
+    ...actual,
+    getStorage: () => {
+      storageAccess.count += 1;
+      return actual.getStorage();
+    },
+  };
+});
+
 import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES } from '@hvault/shared';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
@@ -16,6 +44,9 @@ import { Folder } from '../src/models/Folder.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { BackupLog } from '../src/models/BackupLog.js';
+import { Document } from '../src/models/Document.js';
+import { DocumentUpload } from '../src/models/DocumentUpload.js';
+import { buildObjectKey } from '../src/utils/documentObjects.js';
 import {
   createTestUser,
   authHeader,
@@ -29,6 +60,18 @@ async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfC
   const { token, cookie } = await getCsrfBase(agent);
   return { csrfToken: token, csrfCookie: cookie };
 }
+
+/**
+ * The wrapped-key and stream-framing columns both document rows carry, at the
+ * shapes their schemas require. Opaque here: nothing in this file decrypts.
+ */
+const SEALED_DOCUMENT_COLUMNS = {
+  encryptedDek: 'dek-ciphertext',
+  dekIv: 'dek-iv',
+  dekTag: 'dek-tag',
+  streamSalt: Buffer.alloc(32, 7).toString('base64'),
+  noncePrefix: Buffer.alloc(7, 3).toString('base64'),
+};
 
 const cm = new CryptoManager();
 const encKey = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
@@ -204,6 +247,72 @@ describe('Account Deletion Cascade (API-level)', () => {
       expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(0);
       expect(await AuditLog.countDocuments({ userId: user.id })).toBe(0);
       expect(await BackupLog.countDocuments({ userId: user.id })).toBe(0);
+    });
+
+    /**
+     * The document store is OPTIONAL, and this file configures none of it: no
+     * `S3_*` variable is set and nothing here mocks `storageConfigured`, so the
+     * cascade runs with the feature genuinely off — the state every deployment
+     * that has not opted in is in, and the state `tokenCleanup`'s zombie loop is
+     * in when it reaches this same helper on such a deployment.
+     *
+     * Two things must hold there. The ROWS must go, because they are ordinary
+     * rows and their deletion has nothing to do with storage. And the object
+     * sweep must be a no-op rather than a throw: `getStorage()` answers 503 when
+     * storage is unconfigured, so a sweep that called it unconditionally would
+     * turn every account deletion on a 0.9.x-shaped deployment into a 500.
+     *
+     * Rows are seeded directly. Driving them through the upload endpoints is not
+     * possible here by construction — those routes sit behind `requireStorage`,
+     * which is exactly the condition under test.
+     */
+    it('erases document and staging rows, without reaching for a storage client, when object storage is not configured', async () => {
+      storageAccess.count = 0;
+      const documentId = new mongoose.Types.ObjectId();
+      const uploadId = new mongoose.Types.ObjectId();
+
+      await Document.create({
+        _id: documentId,
+        userId: user.id,
+        objectKey: buildObjectKey(user.id, documentId.toHexString()),
+        ...SEALED_DOCUMENT_COLUMNS,
+        encryptedMeta: 'meta-ciphertext',
+        metaIv: 'meta-iv',
+        metaTag: 'meta-tag',
+        chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+        chunkCount: 1,
+        ciphertextBytes: DOCUMENT_TAG_BYTES + 32,
+        plaintextBytes: 32,
+      });
+      await DocumentUpload.create({
+        _id: uploadId,
+        userId: user.id,
+        objectKey: buildObjectKey(user.id, uploadId.toHexString()),
+        ...SEALED_DOCUMENT_COLUMNS,
+        declaredPlaintextBytes: 32,
+        declaredChunkCount: 1,
+        chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+        vaultKeyVersion: 0,
+        receivedBytes: 0,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      });
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .delete('/api/v1/user')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ password: user.rawPassword });
+
+      // Not a 500: the unconfigured sweep is a no-op, not a 503 in disguise.
+      expect(res.status).toBe(200);
+      expect(await User.findById(user.id)).toBeNull();
+      expect(await Document.countDocuments({ userId: user.id })).toBe(0);
+      expect(await DocumentUpload.countDocuments({ userId: user.id })).toBe(0);
+      // The negative that pins the guard itself, because the sweep's own
+      // try/catch would otherwise hide its absence completely.
+      expect(storageAccess.count).toBe(0);
     });
   });
 
