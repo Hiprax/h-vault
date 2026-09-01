@@ -278,6 +278,105 @@ describe('Vault key rotation — documents leg (sequential branch)', () => {
     expect(after!.pendingEncryptedVaultKey).toBeUndefined();
   });
 
+  it('reports a document the write no longer matches, and rolls the rest back', async () => {
+    // A document deleted BETWEEN the pre-write snapshot and the write itself. The
+    // missing-id abort cannot close that window — it reads the snapshot, and the
+    // row can go afterwards — so the loop has to answer for it, and the answer is
+    // the same as any other failed leg: report it, roll back what was written, and
+    // leave the vault key alone.
+    const first = await seedDocument(user);
+    const second = await seedDocument(user);
+
+    const realUpdateOne = Document.updateOne.bind(Document);
+    let writes = 0;
+    vi.spyOn(Document, 'updateOne').mockImplementation(
+      (...args: Parameters<typeof Document.updateOne>) => {
+        writes += 1;
+        if (writes === 2) {
+          return Promise.resolve({
+            acknowledged: true,
+            matchedCount: 0,
+            modifiedCount: 0,
+            upsertedCount: 0,
+            upsertedId: null,
+          }) as ReturnType<typeof Document.updateOne>;
+        }
+        return realUpdateOne(...args);
+      },
+    );
+
+    const res = await rotate(user, {
+      items: [],
+      folders: [],
+      documents: [rewrapped(first), rewrapped(second)],
+    });
+
+    expect(res.status).toBe(409);
+    expect(String(res.body.message)).toMatch(/1 document\(s\) could not be updated/);
+
+    // Rolled back to the wrap the untouched vault key can still open.
+    const rolledBack = await rawDocument(first);
+    expect(rolledBack.encryptedDek).toBe(ORIGINAL_WRAP.encryptedDek);
+
+    const after = await User.findById(user.id).lean();
+    expect(after!.encryptedVaultKey).toBe(ORIGINAL_KEY);
+    expect(after!.vaultKeyVersion).toBe(0);
+    expect(after!.rotationInProgress).toBe(false);
+  });
+
+  it('still refuses the rotation when the ROLLBACK of a document also fails', async () => {
+    // The worst case the sequential path can reach, and the one that decides
+    // whether it is survivable: the forward write fails, and the compensating
+    // write fails too. What must hold is that the VAULT KEY is not rotated — the
+    // account keeps the key that opens every document the rollback did manage,
+    // and the one it did not is a single unreadable row rather than an unreadable
+    // account. The fence must come down either way, or the user cannot write at
+    // all until the process restarts.
+    const first = await seedDocument(user);
+    const second = await seedDocument(user);
+
+    const realUpdateOne = Document.updateOne.bind(Document);
+    let writes = 0;
+    vi.spyOn(Document, 'updateOne').mockImplementation(
+      (...args: Parameters<typeof Document.updateOne>) => {
+        writes += 1;
+        // 1: the first forward write succeeds. 2: the second fails, which is what
+        // starts the rollback. 3: the rollback of the first fails as well.
+        if (writes >= 2) {
+          throw new Error(`simulated storage failure on write ${String(writes)}`);
+        }
+        return realUpdateOne(...args);
+      },
+    );
+
+    const res = await rotate(user, {
+      items: [],
+      folders: [],
+      documents: [rewrapped(first), rewrapped(second)],
+    });
+
+    expect(res.status).toBe(409);
+    // At least one write after the forward failure, i.e. the rollback really was
+    // attempted and really did fail. Not an exact count: the compensating pass is
+    // reached from two places and is idempotent, so restoring one snapshot twice
+    // is harmless and pinning the number would pin an implementation detail.
+    expect(writes).toBeGreaterThan(2);
+
+    // The residual this arm exists to bound, stated rather than implied: the first
+    // document is still under the NEW wrap, because the compensating write failed.
+    const stranded = await rawDocument(first);
+    expect(stranded.encryptedDek).toBe(rewrapped(first).encryptedDek);
+
+    // And the guarantee that makes that residual survivable: the vault key was
+    // NOT replaced, so every other document — and every item and folder — still
+    // opens, and the fence is down so the account can be written to again.
+    const after = await User.findById(user.id).lean();
+    expect(after!.encryptedVaultKey).toBe(ORIGINAL_KEY);
+    expect(after!.vaultKeyVersion).toBe(0);
+    expect(after!.rotationInProgress).toBe(false);
+    expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+  });
+
   it('rolls documents back when an ITEM write fails after they were rewrapped', async () => {
     // Documents are written last, so this is the reverse direction: proving the
     // item leg's failure path reaches the document rollback would be vacuous

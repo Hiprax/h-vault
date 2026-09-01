@@ -58,6 +58,8 @@ import {
   // Schemas — config
   publicConfigDataSchema,
   publicConfigResponseSchema,
+  fileEncryptionConfigResponseSchema,
+  documentsConfigResponseSchema,
   // Schemas — document
   documentMetaSchema,
   documentKeyRewrapSchema,
@@ -103,6 +105,7 @@ import {
   formatBytes,
   generateId,
   normalizeUri,
+  documentExtension,
   MAX_LOGIN_BACKUP_CODES,
   MAX_LOGIN_BACKUP_CODE_LENGTH,
   MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH,
@@ -193,9 +196,16 @@ describe('barrel exports (src/index.ts)', () => {
     expect(importOperationsSchema).toBeDefined();
   });
 
-  it('exports config schemas', () => {
+  it('exports config schemas, including BOTH per-feature narrowings', () => {
     expect(publicConfigDataSchema).toBeDefined();
     expect(publicConfigResponseSchema).toBeDefined();
+    // One envelope carries two unrelated features, and each reader validates only
+    // its own block through its own `.pick()` narrowing. A narrowing the barrel did
+    // not re-export would be unreachable from the client, which would quietly send
+    // that reader back to the full schema — the exact coupling the pair exists to
+    // remove.
+    expect(fileEncryptionConfigResponseSchema).toBeDefined();
+    expect(documentsConfigResponseSchema).toBeDefined();
   });
 
   it('exports the document schemas and the framing helpers', () => {
@@ -268,6 +278,11 @@ describe('barrel exports (src/index.ts)', () => {
     expect(typeof formatBytes).toBe('function');
     expect(typeof generateId).toBe('function');
     expect(typeof normalizeUri).toBe('function');
+    // The document store's extension rule has to be reachable from BOTH the
+    // application and the isolated render document, and those two share no module
+    // except this package — so a barrel that did not re-export it would guarantee a
+    // second copy of the rule rather than merely an awkward import.
+    expect(typeof documentExtension).toBe('function');
   });
 
   it('exports the backup-code parser and its bounds', () => {

@@ -309,7 +309,9 @@ const MAX_PAGES = 50;
  * concurrently. Resolves with PromiseSettledResult-style entries so the
  * caller can report failures without aborting the batch.
  *
- * Exported for unit testing. Order is preserved.
+ * Exported so `documentsStore` opens a page of documents through the same
+ * bounded pool this opens a page of vault items with, and so both can be unit
+ * tested directly. Order is preserved.
  */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],

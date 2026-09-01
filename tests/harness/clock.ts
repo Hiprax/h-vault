@@ -44,6 +44,14 @@
  * `timers: 'all'` is available for the suites that genuinely drive timers (a
  * clipboard erase deadline, an auto-lock countdown), because those were already
  * doing it by hand and one definition is better than nine.
+ *
+ * `timers: 'timeouts'` sits between the two, for the suite that has to do BOTH in
+ * one test: drive a real backoff deadline forward, and await work that only
+ * settles on the real event loop — instantiating a WebAssembly module, a Web
+ * Crypto operation, a `Blob.arrayBuffer()`. `'all'` also fakes `setImmediate`,
+ * `process.nextTick` and `queueMicrotask`, which is what makes those awaits hang
+ * for ever rather than merely run late, and `'date'` leaves no deadline to
+ * advance. This mode fakes `setTimeout` and `clearTimeout` and nothing else.
  */
 import { vi } from 'vitest';
 
@@ -75,9 +83,16 @@ export interface TestClockOptions {
   /**
    * `'date'` (default) fakes the wall clock and nothing else, so real I/O still
    * settles. `'all'` fakes the timer functions too, for a suite that drives a
-   * deadline rather than merely reads the clock.
+   * deadline rather than merely reads the clock. `'timeouts'` fakes `setTimeout`
+   * and `clearTimeout` alone, for a suite that must drive a deadline while still
+   * awaiting work that settles on the real event loop.
+   *
+   * NOTE for `'timeouts'`: `Date` is NOT faked in that mode, so the wall clock is
+   * not frozen and {@link advanceClockBy} / {@link setClockTo} do not apply. Move
+   * time with `vi.advanceTimersByTimeAsync`, which advances the timer clock this
+   * mode does control. `at` is accepted but has no observable effect there.
    */
-  timers?: 'date' | 'all';
+  timers?: 'date' | 'all' | 'timeouts';
 }
 
 /**
@@ -89,6 +104,7 @@ export function installTestClock({ at, timers = 'date' }: TestClockOptions = {})
   vi.useFakeTimers({
     now: at ?? Date.now(),
     ...(timers === 'date' ? { toFake: ['Date'] as const } : {}),
+    ...(timers === 'timeouts' ? { toFake: ['setTimeout', 'clearTimeout'] as const } : {}),
   });
 }
 

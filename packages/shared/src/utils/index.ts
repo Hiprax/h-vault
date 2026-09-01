@@ -49,3 +49,40 @@ export function generateId(): string {
   }
   throw new Error('Cryptographic random API is unavailable. Cannot generate secure IDs.');
 }
+
+/**
+ * The extension a document's name claims: the lowercased segment after the LAST
+ * dot.
+ *
+ * ONE definition, in the shared package, because three places have to agree on it
+ * and two of them cannot see each other: the browser derives `ext` for the sealed
+ * metadata blob and checks it against the operator's advisory allowlist, and the
+ * isolated render document keys its renderer off the same value. That document is
+ * built as its own module graph and shares nothing with the application, so a copy
+ * of this rule living on the app side would be a second copy by construction — and
+ * the day someone teaches one of them about `.tar.gz`, the other keeps the old
+ * answer.
+ *
+ * A name with NO dot, and a name whose only dot is LEADING, has no extension:
+ * `Dockerfile`, `Makefile`, `.bashrc` and `.env` all answer `''`. That is a
+ * decision rather than an oversight — recognising those would need a second lookup
+ * keyed by whole filename, which is a second source of truth for one question. A
+ * name with several dots keys on the last segment alone (`archive.tar.gz` is
+ * `gz`), because that is what every file dialog and every content-type table in
+ * general use does.
+ *
+ * A name ending in a dot answers `''` as well, and deliberately WITHOUT a guard of
+ * its own: the slice after the final dot is empty, which is already the right
+ * answer. A `lastDot === name.length - 1` check would read as caution and be
+ * incapable of changing any outcome — a branch no test could ever fail on.
+ *
+ * Lower-cased, so `.SH` and `.sh` are one type. Nothing else is normalised: the
+ * caller decides what an unrecognised extension means, and a value returned here
+ * is never trusted as a claim about what a file actually contains.
+ */
+export function documentExtension(name: string): string {
+  const lastDot = name.lastIndexOf('.');
+  // `<= 0` covers both "no dot at all" (-1) and "the only dot is leading" (0).
+  if (lastDot <= 0) return '';
+  return name.slice(lastDot + 1).toLowerCase();
+}

@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { maskEmail, formatBytes, generateId, normalizeUri } from '../src/utils/index.js';
+import {
+  maskEmail,
+  formatBytes,
+  generateId,
+  normalizeUri,
+  documentExtension,
+} from '../src/utils/index.js';
 
 // ---------------------------------------------------------------------------
 // maskEmail
@@ -290,5 +296,83 @@ describe('normalizeUri', () => {
 
   it('handles protocol-relative URIs with paths', () => {
     expect(normalizeUri('//example.com/path')).toBe('https://example.com/path');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// documentExtension
+//
+// The rule three places have to agree on: the application derives `ext` for the
+// sealed metadata blob and checks it against the operator's advisory allowlist,
+// and the isolated render document keys its renderer off the same value. Those two
+// share no module except this package, so what is pinned here is the behaviour of
+// the ONE copy — including the cases where the honest answer is "no extension",
+// which is what a naive `split('.').pop()` gets wrong.
+// ---------------------------------------------------------------------------
+describe('documentExtension', () => {
+  it('returns the lowercased segment after the last dot', () => {
+    expect(documentExtension('notes.md')).toBe('md');
+  });
+
+  it('keys a multi-dot name on its LAST segment, not its first', () => {
+    // `archive.tar.gz` is a gzip file as far as any renderer is concerned, and a
+    // `split('.')[1]` implementation would answer 'tar'.
+    expect(documentExtension('archive.tar.gz')).toBe('gz');
+  });
+
+  it('lowercases, so .SH and .sh are one type', () => {
+    expect(documentExtension('deploy.SH')).toBe('sh');
+    expect(documentExtension('deploy.Sh')).toBe('sh');
+    expect(documentExtension('deploy.sh')).toBe('sh');
+  });
+
+  it('answers empty for a name with no dot at all', () => {
+    // Deliberate: recognising `Dockerfile` would need a second lookup keyed by
+    // whole filename, which is a second source of truth for one question.
+    expect(documentExtension('Dockerfile')).toBe('');
+    expect(documentExtension('Makefile')).toBe('');
+  });
+
+  it('answers empty for a dotfile, whose only dot is leading', () => {
+    expect(documentExtension('.bashrc')).toBe('');
+    expect(documentExtension('.env')).toBe('');
+  });
+
+  it('answers empty for a name that ends in a dot', () => {
+    // There is no segment after the dot, so there is nothing to key on. Reached by
+    // the slice being empty rather than by a guard of its own, which is why the
+    // function has no `lastDot === length - 1` branch: such a branch could not
+    // change this answer, and a branch that cannot change an answer is one no test
+    // could ever fail on.
+    expect(documentExtension('report.')).toBe('');
+  });
+
+  it('answers empty for an empty name', () => {
+    expect(documentExtension('')).toBe('');
+  });
+
+  it('reads the extension of a dotfile that also has one', () => {
+    // The leading dot is not the LAST one here, so this name does have a type —
+    // the boundary that separates this case from `.bashrc`.
+    expect(documentExtension('.eslintrc.json')).toBe('json');
+  });
+
+  it('keeps a non-ASCII extension rather than refusing it', () => {
+    // Nothing is normalised beyond case: the caller decides what an unrecognised
+    // extension means, and refusing one here would degrade a stored document
+    // instead of the upload that produced it.
+    expect(documentExtension('план.тхт')).toBe('тхт');
+  });
+
+  it('does not treat a dot in a directory-like prefix as the extension', () => {
+    // Not a path parser, and not asked to be one: the LAST dot wins, which is what
+    // every file dialog and content-type table in general use does.
+    expect(documentExtension('v1.2/notes.md')).toBe('md');
+  });
+
+  it('leaves the segment otherwise untouched, spaces and all', () => {
+    // The negative that matters: nothing here trims, strips or validates, so a
+    // caller can never mistake this for a claim about what the file contains.
+    expect(documentExtension('weird.na me')).toBe('na me');
   });
 });

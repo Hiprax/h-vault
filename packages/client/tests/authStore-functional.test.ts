@@ -96,6 +96,25 @@ vi.mock('../src/services/api/client', () => ({
   clearCsrfToken: vi.fn(),
 }));
 
+// The documents store is a COLLABORATOR here, not the unit under test: what
+// `clearStore()` does — abort every controller, zero every document key, fire the
+// per-upload abort — is pinned in `documents-store.test.ts`, against the real
+// store. What belongs to THIS file is the one thing only `authStore` decides:
+// WHEN it is called, relative to everything else lock and logout do.
+const mockDocumentsClearStore = vi.fn();
+/** State sampled at the instant the documents teardown ran. */
+let teardownSnapshot: {
+  vaultKey: unknown;
+  mek: unknown;
+  isLocked: boolean;
+  accessToken: unknown;
+} | null = null;
+vi.mock('../src/stores/documentsStore', () => ({
+  useDocumentsStore: {
+    getState: () => ({ clearStore: mockDocumentsClearStore }),
+  },
+}));
+
 const mockClearHealthResults = vi.fn().mockResolvedValue(undefined);
 vi.mock('../src/services/health/healthResultsStore', () => ({
   clearHealthResults: (...args: unknown[]) => mockClearHealthResults(...args),
@@ -183,6 +202,11 @@ function buildMockJwt(sub: string): string {
 beforeEach(() => {
   vi.clearAllMocks();
   useAuthStore.setState({ ...authInitialState });
+  teardownSnapshot = null;
+  mockDocumentsClearStore.mockImplementation(() => {
+    const { vaultKey, mek, isLocked, accessToken } = useAuthStore.getState();
+    teardownSnapshot = { vaultKey, mek, isLocked, accessToken };
+  });
 
   // Default mock implementations
   vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
@@ -1443,5 +1467,179 @@ describe('remember-me cold-start hint (__hv_remember)', () => {
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
 
     setItemSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The document session is torn down by lock() and by logout(), each at the point
+// its own ordering demands.
+//
+// The two orderings are deliberately opposite. `lock()` secures local state
+// FIRST, before any I/O, so a black-holed connection can never leave the vault
+// unlocked with resident key material. `logout()` INVERTS that — it awaits the
+// server call first, so the Axios interceptor can still read the access token and
+// send a valid Bearer header — which means everything after that await is hostage
+// to the connection. So the document teardown belongs inside the block in one and
+// ahead of the await in the other, and putting it in the "matching" place in both
+// would be wrong in exactly one of them.
+// ---------------------------------------------------------------------------
+
+describe('document session teardown on lock and logout', () => {
+  beforeEach(() => {
+    vi.mocked(lockApi).mockResolvedValue({ data: { success: true } } as never);
+    vi.mocked(logoutApi).mockResolvedValue(undefined as never);
+    // Restored per case, not just cleared: one case below replaces this with a
+    // promise it releases by hand, and `clearAllMocks` resets a mock's CALLS but
+    // keeps its implementation — so without this, a case that failed before its
+    // release would hang every later case in the file behind a promise nobody
+    // will ever settle.
+    vi.mocked(cryptoService.clearCryptoKey).mockResolvedValue(undefined);
+  });
+
+  it('lock() tears the document session down with the vault key ALREADY null', async () => {
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      isLocked: false,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().lock();
+
+    expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
+    // The ordering property `lock()` exists to hold, observed from inside the
+    // teardown itself rather than inferred from the end state: by the time the
+    // documents session is ended, the vault is already locked and its keys are
+    // already gone from the store.
+    expect(teardownSnapshot).toEqual({
+      vaultKey: null,
+      mek: null,
+      isLocked: true,
+      // A lock keeps the session alive, which is what lets the per-upload abort
+      // this teardown fires carry a Bearer header at all.
+      accessToken: 'access-token',
+    });
+  });
+
+  it('lock() tears the document session down even when the audit call never resolves', async () => {
+    // A stalled or black-holed connection. The whole point of securing local state
+    // first is that this cannot leave document keys resident.
+    vi.mocked(lockApi).mockReturnValue(new Promise<never>(() => {}) as never);
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().lock();
+
+    expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
+    expect(useAuthStore.getState().isLocked).toBe(true);
+  });
+
+  it('lock() tears the document session down BEFORE it zeroes the key material', async () => {
+    // The other direction of the same ordering. The snapshot case above catches
+    // the teardown being moved EARLIER, before the state is secured; this one
+    // catches it being moved LATER, out of the secure-local-state-first block and
+    // behind an await. `clearCryptoKey` is the first thing `lock()` awaits after
+    // the teardown, so stalling it freezes `lock()` at exactly that point.
+    let releaseZeroing: () => void = () => {};
+    vi.mocked(cryptoService.clearCryptoKey).mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseZeroing = resolve;
+      }),
+    );
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      isLocked: false,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    const lockPromise = useAuthStore.getState().lock();
+    await Promise.resolve();
+
+    expect(cryptoService.clearCryptoKey).toHaveBeenCalled();
+    expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
+
+    releaseZeroing();
+    await lockPromise;
+    expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
+  });
+
+  it('logout() tears the document session down BEFORE the awaited server call', async () => {
+    let releaseLogoutApi: () => void = () => {};
+    vi.mocked(logoutApi).mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseLogoutApi = resolve;
+      }) as never,
+    );
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    const logoutPromise = useAuthStore.getState().logout();
+    await Promise.resolve();
+
+    // The request is still in flight and the documents session is already over.
+    // Left below the await, a stalled logout would keep every document key
+    // resident and every transfer running for the whole five-second timeout — on
+    // the one path where the user has explicitly asked to end the session.
+    expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
+    expect(logoutApi).toHaveBeenCalled();
+
+    releaseLogoutApi();
+    await logoutPromise;
+    expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
+  });
+
+  it('logout() tears it down while the access token can still be attached', async () => {
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().logout();
+
+    // The reason `logout()` inverts `lock()`'s ordering in the first place: the
+    // per-upload abort the teardown fires goes through the shared Axios instance,
+    // whose request interceptor reads the token out of this store. Moving the
+    // teardown after the state reset would leave every abandoned transfer holding
+    // its quota until the collector reclaimed it an hour later.
+    expect(teardownSnapshot?.accessToken).toBe('access-token');
+    expect(useAuthStore.getState().accessToken).toBeNull();
+  });
+
+  it('logout() still tears the document session down when the server call fails', async () => {
+    vi.mocked(logoutApi).mockRejectedValue(new Error('timeout'));
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  it('a logout with no access token still ends the document session', async () => {
+    useAuthStore.setState({ isAuthenticated: true, vaultKey: {} as CryptoKey });
+
+    await useAuthStore.getState().logout();
+
+    // The server call is skipped entirely on this path; the local teardown is not.
+    expect(logoutApi).not.toHaveBeenCalled();
+    expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
   });
 });

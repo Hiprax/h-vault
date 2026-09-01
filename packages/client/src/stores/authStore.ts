@@ -20,6 +20,7 @@ import { eraseCopiedSecretNow } from '../services/clipboard/clipboardService.js'
 import { logger } from '../lib/logger.js';
 import { decodeJwtPayload } from '../lib/accessToken.js';
 import { useVaultStore } from './vaultStore.js';
+import { useDocumentsStore } from './documentsStore.js';
 import { isAxiosError } from 'axios';
 import type { SuccessfulLoginResponse } from '@hvault/shared';
 import { KDF_ITERATIONS, KDF_ALGORITHM, ENCRYPTION_VERSION, ERROR_CODES } from '@hvault/shared';
@@ -543,6 +544,15 @@ export const useAuthStore = create<AuthState>()(
         eraseCopiedSecretNow();
         // Clear decrypted vault data from the vault store
         useVaultStore.getState().clearStore();
+        // Tear the document session down in the same breath, and for the same
+        // reason: it aborts every in-flight transfer and ZEROES every document key
+        // held in memory. A lock during a long upload is the expected outcome —
+        // auto-lock is a wall-clock deadline and uploading is not activity — so
+        // this has to be inside the secure-local-state-first block, not after the
+        // network call below. A key that decrypts user plaintext must not outlive
+        // the lock, and the per-upload abort it fires is itself un-awaited and
+        // bounded so a stalled connection cannot hold the lock open.
+        useDocumentsStore.getState().clearStore();
 
         // Record the vault_lock audit entry best-effort, AFTER local state is
         // already secured. Fire-and-forget with a bounded per-call timeout so a
@@ -585,6 +595,16 @@ export const useAuthStore = create<AuthState>()(
         // the request, and it runs inside the click that triggered logout, which is
         // the activation Firefox and Safari require for a clipboard write.
         eraseCopiedSecretNow();
+        // The document teardown belongs HERE, beside the clipboard erase and
+        // BEFORE the awaited request — not down with the other `clearStore()`
+        // call, which runs after it. `logout()` inverts `lock()`'s ordering on
+        // purpose, so that the Axios interceptor can still attach the Bearer
+        // token; the cost of that inversion is that everything after the await is
+        // hostage to the connection. Left below it, a stalled logout would keep
+        // every document key resident and every transfer running for the whole
+        // five-second timeout — on the one path where the user has explicitly
+        // asked to end the session.
+        useDocumentsStore.getState().clearStore();
 
         if (accessToken) {
           try {

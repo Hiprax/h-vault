@@ -67,10 +67,29 @@ export const publicConfigResponseSchema = z.object({
  *
  * `.pick()` rather than a second literal shape, so `fileEncryption` has exactly one
  * definition and cannot drift; STRIP mode (the default) then ignores `documents`
- * entirely rather than validating and rejecting it. The full schema above is still
- * what a DOCUMENTS reader must use, and it stays strict on purpose: a malformed
- * block has to be refused by the code that would otherwise act on it.
+ * entirely rather than validating and rejecting it.
  */
 export const fileEncryptionConfigResponseSchema = publicConfigResponseSchema.extend({
   data: publicConfigDataSchema.pick({ fileEncryption: true }),
+});
+
+/**
+ * The same envelope again, narrowed to the block a DOCUMENTS reader acts on.
+ *
+ * The coupling runs BOTH ways, which is easy to miss and is the reason this
+ * export exists as well as the one above. `fileEncryption` is REQUIRED in
+ * `publicConfigDataSchema`, so a documents reader validating the whole document
+ * would fail its parse — and fall back to "the feature is unavailable", hiding
+ * the document store — because of a value it never reads. That is the same defect
+ * as its mirror image, pointing the other way: a feature breaking for a reason
+ * nobody can see, caused by a block it does not look at.
+ *
+ * Both narrowings are `.pick()` off the one full shape, so neither restates a
+ * field and the full schema stays available for a reader that genuinely wants the
+ * whole envelope. Narrow does NOT mean lenient: within the block it picks, this is
+ * exactly as strict as the full schema, so a malformed `documents` block is still
+ * refused by the code that would otherwise act on it.
+ */
+export const documentsConfigResponseSchema = publicConfigResponseSchema.extend({
+  data: publicConfigDataSchema.pick({ documents: true }),
 });
