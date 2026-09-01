@@ -70,10 +70,15 @@ describe('API Documentation', () => {
       expect(paths).toContain('/user/profile');
       expect(paths).toContain('/tools/check-password-breach');
       expect(paths).toContain('/backup/setup');
+      expect(paths).toContain('/documents');
+      expect(paths).toContain('/documents/trash');
+      expect(paths).toContain('/documents/usage');
       expect(paths).toContain('/documents/uploads');
       expect(paths).toContain('/documents/uploads/{id}');
       expect(paths).toContain('/documents/uploads/{id}/parts/{partNumber}');
       expect(paths).toContain('/documents/uploads/{id}/complete');
+      expect(paths).toContain('/documents/{id}');
+      expect(paths).toContain('/documents/{id}/segments/{index}');
     });
   });
 

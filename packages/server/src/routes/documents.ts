@@ -5,6 +5,7 @@ import { validate } from '../middleware/validate.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 import {
   documentPartLimiter,
+  documentReadLimiter,
   documentUploadLimiter,
   generalAuthLimiter,
 } from '../middleware/rateLimiter.js';
@@ -16,13 +17,21 @@ import {
 import {
   completeDocumentUploadSchema,
   documentPartParamsSchema,
+  documentSegmentParamsSchema,
   initDocumentUploadSchema,
+  listDocumentTrashSchema,
+  listDocumentsSchema,
 } from '@hvault/shared';
 import {
   abortUpload,
   completeUpload,
+  getDocument,
+  getSegment,
   getUpload,
+  getUsage,
   initUpload,
+  listDocumentTrash,
+  listDocuments,
   listUploads,
   uploadPart,
 } from '../controllers/documentController.js';
@@ -36,6 +45,23 @@ const router = Router();
 // bucket spends no rate-limit budget answering requests it will always refuse.
 router.use(authenticate);
 router.use(requireStorage);
+
+// ── Collections ──────────────────────────────────────────────────────
+//
+// The three literal paths (`/trash`, `/usage`, and `/uploads` below) are all
+// declared ABOVE the `/:id` routes at the foot of this file — exactly as
+// `routes/vault.ts` declares `/items/trash` before `/items/:id`. Express matches
+// in declaration order, so a `/:id` above any of them would swallow the literal
+// word as an id and answer 400 for a malformed ObjectId.
+
+router.get('/', generalAuthLimiter, validate(listDocumentsSchema, 'query'), listDocuments);
+router.get(
+  '/trash',
+  generalAuthLimiter,
+  validate(listDocumentTrashSchema, 'query'),
+  listDocumentTrash,
+);
+router.get('/usage', generalAuthLimiter, getUsage);
 
 // ── Uploads ──────────────────────────────────────────────────────────
 //
@@ -102,6 +128,39 @@ router.post(
   validateObjectId(),
   validate(completeDocumentUploadSchema, 'body'),
   completeUpload,
+);
+
+// ── One document ─────────────────────────────────────────────────────
+//
+// LAST in the file, because these are the routes that take a bare `/:id`.
+
+router.get('/:id', generalAuthLimiter, validateObjectId(), getDocument);
+
+// One sealed segment.
+//
+// `documentReadLimiter` rather than `generalAuthLimiter`, because this is the
+// only read whose request count scales with a file's size: one download is one
+// request per segment, so a single 100 MB document is thirteen of them. Its
+// ceiling is derived from the operator's own `MAX_DOCUMENT_SIZE_MB` for exactly
+// that reason, and it is user-keyed like every other document limiter, so
+// downloading can never spend a budget a sign-in needs.
+//
+// The chain mirrors the part route above, and for the same two reasons:
+// `validateObjectId()` runs FIRST so a malformed id gets this codebase's one
+// "Invalid id format" message rather than a Zod issue, and
+// `documentSegmentParamsSchema` declares `id` as well as `index` because
+// `validate()` REPLACES `req.params` wholesale and `z.object()` strips by
+// default — a schema naming only `index` would delete `id` from the request and
+// the handler would read `undefined`.
+//
+// There is no body parser and no `Range` header: the byte window is computed
+// server-side from the row.
+router.get(
+  '/:id/segments/:index',
+  documentReadLimiter,
+  validateObjectId(),
+  validate(documentSegmentParamsSchema, 'params'),
+  getSegment,
 );
 
 export default router;

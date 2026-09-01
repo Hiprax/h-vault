@@ -797,14 +797,19 @@ Available only where object storage is configured; every route answers **503** o
 is encrypted in the browser before a byte leaves it: the server stores ciphertext, a wrapped key and
 sizes, and never sees a filename, a type, a tag or a note.
 
-| Method | Endpoint                                   | Description                                                                                                   |
-| ------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| GET    | `/documents/uploads`                       | Transfers in progress, with the parts already received                                                        |
-| POST   | `/documents/uploads`                       | Open a transfer; returns the id the browser encrypts against                                                  |
-| GET    | `/documents/uploads/:id`                   | One transfer and its part ledger, so an interrupted upload resumes                                            |
-| DELETE | `/documents/uploads/:id`                   | Cancel a transfer and release what the storage engine holds                                                   |
-| PUT    | `/documents/uploads/:id/parts/:partNumber` | Store one sealed segment (`application/octet-stream`, `Content-Length` required, `x-hv-part-sha256` verified) |
-| POST   | `/documents/uploads/:id/complete`          | Commit the document; sizes are derived from what the storage engine holds, never from the request             |
+| Method | Endpoint                                   | Description                                                                                                    |
+| ------ | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| GET    | `/documents`                               | Active documents (paginated; filter by folder or favorite, sort by created/updated/favorite)                   |
+| GET    | `/documents/trash`                         | Trashed documents (paginated); they still occupy storage until permanently deleted                             |
+| GET    | `/documents/usage`                         | Document count and bytes stored, with the per-user quota and per-document size cap                             |
+| GET    | `/documents/uploads`                       | Transfers in progress, with the parts already received                                                         |
+| POST   | `/documents/uploads`                       | Open a transfer; returns the id the browser encrypts against                                                   |
+| GET    | `/documents/uploads/:id`                   | One transfer and its part ledger, so an interrupted upload resumes                                             |
+| DELETE | `/documents/uploads/:id`                   | Cancel a transfer and release what the storage engine holds                                                    |
+| PUT    | `/documents/uploads/:id/parts/:partNumber` | Store one sealed segment (`application/octet-stream`, `Content-Length` required, `x-hv-part-sha256` verified)  |
+| POST   | `/documents/uploads/:id/complete`          | Commit the document; sizes are derived from what the storage engine holds, never from the request              |
+| GET    | `/documents/:id`                           | One document row: the wrapped key, the framing and the sealed metadata blob                                    |
+| GET    | `/documents/:id/segments/:index`           | One sealed segment as raw bytes (`no-store`); the byte range is computed server-side, never sent by the client |
 
 </details>
 
@@ -904,7 +909,7 @@ Two rules govern where a limiter goes, and both were learned the hard way:
 | Password verify | 5 / user   | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password                                                                                                                                                 |
 | Breach check    | 30 / user  | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                                                                                                                                                                   |
 | Breach batch    | 300 / user | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                                                                                                                                                                   |
-| General auth    | 60 / user  | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, backup settings and history, lock, logout, logout-all                                                                                                                                                                              |
+| General auth    | 60 / user  | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, document list, document trash, document usage, one document's metadata, backup settings and history, lock, logout, logout-all                                                                                                      |
 | Heavy Ops       | 10 / IP    | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                                                                                                                                                                             |
 | Import          | 60 / user  | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                                                                                                                                                   |
 | Document upload | 120 / user | 15 min | opening, completing and cancelling a document transfer — three requests per document whatever its size                                                                                                                                                                                                   |

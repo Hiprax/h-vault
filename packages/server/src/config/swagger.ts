@@ -1034,6 +1034,33 @@ export const swaggerSpec: JsonObject = {
           updatedAt: { type: 'string', format: 'date-time' },
         },
       },
+      DocumentUsageResponse: {
+        type: 'object',
+        description:
+          'What this account has stored and what it may store. Trashed documents are counted in both measurements, because they still occupy their objects in the bucket and both caps are enforced that way; the UI says so rather than letting a user assume a deletion failed. The two limits are reported alongside the measurements because an operator can change either at a restart.',
+        required: ['documentCount', 'usedBytes', 'quotaBytes', 'maxDocumentSizeBytes'],
+        properties: {
+          documentCount: { type: 'integer', minimum: 0, example: 42 },
+          usedBytes: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Plaintext bytes, summed over every document including trashed ones.',
+            example: 734003200,
+          },
+          quotaBytes: {
+            type: 'integer',
+            minimum: 1,
+            description: 'DOCUMENT_STORAGE_QUOTA_MB_PER_USER, in bytes.',
+            example: 2147483648,
+          },
+          maxDocumentSizeBytes: {
+            type: 'integer',
+            minimum: 1,
+            description: 'MAX_DOCUMENT_SIZE_MB, in bytes.',
+            example: 104857600,
+          },
+        },
+      },
 
       // -- Health --
       HealthResponse: {
@@ -1120,7 +1147,154 @@ export const swaggerSpec: JsonObject = {
     //
     // Every route here sits behind `authenticate` AND a storage guard that answers
     // 503 where the operator has configured no object storage, so 503 is a
-    // documented outcome of all four rather than an error condition.
+    // documented outcome of every one of them rather than an error condition.
+    '/documents': {
+      get: {
+        operationId: 'listDocuments',
+        tags: ['Documents'],
+        summary: 'List documents',
+        description:
+          "The caller's own documents that are not in the trash, paginated. The server cannot sort by name — the name lives inside encryptedMeta and it never sees it — so the sort keys are the three columns it does hold, and the document id breaks ties so that skip/limit pagination has a total order and a row cannot slip across a page boundary between two requests.",
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
+          {
+            name: 'limit',
+            in: 'query',
+            schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+          },
+          {
+            name: 'folderId',
+            in: 'query',
+            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c1' },
+          },
+          { name: 'favorite', in: 'query', schema: { type: 'boolean', example: true } },
+          {
+            name: 'sortBy',
+            in: 'query',
+            schema: {
+              type: 'string',
+              enum: ['createdAt', 'updatedAt', 'favorite'],
+              default: 'updatedAt',
+            },
+          },
+          {
+            name: 'sortOrder',
+            in: 'query',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Paginated documents',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/DocumentResponse' },
+                    },
+                    pagination: { $ref: '#/components/schemas/Pagination' },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+    '/documents/trash': {
+      get: {
+        operationId: 'listDocumentTrash',
+        tags: ['Documents'],
+        summary: 'List trashed documents',
+        description:
+          'Documents this account has moved to the trash, paginated and sorted by deletion time by default. A trashed document still occupies its object in the bucket and still counts against the storage quota reported by GET /documents/usage, so recovering that space needs a permanent delete rather than a trash.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
+          {
+            name: 'limit',
+            in: 'query',
+            schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+          },
+          {
+            name: 'sortBy',
+            in: 'query',
+            schema: {
+              type: 'string',
+              enum: ['deletedAt', 'createdAt', 'updatedAt'],
+              default: 'deletedAt',
+            },
+          },
+          {
+            name: 'sortOrder',
+            in: 'query',
+            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Paginated trashed documents',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: {
+                      type: 'array',
+                      items: { $ref: '#/components/schemas/DocumentResponse' },
+                    },
+                    pagination: { $ref: '#/components/schemas/Pagination' },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+    '/documents/usage': {
+      get: {
+        operationId: 'getDocumentUsage',
+        tags: ['Documents'],
+        summary: 'Storage usage and limits',
+        description:
+          'The document count and plaintext bytes this account holds, alongside the per-user quota and the per-document size cap the operator configured. Both measurements include trashed documents, because both caps are enforced that way and a usage figure smaller than the one an upload is refused against would be an explanation the user cannot see.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: {
+            description: 'Usage and limits',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: { $ref: '#/components/schemas/DocumentUsageResponse' },
+                  },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
     '/documents/uploads': {
       get: {
         operationId: 'listDocumentUploads',
@@ -1401,6 +1575,94 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+
+    '/documents/{id}': {
+      get: {
+        operationId: 'getDocument',
+        tags: ['Documents'],
+        summary: 'Get one document',
+        description:
+          'One document row: the wrapped document key, the plaintext framing parameters, the sealed metadata blob and the sizes. Trashed documents are returned too, and carry deletedAt, so the trash view can open one before restoring or purging it. An id belonging to another account is indistinguishable from one that never existed. Before decrypting anything a client should check this row against itself (the two size identities), and then check every framing field against the AUTHENTICATED copy inside the metadata blob — that second comparison is mandatory and is what a substituted salt or nonce prefix is caught by.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'The document',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: { $ref: '#/components/schemas/DocumentResponse' },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+
+    '/documents/{id}/segments/{index}': {
+      get: {
+        operationId: 'getDocumentSegment',
+        tags: ['Documents'],
+        summary: 'Read one sealed segment',
+        description:
+          "One segment of the stored ciphertext, streamed as application/octet-stream with Cache-Control: no-store and an exact Content-Length. There is no Range header on this endpoint and there must never be one: the byte window is computed on the server from the document's own framing columns, so a segment can only ever be read from the offset it was written to. Segment indices are zero-based and the last one is chunkCount - 1; an index outside that is 400, and a document whose stored object has gone missing is 404. The client requests segments one at a time, verifies each one's authentication tag, and compares a running SHA-256 with the digest inside the metadata blob at the end.",
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+          },
+          {
+            name: 'index',
+            in: 'path',
+            required: true,
+            description: 'Zero-based segment index, below the document chunkCount.',
+            schema: { type: 'integer', minimum: 0, example: 0 },
+          },
+        ],
+        responses: {
+          200: {
+            description:
+              'The sealed segment. The body is raw ciphertext, not a JSON envelope, and Content-Length is the exact segment length so a truncated response cannot be mistaken for a whole one.',
+            headers: {
+              'Cache-Control': {
+                description: 'Always no-store: a segment is user ciphertext and is never cached.',
+                schema: { type: 'string', example: 'no-store' },
+              },
+            },
+            content: {
+              'application/octet-stream': {
+                schema: { type: 'string', format: 'binary' },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
           429: { $ref: '#/components/responses/RateLimited' },
           503: { $ref: '#/components/responses/StorageUnavailable' },
         },

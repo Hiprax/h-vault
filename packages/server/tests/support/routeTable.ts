@@ -701,6 +701,36 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
   // why an unconfigured deployment spends no rate-limit budget.
   {
     method: 'get',
+    // Trailing slash, as the two `/api/v1/folders/` rows carry: `collectAppRoutes`
+    // composes an observed path as mount + the router's own declaration, and a
+    // router root is declared as `'/'`.
+    path: '/api/v1/documents/',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/trash',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/usage',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'get',
     path: '/api/v1/documents/uploads',
     auth: 'required',
     csrf: 'exempt',
@@ -767,6 +797,28 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     owned: { param: 'id', resource: 'documentUpload' },
     when: 'always',
     note: 'The only route that creates a documents row; a repeat completion is reported as the row the first one committed.',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/:id',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'document' },
+    when: 'always',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/:id/segments/:index',
+    auth: 'required',
+    csrf: 'exempt',
+    // `documentReadLimiter`, not `generalAuthLimiter`: one download is one
+    // request per segment, so this is the only read whose volume scales with the
+    // operator's own size cap, and its ceiling is derived from it.
+    limiters: ['documentReadLimiter'],
+    owned: { param: 'id', resource: 'document' },
+    when: 'always',
+    note: 'Takes a second path parameter, :index, which authz-matrix.test.ts supplies through its scenario. The only route in this application that answers with raw bytes rather than a JSON envelope.',
   },
 
   // ── /api/v1 (health, config) ──────────────────────────────────────────

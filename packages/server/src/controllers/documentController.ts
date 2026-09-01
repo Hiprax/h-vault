@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
+import { pipeline } from 'node:stream/promises';
 import type { Request, Response } from 'express';
 import mongoose, { type HydratedDocument } from 'mongoose';
-import { catchAsync, httpErrors } from '@hiprax/errors';
+import { catchAsync, httpErrors, ErrorHandler } from '@hiprax/errors';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   DOCUMENT_FRAMING_MISMATCH_MESSAGE,
@@ -15,7 +16,10 @@ import {
 import type {
   CompleteDocumentUploadInput,
   DocumentPartParams,
+  DocumentSegmentParams,
   InitDocumentUploadInput,
+  ListDocumentTrashInput,
+  ListDocumentsInput,
 } from '@hvault/shared';
 import { config } from '../config/index.js';
 import { createModuleLogger } from '../utils/logger.js';
@@ -25,8 +29,8 @@ import { Folder } from '../models/Folder.js';
 import { User } from '../models/User.js';
 import { createAuditLog } from '../services/auditService.js';
 import { getStorage } from '../services/storage/index.js';
-import type { StoragePart } from '../services/storage/types.js';
-import { buildObjectKey, expectedPartSize } from '../utils/documentObjects.js';
+import type { StoragePart, StorageRangeRead } from '../services/storage/types.js';
+import { buildObjectKey, expectedPartSize, segmentRange } from '../utils/documentObjects.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import {
   assertVaultNotRotating,
@@ -85,6 +89,26 @@ const ALLOWED_INIT_FIELDS = new Set([
  * is lean, so this projection is the control rather than a second line of defense.
  */
 const UPLOAD_PROJECTION = '-userId -objectKey -s3UploadId -encryptedDek -dekIv -dekTag -parts.etag';
+
+/**
+ * The committed-document fields a client is allowed to see.
+ *
+ * It reproduces `Document`'s own `toJSON` transform EXACTLY — `__v`, `userId` and
+ * `objectKey` — and that exactness is the point twice over.
+ *
+ * First, because a `.lean()` read does not run `toJSON`, and every read on this
+ * route file is lean. So this projection is the control, not a second line of
+ * defense: `objectKey` is the one server-assigned address on the row, and a
+ * client that never learns it cannot form an expectation about it.
+ *
+ * Second, because `POST /documents/uploads/:id/complete` answers with a HYDRATED
+ * document and therefore goes through `toJSON`, while every read below is lean and
+ * goes through this. The client parses both with the same
+ * `documentResponseSchema`, so the two shapes have to be the same shape; a `__v`
+ * present on one and absent on the other is exactly the kind of difference that
+ * shows up as a validation failure on a code path nobody tested.
+ */
+const DOCUMENT_PROJECTION = '-__v -userId -objectKey';
 
 /**
  * The header carrying the client's SHA-256 of the sealed segment it is sending.
@@ -1240,3 +1264,295 @@ async function completeUnderLock(
 
   return { kind: 'document', document };
 }
+
+// ── Reads ────────────────────────────────────────────────────────────
+//
+// Four JSON reads and one byte stream. Every one of them scopes its query by
+// `{ userId }` rather than by `_id` alone, so a foreign id and an id that never
+// existed produce the same 404 and neither enumerates another account.
+//
+// None of them is rate-limited beyond `generalAuthLimiter`, except the segment
+// stream, which carries `documentReadLimiter`: one download is one request per
+// segment, so it is the only read whose volume scales with the operator's own
+// size cap.
+
+/**
+ * `GET /documents` — the caller's active documents, paginated.
+ *
+ * The sort key is NOT re-checked against a second allowlist here, unlike
+ * `vaultController.listItems`. `listDocumentsSchema` declares it as a
+ * `z.enum([...])` and `validate(schema, 'query')` REPLACES `req.query` with the
+ * parsed result, so the enum is the allowlist; a mirrored array beside it would
+ * be a second copy of the same rule and a branch that can never be taken.
+ *
+ * `_id` is appended to the sort as a TIEBREAK, and that is a correctness fix
+ * rather than tidiness. Pagination here is `skip`/`limit`, so the order has to be
+ * TOTAL: two documents sharing an `updatedAt` (or, on `favorite`, the thousands
+ * that share a boolean) may otherwise come back in a different order on each
+ * request, and a row that moves across the page boundary between two requests is
+ * one the client either sees twice or never sees at all.
+ */
+export const listDocuments = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { page, limit, folderId, favorite, sortBy, sortOrder } =
+    req.query as unknown as ListDocumentsInput;
+
+  // `deletedAt: null` matches a row whose field is ABSENT as well as one holding
+  // an explicit null, which is what makes it the right predicate for a column
+  // that defaults to `undefined` — and it is the same predicate
+  // `vaultController.listItems` uses, so the two lists cannot come to mean
+  // different things by "active".
+  const filter: Record<string, unknown> = { userId, deletedAt: null };
+  if (folderId !== undefined) filter.folderId = folderId;
+  if (favorite !== undefined) filter.favorite = favorite;
+
+  const sortDirection = sortOrder === 'asc' ? 1 : -1;
+
+  const [documents, total] = await Promise.all([
+    Document.find(filter)
+      .select(DOCUMENT_PROJECTION)
+      .sort({ [sortBy]: sortDirection, _id: sortDirection })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
+    Document.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    data: documents,
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  });
+});
+
+/**
+ * `GET /documents/trash` — the caller's trashed documents.
+ *
+ * A separate route rather than a `?trash=true` flag on the list above, exactly as
+ * trashed vault items have their own route: the two views have different sort
+ * keys (`deletedAt` is meaningless on an active row) and different actions.
+ *
+ * A trashed document still occupies its object in the bucket, so it still counts
+ * against `GET /documents/usage`. That is deliberate and the UI says so; a user
+ * who deleted a file and saw no space returned would otherwise assume the
+ * deletion failed.
+ */
+export const listDocumentTrash = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { page, limit, sortBy, sortOrder } = req.query as unknown as ListDocumentTrashInput;
+
+  const filter = { userId, deletedAt: { $exists: true, $ne: null } };
+  const sortDirection = sortOrder === 'asc' ? 1 : -1;
+
+  const [documents, total] = await Promise.all([
+    Document.find(filter)
+      .select(DOCUMENT_PROJECTION)
+      .sort({ [sortBy]: sortDirection, _id: sortDirection })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
+    Document.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    data: documents,
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  });
+});
+
+/**
+ * `GET /documents/usage` — what this account has stored and what it may store.
+ *
+ * The two limits are reported alongside the two measurements deliberately: the
+ * operator can change either at any restart, so a client that cached them from
+ * `GET /config` at sign-in would draw a quota bar against a number that has since
+ * moved.
+ *
+ * `documentCount` counts TRASHED rows and `usedBytes` counts their bytes, because
+ * both caps are enforced that way: `initUpload` measures the document count with
+ * the same unfiltered query and the quota through the same `committedBytesFor`.
+ * A usage endpoint that reported a smaller number than the endpoint that refuses
+ * an upload would be an explanation for a refusal that the user cannot see.
+ */
+export const getUsage = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+
+  const [documentCount, usedBytes] = await Promise.all([
+    Document.countDocuments({ userId }),
+    committedBytesFor(userId),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    data: {
+      documentCount,
+      usedBytes,
+      quotaBytes: storageQuotaBytes(),
+      maxDocumentSizeBytes: maxDocumentBytes(),
+    },
+  });
+});
+
+/**
+ * `GET /documents/:id` — one document's row.
+ *
+ * Trashed rows are returned rather than hidden, which is what lets the trash view
+ * open a document before restoring or purging it; `deletedAt` is on the row, so a
+ * caller can always tell. `vaultController.getItem` behaves the same way.
+ *
+ * This is the response the client checks against `documentResponseSchema` before
+ * it decrypts anything, and then against the AUTHENTICATED copy of the framing
+ * inside the metadata blob. The second comparison is the mandatory one and it
+ * belongs to the code that holds the DEK; this endpoint's job is only to hand
+ * back the row it was asked for, which is why the client also asserts the
+ * returned `_id` is the one it requested.
+ */
+export const getDocument = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { id } = req.params as { id: string };
+
+  const document = await Document.findOne({ _id: id, userId }).select(DOCUMENT_PROJECTION).lean();
+  if (!document) {
+    throw httpErrors.notFound('Document not found');
+  }
+
+  res.status(200).json({ success: true, data: document });
+});
+
+/**
+ * `GET /documents/:id/segments/:index` — one sealed segment, streamed.
+ *
+ * ## The range is computed, never accepted
+ *
+ * There is no `Range` header on this route and there must never be one. The byte
+ * window comes from `segmentRange`, out of the columns on the ROW — the same
+ * function the completion endpoint measures every part with, so a segment can
+ * only ever be read from the offset it was written to. A client-supplied range
+ * would let a caller ask for a window that straddles two segments; those bytes
+ * decrypt to nothing (the tag check fails), so the damage would be a confusing
+ * corruption report rather than a disclosure, but the cure is the same and it is
+ * free: the server already knows exactly which bytes segment `i` is.
+ *
+ * `chunkPlaintextBytes` and `ciphertextBytes` are read from the row rather than
+ * from `DOCUMENT_PLAINTEXT_CHUNK_BYTES`, so changing that constant cannot
+ * re-frame a document that already exists.
+ *
+ * ## Why the bytes are streamed rather than buffered
+ *
+ * A segment is up to 8 MiB. Buffering one per in-flight download would make this
+ * process's memory a multiple of that times the number of concurrent readers, in
+ * a container running under a fixed limit; piping bounds it by the socket
+ * instead.
+ *
+ * ## The headers, and why each is there
+ *
+ *   * `Content-Type: application/octet-stream` — these are opaque sealed bytes.
+ *     Anything else invites a browser to sniff them.
+ *   * `Cache-Control: no-store` — a segment is user ciphertext, and it must not
+ *     survive in a disk cache, a shared-computer profile or an intermediary. The
+ *     service worker already pins `/api/` to `NetworkOnly`; this is the half that
+ *     does not depend on the service worker being installed.
+ *   * `Content-Length` — the EXACT segment length, taken from the framing rather
+ *     than from whatever the engine chose to report, so a short read is a
+ *     truncated response the client cannot mistake for a whole segment.
+ *
+ * ## A missing object is a 404
+ *
+ * There is deliberately no `objectMissing` column on the row: an object that has
+ * gone is discovered here, and the provider's `NoSuchKey` becomes a 404 carrying
+ * a message about the DOCUMENT rather than about a storage key, because that is
+ * what the UI renders. A 404 is not redacted by the error middleware (only 5xx
+ * is, and only in production), so the message really does reach the client.
+ */
+export const getSegment = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { id, index } = req.params as unknown as DocumentSegmentParams;
+
+  const document = await Document.findOne({ _id: id, userId })
+    // `objectKey` is deliberately excluded from every other read on this route
+    // file; it is selected here because this is the one handler that addresses
+    // the object, and it never leaves the process.
+    .select('objectKey chunkCount chunkPlaintextBytes ciphertextBytes')
+    .lean();
+  if (!document) {
+    throw httpErrors.notFound('Document not found');
+  }
+
+  // The row is what bounds the index, and the check has to happen AFTER the
+  // lookup for that reason. The param schema has already refused a negative, a
+  // non-decimal and anything past the global chunk ceiling; this is the bound
+  // that belongs to THIS document.
+  if (index >= document.chunkCount) {
+    throw httpErrors.badRequest(
+      `This document has ${String(document.chunkCount)} segment(s); segment ${String(index)} is outside it.`,
+    );
+  }
+
+  // Throws a `RangeError` for a row whose framing columns cannot describe an
+  // object of the recorded length. That cannot happen for a row this application
+  // committed — the completion endpoint establishes exactly those identities, and
+  // the model's own minimums back them — so it is deliberately not caught: a row
+  // written by a migration or a repair script that broke them should surface as a
+  // server error rather than as a range that reads the wrong bytes.
+  const range = segmentRange(
+    index,
+    document.chunkCount,
+    document.chunkPlaintextBytes,
+    document.ciphertextBytes,
+  );
+
+  let read: StorageRangeRead;
+  try {
+    read = await getStorage().getObjectRange(document.objectKey, range.start, range.end);
+  } catch (error) {
+    // The provider maps `NoSuchKey` and `NotFound` to a 404 and everything else
+    // to 503 or 500, so this narrows to exactly the missing-object case and
+    // re-words it. The original is kept on `cause` for the structured log.
+    if (error instanceof ErrorHandler && error.statusCode === 404) {
+      throw httpErrors.notFound(
+        'The stored contents of this document are missing. It cannot be downloaded.',
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+
+  if (read.bytes !== range.length) {
+    // Refused BEFORE a byte is written, so the client never sees a partial
+    // segment with a `Content-Length` that promised a whole one. Destroying the
+    // body matters: an unread stream holds the engine's connection open.
+    read.body.destroy();
+    logger.error('The storage engine returned a segment of the wrong length', {
+      userId,
+      documentId: id,
+      index,
+      expected: range.length,
+      received: read.bytes,
+    });
+    throw httpErrors.internalServerError('The stored document does not match its recorded size');
+  }
+
+  res.status(200);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Length', String(range.length));
+
+  try {
+    await pipeline(read.body, res);
+  } catch (error) {
+    // `pipeline` destroys both streams on failure, so by the time this runs the
+    // client's connection has already been reset and there is no response left to
+    // write: re-throwing would only ask the error middleware to serialise JSON
+    // onto a socket that is gone. A reset is also the RIGHT outcome — the
+    // declared `Content-Length` means a truncated body cannot be mistaken for a
+    // whole segment, and the segment's authentication tag would refuse it even if
+    // it were.
+    logger.error('A document segment stream failed part-way through', {
+      userId,
+      documentId: id,
+      index,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});

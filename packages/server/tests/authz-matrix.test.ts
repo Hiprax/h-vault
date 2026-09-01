@@ -250,6 +250,18 @@ interface Scenario {
   /** What the OWNER receives. */
   ownerStatus: number;
   /**
+   * The owner's response body is the document's raw bytes rather than this
+   * application's JSON envelope.
+   *
+   * True for exactly one route, `GET /documents/:id/segments/:index`, and the
+   * flag exists because the two things every other read asserts are simply not
+   * there: an octet-stream response has no `success` field and no `_id` to echo
+   * back. What replaces them is the pair of headers only this route sets and a
+   * body equal, byte for byte, to what was stored — a handler that answered with
+   * another document's segment could not produce that by accident.
+   */
+  ownerRespondsWithBytes?: boolean;
+  /**
    * Whether a legitimate call CHANGES the target document.
    *
    * This is the control for the refusal case, not bookkeeping. "A non-owner
@@ -430,7 +442,15 @@ const CALLS: Record<
   string,
   Pick<
     Scenario,
-    'prepare' | 'query' | 'params' | 'body' | 'raw' | 'headers' | 'ownerStatus' | 'ownerMutates'
+    | 'prepare'
+    | 'query'
+    | 'params'
+    | 'body'
+    | 'raw'
+    | 'headers'
+    | 'ownerStatus'
+    | 'ownerMutates'
+    | 'ownerRespondsWithBytes'
   >
 > = {
   'GET /api/v1/vault/items/:id': { ownerStatus: 200, ownerMutates: false },
@@ -455,10 +475,30 @@ const CALLS: Record<
   },
   'DELETE /api/v1/user/sessions/:id': { ownerStatus: 200, ownerMutates: true },
   'DELETE /api/v1/user/trusted-devices/:id': { ownerStatus: 200, ownerMutates: true },
-  // Only the two owned document routes THIS release mounts. `CALLS` is keyed by
+  // Only the owned document routes THIS release mounts. `CALLS` is keyed by
   // route, so an entry written ahead of the route it names is an orphan and the
   // "names no scenario for a route the table does not declare" case above fails
   // by design.
+  'GET /api/v1/documents/:id': { ownerStatus: 200, ownerMutates: false },
+  'GET /api/v1/documents/:id/segments/:index': {
+    ownerStatus: 200,
+    ownerMutates: false,
+    ownerRespondsWithBytes: true,
+    // Segment 0 of the one-segment document the shared `document` scenario
+    // seeds. `PLACEHOLDER_PARAM` would supply `1`, which is a real index on some
+    // documents and outside this one, so the 400 it earns would hide whatever
+    // this case is really trying to observe.
+    params: { index: '0' },
+    // The shared `document` seed writes a ROW and no object, because three of
+    // the four routes that use it never reach storage. This is the one that
+    // does, so it stores the sealed segment the row's `ciphertextBytes` already
+    // describes — `MATRIX_PART_BODY` is exactly 1024 plaintext bytes plus one
+    // authentication tag, which is what `seedDocument` records.
+    prepare: async (id) => {
+      const document = await Document.findById(id).lean();
+      await storageRef.current!.putObject(document!.objectKey, MATRIX_PART_BODY);
+    },
+  },
   'GET /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: false },
   'DELETE /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: true },
   'POST /api/v1/documents/uploads/:id/complete': {
@@ -559,7 +599,7 @@ describe('the matrix covers the table', () => {
     expect(orphaned, 'scenario(s) whose route is no longer in the table').toEqual([]);
   });
 
-  it('runs the matrix over all fourteen id-taking routes', () => {
+  it('runs the matrix over all sixteen id-taking routes', () => {
     // A pinned count, because the cheapest way to silence a failing IDOR case
     // is to change its row's `owned` to null: route-table.test.ts would still
     // pass (it only forces `owned` non-null for paths carrying a parameter, and
@@ -571,7 +611,7 @@ describe('the matrix covers the table', () => {
     // exercised-row count agree. Both are filters of the same array, so that
     // comparison is n === n and cannot fail.
     expect(OWNED_ROWS.map(rowKey).sort()).toEqual(Object.keys(CALLS).sort());
-    expect(OWNED_ROWS).toHaveLength(14);
+    expect(OWNED_ROWS).toHaveLength(16);
   });
 });
 
@@ -603,9 +643,22 @@ describe('cross-user isolation, per id-taking route', () => {
       });
 
       expect(res.status, JSON.stringify(res.body)).toBe(scenario.ownerStatus);
-      expect(res.body.success).toBe(true);
 
       const after = await scenario.read(id);
+      if (scenario.ownerRespondsWithBytes === true) {
+        // Raw ciphertext, so there is no envelope to check. The substitutes are
+        // the two headers only this route sets and the bytes themselves, which
+        // must be the ones `prepare` stored: a handler reading the wrong offset,
+        // the wrong object or a truncated range fails on the body, and one that
+        // let the response be cached fails on the header.
+        expect(res.headers['content-type']).toBe('application/octet-stream');
+        expect(res.headers['cache-control']).toBe('no-store');
+        expect(res.body).toEqual(MATRIX_PART_BODY);
+        expect(after).toEqual(before);
+        return;
+      }
+
+      expect(res.body.success).toBe(true);
       if (scenario.ownerMutates) {
         expect(
           after,
