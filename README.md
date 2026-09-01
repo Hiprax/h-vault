@@ -855,14 +855,14 @@ the current vault and send only what is left.
 <details>
 <summary><b>Public and operational</b></summary>
 
-| Method | Endpoint             | Auth  | Description                                                                   |
-| ------ | -------------------- | ----- | ----------------------------------------------------------------------------- |
-| GET    | `/api/v1/csrf-token` | No    | Fetch a CSRF token for state-changing requests                                |
-| GET    | `/api/v1/config`     | No    | Public config (the File Encryption size guardrail)                            |
-| GET    | `/api/v1/health`     | No    | Health check. Uptime and version are included **outside** production          |
-| GET    | `/api/v1/metrics`    | Token | Server metrics — `x-metrics-token` header; 404s unless `METRICS_TOKEN` is set |
-| GET    | `/api/docs`          | No    | Swagger UI (dev/test, or `ENABLE_SWAGGER=true`)                               |
-| GET    | `/api/v1/docs.json`  | No    | The OpenAPI 3.0.3 document                                                    |
+| Method | Endpoint             | Auth  | Description                                                                                                              |
+| ------ | -------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/api/v1/csrf-token` | No    | Fetch a CSRF token for state-changing requests                                                                           |
+| GET    | `/api/v1/config`     | No    | Public config (the File Encryption size guardrail and the document-store limits)                                         |
+| GET    | `/api/v1/health`     | No    | Health check. Uptime and version are included **outside** production                                                     |
+| GET    | `/api/v1/metrics`    | Token | Server metrics (uptime, memory, database, object storage) — `x-metrics-token` header; 404s unless `METRICS_TOKEN` is set |
+| GET    | `/api/docs`          | No    | Swagger UI (dev/test, or `ENABLE_SWAGGER=true`)                                                                          |
+| GET    | `/api/v1/docs.json`  | No    | The OpenAPI 3.0.3 document                                                                                               |
 
 </details>
 
@@ -964,7 +964,7 @@ h-vault/
 │   │   │   │                    #   AuditLog, BackupLog, JobLock, Migration
 │   │   │   ├── routes/          #   Express routers
 │   │   │   ├── services/        #   auditService
-│   │   │   ├── jobs/            #   backup scheduler, token cleanup, trash purge
+│   │   │   ├── jobs/            #   backup scheduler, token cleanup, trash purge, document GC
 │   │   │   └── utils/           #   tokens, email, job locks, folder graph, graceful shutdown
 │   │   └── tests/               #   Vitest + Supertest + mongodb-memory-server
 │   │

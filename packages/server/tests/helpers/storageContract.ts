@@ -294,6 +294,26 @@ export function runStorageContract(
       expect(listed.map((upload) => upload.key)).not.toContain(other);
     });
 
+    it('lists open uploads in key order rather than in the order they were opened', async () => {
+      // The order is a documented property of the port, not an incidental one: S3
+      // sorts by object key first and only then by initiation time among uploads
+      // sharing a key. A caller that assumed age order — and stopped at the first
+      // entry younger than its threshold — would leave older uploads unreclaimed
+      // for ever, which is why the garbage collector filters instead of breaking.
+      const later = newKey();
+      const earlier = newKey();
+      const [low, high] = [later, earlier].sort() as [string, string];
+      // Opened in the opposite order to the one they must be reported in.
+      await provider.createMultipartUpload(high);
+      await provider.createMultipartUpload(low);
+
+      const listed = (await provider.listMultipartUploads()).filter(
+        (upload) => upload.key === low || upload.key === high,
+      );
+
+      expect(listed.map((upload) => upload.key)).toEqual([low, high]);
+    });
+
     it('pages a prefix listing through its continuation token, each key exactly once', async () => {
       const base = newKey();
       const outsider = newKey();
@@ -326,6 +346,30 @@ export function runStorageContract(
       // The negative: a prefix listing must never reach a key outside the prefix,
       // which is the guarantee an account-wide erasure rests on.
       expect(seen).not.toContain(outsider);
+    });
+
+    it('resumes a prefix listing strictly after a key it is given, and ignores it once past', async () => {
+      const base = newKey();
+      const keys = ['1', '2', '3', '4'].map((suffix) => derivedKey(base, suffix));
+      for (const key of keys) {
+        await provider.putObject(key, pattern('S', 4));
+      }
+
+      // `startAfter` takes an ordinary key rather than an engine-minted token,
+      // which is the whole reason the garbage collector's orphan sweep can stop
+      // after a bounded slice of the bucket and continue an hour later. A
+      // continuation token could not carry that: it is opaque, so no caller may
+      // assume it still means anything on the next run.
+      const resumed = await provider.listObjects(`${base}-`, { startAfter: keys[1] as string });
+
+      expect(resumed.objects.map((object) => object.key)).toEqual([keys[2], keys[3]]);
+
+      // Past the last key there is nothing left, and that is an empty page rather
+      // than an error or a wrap back to the beginning — which is what lets the
+      // sweep recognise the end of the bucket and start over on its next run.
+      const exhausted = await provider.listObjects(`${base}-`, { startAfter: keys[3] as string });
+      expect(exhausted.objects).toEqual([]);
+      expect(exhausted.nextContinuationToken).toBeUndefined();
     });
   });
 }

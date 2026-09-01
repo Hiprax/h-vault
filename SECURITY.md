@@ -304,6 +304,18 @@ orders look interchangeable and are not:
 
 Neither deletion is recoverable, and neither is undone by restoring a backup.
 
+The hourly clean-up referred to above is the only thing in the system that deletes a stored
+file without a request having asked for it, so the rule it works to is stated in the negative:
+it deletes a file only when it can prove nothing refers to it. A file is left where it is
+whenever its name is not one this system wrote, whenever the storage service does not report
+how old it is, whenever it is less than a day old, whenever any entry at all names it —
+active, in the trash, or part-way through being purged — and whenever the transfer that
+created it could still be completed. Every one of those is a reason to do nothing, because an
+unreclaimed file costs storage while a file deleted in error costs a document that no backup
+and no key can bring back. The clean-up also stops early once the storage service has refused
+several operations in a row, so a failing service produces one short run an hour rather than a
+run that never ends.
+
 ### Auto-lock
 
 The vault locks after `autoLockTimeout` minutes without interaction (1 to 1440, default 15).

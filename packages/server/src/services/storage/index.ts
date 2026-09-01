@@ -1,4 +1,4 @@
-import { httpErrors } from '@hiprax/errors';
+import { ErrorHandler, httpErrors } from '@hiprax/errors';
 import { config } from '../../config/index.js';
 import { createS3Provider, type S3StorageOptions } from './s3Provider.js';
 import type { StorageProvider } from './types.js';
@@ -91,4 +91,30 @@ export function getStorage(): StorageProvider {
 
   provider = createS3Provider(options);
   return provider;
+}
+
+/**
+ * Whether a storage failure is the engine saying "the thing you named is not
+ * there", as opposed to saying nothing at all.
+ *
+ * THE one definition, because three callers need the identical answer and they sit
+ * far apart: the documents controller (which treats a missing object as a plain
+ * 404 for the browser, and a missing multipart handle as a cancellation that has
+ * already happened), and the garbage collector (which treats a missing handle as an
+ * abort it no longer has to perform). A second copy of this rule is not a style
+ * problem — it decides whether a failure is counted as success.
+ *
+ * `s3Provider.mapStorageError` is the single place the classification is MADE — it
+ * maps `NoSuchKey`, `NotFound` and `NoSuchUpload` to a 404 and an unreachable
+ * engine to a 503 — so this reads the status that produced rather than
+ * re-classifying an SDK error shape a second time.
+ *
+ * `ErrorHandler` is checked BEFORE the status, and that order is the whole point:
+ * a bare object carrying a `statusCode` is not an error this codebase threw, and
+ * duck-typing on the number alone would let a foreign value be read as "already
+ * gone" — which on the collector's path means counting an abort that never
+ * happened and resetting its circuit breaker while the upload survives.
+ */
+export function isStorageNotFound(error: unknown): boolean {
+  return error instanceof ErrorHandler && error.statusCode === 404;
 }

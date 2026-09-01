@@ -45,24 +45,24 @@ import type {
  * conformance gate exists to measure against the real thing, and inventing them
  * here would mean asserting a behaviour nobody verified.
  *
- * Nothing in it uses entropy or the wall clock beyond `new Date()` for a stored
- * timestamp: upload ids come from a per-instance counter, and ETags are the SHA-256
- * of the bytes, so two runs of a test produce the same values.
+ * Nothing in it uses entropy: upload ids come from a per-instance counter, ETags are
+ * the SHA-256 of the bytes, and every stored timestamp comes from the injectable
+ * clock in {@link InMemoryStorageOptions} (defaulting to `new Date()`), so two runs
+ * of a test produce the same values.
  *
- * TWO LIMITS, recorded here because each will be discovered at exactly the wrong
- * moment otherwise:
+ * ONE LIMIT REMAINS, recorded here because it will be discovered at exactly the
+ * wrong moment otherwise: its multipart implementation accepts non-final parts of
+ * ANY size, which the shared contract relies on. Real AWS S3 and Cloudflare R2
+ * refuse a non-final part below 5 MiB with `EntityTooSmall`; the engine this stack
+ * ships tolerates it (measured), which is why the contract suite may use tiny
+ * parts. That is a property of the engine under test, not of every S3 service.
  *
- *   1. It ALWAYS populates `lastModified` and `initiated`, so the one case those
- *      fields are optional FOR — the garbage collector's "an object whose age I
- *      cannot establish is one I must not delete" rule — cannot be reached through
- *      this double as written. The job that needs that case has to give the double a
- *      way to omit them (a constructor option, added by the phase that has a test
- *      calling it; adding one now with no caller fails the dead-code gate).
- *   2. Its multipart implementation accepts non-final parts of ANY size, which the
- *      shared contract relies on. Real AWS S3 and Cloudflare R2 refuse a non-final
- *      part below 5 MiB with `EntityTooSmall`; the engine this stack ships tolerates
- *      it (measured), which is why the contract suite may use tiny parts. That is a
- *      property of the engine under test, not of every S3 service.
+ * The limit that USED to sit beside it — that the double always populated
+ * `lastModified` and `initiated`, so the "an object whose age I cannot establish is
+ * one I must not delete" rule could not be reached — is gone: {@link
+ * InMemoryStorageOptions} now carries `omitTimestamps` for exactly that case, and
+ * `clock` for the ages the garbage collector's thresholds are expressed in. Both
+ * arrived with the tests that call them, which is why they are not dead options.
  */
 
 interface StoredObject {
@@ -103,10 +103,52 @@ function etagFor(body: Buffer): string {
   return `"${createHash('sha256').update(body).digest('hex')}"`;
 }
 
-export function createInMemoryStorage(): InMemoryStorageProvider {
+/**
+ * The two knobs the garbage collector's tests need, and nothing else.
+ *
+ * Both exist because the collector reasons about TIME, which is the one thing a
+ * double cannot be allowed to take from the wall clock: its thresholds are "older
+ * than `DOCUMENT_UPLOAD_TTL_HOURS + 1h`" and "older than 24 h", and a test that
+ * seeded an object and then waited a day to assert on it is not a test.
+ */
+export interface InMemoryStorageOptions {
+  /**
+   * The clock every stored timestamp is read from. Injectable rather than frozen,
+   * so one test can seed an object "yesterday" and another "just now" against the
+   * same instance by moving the clock between writes.
+   */
+  clock?: () => Date;
+  /**
+   * When true, every listing reports objects and uploads WITHOUT a timestamp,
+   * exactly as an engine that declines to report one does.
+   *
+   * This is not an oddity worth skipping: `StoredObjectSummary.lastModified` and
+   * `StorageUploadSummary.initiated` are optional in the port precisely so that
+   * "I cannot establish this object's age" is representable, and the collector's
+   * rule is that such an object must be LEFT ALONE. Without this option the rule
+   * is unreachable, so the branch that enforces it could be deleted and every test
+   * would still pass.
+   */
+  omitTimestamps?: boolean;
+}
+
+export function createInMemoryStorage(
+  options: InMemoryStorageOptions = {},
+): InMemoryStorageProvider {
+  const now = options.clock ?? ((): Date => new Date());
+  const omitTimestamps = options.omitTimestamps ?? false;
   const objects = new Map<string, StoredObject>();
   const uploads = new Map<string, PendingUpload>();
   let uploadCounter = 0;
+
+  /**
+   * Spreads a timestamp into a summary, or nothing at all under `omitTimestamps`.
+   * One helper for all three call sites, so the double cannot end up reporting an
+   * age on one listing and withholding it on another.
+   */
+  function withLastModified(value: Date): { lastModified?: Date } {
+    return omitTimestamps ? {} : { lastModified: value };
+  }
 
   function requireObject(key: string): StoredObject {
     const object = objects.get(key);
@@ -145,12 +187,12 @@ export function createInMemoryStorage(): InMemoryStorageProvider {
     putObject: async (key: string, body: Uint8Array): Promise<void> => {
       // `Buffer.from` COPIES. Storing the caller's buffer by reference would let a
       // test mutate an object it had already "uploaded", which a socket cannot do.
-      objects.set(key, { body: Buffer.from(body), lastModified: new Date() });
+      objects.set(key, { body: Buffer.from(body), lastModified: now() });
     },
 
     headObject: async (key: string): Promise<StoredObjectStat> => {
       const object = requireObject(key);
-      return { bytes: object.body.byteLength, lastModified: object.lastModified };
+      return { bytes: object.body.byteLength, ...withLastModified(object.lastModified) };
     },
 
     getObjectRange: async (key: string, start: number, end: number): Promise<StorageRangeRead> => {
@@ -178,7 +220,10 @@ export function createInMemoryStorage(): InMemoryStorageProvider {
       options?: ListObjectsOptions,
     ): Promise<StorageObjectPage> => {
       const maxKeys = options?.maxKeys ?? DEFAULT_MAX_KEYS;
-      const after = options?.continuationToken;
+      // S3 ignores `StartAfter` when a `ContinuationToken` is present, so the
+      // token wins here too: the double must not answer a call one way that the
+      // engine answers another.
+      const after = options?.continuationToken ?? options?.startAfter;
       const matching = [...objects.entries()]
         .filter(([key]) => key.startsWith(prefix))
         .filter(([key]) => after === undefined || key > after)
@@ -188,7 +233,7 @@ export function createInMemoryStorage(): InMemoryStorageProvider {
       const objectsPage: StoredObjectSummary[] = page.map(([key, object]) => ({
         key,
         bytes: object.body.byteLength,
-        lastModified: object.lastModified,
+        ...withLastModified(object.lastModified),
       }));
       const lastKey = page.at(-1)?.[0];
       const truncated = matching.length > page.length;
@@ -204,7 +249,7 @@ export function createInMemoryStorage(): InMemoryStorageProvider {
     createMultipartUpload: async (key: string): Promise<string> => {
       uploadCounter += 1;
       const uploadId = `mem-upload-${String(uploadCounter)}`;
-      uploads.set(uploadId, { key, initiated: new Date(), parts: new Map() });
+      uploads.set(uploadId, { key, initiated: now(), parts: new Map() });
       return uploadId;
     },
 
@@ -240,7 +285,7 @@ export function createInMemoryStorage(): InMemoryStorageProvider {
         }
         bodies.push(held.body);
       }
-      objects.set(key, { body: Buffer.concat(bodies), lastModified: new Date() });
+      objects.set(key, { body: Buffer.concat(bodies), lastModified: now() });
       uploads.delete(uploadId);
     },
 
@@ -267,8 +312,22 @@ export function createInMemoryStorage(): InMemoryStorageProvider {
       const summaries: StorageUploadSummary[] = [];
       for (const [uploadId, upload] of uploads) {
         if (prefix !== undefined && !upload.key.startsWith(prefix)) continue;
-        summaries.push({ key: upload.key, uploadId, initiated: upload.initiated });
+        summaries.push({
+          key: upload.key,
+          uploadId,
+          ...(omitTimestamps ? {} : { initiated: upload.initiated }),
+        });
       }
+      // Sorted by KEY, then by initiation time among uploads sharing one, because
+      // that is the order S3 reports and the port warns callers about explicitly:
+      // it is NOT age order, so a sweep that stopped at the first entry younger
+      // than its threshold would leave older uploads unreclaimed for ever.
+      // Returning insertion order here would make that trap unreachable through the
+      // double — a test could seed the young upload first, pass, and prove nothing.
+      summaries.sort((left, right) => {
+        if (left.key !== right.key) return left.key < right.key ? -1 : 1;
+        return (left.initiated?.getTime() ?? 0) - (right.initiated?.getTime() ?? 0);
+      });
       return summaries;
     },
   };

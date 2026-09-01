@@ -129,8 +129,33 @@ export interface StorageProvider {
 
 /** Options for one page of a prefix listing. */
 export interface ListObjectsOptions {
-  /** Opaque token from a previous page's {@link StorageObjectPage}. */
+  /**
+   * Opaque token from a previous page's {@link StorageObjectPage}.
+   *
+   * OPAQUE is the operative word, and it bounds the lifetime of this value: S3
+   * documents the token as obfuscated and says nothing about how long one stays
+   * valid or whether it survives being handed back later. It is therefore the
+   * right way to walk one listing to its end INSIDE a single operation, and the
+   * wrong way to resume a walk an hour later — for which {@link startAfter}
+   * exists.
+   */
   continuationToken?: string;
+  /**
+   * Resume the listing strictly AFTER this key, which is an ordinary key rather
+   * than an engine-minted token.
+   *
+   * It exists for the garbage collector's orphan sweep, the one caller that
+   * examines a bounded slice of the bucket per run and continues from where the
+   * previous run stopped. A `continuationToken` cannot express that: it is opaque,
+   * so nothing may assume it is still meaningful on the next hourly tick, and the
+   * in-memory double could only ever pretend otherwise. `StartAfter` is a plain
+   * string this codebase produced itself, so the double and the real engine agree
+   * on it by construction and the conformance suite can pin that agreement.
+   *
+   * S3 ignores `StartAfter` when `ContinuationToken` is also present. Callers pass
+   * one or the other, never both.
+   */
+  startAfter?: string;
   /** Upper bound on the keys in this page. The engine may return fewer. */
   maxKeys?: number;
 }

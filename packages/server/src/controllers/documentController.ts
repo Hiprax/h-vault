@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import type { Request, Response } from 'express';
 import mongoose, { type HydratedDocument } from 'mongoose';
-import { catchAsync, httpErrors, ErrorHandler } from '@hiprax/errors';
+import { catchAsync, httpErrors } from '@hiprax/errors';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   DOCUMENT_FRAMING_MISMATCH_MESSAGE,
@@ -29,7 +29,7 @@ import { DocumentUpload, type IDocumentUpload } from '../models/DocumentUpload.j
 import { Folder } from '../models/Folder.js';
 import { User } from '../models/User.js';
 import { createAuditLog } from '../services/auditService.js';
-import { getStorage } from '../services/storage/index.js';
+import { getStorage, isStorageNotFound } from '../services/storage/index.js';
 import type { StoragePart, StorageRangeRead } from '../services/storage/types.js';
 import { buildObjectKey, expectedPartSize, segmentRange } from '../utils/documentObjects.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
@@ -188,20 +188,6 @@ async function inFlightBytesFor(userId: string, now: Date): Promise<number> {
     { $group: { _id: null, total: { $sum: '$declaredPlaintextBytes' } } },
   ]);
   return row?.total ?? 0;
-}
-
-/**
- * Whether a storage failure is the engine saying "the thing you named is not
- * there", as opposed to saying nothing at all.
- *
- * `s3Provider.mapStorageError` is the single place that decision is made — it maps
- * `NoSuchKey`, `NotFound` and `NoSuchUpload` to a 404 and an unreachable engine to
- * a 503 — so this reads the status it produced rather than re-classifying an SDK
- * error shape a second time. `ErrorHandler` is checked before the status because a
- * bare object carrying a `statusCode` is not an error this codebase threw.
- */
-function isStorageNotFound(error: unknown): boolean {
-  return error instanceof ErrorHandler && error.statusCode === 404;
 }
 
 /**
@@ -1673,7 +1659,7 @@ export const getSegment = catchAsync(async (req: Request, res: Response): Promis
     // The provider maps `NoSuchKey` and `NotFound` to a 404 and everything else
     // to 503 or 500, so this narrows to exactly the missing-object case and
     // re-words it. The original is kept on `cause` for the structured log.
-    if (error instanceof ErrorHandler && error.statusCode === 404) {
+    if (isStorageNotFound(error)) {
       throw httpErrors.notFound(
         'The stored contents of this document are missing. It cannot be downloaded.',
         { cause: error },

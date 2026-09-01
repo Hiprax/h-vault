@@ -365,6 +365,9 @@ export function createS3Provider(options: S3StorageOptions): StorageProvider {
             ...(listOptions?.continuationToken === undefined
               ? {}
               : { ContinuationToken: listOptions.continuationToken }),
+            ...(listOptions?.startAfter === undefined
+              ? {}
+              : { StartAfter: listOptions.startAfter }),
             ...(listOptions?.maxKeys === undefined ? {} : { MaxKeys: listOptions.maxKeys }),
           }),
         ),
