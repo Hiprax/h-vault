@@ -292,7 +292,7 @@ USER node
 CMD ["node", "packages/server/dist/server.js"]
 
 # -----------------------------------------------------------------------------
-# web-root — the SPA bundle, minus index.html
+# web-root — the SPA bundle, minus its two HTML documents
 # -----------------------------------------------------------------------------
 # The HTML document is ALWAYS served by Express, never by Nginx, because helmet
 # (inside Express) is what attaches the Content-Security-Policy with its
@@ -300,8 +300,17 @@ CMD ["node", "packages/server/dist/server.js"]
 # index.html sitting in Nginx's document root would be a header-free version of
 # the app one URL away, so the file is removed here: Nginx cannot serve what it
 # does not have, no matter how a future `try_files` edit is worded.
+#
+# sandbox.html goes for the same reason and with a sharper consequence. It is the
+# isolated document every stored file is rendered inside, and its whole isolation
+# IS the per-response policy Express attaches to it (packages/server/src/config/
+# sandboxCsp.ts). Served off this disk it would instead carry the doc-root's
+# `default-src 'self'` and none of the sandbox's own directives — no
+# `connect-src 'none'`, no `worker-src 'none'`, no `sandbox allow-scripts` — which
+# is the one way this isolation quietly stops existing while every renderer keeps
+# working. With the file absent, `try_files` falls through to `@app`.
 FROM build-client AS web-root
-RUN rm -f /app/packages/client/dist/index.html
+RUN rm -f /app/packages/client/dist/index.html /app/packages/client/dist/sandbox.html
 
 # -----------------------------------------------------------------------------
 # web — Nginx: the stack's single serving surface

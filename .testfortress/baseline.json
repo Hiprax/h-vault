@@ -470,10 +470,10 @@
     "initialPayloadBudgetKb": 700,
     "htmlShellBudgetKb": 8,
     "measured": {
-      "chunkCount": 58,
-      "htmlShellKb": 1.11,
-      "initialPayloadKb": 582.85,
-      "totalJsKb": 2895.8
+      "chunkCount": 65,
+      "htmlShellKb": 2.95,
+      "initialPayloadKb": 608.8,
+      "totalJsKb": 2963.9
     }
   },
   "resource": {

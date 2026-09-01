@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Client production build wrapper: `tsc -b` then `vite build`.
+ * Client production build wrapper: `tsc -b`, then `vite build` for the
+ * application, then a SECOND `vite build` for the document sandbox.
  *
  * `vite build` is powered by Rolldown's native (Rust/napi) bundler. On Windows,
  * the Rolldown that vite 8.1.5 pins (`rolldown@~1.1.5`) intermittently segfaults
@@ -56,15 +57,41 @@ function run(args, label) {
 const tscStatus = run([binOf('typescript', 'bin/tsc'), '-b'], 'tsc -b');
 if (tscStatus !== 0) process.exit(tscStatus);
 
-// 2) Bundle. Retried once, and ONLY on the native access-violation code.
-const viteBuild = [binOf('vite', 'bin/vite.js'), 'build'];
-let status = run(viteBuild, 'vite build');
-if (NATIVE_CRASH_CODES.has(status)) {
+/**
+ * One `vite build`, with the native-crash retry described above.
+ *
+ * Shared by BOTH builds rather than open-coded twice: the crash is a property of
+ * Rolldown's teardown, not of a particular config, so a second build invoked
+ * with a bare `spawnSync` would be the one that fails a Windows contributor's
+ * push for a reason the first build is already known to survive.
+ */
+function viteBuild(label, extraArgs = []) {
+  const args = [binOf('vite', 'bin/vite.js'), 'build', ...extraArgs];
+  const status = run(args, label);
+  if (!NATIVE_CRASH_CODES.has(status)) return status;
   console.warn(
-    `[client-build] vite build exited ${status} (STATUS_ACCESS_VIOLATION) — an upstream ` +
+    `[client-build] ${label} exited ${status} (STATUS_ACCESS_VIOLATION) — an upstream ` +
       'Rolldown native teardown crash on Windows (vitejs/rolldown-vite#192), not a build ' +
-      'error. Re-running vite build once to produce a verified-complete build.',
+      'error. Re-running once to produce a verified-complete build.',
   );
-  status = run(viteBuild, 'vite build (retry)');
+  return run(args, `${label} (retry)`);
 }
-process.exit(status);
+
+// 2) Bundle the application. Retried once, and ONLY on the native crash code.
+const appStatus = viteBuild('vite build');
+if (appStatus !== 0) process.exit(appStatus);
+
+// 3) Bundle the document sandbox, SECOND and into the same `dist/`.
+//
+// A separate build rather than a second input, because the app and the sandbox
+// share the whole unified/remark substrate and one build would hoist it into a
+// chunk belonging to neither asset directory — see vite.config.sandbox.ts.
+//
+// The ORDER is load-bearing and is pinned by `tests/vite-config.test.ts`
+// alongside the `emptyOutDir: false` that makes it survivable. Vite empties an
+// `outDir` that lies inside the project root, so a sandbox build with the
+// default setting deletes the application that was just built; and running the
+// app build second would delete the sandbox instead. The two facts are one
+// invariant and must never be separated.
+const sandboxStatus = viteBuild('vite build (sandbox)', ['--config', 'vite.config.sandbox.ts']);
+process.exit(sandboxStatus);

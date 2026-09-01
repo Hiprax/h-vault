@@ -1,4 +1,6 @@
 // @vitest-environment node
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   manualChunks,
@@ -161,7 +163,7 @@ describe('vite.config wiring', () => {
   it('wires the dev host, manualChunks, and chunk-size limit', async () => {
     const mod = await import('../vite.config');
     const config = mod.default as {
-      server?: { host?: unknown; strictPort?: unknown; port?: unknown };
+      server?: { host?: unknown; strictPort?: unknown; port?: unknown; cors?: unknown };
       build?: {
         chunkSizeWarningLimit?: unknown;
         rollupOptions?: { output?: { manualChunks?: unknown } };
@@ -178,5 +180,163 @@ describe('vite.config wiring', () => {
     expect(config.server?.port).toBe(resolveDevPort());
     expect(config.build?.rollupOptions?.output?.manualChunks).toBe(manualChunks);
     expect(config.build?.chunkSizeWarningLimit).toBe(850);
+  });
+});
+
+// The document sandbox is a SECOND Vite build, and every setting below is one
+// that fails SILENTLY when it is missing: a blank frame, an unstyled viewer, or
+// an application deleted by the build that was meant to sit beside it. None of
+// them is observable in jsdom (which never loads an iframe's `src`) and none is
+// observable in the app's own build output, so they are pinned here, against the
+// real configs, before anything downstream depends on them.
+describe('the document sandbox build', () => {
+  it('routes chunks AND assets into sandbox-assets/ through the one setting that does both', async () => {
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as {
+      build?: {
+        assetsDir?: unknown;
+        emptyOutDir?: unknown;
+        copyPublicDir?: unknown;
+        outDir?: unknown;
+        rollupOptions?: { input?: unknown; output?: unknown };
+      };
+      plugins?: unknown;
+    };
+
+    // ONE setting, from which Vite derives `entryFileNames`, `chunkFileNames`
+    // AND `assetFileNames`. Setting only `assetFileNames` is the plausible
+    // mistake — it routes the stylesheet and leaves every JS chunk in
+    // `dist/assets/`, which is served with no `Access-Control-Allow-Origin`, so
+    // the opaque origin's module fetch fails and the frame is silently blank
+    // while every header assertion elsewhere still passes.
+    expect(config.build?.assetsDir).toBe('sandbox-assets');
+    // MANDATORY. `resolveEmptyOutDir` returns true whenever `outDir` is inside
+    // the project root, so the default would make this build delete the
+    // application it was just told to sit beside — surfacing as a missing app,
+    // not as anything about the sandbox.
+    expect(config.build?.emptyOutDir).toBe(false);
+    // The app build already copied `public/`; Vite re-copies it on every build.
+    expect(config.build?.copyPublicDir).toBe(false);
+    expect(config.build?.outDir).toBe('dist');
+    expect(String(config.build?.rollupOptions?.input)).toMatch(/sandbox\.html$/);
+    // The assertion that actually closes the failure the comment above
+    // describes. `assetsDir` only decides the filenames Vite DERIVES; an
+    // explicit `rollupOptions.output.chunkFileNames` (added, plausibly, to
+    // "match the app") overrides that derivation and puts every JS chunk back in
+    // `dist/assets/`, where it is served with no ACAO — a frame that is blank in
+    // production only, with every header assertion elsewhere still green.
+    expect(config.build?.rollupOptions?.output).toBeUndefined();
+  });
+
+  it('carries no plugin from the application build', async () => {
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as { plugins?: unknown[] };
+    // A second `VitePWA` would emit its own `sw.js` OVER the application's,
+    // replacing the app's service worker with one that precaches a preview
+    // document. React and Tailwind are absent for their own reasons (a smaller
+    // parser surface, and the plain-CSS constraint the sandbox stylesheet
+    // inherits). Asserted as "no plugins at all" rather than "not VitePWA",
+    // because the next plugin added here would be added without thought.
+    expect(config.plugins ?? []).toEqual([]);
+  });
+
+  it('builds the application FIRST and the sandbox SECOND', async () => {
+    // Order and `emptyOutDir` are one invariant, not two settings. Vite empties
+    // an `outDir` inside the project root, so with the default the sandbox
+    // build deletes the app; reverse the order and the app build would delete
+    // the sandbox instead. Read out of the runner rather than asserted about
+    // the config, because the runner is what decides it.
+    const runner = await readFile(
+      fileURLToPath(new URL('../scripts/build.mjs', import.meta.url)),
+      'utf8',
+    );
+    const appBuild = runner.indexOf("viteBuild('vite build')");
+    const sandboxBuild = runner.indexOf("viteBuild('vite build (sandbox)'");
+    expect(appBuild).toBeGreaterThan(-1);
+    expect(sandboxBuild).toBeGreaterThan(appBuild);
+    expect(runner).toContain('vite.config.sandbox.ts');
+    // Through the SAME retry wrapper, never a bare `spawnSync`: that wrapper
+    // exists for Rolldown's intermittent native teardown segfault on Windows,
+    // and a second build without it fails a Windows contributor's push for a
+    // reason the first build is already known to survive.
+    expect(runner.match(/spawnSync\(/g) ?? []).toHaveLength(1);
+  });
+});
+
+// The dev server is what the e2e and a11y gates actually drive, and it serves
+// the sandbox's modules from `/src/sandbox/` rather than from `sandbox-assets/`,
+// so the production path-scoped header rule cannot reach them.
+describe('the dev server answers the sandbox frame', () => {
+  it("allows an Origin: null request without widening past Vite's own default", async () => {
+    const { defaultAllowedOrigins } = await import('vite');
+    const mod = await import('../vite.config');
+    const config = mod.default as { server?: { cors?: { origin?: unknown } } };
+    const origins = config.server?.cors?.origin;
+
+    expect(Array.isArray(origins)).toBe(true);
+    const list = origins as unknown[];
+    // This is the assertion that proves the addition is LOAD-BEARING rather
+    // than decorative: an opaque origin sends the literal string `null`, and
+    // Vite's default regex does not match it. Without the entry below, the
+    // module fetch gets no ACAO, fails as a network error, and the frame is
+    // blank in dev — which nothing earlier catches, because jsdom never loads
+    // an iframe's src.
+    expect(defaultAllowedOrigins.test('null')).toBe(false);
+    expect(list).toContain('null');
+    // And the default is KEPT rather than replaced. `origin: true` or `'*'`
+    // would also make the frame work, and would drop the restriction for every
+    // request rather than for the one the frame makes.
+    expect(list).toContain(defaultAllowedOrigins);
+    // Nothing wider than those two. `'null'` already re-admits every opaque
+    // origin (any page can mint one with a sandboxed `srcdoc` iframe), which is
+    // a cost the config records rather than hides — but `true`, `'*'` or a
+    // catch-all regex on top of it would take the dev server from "readable by
+    // an opaque origin" to "readable by name", and would do so without anyone
+    // having to write down why.
+    expect(list).toHaveLength(2);
+    expect(list).not.toContain(true);
+    expect(list).not.toContain('*');
+  });
+
+  it('keeps the service worker from answering the sandbox frame with the app shell', async () => {
+    // `vite-plugin-pwa` defaults `navigateFallback` to `index.html` and this
+    // config sets none of its own, so a NavigationRoute covers every
+    // navigation — and an iframe load IS a navigation. Without the denylist the
+    // frame boots the application instead of the sandbox, never handshakes, and
+    // the viewer degrades to "download to view" with no failing request
+    // anywhere to explain it.
+    const source = await readFile(
+      fileURLToPath(new URL('../vite.config.ts', import.meta.url)),
+      'utf8',
+    );
+    const match = /navigateFallbackDenylist:\s*\[([^\]]*)\]/.exec(source);
+    expect(match, 'vite.config.ts declares no navigateFallbackDenylist').not.toBeNull();
+    // INSIDE the `workbox` block, which is where vite-plugin-pwa reads it.
+    // Hoisted one level up to the plugin's own options — a very plausible
+    // edit — the plugin ignores it entirely, and a text scan would still find
+    // it, reconstruct the regex, and pass while production regressed.
+    const workboxStart = source.indexOf('workbox: {');
+    const workboxEnd = source.indexOf('\n      },', workboxStart);
+    expect(workboxStart).toBeGreaterThan(-1);
+    expect(match!.index).toBeGreaterThan(workboxStart);
+    expect(match!.index).toBeLessThan(workboxEnd);
+    const patterns = match![1]!
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => new RegExp(entry.replace(/^\/|\/$/g, '')));
+    // Read back as real RegExps and EXERCISED, so a pattern that is present but
+    // does not match (a missing escape, a stray anchor) fails here rather than
+    // in production.
+    expect(patterns.some((pattern) => pattern.test('/sandbox.html'))).toBe(true);
+    // Workbox tests a denylist entry against `pathname + search`, so a bare `$`
+    // anchor stops matching the moment the frame's src gains a query string —
+    // and the regression is invisible: installed clients only, after a deploy
+    // only, as a viewer that silently degrades to "download to view".
+    expect(patterns.some((pattern) => pattern.test('/sandbox.html?theme=dark'))).toBe(true);
+    expect(patterns.some((pattern) => pattern.test('/vault'))).toBe(false);
+    expect(patterns.some((pattern) => pattern.test('/documents/abc'))).toBe(false);
+    // Not so loose that it swallows a real route that merely starts the same way.
+    expect(patterns.some((pattern) => pattern.test('/sandbox.html.bak'))).toBe(false);
   });
 });

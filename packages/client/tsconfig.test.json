@@ -19,6 +19,16 @@
     // into shipped code without the build type-check catching it.
     "types": ["vite/client", "vite-plugin-pwa/react", "node"]
   },
-  "include": ["src/**/*", "tests/**/*", "*.config.ts", "vite.config.helpers.ts", "scripts/**/*"],
+  "include": [
+    "src/**/*",
+    "tests/**/*",
+    "*.config.ts",
+    "vite.config.helpers.ts",
+    // `*.config.ts` does NOT match this name (it ends `.sandbox.ts`), and the
+    // sandbox build config would otherwise be type-checked only as a side effect
+    // of `tests/vite-config.test.ts` importing it.
+    "vite.config.sandbox.ts",
+    "scripts/**/*"
+  ],
   "references": [{ "path": "../shared" }]
 }

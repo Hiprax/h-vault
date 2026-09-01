@@ -17,7 +17,7 @@ describe('Security Headers & Middleware', () => {
       expect(csp).toBeDefined();
       expect(csp).toContain("default-src 'self'");
       expect(csp).toContain("object-src 'none'");
-      expect(csp).toContain("frame-src 'none'");
+      expect(csp).toContain("frame-src 'self'");
       // Script directive should contain a nonce
       expect(csp).toMatch(/script-src[^;]*'nonce-[A-Za-z0-9+/=]+'[^;]*/);
       // Style directive should use 'unsafe-inline' instead of nonce (SPA trade-off)
@@ -44,6 +44,30 @@ describe('Security Headers & Middleware', () => {
       // Defense-in-depth: no directive anywhere in the CSP may grant the broad 'unsafe-eval'.
       // Match it as a standalone token so the 'wasm-unsafe-eval' substring never trips this.
       expect(csp).not.toMatch(/(^|[\s;])'unsafe-eval'/);
+    });
+
+    it("restricts frame-src to 'self' (the document sandbox) and never blob:, data: or a wildcard", async () => {
+      const res = await request(app).get('/api/v1/health');
+
+      expect(res.status).toBe(200);
+      const csp = res.headers['content-security-policy'] as string;
+      expect(csp).toBeDefined();
+
+      const frameSrcMatch = csp.match(/frame-src([^;]*)/);
+      expect(frameSrcMatch).not.toBeNull();
+      const frameSrc = frameSrcMatch![1]!;
+
+      // The application frames exactly one document — `/sandbox.html`, which is
+      // same-origin BY URL; its opaque origin comes from the iframe's `sandbox`
+      // attribute, not from where it was fetched. So 'self' is the whole of it.
+      expect(frameSrc.trim()).toBe("'self'");
+      // The negatives are the point. `blob:` or `data:` would let an injected
+      // iframe carry its own contents — and such a document DOES inherit its
+      // embedder's CSP, so it would run inside this page's policy rather than
+      // inside the sandbox's far stricter one. A wildcard would frame anything.
+      expect(frameSrc).not.toContain('blob:');
+      expect(frameSrc).not.toContain('data:');
+      expect(frameSrc).not.toContain('*');
     });
 
     it("restricts worker-src to 'self' (Vault Health password-strength worker) and never blob:", async () => {

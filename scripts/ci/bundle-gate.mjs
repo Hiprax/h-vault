@@ -42,6 +42,17 @@
  *  d. EVERY CHUNK HAS A CEILING, listed or not. `DEFAULT_CHUNK_BUDGET_KB` covers
  *     the ones with no entry of their own, so a new route cannot arrive
  *     unbounded — which is the hole a hand-maintained list always has.
+ *
+ *  e. TWO ASSET DIRECTORIES ARE ENUMERATED, NOT ONE. The client is built twice:
+ *     the application into `dist/assets/`, and the document sandbox — its own
+ *     Vite config, its own module graph — into `dist/sandbox-assets/`. A gate
+ *     that walked only `assets/` would leave every sandbox chunk both unmeasured
+ *     and unbounded, AND would make any budget key added for one of them match
+ *     nothing at all: `bundle.budgetKb.*` ratchets `lower`, so an entry that
+ *     matches no file is a ceiling that can never be exceeded and a test that
+ *     can never fail. The same applies to the HTML shell: there are two
+ *     documents now, each is a shell rather than an asset store, and each is
+ *     held to the same per-document budget.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -60,11 +71,23 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const distDir = path.join(repoRoot, 'packages', 'client', 'dist');
 const indexHtml = path.join(distDir, 'index.html');
 
+/**
+ * (e) The two documents the client build emits, and the asset directory each
+ * one's chunks are routed to. Both must exist for the gate to have run at all:
+ * a missing `sandbox.html` means the second build did not happen, which is a
+ * "could not run" rather than a pass over half the output.
+ */
+const HTML_SHELLS = ['index.html', 'sandbox.html'];
+const ASSET_DIRS = ['assets', 'sandbox-assets'];
+
 const kb = (bytes) => Number((bytes / 1024).toFixed(2));
 
-if (!existsSync(indexHtml)) {
+for (const shell of HTML_SHELLS) {
+  if (existsSync(path.join(distDir, shell))) continue;
   console.error(
-    color.red(`  ✖ ${path.relative(repoRoot, indexHtml)} is missing — build the client first`),
+    color.red(
+      `  ✖ ${path.relative(repoRoot, path.join(distDir, shell))} is missing — build the client first`,
+    ),
   );
   process.exit(2);
 }
@@ -72,61 +95,127 @@ if (!existsSync(indexHtml)) {
 ensureReportDir();
 
 const html = readFileSync(indexHtml, 'utf8');
-const htmlBytes = Buffer.byteLength(html, 'utf8');
 
-// (b) Exactly what the browser fetches before first paint.
-const eager = [
-  ...[...html.matchAll(/<script[^>]+type="module"[^>]+src="([^"]+)"/g)].map((m) => m[1]),
-  ...[...html.matchAll(/<link[^>]+rel="modulepreload"[^>]+href="([^"]+)"/g)].map((m) => m[1]),
-  ...[...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/g)].map((m) => m[1]),
+/** Every asset an HTML document tells the browser to fetch before it paints. */
+const referencedAssets = (document) => [
+  ...[...document.matchAll(/<script[^>]+type="module"[^>]+src="([^"]+)"/g)].map((m) => m[1]),
+  ...[...document.matchAll(/<link[^>]+rel="modulepreload"[^>]+href="([^"]+)"/g)].map((m) => m[1]),
+  ...[...document.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/g)].map((m) => m[1]),
 ];
 
+// (b) Exactly what the browser fetches before first paint.
+const eager = referencedAssets(html);
+
 const problems = [];
-let initialPayloadBytes = htmlBytes;
+
+// (e) Each document is a shell, not an asset store, and each is held to the
+// same per-document ceiling. That per-document check is the GATE.
+//
+// The reported `measured.htmlShellKb` is their sum, and it is a RECORD rather
+// than a gate: `ratchet-check.mjs` declares `bundle.measured.*` as `info` and
+// skips it before any comparison, and it never reads this report at all — only
+// the committed CEILINGS (`bundle.budgetKb.*`, `defaultChunkBudgetKb`,
+// `initialPayloadBudgetKb`, `htmlShellBudgetKb`) are ratcheted, direction
+// `lower`, straight from `lib/bundle-budgets.mjs`. That is deliberate on the
+// ratchet's part and is worth stating plainly here, because the opposite belief
+// is what would prompt someone to "repair" it by flipping the direction — which
+// would price every legitimate new page as a regression. The per-file
+// breakdown is emitted beside the sum so the record stays readable when the sum
+// moves.
+const htmlShells = [];
+let htmlShellBytes = 0;
+for (const shell of HTML_SHELLS) {
+  const absolute = path.join(distDir, shell);
+  const bytes = statSync(absolute).size;
+  htmlShellBytes += bytes;
+  htmlShells.push({ file: shell, kb: kb(bytes) });
+  if (kb(bytes) > HTML_SHELL_BUDGET_KB) {
+    problems.push(
+      `${shell} is ${String(kb(bytes))} KiB, over its ${String(HTML_SHELL_BUDGET_KB)} KiB budget`,
+    );
+  }
+  // Every asset EACH document names must actually be in the output. This was
+  // asymmetric before the sandbox arrived — `index.html`'s references were
+  // checked and nothing checked the other document's — and the asymmetry mattered
+  // precisely for the new one: a build that emitted `sandbox.html` naming chunks
+  // it had not written produces a frame that never boots, never handshakes, and
+  // degrades to "download to view" with no failing gate anywhere.
+  for (const href of referencedAssets(readFileSync(absolute, 'utf8'))) {
+    if (existsSync(path.join(distDir, href.replace(/^\//, '')))) continue;
+    problems.push(`${shell} references ${href}, which is not in the build output`);
+  }
+}
+
+let initialPayloadBytes = statSync(indexHtml).size;
 const eagerAssets = [];
 for (const href of eager) {
   const file = path.join(distDir, href.replace(/^\//, ''));
-  if (!existsSync(file)) {
-    problems.push(`index.html references ${href}, which is not in the build output`);
-    continue;
-  }
+  // Missing files are already reported by the per-shell loop above; here the
+  // only job is to skip one so the payload total is not a lie.
+  if (!existsSync(file)) continue;
   const bytes = statSync(file).size;
   initialPayloadBytes += bytes;
   eagerAssets.push({ href, kb: kb(bytes) });
 }
 
-// (c) + (d) Every emitted chunk, measured and bounded.
-const assetsDir = path.join(distDir, 'assets');
+// (c) + (d) + (e) Every emitted chunk, in BOTH asset directories, measured and
+// bounded. A directory that does not exist is reported rather than skipped: the
+// only way `sandbox-assets/` is absent is that the second build did not run, and
+// silently measuring half the output is exactly the failure this widening
+// exists to prevent.
 const chunks = [];
 let totalJsBytes = 0;
-for (const entry of existsSync(assetsDir) ? readdirSync(assetsDir).sort() : []) {
-  if (!entry.endsWith('.js') && !entry.endsWith('.css')) continue;
-  const bytes = statSync(path.join(assetsDir, entry)).size;
-  if (entry.endsWith('.js')) totalJsBytes += bytes;
-  const base = chunkBaseName(entry);
-  const budgetKb = CHUNK_BUDGETS_KB[base] ?? DEFAULT_CHUNK_BUDGET_KB;
-  const overBudget = kb(bytes) > budgetKb;
-  if (overBudget) {
-    problems.push(
-      `chunk ${base} is ${String(kb(bytes))} KiB, over its ${String(budgetKb)} KiB budget (${entry})`,
-    );
+for (const dir of ASSET_DIRS) {
+  const absolute = path.join(distDir, dir);
+  if (!existsSync(absolute)) {
+    problems.push(`the build output has no ${dir}/ directory`);
+    continue;
   }
-  chunks.push({
-    file: entry,
-    base,
-    kb: kb(bytes),
-    budgetKb,
-    explicitBudget: base in CHUNK_BUDGETS_KB,
-    overBudget,
-  });
+  for (const entry of readdirSync(absolute).sort()) {
+    if (!entry.endsWith('.js') && !entry.endsWith('.css')) continue;
+    const bytes = statSync(path.join(absolute, entry)).size;
+    if (entry.endsWith('.js')) totalJsBytes += bytes;
+    const base = chunkBaseName(entry);
+    const budgetKb = CHUNK_BUDGETS_KB[base] ?? DEFAULT_CHUNK_BUDGET_KB;
+    const overBudget = kb(bytes) > budgetKb;
+    if (overBudget) {
+      problems.push(
+        `chunk ${base} is ${String(kb(bytes))} KiB, over its ${String(budgetKb)} KiB budget (${dir}/${entry})`,
+      );
+    }
+    chunks.push({
+      dir,
+      file: entry,
+      base,
+      kb: kb(bytes),
+      budgetKb,
+      explicitBudget: base in CHUNK_BUDGETS_KB,
+      overBudget,
+    });
+  }
 }
 
 if (chunks.length === 0) {
   problems.push('the build output contains no chunks at all');
 }
-if (kb(htmlBytes) > HTML_SHELL_BUDGET_KB) {
+
+// Budgets are keyed by chunk BASE NAME, and there are now two directories, so a
+// name occurring in both would share one ceiling between two unrelated chunks.
+// Raising it to fit the sandbox's copy would silently raise the application's by
+// the same amount, and `bundle.budgetKb.*`'s `lower` ratchet cannot see that,
+// because it is one key. Refused rather than accommodated: the two graphs are
+// separate by construction, so a collision means a chunk was named after
+// something it should not have been, and renaming it is a one-line fix.
+const dirsByBase = new Map();
+for (const chunk of chunks) {
+  const seen = dirsByBase.get(chunk.base) ?? new Set();
+  seen.add(chunk.dir);
+  dirsByBase.set(chunk.base, seen);
+}
+for (const [base, dirs] of dirsByBase) {
+  if (dirs.size < 2) continue;
   problems.push(
-    `index.html is ${String(kb(htmlBytes))} KiB, over its ${String(HTML_SHELL_BUDGET_KB)} KiB budget`,
+    `chunk name ${base} is emitted into ${[...dirs].sort().join(' and ')}, so both would share one budget key`,
   );
 }
 if (kb(initialPayloadBytes) > INITIAL_PAYLOAD_BUDGET_KB) {
@@ -146,7 +235,8 @@ writeJsonReport('bundle.json', {
     htmlShellKb: HTML_SHELL_BUDGET_KB,
   },
   measured: {
-    htmlShellKb: kb(htmlBytes),
+    htmlShellKb: kb(htmlShellBytes),
+    htmlShells,
     initialPayloadKb: kb(initialPayloadBytes),
     totalJsKb: kb(totalJsBytes),
     chunkCount: chunks.length,
@@ -164,5 +254,6 @@ if (problems.length > 0) {
 
 note(
   `bundle.json — initial payload ${String(kb(initialPayloadBytes))} KiB of ${String(INITIAL_PAYLOAD_BUDGET_KB)}, ` +
-    `${String(chunks.length)} chunks, ${String(kb(totalJsBytes))} KiB of JavaScript, every budget met`,
+    `${String(chunks.length)} chunks across ${String(ASSET_DIRS.length)} asset directories, ` +
+    `${String(kb(totalJsBytes))} KiB of JavaScript, every budget met`,
 );

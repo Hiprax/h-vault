@@ -160,6 +160,22 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
   },
   {
     method: 'get',
+    path: '/sandbox.html',
+    auth: 'none',
+    csrf: 'exempt',
+    limiters: [],
+    owned: null,
+    when: 'production',
+    note:
+      'The isolated document every stored file is rendered inside. Mounted only when ' +
+      'NODE_ENV === production, BEFORE express.static and the SPA fallback, because its ' +
+      'whole isolation is the per-response Content-Security-Policy the route attaches ' +
+      '(config/sandboxCsp.ts) — a copy answered off disk would carry helmet’s application ' +
+      'policy instead. It is unauthenticated by design: it holds no data, receives every ' +
+      'byte it renders over a MessagePort, and its own policy denies it any network access.',
+  },
+  {
+    method: 'get',
     // `String(/^(?!\/api\/).*/)` — the SPA catch-all, which serves index.html
     // with a per-request CSP nonce. Registered only in production.
     path: '/^(?!\\/api\\/).*/',

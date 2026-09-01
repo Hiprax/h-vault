@@ -62,7 +62,15 @@ export const DEFAULT_CHUNK_BUDGET_KB = 128;
  */
 export const INITIAL_PAYLOAD_BUDGET_KB = 700;
 
-/** `index.html` itself: a shell, not an asset store. Measured at ~1 KiB. */
+/**
+ * A PER-DOCUMENT ceiling on an HTML shell, applied to EACH of the two documents
+ * the client build emits: `index.html` (measured at ~1 KiB) and `sandbox.html`
+ * (~2 KiB, most of it the comment explaining what the isolated document is).
+ *
+ * Per-document rather than a total, deliberately: a shell is not an asset store,
+ * and that claim is about each document on its own. `bundle-gate.mjs` reports
+ * their SUM as `measured.htmlShellKb` — a record, not a second gate.
+ */
 export const HTML_SHELL_BUDGET_KB = 8;
 
 /**

@@ -250,7 +250,7 @@
     "audit:bundle": {
       "cmd": "npm run audit:bundle",
       "tier": 1,
-      "gate": "the built client's initial payload and every emitted chunk stay inside their committed size budgets, so a library this application loads on demand \u2014 zxcvbn, Argon2id, the file-encryption tool \u2014 cannot become a static import without the build going red",
+      "gate": "the built client's initial payload and every emitted chunk stay inside their committed size budgets, so a library this application loads on demand \u2014 zxcvbn, Argon2id, the file-encryption tool \u2014 cannot become a static import without the build going red; both emitted documents (index.html, sandbox.html) and both asset directories (assets/, sandbox-assets/) are enumerated, and a missing document is reported as could-not-run rather than passed over",
       "report": "bundle.json",
       "requires": ["build:client"]
     },

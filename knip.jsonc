@@ -11,12 +11,24 @@
   // own module, or by declaring the dependency that was really being used.
   //
   // `entry` is not an exception to that rule; it is the opposite of one. knip can
-  // only follow imports, and five of this repository's programs are started by
+  // only follow imports, and six of this repository's programs are started by
   // something that is not an import. Each carries the exact line that runs it, so
-  // the claim is checkable; the four that ship carry knip's `!` (production)
+  // the claim is checkable; the five that ship carry knip's `!` (production)
   // suffix, and the test-tier one deliberately does not:
   //
   //   e2e/start-server.ts             playwright.config.ts:72  `npx tsx e2e/start-server.ts`
+  //   packages/client/src/sandbox/sandbox.ts
+  //                                   packages/client/sandbox.html:36  `<script type="module"
+  //                                   src="/src/sandbox/sandbox.ts">`, bundled by
+  //                                   packages/client/vite.config.sandbox.ts (run by
+  //                                   packages/client/scripts/build.mjs). knip's Vite plugin
+  //                                   reads only configs matching `vite.config.{js,mjs,ts,cjs,
+  //                                   mts,cts}`, which `vite.config.sandbox.ts` does not match —
+  //                                   the same trap as the Playwright config below — while
+  //                                   `src/sandbox/**` IS inside the client's `project` glob, so
+  //                                   every file under it would be reported as an unused file.
+  //                                   Adding the CONFIG to `entry` does NOT work: knip would
+  //                                   follow its ES imports, not its HTML input.
   //   playwright.a11y.config.ts       scripts/ci/a11y-gate.mjs `playwright test --config
   //                                   playwright.a11y.config.ts` (knip's Playwright plugin only
   //                                   recognises the default config NAME, so the a11y config —
@@ -59,7 +71,12 @@
       "project": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
     },
     "packages/client": {
-      "entry": ["src/**/*.worker.ts", "scripts/*.mjs", "tests/**/*.test.{ts,tsx}"],
+      "entry": [
+        "src/**/*.worker.ts",
+        "src/sandbox/sandbox.ts!",
+        "scripts/*.mjs",
+        "tests/**/*.test.{ts,tsx}",
+      ],
       "project": ["src/**/*.{ts,tsx}", "src/**/*.css", "scripts/**/*.mjs", "tests/**/*.{ts,tsx}"],
     },
   },

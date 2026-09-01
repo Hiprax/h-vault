@@ -1,3 +1,5 @@
+import { PREVIEW_MODES, type PreviewMode } from '../constants/index.js';
+
 export function maskEmail(email: string): string {
   const atIndex = email.lastIndexOf('@');
   if (atIndex <= 0) return '***';
@@ -85,4 +87,31 @@ export function documentExtension(name: string): string {
   // `<= 0` covers both "no dot at all" (-1) and "the only dot is leading" (0).
   if (lastDot <= 0) return '';
   return name.slice(lastDot + 1).toLowerCase();
+}
+
+/**
+ * The render mode a decrypted document name resolves to.
+ *
+ * ONE definition of the rule, in the package both sides import, because the
+ * question "is this previewable" is asked twice by two different programs: the
+ * application asks it to decide whether to create a frame at all, and the
+ * isolated sandbox document is told the answer so it can pick a renderer. Two
+ * copies of the map would diverge the day someone teaches one of them about a
+ * new extension, and the symptom would be an empty rectangle rather than an
+ * error.
+ *
+ * Sits beside {@link documentExtension} rather than in `constants/`, because it
+ * is the rule that CONSUMES the extension rule; the map itself
+ * ({@link PREVIEW_MODES}) is the constant.
+ *
+ * Anything the map does not name resolves to `none`, which is a real answer the
+ * interface renders ("download to view") rather than a missing one. A name with
+ * no extension resolves to `none` for the same reason: `Dockerfile`, `Makefile`,
+ * `.bashrc` and `.env` are download-only by the same deliberate rule that says
+ * an extension is the segment after the LAST dot.
+ */
+export function previewModeForName(name: string): PreviewMode {
+  const extension = documentExtension(name);
+  if (extension === '') return 'none';
+  return PREVIEW_MODES[extension] ?? 'none';
 }

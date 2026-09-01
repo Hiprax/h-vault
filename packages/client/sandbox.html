@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The isolated document every stored file is rendered inside.
+
+      It is embedded as <iframe src="/sandbox.html" sandbox="allow-scripts"> with
+      NO allow-same-origin, so it holds an opaque origin: it fails every
+      same-origin check against the page that holds the unlocked vault key, and
+      it can reach neither that page's DOM nor its storage. Every byte it
+      renders arrives over a transferred MessagePort; it fetches nothing, and its
+      own Content-Security-Policy (attached by the Express route that serves it,
+      packages/server/src/config/sandboxCsp.ts) denies it every network
+      capability, including `connect-src`.
+
+      There is deliberately NO Content-Security-Policy meta tag here. The policy
+      is per-response and belongs to the route, for the same reason the app's
+      index.html carries none: a meta tag in the document would be a second,
+      silently-diverging copy, and it could not express `frame-ancestors` or
+      `sandbox` at all.
+
+      This document is built by its OWN Vite config (vite.config.sandbox.ts) into
+      its own `sandbox-assets/` directory. That separation is structural rather
+      than stylistic: the application renders note bodies with `react-markdown`
+      and this document needs the same unified/remark substrate, so a single
+      build would hoist that substrate into a chunk belonging to neither asset
+      directory — and only `sandbox-assets/` is served with the CORS and CORP
+      headers an opaque origin's module fetch requires.
+    -->
+    <title>Document preview</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/sandbox/sandbox.ts"></script>
+  </body>
+</html>

@@ -122,7 +122,14 @@ import {
   MAX_ADDRESS_ZIP_LENGTH,
   MAX_ADDRESS_COUNTRY_LENGTH,
   MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
+  MAX_PREVIEW_BYTES,
+  MAX_PREVIEW_TEXT_LINES,
+  PREVIEW_MODES,
+  PREVIEW_MODE_NAMES,
+  PREVIEW_MAGIC_BYTES,
+  previewModeForName,
 } from '../src/index.js';
+import type { SandboxFrameMessage, SandboxRenderRequest, SandboxTheme } from '../src/index.js';
 
 describe('barrel exports (src/index.ts)', () => {
   it('exports all common schemas', () => {
@@ -283,6 +290,41 @@ describe('barrel exports (src/index.ts)', () => {
     // except this package — so a barrel that did not re-export it would guarantee a
     // second copy of the rule rather than merely an awkward import.
     expect(typeof documentExtension).toBe('function');
+  });
+
+  it('exports the document-preview map, its bounds and the rule that reads them', () => {
+    // The package publishes only the "." subpath, so anything the barrel does not
+    // re-export is unreachable from the client. That matters more here than for
+    // most exports: the application and the isolated render document share NO
+    // module except this package, so a missing re-export does not produce an
+    // import error to fix — it produces a second copy of the previewability rule,
+    // and the two disagreeing shows up as an empty rectangle rather than a crash.
+    expect(typeof previewModeForName).toBe('function');
+    expect(previewModeForName('README.md')).toBe('markdown');
+    expect(PREVIEW_MODES['png']).toBe('image');
+    expect(PREVIEW_MODE_NAMES).toContain('none');
+    expect(PREVIEW_MAGIC_BYTES['png']?.[0]?.bytes[0]).toBe(0x89);
+    expect(MAX_PREVIEW_BYTES).toBe(26_214_400);
+    expect(MAX_PREVIEW_TEXT_LINES).toBe(50_000);
+  });
+
+  it('exports the sandbox message types, which are the ONLY thing the two graphs share', () => {
+    // Type-only, and that is the whole design: `manualChunks` puts `zod` in
+    // `vendor-core` next to AXIOS, so a shared RUNTIME schema would drag an HTTP
+    // client into a document whose policy forbids it every request. These
+    // annotations compile away to nothing, and the file failing to type-check is
+    // what would report the re-export going missing.
+    const theme: SandboxTheme = 'dark';
+    const request: SandboxRenderRequest = {
+      kind: 'render',
+      mode: 'text',
+      ext: 'txt',
+      theme,
+      bytes: new ArrayBuffer(0),
+    };
+    const reply: SandboxFrameMessage = { kind: 'link', href: 'https://example.com' };
+    expect(request.mode).toBe('text');
+    expect(reply.kind).toBe('link');
   });
 
   it('exports the backup-code parser and its bounds', () => {

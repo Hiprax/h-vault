@@ -101,6 +101,11 @@ import {
   MAX_DOCUMENT_META_JSON_BYTES,
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
   MAX_FORMATTABLE_SIZE_BYTES,
+  MAX_PREVIEW_BYTES,
+  MAX_PREVIEW_TEXT_LINES,
+  PREVIEW_MODES,
+  PREVIEW_MODE_NAMES,
+  PREVIEW_MAGIC_BYTES,
   DOCUMENT_STREAM_INFO_PREFIX,
   DOCUMENT_META_INFO_PREFIX,
   DOCUMENT_DEK_WRAP_INFO_PREFIX,
@@ -113,6 +118,7 @@ import {
   loginDataSchema,
   secretDataSchema,
 } from '../src/schemas/vault.js';
+import { previewModeForName } from '../src/utils/index.js';
 
 // ---------------------------------------------------------------------------
 // Security constants
@@ -956,5 +962,136 @@ describe('isValidIdentityEmail / isValidIdentityPhone', () => {
         isValidIdentityPhone(value),
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Document preview: the extension-to-mode map, and the rule that reads it
+// ---------------------------------------------------------------------------
+// This map is asked the same question by two different programs — the
+// application, deciding whether to create a frame at all, and the isolated
+// sandbox document, told the answer so it can pick a renderer. The failure a
+// disagreement produces is an EMPTY RECTANGLE rather than an error, so the map's
+// membership and the derivation rule are pinned here rather than trusted.
+describe('PREVIEW_MODES and previewModeForName', () => {
+  it.each([
+    ['a shell script', 'deploy.sh', 'code'],
+    ['a README', 'README.md', 'markdown'],
+    ['an image', 'diagram.png', 'image'],
+    ['a video', 'clip.mp4', 'media'],
+    ['plain text', 'notes.txt', 'text'],
+    ['stored HTML', 'invoice.html', 'html'],
+    ['a spreadsheet export', 'export.csv', 'text'],
+    ['a config file', 'nginx.conf', 'code'],
+    ['a systemd unit', 'hvault.service', 'code'],
+    ['structured data', 'package.json', 'code'],
+  ])('resolves %s to its mode', (_label, name, mode) => {
+    expect(previewModeForName(name)).toBe(mode);
+  });
+
+  it('gives a name with no extension no preview at all', () => {
+    // A DECISION, not an oversight: recognising these would need a second lookup
+    // keyed by whole filename, which is a second source of truth for one
+    // question. `.bashrc` and `.env` have a LEADING dot only, which is not an
+    // extension under the same rule that makes `archive.tar.gz` a `gz`.
+    for (const name of ['Dockerfile', 'Makefile', 'LICENSE', '.bashrc', '.env', 'hosts']) {
+      expect(previewModeForName(name)).toBe('none');
+    }
+    // A name ending in a dot has an EMPTY extension, which is also no extension.
+    expect(previewModeForName('report.')).toBe('none');
+  });
+
+  it('is case-insensitive, because a case-sensitive lookup is the obvious bug', () => {
+    expect(previewModeForName('DEPLOY.SH')).toBe(previewModeForName('deploy.sh'));
+    expect(previewModeForName('Deploy.Sh')).toBe(previewModeForName('deploy.sh'));
+    expect(previewModeForName('README.MD')).toBe('markdown');
+  });
+
+  it('keys on the LAST segment, so a double extension is not a special case', () => {
+    // `archive.tar.gz` is a `gz` — which no renderer handles — and NOT a
+    // `tar.gz`. Pinned because "helpfully" recognising compound extensions is
+    // the change that would silently make this map two rules instead of one.
+    expect(previewModeForName('archive.tar.gz')).toBe('none');
+    expect(previewModeForName('backup.tar')).toBe('none');
+    expect(previewModeForName('script.min.js')).toBe('code');
+  });
+
+  it('names PDF explicitly rather than leaving it unrecognised', () => {
+    // The distinction the interface renders: "PDFs are download-only" reads
+    // differently from "unrecognised type", and PDF is a DECISION — a PDF
+    // renderer is a large third-party parser with a documented history of
+    // executing attacker JavaScript in its host page (CVE-2024-4367 in pdf.js).
+    expect(PREVIEW_MODES['pdf']).toBe('none');
+    expect(previewModeForName('statement.pdf')).toBe('none');
+  });
+
+  it('gives every entry one of the seven declared modes', () => {
+    // The check that catches a typo'd mode name, which would otherwise mean "no
+    // renderer" silently: the sandbox `switch`es on the mode and its default
+    // branch is "unsupported", so `'markdwon'` would present as a file that
+    // simply refuses to preview.
+    for (const [extension, mode] of Object.entries(PREVIEW_MODES)) {
+      expect(PREVIEW_MODE_NAMES, `${extension} declares mode ${mode}`).toContain(mode);
+    }
+    expect(PREVIEW_MODE_NAMES).toHaveLength(7);
+  });
+
+  it('uses only lowercase, dotless extensions as keys', () => {
+    // The lookup key is what `documentExtension` returns, and it lowercases and
+    // strips the dot. A key written as `.md` or `MD` would be dead: present in
+    // the map, matched by nothing, and invisible to every other assertion here.
+    for (const extension of Object.keys(PREVIEW_MODES)) {
+      expect(extension).toBe(extension.toLowerCase());
+      expect(extension).not.toContain('.');
+      expect(extension.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('registers a magic-byte signature only for a type it offers to preview', () => {
+    // A strict SUBSET. A signature for a type the map does not preview is dead
+    // weight the sniffer would never reach, and — worse — it reads as coverage
+    // that is not there.
+    const previewable = new Set(Object.keys(PREVIEW_MODES));
+    for (const extension of Object.keys(PREVIEW_MAGIC_BYTES)) {
+      expect(previewable, `${extension} has a signature but no mode`).toContain(extension);
+    }
+    expect(Object.keys(PREVIEW_MAGIC_BYTES).length).toBeLessThan(previewable.size);
+  });
+
+  it('declares every signature as real byte values at a real offset', () => {
+    // The offset is not decoration: `ftyp` is at byte 4 of an MP4 and WebP is
+    // `RIFF` at 0 followed by `WEBP` at 8, so a leading-bytes-only model would
+    // miss them or match the wrong container. A byte outside 0..255 or a
+    // negative offset is a transcription slip that would make the sniffer refuse
+    // every file of that type.
+    for (const [extension, signatures] of Object.entries(PREVIEW_MAGIC_BYTES)) {
+      expect(signatures.length, `${extension} has no signature`).toBeGreaterThan(0);
+      for (const signature of signatures) {
+        expect(Number.isInteger(signature.offset)).toBe(true);
+        expect(signature.offset).toBeGreaterThanOrEqual(0);
+        expect(signature.bytes.length).toBeGreaterThan(0);
+        for (const byte of signature.bytes) {
+          expect(Number.isInteger(byte)).toBe(true);
+          expect(byte).toBeGreaterThanOrEqual(0);
+          expect(byte).toBeLessThanOrEqual(0xff);
+        }
+      }
+    }
+  });
+
+  it('pins the two preview budgets both sides read', () => {
+    // MAX_PREVIEW_BYTES is a MEMORY budget before it is a UI one: the app holds
+    // the whole plaintext, the channel hands the same buffer to the sandbox, and
+    // a renderer builds its own representation on top, so the peak is a small
+    // multiple of the file. It matches the restore cap this project already
+    // lives with, so an operator meets one figure rather than two.
+    expect(MAX_PREVIEW_BYTES).toBe(26_214_400);
+    expect(MAX_PREVIEW_BYTES).toBe(MAX_RESTORE_DATA_LENGTH);
+    // Anything the upload panel is willing to FORMAT must also be previewable,
+    // or a user could reformat a file in the browser and then be told it is too
+    // large to look at. The two bounds are set independently, so the ordering
+    // between them is worth pinning rather than assuming.
+    expect(MAX_PREVIEW_BYTES).toBeGreaterThan(MAX_FORMATTABLE_SIZE_BYTES);
+    expect(MAX_PREVIEW_TEXT_LINES).toBe(50_000);
   });
 });

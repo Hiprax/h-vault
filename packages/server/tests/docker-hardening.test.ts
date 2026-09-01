@@ -1004,6 +1004,21 @@ describe('Docker deployment', () => {
       expect(dockerfile).toMatch(/rm -f \/app\/packages\/client\/dist\/index\.html/);
     });
 
+    it('removes sandbox.html from the Nginx document root too', () => {
+      // Sharper than the index.html case above, and the reason it gets its own
+      // assertion. The document sandbox's entire isolation IS the per-response
+      // Content-Security-Policy that Express attaches to /sandbox.html
+      // (src/config/sandboxCsp.ts): `connect-src 'none'`, `worker-src 'none'`,
+      // `sandbox allow-scripts` and the rest. Answered off this disk it would
+      // carry the document root's `default-src 'self'` and NONE of those, so
+      // every renderer would keep working while the containment silently
+      // stopped existing. With the file absent, `try_files` falls through to
+      // `@app` and the tailored policy is the one that reaches the client.
+      // Anchored at the end of the path: an unanchored match would also be
+      // satisfied by `.../sandbox.html.bak`, which deletes nothing that matters.
+      expect(dockerfile).toMatch(/rm -f[^\n]*\/app\/packages\/client\/dist\/sandbox\.html(?:\s|$)/);
+    });
+
     it('serves from a document root this repo owns, not the base image default', () => {
       // The nginx-unprivileged image ships its own /usr/share/nginx/html/index.html
       // (the "Welcome to nginx!" page), and COPY overlays rather than replaces — so
@@ -1279,6 +1294,43 @@ describe('Docker deployment', () => {
       // The SPA fallback goes to the app, never to a local index.html.
       expect(nginxConf).toMatch(/try_files\s+\$uri @app;/);
       expect(nginxConf).not.toMatch(/try_files[^;]*\/index\.html/);
+    });
+
+    it('serves the sandbox assets, and only those, with the CORS and CORP headers an opaque origin needs', () => {
+      // /sandbox.html is framed WITHOUT `allow-same-origin`, so it holds an
+      // opaque origin. A module script is fetched in CORS mode unconditionally
+      // and Vite emits `<script type="module" crossorigin>`, so that request
+      // carries `Origin: null` and needs ACAO; the stylesheet is a no-cors
+      // subresource and needs CORP. Miss either and the frame is SILENTLY
+      // blank — no console error a user would report, no failing request a gate
+      // that only checks status codes would see.
+      // Sliced at the block's own closing brace rather than at the next
+      // `location`, so the COMMENTS between two blocks (which necessarily name
+      // the very headers being asserted absent below) cannot satisfy or defeat
+      // either half of this test.
+      const locationBlock = (header: string): string => {
+        const start = nginxConf.indexOf(header);
+        expect(start, `${header} is not in internal.conf`).toBeGreaterThanOrEqual(0);
+        const end = nginxConf.indexOf('\n    }', start);
+        expect(end, `${header} is never closed`).toBeGreaterThan(start);
+        return nginxConf.slice(start, end);
+      };
+
+      const sandboxBlock = locationBlock('location /sandbox-assets/ {');
+      expect(sandboxBlock).toMatch(/add_header\s+Access-Control-Allow-Origin\s+"\*"\s+always;/);
+      expect(sandboxBlock).toMatch(
+        /add_header\s+Cross-Origin-Resource-Policy\s+"cross-origin"\s+always;/,
+      );
+      // Immutable caching, exactly as /assets/ gets: these are content-hashed.
+      expect(sandboxBlock).toMatch(/max-age=31536000, immutable/);
+
+      // The negative, and the one that matters: the APPLICATION's assets are
+      // NOT readable by an opaque origin. Widening /assets/ would be the easy
+      // "fix" for a blank frame and would hand any sandboxed document on the
+      // internet read access to the app's own bundle.
+      const appAssetsBlock = locationBlock('location /assets/ {');
+      expect(appAssetsBlock).not.toMatch(/Access-Control-Allow-Origin/);
+      expect(appAssetsBlock).not.toMatch(/Cross-Origin-Resource-Policy/);
     });
 
     it('never compresses API responses (BREACH)', () => {

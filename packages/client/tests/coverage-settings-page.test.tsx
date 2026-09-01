@@ -20,6 +20,13 @@ import type { Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
+// Imported rather than written out as a decimal literal. The framing sizes have
+// ONE definition, and `packages/shared/tests/constants.test.ts` scans this whole
+// repository for a second copy of either of them — including inside comments,
+// which is why this note does not quote the number — because a fixture that
+// drifts from the real value is a test asserting against a document layout that
+// does not exist.
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
 
 vi.hoisted(() => {
   if (typeof globalThis.window !== 'undefined') {
@@ -527,7 +534,7 @@ function documentRow(id: string) {
     encryptedMeta: `${id}-meta`,
     metaIv: `${id}-metaIv`,
     metaTag: `${id}-metaTag`,
-    chunkPlaintextBytes: 8_388_592,
+    chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
     chunkCount: 1,
     ciphertextBytes: 16,
     plaintextBytes: 0,

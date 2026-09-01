@@ -397,6 +397,254 @@ export const DOCUMENT_STREAM_INFO_PREFIX = 'hvault/doc/stream/v1|';
 export const DOCUMENT_META_INFO_PREFIX = 'hvault/doc/meta/v1|';
 export const DOCUMENT_DEK_WRAP_INFO_PREFIX = 'hvault/doc/dek-wrap/v1|';
 
+// ---------------------------------------------------------------------------
+// DOCUMENT PREVIEW
+// ---------------------------------------------------------------------------
+// The application decides WHETHER a preview is offered; the isolated sandbox
+// document decides HOW to render it. Both read the numbers and the map below,
+// and neither restates them, because the two answers have to agree: an app that
+// offers a preview for a type the sandbox has no renderer for shows the user an
+// empty rectangle, and an app that declines one the sandbox could render shows a
+// needless download button.
+// ---------------------------------------------------------------------------
+
+// The seven ways a stored document can be presented. `none` is a first-class
+// answer rather than the absence of one: it is what the detail view reads to say
+// "download to view" with a reason, and PREVIEW_MODES names it explicitly for
+// the types this project has deliberately DECIDED not to render (PDF), as
+// distinct from the ones it simply does not recognise.
+export const PREVIEW_MODE_NAMES = [
+  'image',
+  'text',
+  'code',
+  'markdown',
+  'html',
+  'media',
+  'none',
+] as const;
+export type PreviewMode = (typeof PREVIEW_MODE_NAMES)[number];
+
+// The size past which a document is download-only.
+//
+// A MEMORY budget before it is a UI one, and the multiplier is what makes it
+// small: the application holds the whole decrypted plaintext, the channel hands
+// the SAME buffer to the sandbox, and a renderer then builds its own
+// representation on top of it, so the peak is a small multiple of the file. 25
+// MiB keeps that comfortably inside a tab on a modest machine, and it is the
+// same number this project already lives with for a backup restore
+// (MAX_RESTORE_DATA_LENGTH), so an operator meets one figure rather than two.
+export const MAX_PREVIEW_BYTES = 26_214_400;
+// Lines past which the text renderer truncates, with a notice and the byte count
+// rather than silently. A single-line 25 MiB file is one DOM text node and is
+// fine; 50,000 SEPARATE lines is 50,000 nodes, and it is the node count rather
+// than the byte count that stops a tab responding.
+export const MAX_PREVIEW_TEXT_LINES = 50_000;
+
+// Extension to render mode. The lookup key is what `documentExtension` returns:
+// the LOWERCASED segment after the LAST dot of the decrypted name. A name with
+// no dot, and a name whose only dot is leading, therefore has no extension and
+// resolves to `none` — `Dockerfile`, `Makefile`, `.bashrc` and `.env` are all
+// download-only, which is a decision rather than an oversight (recognising them
+// needs a second lookup keyed by whole filename, i.e. a second source of truth
+// for one question).
+//
+// Two consequences worth stating rather than discovering. UPLOADING is not
+// restricted by this map at all: every type uploads, and a type absent here is
+// simply download-only. And a `code` preview is NOT redacted in any way, which
+// is correct for a store whose whole content is sensitive by definition, but it
+// does mean a previewed `prod.env` shows its secrets on screen exactly as a
+// revealed password field would. (`prod.env` has the extension `env`; the file
+// `.env` has none, and is download-only, by the rule above.)
+//
+// ADDING AN EXTENSION HERE IS CHEAP AND SAFE, and that property should govern
+// the decision: every text-family renderer emits text nodes and executes
+// nothing, and an extension with no matching highlighter language degrades to
+// plain text. The worst outcome of a generous list is an unhighlighted preview;
+// the worst outcome of a stingy one is a needless download. Membership is pinned
+// by a test so an addition is a visible edit rather than a silent one.
+export const PREVIEW_MODES: Readonly<Record<string, PreviewMode>> = Object.freeze({
+  // Raster and vector images, all through `<img>`. SVG is NEVER inlined: an
+  // `<img>` cannot run the script an inline SVG can.
+  png: 'image',
+  jpg: 'image',
+  jpeg: 'image',
+  gif: 'image',
+  webp: 'image',
+  avif: 'image',
+  bmp: 'image',
+  ico: 'image',
+  svg: 'image',
+
+  // Plain and tabular text, rendered as text nodes with no language grammar.
+  txt: 'text',
+  text: 'text',
+  log: 'text',
+  csv: 'text',
+  tsv: 'text',
+
+  // Highlightable source and structured data. Shell scripts and configuration
+  // files are deliberately included: they are among the things a person most
+  // often stores and most wants to read without downloading.
+  sh: 'code',
+  bash: 'code',
+  zsh: 'code',
+  fish: 'code',
+  ps1: 'code',
+  bat: 'code',
+  cmd: 'code',
+  py: 'code',
+  rb: 'code',
+  pl: 'code',
+  lua: 'code',
+  sql: 'code',
+  r: 'code',
+  js: 'code',
+  mjs: 'code',
+  cjs: 'code',
+  ts: 'code',
+  tsx: 'code',
+  jsx: 'code',
+  c: 'code',
+  h: 'code',
+  cpp: 'code',
+  hpp: 'code',
+  cs: 'code',
+  java: 'code',
+  kt: 'code',
+  go: 'code',
+  rs: 'code',
+  php: 'code',
+  swift: 'code',
+  diff: 'code',
+  patch: 'code',
+  conf: 'code',
+  cfg: 'code',
+  properties: 'code',
+  env: 'code',
+  service: 'code',
+  json: 'code',
+  jsonc: 'code',
+  json5: 'code',
+  jsonl: 'code',
+  ndjson: 'code',
+  yaml: 'code',
+  yml: 'code',
+  toml: 'code',
+  xml: 'code',
+  ini: 'code',
+
+  // Markdown through remark/rehype with the sanitizer's GitHub-derived schema,
+  // so a README renders the way GitHub renders one.
+  md: 'markdown',
+  markdown: 'markdown',
+  mdown: 'markdown',
+  mkd: 'markdown',
+
+  // Stored HTML through the SAME sanitizing pipeline. Never assigned to an
+  // element's innerHTML: the sanitized tree becomes DOM nodes directly, because
+  // serialising it back to a string and re-parsing it is the mutation-XSS shape.
+  html: 'html',
+  htm: 'html',
+  xhtml: 'html',
+
+  // Audio and video through `<video controls>` / `<audio controls>`, from a blob
+  // URL the sandbox mints itself (one minted by the application would not
+  // resolve in an opaque origin).
+  mp4: 'media',
+  m4v: 'media',
+  webm: 'media',
+  ogv: 'media',
+  mp3: 'media',
+  m4a: 'media',
+  aac: 'media',
+  wav: 'media',
+  flac: 'media',
+  opus: 'media',
+  ogg: 'media',
+  oga: 'media',
+
+  // Named, and DECIDED. A PDF renderer is a large third-party parser with a
+  // documented history of executing attacker JavaScript in its host page
+  // (CVE-2024-4367 in pdf.js), it is the only renderer that would have needed a
+  // worker and a WebAssembly module the isolated document cannot load by URL,
+  // and carrying it would have forced `connect-src` and `worker-src` open for
+  // every other format too. Listing it as `none` rather than omitting it is what
+  // lets the interface say "PDFs are download-only" instead of "unrecognised
+  // type".
+  pdf: 'none',
+});
+
+/**
+ * One leading-byte signature: the bytes a format starts with, and the offset
+ * they start AT.
+ *
+ * The offset is not decoration. Several of the formats here put their signature
+ * after a container header — `ftyp` is at byte 4 of an MP4, and WebP is `RIFF`
+ * at 0 followed by `WEBP` at 8 — so a leading-bytes-only model would either miss
+ * them or match the wrong thing.
+ */
+export interface PreviewSignature {
+  readonly offset: number;
+  readonly bytes: readonly number[];
+}
+
+// What a file's first bytes must look like for its extension's claim to be
+// believed. The sandbox compares them before rendering anything, and a mismatch
+// refuses the preview and says what the file actually looks like.
+//
+// Deliberately PARTIAL, and its keys are a strict SUBSET of PREVIEW_MODES's: a
+// signature registered for a type the map does not offer to preview would be
+// dead weight, and a check can only exist for a format that HAS an unambiguous
+// magic number. Text, markdown, HTML, source code, SVG and INI have none, and
+// inventing one for them would refuse legitimate files.
+//
+// Every entry is a LIST of alternatives, because a format may have more than one
+// legal opening (GIF87a and GIF89a; an MP3 with an ID3 tag and one without).
+export const PREVIEW_MAGIC_BYTES: Readonly<Record<string, readonly PreviewSignature[]>> =
+  Object.freeze({
+    png: [{ offset: 0, bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] }],
+    jpg: [{ offset: 0, bytes: [0xff, 0xd8, 0xff] }],
+    jpeg: [{ offset: 0, bytes: [0xff, 0xd8, 0xff] }],
+    // 'GIF87a' and 'GIF89a'.
+    gif: [
+      { offset: 0, bytes: [0x47, 0x49, 0x46, 0x38, 0x37, 0x61] },
+      { offset: 0, bytes: [0x47, 0x49, 0x46, 0x38, 0x39, 0x61] },
+    ],
+    // 'RIFF' at 0 then 'WEBP' at 8 — the pair, because 'RIFF' alone is also a
+    // WAV, an AVI and half a dozen other containers.
+    webp: [
+      { offset: 0, bytes: [0x52, 0x49, 0x46, 0x46] },
+      { offset: 8, bytes: [0x57, 0x45, 0x42, 0x50] },
+    ],
+    bmp: [{ offset: 0, bytes: [0x42, 0x4d] }],
+    ico: [{ offset: 0, bytes: [0x00, 0x00, 0x01, 0x00] }],
+    // 'ftypavif' at 4.
+    avif: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66] }],
+    // 'ftyp' at 4, common to the whole ISO base-media family.
+    mp4: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70] }],
+    m4v: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70] }],
+    m4a: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70] }],
+    // Matroska/WebM EBML header.
+    webm: [{ offset: 0, bytes: [0x1a, 0x45, 0xdf, 0xa3] }],
+    // 'OggS'.
+    ogg: [{ offset: 0, bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    oga: [{ offset: 0, bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    ogv: [{ offset: 0, bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    opus: [{ offset: 0, bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    // 'ID3' for a tagged file, or a bare MPEG frame sync.
+    mp3: [
+      { offset: 0, bytes: [0x49, 0x44, 0x33] },
+      { offset: 0, bytes: [0xff, 0xfb] },
+    ],
+    // 'RIFF' then 'WAVE', for the same reason as WebP.
+    wav: [
+      { offset: 0, bytes: [0x52, 0x49, 0x46, 0x46] },
+      { offset: 8, bytes: [0x57, 0x41, 0x56, 0x45] },
+    ],
+    // 'fLaC'.
+    flac: [{ offset: 0, bytes: [0x66, 0x4c, 0x61, 0x43] }],
+  });
+
 export const ITEM_TYPES = ['login', 'secret', 'note', 'card', 'identity'] as const;
 export type ItemType = (typeof ITEM_TYPES)[number];
 

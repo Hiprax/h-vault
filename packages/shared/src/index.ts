@@ -9,6 +9,7 @@ export * from './schemas/document.js';
 
 // Types
 export * from './types/index.js';
+export * from './types/sandbox.js';
 
 // Constants
 export * from './constants/index.js';

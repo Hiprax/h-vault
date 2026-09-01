@@ -64,6 +64,53 @@ import { color, formatDuration, note, symbol, warn } from './lib/ui.mjs';
 import { ensureReportDir, writeJsonReport } from './lib/reports.mjs';
 import { runVaultFlow, waitForHealth } from './lib/vault-flow.mjs';
 
+/**
+ * The policy `/sandbox.html` must carry, restated here ON PURPOSE.
+ *
+ * `packages/server/src/config/sandboxCsp.ts` is the single home of this policy
+ * and a server unit test pins that CONSTANT directive by directive. This is the
+ * second, INDEPENDENT pin, over the header the built artifact actually sends —
+ * because a constant test alone passes happily while the route sends something
+ * else (or while `express.static` answers the URL first with helmet's
+ * application policy), and a served-header test alone would leave the constant
+ * free to drift. A gate script cannot import a TypeScript module, so the
+ * restatement is structural rather than a choice; the two copies disagreeing is
+ * exactly the failure worth having.
+ *
+ * Compared DIRECTIVE BY DIRECTIVE, never by substring. `connect-src 'none'` and
+ * `worker-src 'none'` are the containment — the sandbox opens no socket of any
+ * kind — and each is one appended word away from being widened, which a
+ * `.includes("connect-src 'none'")` check stays green through.
+ */
+const SANDBOX_CSP_EXPECTED = {
+  'default-src': "'none'",
+  'script-src': "'self'",
+  'style-src': "'self'",
+  'img-src': "'self' blob: data:",
+  'font-src': "'self' data:",
+  'media-src': 'blob:',
+  'connect-src': "'none'",
+  'worker-src': "'none'",
+  'frame-src': "'none'",
+  'child-src': "'none'",
+  'object-src': "'none'",
+  'base-uri': "'none'",
+  'form-action': "'none'",
+  'frame-ancestors': "'self'",
+  sandbox: 'allow-scripts',
+};
+
+/** `"a 'b'; c 'd'"` -> `{ a: "'b'", c: "'d'" }`, whitespace normalised. */
+function parseCsp(header) {
+  const directives = {};
+  for (const part of header.split(';')) {
+    const tokens = part.trim().split(/\s+/).filter(Boolean);
+    const [name, ...sources] = tokens;
+    if (name) directives[name.toLowerCase()] = sources.join(' ');
+  }
+  return directives;
+}
+
 /** (d) A production boot on a cold machine is seconds; 45 of them is a hang. */
 const BOOT_DEADLINE_MS = 45_000;
 /** What the gate is meant to cost, reported rather than enforced — see (d). */
@@ -286,7 +333,118 @@ try {
     );
 
     // -----------------------------------------------------------------------
-    // 4. The journey (e)
+    // 4. The document sandbox, which is production-only in every part
+    // -----------------------------------------------------------------------
+    // The route, its policy and the two headers `sandbox-assets/` needs all
+    // live inside `if (NODE_ENV === 'production')` or in a built asset
+    // directory, so this gate is the only push-tier place any of them can be
+    // observed. Every failure mode here is SILENT in a browser — a blank
+    // rectangle, no console error worth reporting — which is why they are
+    // asserted over the wire rather than trusted to review.
+    const sandbox = await fetch(new URL('/sandbox.html', baseUrl));
+    const sandboxHtml = await sandbox.text();
+    const sandboxCspRaw = sandbox.headers.get('content-security-policy') ?? '';
+    // `Headers.get` joins repeated headers with ", ". A CSP source list never
+    // contains a comma, so its presence means TWO policies reached the client —
+    // and two policies on one response are INTERSECTED by the browser, which
+    // would kill `blob:` media and `data:` images in one stroke. This is also
+    // what would catch helmet's application policy surviving beside the
+    // sandbox's own.
+    const singleCspHeader = sandboxCspRaw !== '' && !sandboxCspRaw.includes(',');
+    const served = parseCsp(sandboxCspRaw);
+    const cspDiff = [];
+    for (const [directive, sources] of Object.entries(SANDBOX_CSP_EXPECTED)) {
+      if (served[directive] !== sources) {
+        cspDiff.push(
+          `${directive}: expected "${sources}", got "${served[directive] ?? '(absent)'}"`,
+        );
+      }
+    }
+    for (const directive of Object.keys(served)) {
+      if (!(directive in SANDBOX_CSP_EXPECTED)) cspDiff.push(`unexpected directive ${directive}`);
+    }
+    // Revalidated, never held. The document names content-hashed
+    // `/sandbox-assets/` URLs that change on every deploy, so a cached copy is a
+    // frame asking for assets that no longer exist — a dead viewer for every
+    // returning user, one deploy late.
+    const sandboxCache = sandbox.headers.get('cache-control');
+    const cacheOk = sandboxCache === 'no-cache';
+    const sandboxOk = sandbox.status === 200 && singleCspHeader && cacheOk && cspDiff.length === 0;
+    record(
+      'sandbox-document',
+      sandboxOk,
+      sandboxOk
+        ? `/sandbox.html is served by Express with exactly one Content-Security-Policy, matching all ${String(Object.keys(SANDBOX_CSP_EXPECTED).length)} directives`
+        : `GET /sandbox.html returned ${String(sandbox.status)}; single CSP header=${String(singleCspHeader)}; Cache-Control=${String(sandboxCache)}${cspDiff.length > 0 ? `; ${cspDiff.join('; ')}` : ''}`,
+    );
+
+    // The asset headers. A module script is fetched in CORS mode
+    // unconditionally, so from the frame's opaque origin it sends `Origin:
+    // null` and needs ACAO; helmet's default CORP (`same-origin`) separately
+    // blocks the no-cors stylesheet wherever EXPRESS serves it, which is the
+    // path a pm2 deployment and this gate use.
+    //
+    // The negative half keeps the widening scoped, and is phrased as the exact
+    // values `/assets/` carries rather than as their ABSENCE — measured, and
+    // the difference matters. Every Express response already carries both
+    // header NAMES: the `cors` middleware is configured with a fixed string
+    // origin, so it emits `Access-Control-Allow-Origin: <CORS_ORIGIN>`
+    // unconditionally on every response, and helmet's default emits
+    // `Cross-Origin-Resource-Policy: same-origin`. An "must not be present"
+    // assertion is therefore false on a correct build, and the tempting way to
+    // make it pass is to delete the negative — which is the whole check.
+    const sandboxAsset = /<script[^>]+src="(\/sandbox-assets\/[^"]+)"/.exec(sandboxHtml)?.[1];
+    const appAsset = /<script[^>]+src="(\/assets\/[^"]+)"/.exec(html)?.[1];
+    if (!sandboxAsset || !appAsset) {
+      record(
+        'sandbox-assets',
+        false,
+        `could not locate a module script to probe (sandbox-assets=${String(sandboxAsset)}, assets=${String(appAsset)})`,
+      );
+    } else {
+      const [sandboxRes, appRes] = await Promise.all([
+        fetch(new URL(sandboxAsset, baseUrl)),
+        fetch(new URL(appAsset, baseUrl)),
+      ]);
+      const problems = [];
+      if (sandboxRes.headers.get('access-control-allow-origin') !== '*') {
+        problems.push(
+          `${sandboxAsset} Access-Control-Allow-Origin=${String(sandboxRes.headers.get('access-control-allow-origin'))}, expected *`,
+        );
+      }
+      if (sandboxRes.headers.get('cross-origin-resource-policy') !== 'cross-origin') {
+        problems.push(
+          `${sandboxAsset} Cross-Origin-Resource-Policy=${String(sandboxRes.headers.get('cross-origin-resource-policy'))}, expected cross-origin`,
+        );
+      }
+      const appAcao = appRes.headers.get('access-control-allow-origin');
+      const appCorp = appRes.headers.get('cross-origin-resource-policy');
+      // Exactly what the application's own bundle carries today: the single
+      // configured CORS origin, and helmet's same-origin CORP. Either one moving
+      // to the sandbox's values would mean the widening had leaked out of its
+      // directory and handed every sandboxed document on the internet read
+      // access to the app's bundle.
+      if (appAcao !== 'https://smoke.hvault.test') {
+        problems.push(
+          `${appAsset} Access-Control-Allow-Origin=${String(appAcao)}, expected the configured CORS origin`,
+        );
+      }
+      if (appCorp !== 'same-origin') {
+        problems.push(
+          `${appAsset} Cross-Origin-Resource-Policy=${String(appCorp)}, expected same-origin`,
+        );
+      }
+      record(
+        'sandbox-assets',
+        problems.length === 0,
+        problems.length === 0
+          ? 'sandbox-assets/ is readable by an opaque origin; assets/ still carries only the app’s own CORS origin and same-origin CORP'
+          : problems.join('; '),
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. The journey (e)
     // -----------------------------------------------------------------------
     const { MongoClient } = await import('mongodb');
     const client = new MongoClient(mongoUri);
