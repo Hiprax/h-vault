@@ -314,6 +314,25 @@ const declaredUploadFields = {
 };
 
 /**
+ * One document's leg of a vault-key rotation: the id, and the DEK rewrapped under
+ * the NEW vault key.
+ *
+ * This is the whole reason the store uses envelope encryption. A rotation rewraps
+ * 32 bytes per document instead of re-uploading the file, so it stays possible
+ * once an account holds gigabytes, and no object in the bucket is read or written
+ * by it at all.
+ *
+ * It lives in this module, beside `wrappedDekFields`, rather than in
+ * `schemas/vault.ts` where `bulkReEncryptSchema` composes it: the three ciphertext
+ * bounds are declared exactly once on the wire side, and a rotation entry that
+ * restated them would be the second copy that drifts.
+ */
+export const documentKeyRewrapSchema = z.object({
+  id: objectIdSchema,
+  ...wrappedDekFields,
+});
+
+/**
  * `POST /documents/uploads`: the wrapped DEK, the plaintext framing fields and the
  * declared size.
  *

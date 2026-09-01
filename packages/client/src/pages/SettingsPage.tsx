@@ -1340,6 +1340,10 @@ export default function SettingsPage() {
           ...entry.payload,
         })),
         folders: reEncryptedFolders,
+        // Every leg is sent explicitly. A rotation must name every row the
+        // account holds, so an omitted leg is refused outright rather than
+        // leaving those rows sealed under the key being replaced.
+        documents: [],
         newEncryptedVaultKey: encrypted,
         newVaultKeyIv: iv,
         newVaultKeyTag: tag,

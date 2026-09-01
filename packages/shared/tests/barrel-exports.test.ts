@@ -60,6 +60,7 @@ import {
   publicConfigResponseSchema,
   // Schemas — document
   documentMetaSchema,
+  documentKeyRewrapSchema,
   initDocumentUploadSchema,
   completeDocumentUploadSchema,
   updateDocumentSchema,
@@ -203,6 +204,9 @@ describe('barrel exports (src/index.ts)', () => {
     // `schemas/document.ts` exports — and the document store's whole point is that
     // both sides read ONE definition of every bound.
     expect(documentMetaSchema).toBeDefined();
+    // Composed into `bulkReEncryptSchema`'s documents leg, so the rotation's
+    // wrapped-key bounds are the SAME three the upload path declares.
+    expect(documentKeyRewrapSchema).toBeDefined();
     expect(initDocumentUploadSchema).toBeDefined();
     expect(completeDocumentUploadSchema).toBeDefined();
     expect(updateDocumentSchema).toBeDefined();

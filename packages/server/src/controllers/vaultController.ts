@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { VaultItem } from '../models/VaultItem.js';
 import { Folder } from '../models/Folder.js';
+import { Document } from '../models/Document.js';
 import { User } from '../models/User.js';
 import { createAuditLog } from '../services/auditService.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
@@ -505,6 +506,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     idempotencyKey,
     items,
     folders,
+    documents,
     newEncryptedVaultKey,
     newVaultKeyIv,
     newVaultKeyTag,
@@ -538,7 +540,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     res.status(200).json({
       success: true,
       message: 'Vault key rotated successfully',
-      data: { updatedCount: items.length + folders.length },
+      data: { updatedCount: items.length + folders.length + documents.length },
     });
     return;
   }
@@ -558,6 +560,19 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
   // partial failures can be reported in the response.
   const rotationItemErrors: { id: string; error: string }[] = [];
   const rotationFolderErrors: { id: string; error: string }[] = [];
+  const rotationDocumentErrors: { id: string; error: string }[] = [];
+
+  /**
+   * The sequential path's abort message, written once because it is raised from
+   * two places — the pre-write missing-id check and the post-loop failure check —
+   * and a per-leg count that drifted between them would misreport which leg
+   * failed.
+   */
+  const rotationFailureMessage = (): string =>
+    `Vault key rotation failed: ${String(rotationItemErrors.length)} item(s), ` +
+    `${String(rotationFolderErrors.length)} folder(s) and ` +
+    `${String(rotationDocumentErrors.length)} document(s) could not be updated. ` +
+    `The vault key was not changed. Please retry.`;
 
   try {
     // Helper: build the $set for a vault item during rotation
@@ -571,6 +586,95 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       ...(item.searchHash !== undefined ? { searchHash: item.searchHash } : {}),
       ...(item.passwordHistory !== undefined ? { passwordHistory: item.passwordHistory } : {}),
     });
+
+    // Helper: build the $set for a document during rotation.
+    //
+    // Three fields, and deliberately only three. A rotation rewraps the DEK; it
+    // never reads, rewrites or even names the stored object, which is the whole
+    // reason the store uses envelope encryption. Framing (`streamSalt`,
+    // `noncePrefix`, `chunkPlaintextBytes`), sizes and `objectKey` are unreachable
+    // from here, so a rotation cannot mis-frame a document it cannot open.
+    const buildDocumentSet = (doc: (typeof documents)[number]): Record<string, unknown> => ({
+      encryptedDek: doc.encryptedDek,
+      dekIv: doc.dekIv,
+      dekTag: doc.dekTag,
+    });
+
+    /**
+     * Refuses a rotation whose payload does not name every row the account holds.
+     *
+     * The set of rows a rotation rewrites is chosen by the CLIENT, from an
+     * enumeration it performed before the request was sent. The write fence
+     * (`rotationInProgress`) only goes up when the request ARRIVES, so it cannot
+     * see a row created in between — and that row is then left sealed under a
+     * vault key that no longer exists, silently, behind a 200. This is the check
+     * that closes that window, and it must run AFTER the fence is raised or the
+     * same race simply moves to the gap between the count and the fence.
+     *
+     * DISTINCT ids, not array length. `bulkReEncryptSchema` also rejects repeats
+     * outright, but the guarantee here must not lean on it: a payload of
+     * `[A, A, B]` against an account holding `{A, B, C}` satisfies the missing-id
+     * abort (every id it names exists and is owned) and a length comparison alike,
+     * and would replace the vault key while leaving C unreadable forever.
+     *
+     * Combined with the missing-id abort — which already guarantees every supplied
+     * id exists and belongs to this user — equal cardinality is equal SETS, so
+     * counting is enough and a `$nin` over ten thousand ids is not needed.
+     *
+     * The counts are UNFILTERED: no `deletedAt` predicate. A trashed row is sealed
+     * under the same vault key as an active one and the client enumerates both, so
+     * a count that excluded the trash would refuse every rotation on any account
+     * that has ever deleted anything.
+     */
+    const assertRotationCoversEveryRow = async (
+      session?: mongoose.ClientSession,
+    ): Promise<void> => {
+      // Awaited one at a time rather than through `Promise.all`: a ClientSession
+      // may not have two operations in flight at once, and these are three
+      // counted index scans.
+      const options = session === undefined ? {} : { session };
+      const itemCount = await VaultItem.countDocuments({ userId }, options);
+      const folderCount = await Folder.countDocuments({ userId }, options);
+      const documentCount = await Document.countDocuments({ userId }, options);
+
+      const suppliedItems = new Set(items.map((i) => i.id)).size;
+      const suppliedFolders = new Set(folders.map((f) => f.id)).size;
+      const suppliedDocuments = new Set(documents.map((d) => d.id)).size;
+
+      const shortfalls: string[] = [];
+      if (suppliedItems !== itemCount) {
+        shortfalls.push(`items: ${String(suppliedItems)} supplied, ${String(itemCount)} stored`);
+      }
+      if (suppliedFolders !== folderCount) {
+        shortfalls.push(
+          `folders: ${String(suppliedFolders)} supplied, ${String(folderCount)} stored`,
+        );
+      }
+      const documentsShort = suppliedDocuments !== documentCount;
+      if (documentsShort) {
+        shortfalls.push(
+          `documents: ${String(suppliedDocuments)} supplied, ${String(documentCount)} stored`,
+        );
+      }
+      if (shortfalls.length === 0) {
+        return;
+      }
+
+      logger.warn('Vault key rotation aborted: payload does not cover every row', {
+        userId,
+        shortfalls,
+      });
+      throw httpErrors.conflict(
+        `Vault key rotation failed: the request does not cover every row this account holds ` +
+          `(${shortfalls.join('; ')}). A row was created, imported or restored after the vault ` +
+          `was enumerated` +
+          (documentsShort
+            ? ', or a document is awaiting permanent deletion and stays counted until the hourly ' +
+              'cleanup finishes it'
+            : '') +
+          `. The vault key was not changed. Please re-read the vault and retry.`,
+      );
+    };
 
     // Check if the topology supports transactions (replica set or sharded cluster)
     // before attempting one, rather than relying on error string matching. Routed
@@ -625,6 +729,28 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
             }
           }
 
+          // Rewrap every document's DEK under the new vault key. A full peer of
+          // the two loops above: same ownership predicate, same treatment of a
+          // miss. No object in the bucket is read or written.
+          for (const doc of documents) {
+            const documentResult = await Document.updateOne(
+              { _id: doc.id, userId },
+              { $set: buildDocumentSet(doc) },
+              { session: txnSession },
+            );
+
+            if (documentResult.matchedCount === 0) {
+              throw httpErrors.notFound(`Document ${doc.id} not found`);
+            }
+          }
+
+          // Every supplied id now exists and is owned; this is what proves the
+          // payload covered EVERY row. Inside the transaction and after the
+          // loops, so a shortfall aborts the whole rotation rather than leaving
+          // rewritten ciphertext behind, and so a bogus id still surfaces as the
+          // 404 the loops above raise rather than as a coverage complaint.
+          await assertRotationCoversEveryRow(txnSession);
+
           // Update the encrypted vault key and idempotency key on the user
           const userUpdate: Record<string, unknown> = {
             encryptedVaultKey: newEncryptedVaultKey,
@@ -635,7 +761,16 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
             userUpdate.lastRotationKey = idempotencyKey;
             userUpdate.lastRotationAt = new Date();
           }
-          await User.updateOne({ _id: userId }, { $set: userUpdate }, { session: txnSession });
+          // `$inc` in the SAME update document that stores the key, never a value
+          // computed from the `user` read above: that read happens before the
+          // rotation lock is taken, so a computed `$set` would be racy. The
+          // counter is what an in-flight document upload's completion checks
+          // itself against, so it must move exactly when the key it names does.
+          await User.updateOne(
+            { _id: userId },
+            { $set: userUpdate, $inc: { vaultKeyVersion: 1 } },
+            { session: txnSession },
+          );
         });
       } finally {
         // Lower the fence on BOTH outcomes — a committed rotation and an aborted
@@ -669,6 +804,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       // back to the OLD value — i.e. the user can no longer decrypt those items.
       const itemIds = items.map((i) => i.id);
       const folderIds = folders.map((f) => f.id);
+      const documentIds = documents.map((d) => d.id);
       const itemSnapshots = await VaultItem.find({ _id: { $in: itemIds }, userId })
         .select(
           '_id encryptedName nameIv nameTag encryptedData dataIv dataTag searchHash passwordHistory',
@@ -677,33 +813,45 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       const folderSnapshots = await Folder.find({ _id: { $in: folderIds }, userId })
         .select('_id encryptedName nameIv nameTag')
         .lean();
+      // Documents are snapshotted for the same reason, and the reason is sharper
+      // here: a document whose DEK is rewrapped under a vault key that is then
+      // rolled back is a FILE nobody can open again, and unlike an item there is
+      // no second copy of its plaintext anywhere. Only the three wrap fields are
+      // read, because only those three are ever written.
+      const documentSnapshots = await Document.find({ _id: { $in: documentIds }, userId })
+        .select('_id encryptedDek dekIv dekTag')
+        .lean();
 
       // If any requested id is missing from the snapshot, abort BEFORE writing.
       // This catches `Vault item not found` errors up-front so we never partially
       // write before discovering the mismatch.
       const itemSnapshotIds = new Set(itemSnapshots.map((s) => String(s._id)));
       const folderSnapshotIds = new Set(folderSnapshots.map((s) => String(s._id)));
+      const documentSnapshotIds = new Set(documentSnapshots.map((s) => String(s._id)));
       const missingItems = itemIds.filter((id) => !itemSnapshotIds.has(id));
       const missingFolders = folderIds.filter((id) => !folderSnapshotIds.has(id));
-      if (missingItems.length > 0 || missingFolders.length > 0) {
+      const missingDocuments = documentIds.filter((id) => !documentSnapshotIds.has(id));
+      if (missingItems.length > 0 || missingFolders.length > 0 || missingDocuments.length > 0) {
         for (const id of missingItems)
           rotationItemErrors.push({ id, error: 'Vault item not found' });
         for (const id of missingFolders)
           rotationFolderErrors.push({ id, error: 'Folder not found' });
+        for (const id of missingDocuments)
+          rotationDocumentErrors.push({ id, error: 'Document not found' });
         logger.warn('Vault key rotation aborted: requested ids missing before write', {
           userId,
           missingItems: missingItems.length,
           missingFolders: missingFolders.length,
+          missingDocuments: missingDocuments.length,
         });
-        throw httpErrors.conflict(
-          `Vault key rotation failed: ${String(rotationItemErrors.length)} item(s) and ${String(rotationFolderErrors.length)} folder(s) could not be updated. The vault key was not changed. Please retry.`,
-        );
+        throw httpErrors.conflict(rotationFailureMessage());
       }
 
       // Track items and folders successfully written with NEW ciphertext so we
       // can roll them back to the snapshot if a later write fails.
       const writtenItemIds: string[] = [];
       const writtenFolderIds: string[] = [];
+      const writtenDocumentIds: string[] = [];
 
       // Set rotation state marker before starting sequential updates so that a
       // crash mid-way can be detected on the next login. Store the pending new
@@ -733,10 +881,12 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       // forced a large rollback.
       const itemSnapshotById = new Map(itemSnapshots.map((s) => [String(s._id), s]));
       const folderSnapshotById = new Map(folderSnapshots.map((s) => [String(s._id), s]));
+      const documentSnapshotById = new Map(documentSnapshots.map((s) => [String(s._id), s]));
 
       const rollbackPartialWrites = async (): Promise<void> => {
         let rolledBackItems = 0;
         let rolledBackFolders = 0;
+        let rolledBackDocuments = 0;
         let rollbackFailures = 0;
 
         for (const id of writtenItemIds) {
@@ -806,15 +956,52 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           }
         }
 
+        for (const id of writtenDocumentIds) {
+          const snap = documentSnapshotById.get(id);
+          if (!snap) continue;
+          try {
+            // All three columns are required on the model, so unlike an item's
+            // `searchHash` there is no absent-field case to `$unset`: the
+            // snapshot always carries a full wrap to restore.
+            await Document.updateOne(
+              { _id: id, userId },
+              {
+                $set: {
+                  encryptedDek: snap.encryptedDek,
+                  dekIv: snap.dekIv,
+                  dekTag: snap.dekTag,
+                },
+              },
+            );
+            rolledBackDocuments++;
+          } catch (rollbackErr) {
+            rollbackFailures++;
+            logger.error('Failed to roll back document during rotation rollback', {
+              userId,
+              documentId: id,
+              error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+            });
+          }
+        }
+
         logger.warn('Vault key rotation rolled back partially-written ciphertext', {
           userId,
           rolledBackItems,
           rolledBackFolders,
+          rolledBackDocuments,
           rollbackFailures,
         });
       };
 
       try {
+        // Coverage, checked BEFORE the first write and AFTER the fence went up.
+        // Before, because on this topology a shortfall discovered later would
+        // have to be undone row by row; after, because a count taken before the
+        // fence leaves the very window this closes. The missing-id abort above
+        // has already established that every supplied id exists and is owned, so
+        // matching cardinality here means the payload names every row.
+        await assertRotationCoversEveryRow();
+
         // Strict abort-on-first-failure: every successful write is tracked so it
         // can be rolled back if a later write fails. This guarantees that on
         // failure, no item carries NEW ciphertext while the vault key is OLD.
@@ -875,15 +1062,50 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           }
         }
 
-        if (rotationItemErrors.length > 0 || rotationFolderErrors.length > 0) {
+        // Documents last, and only if nothing failed before them, for the same
+        // reason folders follow items: a failure here rolls back every leg, and
+        // compounding failures across legs makes the rollback set ambiguous.
+        if (rotationItemErrors.length === 0 && rotationFolderErrors.length === 0) {
+          for (const doc of documents) {
+            try {
+              const documentResult = await Document.updateOne(
+                { _id: doc.id, userId },
+                { $set: buildDocumentSet(doc) },
+              );
+
+              if (documentResult.matchedCount === 0) {
+                rotationDocumentErrors.push({ id: doc.id, error: 'Document not found' });
+                break;
+              }
+              writtenDocumentIds.push(doc.id);
+            } catch (err) {
+              const message = err instanceof Error ? err.message : 'Unknown error';
+              rotationDocumentErrors.push({ id: doc.id, error: message });
+              logger.error('Failed to update document during rotation', {
+                userId,
+                documentId: doc.id,
+                error: message,
+              });
+              break;
+            }
+          }
+        }
+
+        if (
+          rotationItemErrors.length > 0 ||
+          rotationFolderErrors.length > 0 ||
+          rotationDocumentErrors.length > 0
+        ) {
           logger.warn(
             'Vault key rotation aborted due to partial failures — rolling back partial writes',
             {
               userId,
               itemErrors: rotationItemErrors.length,
               folderErrors: rotationFolderErrors.length,
+              documentErrors: rotationDocumentErrors.length,
               itemsUpdated: writtenItemIds.length,
               foldersUpdated: writtenFolderIds.length,
+              documentsUpdated: writtenDocumentIds.length,
             },
           );
 
@@ -896,9 +1118,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           // as whatever was last successfully committed (i.e. unchanged).
           await clearRotationState(userId);
 
-          throw httpErrors.conflict(
-            `Vault key rotation failed: ${String(rotationItemErrors.length)} item(s) and ${String(rotationFolderErrors.length)} folder(s) could not be updated. The vault key was not changed. Please retry.`,
-          );
+          throw httpErrors.conflict(rotationFailureMessage());
         }
 
         await User.updateOne(
@@ -913,6 +1133,10 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
                 ? { lastRotationKey: idempotencyKey, lastRotationAt: new Date() }
                 : {}),
             },
+            // Same update document as the key it names, and `$inc` rather than a
+            // value computed from the `user` read above, which happened before the
+            // rotation lock was taken.
+            $inc: { vaultKeyVersion: 1 },
             $unset: {
               pendingEncryptedVaultKey: '',
               pendingVaultKeyIv: '',
@@ -945,7 +1169,8 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     await releaseJobLock(rotationJobName, lockId);
   }
 
-  const totalErrors = rotationItemErrors.length + rotationFolderErrors.length;
+  const totalErrors =
+    rotationItemErrors.length + rotationFolderErrors.length + rotationDocumentErrors.length;
 
   const rotateCtx = getRequestContext(req);
   await createAuditLog(
@@ -955,8 +1180,13 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       action: 'vault_key_rotation',
       itemCount: items.length,
       folderCount: folders.length,
+      documentCount: documents.length,
       ...(totalErrors > 0
-        ? { itemErrors: rotationItemErrors.length, folderErrors: rotationFolderErrors.length }
+        ? {
+            itemErrors: rotationItemErrors.length,
+            folderErrors: rotationFolderErrors.length,
+            documentErrors: rotationDocumentErrors.length,
+          }
         : {}),
     },
     rotateCtx.ip,
@@ -967,6 +1197,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     userId,
     itemCount: items.length,
     folderCount: folders.length,
+    documentCount: documents.length,
     errors: totalErrors,
   });
 
@@ -977,9 +1208,10 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         ? `Vault key rotated with ${String(totalErrors)} error(s)`
         : 'Vault key rotated successfully',
     data: {
-      updatedCount: items.length + folders.length - totalErrors,
+      updatedCount: items.length + folders.length + documents.length - totalErrors,
       ...(rotationItemErrors.length > 0 ? { itemErrors: rotationItemErrors } : {}),
       ...(rotationFolderErrors.length > 0 ? { folderErrors: rotationFolderErrors } : {}),
+      ...(rotationDocumentErrors.length > 0 ? { documentErrors: rotationDocumentErrors } : {}),
     },
   });
 });

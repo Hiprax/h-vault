@@ -737,20 +737,20 @@ authoritative.
 <details>
 <summary><b>Vault items</b> — <code>/api/v1/vault</code></summary>
 
-| Method | Endpoint                      | Description                                                   |
-| ------ | ----------------------------- | ------------------------------------------------------------- |
-| GET    | `/vault/items`                | List (paginated; filter by type, folder, favorite; max 200)   |
-| GET    | `/vault/items/trash`          | List soft-deleted items                                       |
-| GET    | `/vault/items/:id`            | Fetch one item                                                |
-| POST   | `/vault/items`                | Create                                                        |
-| PUT    | `/vault/items/:id`            | Update (encrypted payload, or metadata only)                  |
-| DELETE | `/vault/items/:id`            | Soft delete                                                   |
-| DELETE | `/vault/items/:id/permanent`  | Delete permanently from the trash                             |
-| POST   | `/vault/items/restore/:id`    | Restore from the trash                                        |
-| POST   | `/vault/items/bulk-delete`    | Bulk soft delete (max 100)                                    |
-| POST   | `/vault/items/bulk-move`      | Bulk move to a folder (max 100)                               |
-| POST   | `/vault/items/bulk-reencrypt` | **Vault key rotation** — re-key every item and folder at once |
-| DELETE | `/vault/items/trash/empty`    | Empty the trash                                               |
+| Method | Endpoint                      | Description                                                                                                 |
+| ------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| GET    | `/vault/items`                | List (paginated; filter by type, folder, favorite; max 200)                                                 |
+| GET    | `/vault/items/trash`          | List soft-deleted items                                                                                     |
+| GET    | `/vault/items/:id`            | Fetch one item                                                                                              |
+| POST   | `/vault/items`                | Create                                                                                                      |
+| PUT    | `/vault/items/:id`            | Update (encrypted payload, or metadata only)                                                                |
+| DELETE | `/vault/items/:id`            | Soft delete                                                                                                 |
+| DELETE | `/vault/items/:id/permanent`  | Delete permanently from the trash                                                                           |
+| POST   | `/vault/items/restore/:id`    | Restore from the trash                                                                                      |
+| POST   | `/vault/items/bulk-delete`    | Bulk soft delete (max 100)                                                                                  |
+| POST   | `/vault/items/bulk-move`      | Bulk move to a folder (max 100)                                                                             |
+| POST   | `/vault/items/bulk-reencrypt` | **Vault key rotation** — re-key every item, folder and document at once, and the request must name them all |
+| DELETE | `/vault/items/trash/empty`    | Empty the trash                                                                                             |
 
 </details>
 

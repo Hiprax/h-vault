@@ -371,7 +371,7 @@ describe('Cross-User Isolation Edge Cases', () => {
       // so it stayed green even if the rotation had partially succeeded.
       expect(res.status).toBe(409);
       expect(String(res.body.message)).toMatch(
-        /1 item\(s\) and 0 folder\(s\) could not be updated/,
+        /1 item\(s\), 0 folder\(s\) and 0 document\(s\) could not be updated/,
       );
       expect(String(res.body.message)).toMatch(/vault key was not changed/i);
 

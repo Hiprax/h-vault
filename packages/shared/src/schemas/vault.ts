@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { objectIdSchema, paginationSchema } from './common.js';
+import { documentKeyRewrapSchema } from './document.js';
 import {
   ITEM_TYPES,
   CUSTOM_FIELD_TYPES,
@@ -39,6 +40,7 @@ import {
   MAX_ADDRESS_ZIP_LENGTH,
   MAX_ADDRESS_COUNTRY_LENGTH,
   MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
+  MAX_DOCUMENTS_PER_USER,
 } from '../constants/index.js';
 import type { ItemType } from '../constants/index.js';
 import { normalizeUri } from '../utils/index.js';
@@ -136,54 +138,104 @@ export const bulkMoveSchema = z.object({
   folderId: objectIdSchema.nullable(),
 });
 
-export const bulkReEncryptSchema = z.object({
-  authHash: z.string().min(1).max(100),
-  idempotencyKey: z.uuid().optional(),
-  items: z
-    .array(
-      z.object({
-        id: objectIdSchema,
-        encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
-        nameIv: z.string().min(1).max(24),
-        nameTag: z.string().min(1).max(32),
-        encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
-        dataIv: z.string().min(1).max(24),
-        dataTag: z.string().min(1).max(32),
-        searchHash: z
-          .string()
-          .regex(/^[a-f0-9]{64}$/)
-          .optional(),
-        passwordHistory: z
-          .array(
-            z.object({
-              encryptedPassword: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
-              iv: z.string().min(1).max(24),
-              tag: z.string().min(1).max(32),
-              changedAt: z.iso.datetime({ offset: true }),
-            }),
-          )
-          .max(PASSWORD_HISTORY_MAX)
-          .optional(),
-      }),
-    )
-    .min(0)
-    .max(10_000),
-  folders: z
-    .array(
-      z.object({
-        id: objectIdSchema,
-        encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
-        nameIv: z.string().min(1).max(24),
-        nameTag: z.string().min(1).max(32),
-      }),
-    )
-    .max(1000)
-    .optional()
-    .default([]),
-  newEncryptedVaultKey: z.string().min(1).max(200),
-  newVaultKeyIv: z.string().min(1).max(24),
-  newVaultKeyTag: z.string().min(1).max(32),
-});
+/** Collects the ids that appear more than once in one leg of a rotation payload. */
+function duplicateIds(entries: { id: string }[]): string[] {
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const entry of entries) {
+    if (seen.has(entry.id)) {
+      repeated.add(entry.id);
+    }
+    seen.add(entry.id);
+  }
+  return [...repeated];
+}
+
+export const bulkReEncryptSchema = z
+  .object({
+    authHash: z.string().min(1).max(100),
+    idempotencyKey: z.uuid().optional(),
+    items: z
+      .array(
+        z.object({
+          id: objectIdSchema,
+          encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
+          nameIv: z.string().min(1).max(24),
+          nameTag: z.string().min(1).max(32),
+          encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
+          dataIv: z.string().min(1).max(24),
+          dataTag: z.string().min(1).max(32),
+          searchHash: z
+            .string()
+            .regex(/^[a-f0-9]{64}$/)
+            .optional(),
+          passwordHistory: z
+            .array(
+              z.object({
+                encryptedPassword: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
+                iv: z.string().min(1).max(24),
+                tag: z.string().min(1).max(32),
+                changedAt: z.iso.datetime({ offset: true }),
+              }),
+            )
+            .max(PASSWORD_HISTORY_MAX)
+            .optional(),
+        }),
+      )
+      .min(0)
+      .max(10_000),
+    folders: z
+      .array(
+        z.object({
+          id: objectIdSchema,
+          encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
+          nameIv: z.string().min(1).max(24),
+          nameTag: z.string().min(1).max(32),
+        }),
+      )
+      .max(1000)
+      .optional()
+      .default([]),
+    /**
+     * The documents leg: one rewrapped DEK per document, active and trashed alike.
+     *
+     * Optional with a `[]` default for the same reason `folders` is: a client that
+     * predates the document store, or an account on a server with no storage
+     * configured, sends nothing and rotates exactly as it did before. The cap is
+     * the per-user document ceiling itself rather than a slack multiple, because
+     * the handler's completeness check requires the payload to name every row the
+     * account holds, and a cap below that ceiling would make an account at the
+     * limit unable to rotate at all.
+     */
+    documents: z.array(documentKeyRewrapSchema).max(MAX_DOCUMENTS_PER_USER).optional().default([]),
+    newEncryptedVaultKey: z.string().min(1).max(200),
+    newVaultKeyIv: z.string().min(1).max(24),
+    newVaultKeyTag: z.string().min(1).max(32),
+  })
+  /**
+   * No leg may name the same row twice.
+   *
+   * The handler checks COVERAGE by comparing distinct ids against the account's
+   * row count, and a repeat would otherwise let a payload reach the right
+   * cardinality while leaving a row behind: `[A, A, B]` against `{A, B, C}` passes
+   * the missing-id abort, because every id it names does exist and is owned. A
+   * paginated enumeration that double-reads a page under a concurrent write emits
+   * exactly that, so this rejects a buggy client before it rejects a hostile one.
+   * Refusing it here, at 400, also keeps the handler's own check a pure coverage
+   * question rather than two questions wearing one status code.
+   */
+  .superRefine((data, ctx) => {
+    for (const leg of ['items', 'folders', 'documents'] as const) {
+      const repeated = duplicateIds(data[leg]);
+      if (repeated.length > 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [leg],
+          message: `${leg} contains duplicate ids: ${repeated.join(', ')}`,
+        });
+      }
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // API response validation schemas (pre-decryption shape check)

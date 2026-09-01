@@ -527,6 +527,38 @@ export const swaggerSpec: JsonObject = {
             },
             maxItems: 10000,
           },
+          folders: {
+            type: 'array',
+            description:
+              'Every folder in the account, with its name re-encrypted under the new vault key.',
+            items: {
+              type: 'object',
+              required: ['id', 'encryptedName', 'nameIv', 'nameTag'],
+              properties: {
+                id: { type: 'string' },
+                encryptedName: { type: 'string' },
+                nameIv: { type: 'string' },
+                nameTag: { type: 'string' },
+              },
+            },
+            maxItems: 1000,
+          },
+          documents: {
+            type: 'array',
+            description:
+              'Every document in the account, active and trashed alike, with its document key (DEK) rewrapped under the new vault key. Only the wrapped key travels: no stored object is read or written by a rotation, which is why rotating an account holding gigabytes is possible at all. Omit the field entirely on a server with no storage configured.',
+            items: {
+              type: 'object',
+              required: ['id', 'encryptedDek', 'dekIv', 'dekTag'],
+              properties: {
+                id: { type: 'string' },
+                encryptedDek: { type: 'string', minLength: 1, maxLength: 200 },
+                dekIv: { type: 'string', minLength: 1, maxLength: 24 },
+                dekTag: { type: 'string', minLength: 1, maxLength: 32 },
+              },
+            },
+            maxItems: 5000,
+          },
           newEncryptedVaultKey: { type: 'string', minLength: 1, maxLength: 200 },
           newVaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
           newVaultKeyTag: { type: 'string', minLength: 1, maxLength: 32 },
@@ -2275,7 +2307,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Vault'],
         summary: 'Bulk re-encrypt vault items',
         description:
-          'Re-encrypts all vault items with a new vault key after a master password change. Verifies the current auth hash before proceeding. Rate limited: 3 req/IP per 15 min.',
+          'Re-encrypts an account onto a new vault key after a master password change: every item, every folder and every document key, in one request. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 3 req/IP per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -2305,6 +2337,11 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          404: { $ref: '#/components/responses/NotFound' },
+          409: {
+            description:
+              'The rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, or the payload did not cover every row the account holds. Re-read the vault and retry.',
+          },
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },

@@ -53,7 +53,11 @@ import {
   regenerateBackupCodesSchema,
   deleteAccountSchema,
 } from '../src/schemas/user.js';
-import { MAX_IMPORT_ITEMS, PASSWORD_HISTORY_MAX } from '../src/constants/index.js';
+import {
+  MAX_DOCUMENTS_PER_USER,
+  MAX_IMPORT_ITEMS,
+  PASSWORD_HISTORY_MAX,
+} from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
 
@@ -904,6 +908,91 @@ describe('bulkReEncryptSchema', () => {
     expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, folders: bigFolders }).success).toBe(
       false,
     );
+  });
+
+  // ── the documents leg ────────────────────────────────────────────────
+  //
+  // A rotation rewraps the document key, never the file, so an entry is an id and
+  // a wrapped 256-bit key and nothing else. The cases below pin that shape, its
+  // optionality (an older client and an unconfigured server both send nothing)
+  // and the duplicate rejection all three legs now carry.
+
+  const rewrap = {
+    id: '507f1f77bcf86cd799439011',
+    encryptedDek: 'wrapped-dek',
+    dekIv: 'dek-iv',
+    dekTag: 'dek-tag',
+  };
+
+  it('accepts a documents leg of rewrapped document keys', () => {
+    expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, documents: [rewrap] }).success).toBe(
+      true,
+    );
+  });
+
+  it('defaults documents to an empty array when the field is absent', () => {
+    // An older client, or a server with no object storage configured, sends no
+    // documents leg at all and must rotate exactly as it did before.
+    const result = bulkReEncryptSchema.parse(validReEncrypt);
+    expect(result.documents).toEqual([]);
+  });
+
+  it('rejects a documents leg over MAX_DOCUMENTS_PER_USER', () => {
+    const tooMany = Array.from({ length: MAX_DOCUMENTS_PER_USER + 1 }, () => rewrap);
+    expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, documents: tooMany }).success).toBe(
+      false,
+    );
+  });
+
+  it('drops a framing or size field smuggled into a documents entry rather than storing it', () => {
+    // STRIP mode, which is `z.object()`'s default: the rotation route must not be
+    // a way to reach a column that decides how a stored object is cut into sealed
+    // segments, and the parsed value is what the handler writes from.
+    const parsed = bulkReEncryptSchema.parse({
+      ...validReEncrypt,
+      documents: [{ ...rewrap, streamSalt: 'x', chunkCount: 99, objectKey: 'u/other/d/other' }],
+    });
+    expect(parsed.documents[0]).toEqual(rewrap);
+  });
+
+  it('rejects a repeated id in any one leg, naming the leg that repeated it', () => {
+    // `[A, A, B]` against an account holding `{A, B, C}` would otherwise satisfy
+    // the server's missing-id abort and reach the right list length while leaving
+    // C sealed under the outgoing key.
+    const otherItem = { ...validReEncrypt.items[0]!, id: '507f1f77bcf86cd799439012' };
+    for (const [leg, payload] of [
+      ['items', { items: [validReEncrypt.items[0]!, validReEncrypt.items[0]!, otherItem] }],
+      [
+        'folders',
+        {
+          folders: [
+            { id: '507f1f77bcf86cd799439011', encryptedName: 'e', nameIv: 'i', nameTag: 't' },
+            { id: '507f1f77bcf86cd799439011', encryptedName: 'e2', nameIv: 'i2', nameTag: 't2' },
+          ],
+        },
+      ],
+      ['documents', { documents: [rewrap, { ...rewrap, encryptedDek: 'other' }] }],
+    ] as const) {
+      const result = bulkReEncryptSchema.safeParse({ ...validReEncrypt, ...payload });
+      expect(result.success, `${leg} accepted a repeated id`).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((issue) => issue.path[0] === leg)).toBe(true);
+      }
+    }
+  });
+
+  it('accepts each leg naming several DISTINCT ids', () => {
+    // The negative half of the case above: the duplicate check must not refuse a
+    // legitimate multi-row rotation.
+    const result = bulkReEncryptSchema.safeParse({
+      ...validReEncrypt,
+      items: [
+        validReEncrypt.items[0]!,
+        { ...validReEncrypt.items[0]!, id: '507f1f77bcf86cd799439012' },
+      ],
+      documents: [rewrap, { ...rewrap, id: '507f1f77bcf86cd799439013' }],
+    });
+    expect(result.success).toBe(true);
   });
 
   it('accepts optional idempotencyKey as valid UUID', () => {
