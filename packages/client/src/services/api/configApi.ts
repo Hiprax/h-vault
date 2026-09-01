@@ -14,7 +14,7 @@
 
 import type { AxiosResponse } from 'axios';
 import type { ApiResponse, PublicConfig } from '@hvault/shared';
-import { MAX_FILE_ENCRYPTION_SIZE_MB, publicConfigResponseSchema } from '@hvault/shared';
+import { MAX_FILE_ENCRYPTION_SIZE_MB, fileEncryptionConfigResponseSchema } from '@hvault/shared';
 import { api } from './client.js';
 
 const BYTES_PER_MB = 1024 * 1024;
@@ -43,10 +43,16 @@ let cachedMaxBytes: Promise<number> | null = null;
  * Resolve the File Encryption size cap in bytes, cached for the tab's lifetime.
  *
  * Reads `fileEncryption.maxSizeMB` from `GET /config` on first call. On any
- * failure — network error, non-2xx, or a response that fails the shared
- * `publicConfigResponseSchema` (e.g. a missing/negative `maxSizeMB`) — it falls
- * back to `MAX_FILE_ENCRYPTION_SIZE_MB` from `@hvault/shared`. Never
+ * failure — network error, non-2xx, or a response that fails
+ * `fileEncryptionConfigResponseSchema` (e.g. a missing/negative `maxSizeMB`) — it
+ * falls back to `MAX_FILE_ENCRYPTION_SIZE_MB` from `@hvault/shared`. Never
  * rejects; always resolves to a positive byte count.
+ *
+ * The NARROW schema, deliberately, and not the full `publicConfigResponseSchema`:
+ * the same envelope also carries the document store's block, and validating a
+ * block this function does not read would let one bad value there — an operator's
+ * mistyped extension, a field a newer server adds — silently revert this cap to
+ * its default. A documents reader uses the full schema, which stays strict.
  */
 export function getFileEncryptionMaxBytes(): Promise<number> {
   if (cachedMaxBytes) return cachedMaxBytes;
@@ -54,7 +60,7 @@ export function getFileEncryptionMaxBytes(): Promise<number> {
   cachedMaxBytes = (async (): Promise<number> => {
     try {
       const res = await getPublicConfigApi();
-      const parsed = publicConfigResponseSchema.safeParse(res.data);
+      const parsed = fileEncryptionConfigResponseSchema.safeParse(res.data);
       if (!parsed.success) return FALLBACK_MAX_BYTES;
       return parsed.data.data.fileEncryption.maxSizeMB * BYTES_PER_MB;
     } catch {

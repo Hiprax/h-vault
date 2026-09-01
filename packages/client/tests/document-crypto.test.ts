@@ -26,6 +26,9 @@
  * assertions on the framing prototype), so a red test in this file is a defect in
  * the implementation and never a surprising property of AES-GCM.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
@@ -671,5 +674,74 @@ describe('the metadata the write path seals', () => {
     expect(second.metaIv).not.toBe(first.metaIv);
     expect(first.metaIv).not.toBe(toBase64(fixedIv));
     expect(second.encryptedMeta).not.toBe(first.encryptedMeta);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The module's own stated contract about what it may depend on
+// ---------------------------------------------------------------------------
+
+describe('documentCryptoService — the dependencies it is allowed to have', () => {
+  /** The module's source, anchored on THIS file rather than on `process.cwd()`. */
+  const source = (): string =>
+    readFileSync(
+      path.resolve(
+        path.dirname(fileURLToPath(import.meta.url)),
+        '../src/services/crypto/documentCryptoService.ts',
+      ),
+      'utf8',
+    );
+
+  /**
+   * The module's CODE, with every comment removed.
+   *
+   * Load-bearing, not tidiness: this module's docblock discusses the very members
+   * it refuses to use — "NOT `cryptoService.encryptData` / `decryptData`" — so a
+   * scan over the raw text would read the prohibition as a usage and the assertion
+   * below would be red on a correct module. Block comments go first; line comments
+   * are stripped only where one starts a line, so a `//` inside a URL survives.
+   */
+  const code = (): string =>
+    source()
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/^[ \t]*\/\/.*$/gm, ' ');
+
+  /** Every real module specifier, static and dynamic, ignoring the doc-comment prose. */
+  const specifiers = (): string[] => {
+    const text = code();
+    return [
+      ...[...text.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((match) => match[1] ?? ''),
+      ...[...text.matchAll(/import\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1] ?? ''),
+    ];
+  };
+
+  it('imports no store', () => {
+    // Not the same invariant `fileCryptoService` holds, and the difference is the
+    // whole point of stating this one narrowly. That module is ACCOUNT-AGNOSTIC and
+    // may touch no account crypto at all; this one is account-BOUND by design — the
+    // DEK is wrapped under a key derived from the raw vault key — so it imports
+    // `cryptoService` deliberately. What it must never do is reach for state:
+    // every key it uses is a parameter, which is what lets the uploading store keep
+    // the DEK in memory for exactly the life of one transfer and no longer.
+    const all = specifiers();
+    expect(all.length).toBeGreaterThan(0);
+    for (const specifier of all) {
+      expect(specifier, `${specifier} is a store`).not.toMatch(/stores?\//i);
+      expect(specifier, `${specifier} is a store`).not.toMatch(/(auth|vault|ui)Store/i);
+    }
+  });
+
+  it('uses only the three cryptoService members its docblock names', () => {
+    // The refusal this pins is the one that would be silent: `cryptoService`
+    // exports `encryptData`/`decryptData`, which run a `TextEncoder` and a
+    // `TextDecoder` over their payload. That is correct for the vault's JSON and
+    // catastrophic for a file — every byte sequence that is not valid UTF-8 comes
+    // back as U+FFFD, so a PNG or a ZIP would round-trip to something that is not
+    // the file the user uploaded. Reaching for one of them here is a one-word edit
+    // that no round-trip over valid text would catch.
+    const used = new Set(
+      [...code().matchAll(/\bcryptoService\.([A-Za-z0-9_]+)/g)].map((match) => match[1] ?? ''),
+    );
+    expect(used).toEqual(new Set(['clearKey', 'arrayBufferToBase64', 'base64ToArrayBuffer']));
   });
 });

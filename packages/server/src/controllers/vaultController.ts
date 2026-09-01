@@ -9,7 +9,9 @@ import { User } from '../models/User.js';
 import { createAuditLog } from '../services/auditService.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import {
+  assertFolderOwned,
   assertVaultNotRotating,
+  buildFolderAwareUpdate,
   getRequestContext,
   getUserId,
   pickAllowedFields,
@@ -216,27 +218,14 @@ export const updateItem = catchAsync(async (req: Request, res: Response): Promis
   // during a rotation would overwrite a just-rotated row with old-key ciphertext.
   await assertVaultNotRotating(userId);
 
-  if (body.folderId !== undefined && body.folderId !== null) {
-    const folderExists = await Folder.exists({ _id: body.folderId, userId });
-    if (!folderExists) {
-      throw httpErrors.notFound('Target folder not found');
-    }
-  }
+  await assertFolderOwned(body.folderId, userId);
 
   const sanitizedUpdate = pickAllowedFields(body, ALLOWED_UPDATE_FIELDS);
 
-  // When folderId is explicitly null, use $unset so the field is removed from the
-  // document entirely — matching the behaviour of bulkMove (and folder deletion
-  // orphan cleanup). Mixing `folderId: null` with `$unset` elsewhere would leave
-  // the collection in an inconsistent state for filters and queries.
-  const updateOp: Record<string, unknown> = {};
-  if ('folderId' in sanitizedUpdate && sanitizedUpdate.folderId === null) {
-    delete sanitizedUpdate.folderId;
-    updateOp.$unset = { folderId: 1 };
-  }
-  if (Object.keys(sanitizedUpdate).length > 0) {
-    updateOp.$set = sanitizedUpdate;
-  }
+  // `folderId: null` becomes an `$unset` rather than a stored null — see
+  // `buildFolderAwareUpdate`, which `documentController.updateDocument` shares so
+  // the two cannot come to disagree about what an unfiled row looks like.
+  const updateOp = buildFolderAwareUpdate(sanitizedUpdate);
 
   const item = await VaultItem.findOneAndUpdate({ _id: id, userId }, updateOp, {
     returnDocument: 'after',

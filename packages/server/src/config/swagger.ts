@@ -7,6 +7,150 @@ import {
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
 } from '@hvault/shared';
 
+// ---------------------------------------------------------------------------
+// Document-route building blocks
+// ---------------------------------------------------------------------------
+//
+// The sixteen document operations repeated four things verbatim: the id path
+// parameter, the pagination query parameters, the `{ success, data }` envelope
+// and the tail of `$ref`ed error responses. Naming each once and spreading it
+// leaves the SERVED document byte-for-byte identical — a spread emits the same
+// keys, and JavaScript enumerates integer-like keys in ascending numeric order
+// however they were inserted, which is why an error tail may be spread before
+// the 2xx it follows — while giving a response added to every document route one
+// place to be added rather than sixteen.
+//
+// Plain constants rather than `components.parameters` / `components.responses`
+// entries with `$ref`s: a `$ref` would change what /api/v1/docs.json serves, and
+// this file's output IS the published contract. The existing
+// `components.responses` entries are referenced from here for the same reason
+// they always were — they were already `$ref`s in the served document.
+
+/** The document id, as every `/documents/{id}` route declares it. */
+const DOCUMENT_ID_PARAM = {
+  name: 'id',
+  in: 'path',
+  required: true,
+  schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+};
+
+/** The staging-transfer id, as every `/documents/uploads/{id}` route declares it. */
+const UPLOAD_ID_PARAM = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
+
+/**
+ * The `page` and `limit` query parameters, at whichever ceiling the endpoint sets.
+ *
+ * `page` is identical everywhere and `limit` never is, which is why this takes the
+ * two numbers rather than being two constants: written out twice, the pair became
+ * a clone of itself the moment the second one existed.
+ */
+const pageParams = (maxLimit: number, defaultLimit: number): Record<string, unknown>[] => [
+  { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
+  {
+    name: 'limit',
+    in: 'query',
+    schema: { type: 'integer', minimum: 1, maximum: maxLimit, default: defaultLimit },
+  },
+];
+
+/**
+ * `page` and `limit` as the four ITEM lists declare them — documents, trashed
+ * documents, vault items, trashed vault items.
+ *
+ * Separate from `LOG_PAGE_PARAMS` below because the two ceilings are different
+ * decisions rather than one number written twice: an item list is what a client
+ * pages through to render a vault, while a log is read a screenful at a time.
+ * `paginationSchema` in `@hvault/shared` is what actually enforces either.
+ */
+const LIST_PAGE_PARAMS = pageParams(200, 50);
+
+/** `page` and `limit` as the two LOG lists declare them: a smaller page, capped lower. */
+const LOG_PAGE_PARAMS = pageParams(100, 20);
+
+/** `sortOrder`; the two list endpoints differ in their sort KEYS, never in the direction. */
+const DOCUMENT_SORT_ORDER_PARAM = {
+  name: 'sortOrder',
+  in: 'query',
+  schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+};
+
+/** The one schema reference three document responses return. */
+const DOCUMENT_RESPONSE_REF = { $ref: '#/components/schemas/DocumentResponse' };
+
+/**
+ * The three answers EVERY document route can give: it is authenticated, it is
+ * budgeted, and it needs object storage the operator may not have configured.
+ *
+ * Three operations declare a status of their own between the 404 and the 429 — a
+ * 409 on the two that commit, 411/413/415 on the part route — and they simply
+ * declare it after the spread. Integer-like keys serialise in ascending numeric
+ * order whatever order they were written in, so the emitted document is the same
+ * either way and no second, partial constant is needed for them.
+ */
+const DOCUMENT_BASE_ERRORS = {
+  401: { $ref: '#/components/responses/Unauthorized' },
+  429: { $ref: '#/components/responses/RateLimited' },
+  503: { $ref: '#/components/responses/StorageUnavailable' },
+};
+
+/** ...and a 400 wherever `validate()` stands in front of the handler. */
+const DOCUMENT_INPUT_ERRORS = {
+  ...DOCUMENT_BASE_ERRORS,
+  400: { $ref: '#/components/responses/ValidationError' },
+};
+
+/** ...and a 404 wherever the route names one row, which a foreign id also earns. */
+const DOCUMENT_ITEM_ERRORS = {
+  ...DOCUMENT_INPUT_ERRORS,
+  404: { $ref: '#/components/responses/NotFound' },
+};
+
+/** ...and a 403 wherever the route changes state and therefore carries the CSRF check. */
+const DOCUMENT_ITEM_WRITE_ERRORS = {
+  ...DOCUMENT_ITEM_ERRORS,
+  403: { $ref: '#/components/responses/Forbidden' },
+};
+
+/** The CSRF-checked write that names no row: emptying the trash. */
+const DOCUMENT_BULK_WRITE_ERRORS = {
+  ...DOCUMENT_BASE_ERRORS,
+  403: { $ref: '#/components/responses/Forbidden' },
+};
+
+/**
+ * The standard `{ success, data }` envelope, as a response object.
+ *
+ * `extraProperties` is spread AFTER `data`, which is where the two responses
+ * that carry a `message` already put it.
+ */
+const jsonEnvelope = (
+  description: string,
+  data: Record<string, unknown>,
+  extraProperties: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  description,
+  content: {
+    'application/json': {
+      schema: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: true },
+          data,
+          ...extraProperties,
+        },
+      },
+    },
+  },
+});
+
+/** The paginated form of the same envelope, for every list endpoint in this document. */
+const pageEnvelope = (description: string, itemsRef: string): Record<string, unknown> =>
+  jsonEnvelope(
+    description,
+    { type: 'array', items: { $ref: itemsRef } },
+    { pagination: { $ref: '#/components/schemas/Pagination' } },
+  );
+
 /**
  * OpenAPI 3.0.3 specification for the H-Vault REST API.
  *
@@ -1187,12 +1331,7 @@ export const swaggerSpec: JsonObject = {
           "The caller's own documents that are not in the trash, paginated. The server cannot sort by name — the name lives inside encryptedMeta and it never sees it — so the sort keys are the three columns it does hold, and the document id breaks ties so that skip/limit pagination has a total order and a row cannot slip across a page boundary between two requests.",
         security: [{ bearerAuth: [] }],
         parameters: [
-          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
-          {
-            name: 'limit',
-            in: 'query',
-            schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
-          },
+          ...LIST_PAGE_PARAMS,
           {
             name: 'folderId',
             in: 'query',
@@ -1208,35 +1347,11 @@ export const swaggerSpec: JsonObject = {
               default: 'updatedAt',
             },
           },
-          {
-            name: 'sortOrder',
-            in: 'query',
-            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
-          },
+          DOCUMENT_SORT_ORDER_PARAM,
         ],
         responses: {
-          200: {
-            description: 'Paginated documents',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/DocumentResponse' },
-                    },
-                    pagination: { $ref: '#/components/schemas/Pagination' },
-                  },
-                },
-              },
-            },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          200: pageEnvelope('Paginated documents', '#/components/schemas/DocumentResponse'),
+          ...DOCUMENT_INPUT_ERRORS,
         },
       },
     },
@@ -1249,12 +1364,7 @@ export const swaggerSpec: JsonObject = {
           'Documents this account has moved to the trash, paginated and sorted by deletion time by default. A trashed document still occupies its object in the bucket and still counts against the storage quota reported by GET /documents/usage, so recovering that space needs a permanent delete rather than a trash.',
         security: [{ bearerAuth: [] }],
         parameters: [
-          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
-          {
-            name: 'limit',
-            in: 'query',
-            schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
-          },
+          ...LIST_PAGE_PARAMS,
           {
             name: 'sortBy',
             in: 'query',
@@ -1264,35 +1374,11 @@ export const swaggerSpec: JsonObject = {
               default: 'deletedAt',
             },
           },
-          {
-            name: 'sortOrder',
-            in: 'query',
-            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
-          },
+          DOCUMENT_SORT_ORDER_PARAM,
         ],
         responses: {
-          200: {
-            description: 'Paginated trashed documents',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/DocumentResponse' },
-                    },
-                    pagination: { $ref: '#/components/schemas/Pagination' },
-                  },
-                },
-              },
-            },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          200: pageEnvelope('Paginated trashed documents', '#/components/schemas/DocumentResponse'),
+          ...DOCUMENT_INPUT_ERRORS,
         },
       },
     },
@@ -1305,23 +1391,10 @@ export const swaggerSpec: JsonObject = {
           'The document count and plaintext bytes this account holds, alongside the per-user quota and the per-document size cap the operator configured. Both measurements include trashed documents, because both caps are enforced that way and a usage figure smaller than the one an upload is refused against would be an explanation the user cannot see.',
         security: [{ bearerAuth: [] }],
         responses: {
-          200: {
-            description: 'Usage and limits',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/DocumentUsageResponse' },
-                  },
-                },
-              },
-            },
-          },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          200: jsonEnvelope('Usage and limits', {
+            $ref: '#/components/schemas/DocumentUsageResponse',
+          }),
+          ...DOCUMENT_BASE_ERRORS,
         },
       },
     },
@@ -1334,26 +1407,11 @@ export const swaggerSpec: JsonObject = {
           "The caller's own staging uploads, newest first, each with the parts the server already holds. Expired rows are included on purpose: they can no longer accept a part, and listing them is how a user finds one to cancel.",
         security: [{ bearerAuth: [] }],
         responses: {
-          200: {
-            description: 'Transfers in progress',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/DocumentUploadResponse' },
-                    },
-                  },
-                },
-              },
-            },
-          },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          200: jsonEnvelope('Transfers in progress', {
+            type: 'array',
+            items: { $ref: '#/components/schemas/DocumentUploadResponse' },
+          }),
+          ...DOCUMENT_BASE_ERRORS,
         },
       },
       post: {
@@ -1372,24 +1430,10 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          201: {
-            description: 'Transfer opened',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/InitDocumentUploadResponse' },
-                  },
-                },
-              },
-            },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          404: { $ref: '#/components/responses/NotFound' },
+          201: jsonEnvelope('Transfer opened', {
+            $ref: '#/components/schemas/InitDocumentUploadResponse',
+          }),
+          ...DOCUMENT_ITEM_WRITE_ERRORS,
           409: {
             description: 'A vault-key rotation is in progress; retry when it finishes',
             content: {
@@ -1398,8 +1442,6 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
         },
       },
     },
@@ -1411,27 +1453,12 @@ export const swaggerSpec: JsonObject = {
         description:
           'One staging upload with its part ledger, which is what makes a resume possible: the client compares the ledger with the segments it has sealed and sends only the missing ones. An id belonging to another account is indistinguishable from one that never existed.',
         security: [{ bearerAuth: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [UPLOAD_ID_PARAM],
         responses: {
-          200: {
-            description: 'The transfer',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/DocumentUploadResponse' },
-                  },
-                },
-              },
-            },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          404: { $ref: '#/components/responses/NotFound' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          200: jsonEnvelope('The transfer', {
+            $ref: '#/components/schemas/DocumentUploadResponse',
+          }),
+          ...DOCUMENT_ITEM_ERRORS,
         },
       },
       delete: {
@@ -1441,15 +1468,10 @@ export const swaggerSpec: JsonObject = {
         description:
           'Aborts the engine-side multipart upload, then deletes the staging row — in that order, so a crash between the two leaves a row that still names the upload rather than an upload nothing names. No document is created and no committed document is affected.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [UPLOAD_ID_PARAM],
         responses: {
           200: { $ref: '#/components/responses/Acknowledged' },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          404: { $ref: '#/components/responses/NotFound' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          ...DOCUMENT_ITEM_WRITE_ERRORS,
         },
       },
     },
@@ -1463,7 +1485,7 @@ export const swaggerSpec: JsonObject = {
           'Stores one part of a transfer. The body is the raw sealed segment as application/octet-stream, `Content-Length` is required (411 without it), and `x-hv-part-sha256` carries the SHA-256 the server recomputes over the bytes it received. Every part except the LAST must be exactly the ciphertext chunk size: the storage engine accepts a short middle part, and one would shift every later segment boundary and leave the document permanently undecryptable, so the server is what refuses it. Re-sending a part number replaces its ledger entry rather than adding a second one, which is what makes a retried part safe.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [
-          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          UPLOAD_ID_PARAM,
           {
             name: 'partNumber',
             in: 'path',
@@ -1488,35 +1510,19 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          200: {
-            description: 'Part stored',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'object',
-                      properties: {
-                        partNumber: { type: 'integer', example: 1 },
-                        bytes: { type: 'integer', example: DOCUMENT_CIPHERTEXT_CHUNK_BYTES },
-                        receivedBytes: {
-                          type: 'integer',
-                          description: 'The sum of every part stored so far.',
-                          example: DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
-                        },
-                      },
-                    },
-                  },
-                },
+          200: jsonEnvelope('Part stored', {
+            type: 'object',
+            properties: {
+              partNumber: { type: 'integer', example: 1 },
+              bytes: { type: 'integer', example: DOCUMENT_CIPHERTEXT_CHUNK_BYTES },
+              receivedBytes: {
+                type: 'integer',
+                description: 'The sum of every part stored so far.',
+                example: DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
               },
             },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          404: { $ref: '#/components/responses/NotFound' },
+          }),
+          ...DOCUMENT_ITEM_WRITE_ERRORS,
           411: {
             description: 'The request declared no Content-Length',
             content: {
@@ -1541,8 +1547,6 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
         },
       },
     },
@@ -1555,7 +1559,7 @@ export const swaggerSpec: JsonObject = {
         description:
           "Verifies every part against the storage engine's own ledger, DERIVES the document's chunk count and its ciphertext and plaintext sizes from that ledger rather than from this request, re-checks the storage quota against the bytes actually received, and commits the document row. Nothing the client says about the size of its own file is believed. Refused with 400 when a part is missing, when the engine and the server disagree about a part, or when the parts cannot frame a document (a final segment holding only its authentication tag is the case that looks valid and is not); with 409 while a vault-key rotation is running, when the wrapped key was produced under a superseded vault key, or when another completion of the same transfer is already in flight. A repeat completion returns the document the first one committed, so a client that retried after a timeout cannot tell whether its first attempt landed.",
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [UPLOAD_ID_PARAM],
         requestBody: {
           required: true,
           content: {
@@ -1565,24 +1569,8 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          201: {
-            description: 'The document, committed',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/DocumentResponse' },
-                  },
-                },
-              },
-            },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          404: { $ref: '#/components/responses/NotFound' },
+          201: jsonEnvelope('The document, committed', DOCUMENT_RESPONSE_REF),
+          ...DOCUMENT_ITEM_WRITE_ERRORS,
           409: {
             description:
               'The completion cannot proceed yet. A stale vaultKeyVersion carries the current one in `data`, so the client rewraps the document key it still holds and retries this request alone rather than re-sending the file; a rotation in progress or a completion already in flight carry no data and are retried unchanged.',
@@ -1605,8 +1593,6 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
         },
       },
     },
@@ -1619,34 +1605,10 @@ export const swaggerSpec: JsonObject = {
         description:
           'One document row: the wrapped document key, the plaintext framing parameters, the sealed metadata blob and the sizes. Trashed documents are returned too, and carry deletedAt, so the trash view can open one before restoring or purging it. An id belonging to another account is indistinguishable from one that never existed. Before decrypting anything a client should check this row against itself (the two size identities), and then check every framing field against the AUTHENTICATED copy inside the metadata blob — that second comparison is mandatory and is what a substituted salt or nonce prefix is caught by.',
         security: [{ bearerAuth: [] }],
-        parameters: [
-          {
-            name: 'id',
-            in: 'path',
-            required: true,
-            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
-          },
-        ],
+        parameters: [DOCUMENT_ID_PARAM],
         responses: {
-          200: {
-            description: 'The document',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/DocumentResponse' },
-                  },
-                },
-              },
-            },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          404: { $ref: '#/components/responses/NotFound' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          200: jsonEnvelope('The document', DOCUMENT_RESPONSE_REF),
+          ...DOCUMENT_ITEM_ERRORS,
         },
       },
       put: {
@@ -1656,14 +1618,7 @@ export const swaggerSpec: JsonObject = {
         description:
           'Re-seals the metadata blob (a rename, a retag, an edited note) and sets the favorite flag and the folder. It cannot change a single byte of the stored content or of the framing that describes it, and it cannot touch the wrapped document key or the storage key: content is immutable after upload, so replacing bytes means uploading a new document. Sending folderId as null removes the document from its folder; the field is then ABSENT from the response rather than present and null. Unlike every other write that produces ciphertext, this endpoint is NOT refused while a vault-key rotation is running, because the metadata blob is sealed under a key derived from the document key and a rotation only rewraps that key.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [
-          {
-            name: 'id',
-            in: 'path',
-            required: true,
-            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
-          },
-        ],
+        parameters: [DOCUMENT_ID_PARAM],
         requestBody: {
           required: true,
           content: {
@@ -1673,26 +1628,8 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          200: {
-            description: 'The updated document',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/DocumentResponse' },
-                  },
-                },
-              },
-            },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          404: { $ref: '#/components/responses/NotFound' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          200: jsonEnvelope('The updated document', DOCUMENT_RESPONSE_REF),
+          ...DOCUMENT_ITEM_WRITE_ERRORS,
         },
       },
       delete: {
@@ -1702,22 +1639,10 @@ export const swaggerSpec: JsonObject = {
         description:
           'A soft delete: the deletion time is stamped on the row and nothing else happens. The stored object stays in the bucket, the row keeps its wrapped key, and the document still counts against both the document limit and the storage quota reported by GET /documents/usage — so the space comes back at DELETE /documents/{id}/permanent, or when the trash auto-purge reaches it, and the UI says so rather than letting a user assume the deletion failed.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [
-          {
-            name: 'id',
-            in: 'path',
-            required: true,
-            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
-          },
-        ],
+        parameters: [DOCUMENT_ID_PARAM],
         responses: {
           200: { $ref: '#/components/responses/Acknowledged' },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          404: { $ref: '#/components/responses/NotFound' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          ...DOCUMENT_ITEM_WRITE_ERRORS,
         },
       },
     },
@@ -1730,36 +1655,12 @@ export const swaggerSpec: JsonObject = {
         description:
           'Clears the deletion time and returns the restored row. Refused with 404 for a document that is not in the trash, and also for one whose permanent deletion has already begun — such a row carries purgePending, its stored object is gone or going, and the garbage collector will remove the row, so restoring it would return a document that cannot be downloaded and then disappears.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [
-          {
-            name: 'id',
-            in: 'path',
-            required: true,
-            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
-          },
-        ],
+        parameters: [DOCUMENT_ID_PARAM],
         responses: {
-          200: {
-            description: 'The restored document',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/DocumentResponse' },
-                    message: { type: 'string', example: 'Document restored from trash' },
-                  },
-                },
-              },
-            },
-          },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          404: { $ref: '#/components/responses/NotFound' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          200: jsonEnvelope('The restored document', DOCUMENT_RESPONSE_REF, {
+            message: { type: 'string', example: 'Document restored from trash' },
+          }),
+          ...DOCUMENT_ITEM_WRITE_ERRORS,
         },
       },
     },
@@ -1772,22 +1673,10 @@ export const swaggerSpec: JsonObject = {
         description:
           'Destroys a trashed document for good, in three ordered steps: the row is marked purgePending, the stored object is deleted, and only then is the row deleted. A crash after any of them leaves a marker the hourly collector finishes, and the order is what stops an object outliving the row that names it. Deleting the row destroys the only wrapped copy of the document key, so any object that somehow survived is ciphertext under a key that exists nowhere — documents are deliberately absent from the backup payload. Only a document already in the trash may be purged.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [
-          {
-            name: 'id',
-            in: 'path',
-            required: true,
-            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
-          },
-        ],
+        parameters: [DOCUMENT_ID_PARAM],
         responses: {
           200: { $ref: '#/components/responses/Acknowledged' },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          404: { $ref: '#/components/responses/NotFound' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          ...DOCUMENT_ITEM_WRITE_ERRORS,
         },
       },
     },
@@ -1801,38 +1690,25 @@ export const swaggerSpec: JsonObject = {
           'Runs the same three ordered steps as a per-document purge over every document that was in the trash when the request arrived — a document trashed by another tab while it runs is outside that set and survives. It is not a bulk row delete: every document owns an object, so deleting the rows alone would leave the objects behind with nothing naming them. A document whose object cannot be deleted is counted rather than thrown, because it is already marked purgePending and the hourly collector will finish it, so the response reports both counts and the request succeeds either way.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
-          200: {
-            description: 'What was destroyed, and what was deferred to the collector',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'object',
-                      required: ['deletedCount', 'failedCount'],
-                      properties: {
-                        deletedCount: { type: 'integer', minimum: 0, example: 4 },
-                        failedCount: {
-                          type: 'integer',
-                          minimum: 0,
-                          description:
-                            'Documents left marked purgePending for the collector to finish. Zero on a healthy deployment.',
-                          example: 0,
-                        },
-                      },
-                    },
-                    message: { type: 'string', example: '4 document(s) permanently deleted' },
-                  },
+          200: jsonEnvelope(
+            'What was destroyed, and what was deferred to the collector',
+            {
+              type: 'object',
+              required: ['deletedCount', 'failedCount'],
+              properties: {
+                deletedCount: { type: 'integer', minimum: 0, example: 4 },
+                failedCount: {
+                  type: 'integer',
+                  minimum: 0,
+                  description:
+                    'Documents left marked purgePending for the collector to finish. Zero on a healthy deployment.',
+                  example: 0,
                 },
               },
             },
-          },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: { $ref: '#/components/responses/Forbidden' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+            { message: { type: 'string', example: '4 document(s) permanently deleted' } },
+          ),
+          ...DOCUMENT_BULK_WRITE_ERRORS,
         },
       },
     },
@@ -1846,12 +1722,7 @@ export const swaggerSpec: JsonObject = {
           "One segment of the stored ciphertext, streamed as application/octet-stream with Cache-Control: no-store and an exact Content-Length. There is no Range header on this endpoint and there must never be one: the byte window is computed on the server from the document's own framing columns, so a segment can only ever be read from the offset it was written to. Segment indices are zero-based and the last one is chunkCount - 1; an index outside that is 400, and a document whose stored object has gone missing is 404. The client requests segments one at a time, verifies each one's authentication tag, and compares a running SHA-256 with the digest inside the metadata blob at the end.",
         security: [{ bearerAuth: [] }],
         parameters: [
-          {
-            name: 'id',
-            in: 'path',
-            required: true,
-            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
-          },
+          DOCUMENT_ID_PARAM,
           {
             name: 'index',
             in: 'path',
@@ -1876,11 +1747,7 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
-          400: { $ref: '#/components/responses/ValidationError' },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          404: { $ref: '#/components/responses/NotFound' },
-          429: { $ref: '#/components/responses/RateLimited' },
-          503: { $ref: '#/components/responses/StorageUnavailable' },
+          ...DOCUMENT_ITEM_ERRORS,
         },
       },
     },
@@ -1893,20 +1760,7 @@ export const swaggerSpec: JsonObject = {
         description:
           'Returns server health status including database connectivity, uptime, and version.',
         responses: {
-          200: {
-            description: 'Server is healthy',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/HealthResponse' },
-                  },
-                },
-              },
-            },
-          },
+          200: jsonEnvelope('Server is healthy', { $ref: '#/components/schemas/HealthResponse' }),
         },
       },
     },
@@ -2252,12 +2106,7 @@ export const swaggerSpec: JsonObject = {
           'Returns paginated, filterable, sortable list of vault items. All item data is encrypted.',
         security: [{ bearerAuth: [] }],
         parameters: [
-          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
-          {
-            name: 'limit',
-            in: 'query',
-            schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
-          },
+          ...LIST_PAGE_PARAMS,
           {
             name: 'itemType',
             in: 'query',
@@ -2281,24 +2130,7 @@ export const swaggerSpec: JsonObject = {
           },
         ],
         responses: {
-          200: {
-            description: 'Paginated vault items',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/VaultItemResponse' },
-                    },
-                    pagination: { $ref: '#/components/schemas/Pagination' },
-                  },
-                },
-              },
-            },
-          },
+          200: pageEnvelope('Paginated vault items', '#/components/schemas/VaultItemResponse'),
           401: { $ref: '#/components/responses/Unauthorized' },
         },
       },
@@ -2316,20 +2148,7 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          201: {
-            description: 'Item created',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/VaultItemResponse' },
-                  },
-                },
-              },
-            },
-          },
+          201: jsonEnvelope('Item created', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
         },
@@ -2341,33 +2160,9 @@ export const swaggerSpec: JsonObject = {
         summary: 'List trashed items',
         description: 'Returns paginated list of soft-deleted vault items.',
         security: [{ bearerAuth: [] }],
-        parameters: [
-          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
-          {
-            name: 'limit',
-            in: 'query',
-            schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
-          },
-        ],
+        parameters: [...LIST_PAGE_PARAMS],
         responses: {
-          200: {
-            description: 'Paginated trashed items',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/VaultItemResponse' },
-                    },
-                    pagination: { $ref: '#/components/schemas/Pagination' },
-                  },
-                },
-              },
-            },
-          },
+          200: pageEnvelope('Paginated trashed items', '#/components/schemas/VaultItemResponse'),
           401: { $ref: '#/components/responses/Unauthorized' },
         },
       },
@@ -2522,20 +2317,7 @@ export const swaggerSpec: JsonObject = {
         security: [{ bearerAuth: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
-          200: {
-            description: 'Vault item',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/VaultItemResponse' },
-                  },
-                },
-              },
-            },
-          },
+          200: jsonEnvelope('Vault item', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
         },
@@ -2555,20 +2337,7 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          200: {
-            description: 'Item updated',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/VaultItemResponse' },
-                  },
-                },
-              },
-            },
-          },
+          200: jsonEnvelope('Item updated', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
           400: { $ref: '#/components/responses/ValidationError' },
@@ -2623,20 +2392,7 @@ export const swaggerSpec: JsonObject = {
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
-          200: {
-            description: 'Item restored',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/VaultItemResponse' },
-                  },
-                },
-              },
-            },
-          },
+          200: jsonEnvelope('Item restored', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
         },
@@ -2685,20 +2441,7 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          201: {
-            description: 'Folder created',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/FolderResponse' },
-                  },
-                },
-              },
-            },
-          },
+          201: jsonEnvelope('Folder created', { $ref: '#/components/schemas/FolderResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
         },
@@ -2720,20 +2463,7 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          200: {
-            description: 'Folder updated',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/FolderResponse' },
-                  },
-                },
-              },
-            },
-          },
+          200: jsonEnvelope('Folder updated', { $ref: '#/components/schemas/FolderResponse' }),
           400: {
             description: 'Circular parent reference detected',
             content: {
@@ -2790,20 +2520,7 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          200: {
-            description: 'Folder reordered',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/FolderResponse' },
-                  },
-                },
-              },
-            },
-          },
+          200: jsonEnvelope('Folder reordered', { $ref: '#/components/schemas/FolderResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
         },
@@ -2818,20 +2535,7 @@ export const swaggerSpec: JsonObject = {
         description: 'Returns the authenticated user profile and settings.',
         security: [{ bearerAuth: [] }],
         responses: {
-          200: {
-            description: 'User profile',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/UserProfile' },
-                  },
-                },
-              },
-            },
-          },
+          200: jsonEnvelope('User profile', { $ref: '#/components/schemas/UserProfile' }),
           401: { $ref: '#/components/responses/Unauthorized' },
         },
       },
@@ -2852,20 +2556,7 @@ export const swaggerSpec: JsonObject = {
           },
         },
         responses: {
-          200: {
-            description: 'Settings updated',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: { $ref: '#/components/schemas/UserProfile' },
-                  },
-                },
-              },
-            },
-          },
+          200: jsonEnvelope('Settings updated', { $ref: '#/components/schemas/UserProfile' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
         },
@@ -3140,12 +2831,7 @@ export const swaggerSpec: JsonObject = {
         description: 'Returns paginated audit log entries for the authenticated user.',
         security: [{ bearerAuth: [] }],
         parameters: [
-          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
-          {
-            name: 'limit',
-            in: 'query',
-            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
-          },
+          ...LOG_PAGE_PARAMS,
           {
             name: 'action',
             in: 'query',
@@ -3153,24 +2839,7 @@ export const swaggerSpec: JsonObject = {
           },
         ],
         responses: {
-          200: {
-            description: 'Audit log entries',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/AuditLogEntry' },
-                    },
-                    pagination: { $ref: '#/components/schemas/Pagination' },
-                  },
-                },
-              },
-            },
-          },
+          200: pageEnvelope('Audit log entries', '#/components/schemas/AuditLogEntry'),
           401: { $ref: '#/components/responses/Unauthorized' },
         },
       },
@@ -3482,33 +3151,9 @@ export const swaggerSpec: JsonObject = {
         summary: 'Backup history',
         description: 'Returns paginated backup history log.',
         security: [{ bearerAuth: [] }],
-        parameters: [
-          { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
-          {
-            name: 'limit',
-            in: 'query',
-            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
-          },
-        ],
+        parameters: [...LOG_PAGE_PARAMS],
         responses: {
-          200: {
-            description: 'Backup log entries',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'array',
-                      items: { $ref: '#/components/schemas/BackupLogEntry' },
-                    },
-                    pagination: { $ref: '#/components/schemas/Pagination' },
-                  },
-                },
-              },
-            },
-          },
+          200: pageEnvelope('Backup log entries', '#/components/schemas/BackupLogEntry'),
           401: { $ref: '#/components/responses/Unauthorized' },
         },
       },

@@ -615,6 +615,53 @@ describe('GET /documents/uploads', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual([]);
   });
+
+  it('still shows the expired transfer beside a full complement of live ones', async () => {
+    // The reason this page exists is so a user can cancel a transfer that can no
+    // longer accept a part. An EXPIRED row is the oldest, and the page is
+    // newest-first — so a limit of exactly the concurrency cap would truncate the
+    // one row the user came for, and it would keep an engine-side upload nobody can
+    // point at. MongoDB's TTL monitor sweeps on its own schedule, so this state
+    // lasts a minute or more rather than being instantaneous.
+    const expired = await seedUpload(user, {
+      createdAt: new Date(Date.now() - 90 * 60 * 1000),
+      expiresAt: new Date(Date.now() - 30 * 60 * 1000),
+    });
+    const live: string[] = [];
+    for (let i = 0; i < MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER; i += 1) {
+      live.push(await seedUpload(user, { createdAt: new Date(Date.now() - i * 1000) }));
+    }
+
+    const res = await call('get', UPLOADS_PATH, user);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const ids = (res.body.data as { _id: string }[]).map((row) => row._id);
+    expect(ids).toContain(expired);
+    for (const id of live) expect(ids).toContain(id);
+    expect(ids).toHaveLength(MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER + 1);
+    // The row a client needs in order to decide is on the wire, so the UI can say
+    // which transfers are dead rather than guessing.
+    const expiredRow = (res.body.data as { _id: string; expiresAt: string }[]).find(
+      (row) => row._id === expired,
+    );
+    expect(new Date(expiredRow!.expiresAt).getTime()).toBeLessThan(Date.now());
+  });
+
+  it('never puts Mongoose bookkeeping on the wire', async () => {
+    // `documentUploadResponseSchema` strips an unknown key, so a leaked `__v` would
+    // not break a client — it would simply put an internal column on two routes and
+    // not on the rest, which is exactly the asymmetry that becomes an assertion
+    // somewhere later. Both staging reads share one projection; both are checked.
+    const uploadId = await seedUpload(user);
+
+    const list = await call('get', UPLOADS_PATH, user);
+    const one = await call('get', `${UPLOADS_PATH}/${uploadId}`, user);
+
+    expect(list.status).toBe(200);
+    expect(one.status).toBe(200);
+    expect((list.body.data as Record<string, unknown>[])[0]).not.toHaveProperty('__v');
+    expect(one.body.data).not.toHaveProperty('__v');
+  });
 });
 
 describe('DELETE /documents/uploads/:id abandons a transfer', () => {

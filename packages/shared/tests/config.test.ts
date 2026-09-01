@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { publicConfigDataSchema, publicConfigResponseSchema } from '../src/schemas/config.js';
+import {
+  fileEncryptionConfigResponseSchema,
+  publicConfigDataSchema,
+  publicConfigResponseSchema,
+} from '../src/schemas/config.js';
 import type { PublicConfig } from '../src/types/index.js';
 import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
@@ -233,5 +237,50 @@ describe('publicConfigDataSchema — the documents block', () => {
     // the optionality the first case in this block asserts at runtime.
     const older: PublicConfig = { fileEncryption: { maxSizeMB: 25 } };
     expect(publicConfigDataSchema.safeParse(older).success).toBe(true);
+  });
+});
+
+describe('fileEncryptionConfigResponseSchema', () => {
+  it('reads the cap out of an envelope whose documents block is malformed', () => {
+    // The whole reason this schema exists. The full schema refuses this envelope —
+    // and must, because a documents READER cannot act on a block like this — while
+    // the File Encryption cap has no business failing over it. Both halves are
+    // asserted here, because the value is in the DIFFERENCE between them.
+    const envelope = {
+      success: true,
+      data: {
+        fileEncryption: { maxSizeMB: 7 },
+        // Every way the block can be wrong at once: no `enabled`, an extension past
+        // the metadata bound, and a negative number.
+        documents: { maxSizeMB: -1, allowedExtensions: ['x'.repeat(64)] },
+      },
+    };
+
+    expect(publicConfigResponseSchema.safeParse(envelope).success).toBe(false);
+
+    const narrowed = fileEncryptionConfigResponseSchema.safeParse(envelope);
+    expect(narrowed.success).toBe(true);
+    expect(narrowed.success ? narrowed.data.data.fileEncryption.maxSizeMB : null).toBe(7);
+    // Stripped rather than carried through: a caller of this schema must not be
+    // able to read a block nothing validated.
+    expect(narrowed.success ? 'documents' in narrowed.data.data : true).toBe(false);
+  });
+
+  it('still refuses an envelope whose fileEncryption block is the broken one', () => {
+    // Narrower, not laxer. The one field it does read is validated exactly as
+    // before, or the fallback would never fire for the case it exists for.
+    for (const maxSizeMB of [0, -1, 1.5, '100']) {
+      expect(
+        fileEncryptionConfigResponseSchema.safeParse({
+          success: true,
+          data: { fileEncryption: { maxSizeMB } },
+        }).success,
+        `maxSizeMB ${String(maxSizeMB)} was accepted`,
+      ).toBe(false);
+    }
+    expect(fileEncryptionConfigResponseSchema.safeParse({ success: false, data: {} }).success).toBe(
+      false,
+    );
+    expect(fileEncryptionConfigResponseSchema.safeParse({ success: true }).success).toBe(false);
   });
 });

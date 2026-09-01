@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { MAX_DOCUMENT_EXT_LENGTH, publicConfigResponseSchema } from '@hvault/shared';
 
 // Must mock dotenv to prevent .env file dependency during dynamic imports
 vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
@@ -860,8 +861,66 @@ describe('Server Config Validation', () => {
     ])('normalises DOCUMENT_ALLOWED_EXTENSIONS with %s', async (_label, value, expected) => {
       // The client compares a filename's last segment against this list, so the
       // operator's punctuation is normalised ONCE here rather than in every reader.
+      // Cleared first: `mockWarn` is module-scoped and the suite runs shuffled, so
+      // a later test's warning would otherwise decide this one.
+      mockWarn.mockClear();
       const { config } = await loadConfigWithEnv({ DOCUMENT_ALLOWED_EXTENSIONS: value });
       expect(config.DOCUMENT_ALLOWED_EXTENSIONS).toEqual(expected);
+      // Normalisation alone is silent: nothing was thrown away that a client could
+      // have matched, so there is nothing for an operator to act on.
+      expect(mockWarn).not.toHaveBeenCalledWith(
+        expect.stringContaining('DOCUMENT_ALLOWED_EXTENSIONS'),
+      );
+    });
+
+    it('keeps an extension of exactly the metadata bound and drops the one past it', async () => {
+      // The bound is the one `MAX_DOCUMENT_EXT_LENGTH` puts on the `ext` field
+      // inside the sealed metadata blob, so an entry longer than it could never
+      // match a document anyway. n and n+1, because an off-by-one here is a
+      // silently narrowed allowlist in one direction and an unparseable `/config`
+      // in the other.
+      const atBound = 'a'.repeat(MAX_DOCUMENT_EXT_LENGTH);
+      const pastBound = 'b'.repeat(MAX_DOCUMENT_EXT_LENGTH + 1);
+      mockWarn.mockClear();
+      const { config } = await loadConfigWithEnv({
+        DOCUMENT_ALLOWED_EXTENSIONS: `pdf, ${atBound}, ${pastBound}, md`,
+      });
+      expect(config.DOCUMENT_ALLOWED_EXTENSIONS).toEqual(['pdf', atBound, 'md']);
+      expect(config.DOCUMENT_ALLOWED_EXTENSIONS).not.toContain(pastBound);
+      // Dropped LOUDLY: an operator who mistyped this has to be able to find out.
+      expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining('DOCUMENT_ALLOWED_EXTENSIONS'));
+    });
+
+    it('keeps GET /config parseable by the client when an entry is over-long', async () => {
+      // The reason the filter above exists, stated as the behaviour it protects.
+      // `publicConfigDataSchema` bounds EVERY entry, so one over-long extension
+      // fails the parse of the WHOLE envelope — and `getFileEncryptionMaxBytes()`
+      // answers a failed parse by silently falling back to its shared-constant
+      // default. A typo in a DOCUMENTS variable would then change the File
+      // Encryption tool's size cap, in a feature that has nothing to do with
+      // documents.
+      const { config } = await loadConfigWithEnv({
+        FILE_ENCRYPTION_MAX_SIZE_MB: '7',
+        DOCUMENT_ALLOWED_EXTENSIONS: `pdf,${'c'.repeat(MAX_DOCUMENT_EXT_LENGTH + 40)}`,
+        ...storageEnv,
+      });
+
+      const envelope = {
+        success: true as const,
+        data: {
+          fileEncryption: { maxSizeMB: config.FILE_ENCRYPTION_MAX_SIZE_MB },
+          documents: {
+            enabled: true,
+            maxSizeMB: config.MAX_DOCUMENT_SIZE_MB,
+            allowedExtensions: config.DOCUMENT_ALLOWED_EXTENSIONS,
+          },
+        },
+      };
+
+      const parsed = publicConfigResponseSchema.safeParse(envelope);
+      expect(parsed.success).toBe(true);
+      expect(parsed.success && parsed.data.data.fileEncryption.maxSizeMB).toBe(7);
+      expect(parsed.success && parsed.data.data.documents?.allowedExtensions).toEqual(['pdf']);
     });
   });
 

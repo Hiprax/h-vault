@@ -34,7 +34,9 @@ import type { StoragePart, StorageRangeRead } from '../services/storage/types.js
 import { buildObjectKey, expectedPartSize, segmentRange } from '../utils/documentObjects.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import {
+  assertFolderOwned,
   assertVaultNotRotating,
+  buildFolderAwareUpdate,
   documentCompleteLockName,
   getRequestContext,
   getUserId,
@@ -76,6 +78,11 @@ const ALLOWED_INIT_FIELDS = new Set([
  * An EXCLUSION projection, matching `documentUploadResponseSchema` in
  * `@hvault/shared` field for field, and every entry is deliberate:
  *
+ *   * `__v` is Mongoose's own bookkeeping and describes nothing a client can use.
+ *     It is named for the same reason `DOCUMENT_PROJECTION` names it: `z.object()`
+ *     strips an unknown key, so leaving it in would not break a client — it would
+ *     simply put an internal column on the wire on two routes and not on the rest,
+ *     which is the kind of difference that becomes an assertion somewhere later;
  *   * `userId` is implied by the authenticated session;
  *   * `objectKey` is the one server-assigned address in the row, and a client
  *     that never learns it cannot form an expectation about it (the same argument
@@ -89,7 +96,8 @@ const ALLOWED_INIT_FIELDS = new Set([
  * A `.lean()` read does NOT run a schema's `toJSON` transform, and every read here
  * is lean, so this projection is the control rather than a second line of defense.
  */
-const UPLOAD_PROJECTION = '-userId -objectKey -s3UploadId -encryptedDek -dekIv -dekTag -parts.etag';
+const UPLOAD_PROJECTION =
+  '-__v -userId -objectKey -s3UploadId -encryptedDek -dekIv -dekTag -parts.etag';
 
 /**
  * The committed-document fields a client is allowed to see.
@@ -183,6 +191,20 @@ async function inFlightBytesFor(userId: string, now: Date): Promise<number> {
 }
 
 /**
+ * Whether a storage failure is the engine saying "the thing you named is not
+ * there", as opposed to saying nothing at all.
+ *
+ * `s3Provider.mapStorageError` is the single place that decision is made — it maps
+ * `NoSuchKey`, `NotFound` and `NoSuchUpload` to a 404 and an unreachable engine to
+ * a 503 — so this reads the status it produced rather than re-classifying an SDK
+ * error shape a second time. `ErrorHandler` is checked before the status because a
+ * bare object carrying a `statusCode` is not an error this codebase threw.
+ */
+function isStorageNotFound(error: unknown): boolean {
+  return error instanceof ErrorHandler && error.statusCode === 404;
+}
+
+/**
  * The ENGINE's own account of a transfer — what it says it is holding, as opposed
  * to what the staging ledger says it accepted.
  *
@@ -196,8 +218,11 @@ async function inFlightBytesFor(userId: string, now: Date): Promise<number> {
  * multipart transfer must hand every part's receipt back to the engine, and
  * `StoragePart.etag` is non-optional, so this shape carries that guarantee into
  * the completion call instead of leaving a fallback there for a value that cannot
- * be missing. The single-segment shape has no receipts BECAUSE there is nothing to
- * complete: its object is already whole.
+ * be missing. The `object` shape has no receipts BECAUSE there is nothing left to
+ * complete, and TWO transfers reach it: a single-segment one, whose `PutObject`
+ * wrote the whole object at once, and a multipart one whose
+ * `CompleteMultipartUpload` already succeeded — see `readAssembledLedger`. Both
+ * are finished objects, so both are claimed and released the same way.
  */
 type EngineLedger =
   | { readonly mode: 'object'; readonly parts: readonly { partNumber: number; bytes: number }[] }
@@ -223,7 +248,7 @@ type EngineLedger =
  * single-segment transfer would commit one part as the whole document.
  */
 async function readEngineLedger(
-  upload: Pick<IDocumentUpload, 'objectKey' | 's3UploadId' | 'declaredChunkCount'>,
+  upload: Pick<IDocumentUpload, 'objectKey' | 's3UploadId' | 'declaredChunkCount' | 'parts'>,
   context: { userId: string; uploadId: string },
 ): Promise<EngineLedger> {
   if (upload.declaredChunkCount === 1) {
@@ -231,7 +256,8 @@ async function readEngineLedger(
     return { mode: 'object', parts: [{ partNumber: 1, bytes: stat.bytes }] };
   }
 
-  if (upload.s3UploadId === undefined) {
+  const s3UploadId = upload.s3UploadId;
+  if (s3UploadId === undefined) {
     logger.error('A multi-segment staging row names no engine-side upload', {
       ...context,
       declaredChunkCount: upload.declaredChunkCount,
@@ -239,10 +265,91 @@ async function readEngineLedger(
     throw httpErrors.internalServerError('This transfer is no longer in a usable state');
   }
 
+  try {
+    return {
+      mode: 'multipart',
+      s3UploadId,
+      parts: await getStorage().listParts(upload.objectKey, s3UploadId),
+    };
+  } catch (error) {
+    // An upload id the engine does not know is the ONE failure that may still be a
+    // finished transfer rather than a broken one. Everything else is passed on.
+    if (!isStorageNotFound(error)) throw error;
+    return readAssembledLedger(upload, context, error);
+  }
+}
+
+/**
+ * The engine's account of a multipart transfer whose upload id it no longer knows.
+ *
+ * WHY THIS EXISTS. `completeUnderLock` calls `CompleteMultipartUpload` and THEN
+ * deletes the staging row, in that order and deliberately: a transient engine
+ * failure must leave a fully uploaded transfer retryable, which a row deleted
+ * first would not. The cost of that ordering is a window — a crash, or a Mongo
+ * failure, between the two — in which the object is correctly assembled and the
+ * staging row still exists. The engine invalidates the upload id on success, so a
+ * retry's `ListParts` answers `NoSuchUpload`, and without this the user is told
+ * their finished transfer is gone and asked to send the whole file again, while
+ * the assembled object becomes an orphan for the collector.
+ *
+ * WHY IT IS SAFE TO BELIEVE. The check is `HeadObject`'s length against the sum of
+ * the ledger's parts, and it is not a coincidence match:
+ *
+ *   * the object key is derived from a freshly minted, per-transfer upload id, so
+ *     no other transfer can have written it, and a COMMITTED document at that id
+ *     was already answered by the `Document.findOne` two checks earlier;
+ *   * the ledger cannot have moved since the completion call. `uploadPart` reaches
+ *     the engine BEFORE it writes its ledger entry, so once the upload id is
+ *     invalid no further part can be recorded — which is also what makes the
+ *     conditional claim on `receivedBytes` below still hold;
+ *   * an object of the right total length whose parts were the wrong sizes is
+ *     still refused, because the per-part `expectedPartSize` loop runs on this
+ *     path exactly as it does on every other.
+ *
+ * A mismatch, or no object at all, re-throws the ORIGINAL 404: the transfer really
+ * is unfinishable, and the honest answer is the one the engine gave.
+ *
+ * The ledger is SORTED before it is returned. `assertLedgerAgreesWithEngine`
+ * documents that it may assume its `engine` argument is in ascending part-number
+ * order — true of `ListParts`, and NOT true of `upload.parts`, which the
+ * `$concatArrays` ledger update appends to, so a client that sent part 2 before
+ * part 1 stores them in that order. Handing it unsorted would fail a valid
+ * recovery with a "missing part" it does not have.
+ */
+async function readAssembledLedger(
+  upload: Pick<IDocumentUpload, 'objectKey' | 'parts'>,
+  context: { userId: string; uploadId: string },
+  cause: unknown,
+): Promise<EngineLedger> {
+  const ledgerBytes = upload.parts.reduce((total, part) => total + part.bytes, 0);
+
+  let stat;
+  try {
+    stat = await getStorage().headObject(upload.objectKey);
+  } catch (error) {
+    if (isStorageNotFound(error)) throw cause;
+    throw error;
+  }
+
+  if (stat.bytes !== ledgerBytes) {
+    logger.error('A transfer with no engine-side upload has an object of the wrong length', {
+      ...context,
+      objectBytes: stat.bytes,
+      ledgerBytes,
+    });
+    throw cause;
+  }
+
+  logger.warn('Completing a transfer the storage engine had already assembled', {
+    ...context,
+    ledgerBytes,
+  });
+
   return {
-    mode: 'multipart',
-    s3UploadId: upload.s3UploadId,
-    parts: await getStorage().listParts(upload.objectKey, upload.s3UploadId),
+    mode: 'object',
+    parts: [...upload.parts]
+      .sort((left, right) => left.partNumber - right.partNumber)
+      .map((part) => ({ partNumber: part.partNumber, bytes: part.bytes })),
   };
 }
 
@@ -378,6 +485,55 @@ async function releaseTransfer(
 type CompletionOutcome =
   | { readonly kind: 'document'; readonly document: HydratedDocument<IDocument> }
   | { readonly kind: 'staleVaultKey'; readonly vaultKeyVersion: number };
+
+/**
+ * One page of documents and the pagination envelope that describes it, for the
+ * two list endpoints.
+ *
+ * Shared because the two lists differ in exactly two things and both are
+ * arguments: the predicate that decides whose rows they are, and the column they
+ * sort by. Everything else — the projection, the skip/limit arithmetic, the
+ * `_id` tiebreak, the `totalPages` calculation and the envelope's shape — is one
+ * decision, and a second copy of it is a second place for a page size or a sort
+ * order to drift.
+ *
+ * `sortBy` is NOT re-checked against an allowlist here. Each route declares it as
+ * a `z.enum([...])` and `validate(schema, 'query')` REPLACES `req.query` with the
+ * parsed result, so the enum IS the allowlist and the two enums differ (`deletedAt`
+ * is meaningless on an active row, `favorite` on a trashed one) — a mirrored array
+ * here would have to be their union, which is wider than either route allows.
+ *
+ * The `_id` tiebreak is a correctness fix rather than tidiness. Pagination is
+ * `skip`/`limit`, so the order has to be TOTAL: two documents sharing an
+ * `updatedAt` — or, on `favorite`, the thousands sharing a boolean — may otherwise
+ * come back in a different order on each request, and a row that moves across the
+ * page boundary between two requests is one the client either sees twice or never
+ * sees at all.
+ */
+async function sendDocumentPage(
+  res: Response,
+  filter: Record<string, unknown>,
+  query: { page: number; limit: number; sortBy: string; sortOrder: string },
+): Promise<void> {
+  const { page, limit, sortBy, sortOrder } = query;
+  const sortDirection = sortOrder === 'asc' ? 1 : -1;
+
+  const [documents, total] = await Promise.all([
+    Document.find(filter)
+      .select(DOCUMENT_PROJECTION)
+      .sort({ [sortBy]: sortDirection, _id: sortDirection })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
+    Document.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    data: documents,
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  });
+}
 
 /**
  * The committed row, as the completion endpoint reports it.
@@ -534,9 +690,17 @@ export const initUpload = catchAsync(async (req: Request, res: Response): Promis
  * `expiresAt` so the UI can say which is which. Hiding it would leave a row that
  * shows up in no list and holds an engine-side upload nobody can point at.
  *
- * Bounded by the concurrency cap, which is a ceiling this page cannot reach in
- * practice: init refuses a fourth LIVE transfer, and a row past its expiry is
- * removed by the TTL index within the minute.
+ * The limit is TWICE the concurrency cap, and the doubling is the whole reason
+ * this list can do its job. Init refuses a fourth LIVE transfer, so the cap bounds
+ * the live rows — but this page deliberately includes EXPIRED ones, and MongoDB's
+ * TTL monitor sweeps on its own schedule (a minute's granularity, longer under
+ * load). A cap of exactly `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` therefore
+ * truncates the newest-first page at the wrong end: with three live transfers and
+ * one expired row still awaiting the sweep, the row dropped off the page is the
+ * OLDEST — which is precisely the expired one the user came here to cancel, the one
+ * holding an engine-side upload nobody can point at. At most one generation of
+ * rows can be awaiting the sweep at a time, so twice the cap is the real ceiling
+ * and this limit is a safety valve rather than pagination.
  */
 export const listUploads = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -544,7 +708,7 @@ export const listUploads = catchAsync(async (req: Request, res: Response): Promi
   const uploads = await DocumentUpload.find({ userId })
     .select(UPLOAD_PROJECTION)
     .sort({ createdAt: -1 })
-    .limit(MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER)
+    .limit(MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER * 2)
     .lean();
 
   res.json({ success: true, data: uploads });
@@ -585,6 +749,16 @@ export const getUpload = catchAsync(async (req: Request, res: Response): Promise
  * Deleting it here instead would be one request cheaper and one race worse, since
  * this handler cannot yet tell an abandoned single-segment upload from one whose
  * completion is committing the very same key.
+ *
+ * An engine that answers 404 has ALREADY done what this request asked, and the row
+ * is deleted anyway. S3's abort is idempotent by contract, and the alternative is
+ * strictly worse: an upload the engine has forgotten — expired by a bucket
+ * lifecycle rule, or aborted by a previous attempt of this very request whose
+ * response was lost — could then never be cancelled at all, and its row would hold
+ * a concurrency slot and a quota reservation until the staging TTL fired, which is
+ * up to `DOCUMENT_UPLOAD_TTL_HOURS` later. Every OTHER failure still propagates:
+ * a 503 means the engine may still be holding parts, and deleting the row that
+ * names them would strand them until the collector's sweep.
  */
 export const abortUpload = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -598,7 +772,15 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
   }
 
   if (upload.s3UploadId !== undefined) {
-    await getStorage().abortMultipartUpload(upload.objectKey, upload.s3UploadId);
+    try {
+      await getStorage().abortMultipartUpload(upload.objectKey, upload.s3UploadId);
+    } catch (error) {
+      if (!isStorageNotFound(error)) throw error;
+      logger.info('Cancelled a transfer the storage engine had already forgotten', {
+        userId,
+        uploadId: id,
+      });
+    }
   }
 
   await DocumentUpload.deleteOne({ _id: id, userId });
@@ -635,16 +817,19 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
  * Refusing parts as well would abort an 800 MB transfer for a rotation the
  * completion step can already recover from with a single retried request.
  *
- * The quota is not re-checked here either, and the honest reason is a BOUND rather
+ * Neither size cap is re-checked here, and the honest reason is a BOUND rather
  * than an equality. A part number is bounded by `declaredChunkCount`, each part by
  * one segment, and a re-sent part replaces its ledger entry rather than adding one,
  * so the received total cannot exceed `declaredChunkCount` whole chunks. That is
  * not the same as the size init reserved: a transfer declaring one plaintext byte
  * gets a `declaredChunkCount` of 1 and may then legally send a full 8 MiB final
  * part. The overshoot is at most one chunk per transfer, times
- * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER`, and completion re-checks the quota
- * against the bytes actually received before anything is committed — so the
- * transient over-reservation is bounded and never becomes a stored document.
+ * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER`, and completion re-checks BOTH the
+ * per-document cap and the quota against the bytes actually received before
+ * anything is committed — so the transient over-reservation is bounded and never
+ * becomes a stored document. Re-checking here instead would mean refusing a part
+ * mid-transfer for a total the client can still bring back under the cap by
+ * finishing, and would not remove the need for the check at completion anyway.
  */
 export const uploadPart = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -1097,6 +1282,25 @@ async function completeUnderLock(
     }
   }
 
+  // The PER-DOCUMENT cap, re-measured on the bytes that actually arrived. Init
+  // checked `declaredPlaintextBytes`, and a client is not held to that number: only
+  // a NON-final part must be a full chunk, so a transfer that declared one byte gets
+  // a `declaredChunkCount` of 1 and may then legally send a final part of a whole
+  // 8 MiB chunk. That slack is one chunk in absolute terms and therefore harmless
+  // against a large cap and an eight-fold breach against a small one — at
+  // `MAX_DOCUMENT_SIZE_MB=1` the row committed would be eight times the limit
+  // `GET /documents/usage` advertises to the very client that just wrote it.
+  //
+  // Refused the same way the quota is refused below, and for the same reason: the
+  // bytes in the bucket are precisely the bytes this deployment will not store, so
+  // a retry of the same transfer can only ever be refused again.
+  if (plaintextBytes > maxDocumentBytes()) {
+    await releaseTransfer(upload, engine);
+    throw httpErrors.badRequest(
+      `Document is too large. The maximum size is ${String(config.MAX_DOCUMENT_SIZE_MB)} MB.`,
+    );
+  }
+
   // The quota, measured on the bytes that actually arrived rather than on the size
   // the transfer reserved at init — the two differ whenever a client sends a fuller
   // final segment than it declared. Other transfers still in flight are deliberately
@@ -1105,7 +1309,7 @@ async function completeUnderLock(
   // refuse the last of three legitimate uploads.
   const committedBytes = await committedBytesFor(userId);
   if (committedBytes + plaintextBytes > storageQuotaBytes()) {
-    // The ONE refusal here that releases the transfer instead of leaving it
+    // The OTHER refusal here that releases the transfer instead of leaving it
     // retryable. See `releaseTransfer`: the bytes in the bucket are precisely the
     // bytes this account cannot hold.
     await releaseTransfer(upload, engine);
@@ -1280,18 +1484,8 @@ async function completeUnderLock(
 /**
  * `GET /documents` — the caller's active documents, paginated.
  *
- * The sort key is NOT re-checked against a second allowlist here, unlike
- * `vaultController.listItems`. `listDocumentsSchema` declares it as a
- * `z.enum([...])` and `validate(schema, 'query')` REPLACES `req.query` with the
- * parsed result, so the enum is the allowlist; a mirrored array beside it would
- * be a second copy of the same rule and a branch that can never be taken.
- *
- * `_id` is appended to the sort as a TIEBREAK, and that is a correctness fix
- * rather than tidiness. Pagination here is `skip`/`limit`, so the order has to be
- * TOTAL: two documents sharing an `updatedAt` (or, on `favorite`, the thousands
- * that share a boolean) may otherwise come back in a different order on each
- * request, and a row that moves across the page boundary between two requests is
- * one the client either sees twice or never sees at all.
+ * The three filter columns are the only thing this adds to `sendDocumentPage`,
+ * which owns the sort key, the tiebreak and the envelope for both lists.
  */
 export const listDocuments = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -1307,23 +1501,7 @@ export const listDocuments = catchAsync(async (req: Request, res: Response): Pro
   if (folderId !== undefined) filter.folderId = folderId;
   if (favorite !== undefined) filter.favorite = favorite;
 
-  const sortDirection = sortOrder === 'asc' ? 1 : -1;
-
-  const [documents, total] = await Promise.all([
-    Document.find(filter)
-      .select(DOCUMENT_PROJECTION)
-      .sort({ [sortBy]: sortDirection, _id: sortDirection })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean(),
-    Document.countDocuments(filter),
-  ]);
-
-  res.status(200).json({
-    success: true,
-    data: documents,
-    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-  });
+  await sendDocumentPage(res, filter, { page, limit, sortBy, sortOrder });
 });
 
 /**
@@ -1343,23 +1521,8 @@ export const listDocumentTrash = catchAsync(async (req: Request, res: Response):
   const { page, limit, sortBy, sortOrder } = req.query as unknown as ListDocumentTrashInput;
 
   const filter = { userId, deletedAt: { $exists: true, $ne: null } };
-  const sortDirection = sortOrder === 'asc' ? 1 : -1;
 
-  const [documents, total] = await Promise.all([
-    Document.find(filter)
-      .select(DOCUMENT_PROJECTION)
-      .sort({ [sortBy]: sortDirection, _id: sortDirection })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean(),
-    Document.countDocuments(filter),
-  ]);
-
-  res.status(200).json({
-    success: true,
-    data: documents,
-    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-  });
+  await sendDocumentPage(res, filter, { page, limit, sortBy, sortOrder });
 });
 
 /**
@@ -1692,13 +1855,8 @@ export const updateDocument = catchAsync(async (req: Request, res: Response): Pr
 
   // `null` means "clear it" and is handled below; only a real id is checked for
   // ownership, and an unowned one is a 404 rather than a 403 so a caller cannot
-  // enumerate another account's folders.
-  if (body.folderId !== undefined && body.folderId !== null) {
-    const folderExists = await Folder.exists({ _id: body.folderId, userId });
-    if (!folderExists) {
-      throw httpErrors.notFound('Target folder not found');
-    }
-  }
+  // enumerate another account's folders. Shared with `vaultController.updateItem`.
+  await assertFolderOwned(body.folderId, userId);
 
   const sanitizedUpdate = pickAllowedFields(body, ALLOWED_DOCUMENT_UPDATE_FIELDS);
   // Captured here, BEFORE the `folderId` handling below removes it from the
@@ -1708,23 +1866,11 @@ export const updateDocument = catchAsync(async (req: Request, res: Response): Pr
   // future caller reaches this handler with a body `validate()` did not shape.
   const changedFields = Object.keys(sanitizedUpdate).sort();
 
-  // An explicit `folderId: null` `$unset`s the field rather than storing a null,
-  // and that is not cosmetic. `documentResponseSchema` declares `folderId` as
-  // `.optional()` and NOT `.nullable()` — the same convention
-  // `vaultItemResponseSchema` follows — so a stored null would come back as
-  // `folderId: null` and fail the client's pre-decryption shape check on every
-  // un-filed document. The row would be intact and unreadable. `updateItem`,
-  // `bulkMove` and the folder-deletion orphan sweep all `$unset` for the same
-  // reason, so one predicate (`folderId: null`, which matches an ABSENT field)
-  // continues to mean one thing across the collection.
-  const updateOp: Record<string, unknown> = {};
-  if ('folderId' in sanitizedUpdate && sanitizedUpdate.folderId === null) {
-    delete sanitizedUpdate.folderId;
-    updateOp.$unset = { folderId: 1 };
-  }
-  if (Object.keys(sanitizedUpdate).length > 0) {
-    updateOp.$set = sanitizedUpdate;
-  }
+  // An explicit `folderId: null` `$unset`s the field rather than storing a null.
+  // `buildFolderAwareUpdate` owns that rule for `updateItem` and this handler
+  // alike, and it MUTATES `sanitizedUpdate` — which is exactly why
+  // `changedFields` above is read before this line and not after it.
+  const updateOp = buildFolderAwareUpdate(sanitizedUpdate);
 
   // A body that named nothing this endpoint may write — `{}`, or one carrying
   // only fields the allowlist dropped — is answered with the row as it stands.

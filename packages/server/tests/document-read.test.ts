@@ -33,8 +33,10 @@
  * negative is visible in the test that makes it.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { Readable } from 'node:stream';
 import request from 'supertest';
 import mongoose from 'mongoose';
+import { httpErrors } from '@hiprax/errors';
 import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   DOCUMENT_TAG_BYTES,
@@ -52,6 +54,32 @@ vi.mock('../src/config/index.js', async (importOriginal) => {
 const { storageRef } = vi.hoisted(() => ({
   storageRef: { current: undefined as ReturnType<typeof createInMemoryStorage> | undefined },
 }));
+
+/**
+ * The module logger, mocked because ONE branch on this route file has no other
+ * observable effect.
+ *
+ * When `pipeline` fails part-way through a segment it has already destroyed both
+ * streams, so whether the handler logs or re-throws makes no difference a client
+ * can see — the connection is reset either way. The log line IS the branch's
+ * deliverable, and asserting it is the only way to pin "log it, do not re-throw"
+ * against a change that would ask the error middleware to serialise JSON onto a
+ * socket that is gone. Same shape `s3-provider.test.ts` uses.
+ */
+const logs = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+  debug: vi.fn(),
+  verbose: vi.fn(),
+  http: vi.fn(),
+  silly: vi.fn(),
+}));
+
+vi.mock('../src/utils/logger.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/logger.js')>();
+  return { ...actual, createModuleLogger: () => logs };
+});
 
 vi.mock('../src/services/storage/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/services/storage/index.js')>();
@@ -680,6 +708,83 @@ describe('the document read endpoints', () => {
       expect(res.status, JSON.stringify(res.body)).toBe(500);
       expect(res.body.success).toBe(false);
       expect(res.headers['content-type']).toMatch(/application\/json/);
+    });
+
+    it('passes on an unreachable engine as 503 rather than as a missing document', async () => {
+      // Only the provider's 404 is re-worded into "the stored contents of this
+      // document are missing". Everything else is passed through untouched, and the
+      // difference is what a user is told: a 503 is "come back in a minute", while
+      // "this file is gone" is a sentence a password manager must not say about a
+      // document that is still there.
+      const { id } = await seedDocument(owner, { body: pattern(DEFAULT_FRAMED.ciphertextBytes) });
+      vi.spyOn(storageRef.current!, 'getObjectRange').mockRejectedValueOnce(
+        httpErrors.serviceUnavailable('Object storage is unavailable'),
+      );
+
+      const res = await get(owner, `/api/v1/documents/${id}/segments/0`);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(503);
+      expect(String(res.body.message)).not.toMatch(/stored contents of this document are missing/i);
+    });
+
+    it('resets the connection when the segment stream dies part-way through', async () => {
+      // `pipeline` destroys both streams on failure, so by the time the handler's
+      // catch runs the client's connection is already gone and there is no response
+      // left to write: re-throwing would ask the error middleware to serialise JSON
+      // onto a dead socket. A reset is also the RIGHT outcome — the declared
+      // `Content-Length` means a truncated body cannot be mistaken for a whole
+      // segment, and the segment's authentication tag would refuse it even if it
+      // could.
+      const { id } = await seedDocument(owner, { body: pattern(DEFAULT_FRAMED.ciphertextBytes) });
+      const segmentBytes = DEFAULT_FRAMED.ciphertextBytes;
+      vi.spyOn(storageRef.current!, 'getObjectRange').mockResolvedValueOnce({
+        bytes: segmentBytes,
+        // The length the row promises, delivered as a stream that fails after its
+        // first chunk — the shape a dropped connection to the engine really has.
+        body: new Readable({
+          read(this: Readable) {
+            this.push(Buffer.alloc(16, 1));
+            this.destroy(new Error('the engine dropped the connection'));
+          },
+        }),
+      });
+
+      logs.error.mockClear();
+
+      const outcome = await get(owner, `/api/v1/documents/${id}/segments/0`).then(
+        (res) => ({ ok: true as const, res }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+
+      // An HTTP client may surface a reset either way — as a thrown transport error
+      // or as a truncated 200 — and which one is a property of the client, not of
+      // this handler. What the handler guarantees is the same in both: the caller
+      // never receives a WHOLE segment, and never a JSON error body written on top
+      // of octet-stream bytes it had already started sending.
+      if (outcome.ok) {
+        expect(outcome.res.headers['content-type']).toMatch(/application\/octet-stream/);
+        expect(outcome.res.headers['content-type']).not.toMatch(/application\/json/);
+        expect(Buffer.isBuffer(outcome.res.body) ? outcome.res.body.length : 0).toBeLessThan(
+          segmentBytes,
+        );
+      } else {
+        expect(outcome.error).toBeInstanceOf(Error);
+      }
+
+      // The branch's own deliverable. `pipeline` has already destroyed both streams
+      // by the time the catch runs, so this is what distinguishes "log it" from
+      // "re-throw it onto a socket that is gone".
+      expect(logs.error).toHaveBeenCalledWith(
+        'A document segment stream failed part-way through',
+        expect.objectContaining({ documentId: id, index: 0 }),
+      );
+
+      // And the failure was contained: the very next read of the very same segment
+      // returns the whole thing, byte for byte.
+      const retry = await get(owner, `/api/v1/documents/${id}/segments/0`);
+      expect(retry.status).toBe(200);
+      expect(retry.body).toEqual(pattern(DEFAULT_FRAMED.ciphertextBytes));
+      expect(retry.headers['content-length']).toBe(String(segmentBytes));
     });
 
     it('answers an unauthenticated caller with 401 and reads nothing', async () => {

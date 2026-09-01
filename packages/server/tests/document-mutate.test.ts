@@ -479,6 +479,35 @@ describe('the document mutation endpoints', () => {
       expect(res.status).toBe(404);
       expect(await rawRow(seeded.id)).toStrictEqual(before);
     });
+
+    it('answers 404 for a body that names nothing writable on a document that is gone', async () => {
+      // The no-op branch is a READ, so it has to reach the same 404 the write
+      // branch does. Without its own existence check, a `{}` body would answer 200
+      // with an empty envelope for a document that never existed — the one shape a
+      // client cannot tell from success.
+      const absent = new mongoose.Types.ObjectId().toHexString();
+
+      const res = await send('put', owner, `/api/v1/documents/${absent}`, {});
+
+      expect(res.status, JSON.stringify(res.body)).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.data).toBeUndefined();
+      expect(await auditActions(owner)).not.toContain('document_update');
+    });
+
+    it('answers a foreign id exactly as it answers an absent one, for a no-op body too', async () => {
+      // The scoping is on the query, so the no-op read cannot become a way to ask
+      // whether another account holds a given id.
+      const seeded = await seedDocument(owner);
+      const absent = new mongoose.Types.ObjectId().toHexString();
+
+      const foreign = await send('put', intruder, `/api/v1/documents/${seeded.id}`, {});
+      const unknown = await send('put', intruder, `/api/v1/documents/${absent}`, {});
+
+      expect(foreign.status).toBe(404);
+      expect(foreign.status).toBe(unknown.status);
+      expect(foreign.body.message).toEqual(unknown.body.message);
+    });
   });
 
   // -------------------------------------------------------------------------

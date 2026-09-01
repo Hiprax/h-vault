@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { MAX_DOCUMENT_EXT_LENGTH } from '@hvault/shared';
 import { createModuleLogger } from '../utils/logger.js';
 
 // Resolve .env from the monorepo root (4 levels up from packages/server/src/config/).
@@ -311,19 +312,44 @@ const envSchema = z
     // allowed. It is ADVISORY and enforced in the browser: the server receives
     // ciphertext and cannot see a filename, so it could not enforce this even if it
     // wanted to. Normalised here (trimmed, lowercased, leading dots removed,
-    // blanks dropped, duplicates collapsed) so `GET /config` publishes one shape
-    // and the client never has to parse the operator's punctuation.
+    // blanks dropped, over-long ones dropped, duplicates collapsed) so `GET /config`
+    // publishes one shape and the client never has to parse the operator's
+    // punctuation.
+    //
+    // The LENGTH filter is load-bearing and is not about tidiness. This list is
+    // published by `GET /config`, whose envelope the browser parses with
+    // `publicConfigResponseSchema`, and that schema declares each entry
+    // `z.string().max(MAX_DOCUMENT_EXT_LENGTH)` — the same bound the sealed
+    // metadata blob's own `ext` field carries. One over-long entry therefore fails
+    // the parse of the WHOLE envelope, and `getFileEncryptionMaxBytes()` answers a
+    // failed parse by falling back to its shared-constant default: a typo in a
+    // DOCUMENTS variable would silently change the File Encryption tool's size cap,
+    // in a feature that has nothing to do with documents. An entry no client could
+    // ever match is dropped here, loudly, instead.
     DOCUMENT_ALLOWED_EXTENSIONS: z
       .string()
       .optional()
-      .transform((v) => [
-        ...new Set(
-          (v ?? '')
-            .split(',')
-            .map((ext) => ext.trim().toLowerCase().replace(/^\.+/, ''))
-            .filter((ext) => ext.length > 0),
-        ),
-      ]),
+      .transform((v) => {
+        const normalised = (v ?? '')
+          .split(',')
+          .map((ext) => ext.trim().toLowerCase().replace(/^\.+/, ''))
+          .filter((ext) => ext.length > 0);
+        const kept = [
+          ...new Set(normalised.filter((ext) => ext.length <= MAX_DOCUMENT_EXT_LENGTH)),
+        ];
+        const dropped = [
+          ...new Set(normalised.filter((ext) => ext.length > MAX_DOCUMENT_EXT_LENGTH)),
+        ];
+        if (dropped.length > 0) {
+          logger.warn(
+            `DOCUMENT_ALLOWED_EXTENSIONS: dropped ${String(dropped.length)} entry/entries longer ` +
+              `than ${String(MAX_DOCUMENT_EXT_LENGTH)} characters. No file extension is that long, ` +
+              `and publishing one would make GET /config unparseable for every client. First ` +
+              `dropped entry begins: ${dropped[0]?.slice(0, MAX_DOCUMENT_EXT_LENGTH) ?? ''}`,
+          );
+        }
+        return kept;
+      }),
 
     // Audit
     AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),

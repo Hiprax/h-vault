@@ -53,3 +53,24 @@ export const publicConfigResponseSchema = z.object({
   data: publicConfigDataSchema,
   message: z.string().optional(),
 });
+
+/**
+ * The same envelope, narrowed to the ONE block the File Encryption cap reads.
+ *
+ * It exists because a single envelope carries two features that have nothing to do
+ * with each other. `getFileEncryptionMaxBytes()` answers a failed parse by falling
+ * back to `MAX_FILE_ENCRYPTION_SIZE_MB`, so validating the whole document against
+ * the full schema means one bad value under `documents` — an operator's mistyped
+ * extension, a field a newer server adds — silently changes the File Encryption
+ * tool's size cap. That is a feature breaking for a reason nobody can see, caused
+ * by a block it does not read.
+ *
+ * `.pick()` rather than a second literal shape, so `fileEncryption` has exactly one
+ * definition and cannot drift; STRIP mode (the default) then ignores `documents`
+ * entirely rather than validating and rejecting it. The full schema above is still
+ * what a DOCUMENTS reader must use, and it stays strict on purpose: a malformed
+ * block has to be refused by the code that would otherwise act on it.
+ */
+export const fileEncryptionConfigResponseSchema = publicConfigResponseSchema.extend({
+  data: publicConfigDataSchema.pick({ fileEncryption: true }),
+});

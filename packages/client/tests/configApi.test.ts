@@ -128,6 +128,32 @@ describe('configApi', () => {
       expect(mockGet).toHaveBeenCalledTimes(1);
     });
 
+    it('reads the cap out of an envelope whose documents block is malformed', async () => {
+      // The coupling this guards against: ONE envelope carries two features that
+      // have nothing to do with each other, and this function reads only one of
+      // them. Validating the other would mean a mistyped operator extension, or a
+      // field a newer server adds, silently reverting the File Encryption cap to
+      // its default — a feature breaking for a reason nobody can see, caused by a
+      // block it never looks at.
+      mockGet.mockResolvedValue({
+        data: {
+          success: true,
+          data: {
+            fileEncryption: { maxSizeMB: 42 },
+            documents: { maxSizeMB: -1, allowedExtensions: ['x'.repeat(64)] },
+          },
+        },
+      });
+      const { getFileEncryptionMaxBytes } = await importConfigApi();
+
+      const bytes = await getFileEncryptionMaxBytes();
+
+      expect(bytes).toBe(42 * BYTES_PER_MB);
+      // The negative that makes the assertion mean something: this is NOT the
+      // fallback, so the parse really did succeed.
+      expect(bytes).not.toBe(FALLBACK_BYTES);
+    });
+
     it('caches the fallback too — a failed first fetch is not retried', async () => {
       mockGet.mockRejectedValue(new Error('network down'));
       const { getFileEncryptionMaxBytes } = await importConfigApi();
