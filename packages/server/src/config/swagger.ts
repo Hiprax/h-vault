@@ -981,6 +981,36 @@ export const swaggerSpec: JsonObject = {
           },
         },
       },
+      UpdateDocumentRequest: {
+        type: 'object',
+        description:
+          "Everything a stored document may be changed to. CONTENT IS IMMUTABLE AFTER UPLOAD: a segment is never rewritten, which is what guarantees a nonce is never reused under the stream key, so this body cannot reach a framing field, the wrapped document key or the storage key — replacing a document's bytes means uploading a new document. The three metadata fields move together or not at all, because they are one seal. Every field is optional and a body naming none of them is answered with the row as it stands.",
+        properties: {
+          encryptedMeta: {
+            type: 'string',
+            maxLength: MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
+            description:
+              'The re-sealed metadata blob — a rename, a retag or an edited note. Sealed under a key derived from the document key, which a vault-key rotation does not change, which is why this endpoint is not refused during one.',
+            example: 'cmVuYW1lZC1tZXRhZGF0YS1jaXBoZXJ0ZXh0',
+          },
+          metaIv: {
+            type: 'string',
+            maxLength: 24,
+            description:
+              'A FRESHLY RANDOM IV for every re-seal. The metadata key is fixed for a document’s whole life while the blob is mutable, so this is the one value in the design that must never repeat; the browser generates it and never accepts one from a caller.',
+            example: 'bmV3LW1ldGEtaXYtYmFzZTY0',
+          },
+          metaTag: { type: 'string', maxLength: 32, example: 'bmV3LW1ldGEtdGFnLWJhc2U2NA==' },
+          favorite: { type: 'boolean', example: true },
+          folderId: {
+            type: 'string',
+            nullable: true,
+            description:
+              'An owned folder id, or null to remove the document from its folder. A folder belonging to another account is answered with 404, not 403, so folders cannot be enumerated.',
+            example: '66c0f1a2b3c4d5e6f7a8b9c1',
+          },
+        },
+      },
       DocumentResponse: {
         type: 'object',
         description:
@@ -1615,6 +1645,192 @@ export const swaggerSpec: JsonObject = {
           400: { $ref: '#/components/responses/ValidationError' },
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+      put: {
+        operationId: 'updateDocument',
+        tags: ['Documents'],
+        summary: 'Update a document’s metadata and attributes',
+        description:
+          'Re-seals the metadata blob (a rename, a retag, an edited note) and sets the favorite flag and the folder. It cannot change a single byte of the stored content or of the framing that describes it, and it cannot touch the wrapped document key or the storage key: content is immutable after upload, so replacing bytes means uploading a new document. Sending folderId as null removes the document from its folder; the field is then ABSENT from the response rather than present and null. Unlike every other write that produces ciphertext, this endpoint is NOT refused while a vault-key rotation is running, because the metadata blob is sealed under a key derived from the document key and a rotation only rewraps that key.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+          },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/UpdateDocumentRequest' },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'The updated document',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: { $ref: '#/components/schemas/DocumentResponse' },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+      delete: {
+        operationId: 'deleteDocument',
+        tags: ['Documents'],
+        summary: 'Move a document to the trash',
+        description:
+          'A soft delete: the deletion time is stamped on the row and nothing else happens. The stored object stays in the bucket, the row keeps its wrapped key, and the document still counts against both the document limit and the storage quota reported by GET /documents/usage — so the space comes back at DELETE /documents/{id}/permanent, or when the trash auto-purge reaches it, and the UI says so rather than letting a user assume the deletion failed.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+          },
+        ],
+        responses: {
+          200: { $ref: '#/components/responses/Acknowledged' },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+
+    '/documents/{id}/restore': {
+      post: {
+        operationId: 'restoreDocument',
+        tags: ['Documents'],
+        summary: 'Restore a document from the trash',
+        description:
+          'Clears the deletion time and returns the restored row. Refused with 404 for a document that is not in the trash, and also for one whose permanent deletion has already begun — such a row carries purgePending, its stored object is gone or going, and the garbage collector will remove the row, so restoring it would return a document that cannot be downloaded and then disappears.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+          },
+        ],
+        responses: {
+          200: {
+            description: 'The restored document',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: { $ref: '#/components/schemas/DocumentResponse' },
+                    message: { type: 'string', example: 'Document restored from trash' },
+                  },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+
+    '/documents/{id}/permanent': {
+      delete: {
+        operationId: 'purgeDocument',
+        tags: ['Documents'],
+        summary: 'Permanently delete a trashed document',
+        description:
+          'Destroys a trashed document for good, in three ordered steps: the row is marked purgePending, the stored object is deleted, and only then is the row deleted. A crash after any of them leaves a marker the hourly collector finishes, and the order is what stops an object outliving the row that names it. Deleting the row destroys the only wrapped copy of the document key, so any object that somehow survived is ciphertext under a key that exists nowhere — documents are deliberately absent from the backup payload. Only a document already in the trash may be purged.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+          },
+        ],
+        responses: {
+          200: { $ref: '#/components/responses/Acknowledged' },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
+          503: { $ref: '#/components/responses/StorageUnavailable' },
+        },
+      },
+    },
+
+    '/documents/trash/empty': {
+      delete: {
+        operationId: 'emptyDocumentTrash',
+        tags: ['Documents'],
+        summary: 'Permanently delete every trashed document',
+        description:
+          'Runs the same three ordered steps as a per-document purge over every document that was in the trash when the request arrived — a document trashed by another tab while it runs is outside that set and survives. It is not a bulk row delete: every document owns an object, so deleting the rows alone would leave the objects behind with nothing naming them. A document whose object cannot be deleted is counted rather than thrown, because it is already marked purgePending and the hourly collector will finish it, so the response reports both counts and the request succeeds either way.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        responses: {
+          200: {
+            description: 'What was destroyed, and what was deferred to the collector',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', example: true },
+                    data: {
+                      type: 'object',
+                      required: ['deletedCount', 'failedCount'],
+                      properties: {
+                        deletedCount: { type: 'integer', minimum: 0, example: 4 },
+                        failedCount: {
+                          type: 'integer',
+                          minimum: 0,
+                          description:
+                            'Documents left marked purgePending for the collector to finish. Zero on a healthy deployment.',
+                          example: 0,
+                        },
+                      },
+                    },
+                    message: { type: 'string', example: '4 document(s) permanently deleted' },
+                  },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
           429: { $ref: '#/components/responses/RateLimited' },
           503: { $ref: '#/components/responses/StorageUnavailable' },
         },

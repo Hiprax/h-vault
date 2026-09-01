@@ -8,6 +8,7 @@ import {
   documentReadLimiter,
   documentUploadLimiter,
   generalAuthLimiter,
+  heavyOpLimiter,
 } from '../middleware/rateLimiter.js';
 import {
   holdPartUploadSlot,
@@ -21,10 +22,13 @@ import {
   initDocumentUploadSchema,
   listDocumentTrashSchema,
   listDocumentsSchema,
+  updateDocumentSchema,
 } from '@hvault/shared';
 import {
   abortUpload,
   completeUpload,
+  deleteDocument,
+  emptyDocumentTrash,
   getDocument,
   getSegment,
   getUpload,
@@ -33,6 +37,9 @@ import {
   listDocumentTrash,
   listDocuments,
   listUploads,
+  purgeDocument,
+  restoreDocument,
+  updateDocument,
   uploadPart,
 } from '../controllers/documentController.js';
 
@@ -62,6 +69,21 @@ router.get(
   listDocumentTrash,
 );
 router.get('/usage', generalAuthLimiter, getUsage);
+
+// Empty the trash.
+//
+// Declared HERE, among the literals, rather than beside the per-document purge
+// at the foot of the file. `/trash/empty` is two segments and `/:id` is one, so
+// Express would not confuse them today — but the rule this file follows is that
+// every literal path is declared above every `/:id` path, and an exception left
+// in place is what makes the next one look safe.
+//
+// `heavyOpLimiter`, the only route in this file that carries it, and the only one
+// that deserves it: this is one genuinely unbounded operation (up to
+// `MAX_DOCUMENTS_PER_USER` rows, each with an object delete), which is exactly
+// what that IP-keyed budget of 10 per 15 minutes exists for. Every per-row
+// document route deliberately avoids it — see `purgeDocument`.
+router.delete('/trash/empty', heavyOpLimiter, emptyDocumentTrash);
 
 // ── Uploads ──────────────────────────────────────────────────────────
 //
@@ -135,6 +157,35 @@ router.post(
 // LAST in the file, because these are the routes that take a bare `/:id`.
 
 router.get('/:id', generalAuthLimiter, validateObjectId(), getDocument);
+
+// Metadata and attributes. Content is immutable after upload, so this route
+// cannot reach a framing field, the wrapped document key or the object key —
+// `updateDocumentSchema` strips them on the wire and
+// `ALLOWED_DOCUMENT_UPDATE_FIELDS` drops them again in the handler.
+//
+// `generalAuthLimiter`, because a rename or a favorite toggle is an ordinary
+// authenticated write, and it is deliberately NOT rotation-fenced: the sealed
+// blob is under a DEK-derived subkey, which a vault-key rotation does not touch.
+// The reasoning is written out in full above the handler.
+router.put(
+  '/:id',
+  generalAuthLimiter,
+  validateObjectId(),
+  validate(updateDocumentSchema, 'body'),
+  updateDocument,
+);
+
+// The trash lifecycle: in, out, and gone.
+//
+// All three carry `generalAuthLimiter` rather than `heavyOpLimiter`, including
+// the permanent delete. That limiter is IP-keyed at 10 per 15 minutes and is
+// shared with export, backup download and every bulk vault operation, so on a
+// per-row route it would 429 a user who purged eleven documents and then lock
+// them out of emptying their vault trash. It stays on `/trash/empty` above,
+// which is the one genuinely unbounded operation here.
+router.delete('/:id', generalAuthLimiter, validateObjectId(), deleteDocument);
+router.post('/:id/restore', generalAuthLimiter, validateObjectId(), restoreDocument);
+router.delete('/:id/permanent', generalAuthLimiter, validateObjectId(), purgeDocument);
 
 // One sealed segment.
 //

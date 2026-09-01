@@ -499,6 +499,27 @@ const CALLS: Record<
       await storageRef.current!.putObject(document!.objectKey, MATRIX_PART_BODY);
     },
   },
+  'PUT /api/v1/documents/:id': {
+    ownerStatus: 200,
+    ownerMutates: true,
+    // A re-seal of the metadata blob, which is the whole of what this route may
+    // write beside the favorite flag and the folder. The values differ from the
+    // ones `seedDocument` stored, so the owner case really changes the row and
+    // the refusal cases below have something to be evidence of.
+    body: { encryptedMeta: 're-sealed-ciphertext', metaIv: 'new-meta-iv', metaTag: 'new-meta-tag' },
+  },
+  'DELETE /api/v1/documents/:id': { ownerStatus: 200, ownerMutates: true },
+  'POST /api/v1/documents/:id/restore': { ownerStatus: 200, ownerMutates: true },
+  'DELETE /api/v1/documents/:id/permanent': {
+    ownerStatus: 200,
+    // The row is destroyed outright, so `read` finds nothing afterwards — the
+    // strongest form of "the call really acts".
+    ownerMutates: true,
+    // The shared `trashedDocument` seed writes a ROW and no object; the purge
+    // deletes the object before the row, and S3 deletion is idempotent, so no
+    // `prepare` is needed. Storing one anyway would test nothing further and
+    // would hide a handler that skipped the object delete entirely.
+  },
   'GET /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: false },
   'DELETE /api/v1/documents/uploads/:id': { ownerStatus: 200, ownerMutates: true },
   'POST /api/v1/documents/uploads/:id/complete': {
@@ -599,7 +620,7 @@ describe('the matrix covers the table', () => {
     expect(orphaned, 'scenario(s) whose route is no longer in the table').toEqual([]);
   });
 
-  it('runs the matrix over all sixteen id-taking routes', () => {
+  it('runs the matrix over all twenty id-taking routes', () => {
     // A pinned count, because the cheapest way to silence a failing IDOR case
     // is to change its row's `owned` to null: route-table.test.ts would still
     // pass (it only forces `owned` non-null for paths carrying a parameter, and
@@ -611,7 +632,7 @@ describe('the matrix covers the table', () => {
     // exercised-row count agree. Both are filters of the same array, so that
     // comparison is n === n and cannot fail.
     expect(OWNED_ROWS.map(rowKey).sort()).toEqual(Object.keys(CALLS).sort());
-    expect(OWNED_ROWS).toHaveLength(16);
+    expect(OWNED_ROWS).toHaveLength(20);
   });
 });
 

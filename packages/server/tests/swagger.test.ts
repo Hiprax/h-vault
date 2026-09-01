@@ -78,6 +78,9 @@ describe('API Documentation', () => {
       expect(paths).toContain('/documents/uploads/{id}/parts/{partNumber}');
       expect(paths).toContain('/documents/uploads/{id}/complete');
       expect(paths).toContain('/documents/{id}');
+      expect(paths).toContain('/documents/{id}/restore');
+      expect(paths).toContain('/documents/{id}/permanent');
+      expect(paths).toContain('/documents/trash/empty');
       expect(paths).toContain('/documents/{id}/segments/{index}');
     });
   });

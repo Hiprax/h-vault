@@ -20,6 +20,7 @@ import type {
   InitDocumentUploadInput,
   ListDocumentTrashInput,
   ListDocumentsInput,
+  UpdateDocumentInput,
 } from '@hvault/shared';
 import { config } from '../config/index.js';
 import { createModuleLogger } from '../utils/logger.js';
@@ -1555,4 +1556,512 @@ export const getSegment = catchAsync(async (req: Request, res: Response): Promis
       error: error instanceof Error ? error.message : String(error),
     });
   }
+});
+
+// ── Mutations ────────────────────────────────────────────────────────
+//
+// One metadata write and four lifecycle transitions. Every one of them scopes
+// its query by `{ userId }`, exactly as the reads above do, so a foreign id and
+// an id that never existed are indistinguishable.
+//
+// CONTENT IS IMMUTABLE AFTER UPLOAD, and that is the rule the whole section is
+// arranged around. A segment is never rewritten, which is what guarantees a nonce
+// is never reused under a stream key: `iv(i, isLast)` is
+// `noncePrefix || u32be(i) || lastFlag`, so rewriting segment `i` of a document
+// would seal different plaintext under a key and nonce that had already been
+// used, which hands an attacker holding both ciphertexts the XOR of the two
+// plaintexts. Replacing a document's bytes therefore means a NEW document, and
+// nothing below can reach a framing field, the wrapped key or the object key.
+//
+// NONE OF THESE FIVE IS ROTATION-FENCED. The reasoning is per handler and is
+// written out at `updateDocument`, which is the only one that writes ciphertext
+// at all.
+
+/**
+ * The fields `PUT /documents/:id` may write, and the ONLY ones.
+ *
+ * The wire schema (`updateDocumentSchema`) already strips everything else, so
+ * this is the second of two independent filters rather than the only one — the
+ * same belt-and-braces `ALLOWED_INIT_FIELDS` gives the staging row, and the same
+ * one `vaultController`'s `ALLOWED_UPDATE_FIELDS` gives a vault item.
+ *
+ * **It cannot be exercised through the HTTP route, and that is expected rather
+ * than a gap.** `validate()` runs first and `z.object()` strips by default, so by
+ * the time the handler reads `req.body` there is nothing left for this to remove:
+ * measured, replacing the call below with a plain spread of the body leaves the
+ * cross-user and smuggling cases green, and removing the wire schema INSTEAD
+ * leaves them green too. Only removing both turns them red. So each half holds
+ * alone, which is the whole claim of defense in depth, and the wire half is
+ * pinned separately by `packages/shared/tests/document-schema.test.ts` ("cannot
+ * reach a framing field, the DEK or the object key"). What this half is for is a
+ * future handler that reads a body `validate()` did not shape — a bulk endpoint,
+ * a migration path, a route wired without its schema — and it is the cheapest
+ * possible insurance against exactly the mistake nobody notices.
+ *
+ * What it keeps OUT is the entire point, and it is worth naming the three
+ * classes:
+ *
+ *   * **The framing** — `streamSalt`, `noncePrefix`, `chunkPlaintextBytes`,
+ *     `chunkCount`, `ciphertextBytes`, `plaintextBytes`. These describe how the
+ *     stored object is cut into sealed segments. A client that could move one
+ *     would re-frame a document that already exists: every later `Range` read
+ *     would return the wrong window, every segment would fail its tag check, and
+ *     the file would be unreadable with no error until the browser tried to open
+ *     it. `plaintextBytes` additionally is what the quota is charged against.
+ *   * **The wrapped key** — `encryptedDek`, `dekIv`, `dekTag`. The DEK is set at
+ *     completion and rewrapped by exactly one other path, `bulkReEncrypt`, which
+ *     holds the rotation lock while it does so. A second writer here would race
+ *     that one and could store a key wrapped under a superseded vault key,
+ *     which is a document nobody can ever open again.
+ *   * **The object key** — server-assigned, unique, and the only value on the row
+ *     that addresses storage. A client that could set it could point its own row
+ *     at another user's object.
+ *
+ * `_id`, `userId`, `deletedAt`, `purgePending`, `createdAt` and `updatedAt` are
+ * excluded for the ordinary reason: they are identity, ownership, lifecycle and
+ * bookkeeping, and each has its own endpoint or its own writer.
+ */
+const ALLOWED_DOCUMENT_UPDATE_FIELDS = new Set([
+  'encryptedMeta',
+  'metaIv',
+  'metaTag',
+  'favorite',
+  'folderId',
+]);
+
+/**
+ * How many trashed rows `DELETE /documents/trash/empty` reads per page.
+ *
+ * The same 500 `jobs/trashCleanup.ts` uses, and for the same reason: it bounds
+ * the memory one page of rows costs, not the work the request does. The work is
+ * bounded by `MAX_DOCUMENTS_PER_USER`, because a user cannot have more rows in
+ * the trash than they can have rows.
+ */
+const EMPTY_TRASH_PAGE_SIZE = 500;
+
+/**
+ * `PUT /documents/:id` — the sealed metadata blob, the favorite flag, the folder.
+ *
+ * ## Why this endpoint is deliberately NOT rotation-fenced
+ *
+ * Every other write in this codebase that creates ciphertext calls
+ * `assertVaultNotRotating` first, and its absence here is a decision rather than
+ * an omission. That fence exists for writes producing ciphertext under the
+ * caller's VAULT key: a rotation rewrites every such value under a new key while
+ * holding its lock, so a concurrent write of old-key ciphertext would survive the
+ * rotation and be unreadable afterwards.
+ *
+ * The metadata blob is not such a value. It is sealed under `SK_meta`, an
+ * HKDF-SHA256 subkey of the document's own DEK — the vault key is nowhere in its
+ * derivation. A rotation rewraps the DEK (32 bytes per document) and never
+ * touches the blob, so a metadata write landing in the middle of one is still
+ * readable afterwards: it is sealed under a key the rotation did not change, and
+ * the rewrapped DEK still unwraps to the same bytes. Rewriting the blob instead
+ * of rewrapping the key is exactly what makes rotating a vault holding gigabytes
+ * possible at all.
+ *
+ * Fencing anyway would not be free. `bulkReEncrypt` also runs a completeness
+ * check over the account's document count, so a rotation can take a moment on a
+ * large vault; refusing renames and favorites for its duration would buy nothing
+ * and cost the user an unexplained 409.
+ *
+ * The three fields the fence WOULD protect are unreachable from here by
+ * construction: `ALLOWED_DOCUMENT_UPDATE_FIELDS` cannot name the wrapped key.
+ *
+ * ## Why the server does not police IV reuse
+ *
+ * `SK_meta` is deterministic in (DEK, streamSalt, documentId) and therefore fixed
+ * for a document's whole life, while the blob is deliberately mutable — so this
+ * is the one place in the design where a nonce could repeat under a fixed key.
+ * The guard lives in the browser, where `documentCryptoService.encryptMeta`
+ * generates its own `metaIv` and accepts none, and it is asserted there and again
+ * in the mutation suite.
+ *
+ * It is NOT enforced here, and the reason is worth writing down so it is not
+ * "fixed" later: refusing a `metaIv` equal to the stored one would refuse an
+ * IDEMPOTENT RETRY. A client whose first `PUT` timed out after the server
+ * committed it retries the identical body, which carries the identical IV, and a
+ * 400 there would turn a successful write into a permanent failure. The check
+ * would also be worthless against the case it appears to cover, since a client
+ * that reused a nonce could send any other value and still have reused it.
+ */
+export const updateDocument = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { id } = req.params as { id: string };
+  const body = req.body as UpdateDocumentInput;
+
+  // `null` means "clear it" and is handled below; only a real id is checked for
+  // ownership, and an unowned one is a 404 rather than a 403 so a caller cannot
+  // enumerate another account's folders.
+  if (body.folderId !== undefined && body.folderId !== null) {
+    const folderExists = await Folder.exists({ _id: body.folderId, userId });
+    if (!folderExists) {
+      throw httpErrors.notFound('Target folder not found');
+    }
+  }
+
+  const sanitizedUpdate = pickAllowedFields(body, ALLOWED_DOCUMENT_UPDATE_FIELDS);
+  // Captured here, BEFORE the `folderId` handling below removes it from the
+  // object: a clear-the-folder request must still be audited as having named
+  // `folderId`. Taken from the sanitized copy rather than from `body`, so the
+  // names that reach the audit collection are bounded by the allowlist even if a
+  // future caller reaches this handler with a body `validate()` did not shape.
+  const changedFields = Object.keys(sanitizedUpdate).sort();
+
+  // An explicit `folderId: null` `$unset`s the field rather than storing a null,
+  // and that is not cosmetic. `documentResponseSchema` declares `folderId` as
+  // `.optional()` and NOT `.nullable()` — the same convention
+  // `vaultItemResponseSchema` follows — so a stored null would come back as
+  // `folderId: null` and fail the client's pre-decryption shape check on every
+  // un-filed document. The row would be intact and unreadable. `updateItem`,
+  // `bulkMove` and the folder-deletion orphan sweep all `$unset` for the same
+  // reason, so one predicate (`folderId: null`, which matches an ABSENT field)
+  // continues to mean one thing across the collection.
+  const updateOp: Record<string, unknown> = {};
+  if ('folderId' in sanitizedUpdate && sanitizedUpdate.folderId === null) {
+    delete sanitizedUpdate.folderId;
+    updateOp.$unset = { folderId: 1 };
+  }
+  if (Object.keys(sanitizedUpdate).length > 0) {
+    updateOp.$set = sanitizedUpdate;
+  }
+
+  // A body that named nothing this endpoint may write — `{}`, or one carrying
+  // only fields the allowlist dropped — is answered with the row as it stands.
+  //
+  // A read rather than a write, deliberately. It keeps `PUT` idempotent for a
+  // caller that has nothing to change, it writes no audit row for a request that
+  // did nothing, and it does not depend on how the driver treats an update
+  // document with no operators in it. A 400 was the alternative and buys nothing:
+  // the caller receives exactly the state it asked the server to reach.
+  if (Object.keys(updateOp).length === 0) {
+    const current = await Document.findOne({ _id: id, userId }).select(DOCUMENT_PROJECTION).lean();
+    if (!current) {
+      throw httpErrors.notFound('Document not found');
+    }
+    res.status(200).json({ success: true, data: current });
+    return;
+  }
+
+  const document = await Document.findOneAndUpdate({ _id: id, userId }, updateOp, {
+    returnDocument: 'after',
+    runValidators: true,
+  })
+    .select(DOCUMENT_PROJECTION)
+    .lean();
+
+  if (!document) {
+    throw httpErrors.notFound('Document not found');
+  }
+
+  const updateCtx = getRequestContext(req);
+  await createAuditLog(
+    userId,
+    'document_update',
+    // The FIELD NAMES only. An audit row naming the ciphertext would put a copy
+    // of the sealed blob in a second collection with a different retention, and
+    // naming the plaintext is impossible because the server has never seen it.
+    { documentId: id, fields: changedFields },
+    updateCtx.ip,
+    updateCtx.userAgent,
+  );
+
+  logger.info('Document updated', { userId, documentId: id });
+
+  res.status(200).json({ success: true, data: document });
+});
+
+/**
+ * `DELETE /documents/:id` — move a document to the trash.
+ *
+ * A soft delete: `deletedAt` is stamped and NOTHING ELSE HAPPENS. The object
+ * stays in the bucket, the row keeps its wrapped key, and the document still
+ * counts against both the document count and the storage quota — which is what
+ * `GET /documents/usage` reports and what the UI has to say, because a user who
+ * deleted a 90 MB file and saw no space returned would otherwise assume the
+ * deletion failed. Space comes back at `DELETE /documents/:id/permanent`, or when
+ * the trash-auto-purge cron reaches the row.
+ *
+ * Scoped by `{ _id, userId }` with no `deletedAt` predicate, exactly as
+ * `vaultController.deleteItem` is, so trashing means one thing for a document and
+ * for an item. The consequence, stated rather than discovered: a repeat delete of
+ * an already-trashed document is a 200 that RE-STAMPS `deletedAt` and so restarts
+ * its auto-purge clock. That is the right trade — a client retrying after a
+ * timeout gets a 200 rather than a confusing 404 — and it cannot lose data, since
+ * the only thing a later `deletedAt` delays is an automatic purge.
+ *
+ * Not rotation-fenced, and here there is nothing to argue about: it writes a
+ * timestamp. No ciphertext of any kind is created.
+ */
+export const deleteDocument = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { id } = req.params as { id: string };
+
+  const document = await Document.findOneAndUpdate(
+    { _id: id, userId },
+    { $set: { deletedAt: new Date() } },
+    { returnDocument: 'after' },
+  )
+    .select('_id')
+    .lean();
+
+  if (!document) {
+    throw httpErrors.notFound('Document not found');
+  }
+
+  const deleteCtx = getRequestContext(req);
+  await createAuditLog(
+    userId,
+    'document_delete',
+    { documentId: id },
+    deleteCtx.ip,
+    deleteCtx.userAgent,
+  );
+
+  logger.info('Document moved to trash', { userId, documentId: id });
+
+  res.status(200).json({ success: true, message: 'Document moved to trash' });
+});
+
+/**
+ * `POST /documents/:id/restore` — bring a document back out of the trash.
+ *
+ * `$unset` rather than `$set: null`, for the reason the `deletedAt` index records
+ * on the model: the sparse index over `deletedAt` is only small while the field
+ * is genuinely ABSENT on the active majority, and a restore that wrote a null
+ * would index every row that had ever been trashed.
+ *
+ * ## The one predicate that is not copied from `restoreItem`
+ *
+ * `purgePending: null` — that is, the field must be ABSENT.
+ *
+ * A `purgePending` row is one whose permanent deletion started and did not
+ * finish: the marker goes up immediately BEFORE the object delete and comes down
+ * only when the row itself is deleted, so a row still carrying it either has no
+ * object left or is about to lose one, and the hourly collector will delete the
+ * row. Restoring it would put a document back in the ACTIVE list that 404s on
+ * every segment it is asked for and then disappears without explanation.
+ *
+ * This predicate is deliberately NOT added to `updateDocument` or to
+ * `deleteDocument`. Those two write to a row that is going away, which is
+ * pointless but harmless and costs the user nothing; restore is the one
+ * transition that puts a dead document back in front of them.
+ */
+export const restoreDocument = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { id } = req.params as { id: string };
+
+  const document = await Document.findOneAndUpdate(
+    { _id: id, userId, deletedAt: { $exists: true, $ne: null }, purgePending: null },
+    { $unset: { deletedAt: 1 } },
+    { returnDocument: 'after' },
+  )
+    .select(DOCUMENT_PROJECTION)
+    .lean();
+
+  if (!document) {
+    throw httpErrors.notFound('Document not found, not in trash, or already being deleted');
+  }
+
+  const restoreCtx = getRequestContext(req);
+  await createAuditLog(
+    userId,
+    'document_restore',
+    { documentId: id },
+    restoreCtx.ip,
+    restoreCtx.userAgent,
+  );
+
+  logger.info('Document restored from trash', { userId, documentId: id });
+
+  res.status(200).json({
+    success: true,
+    data: document,
+    message: 'Document restored from trash',
+  });
+});
+
+/**
+ * `DELETE /documents/:id/permanent` — destroy a trashed document for good.
+ *
+ * ## The order is the crash-safety argument, and it only works one way round
+ *
+ *   1. Set `purgePending` on the row.
+ *   2. Delete the object.
+ *   3. Delete the row.
+ *
+ * A crash after (1) leaves a marker the hourly collector finds and finishes. A
+ * crash after (2) leaves the same marker on a row whose object is already gone,
+ * and the collector's own delete is idempotent, so it finishes that too. The two
+ * failure states converge on the same repair.
+ *
+ * Reversing (2) and (3) is what must never happen. Deleting the row first
+ * destroys the only record of the object key — the key is derivable from the two
+ * ids, but nothing would be left to derive it FROM — so the object would survive
+ * as an orphan, charged to nobody, findable only by the collector's bounded
+ * hourly sweep of the whole bucket.
+ *
+ * ## Deleting the row is what actually destroys the document
+ *
+ * The row holds the only wrapped copy of the DEK. Once it is gone, any object
+ * that somehow survived is ciphertext under a key that no longer exists anywhere
+ * — not on the server, not in the browser, not in a backup, because documents are
+ * deliberately absent from the backup payload. SECURITY.md says so.
+ *
+ * ## Why `generalAuthLimiter` and not `heavyOpLimiter`
+ *
+ * `heavyOpLimiter` is IP-keyed at 10 per 15 minutes and is shared with export,
+ * backup download, bulk delete, bulk move and empty-trash. On a PER-ROW route it
+ * would 429 a user who purged eleven documents and then lock them out of emptying
+ * their vault trash for a quarter of an hour. The per-item equivalent carries no
+ * limiter at all; this one carries the ordinary authenticated budget.
+ */
+export const purgeDocument = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { id } = req.params as { id: string };
+
+  // Trashed only, exactly as `permanentDelete` requires of a vault item: a
+  // permanent delete is the second, deliberate half of a two-step destruction and
+  // must not be reachable in one request from the active list.
+  const document = await Document.findOneAndUpdate(
+    { _id: id, userId, deletedAt: { $exists: true, $ne: null } },
+    { $set: { purgePending: true } },
+    { returnDocument: 'after' },
+  )
+    // `objectKey` is excluded from every response projection on this route file
+    // and is selected here because this is a handler that addresses the object.
+    // It never leaves the process.
+    .select('objectKey')
+    .lean();
+
+  if (!document) {
+    throw httpErrors.notFound('Document not found in trash');
+  }
+
+  // Deliberately NOT wrapped in a try/catch. A storage failure here must reach
+  // the caller: the marker is already committed, so the collector will finish the
+  // purge, and reporting success for work that has not happened would leave the
+  // user believing their bytes are gone when the row is still there.
+  await getStorage().deleteObject(document.objectKey);
+
+  await Document.deleteOne({ _id: id, userId });
+
+  const purgeCtx = getRequestContext(req);
+  await createAuditLog(
+    userId,
+    'document_purge',
+    { documentId: id },
+    purgeCtx.ip,
+    purgeCtx.userAgent,
+  );
+
+  logger.info('Document permanently deleted', { userId, documentId: id });
+
+  res.status(200).json({ success: true, message: 'Document permanently deleted' });
+});
+
+/**
+ * `DELETE /documents/trash/empty` — destroy every trashed document.
+ *
+ * ## This is NOT the item implementation, and copying it would orphan the bucket
+ *
+ * `vaultController.emptyTrash` is a single `deleteMany`, which is correct there
+ * because a vault item is only a row. Every document row owns an object, so a
+ * `deleteMany` here would delete every row and leave every object behind, charged
+ * to nobody and reachable only by the collector's bounded hourly sweep of the
+ * whole bucket. So this walks the set instead and runs the same three ordered
+ * steps `purgeDocument` does for each row.
+ *
+ * ## The set is bounded before the first delete
+ *
+ * `deletedAt <= startTime`, exactly as the item version bounds itself: a document
+ * trashed by another tab WHILE this request runs is outside the set and survives,
+ * so "empty the trash" means the trash the user was looking at.
+ *
+ * ## Why the pages are walked by `_id` and not by `skip`
+ *
+ * A failing row stays in the set — that is the whole point of leaving it to the
+ * collector — so a query that re-read the same page would return it for ever and
+ * this loop would not terminate. Paging on `_id > lastId` with an ascending sort
+ * advances past a row whether it was deleted or skipped, so the walk is monotonic
+ * and finishes in at most `MAX_DOCUMENTS_PER_USER / EMPTY_TRASH_PAGE_SIZE` pages.
+ *
+ * ## A failure is counted, not thrown
+ *
+ * One unreachable object must not abandon the rows after it, and it does not have
+ * to: the row was marked `purgePending` before the delete was attempted, so the
+ * collector will finish exactly this row. The response therefore carries both
+ * counts and the request succeeds even when every delete failed, because in that
+ * state nothing has been lost — the work is deferred, and the marker is what
+ * defers it.
+ */
+export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+
+  const startTime = new Date();
+  const trashed = { userId, deletedAt: { $exists: true, $ne: null, $lte: startTime } };
+
+  let deletedCount = 0;
+  let failedCount = 0;
+  let lastId: mongoose.Types.ObjectId | undefined;
+
+  for (;;) {
+    const page = await Document.find(
+      lastId === undefined ? trashed : { ...trashed, _id: { $gt: lastId } },
+    )
+      .select('objectKey')
+      .sort({ _id: 1 })
+      .limit(EMPTY_TRASH_PAGE_SIZE)
+      .lean();
+
+    if (page.length === 0) {
+      break;
+    }
+
+    for (const row of page) {
+      // The cursor advances BEFORE the work, not after it, and that is what makes
+      // the walk monotonic: a row whose purge throws is left behind for the
+      // collector and must not be read again, or the loop that is supposed to
+      // leave it alone would return to it for ever.
+      lastId = row._id;
+      try {
+        await Document.updateOne({ _id: row._id, userId }, { $set: { purgePending: true } });
+        await getStorage().deleteObject(row.objectKey);
+        // The engine's own count, never a bare `+= 1`. A row purged by a
+        // concurrent request between this page's read and this delete is removed
+        // by that request and not by this one, so reporting it here would be a
+        // number the caller cannot reconcile with anything. It is not a failure
+        // either: the row is gone, which is what was asked for.
+        const { deletedCount: removed } = await Document.deleteOne({ _id: row._id, userId });
+        deletedCount += removed;
+      } catch (error) {
+        failedCount += 1;
+        logger.error('Failed to purge a trashed document while emptying the trash', {
+          userId,
+          documentId: String(row._id),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  const emptyCtx = getRequestContext(req);
+  await createAuditLog(
+    userId,
+    // `document_purge` rather than a sixth action, exactly as the item version
+    // reuses `item_delete` with an `action` discriminator: this is the same
+    // destruction, in bulk.
+    'document_purge',
+    { action: 'empty_trash', deletedCount, failedCount },
+    emptyCtx.ip,
+    emptyCtx.userAgent,
+  );
+
+  logger.info('Document trash emptied', { userId, deletedCount, failedCount });
+
+  res.status(200).json({
+    success: true,
+    data: { deletedCount, failedCount },
+    message: `${String(deletedCount)} document(s) permanently deleted`,
+  });
 });

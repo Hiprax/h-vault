@@ -730,6 +730,21 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     when: 'always',
   },
   {
+    method: 'delete',
+    path: '/api/v1/documents/trash/empty',
+    auth: 'required',
+    csrf: 'required',
+    // The ONLY document route carrying `heavyOpLimiter`, and the only one that
+    // should: it is one genuinely unbounded operation, up to
+    // MAX_DOCUMENTS_PER_USER rows each with an object delete. Every per-row
+    // document route deliberately carries `generalAuthLimiter` instead, because
+    // this IP-keyed budget of 10 per 15 minutes is shared with export, backup
+    // download and every bulk vault operation.
+    limiters: ['heavyOpLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
     method: 'get',
     path: '/api/v1/documents/uploads',
     auth: 'required',
@@ -806,6 +821,48 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     limiters: ['generalAuthLimiter'],
     owned: { param: 'id', resource: 'document' },
     when: 'always',
+  },
+  {
+    method: 'put',
+    path: '/api/v1/documents/:id',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'document' },
+    when: 'always',
+    note: 'Metadata and attributes only. The allowlist cannot reach a framing field, the wrapped key or the object key, and it is deliberately not rotation-fenced.',
+  },
+  {
+    method: 'delete',
+    path: '/api/v1/documents/:id',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'document' },
+    when: 'always',
+    note: 'Soft delete. The object stays in the bucket and the document still counts against the quota.',
+  },
+  {
+    method: 'post',
+    path: '/api/v1/documents/:id/restore',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'trashedDocument' },
+    when: 'always',
+  },
+  {
+    method: 'delete',
+    path: '/api/v1/documents/:id/permanent',
+    auth: 'required',
+    csrf: 'required',
+    // `generalAuthLimiter`, NOT `heavyOpLimiter`: this is a per-row route, and
+    // that IP-keyed budget of 10 per 15 minutes would 429 a user who purged
+    // eleven documents and then lock them out of emptying their vault trash.
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'trashedDocument' },
+    when: 'always',
+    note: 'Marks purgePending, deletes the object, then deletes the row, so a crash between any two leaves a marker the collector finishes.',
   },
   {
     method: 'get',

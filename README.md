@@ -810,6 +810,11 @@ sizes, and never sees a filename, a type, a tag or a note.
 | POST   | `/documents/uploads/:id/complete`          | Commit the document; sizes are derived from what the storage engine holds, never from the request              |
 | GET    | `/documents/:id`                           | One document row: the wrapped key, the framing and the sealed metadata blob                                    |
 | GET    | `/documents/:id/segments/:index`           | One sealed segment as raw bytes (`no-store`); the byte range is computed server-side, never sent by the client |
+| PUT    | `/documents/:id`                           | Re-seal the metadata blob, set favorite, move between folders; content and framing are immutable               |
+| DELETE | `/documents/:id`                           | Move to the trash; the object stays and the quota is unchanged until it is permanently deleted                 |
+| POST   | `/documents/:id/restore`                   | Restore from the trash                                                                                         |
+| DELETE | `/documents/:id/permanent`                 | Destroy a trashed document: mark, delete the object, then delete the row that holds its only wrapped key       |
+| DELETE | `/documents/trash/empty`                   | Destroy every document that was in the trash when the request arrived                                          |
 
 </details>
 
