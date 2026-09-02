@@ -2,12 +2,15 @@
 /**
  * `test:resource` — the volume and memory budgets.
  *
- * Seven scenarios, run one at a time against a real mongod, over vaults at
- * `MAX_ITEMS_PER_USER` (10,000 items): the backup collector's streaming abort,
- * the largest backup the configuration permits, a full-vault key rotation and its
- * all-or-nothing refusal, a ~25 MiB restore through the route's own 30 MB parser,
- * that parser's boundary from above, and the query plans behind the two
- * cross-user cleanup sweeps.
+ * Nine scenarios, run one at a time against a real mongod, over accounts at the
+ * per-user ceiling: the backup collector's streaming abort, the largest backup the
+ * configuration permits, a full-vault key rotation and its all-or-nothing refusal,
+ * a ~25 MiB restore through the route's own 30 MB parser, that parser's boundary
+ * from above, and the query plans behind the two cross-user cleanup sweeps — all
+ * seven over a vault at `MAX_ITEMS_PER_USER` (10,000 items) — plus the two document
+ * scenarios: a document at the operator's configured maximum size delivered part by
+ * part through the real route, and a full account of `MAX_DOCUMENTS_PER_USER`
+ * (5,000) documents walked page by page.
  *
  *   node scripts/ci/resource-gate.mjs        the gate (this is what the pipeline runs)
  *   npm run test:resource                    the same thing
@@ -91,7 +94,7 @@ rmSync(reportPath('junit-resource.xml'), { force: true });
 mkdirSync(SCENARIO_DIR, { recursive: true });
 
 const started = Date.now();
-console.log(color.bold('\n  resource: volume and memory budgets over a full vault'));
+console.log(color.bold('\n  resource: volume and memory budgets over a full account'));
 
 const code = await runNpm(['run', 'test:resource', '-w', 'packages/server'], {
   // (c) On expiry `proc.mjs` SIGKILLs the npm child and resolves with

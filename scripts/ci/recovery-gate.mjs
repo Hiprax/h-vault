@@ -14,13 +14,21 @@
  *            itself lives in the client package and is covered by its own suite;
  *            this leg proves the bytes it is given are signable.)
  *
- *   CRASH    a real server process, killed by SIGKILL mid-write at six points
+ *   CRASH    a real server process, killed by SIGKILL mid-write at five points
  *            around the rotation write-fence and the import's write boundary, on
  *            both topologies. The stored vault key must always still be the OLD
  *            one, the fence must survive the crash, a login must clear it only
  *            when the dead rotation's lock is genuinely gone, the interrupted
  *            rotation must complete on retry, and no crash may leave a partial
  *            insert.
+ *
+ *   DOCUMENTS the same signal aimed at the object store, at the three points where
+ *            its compensating paths live in a `catch` or a `finally` that SIGKILL
+ *            never runs: mid part upload, between the completion write and the
+ *            document row, and between the object delete and the row delete. Then
+ *            the garbage collector, reclaiming exactly what the crash stranded —
+ *            and never a live document's object, which is the one mistake in this
+ *            system that cannot be undone from a backup.
  *
  *   node scripts/ci/recovery-gate.mjs     the gate (this is what the pipeline runs)
  *   npm run test:recovery                 the same thing
@@ -71,8 +79,8 @@ import { ensureReportDir, reportPath, writeJsonReport } from './lib/reports.mjs'
 /**
  * The wall-clock deadline for the suite.
  *
- * Measured on the reference machine at ~10 s end to end: two mongod instances,
- * a single-node replica set, three 600,000-iteration key derivations and six
+ * Measured on the reference machine at ~17 s end to end: two mongod instances,
+ * a single-node replica set, three 600,000-iteration key derivations and nine
  * child processes that each import the server and then die. Five minutes is far
  * too coarse to fire on a loaded machine and far too tight for a probe that has
  * started waiting on a lock it will never get.
@@ -149,8 +157,11 @@ writeJsonReport('recovery.json', {
     'a crash between the write-fence commit and the vault-key update, at both ends of that window and on both topologies',
     'login recovery firing only once the dead rotation’s lock has expired, and the interrupted rotation completing on retry',
     'a crash before, inside and after the import write, and while holding the per-user lock',
+    'a crash mid part upload, leaving the engine holding a part the staging ledger does not name, which the collector reclaims only once the staging row is gone',
+    'a crash between the completion write and the document row, leaving an object neither collection names, which the orphan sweep reclaims a day later while never touching a live document',
+    'a crash between the object delete and the row delete, leaving purgePending behind for the collector to finish and audit',
   ],
-  // Both files also run inside `test:integration`, and the task carries
+  // All three files also run inside `test:integration`, and the task carries
   // `countsTests: false` in the manifest, so this total is reporting only — it
   // never enters the ratchet's headcount.
   tests,
@@ -163,5 +174,5 @@ if (failed) {
 }
 
 note(
-  `recovery.json — ${String(tests)} tests in ${String(durationMs)}ms: a backup restored across two mongod instances byte for byte, and five crash points that left no partial write behind`,
+  `recovery.json — ${String(tests)} tests in ${String(durationMs)}ms: a backup restored across two mongod instances byte for byte, and eight crash points that left no partial write behind`,
 );

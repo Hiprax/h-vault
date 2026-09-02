@@ -815,7 +815,7 @@ describe('machine-readable reports', () => {
 
   it('runs the recovery drills from their own config, their own report and their own files', () => {
     // The same contract as every other named subset. What is specific to this
-    // gate is the SHAPE of the thing it protects: the two files spawn real child
+    // gate is the SHAPE of the thing it protects: all three files spawn real child
     // processes and kill them, so a membership list that lost one would quietly
     // stop rehearsing an entire disaster while the gate kept reporting green.
     const output = junitOutputFile(recoveryVitestConfig.test?.reporters);
@@ -847,6 +847,7 @@ describe('machine-readable reports', () => {
     // in this test still passes.
     expect([...RECOVERY_SUITE].sort()).toEqual([
       'tests/recovery/crash-consistency.test.ts',
+      'tests/recovery/document-crash.test.ts',
       'tests/recovery/restore-drill.test.ts',
     ]);
 

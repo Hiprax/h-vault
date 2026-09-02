@@ -96,6 +96,21 @@ export const RESOURCE_SCENARIOS = [
     measured: false,
     subject: "the two cross-user cleanup sweeps' query plans",
   },
+  {
+    id: 'documents-part-upload',
+    cases: 1,
+    file: 'tests/resource/documents-part-upload.test.ts',
+    measured: true,
+    subject:
+      'a document at the configured maximum size delivered part by part through the real route',
+  },
+  {
+    id: 'documents-list-volume',
+    cases: 1,
+    file: 'tests/resource/documents-list-volume.test.ts',
+    measured: true,
+    subject: 'a full account of MAX_DOCUMENTS_PER_USER documents walked page by page',
+  },
 ];
 
 /**
@@ -150,6 +165,65 @@ export const RESOURCE_BUDGETS = {
     /** Observed 111.4-143.5 MB for a 26 MB body. Ceiling at ~1.8x. */
     rssGrowthMb: 260,
   },
+  documentsPartUpload: {
+    /**
+     * Observed 790-809 ms over five runs for 100 MB across thirteen parts — the
+     * tightest band in this file at 2.4%. The ceiling is an order of magnitude
+     * above it and deliberately does NOT try to see the retention regression
+     * below: that costs only 851-874 ms, which is 1.08x the observed maximum and
+     * far inside any machine's noise. This one catches a hang, or a part route
+     * that started doing per-part work it did not do before. The memory ceiling
+     * is what catches retention.
+     */
+    durationMs: 8_000,
+    /**
+     * THE BUDGET WITH A MEASURED REGRESSION ON BOTH SIDES. The route as written
+     * grows RSS by 82.9-86.4 MB over five runs; making the storage double RETAIN
+     * each part instead of hashing and dropping it — which is what a handler that
+     * accumulated parts, or a double somebody "fixed" to store them, would cost —
+     * grows it by 149-167 MB over five. 120 MB sits 1.39x above the highest good
+     * run and 0.81x below the lowest bad one, with no overlap to argue about, and
+     * the good band's 2-4% spread means that headroom is many multiples of the
+     * noise.
+     *
+     * Note what the two bands are NOT separated by: thirteen retained 8 MiB parts
+     * are 104 MB of ciphertext, and the measured gap is about 70. V8 collects some
+     * of it while the transfer is still running, which is exactly why this number
+     * was measured rather than computed.
+     */
+    rssGrowthMb: 120,
+  },
+  documentsListVolume: {
+    /**
+     * Observed 650-683 ms over five runs for twenty-five pages of two hundred
+     * rows. An order-of-magnitude ceiling: the regression this scenario exists to
+     * catch costs 1,875 ms, which is only 2.7x the observed maximum, so duration
+     * cannot be the thing that catches it. `deliveredFraction` is.
+     */
+    durationMs: 6_000,
+    /**
+     * Observed 24.2-31.2 MB. A SANITY ceiling, and honestly labelled as one: the
+     * measured regression grows RSS by 39.4 MB, which is 1.26x the observed
+     * maximum and inside the band's own spread, so this number cannot see it
+     * either. A page is a page whether it was sliced in mongod or in the handler,
+     * and the account is only five megabytes on disk. What this catches is a
+     * handler that started holding the whole account across the walk.
+     */
+    rssGrowthMb: 90,
+    /**
+     * THE ONE WITH TEETH, and deterministic. `metrics.document.returned` divided
+     * by the account's row count. Measured at 1.01 in FIVE out of five runs — 5,050
+     * documents for a 5,000-row account, which is two hundred rows plus the count's
+     * single aggregation row plus the authenticating user lookup, times twenty-five
+     * pages — against 25.01 in three out of three with `sendDocumentPage`'s
+     * `.skip().limit()` replaced by a full read and a JavaScript slice. The ceiling
+     * is 2.0 rather than 1.1 because the exact figure depends on the driver's batch
+     * behaviour and on how many round trips authentication costs, neither of which
+     * is this application's contract; what IS the contract is that a page costs one
+     * page, not one account.
+     */
+    deliveredFraction: 2.0,
+  },
 };
 
 /**
@@ -175,6 +249,13 @@ export const NOISE_BAND = {
     'rotation-volume.rssGrowthMb': { min: 66.68, median: 118.82, max: 126.05, spreadPct: 50.0 },
     'restore-volume.durationMs': { min: 17447, median: 19845, max: 21059, spreadPct: 18.2 },
     'restore-volume.rssGrowthMb': { min: 111.36, median: 138.97, max: 143.49, spreadPct: 23.1 },
+    // The two document scenarios, measured 2026-09-02 on the same host under the
+    // same protocol: five consecutive runs of the whole suite, one scenario per
+    // forked worker, nothing else running.
+    'documents-part-upload.durationMs': { min: 790, median: 803, max: 809, spreadPct: 2.4 },
+    'documents-part-upload.rssGrowthMb': { min: 82.28, median: 85.32, max: 86.39, spreadPct: 4.8 },
+    'documents-list-volume.durationMs': { min: 650, median: 657, max: 683, spreadPct: 5.0 },
+    'documents-list-volume.rssGrowthMb': { min: 24.19, median: 28.2, max: 31.2, spreadPct: 24.9 },
   },
   /**
    * The one measurement with NO spread, over eleven runs, and the reason the
@@ -182,6 +263,7 @@ export const NOISE_BAND = {
    */
   deterministic: {
     'backup-streaming.documentsDelivered': { runs: 11, value: 3320, of: 10000 },
+    'documents-list-volume.documentsDelivered': { runs: 5, value: 5050, of: 5000 },
   },
   /**
    * The same two metrics under the regression the streaming scenario exists to
@@ -191,5 +273,10 @@ export const NOISE_BAND = {
   regressionBand: {
     'backup-streaming.documentsDelivered': { runs: 3, value: 10003 },
     'backup-streaming.rssGrowthMb': { runs: 3, min: 118.54, max: 156.41 },
+    // The storage double made to RETAIN each part rather than hash and drop it.
+    'documents-part-upload.rssGrowthMb': { runs: 5, min: 148.6, max: 167.43 },
+    // `sendDocumentPage`'s `.skip().limit()` replaced by a full read and a slice.
+    'documents-list-volume.documentsDelivered': { runs: 3, value: 125050 },
+    'documents-list-volume.deliveredFraction': { runs: 3, value: 25.01 },
   },
 };

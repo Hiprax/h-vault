@@ -18,7 +18,7 @@
  *     the operation runs and the poll is cheap enough (a counter read, no
  *     allocation) to run at {@link SAMPLE_INTERVAL_MS}.
  *
- *  b. ONE MEASURED SCENARIO PER FILE, AND THAT IS WHY THIS DIRECTORY HAS SEVEN
+ *  b. ONE MEASURED SCENARIO PER FILE, AND THAT IS WHY THIS DIRECTORY HAS NINE
  *     FILES INSTEAD OF THE TWO THE OBVIOUS LAYOUT WOULD GIVE. V8 does not return
  *     freed pages to the OS promptly, so a second scenario in the same worker
  *     starts from a floor the first one raised: its `peak - start` growth reads

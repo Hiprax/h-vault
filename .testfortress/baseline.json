@@ -547,23 +547,32 @@
     "budgetMs": {
       "backupFullVault": 6000,
       "backupStreaming": 5000,
+      "documentsListVolume": 6000,
+      "documentsPartUpload": 8000,
       "restoreVolume": 75000,
       "rotationVolume": 45000
     },
     "budgetRssMb": {
       "backupFullVault": 120,
       "backupStreaming": 95,
+      "documentsListVolume": 90,
+      "documentsPartUpload": 120,
       "restoreVolume": 260,
       "rotationVolume": 220
     },
     "deliveredFractionCeiling": {
-      "backupStreaming": 0.6
+      "backupStreaming": 0.6,
+      "documentsListVolume": 2.0
     },
     "noiseBandPct": {
       "backup-full-vault_durationMs": 47.1,
       "backup-full-vault_rssGrowthMb": 11.2,
       "backup-streaming_durationMs": 49.7,
       "backup-streaming_rssGrowthMb": 32.4,
+      "documents-list-volume_durationMs": 5.0,
+      "documents-list-volume_rssGrowthMb": 24.9,
+      "documents-part-upload_durationMs": 2.4,
+      "documents-part-upload_rssGrowthMb": 4.8,
       "restore-volume_durationMs": 18.2,
       "restore-volume_rssGrowthMb": 23.1,
       "rotation-volume_durationMs": 35,

@@ -14,8 +14,11 @@
  * seconds of key derivation to produce a value nothing reads.
  */
 import mongoose from 'mongoose';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES } from '@hvault/shared';
+import { Document } from '../../src/models/Document.js';
 import { VaultItem } from '../../src/models/VaultItem.js';
 import { User } from '../../src/models/User.js';
+import { buildObjectKey } from '../../src/utils/documentObjects.js';
 
 /** How many rows are written per `insertMany`. */
 const INSERT_CHUNK = 500;
@@ -23,6 +26,10 @@ const INSERT_CHUNK = 500;
 /** Fixed-width filler for the fields whose LENGTH is what a scenario varies. */
 const IV = 'i'.repeat(16);
 const TAG = 't'.repeat(22);
+
+/** The two plaintext framing columns, at the exact byte counts the model pins. */
+const STREAM_SALT = Buffer.alloc(32, 7).toString('base64');
+const NONCE_PREFIX = Buffer.alloc(7, 3).toString('base64');
 
 export interface VaultShape {
   /** How many items to write. */
@@ -33,6 +40,15 @@ export interface VaultShape {
   historyEntries?: number;
   /** Tags per item. Quote-dense: two quotes and a comma per entry. */
   tags?: number;
+}
+
+export interface DocumentShape {
+  /** How many `documents` rows to write. */
+  count: number;
+  /** Length of each row's `encryptedMeta`, which dominates a list response's size. */
+  metaBytes: number;
+  /** The plaintext size each row claims, which is what the quota is charged from. */
+  plaintextBytes: number;
 }
 
 /** One item document, shaped by {@link VaultShape}. */
@@ -114,4 +130,62 @@ export async function configureBackupEncryption(userId: string): Promise<void> {
       },
     },
   );
+}
+
+/**
+ * Writes `count` `documents` rows for `userId` and returns how long it took plus
+ * the collection's measured footprint.
+ *
+ * The ciphertext columns are filler for the same reason the vault fixture's are:
+ * no scenario in this directory decrypts anything, and the server treats
+ * `encryptedMeta` and the wrapped key as opaque strings. What has to be REAL is
+ * `objectKey`, because it carries a unique index — a shared value would collide on
+ * the second insert and the seed would stop at one row.
+ *
+ * `_id` is minted per row rather than left to Mongoose so the key can be built
+ * from it: the object key is `u/<userId>/d/<documentId>`, and a row whose key did
+ * not name its own id would be a row the garbage collector's key parser reads as
+ * somebody else's.
+ */
+export async function seedDocuments(
+  userId: string,
+  shape: DocumentShape,
+): Promise<{ count: number; seedMs: number; collectionBytes: number }> {
+  const startedAt = Date.now();
+  const ciphertextBytes = shape.plaintextBytes + DOCUMENT_TAG_BYTES;
+  for (let base = 0; base < shape.count; base += INSERT_CHUNK) {
+    const docs: Record<string, unknown>[] = [];
+    for (let i = base; i < Math.min(base + INSERT_CHUNK, shape.count); i++) {
+      const documentId = new mongoose.Types.ObjectId();
+      docs.push({
+        _id: documentId,
+        userId,
+        objectKey: buildObjectKey(userId, documentId.toHexString()),
+        encryptedDek: `dek-${String(i)}`.padEnd(40, 'k'),
+        dekIv: IV,
+        dekTag: TAG,
+        streamSalt: STREAM_SALT,
+        noncePrefix: NONCE_PREFIX,
+        encryptedMeta: 'm'.repeat(shape.metaBytes),
+        metaIv: IV,
+        metaTag: TAG,
+        chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+        chunkCount: 1,
+        ciphertextBytes,
+        plaintextBytes: shape.plaintextBytes,
+        favorite: false,
+      });
+    }
+    await Document.insertMany(docs, { ordered: false });
+  }
+  const db = mongoose.connection.db;
+  if (!db) throw new Error('seedDocuments() called without a live mongoose connection');
+  const stats = (await db.command({ collStats: Document.collection.collectionName })) as {
+    size?: number;
+  };
+  return {
+    count: shape.count,
+    seedMs: Date.now() - startedAt,
+    collectionBytes: stats.size ?? 0,
+  };
 }

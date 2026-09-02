@@ -49,9 +49,13 @@ import mongoose from 'mongoose';
 import request from 'supertest';
 import app from '../../src/app.js';
 import { AuditLog } from '../../src/models/AuditLog.js';
+import { Document } from '../../src/models/Document.js';
+import { DocumentUpload } from '../../src/models/DocumentUpload.js';
 import { User } from '../../src/models/User.js';
 import { VaultItem } from '../../src/models/VaultItem.js';
+import { getStorage } from '../../src/services/storage/index.js';
 import { CRASH_MARKERS, type CrashRequest, type CrashScenario } from './crashContract.js';
+import { createIpcStorageClient } from './storageBridge.js';
 
 /**
  * Ends this process the way a machine failure does.
@@ -126,6 +130,37 @@ function arm(scenario: CrashScenario): void {
       });
       return;
 
+    case 'document-part-before-ledger-write':
+      // A part upload, killed between the engine write and the ledger write.
+      // `uploadPart` stores the bytes FIRST and records them second, deliberately —
+      // a ledger naming bytes that were never stored would be counted at completion
+      // and produce a document with a hole in it. This is the instant that ordering
+      // is a claim about: the engine holds the part, the staging row does not know,
+      // and nothing has been committed. `DocumentUpload.findOneAndUpdate` has
+      // exactly one call site in this codebase, so the injection cannot fire early.
+      patchStatic(DocumentUpload, 'findOneAndUpdate', () => () => die());
+      return;
+
+    case 'document-complete-before-row-insert':
+      // A completion, killed at the one statement that creates the `documents`
+      // row. On the single-segment path the staging row has ALREADY been deleted by
+      // then, and the object has already been written to its final key at part
+      // time, so the crash leaves an object that NEITHER collection names — the
+      // window `ORPHAN_MIN_AGE_MS` exists to make safe. The handler's own
+      // compensating `deleteObject` sits in the `catch` around this call, which is
+      // exactly what SIGKILL denies it.
+      patchStatic(Document, 'create', () => () => die());
+      return;
+
+    case 'document-purge-after-object-delete':
+      // A permanent delete, killed between the object delete and the row delete.
+      // `purgeDocument` marks `purgePending` first, deletes the object second and
+      // the row third; a crash here is the state that marker exists for. Three
+      // other call sites of `Document.deleteOne` exist (bulk trash-empty and two
+      // crons) and none of them is reachable from this route.
+      patchStatic(Document, 'deleteOne', () => () => die());
+      return;
+
     case 'import-after-commit':
       // The write has committed — on a replica set that means the transaction,
       // on the standalone path (where this scenario is used) it means the insert
@@ -144,6 +179,28 @@ async function main(): Promise<void> {
   const req = JSON.parse(raw) as CrashRequest;
 
   await mongoose.connect(req.uri);
+
+  if (req.storageBridge === true) {
+    // THE INJECTION SEAM, and it is one line because of two properties of the
+    // production code rather than a trick played on it: `createS3Provider` returns
+    // a plain object literal, and `getStorage()` MEMOISES it. So the first call
+    // here builds the real provider (over the four `S3_*` values the parent passed
+    // in the environment, pointing at nothing), and overwriting its methods in
+    // place redirects every later caller in this process. There is no earlier
+    // caller to miss: the one boot-time probe, `runStoragePreflight`, is fired from
+    // `server.ts` inside the `app.listen` callback, and this child imports
+    // `app.js`.
+    //
+    // Off unless the request asked for it: the five vault scenarios run with the
+    // `S3_*` variables empty, where `getStorage()` throws 503.
+    const provider = getStorage();
+    Object.assign(provider, createIpcStorageClient());
+    // One round trip BEFORE the marker below, so a bridge that never came up is a
+    // named startup failure rather than a request that completes and reports
+    // `SURVIVED` — which would send the parent looking at the injection point.
+    await provider.headBucket();
+  }
+
   arm(req.scenario);
 
   // The parent reads this to know the child got as far as its request; a probe
@@ -158,12 +215,20 @@ async function main(): Promise<void> {
   const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
   const csrfCookie = cookies.find((value) => value.startsWith('__csrf='))?.split(';')[0] ?? '';
 
-  const res = await agent
-    .post(req.path)
+  const method = req.method ?? 'POST';
+  const pending = agent[method === 'POST' ? 'post' : method === 'PUT' ? 'put' : 'delete'](req.path)
     .set('Authorization', `Bearer ${req.token}`)
     .set('Cookie', csrfCookie)
-    .set('x-csrf-token', csrfToken)
-    .send(req.body);
+    .set('x-csrf-token', csrfToken);
+  for (const [name, value] of Object.entries(req.headers ?? {})) pending.set(name, value);
+
+  // A raw body is sent as `application/octet-stream`, which is the only type the
+  // part route's parser accepts; superagent computes `Content-Length` from the
+  // buffer, which the 411 guard ahead of that parser requires.
+  const res =
+    req.bodyBase64 === undefined
+      ? await pending.send(req.body)
+      : await pending.type('application/octet-stream').send(Buffer.from(req.bodyBase64, 'base64'));
 
   // Reaching here means the injection point was never hit — the request
   // completed, or failed before it. Either way this probe proved nothing, and
