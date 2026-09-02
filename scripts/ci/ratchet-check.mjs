@@ -350,8 +350,8 @@ const TIER0_REPORTS = ['integrity.json'];
  *
  * `flake.*` is here for exactly the same reason and under exactly the same three
  * conditions. `test:flake` is ten complete runs of every suite plus the whole
- * Playwright suite three times over — about an hour — so it is Tier 2 and does
- * not run on a push. Its own gate enforces the floor at the moment it has the
+ * Playwright suite three times over, measured at 84 minutes, so it is Tier 2 and
+ * does not run on a push. Its own gate enforces the floor at the moment it has the
  * number (zero failures, or it exits 1), `test:flake` must still be a registered
  * tier-2 task or both fields become hard UNMEASURED failures, and inside
  * `verify:full` the report IS fresh and both are compared for real.

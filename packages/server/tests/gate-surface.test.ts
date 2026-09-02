@@ -257,15 +257,19 @@ describe('manifest and runner agree', () => {
 
 describe('tiers', () => {
   it('keeps T0 to the seven gates that fit a 90-second pre-commit budget', () => {
-    // Measured end to end on the reference machine: engines 0.0s, secrets 0.1s,
-    // lint 30.7s, format 15.1s, type-check 36.4s, integrity 2.3s, ratchet 0.1s —
-    // 85 seconds against a 90-second budget. The two anti-cheat gates cost 2.4s
-    // between them; the unit suite alone is 105 seconds and the server suite
-    // 125, which is why both are T1. A tier over budget gets bypassed, and a
-    // bypassed hook gates nothing, so ADDING ANYTHING HERE REQUIRES RE-MEASURING.
-    // 5 seconds of headroom is the tightest this has been: the next thing added
-    // to T0 almost certainly has to buy its time back somewhere else (ESLint's
-    // --cache, or running the independent T0 gates in parallel).
+    // RE-MEASURED end to end on the reference machine over three runs: 2m 23s, 2m 10s
+    // and 1m 49s, so **T0 IS NOW OVER ITS 90-SECOND BUDGET** even on the quietest, and
+    // the runner prints OVER on every run. (It was 85s when this comment was written.)
+    // The quietest breakdown: engines 0.0s, secrets 0.2s, lint 39.2s, format 21.3s,
+    // type-check 44.8s, integrity 3.5s, ratchet 0.1s.
+    // The two anti-cheat gates cost 4.1s between them; the unit suite alone is
+    // ~3 minutes and the server suite ~5, which is why both are T1. A tier over
+    // budget gets bypassed, and a bypassed hook gates nothing, so ADDING ANYTHING
+    // HERE REQUIRES RE-MEASURING AND BUYING THE TIME BACK FIRST: there is no
+    // headroom left to spend. `lint` and `type-check` are ~100s of the total, so
+    // that is where it would have to come from (ESLint's --cache, or running the
+    // independent T0 gates in parallel). The 90 in `tiers.mjs` does NOT move: a
+    // budget raised to fit the measurement stops being a budget.
     //
     // The order matters as much as the membership: `ratchet` reads the report
     // `integrity` writes, so it must come after it. Running the cheap ratchet

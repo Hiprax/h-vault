@@ -473,8 +473,14 @@ describe('DocumentsPage — the surrounding notices', () => {
     const fetchUsage = vi.fn().mockResolvedValue(undefined);
     useDocumentsStore.setState({ fetchUsage, usage: makeUsage(), uploads: {} });
     renderPage();
-    await screen.findByRole('heading', { name: 'Documents' });
-    expect(fetchUsage).toHaveBeenCalledTimes(1);
+    // AWAITED, for the reason spelled out on `loads the list and the usage once the
+    // feature is advertised as available`, at the end of this file's first block: the heading
+    // is not a signal that the passive effect behind it has run. This was the one
+    // place that reasoning had not reached, and the flake gate found it: one
+    // "expected 1, got 0" here at order seed 1338, green in the other nine runs.
+    await waitFor(() => {
+      expect(fetchUsage).toHaveBeenCalledTimes(1);
+    });
 
     act(() => {
       useDocumentsStore.setState({ uploads: { 'up-1': makeUpload() } });

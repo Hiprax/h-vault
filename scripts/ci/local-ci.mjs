@@ -773,7 +773,7 @@ const GATES = [
     // TIER 2, and placed here — after every other suite gate and immediately
     // before the oracle — because it is the second-longest thing in this
     // repository: ten complete runs of all three package suites plus the whole
-    // Playwright suite three times over, about an hour.
+    // Playwright suite three times over, measured at 84 minutes.
     //
     // It is the gate that measures the property every OTHER gate quietly assumes.
     // A suite whose verdict depends on the order it happened to run in is not a

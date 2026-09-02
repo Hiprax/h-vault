@@ -1184,11 +1184,11 @@ npm run ci -- --json            # one JSON document describing the run
 
 Each tier has a stated time budget on the reference machine:
 
-| Tier   | Entry point           | Budget        | Why that number                                                                                                                                                 |
-| ------ | --------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **T0** | `npm run verify:fast` | **90 s**      | It is meant to be run without thinking about it. Measured at ~82 s, and those eight seconds of headroom are why a gate is not added to T0 without re-measuring. |
-| **T1** | `npm run ci`          | **12 min**    | The server suite alone is ~150 s and Playwright is ~6 minutes. Twelve rather than a rounder ten, because a budget nobody meets is a budget nobody respects.     |
-| **T2** | `npm run verify:full` | **unbounded** | `mutation` re-runs the whole suite once per mutant. Any number written here would be fiction.                                                                   |
+| Tier   | Entry point           | Budget        | Why that number                                                                                                                                                                                                                                                                                            |
+| ------ | --------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **T0** | `npm run verify:fast` | **90 s**      | It is meant to be run without thinking about it. Last measured at 1m 49s to 2m 23s over three runs, so T0 is now OVER this budget and the runner says so on every run: `lint` and `type-check` are ~100 s of it between them. Read that as the reason a gate is not added to T0, not as a number to raise. |
+| **T1** | `npm run ci`          | **12 min**    | Playwright alone is ~7.5 minutes and the server suite 3 to 4.5, and the tier measures 22 to 24 across two clean runs. Twelve rather than a rounder ten, because a budget nobody meets is a budget nobody respects.                                                                                         |
+| **T2** | `npm run verify:full` | **unbounded** | `mutation` re-runs the whole suite once per mutant. Any number written here would be fiction.                                                                                                                                                                                                              |
 
 The budgets are **design budgets, not gates**, and both halves of that are deliberate. They are not
 gates because the wall clock of the machine you happen to be on is not a property of this
@@ -1246,8 +1246,8 @@ run waits; the deployment drill's fast sibling `smoke` covers the built artifact
 the volume budgets measure wall-clock time and peak memory while building accounts at the per-user
 ceilings, which takes a minute and is only meaningful in a process running nothing else, so measuring
 them beside three other workers would turn a budget into a coin toss. The last two are the long ones:
-`flake` runs the whole suite ten times, which is about an hour, and `mutation` re-runs it once per
-mutant, which is hours. One more command sits outside the tiers entirely:
+`flake` runs the whole suite ten times plus the Playwright suite three times over, measured at
+84 minutes, and `mutation` re-runs it once per mutant, which is hours. One more command sits outside the tiers entirely:
 
 ```bash
 npm run ci:local                # a temporary worktree at HEAD + `npm ci` + verify:full
@@ -1446,7 +1446,7 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ## Running the whole gauntlet on a remote machine
 
-The push gate is twenty-one minutes. The release tier is a working day, and most of
+The push gate is a little over twenty minutes. The release tier is a working day, and most of
 that day is one gate: `mutation` re-runs the entire test suite once per mutant. That
 is not something to run on the machine you are working on, so the full gauntlet
 usually belongs on a spare box you can start and walk away from.
@@ -1464,23 +1464,55 @@ to do with the answer.
 
 Measured on the reference machine, from the reports each run leaves behind:
 
-| Command               | Gates | Measured   | What dominates it                                                                      |
-| --------------------- | ----- | ---------- | -------------------------------------------------------------------------------------- |
-| `npm run verify:fast` | 7     | **82 s**   | the type check and ESLint                                                              |
-| `npm run ci`          | 29    | **21 min** | Playwright at 6m44s, then CodeQL, the server suite and the client suite at ~3 min each |
-| `npm run verify:full` | 37    | **hours**  | `flake` at 64 min, then `mutation`, which has no honest estimate                       |
+| Command               | Gates | Measured          | What dominates it                                                                                      |
+| --------------------- | ----- | ----------------- | ------------------------------------------------------------------------------------------------------ |
+| `npm run verify:fast` | 7     | **1m 49s-2m 23s** | ESLint and the type check, ~85 s of it between them                                                    |
+| `npm run ci`          | 29    | **22-24 min**     | Playwright at ~7.5 min, then CodeQL at ~4.5, the server suite at 3-4.5 and the client suite at 2.5-3.5 |
+| `npm run verify:full` | 37    | **hours**         | `flake`, then `mutation`, which has no honest estimate                                                 |
 
-`verify:full` is cumulative — it is `npm run ci` plus the eight release-tier gates —
-so the twenty-one minutes above are inside the number, not beside it. Of the release
-tier, seven gates come to about seventy minutes between them and `mutation` is the
-rest. Budget a day, start it in the morning, and do not plan around a finish time.
+**The fast tier no longer fits its own budget, and the table is the honest number rather
+than the target.** T0's design budget is 90 seconds; three runs of it came in at
+2m 23s, 2m 10s and 1m 49s, so even the quietest is over, and the runner prints `OVER` and
+exits 0, because the budget is a design budget and not a gate. Twenty-five phases of new source is what happened to it.
+Take it as the reason not to add a gate to T0, not as a licence to raise the number.
+
+The push tier is a range for the same reason every figure here is a measurement rather
+than a constant: two clean runs of it on the same commit came in at 22m 12s and 24m 16s,
+and the whole 124-second difference sat in the datastore and analyser gates while a
+browser was open on the same four cores. Quote the range, run the gauntlet on a machine
+doing nothing else, and treat any single number as the floor.
+
+`verify:full` is cumulative: it is `npm run ci` plus the eight release-tier gates, so
+those twenty-odd minutes are inside the number rather than beside it. Six of the
+release-tier gates are cheap and measured at ten and a half minutes between them
+(`dst` 6m52s, `deploy` 1m25s, `resource` 1m06s, `fuzz` 41s, `recovery` 20s,
+`upgrade` 13s); `flake` and then `mutation` are the rest. Budget a day, start it in the
+morning, and do not plan around a finish time.
 
 Two commands are **not registered gates**, so `verify:full` does not run them, and both are worth
 knowing about before you plan the day. `npm run verify:selftest` proves every gate can still fail,
-by planting one defect per gate into a temporary copy of the tree. `npm run ci:local` is the clean
-room, and it is not a quick extra: its body **is** `verify:full`, run inside a fresh worktree after
-its own `npm ci`, so it costs a whole second run plus an install. Run either separately, and budget
-for it separately.
+by planting one defect per gate into a temporary copy of the tree: one case per registered task,
+thirty-seven of them, each running that gate's real command until it fails for the declared reason.
+`npm run ci:local` is the clean room, and it is not a quick extra: its body **is** `verify:full`,
+run inside a fresh worktree after its own `npm ci`, so it costs a whole second run plus an install.
+Run either separately, and budget for it separately.
+
+**`verify:selftest` cannot pass while `mutation` holds no floor**, and the coupling is worth stating
+because it arrives looking like an unrelated failure. The `mutation` case plants an extra `!`
+pattern in the declared scope and expects the gate's cheap pre-flight to refuse it, naming the
+directory that left the scope. But that pre-flight compares the declared globs against the
+baseline's `mutation.filesMutated`, and with no `mutation` block there is nothing to compare
+against: the pre-flight passes, the case's failure comes from somewhere else, and the harness
+correctly refuses to credit it. Measured: **36 proven, 1 unproven, 33m 56s**, the one being
+`mutation`, reported as _"exit 1, but its report never mentions the planted defect, so the failure
+is not attributable to it"_. Record the first floor (see below) and the case becomes the
+millisecond pre-flight check it was designed to be. Until then, read a selftest sweep as
+36-of-37 rather than as broken.
+
+That is also the honest duration to plan against: the sweep is **34 minutes**, not the whole day
+`verify:full` needs, because each case runs its gate only until it fails. Two cases carry a time
+cap for the opposite reason, `flake` at five minutes and `mutation` at two, so that a defect which
+failed to land cannot leave the harness waiting on an hours-long gate.
 
 ### Provision the machine, once
 
@@ -1501,11 +1533,26 @@ npm ci                     # all three workspaces
 npm run build:shared       # T0 excludes `build`, so verify:fast consumes shared/dist
 ```
 
-**Playwright's browser is the one prerequisite nothing checks.** Every other external
-tool is declared per gate and reports **could not run** when it is absent. The browser
-is not: `e2e`, `a11y` and the E2E leg of `flake` simply fail with Playwright's own
-"Executable doesn't exist" message, which reads like a code defect and is not one.
-Only the `chromium` project is declared, so one browser is enough:
+**Playwright's browser is the one prerequisite nothing checks**, and what makes it a trap
+is the classification rather than the message. Every other external tool is declared per
+gate and reports **could not run**, which is exit 2 and a verdict of "unknown". The
+browser is declared by nothing, so `e2e`, `a11y` and the E2E leg of `flake` report a
+**failure** instead, exit 1, the same verdict a real defect gets. Pointed at an empty
+browser cache, Playwright itself is clear enough:
+
+```text
+browserType.launch: Executable doesn't exist at
+  .../chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell
+╔════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just installed or updated.       ║
+║ Please run the following command to download new browsers: ║
+║     npx playwright install                                 ║
+╚════════════════════════════════════════════════════════════╝
+```
+
+So the cost is not that the transcript is unreadable; it is that the summary table says
+`✖ e2e` and nothing there distinguishes a missing browser from broken code. Only the
+`chromium` project is declared, so one browser is enough:
 
 ```bash
 npx playwright install --with-deps chromium
@@ -1533,9 +1580,26 @@ scanner version reports differently, which reads as a regression no code caused.
 | `diff-cover` | current | `coverage`    | `uv tool install diff-cover`, or `pipx install diff-cover`      |
 
 `~/.local/bin` is enough for all four; none of them needs root. If you append that
-directory to `PATH` in a shell profile, **start the run from a fresh login shell** —
+directory to `PATH` in a shell profile, **start the run from a fresh login shell**:
 launched from the shell that appended the line without re-reading it, the tools are
 invisible and the run collects four "could not run" verdicts several minutes in.
+
+**Then check what you actually installed, because a drifted tool is invisible.** Those
+versions are the ones `.github/workflows/release.yml` installs, and nothing in the
+pipeline compares the binary on your `PATH` with the pin. A scanner one minor release
+ahead reports a ratcheted count differently, and that arrives as a regression no code
+caused, so ask:
+
+```bash
+actionlint -version                # 1.7.12
+hadolint --version                 # Haskell Dockerfile Linter 2.14.0
+oasdiff --version                  # oasdiff version 1.28.0
+diff-cover --version               # any current release
+```
+
+For the record, the durations published in this section were measured on a machine
+carrying hadolint **2.15.1**, one minor above the pin. Nothing in the run noticed, which
+is the point of the paragraph.
 
 **Docker, for six gates and no fallback.** `docker` (push tier) builds all four images
 and Trivy-scans three of them — the database image is built and deliberately not scanned;
@@ -1547,8 +1611,47 @@ suite three times over and so inherits the same need; and `deploy` (release tier
 the whole Compose stack up from nothing. All six declare the daemon as a prerequisite and
 report **could not run** without it, which is exit 2 and not a pass. Trivy is optional: absent from `PATH`, the container
 gate runs `aquasec/trivy:latest` against a named cache volume instead, which needs the
-daemon socket — under rootless Docker that is `$XDG_RUNTIME_DIR/docker.sock`, not
+daemon socket: under rootless Docker that is `$XDG_RUNTIME_DIR/docker.sock`, not
 `/var/run/docker.sock`.
+
+**The first run pulls about 1.7 GB of images**, and it is worth doing before you walk
+away rather than discovering it inside the first container gate. Four are needed for the
+image builds and the harnesses, and a fifth only when `trivy` is not on `PATH`:
+
+| Image                                     | Size    | Pulled for                                               |
+| ----------------------------------------- | ------- | -------------------------------------------------------- |
+| `mongo:8.0`                               | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
+| `aquasec/trivy:latest`                    | 252 MB  | only when `trivy` is absent from `PATH`                  |
+| `node:24-alpine3.23`                      | 235 MB  | the `base` stage every image built here is built through |
+| `dxflrs/garage:v2.3.0` (digest-pinned)    | 100 MB  | `storage`, `e2e`, `a11y`, `flake`, `deploy`              |
+| `nginxinc/nginx-unprivileged:1.29-alpine` | 82 MB   | the `web` stage                                          |
+
+Trivy's vulnerability database is a further download on its first scan, into the named
+cache volume the container gate keeps for it. Note what a warm cache does to one number
+in the duration table below: `docker` measured 14.5 s here because all four images
+already existed with identical layers. On a fresh machine that gate is four image builds
+and three scans, which is minutes.
+
+**And a warm cache does something worse than distort a duration: it can hide a finding.**
+Both Alpine bases here are rebuilt on their own project's release schedule rather than on
+Alpine's security releases, which is why the Dockerfile runs `apk upgrade --no-cache` in
+the `base` and the `web` stage. That instruction is only as fresh as its layer. Measured
+in one sitting: the container gate passed, Trivy then refreshed its database mid-run, and
+the next gate failed on `libexpat 2.8.3-r0 -> 2.8.4-r0` in the web image, whose cached
+upgrade layer had been built while the branch was still on Alpine 3.23.4 (the app image,
+built from a stage whose cache had turned over, was already on 3.23.5 and clean). Nothing
+in the source had changed. The remedy is to re-resolve those two stages rather than to
+prune the whole builder:
+
+```bash
+docker build --no-cache-filter base,web -f docker/Dockerfile --target web -t hvault-web:local-ci .
+```
+
+So when the container gate reports a fixable OS-package finding, check the age of that
+layer before you go looking for a change that caused it, and expect the same class of
+finding on a box whose builder cache has been sitting for a while. Never answer it by
+pinning a package revision in the Dockerfile: that breaks every build the day Alpine
+drops the revision.
 
 **CodeQL is optional and degrades in stated steps**, so an unequipped machine still
 gets an answer, just a smaller one. Install the bundle into `.cache/codeql` per
@@ -1557,13 +1660,15 @@ one with `HVAULT_CODEQL=/path/to/codeql`. Without it the `sast` gate falls back 
 Semgrep CE or OpenGrep and says so in its report; with no analyser at all it reports
 **SKIPPED**, the one gate allowed to.
 
-**Budget about 20 GB on the filesystem holding the checkout.** A full pass grows the
-working directory to roughly **13 GB**, and almost none of it is the project: the
-mutation gate's Stryker sandboxes land in `.stryker-tmp/` inside the repository and
-measured **8.9 GB** after one run, the CodeQL bundle and the database it builds put
-**3.3 GB** in `.cache/`, `node_modules` is 723 MB and a release-tier run's reports come
-to about 15 MB. All four are gitignored and all four are disposable, but they have to fit
-while the run is happening.
+**Budget about 20 GB on the filesystem holding the checkout.** Almost none of it is the
+project. Measured on this checkout immediately before a full pass: `.cache/` holds
+**3.7 GB** (the CodeQL bundle at 2.5 GB plus the database it builds at 1.1 GB),
+`node_modules` is **759 MB**, the three `packages/*/dist` directories come to 8 MB, `.git`
+is 5.6 MB, and the whole working directory is **6.0 GB** before `mutation` runs. The
+mutation gate's Stryker sandboxes then land in `.stryker-tmp/` inside the repository and
+measured **8.9 GB** after one complete run, which is where the rest of the twenty
+gigabytes goes. A release-tier run's reports come to about 15 MB. All of it is gitignored
+and all of it is disposable, but it has to fit while the run is happening.
 
 **Then give the run a `TMPDIR` on a real disk, and check it rather than assuming.** Two
 more large things go to `os.tmpdir()` instead: the clean room's worktree with its
@@ -1572,6 +1677,13 @@ at roughly 200 MB each. On many hosts `/tmp` is a **tmpfs sized at half of RAM**
 that is a RAM budget wearing a disk's clothes, and it fails late and in disguise: the
 datastore suites die at their first index build, which the runner reports as ordinary
 test failures rather than as a machine that ran out of room.
+
+This is not hypothetical. The machine these numbers were measured on has `/tmp` as a
+16 GB tmpfs on 31 GB of RAM, and it was carrying **ten stranded `mongo-mem-*` data paths
+totalling 2.0 GB of resident memory** from earlier killed runs before the sweep further
+down reclaimed them. With `TMPDIR` exported by the launcher below, `~/hvault-tmp` grew to
+**422 MB** during the server integration gate while the tmpfs stayed flat, which is the
+redirect doing its job.
 
 ```bash
 df -h /tmp .              # a small tmpfs on /tmp means redirect it
@@ -1591,6 +1703,11 @@ than a fixture. Stop the dev stack before starting a run. The client's 5173 is t
 exception and is reusable on purpose: Playwright reuses a dev server that is already
 listening, which is why the gate deliberately does not set `CI`. `VITE_PORT` moves that
 port and Playwright's base URL together; the Mongo port is fixed, so free it.
+
+**There is no third port to free, despite the object-storage engine.** The harness
+publishes it as `-p 127.0.0.1:0:3900`, so the daemon picks the host port and has already
+bound it by the time `docker run` returns. Nothing probes for a free one, so nothing
+collides, and 3900 on the host is not involved.
 
 **The first run needs outbound network.** The unit tier blocks egress on purpose, with
 exactly one hole punched: `mongodb-memory-server` fetching the `mongod` binary on a
@@ -1685,8 +1802,12 @@ Five details in there are load-bearing, and each one is a way runs get lost:
 - **`TMPDIR` is exported for the whole run, not one gate**, because the gates that need
   the space are spread across it.
 
-`NO_COLOR=1` is comfort rather than correctness: the runner already strips ANSI from
-the per-gate transcripts it writes, but not from this top-level log.
+`NO_COLOR=1` is comfort rather than correctness, and it only reaches half the output.
+The runner's own step and verdict lines come out plain, and the per-gate transcripts it
+writes are stripped of ANSI, but the child tools inside a gate do not honour it: measured
+on one run, `run.log` still carried 9,472 escape sequences, all of them from Vite's
+carriage-return progress redraw and the application's own request logger inside the test
+children.
 
 **Then verify it is actually detached before you log out**, because discovering
 otherwise costs a day:
@@ -1740,9 +1861,16 @@ grep -cE 'passed in|failed after' "$RUN/run.log"             # how many have fin
 ls -lt .testfortress/reports/ | head -20                     # what has been written
 ```
 
-That last one is a progress bar by accident and a reliable one: every selected gate's
-reports are **deleted before the run starts**, so a file's presence means the gate that
-declares it has at least begun.
+That last one is a progress bar by accident, and it is reliable for exactly one class of
+file: a gate's **declared** reports and its own `<gate>.log` are deleted before that gate
+runs, so their presence means it has at least begun. Nothing else in the directory is
+cleared, because the runner is handed a gate's declared list and nothing more. The
+per-leg JUnit documents several gates write as a side effect therefore survive from
+earlier runs: `test:flake` declares `flake.json` alone, and on this machine
+`junit-flake-server.xml` sat in that directory eighteen days old while `flake` had not
+yet started. The same holds for `junit-fuzz-*.xml`, `junit-upgrade*.xml`,
+`junit-storage.xml`, `junit-recovery.xml`, `junit-resource.xml`, `openapi.json`,
+`a11y-scans.json` and `diff-cover.json`. Read the mtime, not the name.
 
 **`summary.json` is the exception, and do not use its existence as a finish signal.** It
 is declared by the tier entry points rather than by any gate, so nothing clears it, and on
@@ -1764,19 +1892,27 @@ in the run is seconds.
 | Gate               | Measured | Its own deadline, if it has one              |
 | ------------------ | -------- | -------------------------------------------- |
 | `mutation`         | hours    | none, deliberately                           |
-| `flake`            | 64 min   | 30 min per suite leg, 90 min for the E2E leg |
-| `e2e`              | 6m 44s   | 180 s just to boot the stack                 |
-| `dst`              | 3m 54s   | 15 min per leg                               |
-| `sast`             | 3m 23s   | none                                         |
-| `test-integration` | 3m 22s   | none                                         |
-| `test`             | 3m 1s    | none                                         |
-| `deploy`           | 1m 32s   | 120 s per health wait                        |
-| `type-check`       | 57s      | none                                         |
-| `resource`         | 50s      | 15 min                                       |
-| `lint`             | 47s      | none                                         |
-| `a11y`             | 38s      | none                                         |
-| `fuzz`             | 34s      | 5 min per leg                                |
-| `docker`           | 32s      | none                                         |
+| `flake`            | 84m 26s  | 30 min per suite leg, 90 min for the E2E leg |
+| `e2e`              | 8m 28s   | 180 s just to boot the stack                 |
+| `dst`              | 6m 52s   | 15 min per leg                               |
+| `test-integration` | 4m 53s   | none                                         |
+| `sast`             | 4m 46s   | none                                         |
+| `test`             | 3m 11s   | none                                         |
+| `deploy`           | 1m 25s   | 120 s per health wait                        |
+| `resource`         | 1m 06s   | 15 min                                       |
+| `a11y`             | 57s      | none                                         |
+| `type-check`       | 54s      | none                                         |
+| `lint`             | 48s      | none                                         |
+| `fuzz`             | 41s      | 5 min per leg                                |
+| `property`         | 31s      | none                                         |
+
+Everything else in the run measured under half a minute, and two of those are worth a
+word. `docker` came in at 14.5 s only because its layer cache and Trivy's database were
+warm, as the pull table above says. `build` (24 s), `format` (25 s), `recovery` (20 s),
+`upgrade` (13 s) and `storage` (10 s) are genuinely that cheap. The datastore gates are
+the ones contention moves: `test-integration` measured 3m 16s on an idle box and 4m 53s
+on the same commit while something else was reading the tree, which is the whole argument
+for a machine doing nothing else.
 
 A gate that owns a deadline enforces it itself: exceeding it is a **SIGKILL and a
 failure**, reported as _a hang, not a slow machine_, never as a skip. A gate with no
@@ -1836,6 +1972,16 @@ Two codes you will see inside gate output rather than as the run's own: **78**, 
 only `sast` may emit and which means SKIPPED, and **124**, a wall-clock deadline kill,
 which is always a failure.
 
+One more thing about a `1` on a first full run: read the failing gate names before
+reading the code as a verdict on your change. On the reference run these numbers come
+from, 34 of 37 gates passed and three did not. `mutation` was **stopped at a time limit**
+after 114 seconds, so by the rule further down it is reported as **not run**, not as red,
+and the 2h 3m the run took therefore excludes a real mutation leg. `ratchet-full` failed
+because reports were invalidated by an edit made mid-run, which is the paragraph on a
+frozen checkout further down. `flake` was the only genuine defect of the three: one
+order-dependent client test, failing in one of ten shuffled orders, which is precisely
+what that gate is for.
+
 ### Read the verdict
 
 `.testfortress/reports/summary.json` is the machine-readable form of the whole run —
@@ -1878,11 +2024,43 @@ node scripts/ci/ratchet-check.mjs --accept --reason "first mutation baseline, me
 ```
 
 `--accept` moves every field in its improving direction only, refuses without a
-`--reason`, and refuses while anything is failing or unmeasured — so it can only ever
-be run from a tree that has just gone green. It also **refuses a `--tier` argument**:
+`--reason`, and refuses while anything is failing or unmeasured, so it can only ever be
+run from a tree that has just gone green. It also **refuses a `--tier` argument**:
 accepting demands the full comparison, because a partial one would write a floor from
 numbers it never looked at. Read the baseline back afterwards and confirm the block is
 there; if it is not, nothing was armed and the next run holds no floor either.
+
+Two things about that first run are easy to plan around badly, and both were measured
+the hard way.
+
+**There is no incremental state until a leg finishes.** The Stryker configuration sets
+`incremental: true`, and the incremental file is what makes every later run re-test only
+the mutants whose code, or whose killing test, actually changed. It is written by a
+**completed** leg. So look for
+`.stryker-tmp/incremental-shared.json`, `-client.json` and `-server.json`, and not for
+`.stryker-tmp/` itself: the directory proves nothing, because a killed run leaves its
+sandbox copies behind and no incremental file. Measured on a run stopped after two
+minutes, that is 3.6 GB of sandboxes and three lines in the log reading
+`No incremental result file found`.
+
+Without them the first run is the entire scope from nothing, and the scope is what to
+budget against. Measured on that same run as each leg started: the shared leg is
+**2,469 mutants across 11 files**, the client leg **19,192 across 139**, and the server
+leg 79 files (its count was not reached before the leg was stopped). Stryker's own
+estimate for the shared leg is worth quoting because it explains where the hours go:
+_"Detected 1033 static mutants (42% of total) that are estimated to take 96% of the time
+running the tests"_, which is the price of `ignoreStatic: false` and the reason that
+setting is not negotiable. For calibration, the client leg last ran to completion at
+12h35m over 15,322 mutants, so scale that up by a quarter.
+
+**A partial run banks nothing, deliberately.** If any leg exits non-zero or writes no
+report, including because you killed it, the gate writes **no** `mutation.json` at all,
+on the stated grounds that a report missing a package would be read as a shrunken scope
+rather than as a broken run. There is therefore no way to accumulate a floor leg by leg,
+and equally no way for a killed run to leave behind a number `--accept` could bank. A
+floor comes from one complete run or from no run. That is also why a `mutation` you
+stopped at a time limit must be reported as **not run**, never as red and never as a
+pass.
 
 > **`.testfortress/baseline.json` is the one file a run produces that belongs in git.**
 > Commit and push it from the machine that measured it, never after copying reports
@@ -1929,11 +2107,17 @@ is that "we did not check" and "we checked and it is fine" must not look the sam
 was installed as root. `npx playwright install --with-deps chromium`, without `sudo`,
 as the user who will run the gauntlet.
 
-**`e2e` or `a11y` fail inside setup code** — a rejected TOTP code, an empty CSRF
-response — rather than on an assertion. Suspect resource contention before suspecting a
-regression. Playwright runs single-worker with **retries off**, so a starved server
-surfaces as a hard failure rather than a flake. Re-run it alone with nothing else
-competing.
+**`e2e`, `a11y` or `storage` fail inside setup code** rather than on an assertion: a
+rejected TOTP code, an empty CSRF response, or `the storage engine was not ready within
+60000ms`. Suspect resource contention before suspecting a regression. Playwright runs
+single-worker with **retries off**, so a starved server surfaces as a hard failure rather
+than a flake, and the storage harness gives its engine a 60-second readiness deadline that
+a busy machine can lose. Measured, in one sitting: `storage` passed four times at 6.2 s,
+9.6 s, 6 s and 6.2 s, and failed once with its conformance file taking **63 s** instead of
+3.7 s and the second file's engine never answering, while every one of the 23 conformance
+assertions in the failing run still passed. Re-run it alone with nothing else competing,
+and if it passes, what you saw was the machine. Do not answer it by raising the deadline:
+a timeout lifted to win a race stops being a deadline.
 
 **Scratch space is full, or the datastore gates die for no stated reason.** A killed run
 strands its `mongod` data paths: `mongodb-memory-server` deliberately keeps them "for
@@ -1981,8 +2165,11 @@ docker network ls -q --filter label=com.docker.compose.project=hvault-drill | xa
 ```
 
 **A killed `mutation` left `.stryker-tmp`.** It holds Stryker's sandbox copies of the
-whole checkout — **8.9 GB** after one measured run — and nothing reclaims it on the next
-run. `rm -rf .stryker-tmp`.
+whole checkout, measured at **8.9 GB** after one complete run and at **3.6 GB** after one
+stopped two minutes in, and nothing reclaims it on the next run. Deleting it costs
+nothing a killed run had earned, because the incremental state a later run resumes from is
+written only by a leg that finished, and a killed leg leaves sandboxes without one:
+`rm -rf .stryker-tmp`.
 
 **A killed `ci:local` left a registered worktree.** `git worktree list` shows it;
 `git worktree prune` clears the bookkeeping and `git worktree remove --force <path>`
@@ -1994,10 +2181,26 @@ kill costs disk rather than a dirty checkout. Delete the copy. Running `git stat
 before you copy or commit anything after any abnormal end is still worth the two seconds.
 
 **Two runs at once.** Do not. Two gauntlets collide on `.testfortress/reports/`, on port
-27017 and on the Docker stack names. The realistic version of this is not two gauntlets —
+27017 and on the Docker stack names. The realistic version of this is not two gauntlets:
 it is someone running `git commit` on that checkout mid-run and firing the `pre-commit`
 hook into the same tree. Treat the checkout as frozen for the duration: no commit, no
 checkout, no pull, no push until the run ends.
+
+**Editing a file counts, and `ratchet-full` is where it surfaces.** Freshness is not a
+wall clock: `ratchet-check` takes the newest mtime across every tracked and
+untracked-but-not-ignored file outside `.testfortress/`, and any report older than that
+describes a different tree, so it is reported **STALE**. Edit one line of one file three
+minutes into a two-hour run and the last gate fails naming every report the first
+half-hour wrote, having compared almost nothing. It is behaving exactly as designed, and
+there is no way to talk it round: re-run the gates whose reports it rejected. So make
+your edits before you start it or after it ends, and if you must change something
+mid-run, expect to spend another `npm run ci` on the verdict.
+
+Measured, on the run these numbers come from: 22 reports were rejected as stale, and
+because `flake.json` was one of them the ratchet **deferred** `flake.failures` rather
+than comparing that run's 1 against the recorded 0. The gate that owns the number had
+already failed on it, so nothing escaped, but that is the shape of what an edit mid-run
+costs you: not a wrong answer, an unavailable one.
 
 ### Bring the results home
 
@@ -2070,8 +2273,25 @@ git status --short         # must be clean before you commit anything
 ```
 
 Then the drill's containers, volumes and networks, with the three label-scoped commands
-above. Keep the run directories themselves; they are kilobytes, and `run.log` plus
-`exit-code` are the only durable record that a given commit was measured on a given day.
+above.
+
+**The object-storage engine leaves nothing on disk to reclaim, and that is by design.**
+The test and end-to-end harnesses run it with `--rm` and three tmpfs mounts, mounting
+only the committed `garage.toml` read-only, so a killed run can leave a container and
+never a volume:
+
+```bash
+docker ps -aq --filter label=hvault-test=storage-harness | xargs -r docker rm -f
+```
+
+The named volumes, `hvault-s3-meta` and `hvault-s3-data`, exist only under the deployment
+drill's own Compose project, which itself ends in `down -v --remove-orphans`; the
+label-scoped commands above are the fallback for a drill killed before it got there. On a
+real deployment those two volumes are the only copy of every uploaded document, so never
+point a cleanup command at them by name.
+
+Keep the run directories themselves; they are kilobytes, and `run.log` plus `exit-code`
+are the only durable record that a given commit was measured on a given day.
 
 ---
 

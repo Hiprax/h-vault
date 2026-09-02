@@ -78,7 +78,7 @@ computed in local time and every other gate runs where local time and UTC are th
 thing; `deploy`, the deployment clean room, which stands the whole Compose stack up from
 nothing and is far too heavy for a hook — its fast sibling `smoke` covers the built
 artifact on every push; `flake`, ten complete runs of every suite in ten different
-shuffled orders plus the Playwright suite three times over, which is about an hour; and
+shuffled orders plus the Playwright suite three times over, measured at 84 minutes; and
 `mutation`, the oracle, which re-runs the suite once per mutant and is measured in hours.
 All eight run in `npm run verify:full`.
 
@@ -102,8 +102,11 @@ the reference machine: **T0 90 s**, **T1 12 minutes**, **T2 unbounded**. Those a
 rather than gates, because the wall clock of your laptop is not a property of this repository and
 failing a push over it would only teach people to reach for `--no-verify`. They are still measured:
 every run records `budgetSeconds` beside its own `durationMs` in `summary.json` and prints the
-comparison. The numbers live in `scripts/ci/lib/tiers.mjs`. If you add a gate to T0, re-measure —
-the measured value is ~82 s against a 90 s budget, and there is not much room in it.
+comparison. The numbers live in `scripts/ci/lib/tiers.mjs`. If you add a gate to T0, re-measure, and
+know before you start that there is nothing left to spend: the measured value is now
+**1m 49s to 2m 23s** over three runs against that 90 s budget, so even the quietest is
+over it and the runner says so on every run. `lint` and `type-check` are about 85 s of
+the total between them.
 
 The runner **aggregates by default**: it runs every selected gate and reports all the
 failures, rather than costing you a round trip per failure. A gate whose dependency
