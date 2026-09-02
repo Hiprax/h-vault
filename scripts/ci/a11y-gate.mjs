@@ -3,9 +3,16 @@
  * `test:a11y` — the accessibility suite, run as its own gate.
  *
  * Two specs, driven by `playwright.a11y.config.ts` against the real application:
- * `e2e/a11y.spec.ts` runs axe over fifteen views and modals in the authenticated
+ * `e2e/a11y.spec.ts` runs axe over twenty views and modals in the authenticated
  * DOM, and `e2e/a11y-keyboard.spec.ts` pins the focus and keyboard behaviours a
  * scanner cannot infer.
+ *
+ * Four of those twenty views are the document store's, so this gate DECLARES
+ * `docker` beside `build:shared` in `.testfortress/verify.json` and in
+ * `scripts/ci/local-ci.mjs`: `playwright.a11y.config.ts` spreads the base
+ * config's `webServer`, which runs `e2e/start-server.ts`, which stands the real
+ * object-storage engine up in a container. A declared prerequisite that is
+ * missing is reported as could-not-run, never as a red gate.
  *
  *   node scripts/ci/a11y-gate.mjs        the gate (this is what the pipeline runs)
  *   npm run test:a11y                    the same thing

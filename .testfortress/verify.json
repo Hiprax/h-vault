@@ -174,10 +174,10 @@
     "test:a11y": {
       "cmd": "npm run test:a11y",
       "tier": 1,
-      "gate": "every primary view and modal \u2014 fifteen of them, in the real authenticated DOM \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
+      "gate": "every primary view and modal \u2014 twenty of them, in the real authenticated DOM, four of them the document store's and one of them the isolated preview document itself \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
       "report": ["a11y.json", "junit-a11y.xml"],
       "countsTests": false,
-      "requires": ["build:shared"]
+      "requires": ["build:shared", "docker"]
     },
     "test:fuzz": {
       "cmd": "npm run test:fuzz",
@@ -225,7 +225,7 @@
       "gate": "the suite gives the same answer every time: ten complete runs of all three package suites, each in a DIFFERENT shuffled order derived from the one pinned seed and each with the file parallelism the push tier uses, plus the whole Playwright suite with three executions per test and retries pinned off, produce zero failures \u2014 and the number of runs and the number of failures are both recorded, because ten clean runs bound the per-run flake rate near one in ten rather than establishing zero",
       "report": "flake.json",
       "countsTests": false,
-      "requires": ["build:shared"]
+      "requires": ["build:shared", "docker"]
     },
     "test:mutation": {
       "cmd": "npm run test:mutation",
@@ -304,9 +304,9 @@
     "test:e2e": {
       "cmd": "npm run test:e2e",
       "tier": 1,
-      "gate": "every Playwright spec passes",
+      "gate": "every Playwright spec passes, against a harness that starts an in-memory MongoDB AND the pinned object-storage engine in a container, so the document journeys run against the engine the stack ships rather than against a double",
       "report": "junit-e2e.xml",
-      "requires": ["build:shared"]
+      "requires": ["build:shared", "docker"]
     },
     "audit:image": {
       "cmd": "npm run ci:docker",
@@ -356,7 +356,7 @@
     },
     {
       "area": "rendered-output and degraded-network testing",
-      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over fifteen views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
+      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over twenty views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
       "ledger": ["SUP-0031", "SUP-0037"],
       "review": "2026-11-11"
     },
@@ -374,7 +374,7 @@
     },
     {
       "area": "accessibility below the blocking threshold",
-      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported and ratcheted but do not fail the gate, and 20 are currently open across the fifteen scanned views (landmark-one-main, page-has-heading-one, region, landmark-unique, heading-order). The scan also runs in the light theme only.",
+      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported and ratcheted but do not fail the gate, and 20 are currently open across the twenty scanned views (landmark-one-main, page-has-heading-one, region, landmark-unique, heading-order). The scan also runs in the light theme only.",
       "ledger": [],
       "review": "2026-11-11"
     }

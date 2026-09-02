@@ -683,7 +683,18 @@ const GATES = [
     title: 'E2E (Playwright, Chromium)',
     ci: 'e2e job',
     dependsOn: ['build'],
-    requires: ['build:shared'],
+    // `docker` is APPENDED to the shared build rather than replacing it, and both
+    // halves are load-bearing. The suite still imports `@hvault/shared` for its
+    // constants, so a gate declaring only `docker` would report a missing shared
+    // build as a broken browser journey. And `e2e/start-server.ts` now stands the
+    // real object-storage engine up in a container before it spawns the dev
+    // server: without it the server answers `documents: { enabled: false }`, the
+    // client hides the whole section, and the document specs plus four of the
+    // accessibility views fail with symptoms that say nothing about the code. A
+    // DECLARED prerequisite that is absent is reported as COULD NOT RUN (exit 2),
+    // which is the honest verdict for a machine with no daemon; a discovered one
+    // would be a red gate blaming this application for Docker.
+    requires: ['build:shared', 'docker'],
     // --forbid-only mirrors the CI config's `forbidOnly: !!process.env.CI`, but CI
     // is deliberately NOT set: that would also flip `reuseExistingServer` off and
     // make the gate fail outright whenever a dev server already holds the client
@@ -715,10 +726,15 @@ const GATES = [
     // It runs AFTER `e2e`, and that order is worth keeping: both drive the same
     // dev server, and Playwright reuses one that is already listening, so the
     // second run does not pay for Vite's cold transform of every route chunk.
-    title: 'Accessibility (axe over 15 views, plus the keyboard invariants)',
+    title: 'Accessibility (axe over 20 views, plus the keyboard invariants)',
     ci: 'new — no hosted job ever checked whether this application can be used without a mouse',
     dependsOn: ['build'],
-    requires: ['build:shared'],
+    // `docker` for the same reason `e2e` carries it, and it is not optional here
+    // either: `playwright.a11y.config.ts` spreads the base config's `webServer`
+    // (`gate-surface.test.ts` asserts the two are equal), so this gate boots the
+    // very same `e2e/start-server.ts` and its four document views need the engine
+    // that harness starts.
+    requires: ['build:shared', 'docker'],
     run: (options) => runExe(process.execPath, ['scripts/ci/a11y-gate.mjs'], options),
   },
   {
@@ -776,7 +792,14 @@ const GATES = [
     title: 'Ten shuffled parallel runs of the whole suite, plus the E2E suite three times over',
     ci: 'new — nothing has ever asked whether this suite gives the same answer twice',
     dependsOn: ['build'],
-    requires: ['build:shared'],
+    // `docker` because of the Playwright leg, and it is DECLARED rather than
+    // discovered even though the ten vitest runs need no daemon. The gate's claim
+    // is "ten runs of every suite plus the E2E suite three times over", and
+    // `e2e/start-server.ts` stands the object-storage engine up in a container —
+    // so on a machine with no daemon this gate cannot make that claim at all, and
+    // "could not run" is the honest verdict rather than a red run reporting a
+    // flake rate measured over the suites that happened to work.
+    requires: ['build:shared', 'docker'],
     run: (options) => runExe(process.execPath, ['scripts/ci/flake-run.mjs'], options),
   },
   {

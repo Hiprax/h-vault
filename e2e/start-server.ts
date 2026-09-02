@@ -1,14 +1,17 @@
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { spawn } from 'node:child_process';
 import { applyMongoKernelCompat } from '../packages/server/tests/mongoKernelCompat.js';
+import { createS3Provider } from '../packages/server/src/services/storage/s3Provider.js';
+import { startStorageEngine, type StorageEngine } from '../tests/harness/s3Server.js';
 
 /**
  * E2E server startup script.
  *
- * Starts an in-memory MongoDB on port 27017 (the standard port), then launches
- * `npm run dev` with dev-safe environment variables. Because MMS uses the
- * standard port, both the server and E2E tests (which default to
- * `mongodb://127.0.0.1:27017/hvault`) connect to the same instance.
+ * Starts an in-memory MongoDB on port 27017 (the standard port) and the real
+ * object-storage engine in a container, then launches `npm run dev` with
+ * dev-safe environment variables. Because MMS uses the standard port, both the
+ * server and E2E tests (which default to `mongodb://127.0.0.1:27017/hvault`)
+ * connect to the same instance.
  *
  * If port 27017 is already occupied (e.g. real MongoDB running), MMS is skipped
  * and the existing instance is used instead.
@@ -16,6 +19,33 @@ import { applyMongoKernelCompat } from '../packages/server/tests/mongoKernelComp
 
 const MONGO_PORT = 27017;
 const MONGO_URI = `mongodb://127.0.0.1:${String(MONGO_PORT)}/hvault`;
+
+/**
+ * The per-document ceiling and the per-user allowance this harness pins, in MB.
+ *
+ * They are here rather than in a spec because they are read by `loadConfig` at
+ * the dev server's boot: nothing a test does can change them afterwards, so the
+ * only place they can be chosen is the process that spawns it.
+ *
+ * Both are deliberately TINY. Two of the journeys `e2e/documents.spec.ts` owns
+ * are refusals — a file over the per-document cap, and an upload that would take
+ * the account past its allowance — and at the shipped defaults (100 MB and
+ * 2048 MB) reaching either would mean pushing gigabytes through a browser's
+ * AES-GCM, a dev server and a container to prove an arithmetic comparison. The
+ * numbers are the operator's to choose in any deployment, so choosing small ones
+ * here tests the same code with the same branches.
+ *
+ * `loadConfig` carries a `.refine` requiring the allowance to be at least the
+ * per-document cap, so these two cannot be lowered independently.
+ *
+ * The visible consequence, stated so it is a decision rather than a surprise:
+ * with a 1 MB ceiling and an 8 MiB plaintext chunk, EVERY end-to-end upload is a
+ * single segment and takes the `PutObject` path. Multi-segment framing is
+ * covered where it can be covered honestly and cheaply — the server integration
+ * suite, and `test:storage` against the real engine at the real 8 MiB part size.
+ */
+const MAX_DOCUMENT_SIZE_MB = 1;
+const DOCUMENT_STORAGE_QUOTA_MB_PER_USER = 1;
 
 const E2E_ENV: Record<string, string> = {
   NODE_ENV: 'development',
@@ -36,6 +66,8 @@ const E2E_ENV: Record<string, string> = {
   SMTP_PASS: '',
   GMAIL_USERNAME: '',
   GMAIL_PASSWORD: '',
+  MAX_DOCUMENT_SIZE_MB: String(MAX_DOCUMENT_SIZE_MB),
+  DOCUMENT_STORAGE_QUOTA_MB_PER_USER: String(DOCUMENT_STORAGE_QUOTA_MB_PER_USER),
 };
 
 /**
@@ -53,6 +85,41 @@ const E2E_ENV: Record<string, string> = {
  * an overwrite — see mongoKernelCompat.ts. The spawned mongod inherits process.env.
  */
 applyMongoKernelCompat();
+
+/**
+ * Stand the object-storage engine up, or explain why the suite cannot run.
+ *
+ * The document store is not optional scenery for this harness: with no `S3_*`
+ * configured the server reports `documents: { enabled: false }`, the client hides
+ * the whole section, and `e2e/documents.spec.ts`, `e2e/document-viewer.spec.ts`
+ * and four of the accessibility views would fail with symptoms that say nothing
+ * about the code. So the engine is a hard requirement, and `test:e2e` and
+ * `test:a11y` both DECLARE `docker` in `.testfortress/verify.json` and in
+ * `scripts/ci/local-ci.mjs` — a declared prerequisite that is missing is reported
+ * as "could not run" (exit 2), never as a red gate.
+ *
+ * The readiness probe is the SERVER'S OWN provider, built from the same factory
+ * the dev server will build one from, so "ready" means ready for that client's
+ * credentials, signing and addressing rather than merely that a socket answers.
+ * `tests/harness/s3Server.ts` polls it; it never sleeps, because `test:flake`
+ * runs this suite repeatedly and a fixed wait is either ten times too long or a
+ * race that surfaces in run seven.
+ */
+async function startStorage(): Promise<StorageEngine> {
+  try {
+    return await startStorageEngine({
+      probe: (connection) => createS3Provider(connection).headBucket(),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      'the E2E harness could not start the object-storage engine, so the document store ' +
+        'would be switched off and its specs would fail for a reason that is not about them. ' +
+        'A working Docker daemon is a declared prerequisite of `test:e2e` and `test:a11y`.\n' +
+        message,
+    );
+  }
+}
 
 async function main(): Promise<void> {
   let mongod: MongoMemoryServer | undefined;
@@ -74,12 +141,60 @@ async function main(): Promise<void> {
     console.warn(`[e2e] port ${String(MONGO_PORT)} is busy — assuming a real MongoDB is running`);
   }
 
+  const engine = await startStorage();
+  console.log(`[e2e] object storage on ${engine.endpoint} (${engine.image})`);
+
+  // THIS PROCESS TAKES THE SIGNALS BACK, and the reason is a leak rather than a
+  // preference. `startStorageEngine` installs its own SIGINT/SIGTERM handlers that
+  // remove the container and then call `process.exit(1)` — correct for a vitest
+  // file, which has nothing else to wind down, and wrong here. Node CLONES the
+  // listener array before dispatching a signal, so a handler registered later
+  // cannot cancel one registered earlier, and the harness's `process.exit(1)`
+  // would abort this process in the middle of `mongod.stop()`. Playwright ends
+  // every run with SIGTERM, so that is not an edge case: it would strand a
+  // RAM-backed mongod dbPath under /tmp on EVERY run.
+  //
+  // `engine.stop()` is called from the teardown below instead, and the harness's
+  // `process.on('exit')` hook — a synchronous `docker rm -f`, which no async
+  // teardown could replace — is deliberately left in place as the last resort.
+  process.removeAllListeners('SIGINT');
+  process.removeAllListeners('SIGTERM');
+
   const env: Record<string, string> = {
     ...filterEnv(process.env),
     ...E2E_ENV,
     MONGODB_URI: MONGO_URI,
+    // The four connection variables the server validates ALL-OR-NONE, plus the two
+    // that have defaults. They are spread AFTER the developer's own environment on
+    // purpose: `config/index.ts` calls `dotenv.config()` without `override`, so
+    // process.env wins over the repository's `.env`, and a developer who points
+    // `S3_*` at a real bucket does not have this suite write to it.
+    S3_ENDPOINT: engine.endpoint,
+    S3_REGION: engine.region,
+    S3_BUCKET: engine.bucket,
+    S3_ACCESS_KEY_ID: engine.accessKeyId,
+    S3_SECRET_ACCESS_KEY: engine.secretAccessKey,
+    S3_FORCE_PATH_STYLE: String(engine.forcePathStyle),
   };
 
+  // NOT `detached`, and that is a MEASURED decision rather than a default left
+  // alone. `npm run dev` is `concurrently` under a shell, so `child.kill()`
+  // signals the shell and leaves `vite` and `tsx watch` holding ports 5173 and
+  // 5000 — which is untidy, and which matters more now that this harness owns a
+  // container too: `reuseExistingServer` is on outside CI, so a later run can
+  // adopt a dev server whose storage engine has since been removed and see every
+  // document spec fail against a 503.
+  //
+  // Spawning `detached` and signalling the process GROUP looks like the fix and
+  // is worse. Measured, on a run whose six specs all passed: the group kill still
+  // did not reach `concurrently`'s children, AND Playwright's own webServer
+  // teardown then never completed — the orphans hold the inherited stdout pipe
+  // that Playwright waits on, and putting them outside the group it kills turned a
+  // leak into a HANG. A gate that hangs after a green run is strictly worse than
+  // one that leaves a dev server up, so this stays as it is.
+  //
+  // If a run ever fails inside the document specs with a 503, check for a dev
+  // server from an earlier run first: `ss -tln | grep 5173`.
   const child = spawn('npm run dev', {
     env,
     stdio: 'inherit',
@@ -101,20 +216,24 @@ async function main(): Promise<void> {
     return mongoStop;
   };
 
+  // `engine.stop()` is already idempotent (it latches on its first call), so this
+  // needs no guard of its own; it is written beside `stopMongo` so the two read as
+  // one teardown rather than as two conventions.
+  const stopEverything = (): Promise<unknown> =>
+    Promise.all([stopMongo().catch(() => undefined), engine.stop().catch(() => undefined)]);
+
   const cleanup = (): void => {
     child.kill();
-    void stopMongo().catch(() => undefined);
+    void stopEverything();
   };
 
   process.on('SIGTERM', cleanup);
   process.on('SIGINT', cleanup);
 
   child.on('exit', (code) => {
-    void stopMongo()
-      .catch(() => undefined)
-      .then(() => {
-        process.exit(code ?? 1);
-      });
+    void stopEverything().then(() => {
+      process.exit(code ?? 1);
+    });
   });
 }
 

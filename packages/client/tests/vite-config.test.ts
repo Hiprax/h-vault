@@ -435,6 +435,56 @@ describe('the document sandbox build', () => {
     // reason the first build is already known to survive.
     expect(runner.match(/spawnSync\(/g) ?? []).toHaveLength(1);
   });
+
+  it('gives the isolated document ONE named landmark, because nothing else can check its skeleton', async () => {
+    // The gate this replaces does not exist, and that is the point. axe's
+    // page-level rules — `landmark-one-main`, `region`, `document-title`,
+    // `html-has-lang` — either carry `is-initiator-matches` or aggregate at the
+    // page level, so NONE of them runs against this document while it is framed.
+    // `test:a11y` therefore scans it a second time as a top-level page
+    // (`sandbox-rendered`), which is what found the two findings this markup
+    // answers; but all three of them are graded `moderate`, and that gate blocks
+    // on `serious` and `critical` only. So reverting this file to a bare
+    // `<div id="root">` leaves every gate in this repository green, and the two
+    // findings come back silently.
+    //
+    // Read as SOURCE rather than rendered, because this is the one document
+    // jsdom never loads: `document-sandbox.test.tsx` and `sandbox-renderers.test.ts`
+    // both build their own `<div id="root">` host by hand, so neither of them
+    // sees this file at all.
+    const source = await readFile(
+      fileURLToPath(new URL(`../${SANDBOX_HTML}`, import.meta.url)),
+      'utf8',
+    );
+    // COMMENTS STRIPPED FIRST. This file is heavily commented and its comments
+    // discuss the very markup below by name, so a pattern run over the raw text
+    // matches prose: measured, `/<main([^>]*)>/` found the `<main>` inside the
+    // sentence explaining why the element is a `<main>`, and reported it as an
+    // element with no attributes.
+    const html = source.replace(/<!--[\s\S]*?-->/g, '');
+
+    // The render target is a `<main>`, and it is the element `startSandbox`
+    // looks up: `renderTarget` asks for `#root` and only builds a `<div>` when
+    // the id is missing entirely, so the id and the tag have to travel together.
+    const target = /<main([^>]*)>/.exec(html);
+    expect(target, 'sandbox.html has no <main>').not.toBeNull();
+    const attributes = target?.[1] ?? '';
+    expect(attributes).toContain('id="root"');
+    // NAMED, because embedded this landmark sits beside the application's own
+    // `<main>` and two landmarks sharing a role and an accessible name is
+    // `landmark-unique` — measured, the moment this stopped being a `<div>`.
+    expect(/aria-label="[^"]+"/.test(attributes)).toBe(true);
+
+    // NEGATIVES. Exactly one `<main>`, so a second one added later cannot
+    // reintroduce `landmark-one-main` from the other direction; and no element
+    // still carries the id the renderers look up other than that landmark, so
+    // this cannot pass while the real target is a `<div>` beside it.
+    expect(html.match(/<main[\s>]/g) ?? []).toHaveLength(1);
+    expect(html.match(/id="root"/g) ?? []).toHaveLength(1);
+    // The two page-level rules that pass today and are checked by nothing else.
+    expect(html).toContain('<html lang="en">');
+    expect(/<title>[^<]+<\/title>/.test(html)).toBe(true);
+  });
 });
 
 // The dev server is what the e2e and a11y gates actually drive, and it serves

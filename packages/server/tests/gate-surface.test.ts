@@ -418,6 +418,30 @@ describe('prerequisites are declared, not discovered', () => {
     }
   });
 
+  it('declares docker on the two browser gates, BESIDE the shared build and not instead of it', () => {
+    // `e2e/start-server.ts` starts the real object-storage engine in a container
+    // before it spawns the dev server, so both Playwright gates need a daemon —
+    // `test:a11y` as much as `test:e2e`, because `playwright.a11y.config.ts`
+    // spreads the base config's `webServer` and therefore boots the same
+    // harness. Pinned as the exact PAIR rather than with `toContain`, and in both
+    // places, for two reasons that have each cost this repository something:
+    // dropping `build:shared` would report a missing shared build as a broken
+    // browser journey, and dropping `docker` would report a missing daemon as a
+    // FAILED gate instead of one that could not run.
+    const byId = new Map(gates.map((gate) => [gate.id, gate]));
+    for (const [id, task] of [
+      ['e2e', 'test:e2e'],
+      ['a11y', 'test:a11y'],
+      // The flake gate runs the Playwright suite three times over, so the same
+      // reasoning reaches it: its ten vitest runs need no daemon, but its stated
+      // claim covers the E2E suite, and it cannot make that claim without one.
+      ['flake', 'test:flake'],
+    ] as const) {
+      expect(byId.get(id)?.requires, `gate ${id}`).toEqual(['build:shared', 'docker']);
+      expect(manifest.tasks[task]!.requires, task).toEqual(['build:shared', 'docker']);
+    }
+  });
+
   it('stops a failed build from dragging the gates that consume it into failure', () => {
     const byId = new Map(gates.map((gate) => [gate.id, gate]));
     for (const id of ['type-check', 'test', 'test-integration', 'security', 'e2e']) {
@@ -1306,8 +1330,27 @@ describe('machine-readable reports', () => {
       'settings',
       'vault-health',
       'file-encryption',
+      'documents-list',
+      'document-upload-review',
+      'document-detail',
+      'document-viewer',
       'unlock-screen',
+      'sandbox-rendered',
     ]);
+    // The document views' ORDER is load-bearing in one place, and it is cheap to
+    // state: `sandbox-rendered` comes AFTER `unlock-screen` because the unlock
+    // step locks the vault and every view before it needs an unlocked one, while
+    // that last view is a top-level navigation to `/sandbox.html` and needs no
+    // session at all. A list that put them the other way round would fail in the
+    // spec rather than here, with a symptom that named neither.
+    expect(A11Y_VIEW_IDS.indexOf('sandbox-rendered')).toBeGreaterThan(
+      A11Y_VIEW_IDS.indexOf('unlock-screen'),
+    );
+    for (const view of ['documents-list', 'document-detail', 'document-viewer']) {
+      expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(
+        A11Y_VIEW_IDS.indexOf('unlock-screen'),
+      );
+    }
     // Every id is unique and every view says what state the page is in — the
     // description is what makes a report readable a year later.
     expect(new Set(A11Y_VIEW_IDS).size).toBe(A11Y_VIEW_IDS.length);

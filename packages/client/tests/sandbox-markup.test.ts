@@ -187,6 +187,29 @@ describe('the markdown renderer, on a corpus of hostile documents', () => {
     expect((checkboxes[0] as HTMLInputElement).checked).toBe(true);
     expect((checkboxes[0] as HTMLInputElement).disabled).toBe(true);
 
+    // EVERY checkbox carries an accessible name, and the two kinds get different
+    // ones. A task-list marker takes its own item's text — `remark-gfm` puts that
+    // text NEXT TO the input rather than in a label, so without this a screen
+    // reader announces "checkbox, checked" with nothing saying what is checked,
+    // which axe grades `critical` and which fires on the plainest README there
+    // is. A form field the sanitizer neutralised into a checkbox has no list item
+    // to take a name from, so it gets the constant instead.
+    expect(checkboxes[0]?.getAttribute('aria-label')).toBe('a completed task');
+    expect(checkboxes[1]?.getAttribute('aria-label')).toBe('an incomplete one');
+    const neutralised = rendered.querySelector('input[name="user-content-getElementById"]');
+    expect(neutralised?.getAttribute('type')).toBe('checkbox');
+    expect(neutralised?.getAttribute('aria-label')).toBe('Checkbox in this document');
+    // NEGATIVE: naming a control must not have changed what it IS. The state a
+    // reader needs after the name is still on it, and nothing was hidden from
+    // the accessibility tree to make the finding go away.
+    expect((checkboxes[0] as HTMLInputElement).checked).toBe(true);
+    expect((checkboxes[1] as HTMLInputElement).checked).toBe(false);
+    for (const input of rendered.querySelectorAll('input')) {
+      expect(input.getAttribute('aria-hidden')).toBeNull();
+      expect(input.getAttribute('role')).toBeNull();
+      expect(input.getAttribute('aria-label')).not.toBe('');
+    }
+
     expect(rendered.querySelector('del')?.textContent).toBe('struck through');
     // An autolink, which GFM produces and the sanitizer allows.
     expect(
@@ -202,6 +225,64 @@ describe('the markdown renderer, on a corpus of hostile documents', () => {
     const code = rendered.querySelector('pre code');
     expect(code?.className).toContain('hljs');
     expect(code?.querySelector('.hljs-keyword')).not.toBeNull();
+  });
+
+  it('names a task from its OWN item, never from the sub-tasks nested under it', async () => {
+    // The failure this pins is silent and gets worse with depth: `textContent`
+    // on a list item includes every nested list under it, so the outermost task
+    // in a three-level plan would announce the entire branch before saying
+    // anything about itself.
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(
+        '- [x] ship the outer thing\n  - [ ] the inner thing\n  - [ ] the other inner thing\n',
+      ),
+    );
+
+    const checkboxes = rendered.querySelectorAll('.task-list-item input[type="checkbox"]');
+    expect(checkboxes).toHaveLength(3);
+    expect(checkboxes[0]?.getAttribute('aria-label')).toBe('ship the outer thing');
+    // NEGATIVE: the nested text is absent from the outer name, and each inner
+    // task still gets its own.
+    expect(checkboxes[0]?.getAttribute('aria-label')).not.toContain('inner');
+    expect(checkboxes[1]?.getAttribute('aria-label')).toBe('the inner thing');
+    expect(checkboxes[2]?.getAttribute('aria-label')).toBe('the other inner thing');
+  });
+
+  it('cuts an over-long task name rather than announcing a paragraph before the control', async () => {
+    // An accessible name is read in full BEFORE anything else about the control,
+    // so an unbounded one turns a checkbox into a minute of speech. Cut with an
+    // ellipsis, because the item's own text follows immediately and carries the
+    // rest.
+    const long = 'x'.repeat(200);
+    const rendered = await renderMarkdown(document, bytesOf(`- [ ] ${long}\n`));
+
+    const label = rendered
+      .querySelector('.task-list-item input[type="checkbox"]')
+      ?.getAttribute('aria-label');
+    // 120 characters plus the one-character ellipsis. Asserted as a length and a
+    // suffix rather than as the whole string, so the bound is what is pinned.
+    expect(label).toHaveLength(121);
+    expect(label?.endsWith('\u2026')).toBe(true);
+    expect(label?.startsWith('xxx')).toBe(true);
+  });
+
+  it('falls back to a constant for a checkbox whose item has nothing to name it', async () => {
+    // Reachable two ways: an item that is only a marker, and any `<input>` the
+    // sanitizer neutralised into a checkbox outside a list. Without the
+    // fallback the attribute would be present and EMPTY, which axe grades
+    // exactly as harshly as a missing one — and which would have passed a test
+    // that only asserted the attribute exists.
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf('<ul><li><input type="checkbox"></li></ul>\n\n<input name="loose">\n'),
+    );
+
+    const labels = [...rendered.querySelectorAll('input')].map((input) =>
+      input.getAttribute('aria-label'),
+    );
+    expect(labels).toHaveLength(2);
+    for (const label of labels) expect(label).toBe('Checkbox in this document');
   });
 
   it('tells the reader that remote images are not loaded, rather than showing a broken one', async () => {

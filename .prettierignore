@@ -20,5 +20,13 @@ packages/client/tests/export/goldens
 packages/client/tests/fuzz/corpus
 packages/client/tests/fuzz/format-corpus
 
+# The end-to-end document fixtures, for the same reason: `broken.json` is
+# deliberately unparseable (an elided array element, which the repair engine is
+# asserted to REFUSE, naming the line) and `ugly.json` is deliberately
+# unformatted (single quotes and trailing commas, which the same engine is
+# asserted to repair and reformat). Prettier would fail on the first and rewrite
+# the second into the file the assertion says it must produce.
+e2e/fixtures
+
 # Mutation testing scratch: Stryker sandbox copies of the whole checkout.
 .stryker-tmp

@@ -363,8 +363,22 @@ describe('DocumentsPage — the feature flag decides before anything is fetched'
     renderPage();
 
     expect(await screen.findByRole('heading', { name: 'Documents' })).toBeInTheDocument();
-    expect(fetchDocuments).toHaveBeenCalledTimes(1);
-    expect(fetchUsage).toHaveBeenCalledTimes(1);
+    // AWAITED, because the heading is not a signal that the effect behind it has
+    // run. The load is a passive effect, so React schedules it after the commit
+    // that painted this heading, and asserting the call count the instant the
+    // heading appears is a race with the effect flush — measured, as a single
+    // "expected 1, got 0" inside a pipeline run on a machine that had no free
+    // memory left, passing in isolation every time.
+    //
+    // It is the same claim, not a weaker one: `waitFor` retries until the
+    // callback stops throwing, so a load that never happens still fails on the
+    // deadline, and a load that happens TWICE fails immediately and keeps
+    // failing — `toHaveBeenCalledTimes(1)` can never be satisfied by a second
+    // call arriving later.
+    await waitFor(() => {
+      expect(fetchDocuments).toHaveBeenCalledTimes(1);
+      expect(fetchUsage).toHaveBeenCalledTimes(1);
+    });
     expect(screen.queryByTestId('documents-unavailable')).not.toBeInTheDocument();
     expect(screen.queryByTestId('documents-offline')).not.toBeInTheDocument();
   });

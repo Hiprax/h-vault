@@ -109,7 +109,18 @@ export default defineConfig({
           command: 'npx tsx e2e/start-server.ts',
           url: `${CLIENT_ORIGIN}/api/v1/health`,
           reuseExistingServer: !process.env.CI,
-          timeout: 180_000,
+          // RAISED from 180 s, and only in the direction that cannot hide a
+          // defect. `e2e/start-server.ts` now does three things before the dev
+          // server answers this URL: it starts an in-memory mongod, it starts the
+          // real object-storage engine in a container, and it waits for that
+          // engine to answer a HeadBucket through the server's own S3 client. On a
+          // machine that has never pulled the pinned image, `docker run` fetches
+          // it first — unbounded work that has nothing to do with this
+          // application — and the engine's own readiness deadline is 60 s on top.
+          // A budget is not a gate: expiring early would report a slow first pull
+          // as "the stack never came up", while a longer one costs nothing on a
+          // healthy run and only delays a genuine failure's report.
+          timeout: 420_000,
         },
       }),
 });

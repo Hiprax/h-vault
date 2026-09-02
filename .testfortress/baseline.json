@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-08-14",
-  "commit": "224d125",
+  "recordedAt": "2026-09-02",
+  "commit": "dae7b87",
   "tests": {
-    "count": 7695
+    "count": 9421
   },
   "coverage": {
     "diff": 100
@@ -12,12 +12,12 @@
     "lint": 0,
     "typecheck": 0,
     "compiler": 0,
-    "audit:config": 60
+    "audit:config": 59
   },
   "a11y": {
     "critical": 0,
     "serious": 0,
-    "viewsScanned": 15
+    "viewsScanned": 20
   },
   "suppressions": {
     "count": 20,
@@ -27,16 +27,17 @@
     "packages/shared": {
       "coverage": {
         "line": 100,
-        "branch": 98.83,
+        "branch": 98.91,
         "function": 100,
-        "linesTotal": 548,
-        "branchesTotal": 343,
+        "linesTotal": 652,
+        "branchesTotal": 367,
         "filesMeasured": [
           "src/constants/index.ts",
           "src/index.ts",
           "src/schemas/auth.ts",
           "src/schemas/common.ts",
           "src/schemas/config.ts",
+          "src/schemas/document.ts",
           "src/schemas/folder.ts",
           "src/schemas/user.ts",
           "src/schemas/vault.ts",
@@ -45,26 +46,28 @@
         ]
       },
       "tests": {
-        "count": 996
+        "count": 1284
       }
     },
     "packages/server": {
       "coverage": {
-        "line": 97.96,
-        "branch": 91.39,
-        "function": 97.34,
-        "linesTotal": 3085,
-        "branchesTotal": 1556,
+        "line": 98.84,
+        "branch": 92.93,
+        "function": 98.33,
+        "linesTotal": 4057,
+        "branchesTotal": 2064,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/seedBreachesArgs.ts",
           "src/config/database.ts",
           "src/config/index.ts",
+          "src/config/sandboxCsp.ts",
           "src/config/swagger.ts",
           "src/constants/index.ts",
           "src/controllers/authController.ts",
           "src/controllers/backupController.ts",
           "src/controllers/configController.ts",
+          "src/controllers/documentController.ts",
           "src/controllers/folderController.ts",
           "src/controllers/healthController.ts",
           "src/controllers/metricsController.ts",
@@ -73,16 +76,21 @@
           "src/controllers/vaultController.ts",
           "src/jobs/backupScheduler.ts",
           "src/jobs/breachSeed.ts",
+          "src/jobs/documentCleanup.ts",
           "src/jobs/tokenCleanup.ts",
           "src/jobs/trashCleanup.ts",
           "src/middleware/auth.ts",
           "src/middleware/csrf.ts",
+          "src/middleware/documentPartBody.ts",
           "src/middleware/rateLimitStore.ts",
           "src/middleware/rateLimiter.ts",
+          "src/middleware/requireStorage.ts",
           "src/middleware/validate.ts",
           "src/middleware/validateObjectId.ts",
           "src/models/AuditLog.ts",
           "src/models/BackupLog.ts",
+          "src/models/Document.ts",
+          "src/models/DocumentUpload.ts",
           "src/models/Folder.ts",
           "src/models/JobLock.ts",
           "src/models/Migration.ts",
@@ -92,19 +100,26 @@
           "src/models/User.ts",
           "src/models/VaultItem.ts",
           "src/models/deviceInfo.ts",
+          "src/models/documentFields.ts",
           "src/routes/auth.ts",
           "src/routes/backup.ts",
           "src/routes/config.ts",
+          "src/routes/documents.ts",
           "src/routes/folders.ts",
           "src/routes/health.ts",
           "src/routes/tools.ts",
           "src/routes/user.ts",
           "src/routes/vault.ts",
           "src/services/auditService.ts",
+          "src/services/storage/index.ts",
+          "src/services/storage/s3Provider.ts",
+          "src/services/storage/types.ts",
           "src/utils/breachSeed.ts",
           "src/utils/cascadeDelete.ts",
           "src/utils/controllerHelpers.ts",
           "src/utils/cryptoManager.ts",
+          "src/utils/documentObjects.ts",
+          "src/utils/documentSummary.ts",
           "src/utils/email.ts",
           "src/utils/folderGraph.ts",
           "src/utils/gracefulShutdown.ts",
@@ -114,7 +129,9 @@
           "src/utils/logger.ts",
           "src/utils/loginThrottle.ts",
           "src/utils/migrations.ts",
+          "src/utils/partSemaphore.ts",
           "src/utils/sizeEstimator.ts",
+          "src/utils/storageHealth.ts",
           "src/utils/swaggerWarning.ts",
           "src/utils/token.ts",
           "src/utils/transactionSupport.ts",
@@ -122,22 +139,28 @@
         ]
       },
       "tests": {
-        "count": 3000
+        "count": 3736
       }
     },
     "packages/client": {
       "coverage": {
-        "line": 98.71,
-        "branch": 92.48,
-        "function": 97.95,
-        "linesTotal": 7050,
-        "branchesTotal": 4961,
+        "line": 98.97,
+        "branch": 92.68,
+        "function": 98.32,
+        "linesTotal": 8816,
+        "branchesTotal": 6092,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
           "src/components/auth/LoginPage.tsx",
           "src/components/auth/RegisterPage.tsx",
           "src/components/auth/UnlockScreen.tsx",
+          "src/components/documents/DocumentDetail.tsx",
+          "src/components/documents/DocumentList.tsx",
+          "src/components/documents/DocumentSandbox.tsx",
+          "src/components/documents/DocumentTransformControls.tsx",
+          "src/components/documents/DocumentUploadPanel.tsx",
+          "src/components/documents/StorageUnavailable.tsx",
           "src/components/layout/AppLayout.tsx",
           "src/components/layout/ErrorBoundary.tsx",
           "src/components/layout/OnboardingGuide.tsx",
@@ -176,20 +199,27 @@
           "src/hooks/useClipboardCountdown.ts",
           "src/hooks/useClipboardGuard.ts",
           "src/hooks/useConnectionStatus.ts",
+          "src/hooks/useDocumentsConfig.ts",
           "src/hooks/useFavicon.ts",
           "src/hooks/useKeyboardShortcuts.ts",
+          "src/hooks/useUploadUnloadGuard.ts",
           "src/hooks/useUserSettings.ts",
           "src/lib/accessToken.ts",
           "src/lib/address.ts",
           "src/lib/download.ts",
+          "src/lib/lazySha256.ts",
           "src/lib/lazyZxcvbn.ts",
           "src/lib/logger.ts",
+          "src/lib/sandboxHandshake.ts",
+          "src/lib/textDiff.ts",
           "src/lib/utils.ts",
           "src/lib/vaultData.ts",
           "src/lib/vaultDisplay.ts",
           "src/lib/vaultSearch.ts",
           "src/pages/AuditLogPage.tsx",
           "src/pages/BackupSettingsPage.tsx",
+          "src/pages/DocumentPage.tsx",
+          "src/pages/DocumentsPage.tsx",
           "src/pages/ExportDataPage.tsx",
           "src/pages/FileEncryptionPage.tsx",
           "src/pages/ForgotPasswordPage.tsx",
@@ -205,17 +235,34 @@
           "src/pages/VaultItemPage.tsx",
           "src/pages/VaultPage.tsx",
           "src/pages/VerifyEmailPage.tsx",
+          "src/sandbox/decode.ts",
+          "src/sandbox/dom.ts",
+          "src/sandbox/protocol.ts",
+          "src/sandbox/renderers/html.ts",
+          "src/sandbox/renderers/image.ts",
+          "src/sandbox/renderers/markdown.ts",
+          "src/sandbox/renderers/media.ts",
+          "src/sandbox/renderers/pipeline.ts",
+          "src/sandbox/renderers/table.ts",
+          "src/sandbox/renderers/text.ts",
+          "src/sandbox/sandbox.ts",
+          "src/sandbox/sniff.ts",
+          "src/sandbox/transform/formatEngine.ts",
           "src/services/api/authApi.ts",
           "src/services/api/client.ts",
           "src/services/api/configApi.ts",
+          "src/services/api/documentsApi.ts",
           "src/services/api/userApi.ts",
           "src/services/api/vaultApi.ts",
           "src/services/auth/sessionFailure.ts",
           "src/services/auth/sessionResume.ts",
           "src/services/clipboard/clipboardService.ts",
           "src/services/crypto/cryptoService.ts",
+          "src/services/crypto/documentCryptoService.ts",
           "src/services/crypto/fileCryptoService.ts",
           "src/services/crypto/passwordHistory.ts",
+          "src/services/documents/download.ts",
+          "src/services/documents/transform.ts",
           "src/services/export/csvWriter.ts",
           "src/services/export/folderPath.ts",
           "src/services/export/formats/bitwardenCsv.ts",
@@ -247,6 +294,7 @@
           "src/services/import/uri.ts",
           "src/services/offlineCache.ts",
           "src/stores/authStore.ts",
+          "src/stores/documentsStore.ts",
           "src/stores/encryptedStorage.ts",
           "src/stores/uiStore.ts",
           "src/stores/vaultStore.ts",
@@ -256,12 +304,12 @@
         ]
       },
       "tests": {
-        "count": 3496
+        "count": 4192
       }
     },
     "e2e": {
       "tests": {
-        "count": 203
+        "count": 209
       }
     }
   },
@@ -300,6 +348,7 @@
     "test:security",
     "test:smoke",
     "test:snapshot",
+    "test:storage",
     "test:unit",
     "test:upgrade",
     "typecheck",
@@ -429,9 +478,9 @@
     ]
   },
   "duplication": {
-    "percentage": 2.86,
-    "clones": 132,
-    "duplicatedLines": 1525,
+    "percentage": 1.98,
+    "clones": 122,
+    "duplicatedLines": 1434,
     "totalLines": 52849,
     "ceiling": 2.89,
     "sources": 190
@@ -457,7 +506,7 @@
     "belowError": {
       "actionlint": 0,
       "hadolint": 5,
-      "spectral": 55
+      "spectral": 54
     },
     "inputsExamined": {
       "actionlint": 1,
@@ -465,7 +514,7 @@
       "spectral": 1
     }
   },
-  "reason": "Validation pass over phases 11-20: the client branch-coverage regression repaired with three behavioural tests (92.45 -> 92.48), the first measured flake sample (10 shuffled runs, 609 e2e executions, 0 failures), the branch denominators and the OpenAPI snapshot fingerprint recorded, and test:dst/test:flake added to the registered task list, and the four vendor-prettier-* chunk ceilings seeded by hand for Phase 20 (measured 285.04/309.12/265.94/138.15 KiB against 320/344/300/160) together with their meta.fields entries, without which a later deletion of one would leave its ceiling freely raisable; bundle.measured refreshed by hand because that block is declared 'info' and --accept records none of it.",
+  "reason": "Phase 23: the accessibility gate now scans twenty views (the four document-store views plus the isolated preview document scanned as a top-level page), and the e2e suite carries the document journeys and the viewer isolation spec. Banks every improvement the full push tier measured on a green run, including the coverage denominators and test counts that had accumulated unaccepted since 2026-08-14.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

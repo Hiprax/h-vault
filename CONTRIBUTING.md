@@ -184,6 +184,15 @@ because the obvious way past each of them is the wrong one.
   the matrix until the route is given a scenario. Neither deleting a row nor dropping a file
   from `SECURITY_SUITE` is an answer to a red run here; both are how this gate stops
   checking the thing it exists to check.
+- **`e2e`** and **`a11y`** drive Playwright against a stack `e2e/start-server.ts` starts
+  from nothing: the dev server, an in-memory MongoDB on the standard port, and the same
+  pinned object-storage engine, in a container. **Both declare the `docker` CLI**, and
+  the reason is worth stating because it is not obvious from the gate names: with no
+  engine the server reports `documents: { enabled: false }`, the client hides the whole
+  section, and the document journeys plus four of the twenty scanned accessibility views
+  fail with symptoms that say nothing about the code. Without a daemon both report **could
+  not run** rather than passing quietly. `flake` inherits the same requirement, because
+  the Playwright suite is three of the runs it makes.
 - **`storage`** runs the storage port against the real object-storage engine, in a
   container, on a loopback port — the same `StorageProvider` contract the in-memory double
   passes on every other gate, plus the cases only a real engine can answer. Read a red run

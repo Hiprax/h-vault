@@ -36,7 +36,13 @@ import type { Element, Root, RootContent } from 'hast';
  *    ~890 KiB, by a wide margin the largest thing this document can download —
  *    and the commonest preview of all, a README with no fenced code, needs none
  *    of it.
- * 4. **Become DOM NODES, never a string.** There is deliberately no
+ * 4. **Name every checkbox.** GFM renders a task list as a disabled
+ *    `<input type="checkbox">` with the item's text beside it as a SIBLING, and
+ *    the sanitizer rewrites every other surviving `<input>` into one of the same
+ *    shape. Neither carries an accessible name, which axe grades `critical`
+ *    ("Form elements must have labels") — measured, on a plain README's task
+ *    list. See {@link nameCheckboxes}.
+ * 5. **Become DOM NODES, never a string.** There is deliberately no
  *    `rehype-stringify` anywhere in this feature. Serialising the sanitized tree
  *    and assigning it to `innerHTML` re-parses it, and the second parse is where
  *    mutation XSS lives: the parser recovers something the sanitizer's first pass
@@ -145,6 +151,85 @@ function isRemoteUrl(value: string): boolean {
 }
 
 /**
+ * The longest accessible name a task item may contribute, in characters.
+ *
+ * A list item can be a paragraph, and an accessible name is read out in full
+ * before anything else about the control — so an unbounded one turns a checkbox
+ * into a minute of speech. Cut with an ellipsis rather than at a word boundary:
+ * the item's own text follows immediately and carries the rest.
+ */
+const MAX_CHECKBOX_LABEL_LENGTH = 120;
+
+/** The name for a checkbox that has no list item to take one from. */
+const UNNAMED_CHECKBOX_LABEL = 'Checkbox in this document';
+
+/** List elements whose text belongs to a NESTED item rather than to this one. */
+const NESTED_LIST_TAGS: ReadonlySet<string> = new Set(['ul', 'ol']);
+
+/**
+ * The accessible name for one rendered checkbox: its own list item's text.
+ *
+ * Nested lists are skipped, because a task with sub-tasks under it would
+ * otherwise take the whole subtree as its name — the deeper the list, the longer
+ * the name, and the outermost item would recite the entire branch.
+ *
+ * The parameter is an `HTMLElement` rather than a DOM `Element`, and that is not
+ * a preference: this module imports `Element` FROM HAST, so the bare name means
+ * a syntax tree node here and a DOM element three lines later would compile
+ * against the wrong type entirely — measured, as two type errors that the vitest
+ * suite could never have shown, because it does not type-check.
+ */
+function checkboxLabel(checkbox: HTMLElement): string {
+  const item = checkbox.closest('li');
+  if (!item) return UNNAMED_CHECKBOX_LABEL;
+  let text = '';
+  for (const node of item.childNodes) {
+    const nested =
+      node.nodeType === Node.ELEMENT_NODE &&
+      NESTED_LIST_TAGS.has((node as HTMLElement).tagName.toLowerCase());
+    if (!nested) text += node.textContent ?? '';
+  }
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  if (collapsed === '') return UNNAMED_CHECKBOX_LABEL;
+  return collapsed.length <= MAX_CHECKBOX_LABEL_LENGTH
+    ? collapsed
+    : `${collapsed.slice(0, MAX_CHECKBOX_LABEL_LENGTH)}\u2026`;
+}
+
+/**
+ * Give every rendered checkbox an accessible name.
+ *
+ * A REAL defect, found by the accessibility gate scanning inside the preview
+ * frame and fixed here rather than excluded there. Two kinds of checkbox reach
+ * this point and both arrive unnamed:
+ *
+ *   * GFM's task-list marker. `remark-gfm` emits
+ *     `<input type="checkbox" disabled>` and puts the task's text NEXT TO it, as
+ *     a sibling of the input rather than as a label — so a screen reader
+ *     announces "checkbox, checked" with nothing saying what is checked. axe
+ *     grades that `critical`, and it fires on the plainest README there is.
+ *   * A form field the sanitizer neutralised. The default schema rewrites every
+ *     surviving `<input>` into a disabled checkbox, which is how a stored HTML
+ *     document's form is defused; those have no list item to take a name from
+ *     and get {@link UNNAMED_CHECKBOX_LABEL}.
+ *
+ * `aria-label` rather than a wrapping `<label>`: the announcement is the same,
+ * and restructuring the sanitized tree to move nodes inside a new element is a
+ * far larger change to make on markup a document controls. The state is left
+ * alone — `checked` and `disabled` are what a reader needs after the name, and
+ * neither `role="presentation"` nor `aria-hidden` could keep them.
+ *
+ * Runs on the DOM rather than on the hast tree, beside the `rel` pass below, for
+ * one reason: the text it reads is the item's RENDERED text, and computing that
+ * from a tree would be a second, divergent implementation of `textContent`.
+ */
+function nameCheckboxes(fragment: DocumentFragment): void {
+  for (const checkbox of fragment.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
+    checkbox.setAttribute('aria-label', checkboxLabel(checkbox));
+  }
+}
+
+/**
  * Sanitize a hast tree, highlight it, and turn it into DOM nodes.
  *
  * The one entry point both markup renderers use. Anything added here reaches
@@ -182,6 +267,8 @@ export async function renderSanitizedMarkup(doc: Document, tree: Root): Promise<
   for (const anchor of fragment.querySelectorAll('a')) {
     anchor.setAttribute('rel', 'noopener noreferrer nofollow');
   }
+
+  nameCheckboxes(fragment);
 
   let remoteContent = false;
   for (const image of fragment.querySelectorAll('img')) {

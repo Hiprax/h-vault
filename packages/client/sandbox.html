@@ -32,7 +32,23 @@
     <title>Document preview</title>
   </head>
   <body>
-    <div id="root"></div>
+    <!--
+      A `<main>` rather than a `<div>`, and the id is what every renderer looks
+      up so the tag is free to be the honest one. This document's entire content
+      IS the preview, so without a landmark axe reports `landmark-one-main` and
+      `region` against it — findings no other scan in this repository could
+      produce, because axe's page-level rules carry `is-initiator-matches` and
+      never run on a framed document. The accessibility gate scans this file as a
+      top-level document for exactly that reason (see `e2e/a11yViews.ts`,
+      `sandbox-rendered`), and these two were the first things it found.
+
+      NAMED, and the name is not decoration either. Embedded, this landmark sits
+      inside a page that has a `<main>` of its own, and two landmarks sharing a
+      role AND an accessible name is `landmark-unique` — measured, the moment
+      this stopped being a `<div>`. The name says which of the two a reader has
+      moved into, which is the useful answer as well as the unique one.
+    -->
+    <main id="root" aria-label="Document preview"></main>
     <script type="module" src="/src/sandbox/sandbox.ts"></script>
   </body>
 </html>
