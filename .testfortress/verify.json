@@ -244,7 +244,7 @@
     "test:deploy": {
       "cmd": "npm run test:deploy",
       "tier": 2,
-      "gate": "the Compose stack comes up from nothing with every service healthy and both one-shots completed, publishes exactly one loopback-bound port and nothing else, completes a vault journey through that port, keeps the data across a restart, and re-runs its bootstrap without rewriting a rotated application password",
+      "gate": "the Compose stack comes up from nothing with every service healthy and both one-shots completed, publishes exactly one loopback-bound port and nothing else (the object storage engine none at all), completes a vault journey AND a document journey through that port \u2014 upload, byte-identical download, purge \u2014 serves the isolated render document from Express under its own tailored policy with the two opaque-origin headers scoped to its assets, keeps the data and the wrapped keys across a restart and a storage redeploy, refuses to boot on a half-rotated storage credential and boots on a fully rotated one, and re-runs its bootstrap without rewriting a rotated application password",
       "report": ["deploy.json", "deploy.log"],
       "requires": ["docker"]
     },
@@ -375,6 +375,12 @@
     {
       "area": "accessibility below the blocking threshold",
       "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported and ratcheted but do not fail the gate, and 20 are currently open across the twenty scanned views (landmark-one-main, page-has-heading-one, region, landmark-unique, heading-order). The scan also runs in the light theme only.",
+      "ledger": [],
+      "review": "2026-11-11"
+    },
+    {
+      "area": "the isolated render document under the production header set",
+      "detail": "No gate RENDERS `/sandbox.html` in a browser under the headers a deployment actually sends. The E2E and accessibility suites drive the Vite dev server, which has neither helmet nor the stack's Nginx, so the tailored per-response policy and the two CORS-ish headers scoped to `sandbox-assets/` are absent there; `test:deploy` and `test:smoke` assert those headers over HTTP, directive by directive against the server's own exported constant, but neither runs a browser. What stands in for it is the pair: the behavioural assertions in the E2E viewer specs (a real `/sandbox.html` rendering a real document, including the hostile-input corpus) plus the header assertions in those two gates. The residual risk is a policy that is correct on the wire and still breaks a renderer in a real engine \u2014 a `blob:` media source or a `data:` image refused by a browser rule no HTTP assertion can see. Closing it needs a Playwright project pointed at the built artifact behind the stack's own Nginx rather than at the dev server. No suppression is attached because nothing is excused: this is a stated boundary of what the gate surface covers.",
       "ledger": [],
       "review": "2026-11-11"
     }

@@ -216,13 +216,21 @@ async function main(): Promise<void> {
     return mongoStop;
   };
 
-  // `engine.stop()` is already idempotent (it latches on its first call), so this
-  // needs no guard of its own; it is written beside `stopMongo` so the two read as
-  // one teardown rather than as two conventions.
+  // `engine.stop()` needs no guard of its own because it latches its PROMISE, the
+  // way `stopMongo` does right above — not merely a "already stopping" flag. The
+  // distinction is the whole reason this comment names it: both callers below reach
+  // teardown at once, the second one calls `process.exit()` as soon as its await
+  // resolves, and a second `stop()` that resolved on its own would let that exit run
+  // while `docker rm -f` was still in flight. That stranded one engine per run.
   const stopEverything = (): Promise<unknown> =>
     Promise.all([stopMongo().catch(() => undefined), engine.stop().catch(() => undefined)]);
 
+  // Logged, not silent: the teardown owns a container and a RAM-backed dbPath, and
+  // its two lines are the only way to tell a teardown that ran from one that was
+  // killed before it could. A run that prints the first without the second has
+  // leaked both, which is exactly how the SIGKILL below was found.
   const cleanup = (): void => {
+    console.log('[e2e] signal received, tearing down');
     child.kill();
     void stopEverything();
   };
@@ -232,6 +240,7 @@ async function main(): Promise<void> {
 
   child.on('exit', (code) => {
     void stopEverything().then(() => {
+      console.log('[e2e] teardown complete: storage engine removed, mongod stopped');
       process.exit(code ?? 1);
     });
   });

@@ -5,9 +5,19 @@
  * `audit:image` proves the images BUILD; the E2E suite proves the application
  * WORKS against a development server. Nothing between them ever ran the thing
  * this project actually ships: six containers, one published port, a
- * least-privilege database user, two one-shots the app gates on, and a config
- * surface that only exists in production. This gate stands that stack up from
- * nothing and drives a real user journey through the single port it publishes.
+ * least-privilege database user, an object storage engine on an internal
+ * network, two one-shots the app gates on, and a config surface that only exists
+ * in production. This gate stands that stack up from nothing and drives a real
+ * user journey — a vault item AND a stored document — through the single port it
+ * publishes.
+ *
+ * It is also the ONLY gate where the real Nginx, the real image layout and the
+ * real header set meet, which makes it the only place two things are actually
+ * proven: that the `web-root` stage's deletion of `sandbox.html` leaves the
+ * isolated render document to Express with its own far stricter policy, and that
+ * the two CORS-ish headers an opaque origin needs are scoped to
+ * `sandbox-assets/`. The E2E and a11y suites drive the Vite dev server, which
+ * has neither helmet nor Nginx.
  *
  *   node scripts/ci/deploy-drill.mjs            the gate (what the pipeline runs)
  *   npm run test:deploy                         the same thing
@@ -62,6 +72,18 @@
  *
  *  g. A FAILING RUN CAPTURES THE LOGS BEFORE TEARING DOWN. A container drill
  *     that removes the evidence with the stack is a gate people stop running.
+ *
+ *  h. THE STORAGE CREDENTIAL IS A DIFFERENT TRAP FROM THE DATABASE ONE, and the
+ *     drill asserts the difference rather than assuming the two behave alike.
+ *     The database provisioner boots anyway and leaves an existing password
+ *     alone (f); the storage engine REFUSES to boot when it is handed the same
+ *     access key id with a different secret, exiting 1 rather than rewriting the
+ *     key, so an operator who rotates one value ends up with a crash loop. Both
+ *     halves of the supported procedure are exercised: the refusal, and the
+ *     rotation of the id and the secret TOGETHER — after which the newly minted
+ *     key must still read a document written under the superseded one. That last
+ *     read is what makes the whole sequence an assertion about the bucket rather
+ *     than about a container's exit code.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
@@ -82,17 +104,46 @@ import {
   serviceVerdicts,
   singlePortProblems,
 } from './lib/drill.mjs';
-import { reReadVault, runVaultFlow, waitForHealth } from './lib/vault-flow.mjs';
+import {
+  purgeDocumentFlow,
+  reReadDocument,
+  reReadVault,
+  readDocumentsConfig,
+  runDocumentFlow,
+  runVaultFlow,
+  waitForHealth,
+} from './lib/vault-flow.mjs';
+import {
+  SANDBOX_ASSET_HEADERS_EXPECTED,
+  SANDBOX_CSP_EXPECTED,
+  SANDBOX_DOCUMENT_CACHE_CONTROL,
+  appAssetProblems,
+  cspProblems,
+  sandboxAssetProblems,
+  sandboxAssetUrls,
+} from './lib/sandbox-headers.mjs';
 
 /** (a) Everything about the drill's stack is namespaced away from a real one. */
 const STACK_NAME = 'hvault-drill';
 const HTTP_PORT = 18080;
 const EDGE_SUBNET = '172.31.244.0/24';
 const DATA_SUBNET = '172.31.245.0/24';
-/** The ports the stack must NOT publish: MongoDB, and the app's internal listener. */
+/**
+ * The ports the stack must NOT publish: MongoDB, the app's internal listener, and
+ * the object storage engine's S3 API.
+ *
+ * The storage port is here for the same reason the database's is, and it is the
+ * more dangerous of the two: the bucket holds every stored document's ciphertext,
+ * the engine authenticates with a static key pair out of `.env`, and it sits on
+ * the `internal: true` network precisely so nothing outside the stack can reach
+ * it. `docker-compose.dev.yml` DOES publish it on loopback for host tooling,
+ * which is exactly the differential in (d): a developer running the dev stack
+ * held the port before `up`, and the verdict says so rather than blaming this one.
+ */
 const FORBIDDEN_PORTS = [
   { port: 27017, label: 'MongoDB' },
   { port: 5000, label: "the app's internal listener" },
+  { port: 3900, label: "the object storage engine's S3 API" },
 ];
 /** Bounds `up --wait`'s wait phase (not the build) so a stuck healthcheck is an error, not a hang. */
 const WAIT_TIMEOUT_SECONDS = 300;
@@ -100,6 +151,16 @@ const HEALTH_DEADLINE_MS = 120_000;
 const RESTART_DEADLINE_MS = 120_000;
 /** A TCP probe answers or refuses in microseconds on loopback; a second is generous. */
 const PROBE_TIMEOUT_MS = 1_000;
+/**
+ * How `waitForContainerExit` polls, and how long it waits.
+ *
+ * The storage engine refuses a mismatched credential within a second of starting,
+ * so thirty is generous for a container that is going to stop; the bound exists
+ * for the container that does NOT, which is exactly the failure the credential
+ * probe is there to catch.
+ */
+const CONTAINER_POLL_MS = 500;
+const CONTAINER_EXIT_DEADLINE_MS = 30_000;
 
 const argv = process.argv.slice(2);
 const keepStack = argv.includes('--keep');
@@ -110,6 +171,8 @@ const baseUrl = `http://127.0.0.1:${String(HTTP_PORT)}`;
 const workspace = mkdtempSync(path.join(tmpdir(), 'hvault-drill-'));
 const envFile = path.join(workspace, 'drill.env');
 const overrideFile = path.join(workspace, 'drill-override.yml');
+/** Written only when the credential probe runs; see `renderNoRestartOverride`. */
+const probeOverrideFile = path.join(workspace, 'drill-no-restart.yml');
 
 /**
  * (c) The throwaway deployment's configuration.
@@ -162,8 +225,16 @@ const drillEnv = {
 writeFileSync(envFile, renderEnvFile(drillEnv), 'utf8');
 writeFileSync(overrideFile, renderOverride(envFile), 'utf8');
 
-/** Compose, always with the drill's project, override and env file. */
-const composeArgs = (...rest) => [
+/**
+ * Compose, always with the drill's project, override and env file.
+ *
+ * `extraFiles` is appended AFTER the drill's own override, because Compose merges
+ * `-f` files in order and the last one wins for a scalar. Exactly one caller uses
+ * it (the credential probe, which takes the restart policy off one service), and
+ * it is a parameter rather than a second argument list so there is still one
+ * place that knows how to invoke Compose for this stack.
+ */
+const composeArgs = (rest, extraFiles = []) => [
   'compose',
   '--env-file',
   envFile,
@@ -171,6 +242,7 @@ const composeArgs = (...rest) => [
   'docker-compose.yml',
   '-f',
   overrideFile,
+  ...extraFiles.flatMap((file) => ['-f', file]),
   ...rest,
 ];
 /**
@@ -185,8 +257,9 @@ const composeArgs = (...rest) => [
 const composeEnv = { ...drillEnv };
 
 const compose = (rest, options = {}) =>
-  captureExe('docker', composeArgs(...rest), { env: composeEnv, ...options });
-const composeStreamed = (rest) => runExe('docker', composeArgs(...rest), { env: composeEnv });
+  captureExe('docker', composeArgs(rest), { env: composeEnv, ...options });
+const composeStreamed = (rest, extraFiles = []) =>
+  runExe('docker', composeArgs(rest, extraFiles), { env: composeEnv });
 
 const steps = [];
 const failures = [];
@@ -258,6 +331,124 @@ async function rerunOneShot(service) {
     logs: `${logs.stdout}${logs.stderr}`.trim(),
     started: true,
   };
+}
+
+/**
+ * Waits for one container to STOP, and reports the state it stopped in.
+ *
+ * A BOUNDED poll over `docker inspect` rather than `docker wait`, and the bound
+ * is the whole reason it exists. `docker wait` blocks until the container is not
+ * running, so a container that BOOTS when the probe expects a refusal would hang
+ * this gate for ever rather than fail it — and `local-ci.mjs` puts no deadline on
+ * a gate, so the hang would be the whole pipeline's. The one caller takes the
+ * restart policy off first (`renderNoRestartOverride`), so the container stops
+ * exactly once and `.State.ExitCode` is stable once it has; under
+ * `restart: unless-stopped` it would be whatever the last cycle of a crash loop
+ * happened to leave, which is the other reason that override is not optional.
+ *
+ * A container still running at the deadline is reported as such rather than as an
+ * exit code, so the caller's message says "did not stop" instead of inventing a
+ * number.
+ */
+async function waitForContainerExit(container, deadlineMs) {
+  const started = Date.now();
+  let last = { status: 'unknown', exitCode: null };
+  do {
+    const result = captureExe('docker', [
+      'inspect',
+      '--format',
+      '{{.State.Status}} {{.State.ExitCode}}',
+      container,
+    ]);
+    if (result.ok) {
+      const [status = 'unknown', code = ''] = result.stdout.trim().split(/\s+/);
+      const exitCode = Number.parseInt(code, 10);
+      last = { status, exitCode: Number.isNaN(exitCode) ? null : exitCode };
+      if (status === 'exited' || status === 'dead') return last;
+    } else {
+      last = { status: 'absent', exitCode: null };
+    }
+    await new Promise((resolve) => setTimeout(resolve, CONTAINER_POLL_MS));
+  } while (Date.now() - started < deadlineMs);
+  return last;
+}
+
+/**
+ * Records one assertion whose failure arrives as a thrown `VaultFlowError`.
+ *
+ * The flow helpers throw with a `context`, so the alternative at each of the six
+ * call sites is the same six-line `.catch(error => error)` / `instanceof Error`
+ * block — and `.jscpd.json`'s duplication counters are ratcheted DOWNWARD. It
+ * returns `null` on failure so the caller can skip what depended on it without a
+ * second verdict about the same thing.
+ */
+async function recordFlow(name, describe, attempt) {
+  const outcome = await attempt().catch((error) => error);
+  if (outcome instanceof Error) {
+    record(name, false, outcome.message, { context: outcome.context ?? {} });
+    return null;
+  }
+  record(name, true, describe(outcome));
+  return outcome;
+}
+
+/**
+ * Rewrites the drill's env file in place, which is what a credential rotation IS.
+ *
+ * In place, and not through a second `--env-file`, because the two halves of the
+ * stack read this configuration by two different routes: the storage engine's
+ * `environment:` block is INTERPOLATED from the file Compose was pointed at,
+ * while the app receives it as an `env_file` whose absolute path is baked into
+ * the override written once at startup. A second file would therefore rotate the
+ * engine's credentials and leave the app holding the old ones — which is a state
+ * no operator can reach and which would make the "it can still read the bucket"
+ * assertion below prove the opposite of what it claims.
+ *
+ * `composeEnv` is patched too, for the reason it exists at all: an exported
+ * variable in the operator's shell outranks `--env-file`.
+ */
+function rewriteEnv(patch) {
+  Object.assign(drillEnv, patch);
+  Object.assign(composeEnv, patch);
+  writeFileSync(envFile, renderEnvFile(drillEnv), 'utf8');
+}
+
+/**
+ * A Compose override that takes the restart policy OFF one service, for the one
+ * probe that needs to observe an exit code.
+ *
+ * `restart: unless-stopped` is correct for the deployment and
+ * `docker-hardening.test.ts` requires it — but it turns a service that refuses to
+ * boot into a crash LOOP, where `.State.ExitCode` is whatever the last cycle
+ * happened to leave and a poller can land on a `running` container that is about
+ * to die again. The credential probe below is asking a question about the
+ * ENGINE's boot behaviour rather than about the restart policy, so it takes the
+ * policy off for that one container and puts it back by recreating without this
+ * file. Quoted, because an unquoted `no` is a boolean in YAML.
+ */
+function renderNoRestartOverride(service) {
+  return `services:\n  ${service}:\n    restart: "no"\n`;
+}
+
+/**
+ * Runs one long-lived service again from a fresh container, exactly as a redeploy
+ * would, and waits for it to report healthy.
+ *
+ * `--no-deps`, so a redeploy of storage does not re-run the two one-shots the app
+ * gates on; `--wait`, because "it came back" is the claim and Compose's own
+ * readiness condition is the honest way to make it.
+ */
+async function recreateAndWait(services) {
+  return composeStreamed([
+    'up',
+    '-d',
+    '--no-deps',
+    '--force-recreate',
+    '--wait',
+    '--wait-timeout',
+    String(WAIT_TIMEOUT_SECONDS),
+    ...services,
+  ]);
 }
 
 async function teardown() {
@@ -410,6 +601,29 @@ try {
       { published: publishedPorts(rows) },
     );
 
+    // The storage engine's own row, named rather than merely covered by the
+    // exact-set assertion above.
+    //
+    // `singlePortProblems` already fails if ANY second port appears, so this adds
+    // no coverage today — it adds ATTRIBUTION, and it survives a future edit that
+    // relaxes the set assertion (a second published port is exactly the sort of
+    // thing a later feature argues for). The bucket holds every stored document's
+    // ciphertext and the engine authenticates with a static key pair out of
+    // `.env`, so "no `ports:` at all, on the internal network only" is the control
+    // that keeps it unreachable, and it is one line of YAML away from being lost.
+    const storagePorts = publishedPorts(rows).filter((entry) => entry.service === 'hvault-s3');
+    record(
+      'storage-no-port',
+      storagePorts.length === 0,
+      storagePorts.length === 0
+        ? 'the object storage engine publishes no host port at all'
+        : `hvault-s3 publishes ${String(storagePorts.length)} host port(s): ` +
+            storagePorts
+              .map((entry) => `${entry.url || '*'}:${String(entry.published)}`)
+              .join(', '),
+      { storagePorts },
+    );
+
     // -----------------------------------------------------------------------
     // 5. (d) Nothing else is reachable from the host
     // -----------------------------------------------------------------------
@@ -462,6 +676,120 @@ try {
       );
 
       // ---------------------------------------------------------------------
+      // 6b. The isolated render document, through the real Nginx
+      // ---------------------------------------------------------------------
+      // THIS GATE IS THE ONLY PLACE THE `web-root` DELETION IS PROVEN. Every
+      // header the document sandbox depends on is invisible everywhere else: the
+      // E2E and a11y suites drive the Vite dev server, which has no helmet, no
+      // tailored policy and no Nginx at all, and the smoke gate boots Express
+      // with no proxy in front of it. Here the real image, the real doc root and
+      // the real proxy meet.
+      //
+      // What could go wrong, and is silent in a browser when it does: the
+      // `web-root` stage stops deleting `sandbox.html`, `try_files $uri @app`
+      // finds the file on disk, and Nginx answers with the doc root's
+      // `default-src 'self'` and NONE of the sandbox's own directives — no
+      // `connect-src 'none'`, no `worker-src 'none'`, no `sandbox
+      // allow-scripts`. The frame still renders, and the isolation is simply
+      // gone. `Cache-Control` is the second half of the same discriminator:
+      // Express sends `no-cache`, `location /` sends
+      // `public, max-age=0, must-revalidate`.
+      const sandbox = await fetch(new URL('/sandbox.html', baseUrl));
+      const sandboxHtml = await sandbox.text();
+      // Directive by directive, in BOTH directions, against the same expectation
+      // the smoke gate reads and `clean-room.test.ts` pins to the server's own
+      // exported constant — so this drill cannot drift from the policy it claims
+      // to be checking. It also catches TWO policies on one response, which a
+      // browser INTERSECTS: helmet's application CSP surviving beside the
+      // sandbox's would kill `blob:` media and `data:` images in one stroke.
+      const sandboxCspDiff = cspProblems(sandbox.headers.get('content-security-policy'));
+      const sandboxCache = sandbox.headers.get('cache-control');
+      // Not the SPA shell, either. `/sandbox.html` and `/vault` are both proxied
+      // to Express through `@app`, so a route registered wrongly — or removed —
+      // would fall through to the SPA fallback and answer 200 with the
+      // application's own HTML, nonce and all. The document names its own
+      // `sandbox-assets/` entry and carries no nonce, and both halves are
+      // asserted because either alone is satisfied by the other document.
+      const isSandboxDocument =
+        /<script[^>]+src="\/sandbox-assets\//.test(sandboxHtml) &&
+        !/<script[^>]+nonce="/i.test(sandboxHtml);
+      const sandboxOk =
+        sandbox.status === 200 &&
+        sandboxCache === SANDBOX_DOCUMENT_CACHE_CONTROL &&
+        isSandboxDocument &&
+        sandboxCspDiff.length === 0;
+      record(
+        'sandbox-document',
+        sandboxOk,
+        sandboxOk
+          ? `/sandbox.html comes back through the published port from Express, not off the Nginx disk and not as the SPA shell, with exactly one Content-Security-Policy matching all ${String(Object.keys(SANDBOX_CSP_EXPECTED).length)} directives`
+          : `GET /sandbox.html returned ${String(sandbox.status)}; Cache-Control=${String(sandboxCache)}; is the sandbox document=${String(isSandboxDocument)}${sandboxCspDiff.length > 0 ? `; ${sandboxCspDiff.join('; ')}` : ''}`,
+        { cspDiff: sandboxCspDiff },
+      );
+
+      // The two headers an opaque origin's fetches need, on the SCRIPT and on the
+      // STYLESHEET — and NOT on `/assets/`, which is the half that keeps the
+      // widening scoped.
+      //
+      // The stylesheet is asserted for a reason the client's own build config
+      // names: `build.assetsDir` routes chunks and assets through one setting
+      // today, so they cannot diverge, but a later switch to explicit
+      // `entryFileNames`/`chunkFileNames` that forgot `assetFileNames` would
+      // leave the stylesheet in `/assets/` and ship the viewer UNSTYLED in
+      // production only, while every script-only assertion still passed.
+      //
+      // Under this stack both directories are served from the Nginx document root
+      // rather than by Express, so the negative half names what THAT block sends:
+      // no `Access-Control-Allow-Origin` at all (Nginx adds none for `/assets/`)
+      // and no CORP. On the smoke gate the same negative names Express's own two
+      // values instead, which is why `appAssetProblems` takes them as arguments.
+      const { script: sandboxAsset, stylesheet: sandboxStyle } = sandboxAssetUrls(sandboxHtml);
+      const appAsset = /<script[^>]+src="(\/assets\/[^"]+)"/.exec(html)?.[1];
+      if (!sandboxAsset || !sandboxStyle || !appAsset) {
+        record(
+          'sandbox-assets',
+          false,
+          `could not locate an asset to probe (sandbox script=${String(sandboxAsset)}, ` +
+            `sandbox stylesheet=${String(sandboxStyle)}, app script=${String(appAsset)})`,
+        );
+      } else {
+        const [scriptRes, styleRes, appRes] = await Promise.all([
+          fetch(new URL(sandboxAsset, baseUrl)),
+          fetch(new URL(sandboxStyle, baseUrl)),
+          fetch(new URL(appAsset, baseUrl)),
+        ]);
+        const assetProblems = [
+          // The status FIRST, because the negative half of this check is the half
+          // that can pass on nothing: a 404 for `/assets/main-*.js` carries no
+          // ACAO and no CORP either, so an image layout or an Nginx `location`
+          // that left the app bundle unreachable would be recorded here as a
+          // clean pass. Nothing else in the drill fetches it — `spa-shell` reads
+          // only the document and its nonce — so this is the only place that
+          // notices. Asserted on all three for the same reason.
+          ...[
+            { url: sandboxAsset, res: scriptRes },
+            { url: sandboxStyle, res: styleRes },
+            { url: appAsset, res: appRes },
+          ]
+            .filter(({ res }) => res.status !== 200)
+            .map(({ url, res }) => `${url} answered ${String(res.status)}, not 200`),
+          ...sandboxAssetProblems(sandboxAsset, (name) => scriptRes.headers.get(name)),
+          ...sandboxAssetProblems(sandboxStyle, (name) => styleRes.headers.get(name)),
+          ...appAssetProblems(appAsset, (name) => appRes.headers.get(name), {
+            acao: null,
+            corp: null,
+          }),
+        ];
+        record(
+          'sandbox-assets',
+          assetProblems.length === 0,
+          assetProblems.length === 0
+            ? `sandbox-assets/ carries the ${String(Object.keys(SANDBOX_ASSET_HEADERS_EXPECTED).length)} headers an opaque origin needs on its script AND its stylesheet; /assets/ carries neither`
+            : assetProblems.join('; '),
+        );
+      }
+
+      // ---------------------------------------------------------------------
       // 7. One real user journey, entirely through the published port
       // ---------------------------------------------------------------------
       const flow = await runVaultFlow({
@@ -496,6 +824,55 @@ try {
       });
 
       // ---------------------------------------------------------------------
+      // 7b. One document, all the way through the same port
+      // ---------------------------------------------------------------------
+      // The deployment's promise is that `cp .env.example .env`, fill in the
+      // secrets, `docker compose up` — and the document store is ON, with no
+      // bucket created by hand and no storage step in the setup. The public
+      // config route is where a browser learns that, so it is read first and
+      // asserted rather than assumed; it also checks the framing the deployment
+      // ADVERTISES against the framing this flow seals to, so neither side is
+      // trusted.
+      const documentsConfig = await recordFlow(
+        'documents-enabled',
+        (config) =>
+          `the deployment advertises the document store: ${String(config.maxSizeMB)} MB per file, ` +
+          `${String(config.maxDocuments)} files, ${String(config.quotaMB)} MB quota, ` +
+          `${String(config.chunkPlaintextBytes)}-byte plaintext chunks`,
+        () => readDocumentsConfig({ baseUrl }),
+      );
+
+      // The journey: one sealed segment up, the same bytes back, and the quota
+      // the deployment reports about them. Nothing here is a document the SERVER
+      // could read — it stores ciphertext, a wrapped key and sizes — so what is
+      // being proved is the deployment's own job: that a 12 KiB octet-stream
+      // body survives Nginx (`proxy_request_buffering off`, `client_max_body_size
+      // 32m`, `gzip off` on `/api/`) in both directions, unchanged, and that the
+      // engine on the internal network really did store it.
+      const documentFlow =
+        documentsConfig === null
+          ? null
+          : await recordFlow(
+              'document-journey',
+              (result) =>
+                `uploaded, downloaded byte-identically and accounted for document ${result.documentId}`,
+              () =>
+                runDocumentFlow({
+                  client: flow.client,
+                  // Read out of the deployment's own advertisement rather than
+                  // restated: `constants.test.ts` fails on a second copy of
+                  // either chunk size anywhere but its definition, and the init
+                  // response is then checked against THIS number, so the two
+                  // server surfaces that publish the framing are compared with
+                  // each other.
+                  chunkPlaintextBytes: documentsConfig.chunkPlaintextBytes,
+                  log: (message) => {
+                    note(message);
+                  },
+                }),
+            );
+
+      // ---------------------------------------------------------------------
       // 8. (e) Restart the whole stack; the vault must survive it
       // ---------------------------------------------------------------------
       const restarted = await composeStreamed(['restart']);
@@ -512,19 +889,44 @@ try {
         // A FRESH sign-in, with the credential the flow registered with: the
         // account, its bcrypt hash and the item's ciphertext all have to have
         // outlived the containers for this to return.
-        const survived = await reReadVault({
-          baseUrl,
-          email: flow.email,
-          authHash: flow.authHash,
-          itemId: flow.itemId,
-          expected: flow.item,
-        }).catch((error) => error);
-        if (survived instanceof Error) {
-          record('data-survives-restart', false, survived.message, {
-            context: survived.context ?? {},
-          });
-        } else {
-          record('data-survives-restart', true, 'the item and its ciphertext outlived the restart');
+        await recordFlow(
+          'data-survives-restart',
+          () => 'the item and its ciphertext outlived the restart',
+          () =>
+            reReadVault({
+              baseUrl,
+              email: flow.email,
+              authHash: flow.authHash,
+              itemId: flow.itemId,
+              expected: flow.item,
+            }),
+        );
+
+        // The document is a THREE-part claim where the vault item is a
+        // one-part one, which is why it gets its own step rather than an extra
+        // assertion inside that one: the row must have outlived the database
+        // container, the object must have outlived the STORAGE container and its
+        // volume, and the bytes must still be identical. A restart also re-runs
+        // the engine's own boot provisioning with the same credentials, so this
+        // is the first place the "second boot is a clean no-op" behaviour is
+        // observed at all — the explicit redeploy below then asks it of a
+        // FRESH container.
+        if (documentFlow !== null) {
+          await recordFlow(
+            'document-survives-restart',
+            (result) =>
+              `document ${result.documentId} still downloads ${String(result.bytes)} identical bytes after the restart`,
+            () =>
+              reReadDocument({
+                baseUrl,
+                email: flow.email,
+                authHash: flow.authHash,
+                documentId: documentFlow.documentId,
+                expected: documentFlow.fixture.segment,
+                expectedKey: documentFlow.fixture.init,
+                what: '(after restart)',
+              }),
+          );
         }
       }
 
@@ -542,8 +944,177 @@ try {
       );
 
       // ---------------------------------------------------------------------
-      // 10. (f) A rotated application password survives a redeploy
+      // 10. (h) A redeploy of the storage engine does not rewrite its key
       // ---------------------------------------------------------------------
+      // The engine provisions itself on EVERY boot from `GARAGE_DEFAULT_*`, and
+      // a boot that rewrote the key from the same `.env` values would be
+      // invisible — the values match, so the app would keep working. What makes
+      // the claim testable is the one case where a rewrite and a no-op differ,
+      // and that is the case below (11). This step is the positive control for
+      // it: a FRESH container, the same credentials, and the pre-existing bucket
+      // still readable through the app that never restarted.
+      const storageRedeployed = await recreateAndWait(['hvault-s3']);
+      record(
+        'storage-redeploy',
+        storageRedeployed === 0,
+        storageRedeployed === 0
+          ? 'a fresh storage container with the same credentials reaches its healthcheck'
+          : `up --wait for hvault-s3 exited ${String(storageRedeployed)}`,
+      );
+      if (storageRedeployed === 0 && documentFlow !== null) {
+        await recordFlow(
+          'storage-key-not-rewritten',
+          (result) =>
+            `the same credentials still read the pre-existing bucket: ${String(result.bytes)} identical bytes`,
+          () =>
+            reReadDocument({
+              baseUrl,
+              email: flow.email,
+              authHash: flow.authHash,
+              documentId: documentFlow.documentId,
+              expected: documentFlow.fixture.segment,
+              expectedKey: documentFlow.fixture.init,
+              what: '(after storage redeploy)',
+            }),
+        );
+      }
+
+      // ---------------------------------------------------------------------
+      // 11. (h) The credential-rotation trap, measured rather than assumed
+      // ---------------------------------------------------------------------
+      // MEASURED, and it is the reason `.env` names a rotation procedure at all:
+      // the same access key id with a DIFFERENT secret makes the engine exit 1
+      // (`Access key <id> is associated with a secret key different than the one
+      // given in GARAGE_DEFAULT_SECRET_KEY`) rather than rewriting the stored
+      // key — which is NOT the database provisioner's boot-anyway behaviour, so
+      // an operator who rotates one value the way they would rotate the other
+      // gets a crash loop. The supported rotation is to change the id AND the
+      // secret together, after which the new key reads and writes the existing
+      // bucket.
+      //
+      // The refusal is asserted as an EXIT CODE plus the engine's own message;
+      // `waitForContainerExit` records why the exit code is read by a bounded
+      // poll rather than by `docker wait`.
+      rewriteEnv({ S3_SECRET_ACCESS_KEY: secret() });
+      writeFileSync(probeOverrideFile, renderNoRestartOverride('hvault-s3'), 'utf8');
+      const probeStarted = await composeStreamed(
+        ['up', '-d', '--no-deps', '--force-recreate', 'hvault-s3'],
+        [probeOverrideFile],
+      );
+      if (probeStarted !== 0) {
+        record(
+          'storage-secret-rotation-refused',
+          false,
+          `could not start the storage container for the credential probe: up exited ${String(probeStarted)}`,
+        );
+      } else {
+        const storageContainer = `${STACK_NAME}-s3`;
+        const stopped = await waitForContainerExit(storageContainer, CONTAINER_EXIT_DEADLINE_MS);
+        const probeLogs = captureExe('docker', ['logs', storageContainer]);
+        const output = `${probeLogs.stdout}${probeLogs.stderr}`;
+        const namesTheRefusal = /associated with a secret key different/i.test(output);
+        // BOTH halves, because either alone is weak: an exit 1 could come from a
+        // bad config file or an unwritable volume, and a log line only says what
+        // the process printed on its way to whatever it did next. A container
+        // still RUNNING at the deadline is the failure this exists to catch —
+        // the trap stopped firing — and it is reported as that rather than as an
+        // exit code nobody observed.
+        const refusedOk = stopped.exitCode === 1 && namesTheRefusal;
+        record(
+          'storage-secret-rotation-refused',
+          refusedOk,
+          refusedOk
+            ? 'changing the secret alone makes the storage engine exit 1 naming the mismatched key, rather than rewriting it'
+            : `the storage engine is ${stopped.status} with exit code ${String(stopped.exitCode)} and ` +
+                `${namesTheRefusal ? 'named' : 'did NOT name'} the key mismatch`,
+          { stopped, output: output.slice(-1500) },
+        );
+      }
+
+      // And the supported rotation: BOTH values, together. The app is recreated
+      // with them too, because it reads its credentials at boot from the same
+      // `.env` — a rotation that moved the engine's key and left the app holding
+      // the old one is a state no operator can reach, and asserting the download
+      // against it would prove the opposite of what this claims. The document was
+      // written under the SUPERSEDED key, so the read below is the whole point:
+      // the newly minted key can still read the pre-existing bucket.
+      rewriteEnv({
+        S3_ACCESS_KEY_ID: `${drillEnv.S3_ACCESS_KEY_ID}2`,
+        S3_SECRET_ACCESS_KEY: secret(),
+      });
+      const rotatedPair = await recreateAndWait(['hvault-s3', 'hvault-app']);
+      record(
+        'storage-credential-rotation',
+        rotatedPair === 0,
+        rotatedPair === 0
+          ? 'changing the access key id and the secret together boots the storage engine and the app'
+          : `up --wait after rotating both credentials exited ${String(rotatedPair)}`,
+      );
+      if (rotatedPair === 0 && documentFlow !== null) {
+        await recordFlow(
+          'rotated-credentials-read-the-bucket',
+          (result) =>
+            `the newly minted key reads the pre-existing bucket: ${String(result.bytes)} identical bytes`,
+          () =>
+            reReadDocument({
+              baseUrl,
+              email: flow.email,
+              authHash: flow.authHash,
+              documentId: documentFlow.documentId,
+              expected: documentFlow.fixture.segment,
+              expectedKey: documentFlow.fixture.init,
+              what: '(after credential rotation)',
+            }),
+        );
+
+        // -------------------------------------------------------------------
+        // 12. The document goes away, object and all
+        // -------------------------------------------------------------------
+        // LAST, because everything above needed the document to still be there.
+        // Trash then purge, because they are two different operations with two
+        // different consequences, and the negative is asserted on both sides:
+        // the row 404s, the trash is empty, and the quota is back to zero.
+        //
+        // Be exact about which claim rests on which fact, because the difference
+        // decides what a green run means. The quota is a Mongo aggregation over
+        // the rows, so a zero there proves the ROW is gone and says nothing about
+        // the bucket. What carries the object is the 200 on the purge itself:
+        // `purgeDocument` deliberately does not catch a storage failure, so an
+        // engine that refused or silently dropped the delete surfaces as a 5xx
+        // that `expectEnvelope` rejects. The drill cannot go and look in the
+        // bucket, by design — the engine publishes no port to look through.
+        await recordFlow(
+          'document-purge',
+          (result) =>
+            `document ${result.documentId} was trashed, purged and is gone from the quota`,
+          () =>
+            purgeDocumentFlow({
+              baseUrl,
+              email: flow.email,
+              authHash: flow.authHash,
+              documentId: documentFlow.documentId,
+            }),
+        );
+      }
+
+      // ---------------------------------------------------------------------
+      // 13. (f) A rotated application password survives a redeploy
+      // ---------------------------------------------------------------------
+      // LAST, AND THAT ORDER IS LOAD-BEARING — measured, on the run that added
+      // the storage steps above. This step rotates the app's database password
+      // INSIDE the database and deliberately does NOT touch the deployment's
+      // configuration, because the assertion is that the value in `.env` stops
+      // authenticating while the rotated one keeps working. The consequence is
+      // that from here on the stack's own `.env` holds a SUPERSEDED database
+      // credential: the running app is unaffected (it read its URI at boot and
+      // holds an open connection), but any container RECREATED afterwards comes
+      // up with the stale password and cannot authenticate at all. That is
+      // exactly what the storage-credential rotation above does to `hvault-app`,
+      // and running it after this step failed its healthcheck with
+      // `SCRAM authentication failed, storedKey mismatch` — a failure in the
+      // DRILL's ordering that reads like a broken deployment. So every step that
+      // recreates a container belongs above this one, and nothing may be
+      // appended below it.
       const rotated = secret();
       const rotation = mongosh(
         "db.getSiblingDB('admin').auth(process.env.R_U, process.env.R_P);" +
@@ -628,6 +1199,6 @@ if (failures.length > 0) {
 
 console.log(
   color.green(
-    `\n${symbol.pass} deployment clean room: ${String(steps.length)} checks passed — stack healthy, one published port, journey through it, data survived a restart, redeploy idempotent`,
+    `\n${symbol.pass} deployment clean room: ${String(steps.length)} checks passed — stack healthy, one published port, the isolated render document served through it with its own policy, a vault item and a document round-tripped byte for byte, both survived a restart, redeploy idempotent, and the storage credential rotation behaves as measured`,
   ),
 );

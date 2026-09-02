@@ -125,7 +125,13 @@ export interface StorageEngine extends StorageConnection {
   containerId: string;
   /** The image reference the stack pins, for the same reason. */
   image: string;
-  /** Removes the container and its tmpfs volumes. Safe to call twice. */
+  /**
+   * Removes the container and its tmpfs volumes.
+   *
+   * Safe to call twice, and a second call JOINS the first rather than resolving
+   * beside it: a caller that exits once its own call resolves would otherwise
+   * leave the removal in flight. See `stop` for the run this was measured on.
+   */
   stop: () => Promise<void>;
 }
 
@@ -301,19 +307,32 @@ export async function startStorageEngine(
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
 
-  let stopped = false;
-  const stop = async (): Promise<void> => {
-    if (stopped) return;
-    stopped = true;
-    process.off('exit', cleanUp);
+  const removeContainer = async (): Promise<void> => {
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
     try {
       await execFileAsync('docker', ['rm', '-f', containerId]);
     } catch {
       // As in `removeContainerSync`: already gone is the outcome we wanted.
+    } finally {
+      // Unregistered only AFTER the removal has actually happened, never before
+      // the await: this hook is the synchronous last resort for an exit that
+      // races this removal, so disarming it first left exactly the window it
+      // exists to cover uncovered.
+      process.off('exit', cleanUp);
     }
   };
+
+  // Latches the PROMISE rather than a boolean, so a second caller JOINS the
+  // removal instead of resolving beside it. MEASURED: `e2e/start-server.ts`
+  // reaches teardown from two directions at once — Playwright's SIGTERM, and the
+  // dev server's `exit` handler, which then calls `process.exit()` — and a second
+  // `stop()` that returned immediately let that exit run while `docker rm -f` was
+  // still in flight, stranding one engine per `test:e2e` and `test:a11y` run on
+  // runs that ended green. `stopMongo` in that file already memoizes its promise
+  // for the same reason; this makes the two teardowns behave alike.
+  let stopping: Promise<void> | undefined;
+  const stop = (): Promise<void> => (stopping ??= removeContainer());
 
   try {
     const { stdout: portOut } = await execFileAsync('docker', [

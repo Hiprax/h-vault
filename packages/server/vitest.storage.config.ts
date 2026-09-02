@@ -15,7 +15,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * `include` and the files on disk, in both directions, so a suite cannot fall
  * between the two configs and be run by neither.
  */
-export const STORAGE_SUITE = ['tests/storage/conformance.test.ts'];
+export const STORAGE_SUITE = [
+  'tests/storage/conformance.test.ts',
+  'tests/storage/harness-teardown.test.ts',
+];
 
 /**
  * Its OWN JUnit report, for the same reason as every other subset gate: pointed

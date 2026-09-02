@@ -442,6 +442,43 @@ describe('prerequisites are declared, not discovered', () => {
     }
   });
 
+  it('lets the browser harness tear itself down instead of being killed along with it', () => {
+    // Two settings on one `webServer` block, each of which reads like boilerplate
+    // to anyone who has not watched a run without it, and each MEASURED here.
+    // `e2e/start-server.ts` owns a storage-engine CONTAINER and a RAM-backed
+    // mongod dbPath, and the teardown that reclaims both only runs if the harness
+    // is (a) signalled rather than killed, and (b) still alive while it works.
+    //
+    //  (a) Playwright's webServer REFUSES a graceful close unless
+    //      `gracefulShutdown` is set: its `attemptToGracefullyClose` throws
+    //      `skip graceful shutdown` and the fallback is
+    //      `process.kill(-pid, 'SIGKILL')` over the whole process group, which no
+    //      handler and no `process.on('exit')` hook survives.
+    //  (b) It then waits for THE PROCESS IT LAUNCHED to close. Behind
+    //      `npx tsx <file>` that is a wrapper which closes as soon as it has
+    //      forwarded the signal: the run was reported terminated 102 ms in, with
+    //      the harness's `docker rm -f` still in flight and the harness dying
+    //      with its parent. Launched as `node` it IS the harness, so the close
+    //      Playwright waits for is the teardown's own.
+    //
+    // Both shipped broken and the symptom was silent, which is why this is pinned
+    // rather than left to a comment: every green `test:e2e` and `test:a11y` run
+    // left an engine container running and a dbPath under /tmp.
+    const webServer = playwrightConfig.webServer;
+    if (webServer === undefined || Array.isArray(webServer)) {
+      throw new Error('the base Playwright config must declare exactly one webServer');
+    }
+    expect(webServer.gracefulShutdown).toEqual({ signal: 'SIGTERM', timeout: 30_000 });
+    // Not merely "set": this API reads `timeout: 0` as "wait for ever", and the
+    // gates behind it have no deadline of their own to fall back on.
+    expect(webServer.gracefulShutdown?.timeout).not.toBe(0);
+    // The property, not the exact string: node must be the process the shell
+    // execs, and the file it runs must be the harness. An added node flag is
+    // fine; another launcher in front of it is the defect.
+    expect(webServer.command).toMatch(/^node .*\be2e\/start-server\.ts$/);
+    expect(webServer.command).toContain('--import tsx');
+  });
+
   it('stops a failed build from dragging the gates that consume it into failure', () => {
     const byId = new Map(gates.map((gate) => [gate.id, gate]));
     for (const id of ['type-check', 'test', 'test-integration', 'security', 'e2e']) {

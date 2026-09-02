@@ -1228,7 +1228,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                               | _new_                      |
 | `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline                                                                                       | _new_                      |
 | `resource`         | T2   | Volume and memory budgets at the per-user ceilings: streaming backup collection, a full-vault key rotation, a 25 MiB restore, the cleanup sweeps' query plans, a max-size document sent part by part, a full document list walked page by page | _new_                      |
-| `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a journey through it, data across a restart, an idempotent redeploy                                                                                                  | _new_                      |
+| `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a vault item and a document round-tripped through it, the render document served with its own policy, a restart, an idempotent redeploy, the storage credential trap | _new_                      |
 | `upgrade`          | T2   | A vault and a `.env` written by the PREVIOUS release, read by this one: every item still decrypts and parses to what that release parsed it to                                                                                                 | _new_                      |
 | `recovery`         | T2   | A backup restored into a second, empty database, and a real process SIGKILLed mid-rotation, mid-import, mid-upload, mid-completion and mid-purge                                                                                               | _new_                      |
 | `dst`              | T2   | The whole suite again in a DST-observing zone, so an assertion that is right only because local time and UTC agree fails here rather than on a user's machine                                                                                  | _new_                      |
@@ -1770,10 +1770,10 @@ in the run is seconds.
 | `sast`             | 3m 23s   | none                                         |
 | `test-integration` | 3m 22s   | none                                         |
 | `test`             | 3m 1s    | none                                         |
+| `deploy`           | 1m 32s   | 120 s per health wait                        |
 | `type-check`       | 57s      | none                                         |
-| `deploy`           | 54s      | 120 s per health wait                        |
-| `lint`             | 47s      | none                                         |
 | `resource`         | 50s      | 15 min                                       |
+| `lint`             | 47s      | none                                         |
 | `a11y`             | 38s      | none                                         |
 | `fuzz`             | 34s      | 5 min per leg                                |
 | `docker`           | 32s      | none                                         |
