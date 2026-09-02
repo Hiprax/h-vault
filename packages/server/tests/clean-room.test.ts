@@ -2,7 +2,7 @@
  * The clean-room gates' decisions: `test:deploy`'s verdicts and the end-to-end
  * flow's HTTP contract.
  *
- * Both runners are unavoidably slow — one stands five containers up, the other
+ * Both runners are unavoidably slow — one stands six containers up, the other
  * checks out HEAD and installs it from scratch — so the parts that DECIDE
  * anything live in `scripts/ci/lib/{drill,vault-flow}.mjs` and are exercised
  * here, for the same reason `lib/tiers.mjs` is exercised beside the pipeline
@@ -59,7 +59,7 @@ const row = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   ...over,
 });
 
-/** A whole healthy stack: three long-lived services and two completed one-shots. */
+/** A whole healthy stack: four long-lived services and two completed one-shots. */
 const healthyStack = (): Record<string, unknown>[] => [
   row({
     Service: 'hvault-nginx',
@@ -72,6 +72,11 @@ const healthyStack = (): Record<string, unknown>[] => [
   }),
   row({ Service: 'hvault-app' }),
   row({ Service: 'hvault-db' }),
+  // The object storage engine. `healthy` here, deliberately stricter than the
+  // app's own `service_started` dependency on it: the app must not be held down by
+  // storage, but the DRILL is asking whether the deployment came up correctly, and
+  // there the engine reaching its own healthcheck is the thing to prove.
+  row({ Service: 'hvault-s3' }),
   row({ Service: 'hvault-bootstrap', State: 'exited', Health: '', ExitCode: 0 }),
   row({ Service: 'hvault-db-init', State: 'exited', Health: '', ExitCode: 0 }),
 ];

@@ -9,21 +9,37 @@ pipeline and about tests are not optional.
 
 ## Getting set up
 
-You need **Node 24+** (pinned in `.nvmrc`) and **Docker** (for MongoDB, and for the
-`docker` pipeline gate).
+You need **Node 24+** (pinned in `.nvmrc`) and **Docker** (for MongoDB and the object
+storage the document store uses, and for the `docker` pipeline gate).
 
 ```bash
 git clone https://github.com/Hiprax/h-vault.git
 cd h-vault
 npm install                                   # installs all workspaces
 cp .env.example .env                          # then set the three required secrets
-docker compose -f docker-compose.dev.yml up -d   # MongoDB
+docker compose -f docker-compose.dev.yml up -d   # MongoDB + object storage
 npm run build:shared                          # shared must be built before server/client
 npm run dev                                   # http://localhost:5173
 ```
 
 `packages/shared` is a build-time dependency of both other packages. If the server or
 client fails to resolve `@hvault/shared`, you skipped `npm run build:shared`.
+
+The dev stack also brings up the object storage the document store writes to, on
+`127.0.0.1:3900` with fixed development credentials. A host-run `npm run dev` does not pick
+those up on its own — the document store stays off until you add them to `.env`, which is
+why `.env.example` ships them empty:
+
+```bash
+S3_ENDPOINT=http://127.0.0.1:3900
+S3_BUCKET=hvault-documents
+S3_ACCESS_KEY_ID=hvaultdev
+S3_SECRET_ACCESS_KEY=dev-only-not-a-real-secret-key!!
+```
+
+All four or none: a partial set disables the feature with a warning. The values are the
+literals in `docker-compose.dev.yml`, and the endpoint is `127.0.0.1` rather than
+`hvault-s3` because your server is on the host, not inside the stack's network.
 
 The client dev server binds **5173** (Vite's default) and the API binds 5000. If 5173 is
 taken on your machine, override it through the process environment — Playwright's E2E
@@ -328,7 +344,7 @@ packages/server   # Express 5 API, Mongoose models, background jobs
 packages/client   # React 19 SPA, Web Crypto, Zustand stores
 e2e/              # Playwright specs
 scripts/ci/       # the local pipeline (this repo's real CI)
-docker/           # Dockerfile targets, internal + system Nginx configs
+docker/           # Dockerfile targets, internal + system Nginx configs, storage engine config
 ```
 
 ## Reporting bugs and requesting features

@@ -34,9 +34,9 @@
   //                                   recognises the default config NAME, so the a11y config —
   //                                   which the accessibility gate passes on the command line —
   //                                   is invisible to it)
-  //   ecosystem.config.cjs            README.md:568            `pm2 start ecosystem.config.cjs --env production`
+  //   ecosystem.config.cjs            README.md:658            `pm2 start ecosystem.config.cjs --env production`
   //   docker/mongo/provision-app-user.js
-  //                                   docker-compose.yml:463   mongosh argument in `hvault-db-init`
+  //                                   docker-compose.yml:508   mongosh argument in `hvault-db-init`
   //   packages/server/tests/recovery/crashChild.ts
   //                                   tests/recovery/crashProbe.ts:91  `spawn(node, ['--import',
   //                                   'tsx', crashChild.ts, …])` — the crash drill's doomed

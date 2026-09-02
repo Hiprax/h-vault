@@ -2,8 +2,10 @@
 /**
  * Container gate — the local stand-in for the old `docker-build` CI job.
  *
- * Builds all four production images, proves the Nginx config parses, proves the
- * compose stack resolves, and scans the three application images with Trivy.
+ * Builds all four production images this repository BUILDS, proves the Nginx
+ * config parses, proves the compose stack resolves, and scans the three
+ * application images with Trivy. The stack's two upstream images are not built
+ * here; see the `IMAGES` comment for which of them is scanned and why.
  *
  * Two things it does NOT do the obvious way, both learned from a real Docker
  * setup rather than from the docs:
@@ -49,6 +51,22 @@ const TRIVY_IMAGE = 'aquasec/trivy:latest';
 // no exception at all.
 const BASELINE = path.join(repoRoot, 'scripts', 'ci', 'trivy-baseline.json');
 
+// Every entry here is a `docker build` target from THIS repository. That is the
+// whole membership rule, and it is why the stack's two upstream images are
+// treated the way they are:
+//
+//   * `hvault-db` IS built here (docker/mongo.Dockerfile adds a key-file
+//     entrypoint to mongo:8.0), so it is built — but `scan: false`, because the
+//     findings would be mongo:8.0's and there is nothing this repository can do
+//     about them.
+//   * `hvault-s3` (the object storage engine) is absent altogether, and
+//     deliberately: it is pulled by digest and never built, and it ships as a
+//     single static binary in a scratch-style image with no OS package inventory
+//     and no language manifest, so a Trivy scan reports zero findings and buys
+//     false assurance rather than coverage. Read that as a decision, not an
+//     oversight. The controls that DO apply to it are the digest pin, the
+//     internal-only network with no published port, and the hardening block —
+//     all of them asserted in packages/server/tests/docker-hardening.test.ts.
 const IMAGES = [
   { name: 'hvault-app', file: 'docker/Dockerfile', target: 'app', scan: true },
   { name: 'hvault-web', file: 'docker/Dockerfile', target: 'web', scan: true },
@@ -162,7 +180,8 @@ if (nginx.status !== 0) fail(`nginx -t rejected the configuration (exit ${String
 // rejects an empty value exactly as it rejects a missing one, so the gate supplies a
 // throwaway of its own through the environment (Compose reads the shell first, then
 // the file) rather than weakening the example. It never touches the real .env, and
-// the value never leaves this process.
+// the value never leaves this process. The same holds for the four storage values
+// the `hvault-s3` service guards the same way.
 
 console.log(color.cyan('\n  validating compose stack'));
 const envPath = path.join(repoRoot, '.env');
@@ -175,12 +194,24 @@ if (createdEnv) {
 try {
   const config = captureExe('docker', ['compose', 'config', '--quiet'], {
     // captureExe merges this over process.env for the child only.
-    // Both guarded secrets: the app/bootstrap URI interpolates
+    // EVERY `${VAR:?…}`-guarded value in the stack has to be here, because
+    // `compose config` resolves the whole file and reports every missing one at
+    // once. The Mongo pair: the app/bootstrap URI interpolates
     // ${MONGO_APP_PASSWORD:?...} and hvault-db-init interpolates both, so
-    // supplying only the root password makes `compose config` fail here.
+    // supplying only the root password makes `compose config` fail here. The four
+    // storage values: hvault-s3 maps them onto the engine's own GARAGE_* names,
+    // and .env.example ships all four EMPTY on purpose (a placeholder is a
+    // working credential), which `${VAR:?}` rejects exactly as it rejects a
+    // missing one. Throwaways in the environment rather than edits to the
+    // example is what keeps the example honest; none of these values ever leaves
+    // this process, and no container is started from them.
     env: {
       MONGO_ROOT_PASSWORD: 'docker-gate-throwaway-not-a-real-secret',
       MONGO_APP_PASSWORD: 'docker-gate-throwaway-not-a-real-secret',
+      S3_BUCKET: 'docker-gate-throwaway-bucket',
+      S3_ACCESS_KEY_ID: 'docker-gate-throwaway-key-id',
+      S3_SECRET_ACCESS_KEY: 'docker-gate-throwaway-not-a-real-secret',
+      S3_RPC_SECRET: 'docker-gate-throwaway-not-a-real-secret',
     },
   });
   if (!config.ok) {

@@ -339,9 +339,10 @@ docker-compose.dev.yml up -d` — and the same file also starts a hot-reload **a
 
 ## Docker deployment (recommended)
 
-The stack is **self-contained**: the API, the SPA, MongoDB and the Nginx that fronts them all
-live inside it. It publishes exactly **one** host port, bound to loopback, and your machine's own
-system Nginx terminates TLS and proxies to it.
+The stack is **self-contained**: the API, the SPA, MongoDB, the S3-compatible object storage the
+document store writes ciphertext to, and the Nginx that fronts them all live inside it. It
+publishes exactly **one** host port, bound to loopback, and your machine's own system Nginx
+terminates TLS and proxies to it.
 
 ```mermaid
 flowchart TD
@@ -354,9 +355,11 @@ flowchart TD
         APP["hvault-app<br/>Express API + SPA shell"]
         BOOT["hvault-bootstrap<br/>one-shot: MongoDB indexes"]
         DB["hvault-db<br/>MongoDB, single-node rs0"]
+        S3["hvault-s3<br/>object storage: document ciphertext"]
 
         NGX -->|"edge"| APP
         APP -->|"data"| DB
+        APP -->|"data"| S3
         BOOT -->|"data"| DB
         BOOT -.->|"must exit 0 first"| APP
     end
@@ -364,16 +367,26 @@ flowchart TD
     classDef edge fill:#dbeafe,stroke:#2563eb,color:#111
     classDef data fill:#dcfce7,stroke:#16a34a,color:#111
     class NGX,APP edge
-    class DB,BOOT data
+    class DB,BOOT,S3 data
 ```
 
 `data` is an **internal** network: no published port, and no route to the internet. Nginx is not
-on it at all.
+on it at all, and neither the database nor the object storage can be reached from outside the
+stack or reach out of it.
+
+The storage engine is [Garage](https://garagehq.deuxfleurs.fr) (AGPL-3.0), pinned by digest and
+running as a separate container — one static binary, about 6 MiB idle. `docker compose up` brings
+it up **already provisioned**: the bucket and the access key are created on first boot from the
+values you put in `.env`, so there is no storage step in this guide. Everything it holds is
+ciphertext sealed in the browser, so it never sees a filename, a MIME type, a tag, a note or any
+content. Its volume is also the **only** place your users' document bytes exist — read
+[the backup boundary](#back-up-the-database-and-the-document-storage) before you rely on backups.
 
 ### 0. Host prerequisites
 
-Nothing on the host but Docker. MongoDB, Node and the routing Nginx all live **inside** the stack —
-the only thing you install yourself is the system Nginx that terminates TLS in front of it (step 3).
+Nothing on the host but Docker. MongoDB, the object storage, Node and the routing Nginx all live
+**inside** the stack — the only thing you install yourself is the system Nginx that terminates TLS
+in front of it (step 3).
 
 - **Docker Engine** with the **Compose plugin ≥ 2.24** (`docker compose version`). The stack uses
   the `env_file` long syntax, which older Compose rejects with a parse error.
@@ -404,17 +417,18 @@ chmod 600 .env          # it holds every secret the deployment has
 
 At minimum:
 
-| Variable                                                    | Notes                                                                                                                                |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `SESSION_SECRET` | 32+ chars, all different. `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`                                 |
-| `TWO_FACTOR_ENCRYPTION_KEY`                                 | Set it on day one. Unset, 2FA secrets are encrypted under `SESSION_SECRET` — which means rotating `SESSION_SECRET` later breaks 2FA. |
-| `MONGO_ROOT_PASSWORD`                                       | Ships **empty**, and the stack refuses to start until you set it. Must be **URL-safe** (it goes into a URI): `openssl rand -hex 32`. |
-| `APP_URL`, `CORS_ORIGIN`                                    | Your public HTTPS URL. The app **refuses to boot** in production with a non-HTTPS `CORS_ORIGIN`.                                     |
-| `HVAULT_HTTP_PORT`                                          | The single loopback port to publish (default `8080`). One per stack if the host runs several.                                        |
-| `TRUST_PROXY_HOPS`                                          | `2` with the system Nginx in front (the default); `1` if you expose the loopback port directly.                                      |
-| `HVAULT_STACK_NAME`                                         | Namespaces the Compose project, containers, networks and volumes. Change it **only** for a second stack on the same host.            |
-| `HVAULT_EDGE_SUBNET`, `HVAULT_DATA_SUBNET`                  | Only if `172.31.24x` is already taken here. An overlap is fatal: Docker refuses to create the network.                               |
-| `HVAULT_VERSION`                                            | The tag the stack's images are built under. Keep it equal to `package.json`'s `version` (a test asserts the Compose default does).   |
+| Variable                                                                 | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `SESSION_SECRET`              | 32+ chars, all different. `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `TWO_FACTOR_ENCRYPTION_KEY`                                              | Set it on day one. Unset, 2FA secrets are encrypted under `SESSION_SECRET` — which means rotating `SESSION_SECRET` later breaks 2FA.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `MONGO_ROOT_PASSWORD`                                                    | Ships **empty**, and the stack refuses to start until you set it. Must be **URL-safe** (it goes into a URI): `openssl rand -hex 32`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_RPC_SECRET` | The document store's object storage. All four ship **empty** and the stack refuses to start until you set them, exactly like the database passwords — a placeholder would be a working bucket credential published in this repository. The bucket and the key are created for you on first boot, so the bucket name must be a **valid S3 bucket name** (3–63 characters, lower case; the engine refuses to start otherwise) and the access key id must be **at least 8 characters**. `openssl rand -hex 32` for the two secrets. Leave `S3_ENDPOINT` empty: the stack points the app at its own storage container. |
+| `APP_URL`, `CORS_ORIGIN`                                                 | Your public HTTPS URL. The app **refuses to boot** in production with a non-HTTPS `CORS_ORIGIN`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `HVAULT_HTTP_PORT`                                                       | The single loopback port to publish (default `8080`). One per stack if the host runs several.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `TRUST_PROXY_HOPS`                                                       | `2` with the system Nginx in front (the default); `1` if you expose the loopback port directly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `HVAULT_STACK_NAME`                                                      | Namespaces the Compose project, containers, networks and volumes. Change it **only** for a second stack on the same host.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `HVAULT_EDGE_SUBNET`, `HVAULT_DATA_SUBNET`                               | Only if `172.31.24x` is already taken here. An overlap is fatal: Docker refuses to create the network.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `HVAULT_VERSION`                                                         | The tag the stack's images are built under. Keep it equal to `package.json`'s `version` (a test asserts the Compose default does).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 > **Running two H-Vaults on one host?** Give the second its own `HVAULT_STACK_NAME`,
 > `HVAULT_HTTP_PORT` and subnets. The stack name matters most: two stacks sharing it do not fail
@@ -429,7 +443,8 @@ docker compose up -d --build --wait
 
 `--wait` blocks until every service reports **healthy** and **exits non-zero if any does not** —
 that is the gate. A green `docker compose config` proves nothing. Afterwards `docker compose ps`
-should show three services `healthy` and `hvault-bootstrap` `Exited (0)`.
+should show four services `healthy` — `hvault-nginx`, `hvault-app`, `hvault-db` and `hvault-s3` —
+and the two one-shots, `hvault-bootstrap` and `hvault-db-init`, `Exited (0)`.
 
 On a first or clean deployment that is the whole story. The one case where `--wait` reports a
 failure the stack does not have is **re-running it to recover from an app outage longer than about
@@ -461,8 +476,11 @@ instead? Use `docker/nginx/system.pm2.example.conf`, which proxies straight to E
 
 ### What the stack does for you
 
-- **One exposed surface.** Only Nginx publishes a port, on `127.0.0.1`. MongoDB has no published
-  port and sits on an internal network with no route to the internet.
+- **One exposed surface.** Only Nginx publishes a port, on `127.0.0.1`. Neither MongoDB nor the
+  object storage has a published port; both sit on an internal network with no route to the
+  internet, so the storage engine's S3 API — which authenticates with a static key pair and has
+  none of the app's rate limiting, CSRF or session handling in front of it — is unreachable from
+  anywhere but the app container.
 - **Security headers stay intact.** Nginx serves the content-hashed `/assets/*` straight from disk
   (immutable caching, gzip, `nosniff`), but every **HTML document** is proxied to Express, so
   helmet remains the single owner of the CSP, its per-request nonce, `X-Frame-Options` and
@@ -474,11 +492,17 @@ instead? Use `docker/nginx/system.pm2.example.conf`, which proxies straight to E
   account deletion and refresh-token rotation take their atomic paths.
 - **Hardened by default.** `no-new-privileges` everywhere; all Linux capabilities dropped (MongoDB
   keeps only the five its entrypoint needs to drop to an unprivileged user); read-only root
-  filesystems on the app, Nginx **and** the bootstrap; memory, CPU and `pids_limit` bounds; log
-  rotation; and healthcheck probes that leak nothing into `docker inspect`.
+  filesystems on the app, Nginx, the bootstrap **and** the storage engine; memory, CPU and
+  `pids_limit` bounds; log rotation; and healthcheck probes that leak nothing into
+  `docker inspect`. The one image the stack does not build — the storage engine — is pinned by
+  **digest** as well as by tag, so a moved tag cannot change what runs.
+- **Documents cost the vault nothing when storage is unwell.** The app waits for the storage
+  container to _start_, never for it to be _healthy_: documents are an optional feature, and a
+  storage problem must not be able to hold a password manager's login down. A storage outage
+  degrades documents alone, through the boot preflight and per-request errors.
 
 <details>
-<summary><b>Updating, rolling back, and backing up the database</b></summary>
+<summary><b>Updating, rolling back, and backing up your data</b></summary>
 
 #### Update
 
@@ -503,11 +527,35 @@ Images are tagged with `HVAULT_VERSION`, so the previous release's images are st
 under their own tag, and `docker compose ps` names the version actually serving. A rollback does
 **not** roll the database back.
 
-#### Back up the database
+#### Back up the database AND the document storage
 
-The vault lives in the `hvault-db-data` volume. It is encrypted at rest by the client — but it is
-still the only copy, and the server cannot decrypt it for you. A lost volume with no backup is a
-lost vault.
+> **Read this before you trust a backup.** H-Vault's own backup feature — the encrypted archive it
+> emails and lets a user download — **does not contain documents**. It never has and it is not
+> meant to: a backup is a single JSON document capped at about 25 MiB, and uploaded files do not
+> fit in one. What a backup carries instead is a `documentSummary` breadcrumb saying how many
+> documents and how many bytes the account held when it was taken, precisely so that a restore can
+> say "this account had 43 documents; documents are not part of a backup" rather than looking
+> complete. An operator who takes H-Vault's backups faithfully and never captures the storage
+> volume still has **nothing** after losing it. The volume is the only copy.
+
+Your data lives in **three** places, and a backup that captures fewer than all three is not a
+backup:
+
+| What                | Where                                       | Holds                                                                               |
+| ------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------- |
+| The vault           | volume `hvault-db-data`                     | Every item, folder, user and — for documents — the **wrapped keys** and the framing |
+| Document ciphertext | volumes `hvault-s3-data` + `hvault-s3-meta` | The sealed bytes of every uploaded file, and the storage engine's index of them     |
+| The configuration   | the root `.env`                             | `TWO_FACTOR_ENCRYPTION_KEY`, the database and bucket credentials                    |
+
+**Capture them together, or not at all.** A document's key is wrapped and stored in MongoDB while
+its bytes sit in the storage engine, so neither half is usable alone: Mongo without the storage
+volumes is a list of documents whose files are gone, and the storage volumes without Mongo are
+opaque bytes nobody holds a key for. Snapshots taken minutes apart are fine — an uploaded document
+is immutable, so a row that arrived after the storage snapshot is the only thing that can be
+missing, and that is the failure mode the client already renders as a document whose object is
+missing. Snapshots taken **days** apart are not.
+
+The database half is a `mongodump`, which is consistent while the stack runs:
 
 ```bash
 set -a && . ./.env && set +a
@@ -516,7 +564,34 @@ docker compose exec -T hvault-db mongodump \
   --authenticationDatabase admin --db hvault --archive | gzip > hvault-$(date +%F).gz
 ```
 
-Restore into an empty (or to-be-overwritten) stack:
+The storage half is the two volumes, and here the method matters more than the destination:
+
+> **A file-level copy of a running storage engine is not a backup.** `docker cp`, `rsync` or `tar`
+> over a live `hvault-s3-meta` reads a database that is being written to, and what comes back can
+> be a metadata store that will not open — with nothing to tell you until the day you restore it.
+> Either **stop the stack first**, or take a filesystem/block-level **snapshot** (LVM, ZFS, btrfs,
+> your hypervisor or your cloud provider's volume snapshot), which is atomic.
+
+Stopped, it is an ordinary archive of both volumes:
+
+```bash
+set -a && . ./.env && set +a
+STACK="${HVAULT_STACK_NAME:-hvault}"      # Compose prefixes every volume with the project name
+docker compose stop
+docker run --rm \
+  -v "${STACK}_hvault-s3-meta":/meta:ro \
+  -v "${STACK}_hvault-s3-data":/data:ro \
+  -v "$PWD":/out alpine \
+  tar czf "/out/hvault-storage-$(date +%F).tgz" -C / meta data
+docker compose up -d --wait
+```
+
+(`docker volume ls` confirms the names on your host. `docker compose down` does **not** remove
+them; only `down -v` does, and that is the command that destroys every uploaded document.)
+
+#### Restore
+
+Restore the database:
 
 ```bash
 set -a && . ./.env && set +a
@@ -526,39 +601,63 @@ gunzip -c hvault-2026-07-14.gz | docker compose exec -T hvault-db mongorestore \
 docker compose restart hvault-app        # drop any cached connections
 ```
 
-Keep a backup of `.env` **with** the data: the vault is decryptable only with each user's master
-password, but `TWO_FACTOR_ENCRYPTION_KEY` is what makes the stored 2FA secrets readable.
+Restore the storage volumes the same way you captured them — un-tar into the two named volumes
+with the stack stopped, or roll the snapshot back.
+
+> **Put both halves in place before the stack comes up, and never bring it up on a storage volume
+> that is NEWER than the database.** An hourly clean-up sweeps the bucket for objects that no
+> database row names and, once an object is more than a day old, deletes them — that is what
+> reclaims the debris of an abandoned upload. It cannot tell that debris from a file whose row is
+> simply missing because you restored an older dump. So a stack started with storage ahead of the
+> database permanently destroys every document the database does not know about, within the hour,
+> and restoring the dump you actually meant to use afterwards finds the bytes already gone. Keep
+> the stack down until both halves are in place.
+
+**The direction matters.** Restoring MongoDB **without** the storage volumes is not corruption and
+does not fail loudly: every item and folder comes back, and every document row comes back too,
+pointing at objects that no longer exist. The app renders those as documents whose file is missing;
+the metadata, the name and the tags are still there, and only the bytes are gone. Restoring the
+storage volumes **without** MongoDB leaves objects nobody holds a key for, which is unrecoverable —
+the wrapped key is the only way in, and it lives in the database.
+
+Keep a backup of `.env` **with** the data. The vault is decryptable only with each user's master
+password, but `TWO_FACTOR_ENCRYPTION_KEY` is what makes the stored 2FA secrets readable, and
+`S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` are what let the restored stack open its own bucket.
 
 </details>
 
 <details>
 <summary><b>Rotating secrets</b></summary>
 
-| Secret                                     | Effect of rotating it                                                                                                                                                                                                                                                                                                                                                                                   | How                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`  | Every session is invalidated; users log in again. Safe, and the right move after any suspected exposure.                                                                                                                                                                                                                                                                                                | Edit `.env`, `docker compose up -d`.                                                                                                                                                                                                                                                     |
-| `SESSION_SECRET`                           | In-flight CSRF tokens are rejected once (the client re-fetches automatically). **Also the fallback 2FA key** — read the next row first.                                                                                                                                                                                                                                                                 | Edit `.env`, `docker compose up -d`.                                                                                                                                                                                                                                                     |
-| `TWO_FACTOR_ENCRYPTION_KEY`                | **Destructive.** It decrypts the stored TOTP secrets. Rotate it and every 2FA user is locked out of their authenticator and must use a one-time backup code.                                                                                                                                                                                                                                            | Don't, unless you must. Set a dedicated key on day one so you never have to.                                                                                                                                                                                                             |
-| `MONGO_ROOT_PASSWORD`                      | `MONGO_INITDB_ROOT_*` only creates the user on the **first** boot against an empty data dir; changing `.env` later just breaks authentication.                                                                                                                                                                                                                                                          | Rotate it inside the database first (see troubleshooting), then update `.env`.                                                                                                                                                                                                           |
-| `MONGO_APP_PASSWORD`                       | `hvault-db-init` reconciles the user's **roles** on every `up` but never rewrites an existing password, so changing `.env` alone breaks the app's authentication on the next deploy — the same trap as the root password.                                                                                                                                                                               | Rotate inside the database first: `docker compose exec hvault-db mongosh -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.getSiblingDB("hvault").changeUserPassword("hvault_app","<new>")'`, then update `.env` and `docker compose up -d`. |
-| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Rotate the two **together**. A storage engine that already knows the access key id with a different secret refuses to start rather than adopting the new one, so changing the secret alone leaves the storage service crash-looping; a new id with a new secret reads and writes the existing bucket. Documents themselves are unaffected: they are encrypted with keys the storage service never holds |
+| Secret                                     | Effect of rotating it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | How                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`  | Every session is invalidated; users log in again. Safe, and the right move after any suspected exposure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Edit `.env`, `docker compose up -d`.                                                                                                                                                                                                                                                     |
+| `SESSION_SECRET`                           | In-flight CSRF tokens are rejected once (the client re-fetches automatically). **Also the fallback 2FA key** — read the next row first.                                                                                                                                                                                                                                                                                                                                                                                                                                              | Edit `.env`, `docker compose up -d`.                                                                                                                                                                                                                                                     |
+| `TWO_FACTOR_ENCRYPTION_KEY`                | **Destructive.** It decrypts the stored TOTP secrets. Rotate it and every 2FA user is locked out of their authenticator and must use a one-time backup code.                                                                                                                                                                                                                                                                                                                                                                                                                         | Don't, unless you must. Set a dedicated key on day one so you never have to.                                                                                                                                                                                                             |
+| `MONGO_ROOT_PASSWORD`                      | `MONGO_INITDB_ROOT_*` only creates the user on the **first** boot against an empty data dir; changing `.env` later just breaks authentication.                                                                                                                                                                                                                                                                                                                                                                                                                                       | Rotate it inside the database first (see troubleshooting), then update `.env`.                                                                                                                                                                                                           |
+| `MONGO_APP_PASSWORD`                       | `hvault-db-init` reconciles the user's **roles** on every `up` but never rewrites an existing password, so changing `.env` alone breaks the app's authentication on the next deploy — the same trap as the root password.                                                                                                                                                                                                                                                                                                                                                            | Rotate inside the database first: `docker compose exec hvault-db mongosh -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.getSiblingDB("hvault").changeUserPassword("hvault_app","<new>")'`, then update `.env` and `docker compose up -d`. |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Rotate the two **together**, always. Measured against the pinned engine: changing the **secret alone** makes it exit 1 on the next `up` with `Access key <id> is associated with a secret key different than the one given in GARAGE_DEFAULT_SECRET_KEY` — it refuses to adopt the new secret rather than rewriting the key, and `restart: unless-stopped` turns that into a crash loop. Changing **both** mints a new key that reads and writes the pre-existing bucket. Documents themselves are unaffected either way: they are sealed with keys the storage service never holds. | Edit **both** values in `.env`, `docker compose up -d`, confirm `docker compose ps` shows `hvault-s3` healthy, then remove the superseded key: `docker compose exec hvault-s3 /garage key delete <old-id>`.                                                                              |
+| `S3_RPC_SECRET`                            | The storage engine's cluster RPC secret. Single-node, so nothing else holds it and rotating it is safe.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Edit `.env`, `docker compose up -d`.                                                                                                                                                                                                                                                     |
 
 </details>
 
 <details>
 <summary><b>Troubleshooting</b></summary>
 
-| Symptom                                                                                            | Cause and fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MongoDB crash-loops on Ubuntu 26.04 / any Linux 6.19+ kernel                                       | SERVER-121912. MongoDB 8.0 moved TCMalloc to per-CPU caches that violate the rseq ABI as it changed in kernel 6.19, so mongod aborts at startup and `restart: unless-stopped` loops forever. The fix ships in the stack — `GLIBC_TUNABLES=glibc.pthread.rseq=1`, set at **every** mongod launch site (both compose files, the server test setup, the E2E harness). If you hit this, something removed it. **Never set it to `0`**: that is mongod's own default, and precisely the value that breaks.                                                                            |
-| `docker compose up` fails: "Pool overlaps with other one on this address space"                    | Another Docker network already owns `172.31.240.0/24` or `172.31.241.0/24`. Set `HVAULT_EDGE_SUBNET` / `HVAULT_DATA_SUBNET` to free blocks, and give each stack its own `HVAULT_HTTP_PORT`. If free blocks keep getting taken, narrow Docker's own auto-allocation range instead — it carves bridges out of `172.17.0.0/12` from the bottom up — by setting `default-address-pools` in `/etc/docker/daemon.json`.                                                                                                                                                                |
-| `up -d --wait` exits 1 saying `container hvault-nginx is unhealthy`, but the port answers `200`    | Only after an app outage longer than ~75 s. Nginx's health probe runs **through** the proxy to `/api/v1/health`, so while the app is down nginx fails its five retries and is marked unhealthy; Compose treats an already-unhealthy container as terminal instead of waiting for its next probe. The stack is fine — confirm with `curl -fsS http://127.0.0.1:${HVAULT_HTTP_PORT:-8080}/api/v1/health`, then re-run the command (nginx clears itself on its first good probe, ≤15 s). The deep probe is deliberate: it is what proves the whole single-port path at deploy time. |
-| Upgrading an **existing** deployment from `mongo:7.0`                                              | mongod 8.0 starts on a 7.0 data directory as-is. Then raise the compatibility version once, or 8.0 keeps behaving like 7.0: `docker compose exec hvault-db mongosh -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({setFeatureCompatibilityVersion:"8.0", confirm:true})'`. Take a `mongodump` first — it is not reversible without a restore.                                                                                                                                                                        |
-| App exits with code 0 and no log output                                                            | Almost always a config error thrown before the app installs its error handling. `docker compose logs hvault-app`, and check `.env` has every required secret.                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `MongoParseError` / auth failures on boot                                                          | `MONGO_ROOT_PASSWORD` or `MONGO_APP_PASSWORD` contains a character that is URI syntax (`@ : / ? #`). Regenerate it with `openssl rand -hex 32`.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Upgrading an existing deployment: `docker compose up` aborts with `MONGO_APP_PASSWORD is required` | Expected, and it fails **before** any container is created. The app no longer authenticates as database root — it uses a least-privilege `readWrite`-on-`hvault` user that the new one-shot `hvault-db-init` provisions. Add `MONGO_APP_USERNAME` / `MONGO_APP_PASSWORD` (URL-safe, `openssl rand -hex 32`) to `.env`, then `docker compose up -d --build`. The user is created on that first `up`; existing data is untouched.                                                                                                                                                  |
-| `hvault-db` goes **unhealthy after you change `MONGO_ROOT_PASSWORD`**                              | `MONGO_INITDB_ROOT_*` only creates the user on the first boot against an empty data directory, so changing it later does not rotate the existing user. Rotate it inside the database: `docker compose exec hvault-db mongosh -u <old-user> -p <old-pass> --authenticationDatabase admin --eval 'db.getSiblingDB("admin").changeUserPassword("<user>","<new-pass>")'`, then update `.env`.                                                                                                                                                                                        |
-| App boots in dev but the container exits complaining about `CORS_ORIGIN`                           | Compose forces `NODE_ENV=production`, where a non-HTTPS `CORS_ORIGIN` is a hard boot failure by design. Set `CORS_ORIGIN` and `APP_URL` to your real `https://` URL — that value is valid for local `npm run dev` too, since the Vite dev server proxies `/api` same-origin.                                                                                                                                                                                                                                                                                                     |
+| Symptom                                                                                                                      | Cause and fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MongoDB crash-loops on Ubuntu 26.04 / any Linux 6.19+ kernel                                                                 | SERVER-121912. MongoDB 8.0 moved TCMalloc to per-CPU caches that violate the rseq ABI as it changed in kernel 6.19, so mongod aborts at startup and `restart: unless-stopped` loops forever. The fix ships in the stack — `GLIBC_TUNABLES=glibc.pthread.rseq=1`, set at **every** mongod launch site (both compose files, the server test setup, the E2E harness). If you hit this, something removed it. **Never set it to `0`**: that is mongod's own default, and precisely the value that breaks.                                                                                       |
+| `docker compose up` fails: "Pool overlaps with other one on this address space"                                              | Another Docker network already owns `172.31.240.0/24` or `172.31.241.0/24`. Set `HVAULT_EDGE_SUBNET` / `HVAULT_DATA_SUBNET` to free blocks, and give each stack its own `HVAULT_HTTP_PORT`. If free blocks keep getting taken, narrow Docker's own auto-allocation range instead — it carves bridges out of `172.17.0.0/12` from the bottom up — by setting `default-address-pools` in `/etc/docker/daemon.json`.                                                                                                                                                                           |
+| `up -d --wait` exits 1 saying `container hvault-nginx is unhealthy`, but the port answers `200`                              | Only after an app outage longer than ~75 s. Nginx's health probe runs **through** the proxy to `/api/v1/health`, so while the app is down nginx fails its five retries and is marked unhealthy; Compose treats an already-unhealthy container as terminal instead of waiting for its next probe. The stack is fine — confirm with `curl -fsS http://127.0.0.1:${HVAULT_HTTP_PORT:-8080}/api/v1/health`, then re-run the command (nginx clears itself on its first good probe, ≤15 s). The deep probe is deliberate: it is what proves the whole single-port path at deploy time.            |
+| Upgrading an **existing** deployment from `mongo:7.0`                                                                        | mongod 8.0 starts on a 7.0 data directory as-is. Then raise the compatibility version once, or 8.0 keeps behaving like 7.0: `docker compose exec hvault-db mongosh -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({setFeatureCompatibilityVersion:"8.0", confirm:true})'`. Take a `mongodump` first — it is not reversible without a restore.                                                                                                                                                                                   |
+| App exits with code 0 and no log output                                                                                      | Almost always a config error thrown before the app installs its error handling. `docker compose logs hvault-app`, and check `.env` has every required secret.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `MongoParseError` / auth failures on boot                                                                                    | `MONGO_ROOT_PASSWORD` or `MONGO_APP_PASSWORD` contains a character that is URI syntax (`@ : / ? #`). Regenerate it with `openssl rand -hex 32`.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Upgrading an existing deployment: `docker compose up` aborts with `S3_BUCKET is required` (or one of the other three `S3_*`) | Expected, and it fails **before** any container is created. The stack now runs an object storage service (`hvault-s3`) for the document store, and it guards its four values the same way it guards the database passwords — a placeholder would be a working bucket credential published in this repository. Add `S3_BUCKET`, `S3_ACCESS_KEY_ID` (8+ characters), `S3_SECRET_ACCESS_KEY` and `S3_RPC_SECRET` to `.env`, leave `S3_ENDPOINT` empty, then `docker compose up -d --build`. The bucket and key are created on that first `up`; existing data is untouched.                     |
+| `hvault-s3` crash-loops after you change `S3_SECRET_ACCESS_KEY`                                                              | You changed the secret without changing the id. Measured: the engine exits 1 with `Access key <id> is associated with a secret key different than the one given in GARAGE_DEFAULT_SECRET_KEY` rather than adopting the new secret, and `restart: unless-stopped` retries forever. Set a **new `S3_ACCESS_KEY_ID` as well**, `docker compose up -d`, then drop the old one with `docker compose exec hvault-s3 /garage key delete <old-id>`. Reverting to the previous secret also works. Documents are unharmed either way — the bytes are sealed with keys the storage engine never holds. |
+| Uploads fail, or the Documents page reports storage unavailable, while the vault works fine                                  | By design the app depends on the storage container having **started**, never on it being **healthy**, so the stack comes up and serves the vault even when storage does not. Check `docker compose ps hvault-s3` and `docker compose logs hvault-s3`. If the deployment is not meant to have documents at all, that is not this stack: leave the feature to a PM2 deployment, which has no storage engine.                                                                                                                                                                                  |
+| Upgrading an existing deployment: `docker compose up` aborts with `MONGO_APP_PASSWORD is required`                           | Expected, and it fails **before** any container is created. The app no longer authenticates as database root — it uses a least-privilege `readWrite`-on-`hvault` user that the new one-shot `hvault-db-init` provisions. Add `MONGO_APP_USERNAME` / `MONGO_APP_PASSWORD` (URL-safe, `openssl rand -hex 32`) to `.env`, then `docker compose up -d --build`. The user is created on that first `up`; existing data is untouched.                                                                                                                                                             |
+| `hvault-db` goes **unhealthy after you change `MONGO_ROOT_PASSWORD`**                                                        | `MONGO_INITDB_ROOT_*` only creates the user on the first boot against an empty data directory, so changing it later does not rotate the existing user. Rotate it inside the database: `docker compose exec hvault-db mongosh -u <old-user> -p <old-pass> --authenticationDatabase admin --eval 'db.getSiblingDB("admin").changeUserPassword("<user>","<new-pass>")'`, then update `.env`.                                                                                                                                                                                                   |
+| App boots in dev but the container exits complaining about `CORS_ORIGIN`                                                     | Compose forces `NODE_ENV=production`, where a non-HTTPS `CORS_ORIGIN` is a hard boot failure by design. Set `CORS_ORIGIN` and `APP_URL` to your real `https://` URL — that value is valid for local `npm run dev` too, since the Vite dev server proxies `/api` same-origin.                                                                                                                                                                                                                                                                                                                |
 
 </details>
 
@@ -575,6 +674,14 @@ distributed MongoDB locks, so they never double-run across instances. Express se
 itself in this mode (there is no internal Nginx), so front it with
 `docker/nginx/system.pm2.example.conf` and set `TRUST_PROXY=1`.
 
+**There is no storage engine here**, so the document store is simply **off** unless you point
+`S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` at storage of your own —
+any S3-compatible service, self-hosted or hosted. All four or none: a partial set is a startup
+error in production. Nothing else changes if you leave them empty; the API reports the feature as
+unavailable and the app hides it. (`S3_RPC_SECRET` belongs to the Docker stack's storage container
+and is not read here at all.) If you do configure storage under PM2, its data is yours to back up,
+and the boundary above still holds: documents are not in H-Vault's own backups.
+
 ---
 
 ## Deployment security checklist
@@ -585,6 +692,8 @@ itself in this mode (there is no internal Nginx), so front it with
 - [ ] `TWO_FACTOR_ENCRYPTION_KEY` — set explicitly, so 2FA does not depend on `SESSION_SECRET`
 - [ ] `MONGO_ROOT_PASSWORD` — strong, and URL-safe
 - [ ] `MONGO_APP_PASSWORD` — strong, and URL-safe (the app authenticates as this user, not as root)
+- [ ] `S3_ACCESS_KEY_ID` (8+ chars) and `S3_SECRET_ACCESS_KEY` — strong, and rotated only as a pair
+- [ ] `S3_RPC_SECRET` — strong; it is the storage engine's cluster secret, not its bucket key
 - [ ] No secret starts with `dev-` (the app refuses to boot in production if one does)
 
 **Network**
@@ -592,8 +701,8 @@ itself in this mode (there is no internal Nginx), so front it with
 - [ ] TLS terminated by a reverse proxy; HTTPS enforced for all clients
 - [ ] `CORS_ORIGIN` is your production `https://` origin
 - [ ] `TRUST_PROXY_HOPS` equals the real number of proxies in front of the app
-- [ ] The stack publishes exactly one port, bound to `127.0.0.1`; MongoDB publishes none
-- [ ] Only 80/443 open to the internet; MongoDB's 27017 unreachable from outside
+- [ ] The stack publishes exactly one port, bound to `127.0.0.1`; MongoDB and the object storage publish none
+- [ ] Only 80/443 open to the internet; MongoDB's 27017 and the storage API's 3900 unreachable from outside
 
 **Email** — required for verification, password reset, account unlock and backups
 
@@ -606,6 +715,10 @@ itself in this mode (there is no internal Nginx), so front it with
       via `npm run create-indexes -w packages/server`, because `autoIndex` is off in production
 - [ ] A replica set, if you want the transactional paths (the Docker stack gives you one)
 - [ ] Database backups scheduled independently of H-Vault's own backup feature
+- [ ] **The document storage volumes are backed up too, alongside the database and `.env`.**
+      Documents are not in H-Vault's own backups: `hvault-s3-data` is the only copy of every
+      uploaded file, and its wrapped keys live in MongoDB, so the two are only useful together.
+      Snapshot or stop-then-copy — a file-level copy of a running storage engine is not a backup
 
 ---
 
@@ -687,19 +800,22 @@ start** rather than run misconfigured.
 <details>
 <summary><b>Docker Compose variables</b> — read by Compose, not by the app</summary>
 
-| Variable              | Default           | Notes                                                                                                                                              |
-| --------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HVAULT_HTTP_PORT`    | `8080`            | The one host port published, always bound to `127.0.0.1`                                                                                           |
-| `HVAULT_STACK_NAME`   | `hvault`          | Namespaces the project, containers, networks and volumes                                                                                           |
-| `HVAULT_VERSION`      | `0.9.0`           | Image tag for the three first-party images. Keep it equal to `package.json`                                                                        |
-| `HVAULT_EDGE_SUBNET`  | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                                                                                 |
-| `HVAULT_DATA_SUBNET`  | `172.31.241.0/24` | App ↔ MongoDB. Internal: no published port, no route out                                                                                           |
-| `TRUST_PROXY_HOPS`    | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                                                                                        |
-| `MONGO_ROOT_USERNAME` | `hvault`          | Created on the database's first boot only. Held by `hvault-db` and `hvault-db-init` only                                                           |
-| `MONGO_ROOT_PASSWORD` | — (**required**)  | Ships empty; the stack refuses to start without it. Must be URL-safe                                                                               |
-| `MONGO_APP_USERNAME`  | `hvault_app`      | The least-privilege account the app and index bootstrap authenticate as                                                                            |
-| `MONGO_APP_PASSWORD`  | — (**required**)  | Ships empty; the stack refuses to start without it. Must be URL-safe                                                                               |
-| `S3_RPC_SECRET`       | —                 | The storage engine's own cluster RPC secret, read by the storage container and never by the app. Only needed when the document store is configured |
+| Variable               | Default           | Notes                                                                                                                                              |
+| ---------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HVAULT_HTTP_PORT`     | `8080`            | The one host port published, always bound to `127.0.0.1`                                                                                           |
+| `HVAULT_STACK_NAME`    | `hvault`          | Namespaces the project, containers, networks and volumes                                                                                           |
+| `HVAULT_VERSION`       | `0.9.0`           | Image tag for the three first-party images. Keep it equal to `package.json`                                                                        |
+| `HVAULT_EDGE_SUBNET`   | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                                                                                 |
+| `HVAULT_DATA_SUBNET`   | `172.31.241.0/24` | App ↔ MongoDB and the object storage. Internal: no published port, no route out                                                                    |
+| `TRUST_PROXY_HOPS`     | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                                                                                        |
+| `MONGO_ROOT_USERNAME`  | `hvault`          | Created on the database's first boot only. Held by `hvault-db` and `hvault-db-init` only                                                           |
+| `MONGO_ROOT_PASSWORD`  | — (**required**)  | Ships empty; the stack refuses to start without it. Must be URL-safe                                                                               |
+| `MONGO_APP_USERNAME`   | `hvault_app`      | The least-privilege account the app and index bootstrap authenticate as                                                                            |
+| `MONGO_APP_PASSWORD`   | — (**required**)  | Ships empty; the stack refuses to start without it. Must be URL-safe                                                                               |
+| `S3_BUCKET`            | — (**required**)  | Read by Compose as well as by the app: the storage container CREATES this bucket on first boot. Ships empty; the stack refuses to start without it |
+| `S3_ACCESS_KEY_ID`     | — (**required**)  | Likewise: Compose hands it to the storage container, which mints the key. Min 8 characters — the engine rejects a shorter id at boot               |
+| `S3_SECRET_ACCESS_KEY` | — (**required**)  | Likewise. Rotate it only together with the id above, or the storage container crash-loops (see "Rotating secrets")                                 |
+| `S3_RPC_SECRET`        | — (**required**)  | The storage engine's own cluster RPC secret, read by the storage container and never by the app — the app's `environment:` blanks it back out      |
 
 </details>
 

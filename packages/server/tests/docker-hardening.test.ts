@@ -13,15 +13,24 @@
  *   * an auto-allocated bridge subnet can collide with another project's network
  *     and blackhole traffic between containers that resolve each other happily;
  *   * serving the SPA's HTML from Nginx's own document root strips every security
- *     header helmet attaches to it.
+ *     header helmet attaches to it;
+ *   * the object storage engine refuses to boot when its access key id is known
+ *     with a different secret, so a half-rotated credential is a crash loop rather
+ *     than a quiet adoption.
  *
  * A refactor that drops one of these gets a red test instead of an incident.
+ *
+ * The service lists below (`longRunning`, `everyService`) are built BY LITERAL
+ * NAME. A service added to docker-compose.yml and not to them escapes every
+ * cross-service rule in this file silently, so they are part of the cost of
+ * adding a service, not an afterthought.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import { DOCUMENT_CIPHERTEXT_CHUNK_BYTES } from '@hvault/shared';
 
 interface HealthCheck {
   test?: string[] | string;
@@ -206,11 +215,24 @@ const nginx = compose.services['hvault-nginx'];
 const bootstrap = compose.services['hvault-bootstrap'];
 /** One-shot that provisions the least-privilege application database user. */
 const dbInit = compose.services['hvault-db-init'];
+/** The S3-compatible object storage the document store writes ciphertext to. */
+const s3 = compose.services['hvault-s3'];
 
+/**
+ * The two lists every cross-service rule below iterates, BY LITERAL NAME.
+ *
+ * That is the trap they carry, and it is why adding a service to the stack means
+ * editing this file in the same change: a service missing from these arrays is
+ * not partially checked, it is checked by NOTHING — not log rotation, not the
+ * restart policy, not `container_name` namespacing, not `init:`, and above all
+ * not "publishes a port from Nginx and from nowhere else", which is the one
+ * assertion whose failure puts an unauthenticated surface on the host.
+ */
 const longRunning: [string, ServiceConfig | undefined][] = [
   ['hvault-nginx', nginx],
   ['hvault-app', app],
   ['hvault-db', db],
+  ['hvault-s3', s3],
 ];
 const everyService: [string, ServiceConfig | undefined][] = [
   ...longRunning,
@@ -275,6 +297,21 @@ describe('Docker deployment', () => {
       expect(app?.ports).toBeUndefined();
       expect(db?.ports).toBeUndefined();
       expect(bootstrap?.ports).toBeUndefined();
+      expect(dbInit?.ports).toBeUndefined();
+      // The storage engine holds every document's ciphertext and speaks an S3 API
+      // that authenticates with a static key pair. Published, it would be a
+      // second front door to the deployment's data with none of the app's rate
+      // limiting, CSRF or session handling in front of it.
+      expect(s3?.ports).toBeUndefined();
+
+      // ...and named services are not the rule. Enumerating them one by one is
+      // how a seventh service arrives with a `ports:` block nobody asserted
+      // against, so the closing claim is made over EVERY service the compose file
+      // declares: exactly one of them publishes anything at all.
+      const publishing = Object.entries(compose.services)
+        .filter(([, service]) => (service?.ports ?? []).length > 0)
+        .map(([name]) => name);
+      expect(publishing).toEqual(['hvault-nginx']);
     });
 
     it('binds that port to 127.0.0.1, never 0.0.0.0', () => {
@@ -340,6 +377,10 @@ describe('Docker deployment', () => {
       // one: its master reaps its own workers, and it exits 0 either way.
       expect(db?.init).toBeUndefined();
       expect(nginx?.init).toBeUndefined();
+      // The storage engine is a single static Rust binary that execs as PID 1 and
+      // handles its own signals; it forks nothing, so there are no zombies for an
+      // init to reap.
+      expect(s3?.init).toBeUndefined();
     });
 
     it('tags its own images with the release, and the default tracks package.json', () => {
@@ -640,6 +681,47 @@ describe('Docker deployment', () => {
       expect(JSON.stringify(nginx?.environment ?? {})).not.toContain('MONGO_ROOT_PASSWORD');
     });
 
+    it("scrubs the storage engine's cluster RPC secret out of the app and bootstrap too", () => {
+      // Exactly the same mechanism as the four MongoDB credentials above, for
+      // exactly the same reason: `env_file: .env` injects EVERY key, and
+      // S3_RPC_SECRET is the storage engine's CLUSTER secret — the credential that
+      // lets a peer join the storage cluster and read every stored block, bypassing
+      // the S3 API and its bucket key entirely. Only hvault-s3 has any business
+      // holding it. The app never reads it (the server's Zod schema deliberately
+      // does not declare it), so blanking it is invisible to the application.
+      //
+      // Present-and-empty, not merely absent: absent lets `env_file`'s value
+      // through, which is the bug.
+      for (const [label, service] of [
+        ['hvault-app', app],
+        ['hvault-bootstrap', bootstrap],
+      ] as const) {
+        expect(service?.environment, `${label}.S3_RPC_SECRET`).toHaveProperty('S3_RPC_SECRET', '');
+      }
+      // ...and the one service that DOES read it interpolates the same key.
+      expect(s3?.environment?.['GARAGE_RPC_SECRET']).toMatch(/\$\{S3_RPC_SECRET:\?/);
+    });
+
+    it('pins the storage endpoint at the in-stack service, so the config cannot be partial', () => {
+      // S3_ENDPOINT is container topology, exactly like MONGODB_URI: .env cannot
+      // know the in-stack address, and the app validates the four connection
+      // variables ALL-OR-NONE, throwing in production on a partial set. The stack
+      // guards the other three with `${...:?}`, so an operator who fills in only
+      // what Compose demands would otherwise hand the app three of four and watch
+      // it refuse to boot.
+      //
+      // Plain http is correct here and is not an oversight: `hvault-s3` is a
+      // single-label host on an `internal: true` network, which is one of the three
+      // shapes isProductionStorageEndpoint accepts precisely so that two containers
+      // on a private bridge are not asked to terminate TLS to each other.
+      expect(app?.environment?.['S3_ENDPOINT']).toBe('http://hvault-s3:3900');
+      // The negative the exact match does not give: .env.example must NOT ship a
+      // value for the same key. `environment:` silently outranks `env_file:`, so a
+      // populated S3_ENDPOINT there is a setting an operator can edit, redeploy,
+      // and watch have no effect whatsoever.
+      expect(envExample).toMatch(/^S3_ENDPOINT=$/m);
+    });
+
     it('provisions the scoped user from a gated, egress-less one-shot', () => {
       // Ordering: createUser is a WRITE, so it needs a writable primary — which is
       // exactly what hvault-db's healthcheck proves before this is allowed to run.
@@ -679,6 +761,33 @@ describe('Docker deployment', () => {
         'service_completed_successfully',
       );
       expect(app?.depends_on?.['hvault-db']?.condition).toBe('service_healthy');
+    });
+
+    it('waits for storage to START, never for it to be HEALTHY', () => {
+      // The one-word difference is a blast-radius decision, and it is invisible
+      // in a diff: `service_healthy` reads like the safer choice and is the
+      // opposite. Documents are an OPTIONAL feature. Gate the app on storage
+      // HEALTH and a storage engine that is slow, wedged or misconfigured holds
+      // `up --wait` and then fails it — on a stack whose logins, items and folders
+      // are perfectly fine. A password manager must not be taken down by the
+      // service that holds its attachments.
+      //
+      // `service_started` still preserves ORDERING, which is all that is wanted,
+      // and the engine still HAS a healthcheck: the deploy drill's
+      // SERVICE_EXPECTATIONS demands `healthy` there, deliberately stricter than
+      // this, because "did the deployment come up correctly" is a different
+      // question from "may the app start".
+      expect(app?.depends_on?.['hvault-s3']?.condition).toBe('service_started');
+
+      // ...and the index bootstrap has NO dependency on storage at all. It
+      // creates MongoDB indexes and never makes a storage call, so a dependency
+      // there would be coupling with no purpose — and it would put storage on the
+      // critical path of `service_completed_successfully`, which the app DOES gate
+      // on, quietly undoing the decision above by another route.
+      expect(bootstrap?.depends_on).not.toHaveProperty('hvault-s3');
+      expect(Object.keys(bootstrap?.depends_on ?? {})).toEqual(
+        expect.arrayContaining(['hvault-db', 'hvault-db-init']),
+      );
     });
   });
 
@@ -909,6 +1018,186 @@ describe('Docker deployment', () => {
       expect(nginx?.stop_signal).toBe('SIGQUIT');
       const graceSeconds = Number(/^(\d+)s$/.exec(nginx?.stop_grace_period ?? '')?.[1] ?? 0);
       expect(graceSeconds).toBeGreaterThanOrEqual(30);
+    });
+  });
+
+  describe('hvault-s3 (object storage for the document store)', () => {
+    it('pins the image by DIGEST as well as by tag, because this one is not built here', () => {
+      // Every other image in the stack is a `docker build` target from this
+      // repository, so its contents are decided by this checkout. This one is
+      // pulled. A tag is a mutable pointer — the publisher can move `v2.3.0` onto
+      // different bytes at any time, and nothing in a `docker compose up` would
+      // notice — so the digest is what actually pins what runs. Both are kept: the
+      // tag is what a human reads, the digest is what Docker enforces.
+      const image = s3?.image ?? '';
+      expect(image).toMatch(/^dxflrs\/garage:v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
+      // The negative that the regex above does NOT give for free: no OTHER
+      // reference to this image anywhere in the file may lack the digest. A
+      // second, un-pinned mention — a comment someone copies, an override, a
+      // future sidecar — is how the pin stops being the thing that runs.
+      const references = composeYaml.match(/dxflrs\/garage:[^\s'"]+/g) ?? [];
+      expect(references.length).toBeGreaterThan(0);
+      expect(references.filter((reference) => !reference.includes('@sha256:'))).toEqual([]);
+    });
+
+    it('runs the provisioning flags that make the bucket exist without an operator step', () => {
+      // The promise this service exists to keep is that `docker compose up` brings
+      // the document store up ALREADY PROVISIONED: no bucket to create by hand, no
+      // access key to mint, no storage step in the setup instructions.
+      // `--single-node` writes the cluster layout on first boot; `--default-bucket`
+      // creates the bucket from GARAGE_DEFAULT_BUCKET and IMPLIES
+      // `--default-access-key`, which mints the key pair from the other two
+      // variables. Both of the latter require `--single-node`, so dropping it
+      // silently removes the provisioning rather than failing loudly.
+      const command = [s3?.command ?? []].flat().join(' ');
+      expect(command).toContain('--single-node');
+      expect(command).toContain('--default-bucket');
+      // The image's own CMD is `/garage server` with an EMPTY entrypoint, so the
+      // entrypoint is spelled out and the command reads as a whole command rather
+      // than as an append to something invisible.
+      expect([s3?.entrypoint ?? []].flat().join(' ')).toBe('/garage');
+      expect(command.startsWith('server ')).toBe(true);
+    });
+
+    it('maps the engine variables onto the SAME .env keys the app reads', () => {
+      // Two independent key names for one credential is how an operator ends up
+      // with an app that 403s against its own bucket and no diagnostic to explain
+      // it: they rotate S3_ACCESS_KEY_ID, the engine keeps minting the old
+      // GARAGE_DEFAULT_ACCESS_KEY, and both halves look correctly configured. One
+      // value driving both sides makes that impossible, which is also why there is
+      // no GARAGE_* key anywhere in .env.example.
+      const env = s3?.environment ?? {};
+      expect(env['GARAGE_DEFAULT_ACCESS_KEY']).toMatch(/\$\{S3_ACCESS_KEY_ID:\?/);
+      expect(env['GARAGE_DEFAULT_SECRET_KEY']).toMatch(/\$\{S3_SECRET_ACCESS_KEY:\?/);
+      expect(env['GARAGE_DEFAULT_BUCKET']).toMatch(/\$\{S3_BUCKET:\?/);
+      expect(envExample).not.toMatch(/^GARAGE_/m);
+    });
+
+    it('cannot boot on an empty storage credential, and ships all four empty', () => {
+      // Same fail-closed contract as the database passwords: `${VAR:?…}` makes
+      // Compose refuse to RESOLVE the stack when the value is missing or empty, so
+      // the failure happens before a container exists and it names the variable.
+      // A placeholder in .env.example would be a working bucket credential
+      // published in this repository, with nothing to tell the operator.
+      //
+      // BOTH halves of the title are asserted here, deliberately. The guard on its
+      // own is satisfied by an example file that ships a working value, and an
+      // empty example on its own is satisfied by a `${VAR:-default}` that quietly
+      // substitutes one — it is the PAIR that fails closed, so the pair is pinned
+      // in one place rather than split across two tests that each look complete.
+      const guarded: Record<string, string | undefined> = {
+        S3_BUCKET: s3?.environment?.['GARAGE_DEFAULT_BUCKET'],
+        S3_ACCESS_KEY_ID: s3?.environment?.['GARAGE_DEFAULT_ACCESS_KEY'],
+        S3_SECRET_ACCESS_KEY: s3?.environment?.['GARAGE_DEFAULT_SECRET_KEY'],
+        S3_RPC_SECRET: s3?.environment?.['GARAGE_RPC_SECRET'],
+      };
+      for (const [key, interpolation] of Object.entries(guarded)) {
+        expect(envExample, key).toMatch(new RegExp(`^${key}=$`, 'm'));
+        // `:?` and not `:-`. The colon is what makes it reject an EMPTY value as
+        // well as a missing one, and `.env.example` ships every one of these empty.
+        expect(interpolation, key).toMatch(new RegExp(`^\\$\\{${key}:\\?`));
+      }
+    });
+
+    it('is hardened: no-new-privileges, every capability dropped, read-only root', () => {
+      expect(s3?.security_opt).toContain('no-new-privileges:true');
+      expect(s3?.cap_drop).toContain('ALL');
+      expect(s3?.read_only).toBe(true);
+      // It listens on 3900/3901, both unprivileged, so it needs no capability at
+      // all — not even NET_BIND_SERVICE.
+      expect(s3?.cap_add).toBeUndefined();
+    });
+
+    it('gives the read-only root a writable /tmp, WITHOUT pinning it to a uid', () => {
+      // The opposite of the app's and Nginx's tmpfs rule, and the reason it gets
+      // its own assertion rather than being folded into theirs. Those two images
+      // declare a non-root USER (1000 and 101), so a root-owned tmpfs is one their
+      // process cannot write and the container dies silently on its first restart.
+      // This image declares NO user, so the process IS root inside the container
+      // and a `uid=1000` pin here would reproduce that same failure from the other
+      // direction.
+      const tmpOpts = tmpfsOptions(s3, '/tmp');
+      expect(tmpOpts).toMatch(/size=\d+m/);
+      expect(tmpOpts).not.toContain('uid=');
+    });
+
+    it('bounds processes, memory and CPU', () => {
+      // Idle footprint is ~6 MiB, so 512 MB is headroom rather than a target; the
+      // point of the bound is that a leak or a compromise cannot take the host down
+      // with it.
+      expect(s3?.pids_limit).toBeGreaterThanOrEqual(50);
+      expect(s3?.pids_limit).toBeLessThanOrEqual(1000);
+      expect(s3?.mem_limit).toBeDefined();
+      expect(s3?.cpus).toBeDefined();
+    });
+
+    it('probes health in EXEC form, because the image ships no shell', () => {
+      // A `CMD-SHELL` probe on a scratch-style image does not fail loudly — it
+      // fails as "unhealthy", forever, and the stack never finishes coming up.
+      // Compose's list form with a leading `CMD` is what runs the binary directly.
+      const test = [s3?.healthcheck?.test ?? []].flat();
+      expect(test[0]).toBe('CMD');
+      expect(test).toContain('/garage');
+      // The negative `test[0] === 'CMD'` does not cover: a probe that keeps the
+      // exec form but invokes a shell that is not in the image
+      // (`['CMD', '/bin/sh', '-c', ...]`) fails exactly the same way, and looks
+      // right at a glance.
+      expect(test.some((token) => /sh$|bash$/.test(token))).toBe(false);
+    });
+
+    it('sits on the data network only, with the config mounted read-only', () => {
+      // `data` is `internal: true`: no published port and no route to the
+      // internet, in either direction. The app is the only thing that talks to it.
+      expect(networksOf(s3)).toEqual(['data']);
+      const volumes = s3?.volumes ?? [];
+      // The config file holds no secret (credentials arrive through the
+      // environment), which is what makes committing and mounting it safe — and
+      // `:ro` is what keeps a compromised engine from rewriting its own block size
+      // or data directory.
+      expect(volumes).toContain('./docker/garage/garage.toml:/etc/garage.toml:ro');
+      // Both named volumes, because the metadata and the blocks are separate and
+      // BOTH are needed to read a stored document back.
+      expect(volumes.some((volume) => volume.startsWith('hvault-s3-meta:'))).toBe(true);
+      expect(volumes.some((volume) => volume.startsWith('hvault-s3-data:'))).toBe(true);
+    });
+
+    it("configures a block size that matches the app's ciphertext chunk exactly", () => {
+      // One crypto segment is one uploaded part is one downloaded range, and
+      // DOCUMENT_CIPHERTEXT_CHUNK_BYTES fixes that at 8 MiB. The engine
+      // re-serialises an object's block list once per block, and upstream asks that
+      // multipart parts be at least block_size and an exact multiple of it — so a
+      // block size left at the 1 MiB default makes every part eight blocks and
+      // rewrites the block list eight times per part. The two numbers are one
+      // decision written in two files; this is what stops them drifting apart.
+      const garageToml = readFileSync(
+        path.join(repoRoot, 'docker', 'garage', 'garage.toml'),
+        'utf-8',
+      );
+      expect(garageToml).toMatch(/^block_size = "8M"$/m);
+      expect(DOCUMENT_CIPHERTEXT_CHUNK_BYTES).toBe(8 * 1024 * 1024);
+      // The app reaches it at the address the app's environment pins, so the
+      // listener has to be the one that address names.
+      expect(garageToml).toMatch(/^api_bind_addr = "\[::\]:3900"$/m);
+      // ...and the region has to be the one the app defaults to, because SigV4
+      // signs it: a mismatch is a signature failure against your own bucket.
+      expect(garageToml).toMatch(/^s3_region = "us-east-1"$/m);
+      expect(envExample).toMatch(/^S3_REGION=us-east-1$/m);
+    });
+
+    it('runs the same pinned engine in the development stack, and publishes it on loopback', () => {
+      // A storage behaviour difference between dev and prod must never be able to
+      // be a storage ENGINE difference — the same rule the two compose files
+      // already hold for MongoDB's major version. The dev stack does publish a
+      // port, which production must not: it is bound to 127.0.0.1 for host tooling,
+      // exactly as the dev database is.
+      const devCompose = readFileSync(path.join(repoRoot, 'docker-compose.dev.yml'), 'utf-8');
+      const digest = /@(sha256:[0-9a-f]{64})/.exec(s3?.image ?? '')?.[1];
+      expect(digest).toBeDefined();
+      expect(devCompose).toContain(digest!);
+      expect(devCompose).toMatch(/^ {6}- '127\.0\.0\.1:3900:3900'$/m);
+      // The dev credentials are literals so the dev stack needs no .env at all,
+      // and they must never be the production stack's guarded keys.
+      expect(devCompose).not.toMatch(/GARAGE_DEFAULT_SECRET_KEY: \$\{/);
     });
   });
 

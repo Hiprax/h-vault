@@ -4,7 +4,7 @@
  * Everything here is pure: what "every service is healthy" means for a stack
  * that contains two one-shots, what the stack is allowed to publish, and what
  * configuration a throwaway deployment needs. They are the claims the gate
- * makes, and a claim that can only be exercised by standing a five-service
+ * makes, and a claim that can only be exercised by standing a six-service
  * Compose stack up is a claim nothing tests — the same reason `lib/tiers.mjs`
  * exists beside the runner rather than inside it.
  *
@@ -22,11 +22,22 @@
  * repair — asserting only on the services that stay up — would stop checking the
  * two containers whose failure silently costs the deployment its indexes and its
  * least-privilege database user.
+ *
+ * `hvault-s3` is `healthy`, and that is deliberately STRICTER than the app's own
+ * dependency on it. The app gates on `service_started`, because documents are an
+ * optional feature and a storage problem must never be able to take the password
+ * manager down. The DRILL is asking a different question — did the deployment
+ * come up correctly, all of it — and there the storage engine reaching its own
+ * healthcheck is exactly what must be proved. Relaxing this row to match the
+ * compose dependency would leave the one service whose failure mode is a silent
+ * crash loop (see the credential-rotation trap in docker-compose.yml) checked by
+ * nothing.
  */
 export const SERVICE_EXPECTATIONS = {
   'hvault-nginx': 'healthy',
   'hvault-app': 'healthy',
   'hvault-db': 'healthy',
+  'hvault-s3': 'healthy',
   'hvault-bootstrap': 'completed',
   'hvault-db-init': 'completed',
 };

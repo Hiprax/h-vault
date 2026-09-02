@@ -1,0 +1,56 @@
+# =============================================================================
+# H-Vault — object storage engine (Garage) configuration
+# =============================================================================
+# Mounted read-only into hvault-s3 at /etc/garage.toml. It holds NO secret: the
+# credentials and the bucket name arrive as GARAGE_DEFAULT_* environment
+# variables mapped from the same .env keys the app reads, and the cluster RPC
+# secret arrives as GARAGE_RPC_SECRET. That is why this file is committed and
+# mounted `:ro` while .env is not.
+#
+# Everything the engine holds is CIPHERTEXT. Documents are sealed in the browser
+# before a byte leaves the machine, so this service never sees a filename, a MIME
+# type, a tag, a note or any content — only opaque segments and their sizes.
+#
+# This is the MINIMAL working configuration, verified against the pinned image:
+# no [admin] block and no rpc_public_addr are needed for a single node.
+
+# Where the engine keeps its own metadata and the stored blocks. Both are named
+# volumes in docker-compose.yml (hvault-s3-meta, hvault-s3-data). The DATA volume
+# is the only copy of every uploaded document — see the backup boundary in
+# README.md before you assume H-Vault's own backups cover it. They do not.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+
+# SQLite rather than LMDB: one node, one process, and a metadata store whose file
+# a filesystem-level snapshot can capture without a sparse 1 TiB map.
+db_engine = "sqlite"
+
+# One node holds one copy. Redundancy here would be a second copy on the same
+# disk in the same container — the durability answer is the backup procedure, not
+# a replication factor that cannot survive losing the volume.
+replication_factor = 1
+
+# LOAD-BEARING, and the one number in this file that is not a default.
+#
+# Garage re-serialises an object's block list once per block, so upstream's own
+# known-issues page asks that multipart parts be AT LEAST block_size and an exact
+# MULTIPLE of it. H-Vault's ciphertext chunk — one crypto segment, one uploaded
+# part, one ranged GET — is DOCUMENT_CIPHERTEXT_CHUNK_BYTES = 8 MiB, so the block
+# size is set to match it and one part is exactly one block. Left at the 1 MiB
+# default, every part would be eight blocks and the block list would be rewritten
+# eight times per part. Change one of the two numbers and you must change both.
+block_size = "8M"
+
+# Cluster RPC. Bound inside the container only; the service publishes no port and
+# sits on the `internal: true` data network, so nothing outside the stack can
+# reach either listener. The secret comes from GARAGE_RPC_SECRET.
+rpc_bind_addr = "[::]:3901"
+
+[s3_api]
+# Must match the app's S3_REGION (default us-east-1, .env.example). SigV4 signs
+# the region, so a mismatch is a signature failure against your own bucket.
+s3_region = "us-east-1"
+# The S3 endpoint the app reaches at http://hvault-s3:3900 (pinned in the app's
+# `environment:` block, because it is container topology rather than operator
+# configuration).
+api_bind_addr = "[::]:3900"

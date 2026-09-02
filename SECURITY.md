@@ -302,7 +302,13 @@ orders look interchangeable and are not:
   remainder reclaimed by the scheduled clean-up. On a deployment with no document store
   configured the sweep does nothing at all.
 
-Neither deletion is recoverable, and neither is undone by restoring a backup.
+Neither deletion is recoverable, and neither is undone by restoring a backup. The same fact
+has an operational consequence that belongs to whoever runs the server rather than to whoever
+uses it: because documents are not in a backup, the **storage volume is the only copy of every
+uploaded file**, and it must be captured alongside the database and the deployment's `.env` —
+the wrapped keys live in the database, the ciphertext lives in the storage service, and neither
+half is usable without the other. The README's backup section gives the volumes and the
+procedure, including why a file-level copy of a running storage engine is not a backup.
 
 The hourly clean-up referred to above is the only thing in the system that deletes a stored
 file without a request having asked for it, so the rule it works to is stated in the negative:
@@ -418,3 +424,27 @@ put an instance in front of real data — in particular: set a dedicated
 `TWO_FACTOR_ENCRYPTION_KEY`, generate every secret randomly, terminate TLS, set
 `TRUST_PROXY_HOPS` to the true number of proxies, and keep the single published port bound
 to `127.0.0.1`.
+
+### The object storage service
+
+The bundled Docker stack runs an S3-compatible storage service for the document store. Three
+properties of it are load-bearing. The first two are asserted by the test suite rather than
+left to a reviewer's eye; the third is a measured behaviour of the engine, so it is written
+down and covered by the deployment drill rather than by a unit test:
+
+- **It publishes no port and sits on the internal network.** Its S3 API authenticates with a
+  static key pair and has none of the application's rate limiting, CSRF handling or session
+  management in front of it, so the app container is the only thing that can reach it. Do not
+  publish it "for tooling"; use `docker compose exec` instead.
+- **Its image is pinned by digest.** It is the one image in the stack this repository does not
+  build, and a tag is a mutable pointer.
+- **Its bucket credentials rotate as a pair.** Measured against the pinned engine: changing
+  the secret alone makes the service exit 1 and refuse to start rather than adopt the new
+  value, which under a restart policy is a crash loop. Change the access key id and the secret
+  together, then delete the superseded key. The README's secret-rotation table carries the
+  procedure.
+
+The service holds nothing but ciphertext: documents are sealed in the browser under a key the
+server never sees, so it holds no filename, no MIME type, no tag, no note and no content. That
+is what makes it safe for it to be a separate service at all — but it is also why its volume,
+and only its volume, holds your users' files. See the backup boundary above.

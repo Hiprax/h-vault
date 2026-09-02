@@ -704,7 +704,7 @@ const GATES = [
     id: 'deploy',
     task: 'test:deploy',
     // TIER 2, and the second gate to sit there. It is the heaviest thing in the
-    // repository — it builds the images, stands five containers up from nothing,
+    // repository — it builds the images, stands six containers up from nothing,
     // restarts them and rotates a database credential — so it belongs to
     // `verify:full` and the release, not to a hook someone is waiting on. What
     // it proves is not covered anywhere else at any tier: `audit:image` builds

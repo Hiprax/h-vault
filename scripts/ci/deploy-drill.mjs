@@ -4,7 +4,7 @@
  *
  * `audit:image` proves the images BUILD; the E2E suite proves the application
  * WORKS against a development server. Nothing between them ever ran the thing
- * this project actually ships: five containers, one published port, a
+ * this project actually ships: six containers, one published port, a
  * least-privilege database user, two one-shots the app gates on, and a config
  * surface that only exists in production. This gate stands that stack up from
  * nothing and drives a real user journey through the single port it publishes.
@@ -142,6 +142,21 @@ const drillEnv = {
   APP_NAME: 'H-Vault',
   BCRYPT_ROUNDS: '12',
   SMTP_FROM: 'noreply@hvault.test',
+  // Object storage. All four are `${...:?}`-guarded in docker-compose.yml, so
+  // Compose refuses to resolve the stack without them and the drill would fail
+  // before a container existed — the same reason the two Mongo passwords are
+  // here. S3_ENDPOINT is deliberately absent: the stack pins the in-stack address
+  // itself, and supplying one here would only test a value the deployment
+  // overrides.
+  //
+  // The access key id is a fixed literal rather than a generated secret because
+  // the storage engine refuses an id shorter than 8 characters at boot, and
+  // because an id is not a secret; the two that are get a fresh 32-byte value per
+  // run, like every other credential above.
+  S3_BUCKET: 'hvault-drill',
+  S3_ACCESS_KEY_ID: 'hvaultdrillkey',
+  S3_SECRET_ACCESS_KEY: secret(),
+  S3_RPC_SECRET: secret(),
 };
 
 writeFileSync(envFile, renderEnvFile(drillEnv), 'utf8');
@@ -251,8 +266,8 @@ async function teardown() {
     warn(`its configuration is at ${envFile} — delete it when you are done`);
     return;
   }
-  // Recorded, not discarded. A teardown that fails leaves five containers and
-  // two volumes on the host, and the only thing that would ever notice is the
+  // Recorded, not discarded. A teardown that fails leaves six containers and
+  // four volumes on the host, and the only thing that would ever notice is the
   // NEXT run's `down -v` — which happens before this run's port differential is
   // read, so the leak is invisible in every report. It is not fatal (the drill's
   // verdict is about the stack it brought up), but it must be visible.
