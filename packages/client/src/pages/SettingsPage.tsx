@@ -358,7 +358,7 @@ interface ImportConfirmSummary {
  * Deliberately NOT `documentsStore`'s `fetchAllPages`, and the difference is the
  * whole point of this function rather than a duplication of it. That one exists to
  * DISPLAY documents: it opens each row's metadata blob, and it drops a row it
- * cannot validate so that one bad document does not cost the user the other 4,999.
+ * cannot validate so that one bad document does not cost the user every other one.
  * A rotation needs the exact opposite of both. It decrypts no metadata at all — the
  * blob is sealed under a key derived from the document's own DEK, which a rotation
  * only rewraps, so opening it would be reading user plaintext for no reason — and it
@@ -378,9 +378,12 @@ async function enumerateDocumentRows(
   do {
     const body = (await request(page)).data;
     if (!body.success) throw new Error('Failed to fetch documents');
-    // Clamped for the same reason the store clamps it: an account cannot hold more
-    // than `MAX_DOCUMENTS_PER_USER` documents, so a `totalPages` past the ceiling is
-    // an inflated number rather than more rows to read.
+    // Clamped for the same reason the store clamps it: `MAX_DOCUMENT_PAGES` is
+    // derived from how many rows an account can ACTUALLY hold, so a `totalPages`
+    // past the ceiling is an inflated number rather than more rows to read. That
+    // ceiling is NOT the advertised per-user limit — see the constant's own
+    // comment — and it must not be re-derived from one here, because this walk is
+    // the one that may never drop a row.
     totalPages = Math.min(body.pagination.totalPages, MAX_DOCUMENT_PAGES);
     rows.push(...body.data);
     page += 1;

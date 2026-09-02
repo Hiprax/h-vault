@@ -1,4 +1,4 @@
-import { MAX_PREVIEW_TEXT_LINES } from '@hvault/shared';
+import { MAX_PREVIEW_TEXT_LINES, extensionTable } from '@hvault/shared';
 import { decodeDocumentText } from '../decode';
 import { documentShell, el, notice, viewToggle } from '../dom';
 import { delimiterFor, parseDelimited, renderTable } from './table';
@@ -51,7 +51,7 @@ import { delimiterFor, parseDelimited, renderTable } from './table';
  * bounds — so adding one means re-measuring that budget, not assuming it still
  * holds.
  */
-export const HIGHLIGHT_LANGUAGES: Readonly<Record<string, string>> = Object.freeze({
+export const HIGHLIGHT_LANGUAGES: Readonly<Record<string, string>> = extensionTable({
   sh: 'bash',
   bash: 'bash',
   zsh: 'bash',

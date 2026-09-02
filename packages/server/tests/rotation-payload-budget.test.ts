@@ -19,7 +19,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  MAX_DOCUMENTS_PER_USER,
+  MAX_DOCUMENTS_PER_ROTATION,
   MAX_ENCRYPTED_DATA_LENGTH,
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_FOLDERS_PER_USER,
@@ -90,7 +90,11 @@ function maximalFolderEntry(): Record<string, string> {
 }
 
 const documentEntryBytes = encodedBytes(maximalDocumentEntry());
-const documentsLegBytes = documentEntryBytes * MAX_DOCUMENTS_PER_USER;
+// `MAX_DOCUMENTS_PER_ROTATION`, not the advertised per-user limit: the wire cap is
+// what a worst-case body may actually carry, and it is deliberately a few rows
+// above the limit an init refuses at, because an account can finish past that
+// limit and a rotation must name every row it holds.
+const documentsLegBytes = documentEntryBytes * MAX_DOCUMENTS_PER_ROTATION;
 const foldersLegBytes = encodedBytes(maximalFolderEntry()) * MAX_FOLDERS_PER_USER;
 const itemsLegBytes = encodedBytes(maximalItemEntry()) * MAX_ITEMS_PER_USER;
 

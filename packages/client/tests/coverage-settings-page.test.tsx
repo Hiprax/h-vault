@@ -26,7 +26,7 @@ import React from 'react';
 // which is why this note does not quote the number — because a fixture that
 // drifts from the real value is a test asserting against a document layout that
 // does not exist.
-import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, MAX_DOCUMENTS_PER_ROTATION } from '@hvault/shared';
 
 vi.hoisted(() => {
   if (typeof globalThis.window !== 'undefined') {
@@ -1104,6 +1104,33 @@ describe('SettingsPage — error paths and branches', () => {
     });
     expect(mockListDocuments).not.toHaveBeenCalledWith({
       page: MAX_DOCUMENT_PAGES + 1,
+      limit: DOCUMENT_PAGE_SIZE,
+    });
+  });
+
+  it('reads every page an account that is really at its ceiling would report', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    // The ceiling this walk clamps to has to be derived from how many rows an
+    // account can ACTUALLY hold, which is not the advertised per-user limit: the
+    // server checks the document count only when a transfer is opened, so three
+    // concurrent transfers can all pass the same reading and all commit. An
+    // account sitting at that real maximum reports one more page than a ceiling
+    // derived from the advertised limit allows, and the walk would stop a page
+    // short — dropping rows silently, in the one enumeration whose entire purpose
+    // is that it must never drop one, and leaving the account unable to rotate its
+    // vault key for ever.
+    const realPages = Math.ceil(MAX_DOCUMENTS_PER_ROTATION / DOCUMENT_PAGE_SIZE);
+    mockListDocuments.mockResolvedValue(documentPage([documentRow(docId(1))], realPages));
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    expect(mockListDocuments).toHaveBeenCalledTimes(realPages);
+    expect(mockListDocuments).toHaveBeenCalledWith({
+      page: realPages,
       limit: DOCUMENT_PAGE_SIZE,
     });
   });

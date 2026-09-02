@@ -264,6 +264,30 @@ describe('comparing a document’s bytes with what its name claims', () => {
     // as well as its own; nine constrained bytes beat five.
     expect(previewRefusal('markdown', 'md', fileLookingLike('avif'))).toContain('AVIF');
   });
+
+  it('is not fooled by an extension that names an inherited property', () => {
+    // Every table in this document is indexed by an extension taken from a name
+    // somebody else chose, so an ordinary object literal would answer
+    // `PREVIEW_MAGIC_BYTES['constructor']` with the `Object` FUNCTION and this
+    // sniffer would call `.some` on it. The tables are built with no prototype
+    // instead, which is what makes the `undefined` branch reachable for these two
+    // names — asserted here on the READER, because the shared suite pins the data.
+    for (const ext of ['constructor', '__proto__']) {
+      expect(() => previewRefusal('text', ext, bytesOf('#!/bin/sh\n'))).not.toThrow();
+      expect(previewRefusal('text', ext, bytesOf('#!/bin/sh\n')), ext).toBeNull();
+    }
+  });
+
+  it('builds every extension-keyed table in this document without a prototype', () => {
+    // The structural half, and it is what a future map added with `Object.freeze`
+    // would fail. `formatEngine`'s `JSON_PARSERS` is not exported and is not
+    // listed here; it is also not reachable with an inherited name, because
+    // `parserFor` is only called for an extension that already answered a real
+    // syntax through `TRANSFORM_SYNTAXES`, which the shared suite pins.
+    for (const table of [HIGHLIGHT_LANGUAGES, IMAGE_MEDIA_TYPES, MEDIA_TYPES]) {
+      expect(Object.getPrototypeOf(table)).toBeNull();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

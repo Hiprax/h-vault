@@ -2,6 +2,7 @@ import {
   MAX_TRANSFORM_EXCERPT_LENGTH,
   MAX_TRANSFORM_MESSAGE_LENGTH,
   canRepairSyntax,
+  extensionTable,
   transformSyntaxForExtension,
   type SandboxTransformFailedMessage,
   type SandboxTransformRequest,
@@ -96,7 +97,7 @@ export const PRETTIER_VERSION = '3.9.5';
  * the test suite asserts in both directions — an extension added there and
  * forgotten here would fall back to the strict parser and lose comments.
  */
-const JSON_PARSERS: Readonly<Record<string, 'json' | 'jsonc' | 'json5'>> = Object.freeze({
+const JSON_PARSERS: Readonly<Record<string, 'json' | 'jsonc' | 'json5'>> = extensionTable({
   json: 'json',
   jsonc: 'jsonc',
   json5: 'json5',

@@ -40,7 +40,7 @@ import {
   MAX_ADDRESS_ZIP_LENGTH,
   MAX_ADDRESS_COUNTRY_LENGTH,
   MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
-  MAX_DOCUMENTS_PER_USER,
+  MAX_DOCUMENTS_PER_ROTATION,
 } from '../constants/index.js';
 import type { ItemType } from '../constants/index.js';
 import { normalizeUri } from '../utils/index.js';
@@ -201,13 +201,23 @@ export const bulkReEncryptSchema = z
      *
      * Optional with a `[]` default for the same reason `folders` is: a client that
      * predates the document store, or an account on a server with no storage
-     * configured, sends nothing and rotates exactly as it did before. The cap is
-     * the per-user document ceiling itself rather than a slack multiple, because
-     * the handler's completeness check requires the payload to name every row the
-     * account holds, and a cap below that ceiling would make an account at the
-     * limit unable to rotate at all.
+     * configured, sends nothing and rotates exactly as it did before.
+     *
+     * The cap is `MAX_DOCUMENTS_PER_ROTATION` and NOT the per-user ceiling, and
+     * the difference is load-bearing: the server checks the document count only
+     * when a transfer is opened, so an account can finish
+     * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1` rows past the advertised
+     * limit. The handler's completeness check requires this payload to name EVERY
+     * row the account holds, so a cap at the advertised limit would leave such an
+     * account unable to rotate at all — too long for this schema and too short for
+     * the coverage check, at the same time. That constant's own comment carries the
+     * derivation.
      */
-    documents: z.array(documentKeyRewrapSchema).max(MAX_DOCUMENTS_PER_USER).optional().default([]),
+    documents: z
+      .array(documentKeyRewrapSchema)
+      .max(MAX_DOCUMENTS_PER_ROTATION)
+      .optional()
+      .default([]),
     newEncryptedVaultKey: z.string().min(1).max(200),
     newVaultKeyIv: z.string().min(1).max(24),
     newVaultKeyTag: z.string().min(1).max(32),

@@ -87,6 +87,7 @@ import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   DOCUMENT_STREAM_SALT_BYTES,
   DOCUMENT_NONCE_PREFIX_BYTES,
+  MAX_DOCUMENTS_PER_ROTATION,
   MAX_DOCUMENTS_PER_USER,
   MAX_DOCUMENT_CHUNK_COUNT,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
@@ -384,6 +385,7 @@ describe('Document-store constants', () => {
     ['DOCUMENT_STREAM_SALT_BYTES', DOCUMENT_STREAM_SALT_BYTES, 32],
     ['DOCUMENT_NONCE_PREFIX_BYTES', DOCUMENT_NONCE_PREFIX_BYTES, 7],
     ['MAX_DOCUMENTS_PER_USER', MAX_DOCUMENTS_PER_USER, 5_000],
+    ['MAX_DOCUMENTS_PER_ROTATION', MAX_DOCUMENTS_PER_ROTATION, 5_003],
     ['MAX_DOCUMENT_CHUNK_COUNT', MAX_DOCUMENT_CHUNK_COUNT, 10_000],
     ['MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER', MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER, 3],
     ['MAX_IN_FLIGHT_PART_UPLOADS', MAX_IN_FLIGHT_PART_UPLOADS, 4],
@@ -435,6 +437,24 @@ describe('Document-store constants', () => {
       1024 * 1024 * 1024,
     );
     expect(MAX_DOCUMENT_CHUNK_COUNT).toBe(10_000);
+  });
+
+  it('lets a rotation name every row an account can actually hold, not just the advertised limit', () => {
+    // THE RELATION, which is what this pair is for, and it is not the literal
+    // above. The document count is checked only when a transfer is OPENED, so
+    // `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` transfers can pass the same
+    // reading of `MAX_DOCUMENTS_PER_USER - 1` and all commit: the reachable
+    // maximum is `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER
+    // - 1`. A rotation payload must name EVERY row, so a wire cap at or below the
+    // advertised limit locks such an account out of rotating its vault key for
+    // ever. This is the assertion that fails if either input constant moves and
+    // the rotation bound does not follow it.
+    expect(MAX_DOCUMENTS_PER_ROTATION).toBeGreaterThanOrEqual(
+      MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1,
+    );
+    // The client's page ceiling has to reach the same row, and that half is pinned
+    // in `packages/client/tests/documents-api.test.ts`, where those two constants
+    // live.
   });
 
   it('fills a 12-byte GCM nonce exactly: prefix, segment index, last-segment flag', () => {
@@ -1047,6 +1067,34 @@ describe('PREVIEW_MODES and previewModeForName', () => {
     }
     expect(PREVIEW_MODE_NAMES).toHaveLength(7);
   });
+
+  it('answers "none" for a name whose extension is an inherited property name', () => {
+    // A document name is chosen by whoever handed the user the file, and the
+    // extension rule hands whatever follows the last dot straight to a lookup. On
+    // an ordinary object literal `PREVIEW_MODES['constructor']` resolves to the
+    // `Object` FUNCTION through the prototype chain, and `?? 'none'` never fires
+    // because a function is not nullish — so `notes.constructor` is offered a
+    // preview, and the mode posted into the sandbox is a value structured clone
+    // refuses. That throws inside the host's handshake handler AFTER the listener
+    // and the deadline are gone, which leaves the preview on its spinner for ever
+    // with no fallback: the one outcome the viewer is built never to have.
+    //
+    // `__proto__` is the same hazard with a different value (`Object.prototype`),
+    // and both are reachable because the rule lowercases: `toString` and
+    // `valueOf` become `tostring`/`valueof` and miss, while these two do not.
+    for (const name of ['notes.constructor', 'notes.__proto__']) {
+      expect(previewModeForName(name), name).toBe('none');
+    }
+  });
+
+  it('has no prototype, so no inherited name can be read out of it as a mode', () => {
+    // The structural half of the case above, asserted on the DATA rather than on
+    // one helper: `previewModeForName` is not the only reader — `sniff.ts` looks
+    // up `PREVIEW_MODES[actual.ext]` directly — so a guard added to the helper
+    // alone would leave the other call site exactly as it was.
+    expect(Object.getPrototypeOf(PREVIEW_MODES)).toBeNull();
+    expect(Object.getPrototypeOf(PREVIEW_MAGIC_BYTES)).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1089,6 +1137,17 @@ describe('TRANSFORM_SYNTAXES, transformSyntaxForName and canRepairSyntax', () =>
       expect(transformSyntaxForName(name), name).toBeNull();
     }
     expect(transformSyntaxForExtension('')).toBeNull();
+  });
+
+  it('answers null for an extension that is an inherited property name', () => {
+    // The same hazard as the preview map's, and it surfaces earlier here: a
+    // truthy answer makes the upload panel offer the Format checkbox for a file
+    // no formatter can read, and the engine then refuses it with a sentence about
+    // the parser rather than about the file type.
+    for (const name of ['data.constructor', 'data.__proto__']) {
+      expect(transformSyntaxForName(name), name).toBeNull();
+    }
+    expect(Object.getPrototypeOf(TRANSFORM_SYNTAXES)).toBeNull();
   });
 
   it('is case-insensitive through the extension rule, not a second lowercase entry', () => {

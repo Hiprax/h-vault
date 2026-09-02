@@ -910,6 +910,92 @@ describe('documentsStore — uploading', () => {
     expect(Array.from(opened)).toEqual(Array.from(CONTENT));
   });
 
+  it('walks a file across TWO segments, one part each, framed by index and last flag', async () => {
+    // The only case in this file whose source is larger than one plaintext chunk,
+    // and the arithmetic it reaches exists nowhere else. At `chunkCount === 1` the
+    // loop runs once, so `partNumber` is always 1, `isLast` is always true and the
+    // completed-prefix term of `sentBytes` is always zero — three values that
+    // cannot be wrong in any single-segment test. The chunk size cannot be shrunk
+    // to reach this cheaply either: the client refuses a server that advertises a
+    // different `chunkPlaintextBytes`, deliberately, so the file has to be real.
+    const bigLength = DOCUMENT_PLAINTEXT_CHUNK_BYTES + 5;
+    const big = new Uint8Array(bigLength) as DocumentBytes;
+    // Content that differs per position, so a segment opened at the wrong offset
+    // decodes to the wrong bytes rather than to an accidentally-matching run.
+    for (let index = 0; index < bigLength; index += 1) big[index] = (index * 31 + 7) & 0xff;
+    committedRow = await makeRow(ID_A, 'big.bin', { plaintextBytes: bigLength });
+
+    const seen: number[] = [];
+    const unsubscribe = useDocumentsStore.subscribe((state) => {
+      const bytes = state.uploads[ID_A]?.sentBytes;
+      if (bytes !== undefined) seen.push(bytes);
+    });
+    await useDocumentsStore.getState().startUpload({
+      source: source(big),
+      name: 'big.bin',
+      mime: 'application/octet-stream',
+    });
+    unsubscribe();
+
+    // ONE part per segment, numbered from 1, and every non-final part exactly one
+    // ciphertext chunk: a short middle part silently desynchronises every later
+    // segment boundary, which is the failure the server also refuses.
+    const parts = partRequests();
+    expect(parts).toHaveLength(2);
+    expect(parts.map((part) => part.url)).toEqual([
+      `/documents/uploads/${ID_A}/parts/1`,
+      `/documents/uploads/${ID_A}/parts/2`,
+    ]);
+    expect((parts[0]?.data as ArrayBuffer).byteLength).toBe(DOCUMENT_CIPHERTEXT_CHUNK_BYTES);
+    expect((parts[1]?.data as ArrayBuffer).byteLength).toBe(5 + DOCUMENT_TAG_BYTES);
+
+    // Both parts open at their OWN index with their own last-segment flag, and
+    // concatenate back to the file. A store that marked every segment final, or
+    // that re-read the first slice for the second part, cannot pass this.
+    const init = JSON.parse(requestsFor('POST', '/documents/uploads')[0]?.data as string) as Record<
+      string,
+      string
+    >;
+    const complete = completeBodies[0] as unknown as Record<string, string>;
+    const streamSalt = new Uint8Array(cryptoService.base64ToArrayBuffer(init.streamSalt ?? ''));
+    const noncePrefix = new Uint8Array(cryptoService.base64ToArrayBuffer(init.noncePrefix ?? ''));
+    const dek = await unwrapDek(
+      {
+        encryptedDek: complete.encryptedDek ?? '',
+        dekIv: complete.dekIv ?? '',
+        dekTag: complete.dekTag ?? '',
+      },
+      await deriveWrapKey(vaultKey, ID_A),
+    );
+    const streamKey = await deriveStreamKey(dek as DocumentBytes, streamSalt, ID_A);
+    const first = await decryptSegment(
+      streamKey,
+      { noncePrefix, index: 0, isLast: false },
+      new Uint8Array(parts[0]?.data as ArrayBuffer) as DocumentBytes,
+    );
+    const second = await decryptSegment(
+      streamKey,
+      { noncePrefix, index: 1, isLast: true },
+      new Uint8Array(parts[1]?.data as ArrayBuffer) as DocumentBytes,
+    );
+    expect(first.length).toBe(DOCUMENT_PLAINTEXT_CHUNK_BYTES);
+    expect(Array.from(second)).toEqual(Array.from(big.subarray(DOCUMENT_PLAINTEXT_CHUNK_BYTES)));
+    const rejoined = new Uint8Array(bigLength) as DocumentBytes;
+    rejoined.set(first, 0);
+    rejoined.set(second, DOCUMENT_PLAINTEXT_CHUNK_BYTES);
+    // Compared by DIGEST rather than by `toEqual`: a deep-equality assertion over
+    // eight million elements spends most of a minute inside the matcher's own diff
+    // machinery, for a weaker statement than "these are the same bytes".
+    expect(await sha256Hex(rejoined)).toBe(await sha256Hex(big));
+
+    // `sentBytes` is ABSOLUTE, so the second part's progress starts from the first
+    // part's total rather than from zero: it never goes backwards and never passes
+    // the file's own size.
+    expect(seen.some((value) => value >= DOCUMENT_PLAINTEXT_CHUNK_BYTES)).toBe(true);
+    expect(Math.max(...seen)).toBe(bigLength);
+    expect(seen.every((value, index) => index === 0 || value >= (seen[index - 1] ?? 0))).toBe(true);
+  });
+
   it('does not list a committed row whose id is not the transfer it asked about', async () => {
     // The completion answered about a DIFFERENT document. The upload itself did
     // commit, so there is nothing to recover here — but a row inserted under an id
@@ -1454,6 +1540,61 @@ describe('documentsStore — uploading', () => {
 
     expect(useDocumentsStore.getState().documents).toEqual([]);
     expect(useDocumentsStore.getState().uploads).toEqual({});
+  });
+
+  it('does not list a document whose committed row was OPENED after the vault locked', async () => {
+    await primeCommittedRow();
+
+    // A DIFFERENT window from the case above, and the one nothing could reach.
+    // `endSession` removes the transfer from the `sessions` map BEFORE the
+    // committed row is opened, and that map is the only thing `clearStore()` and
+    // `cancelUpload` iterate — so from that line on nothing in this codebase can
+    // abort the signal, and the `isAborted` check that guards the write cannot
+    // fire. A lock landing while the row is being DECRYPTED therefore put a fully
+    // decrypted name, type, note and digest into a store the lock had just
+    // emptied, where it survived until the next fetch, and across a logout into
+    // the next account on the same tab.
+    //
+    // The lock is fired from a passthrough spy on Web Crypto's `decrypt` rather
+    // than from a timer: `openDocumentRow` unwraps the DEK and then opens the
+    // metadata blob, so the first `decrypt` after the completion response lands
+    // exactly inside the window, deterministically and with the real crypto still
+    // doing the work.
+    let completeSeen = false;
+    api.defaults.adapter = async (config) => {
+      const response = await adapter(config);
+      if ((config.url ?? '').endsWith('/complete')) completeSeen = true;
+      return response;
+    };
+
+    const subtle = globalThis.crypto.subtle;
+    const realDecrypt = subtle.decrypt.bind(subtle) as typeof subtle.decrypt;
+    let locked = false;
+    const decryptSpy = vi
+      .spyOn(subtle, 'decrypt')
+      .mockImplementation(async (algorithm, key, data) => {
+        if (completeSeen && !locked) {
+          locked = true;
+          useDocumentsStore.getState().clearStore();
+        }
+        return realDecrypt(algorithm, key, data);
+      });
+
+    try {
+      await expect(
+        useDocumentsStore.getState().startUpload({
+          source: source(),
+          name: 'a.txt',
+          mime: 'text/plain',
+        }),
+      ).resolves.toBe(ID_A);
+
+      expect(locked).toBe(true);
+      expect(useDocumentsStore.getState().documents).toEqual([]);
+      expect(useDocumentsStore.getState().uploads).toEqual({});
+    } finally {
+      decryptSpy.mockRestore();
+    }
   });
 
   it('abandons a part the server refuses on authorization grounds', async () => {

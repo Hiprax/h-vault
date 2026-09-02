@@ -4,6 +4,7 @@ import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   HIBP_BATCH_MAX_PREFIXES,
+  MAX_DOCUMENTS_PER_ROTATION,
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
 } from '@hvault/shared';
 
@@ -557,7 +558,10 @@ export const swaggerSpec: JsonObject = {
                 dekTag: { type: 'string', minLength: 1, maxLength: 32 },
               },
             },
-            maxItems: 5000,
+            // The rotation bound, not the advertised per-user limit: an account
+            // can finish a few rows past that limit, and a rotation must name
+            // every row it holds. See the constant's own comment.
+            maxItems: MAX_DOCUMENTS_PER_ROTATION,
           },
           newEncryptedVaultKey: { type: 'string', minLength: 1, maxLength: 200 },
           newVaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },

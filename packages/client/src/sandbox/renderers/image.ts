@@ -1,3 +1,4 @@
+import { extensionTable } from '@hvault/shared';
 import { documentShell, el, notice } from '../dom';
 
 /**
@@ -42,7 +43,7 @@ import { documentShell, el, notice } from '../dom';
  * extension claims. Deriving it here keeps one source of truth for the claim,
  * and it is a claim the browser is free to reject.
  */
-export const IMAGE_MEDIA_TYPES: Readonly<Record<string, string>> = Object.freeze({
+export const IMAGE_MEDIA_TYPES: Readonly<Record<string, string>> = extensionTable({
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',

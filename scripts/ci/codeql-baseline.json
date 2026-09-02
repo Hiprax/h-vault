@@ -73,6 +73,11 @@
       "file": "packages/server/src/controllers/vaultController.ts"
     },
     {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::6a50ef035ac45bbb:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
       "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::7216de67c39b77ae:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/vaultController.ts"
@@ -89,11 +94,6 @@
     },
     {
       "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::b2787cebd4b4590:1",
-      "rule": "js/sql-injection",
-      "file": "packages/server/src/controllers/vaultController.ts"
-    },
-    {
-      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::c673bac1e7219691:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/vaultController.ts"
     },

@@ -34,7 +34,31 @@ const logger = createModuleLogger('vault-controller');
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const ALLOWED_SORT_FIELDS = ['createdAt', 'updatedAt', 'itemType', 'favorite'];
+const ALLOWED_SORT_FIELDS = ['createdAt', 'updatedAt', 'itemType', 'favorite'] as const;
+
+/** The fields `GET /vault/items/trash` may be ordered by. */
+const ALLOWED_TRASH_SORT_FIELDS = ['deletedAt', 'createdAt', 'updatedAt', 'itemType'] as const;
+
+/**
+ * The sort field a request asked for, taken FROM THE ALLOWLIST rather than from
+ * the request.
+ *
+ * `allowed.includes(sortBy) ? sortBy : fallback` admits exactly the same four
+ * strings, so this is not a stronger check — but the value it returns flows from
+ * the constant array instead of from `req.query`, and that difference is worth
+ * having twice over. It is what a reader can verify locally, without holding the
+ * `includes` guard in their head while looking at the computed key three lines
+ * down; and it is what static analysis can verify too, because a computed key
+ * whose string came from a request is a NoSQL-injection finding however it was
+ * guarded, while one that came from a literal array is not.
+ */
+function resolveSortField<const T extends readonly string[]>(
+  allowed: T,
+  requested: string,
+  fallback: T[number],
+): T[number] {
+  return allowed.find((field) => field === requested) ?? fallback;
+}
 
 // Defense-in-depth field allowlists — even though Zod validates the request body,
 // these ensure only expected fields are passed to Mongoose create/update operations.
@@ -120,12 +144,47 @@ export const listItems = catchAsync(async (req: Request, res: Response): Promise
 
   const skip = (page - 1) * limit;
   const sortDirection = sortOrder === 'asc' ? 1 : -1;
-  const safeSortBy = ALLOWED_SORT_FIELDS.includes(sortBy) ? sortBy : 'updatedAt';
+  const safeSortBy = resolveSortField(ALLOWED_SORT_FIELDS, sortBy, 'updatedAt');
 
+  // `_id` as a TIEBREAK, so the sort is a TOTAL order rather than a partial one.
+  // Without it, `updatedAt` ties — which an import's `insertMany` and a hundred-row
+  // bulk move both produce by stamping one instant across every row they touch —
+  // leave the order within the tie unspecified, and a `skip`/`limit` walk can then
+  // return one row on two pages while never returning another. That is exactly the
+  // `[A, A, B]` rotation payload `bulkReEncryptSchema`'s duplicate-id refusal and
+  // `assertRotationCoversEveryRow` exist to catch, arriving from an ordinary client
+  // rather than a hostile one. `documentController`'s own list has carried this
+  // tiebreak from the start.
+  //
+  // Two things it is NOT. It does not make a `skip`-based walk safe under
+  // concurrent INSERTS or DELETES — only keyset pagination (`_id > lastId`, which
+  // this codebase uses where that matters) would — so the two refusals above stay
+  // the backstop rather than becoming decoration.
+  //
+  // And it is NOT free, stated at its real size rather than as a shrug. None of
+  // `VaultItem`'s COMPOUND indexes carries `_id` (every collection has the
+  // automatic `_id_` index, which is no help to a compound sort), so
+  // `{updatedAt: -1, _id: -1}` can no longer be served by
+  // `{userId: 1, updatedAt: -1}` and the planner adds a blocking SORT. That SORT
+  // sits ABOVE the FETCH, so a page no longer reads roughly `skip + limit` rows —
+  // the old plan fetched at least that many, and more on an account with trash,
+  // since `deletedAt` was a residual filter on the index rather than a bound in it
+  // — it reads EVERY row the filter matches, bounded by `MAX_ITEMS_PER_USER`, and
+  // sorts them, holding at most `skip + limit` of them in the sort buffer because
+  // the `limit` bounds it. On the MongoDB this project pins (8.0; the behaviour
+  // dates from 6.0) a sort past the 100 MB limit SPILLS TO TEMPORARY FILES rather
+  // than failing, so the price is latency and IO and never an error the user sees.
+  //
+  // It is accepted rather than bought off with indexes because the cheaper fix is
+  // not cheap here: `_id` would have to be appended to every sort-serving compound
+  // index, and `scripts/create-indexes.ts` only ever calls `createIndexes()` — it
+  // never drops — so each superseded prefix would linger until a drop migration
+  // retired it. It is also the same cost the document list already pays
+  // (`documentController`'s `sendDocumentPage`).
   const [items, total] = await Promise.all([
     VaultItem.find(filter)
       .select('-userId -sourceRefId')
-      .sort({ [safeSortBy]: sortDirection })
+      .sort({ [safeSortBy]: sortDirection, _id: sortDirection })
       .skip(skip)
       .limit(limit)
       .lean(),
@@ -439,14 +498,15 @@ export const listTrash = catchAsync(async (req: Request, res: Response): Promise
 
   const skip = (page - 1) * limit;
   const sortDirection = sortOrder === 'asc' ? 1 : -1;
-  const safeSortBy = ['deletedAt', 'createdAt', 'updatedAt', 'itemType'].includes(sortBy)
-    ? sortBy
-    : 'deletedAt';
+  const safeSortBy = resolveSortField(ALLOWED_TRASH_SORT_FIELDS, sortBy, 'deletedAt');
 
+  // The same `_id` tiebreak `listItems` carries, and the tie is the NORMAL case
+  // here rather than an unlucky one: a bulk delete stamps one `deletedAt` across
+  // every row it touches. See the note above for what this does and does not buy.
   const [items, total] = await Promise.all([
     VaultItem.find(filter)
       .select('-userId -sourceRefId')
-      .sort({ [safeSortBy]: sortDirection })
+      .sort({ [safeSortBy]: sortDirection, _id: sortDirection })
       .skip(skip)
       .limit(limit)
       .lean(),

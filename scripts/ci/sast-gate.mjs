@@ -79,10 +79,33 @@ const updatingBaseline = process.argv.includes('--update-baseline');
 /**
  * Identifies a finding across edits that move it.
  *
- * CodeQL's own `primaryLocationLineHash` hashes the offending line's *content*,
+ * CodeQL's own `primaryLocationLineHash` hashes CONTENT rather than a position,
  * so inserting an import above a finding does not resurrect it as "new" — which
  * a rule+file+line key would, on every unrelated edit, until the baseline was
  * noise and the gate was worthless.
+ *
+ * Know its ACTUAL window before trusting it, because "the offending line" is not
+ * what it hashes. `codeql-action`'s `fingerprints.ts` rolls a hash over the first
+ * BLOCK_SIZE = 100 non-space/non-tab characters counted FORWARD from the start of
+ * the line, spilling across line boundaries; the trailing `:N` disambiguates
+ * identical hashes within one file. Forward-only is what makes an edit ABOVE a
+ * finding free — and it means an edit BELOW one, within those 100 characters, DOES
+ * re-fingerprint it. Measured: adding an `_id` tiebreak to a `.sort()` two lines
+ * under a flagged `VaultItem.find(filter)` moved that finding's hash, which reads
+ * in the report as one finding fixed and one new.
+ *
+ * A single fixed/new PAIR on the same rule and file, with the ledger's total
+ * unchanged, is CONSISTENT WITH a re-fingerprint — it is not proof of one, and the
+ * difference matters because `--update-baseline` rewrites the whole error bucket
+ * from the current run. That shape is produced just as exactly by a change that
+ * fixes one finding and introduces a different one in the same file under the same
+ * rule, which is a live possibility here: one file carries thirteen baselined
+ * `js/sql-injection` findings. The ledger cannot settle it for you either, because
+ * it stores only `{fingerprint, rule, file}` — the "fixed" side has no line and no
+ * message left to compare against. So discriminate from the SARIF, not from the
+ * shape: open the run's own report and confirm the NEW finding's line and message
+ * sit inside the region this change edited. If they do not, it is a new finding
+ * wearing a re-fingerprint's shape, and accepting it would bury it.
  */
 const fingerprint = (result) =>
   [

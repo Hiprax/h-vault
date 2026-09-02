@@ -161,6 +161,17 @@ describe('Vault key rotation — documents leg (sequential branch)', () => {
     vi.restoreAllMocks();
   });
 
+  it('runs against a topology where transactions are NOT available', () => {
+    // The sequential branch is reached ONLY when `supportsTransactions` is false,
+    // so without this the block would silently assert the TRANSACTIONAL branch the
+    // day the harness handed this file a replica set — and every case below would
+    // still pass, against code it was never written for. A standalone `it` rather
+    // than a hook: a failing hook is reported as harness breakage and can rename or
+    // suppress the tests around it, while this fails as one line that says what
+    // broke. Its replica-set counterpart asserts the mirror image.
+    expect(supportsTransactions(mongoose.connection)).toBe(false);
+  });
+
   it('rewraps every document DEK, moves vaultKeyVersion by exactly one, and touches no framing column', async () => {
     const active = await seedDocument(user);
     const trashed = await seedDocument(user, { deletedAt: new Date() });

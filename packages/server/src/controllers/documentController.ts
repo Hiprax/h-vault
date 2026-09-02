@@ -1783,8 +1783,8 @@ const ALLOWED_DOCUMENT_UPDATE_FIELDS = new Set([
  *
  * The same 500 `jobs/trashCleanup.ts` uses, and for the same reason: it bounds
  * the memory one page of rows costs, not the work the request does. The work is
- * bounded by `MAX_DOCUMENTS_PER_USER`, because a user cannot have more rows in
- * the trash than they can have rows.
+ * bounded by how many rows the account holds, because a user cannot have more
+ * rows in the trash than they have rows.
  */
 const EMPTY_TRASH_PAGE_SIZE = 500;
 
@@ -2116,7 +2116,9 @@ export const purgeDocument = catchAsync(async (req: Request, res: Response): Pro
  * collector — so a query that re-read the same page would return it for ever and
  * this loop would not terminate. Paging on `_id > lastId` with an ascending sort
  * advances past a row whether it was deleted or skipped, so the walk is monotonic
- * and finishes in at most `MAX_DOCUMENTS_PER_USER / EMPTY_TRASH_PAGE_SIZE` pages.
+ * and finishes in at most one page per `EMPTY_TRASH_PAGE_SIZE` rows the account
+ * holds — a bound stated by the cursor rather than by a constant, since an account
+ * can carry a few rows past the limit an init refuses at.
  *
  * ## A failure is counted, not thrown
  *

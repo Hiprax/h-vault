@@ -151,8 +151,25 @@ const documentSchema = new Schema<IDocument>(
  * The document list, in the order the UI asks for it: one user's active
  * documents, newest change first. `deletedAt` sits in the middle because every
  * listing predicate names it (active rows ask for absent, the trash view asks for
- * present), so it must precede the sort key for the index to serve both without a
- * blocking SORT stage.
+ * present), so it must precede the sort key for the index to serve both.
+ *
+ * It serves the PREDICATE of both listings, and the LEADING SORT KEY of each only
+ * at that listing's DEFAULT `sortBy`: `updatedAt` for the active list (this
+ * index's third key, under a point bound on `deletedAt`) and `deletedAt` for the
+ * trash list (its second key, scanned as a range). Ask either listing for one of
+ * its other permitted keys — `createdAt` or `favorite` active, `createdAt` or
+ * `updatedAt` in the trash, where the range bound on `deletedAt` leaves the third
+ * key with no global order — and this index contributes nothing to the sort at
+ * all.
+ *
+ * And a blocking SORT is added in EVERY case regardless, because the listing
+ * orders by `{ <sortBy>: dir, _id: dir }` — the `_id` tiebreak that makes a paged
+ * walk a total order — and `_id` is in no index here. So the tiebreak is what
+ * costs the two default sorts their index-provided ordering; the other four paid
+ * for a blocking SORT with or without it. That is the deliberate trade:
+ * bounded by the per-user document ceiling, and spilling to temporary files
+ * rather than failing on MongoDB 6.0 and later. `vaultController`'s `listItems`
+ * carries the same tiebreak and the same note.
  */
 documentSchema.index({ userId: 1, deletedAt: 1, updatedAt: -1 });
 /** Folder contents, and the orphan sweep `deleteFolder` runs after re-parenting. */

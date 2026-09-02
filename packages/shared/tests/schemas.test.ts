@@ -54,6 +54,8 @@ import {
   deleteAccountSchema,
 } from '../src/schemas/user.js';
 import {
+  MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
+  MAX_DOCUMENTS_PER_ROTATION,
   MAX_DOCUMENTS_PER_USER,
   MAX_IMPORT_ITEMS,
   PASSWORD_HISTORY_MAX,
@@ -857,7 +859,14 @@ describe('bulkReEncryptSchema', () => {
   });
 
   it('rejects items over 10,000', () => {
-    const bigItems = Array.from({ length: 10_001 }, () => validReEncrypt.items[0]!);
+    // DISTINCT ids, and that is the whole point of the generator. Had this been
+    // built from 10,001 copies of ONE entry, the duplicate-id `.superRefine` would
+    // be what refuses the payload and the array cap would never be reached — so
+    // `.max(10_000)` could be deleted and this test would stay green.
+    const bigItems = Array.from({ length: 10_001 }, (_, index) => ({
+      ...validReEncrypt.items[0]!,
+      id: `507f1f77bcf86cd7994${String(index).padStart(5, '0')}`,
+    }));
     expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, items: bigItems }).success).toBe(
       false,
     );
@@ -937,8 +946,41 @@ describe('bulkReEncryptSchema', () => {
     expect(result.documents).toEqual([]);
   });
 
-  it('rejects a documents leg over MAX_DOCUMENTS_PER_USER', () => {
-    const tooMany = Array.from({ length: MAX_DOCUMENTS_PER_USER + 1 }, () => rewrap);
+  /** `count` documents-leg entries with DISTINCT ids, as a real payload has. */
+  function distinctRewraps(count: number): (typeof rewrap)[] {
+    return Array.from({ length: count }, (_, index) => ({
+      ...rewrap,
+      id: `507f1f77bcf86cd7994${String(index).padStart(5, '0')}`,
+    }));
+  }
+
+  it('accepts a documents leg naming every row an account can actually hold', () => {
+    // The bound that matters, and it is NOT `MAX_DOCUMENTS_PER_USER`. The server
+    // checks the document count only when a transfer is OPENED
+    // (`documentController`'s init), so three transfers opened against the same
+    // count all pass and all commit: an account can finish at
+    // `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1` rows past the advertised
+    // limit. A rotation must name EVERY row the account holds — the handler
+    // compares distinct ids against an unfiltered `countDocuments` — so a wire cap
+    // set to the advertised limit makes such an account unable to rotate its vault
+    // key ever again, in either direction: too long for the schema, too short for
+    // the coverage check. This case is the one that fails if the cap is set to the
+    // wrong number.
+    const atCeiling = distinctRewraps(
+      MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1,
+    );
+    expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, documents: atCeiling }).success).toBe(
+      true,
+    );
+  });
+
+  it('rejects a documents leg over MAX_DOCUMENTS_PER_ROTATION', () => {
+    // DISTINCT ids, deliberately. Had this been built from N+1 copies of one
+    // object, the duplicate-id `.superRefine` would refuse the payload and the
+    // array cap would never be reached, so the `.max()` could be deleted with this
+    // test still green — exactly the mutant `stryker`'s `ignoreStatic: false`
+    // exists to score.
+    const tooMany = distinctRewraps(MAX_DOCUMENTS_PER_ROTATION + 1);
     expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, documents: tooMany }).success).toBe(
       false,
     );
@@ -953,6 +995,30 @@ describe('bulkReEncryptSchema', () => {
       documents: [{ ...rewrap, streamSalt: 'x', chunkCount: 99, objectKey: 'u/other/d/other' }],
     });
     expect(parsed.documents[0]).toEqual(rewrap);
+  });
+
+  it('checks for a repeat AFTER objectIdSchema has lowercased, not before', () => {
+    // The ORDERING is the property, not the input. `objectIdSchema` lowercases in
+    // a `.transform()`, and the parent `.superRefine` sees post-transform data, so
+    // `AABB…0001` and `aabb…0001` are ONE id by the time the duplicate check runs.
+    // Move that check ahead of the transform — or drop the lowercasing — and the
+    // pair sails through as two distinct entries: `[A, A, B]` with the right list
+    // length, which is exactly the payload the refusal exists to stop, wearing a
+    // different case. Mongo's `_id` comparison is byte-exact, but every id in this
+    // payload reaches it through this transform, so the two really are one row.
+    const upper = { ...validReEncrypt.items[0]!, id: 'AABBCCDDEEFF001122334455' };
+    const lower = { ...validReEncrypt.items[0]!, id: 'aabbccddeeff001122334455' };
+    const other = { ...validReEncrypt.items[0]!, id: '507f1f77bcf86cd799439012' };
+
+    const result = bulkReEncryptSchema.safeParse({
+      ...validReEncrypt,
+      items: [upper, lower, other],
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.path[0] === 'items')).toBe(true);
+    }
   });
 
   it('rejects a repeated id in any one leg, naming the leg that repeated it', () => {

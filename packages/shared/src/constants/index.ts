@@ -285,6 +285,31 @@ export const MAX_DOCUMENT_CHUNK_COUNT = 10_000;
 // enough that the quota arithmetic (committed bytes plus in-flight declared
 // bytes) cannot be inflated by opening uploads that are never completed.
 export const MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER = 3;
+// How many documents ONE ROTATION payload may name, which is deliberately NOT
+// `MAX_DOCUMENTS_PER_USER`.
+//
+// The count is checked when a transfer is OPENED and never again
+// (`documentController`'s init: `documentCount >= MAX_DOCUMENTS_PER_USER`), so
+// three transfers opened against the same reading of 4,999 all pass and all
+// commit. The highest number of rows an account can actually hold is therefore
+// `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1`, and a
+// fourth transfer cannot be opened until it is back under the limit.
+//
+// A rotation must name EVERY row the account holds — the handler compares
+// distinct ids against an UNFILTERED `countDocuments`, because a trashed document
+// is sealed under the same vault key as an active one. So a wire cap set to the
+// advertised limit locks such an account out of rotating its vault key for ever,
+// in both directions at once: too long for the schema (400) and too short for the
+// coverage check (409), with permanently deleting documents the only way out.
+//
+// The extra unit of slack over the reachable maximum is deliberate. This cap
+// bounds a request BODY; it enforces nothing, because `assertRotationCoversEveryRow`
+// is what decides whether a rotation is legitimate. An over-generous cap therefore
+// admits nothing extra, while a cap one row short bricks a vault key — so the
+// asymmetry is resolved in favour of slack, and the slack is named rather than
+// accidental.
+export const MAX_DOCUMENTS_PER_ROTATION =
+  MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER;
 // Parts the SERVER buffers concurrently, PER WORKER PROCESS, across all users:
 // the semaphore the part handler takes before its body parser runs. Four parts at
 // DOCUMENT_CIPHERTEXT_CHUNK_BYTES is 32 MiB of buffered ciphertext per process,
@@ -387,6 +412,42 @@ export const MAX_ENCRYPTED_DOCUMENT_META_LENGTH = 49_152;
 // it the file still uploads, untransformed.
 export const MAX_FORMATTABLE_SIZE_BYTES = 5_242_880;
 
+/**
+ * A frozen lookup table keyed by a FILE EXTENSION, with no prototype.
+ *
+ * Every table this builds is read as `TABLE[extension]`, and `extension` is
+ * whatever follows the last dot of a name that was chosen by whoever handed the
+ * user the file. On an ordinary object literal that lookup walks the prototype
+ * chain, so `'constructor'` answers the `Object` FUNCTION and `'__proto__'`
+ * answers `Object.prototype` — neither of which is nullish, so the `?? fallback`
+ * every reader writes never fires and a value that is not a member of the table's
+ * own value type escapes into code that was typed as though it could not.
+ *
+ * Measured, before this existed: a document named `notes.constructor` was offered
+ * a preview, and the mode posted into the sandbox was a function, which structured
+ * clone refuses — the `postMessage` threw inside the host's handshake handler
+ * AFTER the window listener and the handshake deadline had already been torn
+ * down, so the viewer sat on its spinner for ever with no fallback and nothing to
+ * report. That is the one outcome the whole preview protocol is built never to
+ * have.
+ *
+ * Fixed at the DATA rather than at each reader, because the readers are the
+ * problem: there are seven of these tables across two packages, `sniff.ts` reads
+ * two of them directly, and a guard is a discipline every future call site has to
+ * remember. A null prototype makes the inherited names simply absent, so every
+ * present and future `TABLE[ext] ?? fallback` is correct by construction.
+ * `Object.create(null)` for exactly this hazard is already the house pattern —
+ * `packages/client/src/services/import/identity.ts` uses it so a `__proto__` key
+ * is hashed as data.
+ *
+ * Nothing else changes: `Object.keys`, `Object.entries`, `Object.freeze` and
+ * spread all behave identically on a null-prototype object, and every reader of
+ * these tables either indexes them or iterates them.
+ */
+export function extensionTable<T>(entries: Record<string, T>): Readonly<Record<string, T>> {
+  return Object.freeze(Object.assign(Object.create(null) as Record<string, T>, entries));
+}
+
 // The vocabulary of the two in-browser transforms: which extensions each one
 // understands, and which of them REPAIR can be offered for.
 //
@@ -408,7 +469,7 @@ export const MAX_FORMATTABLE_SIZE_BYTES = 5_242_880;
 export const TRANSFORM_SYNTAX_NAMES = ['json', 'jsonl', 'markdown', 'yaml'] as const;
 export type TransformSyntax = (typeof TRANSFORM_SYNTAX_NAMES)[number];
 
-export const TRANSFORM_SYNTAXES: Readonly<Record<string, TransformSyntax>> = Object.freeze({
+export const TRANSFORM_SYNTAXES: Readonly<Record<string, TransformSyntax>> = extensionTable({
   json: 'json',
   jsonc: 'json',
   json5: 'json',
@@ -518,7 +579,7 @@ export const MAX_PREVIEW_TEXT_LINES = 50_000;
 // plain text. The worst outcome of a generous list is an unhighlighted preview;
 // the worst outcome of a stingy one is a needless download. Membership is pinned
 // by a test so an addition is a visible edit rather than a silent one.
-export const PREVIEW_MODES: Readonly<Record<string, PreviewMode>> = Object.freeze({
+export const PREVIEW_MODES: Readonly<Record<string, PreviewMode>> = extensionTable({
   // Raster and vector images, all through `<img>`. SVG is NEVER inlined: an
   // `<img>` cannot run the script an inline SVG can.
   png: 'image',
@@ -695,7 +756,7 @@ export interface PreviewSignature {
 // opening (GIF87a and GIF89a; an MP3 with an ID3 tag and one without). Within an
 // alternative, every non-wildcard byte must match.
 export const PREVIEW_MAGIC_BYTES: Readonly<Record<string, readonly PreviewSignature[]>> =
-  Object.freeze({
+  extensionTable({
     png: [{ bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] }],
     jpg: [{ bytes: [0xff, 0xd8, 0xff] }],
     jpeg: [{ bytes: [0xff, 0xd8, 0xff] }],

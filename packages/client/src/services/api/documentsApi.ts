@@ -28,7 +28,7 @@
  */
 
 import { isAxiosError, type AxiosProgressEvent, type AxiosResponse } from 'axios';
-import { MAX_DOCUMENTS_PER_USER, PAGINATION_DEFAULTS } from '@hvault/shared';
+import { MAX_DOCUMENTS_PER_ROTATION, PAGINATION_DEFAULTS } from '@hvault/shared';
 import type {
   ApiResponse,
   CompleteDocumentUploadInput,
@@ -62,11 +62,22 @@ export const DOCUMENT_PAGE_SIZE = PAGINATION_DEFAULTS.MAX_LIMIT;
 
 /**
  * Hard ceiling on the pages one walk may read, derived from the two numbers that
- * bound it rather than written as a literal: an account cannot hold more than
- * `MAX_DOCUMENTS_PER_USER` documents, so a loop that ran past this is following an
- * inflated `totalPages` rather than reading real rows.
+ * bound it rather than written as a literal: a loop that ran past this is
+ * following an inflated `totalPages` rather than reading real rows.
+ *
+ * Derived from `MAX_DOCUMENTS_PER_ROTATION` and NOT from `MAX_DOCUMENTS_PER_USER`,
+ * because the question this ceiling asks is "how many rows can this account
+ * ACTUALLY hold", not "when does the server refuse a new one". Those two numbers
+ * differ: the count is checked only when a transfer is opened, so an account can
+ * finish `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1` rows past the advertised
+ * limit. Derived from the advertised limit, this ceiling stops a page short on
+ * exactly those accounts — and it does so SILENTLY, which costs two different
+ * things at once: the rotation walk drops rows it is required never to drop and
+ * the account can never rotate its vault key again, and the list view simply never
+ * shows those documents, so their owner cannot open, download, trash or
+ * permanently delete them while their bytes keep counting against the quota.
  */
-export const MAX_DOCUMENT_PAGES = Math.ceil(MAX_DOCUMENTS_PER_USER / DOCUMENT_PAGE_SIZE);
+export const MAX_DOCUMENT_PAGES = Math.ceil(MAX_DOCUMENTS_PER_ROTATION / DOCUMENT_PAGE_SIZE);
 
 // ---------------------------------------------------------------------------
 // Query parameter types

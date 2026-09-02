@@ -1134,7 +1134,7 @@ async function fetchAllPages(
       // `openDocumentRow` catches its own failures and answers `null` for a row it
       // refuses, so a rejection here is a fault in this client rather than in the
       // data. It is counted with the refusals rather than thrown, because one bad
-      // row must not cost the user the other 4,999.
+      // row must not cost the user every other one.
       if (result.status === 'rejected' || !result.value) {
         invalid += 1;
         continue;
@@ -1358,8 +1358,25 @@ async function runTransfer(
     // vault key would still decrypt: clearing a key zeroes an exported copy, not
     // the live handle.
     if (isAborted(signal)) return uploadId;
+
+    // FROM HERE ON THE SIGNAL CAN NO LONGER MOVE, WHICH IS WHY THE GUARD CHANGES.
+    // `endSession` has removed this transfer from `sessions`, and that map is the
+    // only thing `clearStore()` and `cancelUpload` iterate — so nothing in this
+    // codebase can abort this controller any more, and a second `isAborted` check
+    // here would be a guard that cannot fire, reading as protection while
+    // providing none. `mutationGeneration` is what a lock or a logout actually
+    // moves, and it is the guard every other post-await writer in this file uses.
+    // That counter is incremented in exactly one place, `clearStore()`, so it says
+    // "everything was discarded" and nothing else — an ordinary delete or rename
+    // does not move it, and capturing it here rather than earlier is simply the
+    // narrowest honest window rather than a way to dodge one.
+    // Without it, a lock landing inside `openDocumentRow` — which is
+    // several Web Crypto round trips — put a fully decrypted name, type, note and
+    // digest into the store the lock had just emptied, where it survived until the
+    // next fetch and, on the logout path, into the next account on the same tab.
+    const myGeneration = mutationGeneration;
     const opened = await openDocumentRow(row, vaultKey);
-    if (isAborted(signal)) return uploadId;
+    if (myGeneration !== mutationGeneration) return uploadId;
     // The committed row is added to the list only when it is the row this transfer
     // asked about. A response describing a DIFFERENT document is not something to
     // recover from here — the upload did commit — but inserting it would put a row

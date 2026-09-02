@@ -235,6 +235,26 @@ describe('DocumentDetail — the decision to preview', () => {
     expect(screen.getByTestId('document-download-to-view')).toHaveTextContent(/no extension/i);
   });
 
+  it('creates no frame for a name whose extension is an inherited property name', async () => {
+    // A document name is whatever the person who handed the user the file chose,
+    // and the extension rule hands the segment after the last dot straight to a
+    // lookup. `constructor` and `__proto__` are the two that survive the
+    // lowercasing, and on an ordinary object literal they resolve THROUGH the
+    // prototype to the `Object` function and to `Object.prototype` — neither
+    // nullish, so the `?? 'none'` fallback never fires and this view offers a
+    // preview whose `mode` is a value structured clone refuses. The `postMessage`
+    // then throws inside the host's handshake handler, after the window listener
+    // and the ten-second deadline have already been removed, and the reader is
+    // left with a spinner that never resolves and no download offered.
+    for (const name of ['notes.constructor', 'notes.__proto__']) {
+      renderDetail(makeDocument({ meta: makeMeta({ name, ext: name.split('.')[1] ?? '' }) }));
+      expect(frame(), name).toBeNull();
+      expect(screen.getByTestId('document-download-to-view')).toBeInTheDocument();
+      expect(harness.readDocumentPlaintext).not.toHaveBeenCalled();
+      cleanup();
+    }
+  });
+
   it('declines a document over the preview budget, showing its size', async () => {
     // Decided from the METADATA, before a single segment is fetched. Reversed,
     // this document would be downloaded and decrypted in full and only then

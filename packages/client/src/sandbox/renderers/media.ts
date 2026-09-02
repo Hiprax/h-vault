@@ -1,3 +1,4 @@
+import { extensionTable } from '@hvault/shared';
 import { documentShell, el, notice } from '../dom';
 
 /**
@@ -20,7 +21,7 @@ import { documentShell, el, notice } from '../dom';
 /** Extension to the element that plays it and the media type it is labelled with. */
 export const MEDIA_TYPES: Readonly<
   Record<string, { readonly kind: 'audio' | 'video'; readonly type: string }>
-> = Object.freeze({
+> = extensionTable({
   mp4: { kind: 'video', type: 'video/mp4' },
   m4v: { kind: 'video', type: 'video/mp4' },
   webm: { kind: 'video', type: 'video/webm' },

@@ -333,6 +333,32 @@ describe('documentCleanup sweep 1: abandoned engine-side uploads', () => {
     expect(surviving.map((upload) => upload.uploadId)).toEqual([uploadId]);
   });
 
+  it("claims an engine upload by the staging row's _id, never by its s3UploadId", async () => {
+    const callback = startAndCapture();
+    const userId = new mongoose.Types.ObjectId();
+    const documentId = agedId(30 * HOUR);
+    const objectKey = buildObjectKey(userId.toHexString(), documentId.toHexString());
+    const uploadId = await seedEngineUpload(objectKey, 30 * HOUR);
+    // The SAME live transfer as the case above, with one difference: the row's
+    // `s3UploadId` does not match the handle the engine is holding. That is the
+    // shape an interrupted re-initiation leaves behind, and it is the only shape
+    // that tells the two implementations apart — every other fixture in this file
+    // seeds both identifiers in agreement, so a sweep rewritten to
+    // `find({ s3UploadId: { $in: ... } })` passes all of them.
+    //
+    // Keying on `_id` is not a stylistic preference: `_id` IS the documentId inside
+    // the object key and it is the collection's primary index, while `s3UploadId`
+    // carries no index at all, so the alternative turns an hourly job into a full
+    // scan of the busiest collection in the schema AND, here, aborts a transfer a
+    // client is still sending parts to.
+    await seedStagingRow(userId, documentId, { s3UploadId: 'a-stale-handle' });
+
+    await callback();
+
+    const surviving = await storageRef.current!.listMultipartUploads();
+    expect(surviving.map((upload) => upload.uploadId)).toEqual([uploadId]);
+  });
+
   it('leaves an upload younger than the threshold, and does not stop scanning at it', async () => {
     const callback = startAndCapture();
     // The engine reports uploads in KEY order, not age order — the double sorts

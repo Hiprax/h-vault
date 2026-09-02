@@ -866,6 +866,13 @@ the current vault and send only what is left.
 
 </details>
 
+The `storage` block `/api/v1/metrics` reports is a **boot-time reading, not a live probe**:
+one `HeadBucket` runs per worker process once the port is open, and the result is held for
+the life of that process. `lastProbeOk: false` therefore keeps reading `false` after a bucket
+is repaired until the process restarts, and `lastProbeAt: null` means the probe has not
+answered yet rather than that it answered badly. `/api/v1/health` deliberately does not probe
+storage at all, so it still answers while storage is down.
+
 ### Response format
 
 ```jsonc

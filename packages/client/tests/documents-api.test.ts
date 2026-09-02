@@ -36,7 +36,10 @@ vi.mock('../src/services/api/client', () => ({
   ensureCsrfToken: vi.fn(),
 }));
 
+import { MAX_DOCUMENTS_PER_ROTATION } from '@hvault/shared';
 import {
+  DOCUMENT_PAGE_SIZE,
+  MAX_DOCUMENT_PAGES,
   PART_DIGEST_HEADER,
   abortDocumentUploadApi,
   completeDocumentUploadApi,
@@ -64,6 +67,27 @@ beforeEach(() => {
   mockPost.mockReset().mockResolvedValue({ data: { success: true, data: null } });
   mockPut.mockReset().mockResolvedValue({ data: { success: true, data: null } });
   mockDelete.mockReset().mockResolvedValue({ data: { success: true, data: null } });
+});
+
+describe('the page ceiling both document walks clamp to', () => {
+  it('reaches every row an account can actually hold', () => {
+    // The ceiling exists to stop a walk following an inflated `totalPages`, and it
+    // has to be derived from how many rows an account can ACTUALLY hold rather
+    // than from the limit an upload is refused at. Those differ: the count is
+    // checked only when a transfer is opened, so several concurrent transfers pass
+    // the same reading and all commit. Derived from the advertised limit, this
+    // ceiling stops one page short on exactly those accounts — silently, which
+    // costs two separate things: the rotation walk drops rows it may never drop
+    // and the account can never rotate its vault key again, and the list view
+    // never shows those documents at all, so nobody can open, download or delete
+    // them while their bytes keep counting against the quota.
+    expect(MAX_DOCUMENT_PAGES * DOCUMENT_PAGE_SIZE).toBeGreaterThanOrEqual(
+      MAX_DOCUMENTS_PER_ROTATION,
+    );
+    // And no more than one page of slack past it, so the ceiling stays a bound
+    // rather than a number nobody derived.
+    expect((MAX_DOCUMENT_PAGES - 1) * DOCUMENT_PAGE_SIZE).toBeLessThan(MAX_DOCUMENTS_PER_ROTATION);
+  });
 });
 
 describe('documentsApi — collection routes', () => {
