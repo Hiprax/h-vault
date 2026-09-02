@@ -1210,6 +1210,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `build`            | T1   | `npm run build` (shared → server → client)                                                                                                                    | `ci` job                   |
 | `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                                               | `ci` job                   |
 | `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                                                     | `ci` job                   |
+| `storage`          | T1   | The storage port against the pinned engine in a container: the same contract the double passes, plus what only a real engine can answer                       | _new_                      |
 | `security`         | T1   | The cross-user authorization matrix over the whole route table                                                                                                | _new_                      |
 | `observability`    | T1   | Log, audit-row and error-body redaction                                                                                                                       | _new_                      |
 | `property`         | T1   | The generated-input invariants, run in two timezones                                                                                                          | _new_                      |
@@ -1466,8 +1467,8 @@ Measured on the reference machine, from the reports each run leaves behind:
 | Command               | Gates | Measured   | What dominates it                                                                      |
 | --------------------- | ----- | ---------- | -------------------------------------------------------------------------------------- |
 | `npm run verify:fast` | 7     | **82 s**   | the type check and ESLint                                                              |
-| `npm run ci`          | 28    | **21 min** | Playwright at 6m44s, then CodeQL, the server suite and the client suite at ~3 min each |
-| `npm run verify:full` | 36    | **hours**  | `flake` at 64 min, then `mutation`, which has no honest estimate                       |
+| `npm run ci`          | 29    | **21 min** | Playwright at 6m44s, then CodeQL, the server suite and the client suite at ~3 min each |
+| `npm run verify:full` | 37    | **hours**  | `flake` at 64 min, then `mutation`, which has no honest estimate                       |
 
 `verify:full` is cumulative — it is `npm run ci` plus the eight release-tier gates —
 so the twenty-one minutes above are inside the number, not beside it. Of the release
@@ -1724,7 +1725,7 @@ duration.
 
 ### Watch it from anywhere
 
-The runner streams. It prints a `[n/36]` step line for each gate as it starts, the
+The runner streams. It prints a `[n/37]` step line for each gate as it starts, the
 gate's own output beneath it, and a pass or fail line with a duration when it ends. A
 boxed summary table and the tier budget comparison come last.
 
@@ -1747,9 +1748,9 @@ the launcher is the only unambiguous signal that this run is over.
 
 **The step counter is not a clock either.** Gates run in the order `npm run ci -- --list`
 prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the two
-longest gates in the repository sit at positions 32 and 33 of 36. A `verify:full` that has
-been on `[33/36]` for four hours is not stuck; it is doing the thing you asked for. The
-same run reaching `[31/36]` in half an hour is likewise normal, and tells you almost
+longest gates in the repository sit at positions 33 and 34 of 37. A `verify:full` that has
+been on `[34/37]` for four hours is not stuck; it is doing the thing you asked for. The
+same run reaching `[31/37]` in half an hour is likewise normal, and tells you almost
 nothing about how much is left.
 
 **Distinguishing slow from stuck** needs one number: how long the gate named on the

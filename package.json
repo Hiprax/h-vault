@@ -48,6 +48,7 @@
     "test:property": "node scripts/ci/property-gate.mjs",
     "test:fuzz": "node scripts/ci/fuzz-gate.mjs",
     "test:resource": "node scripts/ci/resource-gate.mjs",
+    "test:storage": "node scripts/ci/storage-gate.mjs",
     "test:upgrade": "node scripts/ci/upgrade-gate.mjs",
     "test:recovery": "node scripts/ci/recovery-gate.mjs",
     "test:flake": "node scripts/ci/flake-run.mjs",

@@ -125,6 +125,46 @@ describe('in-memory storage double — the parts a real engine cannot share', ()
     expect(firstPart.etag.endsWith('"')).toBe(true);
   });
 
+  it('sorts its own listing by key, then by initiation time, so no test can seed its way past the age filter', async () => {
+    // This is a property of the DOUBLE, deliberately, and it is NOT a claim about
+    // any engine. The shared contract used to assert key order for every
+    // implementation; it does not hold. AWS documents key-then-initiation-time
+    // sorting for a general purpose bucket and documents a directory bucket as one
+    // where the uploads "aren't sorted lexicographically based on the object keys",
+    // and the engine this stack ships sorts by upload id (measured, and recorded in
+    // `tests/storage/conformance.test.ts`). So the port promises a complete page and
+    // nothing about its sequence.
+    //
+    // The double sorts anyway, and the reason is the one written beside the sort in
+    // `helpers/inMemoryStorage.ts`: returning INSERTION order would let a garbage
+    // collector test seed the young upload first, see it first, and pass without
+    // ever exercising the rule that the sweep must FILTER rather than break. A
+    // deterministic order that is not insertion order keeps that trap reachable.
+    // Pinned here rather than in the shared contract because a fake's determinism
+    // is a fact about the fake.
+    const storage = createInMemoryStorage();
+    const early = uniqueKey();
+    const late = uniqueKey();
+    const [low, high] = [early, late].sort() as [string, string];
+
+    // Opened in the opposite order to the one they must be reported in, so the
+    // assertion cannot be satisfied by insertion order.
+    const highId = await storage.createMultipartUpload(high);
+    const lowId = await storage.createMultipartUpload(low);
+    // A second upload on the SAME key, opened last, to reach the tie-break. Two
+    // calls can share a millisecond, and `Array.prototype.sort` is stable, so the
+    // expected order below is the same whether the timestamps differ or not.
+    const lowIdAgain = await storage.createMultipartUpload(low);
+
+    const listed = await storage.listMultipartUploads();
+
+    expect(listed.map((upload) => upload.key)).toEqual([low, low, high]);
+    // The negative: the ids must still travel with their own keys, because an
+    // abort is addressed by the pair and a sort that reordered one and not the
+    // other would abort the wrong transfer.
+    expect(listed.map((upload) => upload.uploadId)).toEqual([lowId, lowIdAgain, highId]);
+  });
+
   it('lists every open upload when no prefix is given', async () => {
     const storage = createInMemoryStorage();
     const first = uniqueKey();

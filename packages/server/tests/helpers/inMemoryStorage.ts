@@ -318,12 +318,20 @@ export function createInMemoryStorage(
           ...(omitTimestamps ? {} : { initiated: upload.initiated }),
         });
       }
-      // Sorted by KEY, then by initiation time among uploads sharing one, because
-      // that is the order S3 reports and the port warns callers about explicitly:
-      // it is NOT age order, so a sweep that stopped at the first entry younger
-      // than its threshold would leave older uploads unreclaimed for ever.
-      // Returning insertion order here would make that trap unreachable through the
-      // double — a test could seed the young upload first, pass, and prove nothing.
+      // Sorted by KEY, then by initiation time among uploads sharing one. This is a
+      // DETERMINISM CHOICE FOR THE FAKE and not a claim about any engine: the port
+      // promises a complete page and says nothing about its sequence, AWS documents
+      // key-then-time sorting for one bucket class and documents another as not
+      // sorted lexicographically at all, and the engine this stack ships sorts by
+      // upload id (measured, and recorded in `tests/storage/conformance.test.ts`).
+      //
+      // The sort stays because of what it makes REACHABLE. The order is not age
+      // order, so a sweep that stopped at the first entry younger than its
+      // threshold leaves older uploads unreclaimed for ever — and returning
+      // INSERTION order here would put that trap out of reach through the double,
+      // because a test could seed the young upload first, see it first, and pass
+      // without exercising the rule at all. Pinned by its own case in
+      // `tests/storage-contract.test.ts`, beside the other facts about this double.
       summaries.sort((left, right) => {
         if (left.key !== right.key) return left.key < right.key ? -1 : 1;
         return (left.initiated?.getTime() ?? 0) - (right.initiated?.getTime() ?? 0);

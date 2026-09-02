@@ -43,6 +43,7 @@ import clientVitestConfig from '../../client/vitest.config';
 import clientFuzzConfig, { CLIENT_FUZZ_SUITE } from '../../client/vitest.fuzz.config';
 import serverFuzzConfig, { SERVER_FUZZ_SUITE } from '../vitest.fuzz.config';
 import resourceVitestConfig, { RESOURCE_SUITE } from '../vitest.resource.config';
+import storageVitestConfig, { STORAGE_SUITE } from '../vitest.storage.config';
 import upgradeVitestConfig, { UPGRADE_SUITE } from '../vitest.upgrade.config';
 import recoveryVitestConfig, { RECOVERY_SUITE } from '../vitest.recovery.config';
 import clientUpgradeConfig, { CLIENT_UPGRADE_SUITE } from '../../client/vitest.upgrade.config';
@@ -648,6 +649,69 @@ describe('machine-readable reports', () => {
     expect(declaredReports).not.toContain('junit-resource.xml');
   });
 
+  it('runs the storage conformance suite, and leaves none of its files to no gate at all', () => {
+    // The same contract `test:resource` has, and for the same reason: this is the
+    // OTHER suite the push tier's ordinary server run does not pick up. The base
+    // config excludes `tests/storage/**` because these cases start a real engine
+    // in a container, and a suite that fails when a Docker daemon is not running
+    // is a suite people learn to distrust — the honest answer to a missing
+    // prerequisite is the runner's "could not run", which is why the gate
+    // declares `docker`.
+    //
+    // That exclusion is exactly the shape a quietly retired suite has, so both
+    // halves are pinned: the base config excludes the directory, and the storage
+    // config claims every file in it.
+    expect(serverVitestConfig.test?.exclude).toContain('tests/storage/**');
+    expect(storageVitestConfig.test?.include).toEqual(STORAGE_SUITE);
+    expect(STORAGE_SUITE.length).toBeGreaterThan(0);
+    for (const file of STORAGE_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'packages', 'server', file)), file).toBe(true);
+    }
+
+    // Both directions. A file on disk that `STORAGE_SUITE` does not name would be
+    // run by NOTHING — excluded from the push tier and never included here —
+    // which is a test that exists and cannot fail. vitest errors only on an EMPTY
+    // match, so a list that has gone stale in part shrinks the gate in silence.
+    const dir = path.join(repoRoot, 'packages', 'server', 'tests', 'storage');
+    const onDisk = readdirSync(dir)
+      .filter((entry) => entry.endsWith('.test.ts'))
+      .map((entry) => `tests/storage/${entry}`)
+      .sort();
+    expect(onDisk).toEqual([...STORAGE_SUITE].sort());
+
+    // Its own JUnit report, never the server suite's — pointed there it would
+    // overwrite the artifact `audit:ratchet:full` reads the headcount from.
+    const output = junitOutputFile(storageVitestConfig.test?.reporters);
+    expect(path.resolve(output!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-storage.xml'),
+    );
+    expect(output).not.toBe(junitOutputFile(serverVitestConfig.test?.reporters));
+
+    // And only the JSON report is DECLARED. Unlike `test:fuzz` and
+    // `test:resource`, this gate DOES run on every push — so the reason is the
+    // other one: these tests are its own rather than a re-run of the server
+    // suite's, and declaring the JUnit would put them in `tests.count`, making
+    // the headcount rise and fall with whether a Docker daemon was running. The
+    // task carries `countsTests: false` for the same reason.
+    expect(reportsOf(manifest.tasks['test:storage']!)).toEqual(['storage.json']);
+    expect(manifest.tasks['test:storage']!.countsTests).toBe(false);
+    const declaredReports = nonComposite.flatMap(([, task]) => reportsOf(task));
+    expect(declaredReports).not.toContain('junit-storage.xml');
+
+    // The prerequisite is DECLARED rather than discovered, in both places, and
+    // `build:shared` is beside it rather than replaced by it: the suite imports
+    // `@hvault/shared` for the framing constants, so a gate declaring only
+    // `docker` would report a missing shared build as a broken storage port.
+    const byId = new Map(gates.map((gate) => [gate.id, gate]));
+    expect(byId.get('storage')?.requires).toEqual(['docker', 'build:shared']);
+    expect(manifest.tasks['test:storage']!.requires).toEqual(['docker', 'build:shared']);
+    expect(byId.get('storage')?.dependsOn).toContain('build');
+    // Tier 1, and stated here as well as in the tier tests, because moving it to
+    // Tier 2 would be the quiet way to stop checking a silent data-loss class on
+    // every push while the gate still looked registered.
+    expect(byId.get('storage')?.tier).toBe(1);
+  });
+
   it('runs the upgrade suite from its own config, its own report and its own files', () => {
     // The same contract as every other named subset, plus one thing only this
     // gate has: two committed GOLDENS. A vault and a `.env` recorded from the
@@ -867,7 +931,7 @@ describe('machine-readable reports', () => {
     // a typo in one is SILENT in both directions that matter: the gate never
     // writes a score for it, so the baseline never gains a floor for it, and the
     // "core modules carry the higher threshold" claim quietly applies to
-    // nothing. Existence on disk is what makes the six real.
+    // nothing. Existence on disk is what makes each of them real.
     expect(CORE_MODULES).toEqual([
       'packages/client/src/services/crypto/',
       'packages/shared/src/schemas/',
@@ -875,6 +939,7 @@ describe('machine-readable reports', () => {
       'packages/server/src/controllers/vaultController.ts',
       'packages/client/src/services/import/',
       'packages/server/src/utils/folderGraph.ts',
+      'packages/server/src/controllers/documentController.ts',
     ]);
     for (const modulePath of CORE_MODULES) {
       expect(existsSync(path.join(repoRoot, modulePath)), modulePath).toBe(true);

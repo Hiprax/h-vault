@@ -54,12 +54,27 @@ const logger = createModuleLogger('jobs/documentCleanup');
  *
  * `listMultipartUploads` returns ONE page in the engine's own order, and the port
  * exposes no key/upload marker, so sweep 1 can only ever see the head of that
- * listing. Claimed uploads at the head therefore shadow anything deeper. The shadow
- * is small by construction — a user may hold at most
- * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` open transfers, and within a user the
- * older ObjectId sorts first — so the "a backlog drains over successive runs" claim
- * the port makes holds only because the head does in fact drain. If that ever stops
- * being true, the fix is a marker on the port, not a bigger page here.
+ * listing. Entries the sweep cannot remove therefore shadow anything deeper.
+ *
+ * The order is the ENGINE's and nothing may be assumed about it — the shipped one
+ * sorts by upload id, measured, so it is neither key order nor age order — which
+ * means the reason the head drains has to be a COUNTING argument rather than a
+ * positional one. It is this. An entry leaves the listing when it is aborted or
+ * completed, and the entries a given run cannot remove are: one younger than
+ * `DOCUMENT_UPLOAD_TTL_HOURS` plus the grace (which ages out), one whose key this
+ * codebase did not write (permanent, and there should be none), one still claimed
+ * by a staging row (bounded by `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` per user,
+ * and the row carries a TTL), and one whose abort was refused (transient). So every
+ * abandoned upload reaches the head provided the permanently immovable count stays
+ * below the engine's page maximum. That holds under every order, which is why it is
+ * the version written down. Note it is a bound nothing here measures: it would need
+ * re-checking if that per-user cap, or the number of accounts, ever moved by orders
+ * of magnitude.
+ *
+ * If it ever stops holding, the fix is NOT a bigger page and NOT the obvious key
+ * marker: S3's `key-marker` is defined in terms of a key ordering this engine does
+ * not provide, so it would skip or repeat entries. See `services/storage/types.ts`,
+ * which records what a sound paginator on this port would have to look like.
  *
  * Sweep 3 is the ONLY reclamation path for objects an account erasure could not
  * delete: `cascadeDelete`'s prefix sweep logs and swallows a storage failure

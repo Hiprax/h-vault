@@ -19,6 +19,14 @@ import type { StorageProvider, StorageRangeRead } from '../../src/services/stora
  *     between S3 services, so they belong to the engine-specific half of the
  *     conformance suite. What is asserted here is what this design DEPENDS on, and
  *     what a second implementation could get wrong while still looking finished.
+ *
+ *     The same rule caught a case in this very file once the conformance gate
+ *     existed to check it: the LISTING ORDER of open multipart uploads was
+ *     asserted here as "key order", which is documented behaviour for one AWS
+ *     bucket class, is documented as NOT holding for another, and does not hold for
+ *     the engine this stack ships. It has been replaced by the completeness claim
+ *     the collector actually rests on. An ordering belief is exactly the shape this
+ *     rule exists to keep out.
  *   * **The part sizes are deliberately tiny.** The port is size-agnostic — its job
  *     is concatenation, ordering and ranges — so exercising it with 8 MiB parts
  *     would buy nothing but minutes. The real 8 MiB framing is proved by the
@@ -294,24 +302,56 @@ export function runStorageContract(
       expect(listed.map((upload) => upload.key)).not.toContain(other);
     });
 
-    it('lists open uploads in key order rather than in the order they were opened', async () => {
-      // The order is a documented property of the port, not an incidental one: S3
-      // sorts by object key first and only then by initiation time among uploads
-      // sharing a key. A caller that assumed age order — and stopped at the first
-      // entry younger than its threshold — would leave older uploads unreclaimed
-      // for ever, which is why the garbage collector filters instead of breaking.
-      const later = newKey();
-      const earlier = newKey();
-      const [low, high] = [later, earlier].sort() as [string, string];
-      // Opened in the opposite order to the one they must be reported in.
-      await provider.createMultipartUpload(high);
-      await provider.createMultipartUpload(low);
+    it('reports every open upload under the prefix, in an order no caller may assume', async () => {
+      // COMPLETENESS is what the collector depends on; SEQUENCE is not, and this
+      // case used to assert the sequence. It said "S3 sorts by object key first and
+      // only then by initiation time", which is a property of ONE AWS bucket class
+      // rather than of S3: the ListMultipartUploads reference documents exactly
+      // that sorting for a general purpose bucket and, in the same block, documents
+      // a directory bucket as one where "the multipart uploads aren't sorted
+      // lexicographically based on the object keys".
+      //
+      // The engine this stack ships does not sort by key either. MEASURED
+      // 2026-09-02 against the pinned image: five uploads opened for keys
+      // zz, aa, mm, bb, yy came back as yy, bb, mm, zz, aa — neither key order nor
+      // the order they were opened in — and the sequence is exactly the set sorted
+      // by UPLOAD ID, stable across repeated calls. Two uploads on ONE key came
+      // back reversed. Against a bucket shared with the rest of a suite the old
+      // assertion therefore failed about three runs in four.
+      //
+      // So the port promises a complete page and says nothing about its sequence,
+      // which is what `types.ts` documents and what `documentCleanup`'s first sweep
+      // is written for: it FILTERS on `initiated` and never breaks early, which is
+      // correct under all three of those orders and under any other. The engine's
+      // own ordering is recorded in the conformance suite, where a real engine can
+      // keep the record honest; the double's is pinned in `storage-contract.test.ts`,
+      // where it belongs, because it is a determinism choice for a fake.
+      const base = newKey();
+      const openedFirst = derivedKey(base, 'a');
+      const openedSecond = derivedKey(base, 'b');
+      const firstId = await provider.createMultipartUpload(openedFirst);
+      const secondId = await provider.createMultipartUpload(openedSecond);
 
-      const listed = (await provider.listMultipartUploads()).filter(
-        (upload) => upload.key === low || upload.key === high,
+      const listed = await provider.listMultipartUploads(`${base}-`);
+
+      // THE NEGATIVE this case exists for, asserted before anything else so that a
+      // short answer cannot slip past a vacuous loop: the listing must not be
+      // TRUNCATED to the head of whatever order the engine picked. A provider that
+      // returned the engine's first entry only, or that stopped at one page and
+      // dropped the rest, passes any "is it sorted" assertion and fails here — and
+      // in production it would strand every upload behind the head, unreclaimed,
+      // for ever.
+      expect(listed).toHaveLength(2);
+      expect(listed.map((upload) => `${upload.key}#${upload.uploadId}`).sort()).toEqual(
+        [`${openedFirst}#${firstId}`, `${openedSecond}#${secondId}`].sort(),
       );
-
-      expect(listed.map((upload) => upload.key)).toEqual([low, high]);
+      // Every entry is individually datable, which is what makes FILTERING possible
+      // where ordering is not: an entry whose age the caller cannot read is one the
+      // collector must leave alone, so the field has to be present per entry rather
+      // than inferable from a position in the list.
+      for (const upload of listed) {
+        expect(upload.initiated).toBeInstanceOf(Date);
+      }
     });
 
     it('pages a prefix listing through its continuation token, each key exactly once', async () => {

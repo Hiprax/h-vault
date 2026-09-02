@@ -31,6 +31,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { DOCUMENT_CIPHERTEXT_CHUNK_BYTES } from '@hvault/shared';
+import { resolveComposeImage, STORAGE_COMPOSE_SERVICE } from '../../../tests/harness/s3Server.js';
 
 interface HealthCheck {
   test?: string[] | string;
@@ -1038,6 +1039,28 @@ describe('Docker deployment', () => {
       const references = composeYaml.match(/dxflrs\/garage:[^\s'"]+/g) ?? [];
       expect(references.length).toBeGreaterThan(0);
       expect(references.filter((reference) => !reference.includes('@sha256:'))).toEqual([]);
+    });
+
+    it('is the same image the storage conformance harness starts, read from this very file', () => {
+      // `test:storage` stands this engine up outside Compose, in a bare
+      // container, and runs the storage port against it. That gate is only worth
+      // anything while the engine it starts is the engine the stack runs, so the
+      // harness READS the reference out of this file rather than carrying its
+      // own copy — a literal there would be a second definition that the digest
+      // pin above does not cover, and the conformance suite could go on passing
+      // against an image the deployment stopped using.
+      //
+      // The harness cannot use a YAML parser (`yaml` is a devDependency of this
+      // package alone, and the end-to-end harness at the repository root imports
+      // the same module), so it scans the file by indentation. This is the
+      // assertion that keeps that scan honest: what it returns must equal what a
+      // real parser reads.
+      expect(STORAGE_COMPOSE_SERVICE).toBe('hvault-s3');
+      expect(resolveComposeImage()).toBe(s3?.image);
+      // And the negative: the scan must not silently answer for some other
+      // service when the one it names is gone, which is how it would keep
+      // returning an image after the service was renamed.
+      expect(() => resolveComposeImage('hvault-no-such-service')).toThrow(/no service named/);
     });
 
     it('runs the provisioning flags that make the bucket exist without an operator step', () => {

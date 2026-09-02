@@ -343,6 +343,36 @@ const GATES = [
     run: (options) => runNpm(['run', 'test:integration'], options),
   },
   {
+    id: 'storage',
+    task: 'test:storage',
+    // TIER 1, and unlike every other container-dependent gate here. The
+    // reasoning is worth stating, because "it needs Docker" is the argument that
+    // would otherwise park it beside `deploy` in the release tier:
+    //
+    //   * what it proves is a SILENT TOTAL-LOSS class. The engine stores a short
+    //     middle part without complaint (measured), which moves every later
+    //     segment boundary by the shortfall and makes the document permanently
+    //     unopenable — and nothing announces it. The server is the only thing
+    //     refusing one, so the refusal belongs on every push rather than before
+    //     a release.
+    //   * it is CHEAP: one 6 MiB container and a handful of API calls, measured
+    //     at ~5 s end to end, against a 12-minute tier budget.
+    //   * Docker was ALREADY a push-tier prerequisite — `audit:image` is Tier 1
+    //     and declares it — so this adds no new requirement to a push, and a
+    //     missing daemon is reported as COULD NOT RUN rather than as a failure.
+    //
+    // Its files run HERE and nowhere else: the base server config excludes
+    // `tests/storage/**` so the ordinary suite never tries to start a container.
+    // `gate-surface.test.ts` asserts every file in that directory is claimed
+    // here, so a case cannot fall between the two configs and be run by neither.
+    tier: 1,
+    title: 'The storage port against the real engine in a container (conformance)',
+    ci: 'new — no hosted job ever ran this application against a real object store',
+    dependsOn: ['build'],
+    requires: ['docker', 'build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/storage-gate.mjs'], options),
+  },
+  {
     id: 'security',
     task: 'test:security',
     tier: 1,

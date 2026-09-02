@@ -36,8 +36,8 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     pool: 'forks',
-    // The ONE directory this suite does not pick up, and the reason is not that
-    // its assertions are weaker.
+    // The TWO directories this suite does not pick up, and in neither case is
+    // the reason that their assertions are weaker.
     //
     // `tests/resource/**` measures wall-clock duration and peak RSS while
     // building 10,000-item vaults — a minute of work whose numbers are only
@@ -47,12 +47,22 @@ export default defineConfig({
     // coin toss. They run as `test:resource` (Tier 2) through
     // `vitest.resource.config.ts`, which serializes them.
     //
-    // This is a NEW directory carved out at the moment it was written, not an
-    // existing suite quietly parked: nothing that ran here before still runs
+    // `tests/storage/**` runs the storage port against a REAL engine in a
+    // container. It is excluded here because it needs Docker, which the ordinary
+    // server suite must not: a suite that fails when a daemon is not running is
+    // a suite people learn to distrust, and the honest answer for a missing
+    // prerequisite is "could not run" from the pipeline rather than a red test.
+    // It runs as `test:storage` (Tier 1, `requires: ['docker']`) through
+    // `vitest.storage.config.ts`, and the mocked-SDK provider suite
+    // (`tests/s3-provider.test.ts`) keeps `s3Provider.ts` covered on every push
+    // whether or not Docker is there.
+    //
+    // Both are NEW directories carved out at the moment they were written, not
+    // existing suites quietly parked: nothing that ran here before now runs
     // nowhere. `gate-surface.test.ts` asserts every file under `tests/resource`
-    // is claimed by the resource gate, so a scenario cannot fall between the two
-    // configs and be run by neither.
-    exclude: ['**/node_modules/**', '**/dist/**', 'tests/resource/**'],
+    // and every file under `tests/storage` is claimed by its own gate, so a file
+    // cannot fall between two configs and be run by neither.
+    exclude: ['**/node_modules/**', '**/dist/**', 'tests/resource/**', 'tests/storage/**'],
     // There is deliberately no `singleFork` here. The key this file used to
     // carry — `forks: { singleFork: true }` — is not a Vitest 4 option at all
     // (neither `test.forks` nor `test.poolOptions` exists in this version), so it

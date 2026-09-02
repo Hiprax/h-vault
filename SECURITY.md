@@ -392,14 +392,15 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 
 ## Security practices in this repository
 
-- Every push runs `npm run ci` locally through the `pre-push` hook — twenty-eight gates,
+- Every push runs `npm run ci` locally through the `pre-push` hook — twenty-nine gates,
   including a dependency audit at moderate and above over the production tree, ESLint with
   `eslint-plugin-security`, static analysis (CodeQL where the CLI is installed, otherwise
   Semgrep CE or OpenGrep, and the gate reports which engine answered), container builds
   scanned with Trivy (zero fixable CRITICAL/HIGH), a secret scan over every tracked file
   **and every blob in git history**, the cross-user authorization matrix over the whole
-  route table, and a redaction suite that asserts no request value, audit row or production
-  error body carries a secret. Eight further gates run before a release, among them a fuzz
+  route table, a conformance run of the storage port against the real object-storage engine
+  in a container, and a redaction suite that asserts no request value, audit row or
+  production error body carries a secret. Eight further gates run before a release, among them a fuzz
   run over the seven import parsers, a crash-consistency drill that SIGKILLs a real process
   mid-write, the mutation oracle, and the deployment clean room.
 - The gates are themselves guarded, because a security gate that can be edited to pass is

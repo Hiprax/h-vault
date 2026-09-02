@@ -361,11 +361,19 @@ describe('documentCleanup sweep 1: abandoned engine-side uploads', () => {
 
   it('leaves an upload younger than the threshold, and does not stop scanning at it', async () => {
     const callback = startAndCapture();
-    // The engine reports uploads in KEY order, not age order — the double sorts
-    // the same way, and the conformance suite pins that in both implementations —
-    // so the YOUNG upload's key is chosen to sort FIRST. A sweep that stopped at
+    // Nothing may be assumed about the order the ENGINE reports uploads in — the
+    // shipped one sorts by upload id, which is neither key order nor age order, and
+    // the port promises only a complete page. What this case needs is simply an
+    // order in which the YOUNG upload comes FIRST, because a sweep that stopped at
     // the first entry younger than its threshold would then leave the older one
     // behind it unreclaimed for ever.
+    //
+    // It is arranged to come first TWICE OVER, and that redundancy is deliberate:
+    // its key sorts first, which is the order the double reports (a determinism
+    // choice for the fake, pinned by its own case in `storage-contract.test.ts`),
+    // AND it is seeded first, so the trap stays reachable under plain insertion
+    // order too. Depending on the double's sort alone would leave this case passing
+    // vacuously the day that sort changed.
     const youngKey = buildObjectKey('000000000000000000000001', agedId(1 * HOUR).toHexString());
     const oldKey = buildObjectKey('ffffffffffffffffffffffff', agedId(30 * HOUR).toHexString());
     const youngUpload = await seedEngineUpload(youngKey, 1 * HOUR);

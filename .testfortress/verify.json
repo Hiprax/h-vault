@@ -123,6 +123,14 @@
       "coverage": ["packages/server/coverage/cobertura-coverage.xml"],
       "requires": ["build:shared"]
     },
+    "test:storage": {
+      "cmd": "npm run test:storage",
+      "tier": 1,
+      "gate": "the storage port behaves the same against the real engine in a container as against the in-memory double the push tier uses: the shared StorageProvider contract passes unchanged, segments at the real 8 MiB framing size read back at exactly the offsets the framing predicts, an open upload carries a real initiation date, a missing bucket is named on every operation that can carry an error body so it reads as 503 rather than as a missing file, and the engine STORES a short middle part while the server refuses that same part through the real route and leaves nothing in the bucket",
+      "report": "storage.json",
+      "countsTests": false,
+      "requires": ["docker", "build:shared"]
+    },
     "test:security": {
       "cmd": "npm run test:security",
       "tier": 1,

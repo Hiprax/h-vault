@@ -114,15 +114,35 @@ export interface StorageProvider {
    * One page of multipart uploads the engine still holds, in the ENGINE's own order,
    * each with the time it recorded when the upload was initiated.
    *
-   * NOT in age order, and a caller must not assume it is: S3 sorts these by object
-   * key first and only then by initiation time among uploads sharing a key. A sweep
-   * that stopped at the first entry younger than its threshold would therefore leave
+   * NOT in age order, and a caller must not assume ANY order — not age, not key.
+   * A sweep that stopped at the first entry younger than its threshold would leave
    * older uploads unreclaimed for ever. Filter on `initiated`; never break early.
+   *
+   * "The engine's own order" is meant literally, because there is no cross-service
+   * order to promise. AWS documents key-then-initiation-time sorting for a general
+   * purpose bucket and, in the same block, documents a directory bucket as one
+   * where the uploads "aren't sorted lexicographically based on the object keys".
+   * The engine this stack ships orders by UPLOAD ID: measured 2026-09-02 against
+   * the pinned image, five uploads opened for keys zz, aa, mm, bb, yy came back as
+   * yy, bb, mm, zz, aa — the set sorted by upload id, stable across repeated calls,
+   * and uncorrelated with both key and age. The conformance gate records it; the
+   * shared contract asserts only that the page is COMPLETE.
    *
    * One page (up to the engine's own maximum) rather than every upload: this feeds
    * a best-effort reclamation that runs hourly, so a backlog drains over successive
    * runs, and an unbounded listing on a shared code path is how one wedged account
    * starves the job.
+   *
+   * The obvious extension is therefore closed, and it is worth knowing before
+   * reaching for it: S3's continuation for this operation is `key-marker` plus
+   * `upload-id-marker`, whose meaning is DEFINED by the key ordering the engine
+   * above does not provide, so a key marker on this port would skip or repeat
+   * entries against it. If paging ever becomes necessary the only sound form is the
+   * engine's own truncation flag and markers carried verbatim, which the
+   * implementation currently discards. Sorting inside the implementation is not an
+   * alternative and is worse than doing nothing: the page's MEMBERSHIP is still
+   * chosen by the engine, so a sorted page would present a truncated arbitrary
+   * sample as an ordered prefix.
    */
   listMultipartUploads(prefix?: string): Promise<StorageUploadSummary[]>;
 }

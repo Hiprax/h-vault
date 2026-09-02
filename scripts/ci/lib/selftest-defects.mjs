@@ -273,6 +273,57 @@ export const DEFECTS = {
     evidence: (text) => /__selftest_probe|selftest probe/.test(text),
   },
 
+  'test:storage': {
+    requires: ['docker'],
+    // The defect this gate was built for, and it is a one-character class of
+    // edit: the non-final part's EQUALITY relaxed to a BOUND. It still refuses a
+    // part that is too big, so it reads like a tidy-up that kept the important
+    // half — and it lets a SHORT middle part through.
+    //
+    // What it breaks is total and silent. The storage engine stores that part
+    // without complaint (this gate measures exactly that, against the real
+    // engine), the completion step assembles it, the upload succeeds, and every
+    // later segment now begins `shortfall` bytes earlier than
+    // `i * DOCUMENT_CIPHERTEXT_CHUNK_BYTES`. Every ranged read after the short
+    // part therefore authenticates as nothing, and the document can never be
+    // opened again — with no error anywhere, at a point in the file nobody can
+    // predict.
+    //
+    // HONESTY NOTE, because the tempting claim here is false: this defect is NOT
+    // invisible to the rest of the suite. `packages/server/tests/document-parts.test.ts`
+    // has a case named "a SHORT MIDDLE PART" that drives the same rule against
+    // the in-memory double, so the mutation also turns `test:integration` red on
+    // every push. That does not disqualify the case — the obligation is to prove
+    // THIS gate can fail, attributably, and it does — but nobody should read this
+    // entry as evidence that the gate is the only thing covering the rule. What
+    // the gate adds over that file is the other half of the sentence: that the
+    // engine underneath really does accept the part, so the server's refusal is
+    // the only thing there is.
+    //
+    // The pattern is byte-exact against today's source. A rewrite of that line
+    // turns `String.replace` into a no-op, which fails in the SAFE direction: the
+    // gate stays green, the harness reports `unproven`, and the run exits
+    // non-zero — provided the evidence predicate below cannot be satisfied by a
+    // green report.
+    title:
+      'relax the non-final part size rule from an equality to a bound, admitting a short middle part',
+    mutate: {
+      'packages/server/src/controllers/documentController.ts': (text) =>
+        text.replace(
+          '  if (!isFinalPart && partBytes !== DOCUMENT_CIPHERTEXT_CHUNK_BYTES) {',
+          '  if (!isFinalPart && partBytes > DOCUMENT_CIPHERTEXT_CHUNK_BYTES) {',
+        ),
+    },
+    // The rendered assertion, which only a FAILING run can produce, AND the name
+    // of the case that produced it. `storage.json` records `status` and the list
+    // of checks either way, so matching a check's wording would be satisfied by a
+    // fully green report — the trap recorded on `test:security`. `expected 200 to
+    // be 400` is the part handler answering success where it must refuse, and no
+    // other case in this suite compares those two numbers.
+    evidence: (text) =>
+      /expected 200 to be 400/.test(text) && /REFUSES the short middle part/.test(text),
+  },
+
   'test:security': {
     // The defect this gate exists to catch, planted at its source: an
     // ownership filter removed from a controller query. `getItem` is chosen
