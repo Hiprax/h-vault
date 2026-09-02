@@ -32,11 +32,28 @@ const DOCUMENT_ID_PARAM = {
   name: 'id',
   in: 'path',
   required: true,
+  description:
+    'The document id. An id belonging to another account is answered with 404, exactly as one that never existed, so documents cannot be enumerated.',
   schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
 };
 
-/** The staging-transfer id, as every `/documents/uploads/{id}` route declares it. */
-const UPLOAD_ID_PARAM = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
+/**
+ * The staging-transfer id, as every `/documents/uploads/{id}` route declares it.
+ *
+ * Same shape as {@link DOCUMENT_ID_PARAM} and deliberately a separate constant:
+ * a transfer id and a document id are the SAME value for one upload — the id is
+ * minted at init because the browser binds its key derivation to it before
+ * sealing the first byte — and a reader has to be told that rather than left to
+ * infer it from two identical declarations.
+ */
+const UPLOAD_ID_PARAM = {
+  name: 'id',
+  in: 'path',
+  required: true,
+  description:
+    'The transfer id returned by POST /documents/uploads. It is also the id the committed document will have.',
+  schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c0' },
+};
 
 /**
  * The `page` and `limit` query parameters, at whichever ceiling the endpoint sets.
@@ -46,11 +63,23 @@ const UPLOAD_ID_PARAM = { name: 'id', in: 'path', required: true, schema: { type
  * a clone of itself the moment the second one existed.
  */
 const pageParams = (maxLimit: number, defaultLimit: number): Record<string, unknown>[] => [
-  { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
+  {
+    name: 'page',
+    in: 'query',
+    description: 'One-based page number. A page past the end is an empty array, not a 404.',
+    schema: { type: 'integer', minimum: 1, default: 1, example: 1 },
+  },
   {
     name: 'limit',
     in: 'query',
-    schema: { type: 'integer', minimum: 1, maximum: maxLimit, default: defaultLimit },
+    description: `Rows per page, at most ${String(maxLimit)}. A larger value is a validation error rather than a silent clamp.`,
+    schema: {
+      type: 'integer',
+      minimum: 1,
+      maximum: maxLimit,
+      default: defaultLimit,
+      example: defaultLimit,
+    },
   },
 ];
 
@@ -72,6 +101,8 @@ const LOG_PAGE_PARAMS = pageParams(100, 20);
 const DOCUMENT_SORT_ORDER_PARAM = {
   name: 'sortOrder',
   in: 'query',
+  description:
+    'Direction of the chosen sort key. The document id is always the final tie-break, so a page boundary is stable even when many rows share a timestamp.',
   schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
 };
 
@@ -1371,12 +1402,21 @@ export const swaggerSpec: JsonObject = {
           {
             name: 'folderId',
             in: 'query',
+            description:
+              'Return only the documents in this owned folder. A folder belonging to another account simply matches nothing.',
             schema: { type: 'string', example: '66c0f1a2b3c4d5e6f7a8b9c1' },
           },
-          { name: 'favorite', in: 'query', schema: { type: 'boolean', example: true } },
+          {
+            name: 'favorite',
+            in: 'query',
+            description: 'Return only favorites when true.',
+            schema: { type: 'boolean', example: true },
+          },
           {
             name: 'sortBy',
             in: 'query',
+            description:
+              'One of the three columns the server can actually read. There is no name sort: the name is inside encryptedMeta and the server never sees it, so a client that wants alphabetical order sorts the decrypted page itself.',
             schema: {
               type: 'string',
               enum: ['createdAt', 'updatedAt', 'favorite'],
@@ -1404,6 +1444,8 @@ export const swaggerSpec: JsonObject = {
           {
             name: 'sortBy',
             in: 'query',
+            description:
+              'Defaults to the deletion time, because the trash is read newest-deleted-first; the other two are the same columns the active list offers.',
             schema: {
               type: 'string',
               enum: ['deletedAt', 'createdAt', 'updatedAt'],
@@ -1533,8 +1575,13 @@ export const swaggerSpec: JsonObject = {
             name: 'x-hv-part-sha256',
             in: 'header',
             required: true,
-            description: 'SHA-256 of the sealed segment, 64 lowercase hexadecimal characters.',
-            schema: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+            description:
+              'SHA-256 of the sealed segment, 64 lowercase hexadecimal characters. The server recomputes it over the bytes it received and refuses a mismatch, so this detects a truncated or corrupted transfer before the part enters the ledger.',
+            schema: {
+              type: 'string',
+              pattern: '^[a-f0-9]{64}$',
+              example: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+            },
           },
         ],
         requestBody: {

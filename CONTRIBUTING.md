@@ -130,9 +130,9 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
-### Ten gates whose failure asks for something specific
+### Twelve gates whose failure asks for something specific
 
-Most gates tell you what to fix. These ten are worth reading before you meet them,
+Most gates tell you what to fix. These twelve are worth reading before you meet them,
 because the obvious way past each of them is the wrong one.
 
 - **`coverage`** holds each package to the line, branch and function coverage already
@@ -331,6 +331,18 @@ gate.
   `## [Unreleased]` using the Keep a Changelog categories (`Added`, `Changed`,
   `Deprecated`, `Removed`, `Fixed`, `Security`). A `docs-sync` test asserts that parts of
   the README stay in step with the code, so it will tell you if you missed one.
+- **Nothing from a stored document may be parsed in the app's origin.** Every parser that
+  touches an uploaded file — the markdown pipeline, the HTML sanitizer, the highlighter,
+  Prettier, the JSON repairer — lives under `packages/client/src/sandbox/`, which is built
+  by its **own** Vite config into `sandbox-assets/` and runs inside an `<iframe
+sandbox="allow-scripts">` with an opaque origin and its own `connect-src 'none'` policy.
+  Two rules follow, and both fail quietly rather than loudly if you break them. The two
+  module graphs must share no chunk, so never import an app module from `src/sandbox/` or a
+  sandbox module from the app — the separate build is what makes that structural, and a
+  shared chunk would either be blocked by CORS in the frame or silently leave the app's
+  measured bundle. And `allow-same-origin` must never be added beside `allow-scripts`: the
+  pair lets the framed document remove its own sandbox, which is the entire boundary.
+  [SECURITY.md](SECURITY.md) explains why.
 - **Touching crypto, auth, or the backup/restore path?** Say so explicitly in the PR
   description and explain why the change is safe. These paths carry the whole product;
   they are reviewed on the assumption that a subtle mistake there is unrecoverable for a
@@ -367,6 +379,7 @@ An ordinary push publishes nothing and says so.
 packages/shared   # Zod schemas, TypeScript types, constants — built first
 packages/server   # Express 5 API, Mongoose models, background jobs
 packages/client   # React 19 SPA, Web Crypto, Zustand stores
+  src/sandbox/    #   the isolated document every stored file is rendered in — SEPARATE build
 e2e/              # Playwright specs
 scripts/ci/       # the local pipeline (this repo's real CI)
 docker/           # Dockerfile targets, internal + system Nginx configs, storage engine config

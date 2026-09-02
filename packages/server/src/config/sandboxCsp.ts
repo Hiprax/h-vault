@@ -45,14 +45,21 @@ import path from 'node:path';
  *     `Access-Control-Allow-Origin` header — which is why `sandbox-assets/` is
  *     served with one and `assets/` is not.
  *
- *  2. `connect-src 'none'` is the containment. The sandbox opens no socket of
- *     any kind: it receives bytes over a `MessagePort` and renders them. A
- *     renderer that cannot open a socket cannot exfiltrate a document to
- *     anyone, cannot reach this application's own API, and cannot burn a user's
- *     rate-limit budget into a login lockout. It is only affordable because
- *     there is no PDF renderer — pdf.js needs a worker and a WebAssembly
- *     decoder fetched by URL, and carrying it would have forced `connect-src`
- *     and `worker-src` open for every other format too.
+ *  2. `connect-src 'none'` is the containment, and it is worth stating its
+ *     exact reach rather than the slogan. It blocks `fetch`, `XMLHttpRequest`,
+ *     WebSockets, `EventSource` and `sendBeacon`, so a renderer can never READ
+ *     a response; and no directive below names an external host, so nothing it
+ *     emits reaches a third party. It does NOT stop every request: `script-src`,
+ *     `style-src`, `img-src` and `font-src` allow `'self'`, and by (1) above
+ *     `'self'` still names this server inside a sandboxed document, so an
+ *     `<img src="/api/v1/…">` is a GET this server would see. Do not write
+ *     "opens no socket of any kind" — the earlier wording here, and false. The
+ *     bound is NO HOST BUT THIS ONE AND NO READABLE ANSWER, which is the same
+ *     bound self-navigation already has (SECURITY.md's residual risk 1), so the
+ *     document is not claiming an isolation the policy does not deliver. All of
+ *     it is only affordable because there is no PDF renderer — pdf.js needs a
+ *     worker and a WebAssembly decoder fetched by URL, and carrying it would
+ *     have forced `connect-src` and `worker-src` open for every other format.
  *
  *  3. The `sandbox allow-scripts` DIRECTIVE repeats the iframe attribute inside
  *     the policy, so the document sandboxes ITSELF even if a future embedder

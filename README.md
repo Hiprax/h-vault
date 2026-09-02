@@ -137,6 +137,99 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   nobody. Lose the password and the file is gone — the UI says so, plainly.
 - **Soft delete.** A 30-day trash with restore, purged by a nightly job.
 
+### Documents
+
+An encrypted document store, **optional and off unless the operator configured object
+storage** — a deployment without it looks exactly as it did before, with no Documents entry in
+the sidebar and nothing to switch off.
+
+- **Any file, sealed in your browser.** Each document gets its own random 256-bit key, wrapped
+  under a key derived from your vault key and bound to that document's id, and the file is
+  encrypted in segments that each seal to exactly 8 MiB — every segment carrying its own position
+  and an end-of-file marker inside its nonce, so a hostile server cannot reorder, truncate, or
+  splice one document into another without the decryption failing. What the server stores is ciphertext, a wrapped key and
+  sizes: **no filename, no MIME type, no tag, no note, no content**. The name, type, tags, note
+  and a whole-file SHA-256 live in their own sealed blob, and a download is checked against that
+  digest on the way out — so what comes back is byte-identical or it is discarded and you are
+  told.
+- **Any file type uploads.** `DOCUMENT_ALLOWED_EXTENSIONS` is a **browser-side convenience**, not
+  a control: the server receives ciphertext and cannot see a filename, so it cannot enforce an
+  extension and does not pretend to. Set it and the upload panel will steer your users; leave it
+  empty — the default — and every type uploads. Either way, a determined client can upload
+  anything, and the docs say so rather than implying a server-side check that does not exist.
+- **Rotating your vault key does not re-upload anything.** A rotation rewraps **32 bytes per
+  document** instead of rewriting every file, which is the only way rotation stays possible once
+  an account holds gigabytes. The request must name every item, folder and document the account
+  has, and is refused if it does not, so a row created while you were preparing the rotation
+  cannot be left behind under the superseded key.
+- **Format and repair before uploading, optionally.** Two checkboxes on the upload panel tidy a
+  document before it is encrypted — **format** for `json`, `jsonc`, `json5`, `jsonl`, `ndjson`,
+  `md`, `markdown`, `yaml` and `yml`, and **repair** for the JSON family only (a heuristic that
+  guessed at YAML indentation would change meaning silently, and Markdown has no parse failure to
+  repair — both still get a parse check through the formatter). Nothing is rewritten silently: you
+  see the byte delta, the lines added and removed, and a unified diff, and confirm before the
+  upload starts. A file that cannot be repaired **stops** the upload and names the line, the
+  column and the offending text, and offers to upload the original untouched. Both run on files up
+  to 5 MB, and both run inside the isolated frame described below rather than in the page.
+- **A viewer that cannot reach your vault.** Documents are displayed inside an isolated frame
+  with an **opaque origin**: it holds no key, no token, no cookie and no storage, it cannot read
+  the page that embeds it, and its own content-security policy leaves it unable to reach any host
+  but this one or to read a single response. Your browser decrypts
+  and verifies the file, and only then hands the frame the bytes — never the document key, the
+  vault key, an access token, the document's id or even its name. The title, the toolbar and the
+  download button are drawn outside the frame, so nothing a document renders can forge them, and
+  a link inside a document asks for confirmation and shows you the destination's origin before it
+  opens.
+
+#### What renders, and what is download-only
+
+Every renderer below emits DOM nodes directly and never assigns HTML to the page, and before any
+of them runs the file's **leading bytes are compared with what its name claims** — a PDF renamed
+`.md` is refused, and the refusal says what the file actually looks like.
+
+| Mode       | Extensions                                                                                                                                                                                                                                                                                                | How it is shown                                                                                                                                                             |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `image`    | `png` `jpg` `jpeg` `gif` `webp` `avif` `bmp` `ico` `svg`                                                                                                                                                                                                                                                  | Through `<img>`. **SVG is never inlined**, because an `<img>` cannot run the script an inline SVG can                                                                       |
+| `markdown` | `md` `markdown` `mdown` `mkd`                                                                                                                                                                                                                                                                             | The way GitHub renders a README — headings, tables, task lists, strikethrough, autolinks, footnotes, fenced code with highlighting — sanitized with a GitHub-derived schema |
+| `html`     | `html` `htm` `xhtml`                                                                                                                                                                                                                                                                                      | The same sanitizing pipeline. Script, `on*` handlers and `javascript:` URLs do not survive it                                                                               |
+| `text`     | `txt` `text` `log` `csv` `tsv`                                                                                                                                                                                                                                                                            | Text nodes, never HTML; `csv` and `tsv` as a table whose cells are text, so a formula-shaped cell is shown verbatim rather than interpreted                                 |
+| `code`     | `sh` `bash` `zsh` `fish` `ps1` `bat` `cmd` `py` `rb` `pl` `lua` `sql` `r` `js` `mjs` `cjs` `ts` `tsx` `jsx` `c` `h` `cpp` `hpp` `cs` `java` `kt` `go` `rs` `php` `swift` `diff` `patch` `conf` `cfg` `properties` `env` `service` `json` `jsonc` `json5` `jsonl` `ndjson` `yaml` `yml` `toml` `xml` `ini` | Text nodes with syntax highlighting. An extension with no matching grammar simply reads as plain text                                                                       |
+| `media`    | `mp4` `m4v` `webm` `ogv` `mp3` `m4a` `aac` `wav` `flac` `opus` `ogg` `oga`                                                                                                                                                                                                                                | `<video controls>` / `<audio controls>`, from a blob URL the frame mints itself                                                                                             |
+
+Everything else is **download-only, and each case is a decision rather than a gap**:
+
+| Not rendered                                                              | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`pdf`**                                                                 | Deliberate. A PDF viewer is a large third-party parser, and the best-known one had arbitrary JavaScript execution _in the hosting page_ (CVE-2024-4367 in pdf.js) — which here would be the page holding your unlocked vault key. It is also the only renderer that would have needed network access and a WebAssembly module, which would have had to be opened up for every other format too. Download it and open it in the viewer your computer already has |
+| **Office formats** — `docx`, `xlsx`, `pptx`                               | The same reason, plus fidelity a preview could not honestly claim                                                                                                                                                                                                                                                                                                                                                                                               |
+| **Files with no extension** — `Dockerfile`, `Makefile`, `.bashrc`, `.env` | The renderer is chosen from the lowercased segment after the **last dot**, so a name with no dot — or whose only dot is leading — has nothing to choose from. Recognising them would take a second lookup keyed by whole filename, which is a second source of truth for one question. (`prod.env` has the extension `env` and does render; the file `.env` does not)                                                                                           |
+| **Anything over 25 MB**                                                   | A memory budget before a UI one: the page holds the whole decrypted file, hands the same buffer to the frame, and the renderer builds its own representation on top, so the peak is a multiple of the file                                                                                                                                                                                                                                                      |
+| **Anything else**                                                         | Unrecognised rather than refused. Adding an extension to the table above is cheap and safe, so the list grows when someone asks                                                                                                                                                                                                                                                                                                                                 |
+
+Two consequences worth stating plainly. A preview is **not redacted in any way** — which is right
+for a store whose whole content is sensitive by definition, but it does mean a previewed
+`prod.env` shows its secrets on screen exactly as a revealed password field would. And a document
+whose key will not unwrap cannot be renamed or downloaded at all: its name, type, tags and note
+live in a sealed blob that will not open, so there is nothing to rewrite and no key to rewrite it
+with, and the file's own bytes are sealed under a key derived from the same document key, so there
+is nothing to hand back either. It stays movable, favoritable, trashable,
+restorable and deletable, and the app says so instead of failing quietly.
+
+#### Documents are not in your backups
+
+This is the one thing to know before you rely on either. H-Vault's encrypted backup — scheduled,
+emailed, downloadable — carries your vault. It does **not** carry your documents, and it never
+will: a backup is a single JSON file of about 25 MiB and uploaded files do not fit in one. What it
+carries instead is a count, so a restored account says "this account had 43 documents" rather than
+looking complete when it is not.
+
+For a self-hosted deployment that means the **object storage volume is the only copy of every
+uploaded file**, and it has to be captured together with the database and the deployment's `.env`
+— the wrapped keys are in the database, the ciphertext is in the storage service, and neither half
+is usable without the other. The procedure, the volume names and why a file-level copy of a
+running storage engine is not a backup are in
+[Back up the database AND the document storage](#back-up-the-database-and-the-document-storage).
+
 ### Experience
 
 - **Progressive Web App** — installable, with offline read access from an encrypted IndexedDB
@@ -230,20 +323,79 @@ flowchart LR
 The backup file also carries an HMAC-SHA256 signature computed under a key separated from the
 BWK by HKDF, so tampering is detected at restore time rather than discovered later.
 
+### Document encryption
+
+A document is not encrypted under the vault key directly. Each one gets its own key, and the
+vault key only ever **wraps** it — which is what makes a rotation 32 bytes per document instead of
+a re-upload of every file.
+
+```mermaid
+flowchart TD
+    subgraph client["YOUR DEVICE"]
+        VK["Vault Key"]
+        ID["Document id<br/>(assigned before the first byte is sealed)"]
+        DEK["Document key<br/>random 256-bit"]
+        VK --> HK["HKDF-SHA256<br/>info binds the document id"]
+        ID --> HK
+        HK --> WK["Wrapping key"]
+        WK -->|"AES-256-GCM wraps"| WDEK["Wrapped document key"]
+        DEK --> WDEK
+        SALT["Stream salt<br/>random 32 bytes"] --> HK2["HKDF-SHA256"]
+        DEK --> HK2
+        ID --> HK2
+        HK2 --> SK["Segment key"]
+        HK2 --> MK["Metadata key"]
+        SK -->|"AES-256-GCM<br/>nonce = prefix + index + last-flag"| SEG["Sealed 8 MiB segments"]
+        MK -->|"AES-256-GCM<br/>fresh IV on every seal"| META["Sealed metadata:<br/>name · type · tags · note · SHA-256"]
+    end
+
+    subgraph server["THE SERVER"]
+        SW["Wrapped document key<br/>+ IV + auth tag"]
+        SM["Sealed metadata blob"]
+        SF["Framing: salt, nonce prefix,<br/>chunk size, chunk count, byte counts"]
+        SO["Ciphertext object<br/>in the storage service"]
+    end
+
+    WDEK --> SW
+    META --> SM
+    SEG --> SO
+    SALT --> SF
+
+    classDef secret fill:#f3e8ff,stroke:#7c3aed,color:#111
+    classDef opaque fill:#e5e7eb,stroke:#6b7280,color:#111
+    class VK,DEK,WK,SK,MK secret
+    class SW,SM,SO opaque
+```
+
+Four properties follow from putting the segment's **position** and an **end-of-file flag** inside
+its nonce, and the document id inside every key derivation. A hostile server cannot reorder
+segments, cannot truncate the file, cannot substitute a segment from another document, and cannot
+swap the framing parameters it stores in plaintext — every one of those makes the decryption fail
+rather than producing plausible bytes. The framing is stored twice on purpose: once in the columns
+the server needs for range arithmetic, and once inside the authenticated metadata blob. **A client
+must compare the two and refuse on a mismatch**, which is what turns a plaintext copy the server
+could edit into one it cannot.
+
+Content is immutable after upload — a segment is never rewritten, so a nonce is never reused under
+a segment key — and replacing bytes means a new document. Renaming or retagging re-seals only the
+metadata blob, under a freshly generated IV each time.
+
 ### Cryptographic parameters
 
-| Parameter                 | Value                                                                                  |
-| ------------------------- | -------------------------------------------------------------------------------------- |
-| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)       |
-| Master-key salt           | The account email — see the note above                                                 |
-| Backup-key salt           | 16 random bytes                                                                        |
-| Encryption                | AES-256-GCM                                                                            |
-| Key size                  | 256 bits                                                                               |
-| IV                        | 12 bytes, freshly random for **every** field                                           |
-| Authentication tag        | 16 bytes                                                                               |
-| Name hash                 | HMAC-SHA256 over the name, keyed by the vault key — folder-name uniqueness, not search |
-| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                 |
-| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                             |
+| Parameter                 | Value                                                                                                                                          |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)                                                               |
+| Master-key salt           | The account email — see the note above                                                                                                         |
+| Backup-key salt           | 16 random bytes                                                                                                                                |
+| Encryption                | AES-256-GCM                                                                                                                                    |
+| Key size                  | 256 bits                                                                                                                                       |
+| IV                        | 12 bytes, freshly random for **every** field                                                                                                   |
+| Authentication tag        | 16 bytes                                                                                                                                       |
+| Name hash                 | HMAC-SHA256 over the name, keyed by the vault key — folder-name uniqueness, not search                                                         |
+| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                                                                         |
+| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                                                                                     |
+| Document key              | Random 256-bit per document, wrapped under HKDF-SHA256(vault key, info bound to the document id)                                               |
+| Document segment          | AES-256-GCM over 8,388,592 bytes of plaintext, sealing to exactly 8 MiB; nonce = 7 random bytes ‖ big-endian segment index ‖ last-segment flag |
 
 ### Honest strength metering
 
@@ -912,6 +1064,10 @@ Available only where object storage is configured; every route answers **503** o
 `GET /config` says which it is so the app can hide the feature rather than probe for it. A document
 is encrypted in the browser before a byte leaves it: the server stores ciphertext, a wrapped key and
 sizes, and never sees a filename, a type, a tag or a note.
+
+Because it never sees a filename, the server cannot enforce a file-type restriction either:
+`DOCUMENT_ALLOWED_EXTENSIONS` is applied by the browser and **any** type reaches these endpoints.
+Treat it as a nudge for your own users, not as a control at the API boundary.
 
 | Method | Endpoint                                   | Description                                                                                                    |
 | ------ | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
