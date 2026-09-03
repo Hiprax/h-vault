@@ -30,6 +30,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { captureExe, repoRoot } from './lib/proc.mjs';
 import { writeJsonReport } from './lib/reports.mjs';
+import { evaluateDenominator } from './lib/scan-denominator.mjs';
 import { color, symbol } from './lib/ui.mjs';
 
 const MAX_FILE_BYTES = 1024 * 1024;
@@ -132,14 +133,22 @@ function filesToScan() {
     console.error(`${symbol.fail} secret-scan: git ${args.join(' ')} failed`);
     process.exit(1);
   }
-  return [
+  const enumerated = [
     ...new Set(
       result.stdout
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean),
     ),
-  ].filter((file) => !isExcluded(file));
+  ];
+  // BOTH halves escape, because the denominator needs both. A scan that read
+  // nothing because it was handed nothing is a different fact from a scan that
+  // read nothing because everything it was handed was excluded, and only one of
+  // those is a broken scanner. See `lib/scan-denominator.mjs`.
+  return {
+    files: enumerated.filter((file) => !isExcluded(file)),
+    excluded: enumerated.filter((file) => isExcluded(file)),
+  };
 }
 
 /**
@@ -281,13 +290,17 @@ function scanBuffer(buffer, origin) {
  *
  * A finding count is meaningless without it: one over-broad `EXCLUDED` pattern,
  * or a `git ls-files` that returns nothing, and the gate is green having read no
- * bytes at all. Zero scanned files is therefore a failure, and both counts go
- * into the report so a later run can be compared with this one.
+ * bytes at all. Zero scanned files is therefore a failure — but "zero scanned"
+ * has three causes and only two of them are that failure, so the verdict is
+ * `lib/scan-denominator.mjs`'s to give rather than a bare `=== 0`. All three
+ * counts go into the report so a later run can be compared with this one.
  */
 let filesScanned = 0;
 let bytesScanned = 0;
 
-for (const file of filesToScan()) {
+const enumeration = filesToScan();
+
+for (const file of enumeration.files) {
   const buffer = readContent(file);
   if (!buffer) continue;
   filesScanned++;
@@ -295,11 +308,15 @@ for (const file of filesToScan()) {
   scanBuffer(buffer, { file, where: 'working-tree' });
 }
 
-if (filesScanned === 0) {
-  console.error(
-    `${symbol.fail} secret-scan: 0 files scanned — the enumeration or the exclusion list is broken, ` +
-      'and a scan of nothing finds nothing',
-  );
+const denominator = evaluateDenominator({
+  staged,
+  enumerated: enumeration.files.length + enumeration.excluded.length,
+  excluded: enumeration.excluded,
+  scanned: filesScanned,
+});
+
+if (!denominator.ok) {
+  console.error(`${symbol.fail} secret-scan: ${denominator.message}`);
   process.exit(1);
 }
 
@@ -332,6 +349,8 @@ if (writeReport) {
     scannedAt: new Date().toISOString(),
     mode: staged ? 'staged' : withHistory ? 'tree+history' : 'tree',
     // What was actually read. "0 findings" over 0 files is not a clean tree.
+    filesEnumerated: enumeration.files.length + enumeration.excluded.length,
+    filesExcluded: enumeration.excluded.length,
     filesScanned,
     bytesScanned,
     blobsScanned: withHistory ? blobsScanned : undefined,
@@ -370,7 +389,7 @@ if (findings.length > 0) {
 
 console.log(
   color.green(
-    `${symbol.pass} secret-scan: no secrets in ${String(filesScanned)} file(s)` +
+    `${symbol.pass} secret-scan: ${denominator.message}` +
       (withHistory ? ` + ${String(blobsScanned)} historical blob(s)` : ''),
   ),
 );

@@ -16,7 +16,19 @@
  *      exact red X this whole change exists to remove.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -26,6 +38,7 @@ import {
   majorOf,
   planRelease,
 } from '../../../scripts/ci/lib/version.mjs';
+import { evaluateDenominator } from '../../../scripts/ci/lib/scan-denominator.mjs';
 import { extractRelease } from '../../../scripts/ci/changelog-extract.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -650,5 +663,349 @@ describe('changelog extraction: the release body is the curated entry', () => {
     expect(section).toContain('### Added');
     expect(section).toContain('### Fixed');
     expect(section).toContain('- a bug');
+  });
+});
+
+/**
+ * The secret scanner's DENOMINATOR, which decides whether a scan read enough to
+ * be believed.
+ *
+ * The rule is not "zero scanned files is fatal": that shipped as a pre-commit
+ * hook which refused every documentation-only and test-only commit, because
+ * every file such a commit stages is one the scanner was deliberately told to
+ * skip. The three causes of "zero scanned" have to be told apart, and the
+ * relaxation has to stay confined to the staged mode — over the whole tree,
+ * "everything was excluded" is the over-broad-pattern failure the check exists
+ * to catch.
+ */
+describe('secret-scan denominator: zero scanned files has three causes, not one', () => {
+  it('fails a staged scan that enumerated nothing at all', () => {
+    const verdict = evaluateDenominator({ staged: true, enumerated: 0, excluded: [], scanned: 0 });
+
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe('empty-enumeration');
+    expect(verdict.message).toContain('a scan of nothing finds nothing');
+    // The hole this fix must not open: an empty enumeration is not the same
+    // thing as an enumeration that was entirely excluded, and must never be
+    // answered with the excluded-only pass.
+    expect(verdict.message).not.toContain('nothing to scan');
+  });
+
+  it('fails a whole-tree scan that enumerated nothing at all', () => {
+    const verdict = evaluateDenominator({ staged: false, enumerated: 0, excluded: [], scanned: 0 });
+
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe('empty-enumeration');
+    expect(verdict.message).toContain('the enumeration is broken');
+    expect(verdict.message).not.toContain('nothing to scan');
+  });
+
+  it('passes a staged set whose every file is on the exclusion list', () => {
+    const verdict = evaluateDenominator({
+      staged: true,
+      enumerated: 1,
+      excluded: ['SECURITY.md'],
+      scanned: 0,
+    });
+
+    expect(verdict.ok).toBe(true);
+    expect(verdict.reason).toBe('all-excluded');
+    // It has to say WHAT was excluded, or the developer is told a hook passed
+    // for a reason they cannot check.
+    expect(verdict.message).toContain('SECURITY.md');
+    expect(verdict.message).toContain('nothing to scan');
+    // ...and it must not claim to have read anything, which is the whole point
+    // of keeping a denominator at all.
+    expect(verdict.message).not.toMatch(/no secrets in/);
+  });
+
+  it('still fails a WHOLE-TREE scan whose every file is on the exclusion list', () => {
+    // The mode-awareness, asserted from the side that keeps the guard: a tree of
+    // thousands of files cannot legitimately be nothing but documentation and
+    // fixtures, so this is the over-broad-pattern failure. Making the staged
+    // relaxation global would turn this green and delete the check.
+    const verdict = evaluateDenominator({
+      staged: false,
+      enumerated: 1,
+      excluded: ['SECURITY.md'],
+      scanned: 0,
+    });
+
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe('all-excluded');
+    expect(verdict.message).toContain('over-broad');
+    expect(verdict.message).not.toContain('nothing to scan');
+  });
+
+  it('fails when files survived exclusion but none of them could be read', () => {
+    // `readContent` returns null on a `git show` failure or a file that vanished
+    // mid-scan, and the loop steps past it without counting it. Bytes were owed
+    // to this scan and it did not get them — in either mode.
+    for (const staged of [true, false]) {
+      const verdict = evaluateDenominator({
+        staged,
+        enumerated: 3,
+        excluded: ['README.md'],
+        scanned: 0,
+      });
+
+      expect(verdict.ok, `staged=${String(staged)}`).toBe(false);
+      expect(verdict.reason).toBe('nothing-readable');
+      expect(verdict.message).toContain('2 file(s) survived the exclusion list');
+      expect(verdict.message).not.toContain('nothing to scan');
+    }
+  });
+
+  it('reports the files it read, not the files it was handed', () => {
+    // The denominator is what was READ. An excluded file that inflated this
+    // count would be a scan reporting coverage it never had.
+    const verdict = evaluateDenominator({
+      staged: true,
+      enumerated: 3,
+      excluded: ['SECURITY.md', 'README.md'],
+      scanned: 1,
+    });
+
+    expect(verdict.ok).toBe(true);
+    expect(verdict.reason).toBe('scanned');
+    expect(verdict.message).toBe('no secrets in 1 file(s)');
+  });
+
+  it('passes a set with nothing excluded at all', () => {
+    const verdict = evaluateDenominator({ staged: false, enumerated: 2, excluded: [], scanned: 2 });
+
+    expect(verdict.ok).toBe(true);
+    expect(verdict.reason).toBe('scanned');
+    expect(verdict.message).toBe('no secrets in 2 file(s)');
+  });
+
+  it('refuses counts that cannot describe a real scan, rather than passing them', () => {
+    // The only caller derives all three from one deduped list partitioned by
+    // `isExcluded`, so none of these is reachable from it. They are refused
+    // anyway: this module is meant to be usable away from that caller, and the
+    // wrong default for a security gate handed arithmetic it cannot explain is
+    // to vouch for the scan. `staged: true` throughout, because that is the mode
+    // with a passing branch to fall into.
+    const incoherent = [
+      {
+        label: 'more excluded than enumerated',
+        enumerated: 2,
+        excluded: ['a', 'b', 'c'],
+        scanned: 0,
+      },
+      { label: 'negative enumeration', enumerated: -1, excluded: [], scanned: 0 },
+      { label: 'negative scan count', enumerated: 2, excluded: [], scanned: -1 },
+      { label: 'scanned more than survived exclusion', enumerated: 2, excluded: ['a'], scanned: 2 },
+      { label: 'fractional enumeration', enumerated: 1.5, excluded: [], scanned: 1 },
+      { label: 'fractional scan count', enumerated: 3, excluded: [], scanned: 1.5 },
+    ];
+
+    for (const { label, ...counts } of incoherent) {
+      const verdict = evaluateDenominator({ staged: true, ...counts });
+
+      expect(verdict.ok, label).toBe(false);
+      expect(verdict.reason, label).toBe('incoherent');
+      // Never the excluded-only pass, which is the branch these would otherwise
+      // fall into, and never a claimed scan.
+      expect(verdict.message, label).not.toContain('nothing to scan');
+      expect(verdict.message, label).not.toMatch(/no secrets in/);
+    }
+  });
+
+  it('names a bounded sample of the exclusions rather than the whole commit', () => {
+    // A hook's output is the only feedback `git commit` gives; a docs commit
+    // touching fifty files must not bury it.
+    const excluded = Array.from({ length: 7 }, (_, index) => `docs/page-${String(index)}.md`);
+    const verdict = evaluateDenominator({ staged: true, enumerated: 7, excluded, scanned: 0 });
+
+    expect(verdict.ok).toBe(true);
+    expect(verdict.message).toContain('docs/page-4.md');
+    expect(verdict.message).toContain('and 2 more');
+    expect(verdict.message).not.toContain('docs/page-5.md');
+  });
+});
+
+/**
+ * A throwaway repository holding a copy of the scanner, so the program runs end
+ * to end against a real git index that is not this checkout's.
+ *
+ * `lib/proc.mjs` derives `repoRoot` from its own location (`../../..`), so a
+ * copy at `<tmp>/scripts/ci/` makes `<tmp>` the repository the scanner
+ * enumerates. That is the only honest way to drive the real program: the
+ * alternative is staging files in the developer's own working tree, which would
+ * clobber whatever they had staged. The WHOLE `lib` directory is copied rather
+ * than the modules the scanner imports today, so a new import turns this into a
+ * test of the scanner rather than a test of a module-resolution error.
+ */
+/**
+ * The variables through which git tells a child process WHERE the repository is.
+ * `githooks(5)` requires clearing them before invoking git "in a foreign
+ * repository or in a different working tree", which is precisely what the
+ * harness below does.
+ */
+const GIT_LOCATION_VARIABLES = new Set([
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_NAMESPACE',
+  'GIT_CEILING_DIRECTORIES',
+]);
+
+function runScannerOn(
+  files: Record<string, string>,
+  options: { stage?: string[]; args?: string[] } = {},
+): { status: number; output: string } {
+  const dir = mkdtempSync(path.join(tmpdir(), 'hv-secret-scan-'));
+  try {
+    mkdirSync(path.join(dir, 'scripts', 'ci'), { recursive: true });
+    cpSync(path.join(repoRoot, 'scripts', 'ci', 'lib'), path.join(dir, 'scripts', 'ci', 'lib'), {
+      recursive: true,
+    });
+    copyFileSync(
+      path.join(repoRoot, 'scripts', 'ci', 'secret-scan.mjs'),
+      path.join(dir, 'scripts', 'ci', 'secret-scan.mjs'),
+    );
+    for (const [relative, contents] of Object.entries(files)) {
+      const target = path.join(dir, relative);
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, contents);
+    }
+
+    // git's own variables are STRIPPED, not inherited. `githooks(5)` is explicit
+    // that a hook invoking git "in a foreign repository or in a different
+    // working tree" must clear these, and this harness is exactly that: with
+    // `GIT_DIR` inherited, `git init` silently re-initialises the REAL
+    // repository and `git add` writes these fixtures into the developer's own
+    // index — both exit 0, and the assertions here would still pass, because
+    // the enumeration read back is the one just written. Measured on git 2.55.0:
+    // no hook on this version exports `GIT_DIR`, so nothing leaks today; forcing
+    // it reproduces the overwrite exactly, which is why this does not rely on
+    // which variables a given git version happens to export.
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !GIT_LOCATION_VARIABLES.has(key)),
+    );
+
+    const git = (...args: string[]): string => {
+      const result = spawnSync('git', args, { cwd: dir, env, encoding: 'utf-8' });
+      if (result.status !== 0) throw new Error(`git ${args.join(' ')}: ${result.stderr}`);
+      return result.stdout.trim();
+    };
+    git('-c', 'init.defaultBranch=main', 'init', '-q');
+
+    // The isolation, asserted rather than assumed: every later `git add` writes
+    // to THIS index. A harness that silently staged into the real repository
+    // would still make every assertion below pass.
+    // Matched on the temp directory's unique basename rather than on the whole
+    // path: git reports forward slashes on Windows, and macOS resolves
+    // `/var/folders/...` to `/private/var/folders/...`, so a prefix comparison
+    // would fail on two platforms for reasons that are not this bug. The real
+    // repository's git dir cannot contain this basename.
+    const gitDir = git('rev-parse', '--absolute-git-dir');
+    expect(gitDir, `scanner harness escaped its temp repo: ${gitDir}`).toContain(
+      path.basename(dir),
+    );
+
+    const staged = options.stage ?? [];
+    if (staged.length > 0) git('add', ...staged);
+
+    const result = spawnSync(
+      process.execPath,
+      [path.join(dir, 'scripts', 'ci', 'secret-scan.mjs'), ...(options.args ?? ['--staged'])],
+      { cwd: dir, env, encoding: 'utf-8' },
+    );
+    return { status: result.status ?? -1, output: `${result.stdout}${result.stderr}` };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('secret-scan --staged: the pre-commit hook, run against a real index', () => {
+  // Assembled rather than written out, so the scanner never has a reason to
+  // flag this file — the same trick `lib/selftest-defects.mjs` uses.
+  const AWS_KEY = ['AKIA', 'IOSFODNN7', 'EXAMPLE'].join('');
+  // Everything the tree-mode cases need out of the way: the copied scanner and
+  // the ignore file itself, leaving only the fixtures to enumerate.
+  const IGNORE_THE_HARNESS = 'scripts/\n.gitignore\n';
+
+  it('passes a commit that stages nothing but excluded files', () => {
+    const result = runScannerOn({ 'SECURITY.md': '# Security\n' }, { stage: ['SECURITY.md'] });
+
+    expect(result.status).toBe(0);
+    expect(result.output).toContain('nothing to scan');
+    expect(result.output).toContain('SECURITY.md');
+    // The regression, named: this is the message that blocked the commit.
+    expect(result.output).not.toContain('0 files scanned');
+    expect(result.output).not.toMatch(/no secrets in/);
+  });
+
+  it('counts only the files it actually read', () => {
+    const result = runScannerOn(
+      { 'SECURITY.md': '# Security\n', 'src/app.ts': "export const greeting = 'hello';\n" },
+      { stage: ['SECURITY.md', 'src/app.ts'] },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.output).toContain('no secrets in 1 file(s)');
+    // The excluded file neither inflated the denominator nor took the
+    // all-excluded exit beside a file that did need reading.
+    expect(result.output).not.toContain('2 file(s)');
+    expect(result.output).not.toContain('nothing to scan');
+  });
+
+  it('still finds a secret in the scannable file beside an excluded one', () => {
+    const result = runScannerOn(
+      { 'SECURITY.md': '# Security\n', 'src/app.ts': `export const key = '${AWS_KEY}';\n` },
+      { stage: ['SECURITY.md', 'src/app.ts'] },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('src/app.ts:1');
+    expect(result.output).toContain('aws-access-key');
+    // The exclusion must not leak sideways into the file next to it.
+    expect(result.output).not.toContain('nothing to scan');
+  });
+
+  it('still fails when nothing was staged at all', () => {
+    const result = runScannerOn({ 'SECURITY.md': '# Security\n' }, { stage: [] });
+
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('0 files enumerated');
+    expect(result.output).toContain('a scan of nothing finds nothing');
+    expect(result.output).not.toContain('nothing to scan');
+  });
+
+  it('still fails a WHOLE-TREE scan in which everything was excluded', () => {
+    const result = runScannerOn(
+      { '.gitignore': IGNORE_THE_HARNESS, 'SECURITY.md': '# Security\n' },
+      { args: [] },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('over-broad');
+    // The staged relaxation must not reach the mode where "everything was
+    // excluded" is a claim about the repository rather than about one commit.
+    expect(result.output).not.toContain('nothing to scan');
+  });
+
+  it('still fails a WHOLE-TREE scan that enumerated nothing', () => {
+    const result = runScannerOn({ '.gitignore': IGNORE_THE_HARNESS }, { args: [] });
+
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('0 files enumerated');
+    expect(result.output).not.toContain('nothing to scan');
+  });
+
+  it('still passes a WHOLE-TREE scan over a clean file', () => {
+    const result = runScannerOn(
+      { '.gitignore': IGNORE_THE_HARNESS, 'src/app.ts': "export const greeting = 'hello';\n" },
+      { args: [] },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.output).toContain('no secrets in 1 file(s)');
+    expect(result.output).not.toContain('nothing to scan');
   });
 });

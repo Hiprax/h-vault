@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-09-03",
-  "commit": "be2f4fa",
+  "commit": "af609ee",
   "tests": {
-    "count": 9468
+    "count": 9484
   },
   "coverage": {
     "diff": 100
@@ -139,7 +139,7 @@
         ]
       },
       "tests": {
-        "count": 3783
+        "count": 3799
       }
     },
     "packages/client": {
@@ -523,7 +523,7 @@
       "spectral": 1
     }
   },
-  "reason": "Record the 47 server tests the document-store work added (tests.count 9421 -> 9468, packages/server 3736 -> 3783), measured on the green v0.10.0 push-tier run. The floor was left at the pre-feature value, so nothing stopped those tests being deleted.",
+  "reason": "secret-scan denominator fix: 16 new tests in local-pipeline.test.ts covering evaluateDenominator's four verdicts and the pre-commit hook end to end against a real index",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-03
+
+### Fixed
+
+- **The pre-commit secret scan no longer refuses a commit whose every file it was told to skip.** The hook fails when it scans nothing, because a finding count means nothing without the number of files it was counted over — but "nothing was scanned" has three causes and it treated them as one. A commit touching only `SECURITY.md`, only `README.md`, only `.env.example`, only the lockfile, or only tests stages nothing but paths on the scanner's own exclusion list, and every such commit was blocked with a message about a broken exclusion list. It now passes, naming the files it skipped and stating plainly that it read nothing, rather than reporting a clean scan it never performed. The check keeps its teeth everywhere it had them: an enumeration that returns nothing at all is still fatal, files that survive exclusion but cannot be read are still fatal, a secret staged beside an excluded file is still found, and over the whole tree — where "everything was excluded" means the exclusion list has grown a pattern matching everything — it is still fatal.
+
 ## [0.10.0] - 2026-09-03
 
 ### Added
@@ -490,7 +496,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/Hiprax/h-vault/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Hiprax/h-vault/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Hiprax/h-vault/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Hiprax/h-vault/compare/v0.7.0...v0.8.0
