@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-09-02",
-  "commit": "dae7b87",
+  "recordedAt": "2026-09-03",
+  "commit": "be2f4fa",
   "tests": {
-    "count": 9421
+    "count": 9468
   },
   "coverage": {
     "diff": 100
@@ -139,7 +139,7 @@
         ]
       },
       "tests": {
-        "count": 3736
+        "count": 3783
       }
     },
     "packages/client": {
@@ -452,17 +452,26 @@
       "packages.packages/shared.tests.count",
       "resource.budgetMs.backupFullVault",
       "resource.budgetMs.backupStreaming",
+      "resource.budgetMs.documentsListVolume",
+      "resource.budgetMs.documentsPartUpload",
       "resource.budgetMs.restoreVolume",
       "resource.budgetMs.rotationVolume",
       "resource.budgetRssMb.backupFullVault",
       "resource.budgetRssMb.backupStreaming",
+      "resource.budgetRssMb.documentsListVolume",
+      "resource.budgetRssMb.documentsPartUpload",
       "resource.budgetRssMb.restoreVolume",
       "resource.budgetRssMb.rotationVolume",
       "resource.deliveredFractionCeiling.backupStreaming",
+      "resource.deliveredFractionCeiling.documentsListVolume",
       "resource.noiseBandPct.backup-full-vault_durationMs",
       "resource.noiseBandPct.backup-full-vault_rssGrowthMb",
       "resource.noiseBandPct.backup-streaming_durationMs",
       "resource.noiseBandPct.backup-streaming_rssGrowthMb",
+      "resource.noiseBandPct.documents-list-volume_durationMs",
+      "resource.noiseBandPct.documents-list-volume_rssGrowthMb",
+      "resource.noiseBandPct.documents-part-upload_durationMs",
+      "resource.noiseBandPct.documents-part-upload_rssGrowthMb",
       "resource.noiseBandPct.restore-volume_durationMs",
       "resource.noiseBandPct.restore-volume_rssGrowthMb",
       "resource.noiseBandPct.rotation-volume_durationMs",
@@ -514,7 +523,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 23: the accessibility gate now scans twenty views (the four document-store views plus the isolated preview document scanned as a top-level page), and the e2e suite carries the document journeys and the viewer isolation spec. Banks every improvement the full push tier measured on a green run, including the coverage denominators and test counts that had accumulated unaccepted since 2026-08-14.",
+  "reason": "Record the 47 server tests the document-store work added (tests.count 9421 -> 9468, packages/server 3736 -> 3783), measured on the green v0.10.0 push-tier run. The floor was left at the pre-feature value, so nothing stopped those tests being deleted.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -562,14 +571,14 @@
     },
     "deliveredFractionCeiling": {
       "backupStreaming": 0.6,
-      "documentsListVolume": 2.0
+      "documentsListVolume": 2
     },
     "noiseBandPct": {
       "backup-full-vault_durationMs": 47.1,
       "backup-full-vault_rssGrowthMb": 11.2,
       "backup-streaming_durationMs": 49.7,
       "backup-streaming_rssGrowthMb": 32.4,
-      "documents-list-volume_durationMs": 5.0,
+      "documents-list-volume_durationMs": 5,
       "documents-list-volume_rssGrowthMb": 24.9,
       "documents-part-upload_durationMs": 2.4,
       "documents-part-upload_rssGrowthMb": 4.8,
