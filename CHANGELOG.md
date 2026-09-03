@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-03
+
 ### Added
 
 - **Configuration for an optional encrypted document store**, off unless it is configured. Four new connection variables (`S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`) are validated all-or-none, exactly like SMTP: set them all and the feature is available, leave them all empty and nothing changes, and a partial set is a startup error in production rather than a half-enabled feature. Alongside them: `S3_REGION` (default `us-east-1`), `S3_FORCE_PATH_STYLE` (default on, because virtual-host addressing needs DNS an in-stack service does not have), `MAX_DOCUMENT_SIZE_MB` (1-1024, default 100), `DOCUMENT_STORAGE_QUOTA_MB_PER_USER` (1-1048576, default 2048, and it must cover the size cap or the app refuses to boot), `DOCUMENT_UPLOAD_TTL_HOURS` (1-168, default 24) and `DOCUMENT_ALLOWED_EXTENSIONS`, an advisory allowlist enforced in the browser because the server receives ciphertext and cannot see a filename. In production a plain `http://` endpoint is accepted only for a loopback address, an RFC 1918 private address or a single-label host such as an in-stack service name, so bucket credentials cannot cross a network in the clear by accident. All of them are documented in `.env.example` and the README, together with `S3_RPC_SECRET`, which only a self-hosted storage container reads.
@@ -488,7 +490,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Hiprax/h-vault/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Hiprax/h-vault/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Hiprax/h-vault/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Hiprax/h-vault/compare/v0.6.0...v0.7.0
