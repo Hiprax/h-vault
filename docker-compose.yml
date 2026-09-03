@@ -2,7 +2,8 @@
 # H-Vault — production stack (self-contained)
 # =============================================================================
 # Everything H-Vault needs to run lives in here: the API, the SPA, the database,
-# and the Nginx that fronts them. The stack publishes exactly ONE host port —
+# the object storage the document store writes ciphertext to, and the Nginx that
+# fronts them. The stack publishes exactly ONE host port —
 # 127.0.0.1:${HVAULT_HTTP_PORT:-8080} — and the host's own system Nginx terminates
 # TLS and reverse-proxies to it (see docker/nginx/system.docker.example.conf).
 #
@@ -12,8 +13,10 @@
 #                       └── /api/* and every HTML document  -> hvault-app:5000
 #                                                       hvault-app        [edge+data]
 #                                                       hvault-db:27017   [data]
+#                                                       hvault-s3:3900    [data]
 #
 #   hvault-bootstrap  one-shot: creates the MongoDB indexes, then exits [data]
+#   hvault-db-init    one-shot: creates the least-privilege app user    [data]
 #
 # Configuration comes from ONE file: ./.env at the repo root. It is handed to the
 # app container wholesale via `env_file`, so there is no per-package .env to keep
@@ -119,6 +122,27 @@ x-hvault-app-environment: &hvault-app-environment
   MONGO_ROOT_PASSWORD: ''
   MONGO_APP_USERNAME: ''
   MONGO_APP_PASSWORD: ''
+  # The in-stack object storage endpoint, pinned here for exactly the same reason
+  # MONGODB_URI is: it is CONTAINER TOPOLOGY, not operator configuration, and .env
+  # cannot know it. `hvault-s3` resolves on the `data` network to the storage
+  # engine's S3 API listener (docker/garage/garage.toml pins `api_bind_addr` to
+  # 3900), so this stack never needs an operator to terminate TLS between two
+  # containers on an internal network — plain http to a single-label host is one
+  # of the three shapes the app's own production endpoint check accepts.
+  #
+  # This is also what keeps the storage configuration COMPLETE. The app validates
+  # S3_ENDPOINT / S3_BUCKET / S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY all-or-none
+  # and THROWS in production on a partial set, so a stack that took the three
+  # credentials from .env and left the endpoint to the operator would refuse to
+  # boot for anyone who filled in only what the `${...:?}` guards below demand.
+  S3_ENDPOINT: http://hvault-s3:3900
+  # Scrubbed for the same reason as the four MongoDB credentials above: the single
+  # root .env reaches this container wholesale, and S3_RPC_SECRET is the storage
+  # engine's own CLUSTER secret, which only hvault-s3 has any business holding.
+  # The app never reads it (it is deliberately absent from the server's Zod
+  # schema), so blanking it is invisible to the application and removes one more
+  # credential from the blast radius of an RCE here.
+  S3_RPC_SECRET: ''
 
 # Rotate container logs so a long-running deployment cannot fill the host disk.
 x-hvault-logging: &hvault-logging
@@ -314,6 +338,22 @@ services:
       # Never start the API against a database whose indexes have not been built.
       hvault-bootstrap:
         condition: service_completed_successfully
+      # `service_started`, NOT `service_healthy`, and the difference is a
+      # deliberate blast-radius decision rather than an oversight.
+      #
+      # Documents are an OPTIONAL feature. Gating the password manager's startup
+      # on storage health would let a storage problem take the vault down: an
+      # engine that is slow to come up, or wedged, would hold `up --wait` and then
+      # fail it, on a stack whose logins, items and folders are perfectly fine.
+      # Ordering is what is actually wanted here, and ordering is what this gives.
+      # The service still HAS a healthcheck — the deploy drill asserts it reaches
+      # `healthy` — and a storage outage degrades documents only, through the boot
+      # preflight and per-request errors.
+      #
+      # hvault-bootstrap deliberately has no such dependency at all: it creates
+      # MongoDB indexes and never touches storage.
+      hvault-s3:
+        condition: service_started
     healthcheck:
       # Silent probe: any failure (network, non-2xx, unexpected error) exits 1
       # without printing why. That keeps internal paths, URLs and stack traces out
@@ -594,12 +634,108 @@ services:
       # file before the set can even be initiated.
       start_period: 40s
 
+  # --- Object storage for the document store (S3-compatible) -----------------
+  # Garage: a single static binary, one node, ~6 MiB idle. It exists so that
+  # `docker compose up` brings the document store up ALREADY PROVISIONED — no
+  # bucket to create by hand, no access key to mint, no storage step in the setup
+  # instructions. `--single-node` writes the cluster layout on first boot,
+  # `--default-bucket` creates the bucket from GARAGE_DEFAULT_BUCKET and implies
+  # `--default-access-key`, which mints the key from the other two variables. A
+  # second boot with the same credentials is a clean no-op.
+  #
+  # Everything it holds is CIPHERTEXT. Documents are sealed in the browser under a
+  # per-document key the server never sees, so this service holds opaque segments
+  # and their sizes — never a filename, a MIME type, a tag, a note or any content.
+  #
+  # It is the one image in this stack that is NOT built here, so it is pinned BY
+  # DIGEST as well as by tag: a tag can be moved, a digest cannot. It is also the
+  # one image Trivy does not scan, and that is recorded in scripts/ci/docker-gate.mjs
+  # next to the IMAGES list rather than here, where nobody comparing gates would
+  # look.
+  #
+  # THE OPERATOR TRAP, measured against this exact image: changing
+  # S3_SECRET_ACCESS_KEY on its own makes the process exit 1 with
+  #   "Access key <id> is associated with a secret key different than the one
+  #    given in GARAGE_DEFAULT_SECRET_KEY"
+  # and `restart: unless-stopped` turns that into a crash loop. Rotate the ID AND
+  # the secret TOGETHER; the new key reads and writes the pre-existing bucket, and
+  # the superseded one is removed with
+  # `docker compose exec hvault-s3 /garage key delete <old-id>`. README.md carries
+  # this in the secret-rotation table, which is where an operator meets it.
+  #
+  # AGPL-3.0, running as a separate process in its own container with no linking
+  # and no code from it in this repository — the same posture this stack already
+  # holds for mongo:8.0 under SSPL-1.0.
+  hvault-s3:
+    image: dxflrs/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
+    container_name: ${HVAULT_STACK_NAME:-hvault}-s3
+    restart: unless-stopped
+    # The image's own CMD is `/garage server`; the entrypoint is empty. Both are
+    # spelled out so the flags below read as a complete command rather than as an
+    # append to something invisible.
+    entrypoint: /garage
+    command: server --single-node --default-bucket
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      # No uid/gid pin here, unlike the app (1000) and Nginx (101): this image
+      # declares no USER, so the process is root inside the container and a
+      # root-owned tmpfs is the one it can write. Pinning it to 1000 would
+      # reproduce the silent-restart failure those two pins exist to prevent, from
+      # the opposite direction.
+      - /tmp:size=64m,mode=1777
+    mem_limit: 512m
+    cpus: '1.0'
+    pids_limit: 100
+    logging: *hvault-logging
+    environment:
+      # The engine's OWN variable names, mapped onto the SAME .env keys the app
+      # reads. One value drives both sides, so they cannot drift. Two independent
+      # key names for one credential is how an operator ends up with an app that
+      # 403s against its own bucket and no diagnostic to explain it — which is why
+      # there are no GARAGE_* keys in .env.example at all.
+      #
+      # `:?` guards, exactly like the database credentials above: Compose refuses
+      # to resolve the stack when one is missing OR empty, so the failure happens
+      # before a container exists and it names the variable. .env.example ships all
+      # four empty on purpose — a placeholder is a working credential.
+      GARAGE_DEFAULT_ACCESS_KEY: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID is required (min 8 characters)}
+      GARAGE_DEFAULT_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required (min 16 characters)}
+      GARAGE_DEFAULT_BUCKET: ${S3_BUCKET:?S3_BUCKET is required}
+      # The cluster RPC secret. Only this container reads it; the app's
+      # `environment:` blanks it, and the server's config schema does not declare
+      # it at all.
+      GARAGE_RPC_SECRET: ${S3_RPC_SECRET:?S3_RPC_SECRET is required (openssl rand -hex 32)}
+    volumes:
+      # Read-only, and it holds no secret: the credentials and the bucket name
+      # arrive through the environment above.
+      - ./docker/garage/garage.toml:/etc/garage.toml:ro
+      - hvault-s3-meta:/var/lib/garage/meta
+      - hvault-s3-data:/var/lib/garage/data
+    networks:
+      # `data` only, and NO `ports:` at all — the stack's single published port
+      # stays its only surface. The app is the only thing that talks to it.
+      - data
+    healthcheck:
+      # EXEC form, not CMD-SHELL: this image has no shell to run one with. The
+      # binary exits 0 once the node is up and answering its own RPC, which is
+      # what the app's first HeadBucket needs.
+      test: ['CMD', '/garage', 'status']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
 # --- networks ----------------------------------------------------------------
 # Two networks separate the public-facing edge from the data tier:
 #   edge — Nginx <-> app, plus the app's outbound route (SMTP, the HIBP breach API).
 #          Nginx never joins `data`, so it cannot reach MongoDB.
-#   data — app/bootstrap <-> MongoDB. `internal: true` denies this tier any route to
-#          the internet, so the database can neither be reached from outside nor
+#   data — app/bootstrap <-> MongoDB, and app <-> the object storage engine.
+#          `internal: true` denies this tier any route to the internet, so neither
+#          the database nor the storage engine can be reached from outside or
 #          reach out itself.
 #
 # The subnets are PINNED rather than auto-allocated. Docker hands an unpinned
@@ -642,7 +778,22 @@ networks:
 # --- volumes -----------------------------------------------------------------
 volumes:
   # The vault. Encrypted at rest by the client (the server never sees plaintext),
-  # but still the only copy — back it up out of band.
+  # but still the only copy — back it up out of band, and back it up TOGETHER with
+  # hvault-s3-data below and the root .env: a document's wrapped key lives here
+  # while its bytes live there, and neither half is usable alone.
   hvault-db-data:
   # The generated replica-set key file (see docker/mongo/keyfile-entrypoint.sh).
   hvault-db-config:
+  # The storage engine's own metadata: the cluster layout, the access key, the
+  # bucket, and the block list of every stored object.
+  hvault-s3-meta:
+  # EVERY UPLOADED DOCUMENT'S CIPHERTEXT, and the ONLY copy of it. Documents are
+  # deliberately NOT part of H-Vault's own backup payload (a backup carries only a
+  # `documentSummary` breadcrumb saying how many it does not contain), so an
+  # operator who takes those backups faithfully still has nothing after losing
+  # this volume. It must be captured together with hvault-db-data and the root
+  # .env — the wrapped keys live in Mongo, the ciphertext lives here, and neither
+  # half is usable alone. See "Back up the database AND the document storage" in
+  # README.md for the procedure and why a file-level copy of a RUNNING engine is
+  # not a backup.
+  hvault-s3-data:

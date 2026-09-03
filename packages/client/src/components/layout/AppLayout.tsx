@@ -4,6 +4,7 @@ import {
   Shield,
   Key,
   FileLock2,
+  Files,
   Settings,
   Lock,
   LogOut,
@@ -23,6 +24,7 @@ import { useVaultStore } from '../../stores/vaultStore';
 import { useToast } from '../ui/Toast';
 import { cn } from '../../lib/utils';
 import { useAutoLock } from '../../hooks/useAutoLock';
+import { useDocumentsConfig } from '../../hooks/useDocumentsConfig';
 import { useClipboardCountdown } from '../../hooks/useClipboardCountdown';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { OnboardingGuide } from './OnboardingGuide';
@@ -64,13 +66,49 @@ export function isNavItemActive(item: Pick<NavItem, 'to' | 'match'>, pathname: s
   return pathname === item.to || pathname.startsWith(`${item.to}/`);
 }
 
-const navItems: NavItem[] = [
-  { label: 'Vault', to: '/vault', icon: Shield, match: isVaultSectionActive },
+const VAULT_NAV_ITEM: NavItem = {
+  label: 'Vault',
+  to: '/vault',
+  icon: Shield,
+  match: isVaultSectionActive,
+};
+
+const REMAINING_NAV_ITEMS: NavItem[] = [
   { label: 'Password Generator', to: '/generator', icon: Key },
   { label: 'File Encryption', to: '/tools/file-encryption', icon: FileLock2 },
   { label: 'Vault Health', to: '/vault/health', icon: Activity },
   { label: 'Settings', to: '/settings', icon: Settings },
 ];
+
+/**
+ * The document store's entry, rendered ONLY where the server says the feature is
+ * available.
+ *
+ * It carries no `match` of its own: the default exact-or-descendant rule already
+ * lights it on `/documents` and on `/documents/:id` and on nothing else, which is
+ * exactly right here. `/vault`'s override exists because that section has a
+ * sibling route with its own nav item; this one has no sibling to disambiguate,
+ * and a `match` that restated the default would be a second copy of it.
+ *
+ * It sits after "Vault" because that is where a reader looks for the OTHER thing
+ * the vault holds, rather than at the end beside the tools.
+ */
+const DOCUMENTS_NAV_ITEM: NavItem = { label: 'Documents', to: '/documents', icon: Files };
+
+/**
+ * The navigation, with the document store's entry spliced in when this server
+ * offers it.
+ *
+ * Two explicit lists rather than one list filtered by a predicate, because the
+ * predicate would have to be evaluated for every entry in order to hide exactly
+ * one of them, and a `hidden` flag on `NavItem` would be a field five entries
+ * carry for the sake of the sixth. Exported so the entry's presence and its
+ * position can be pinned without rendering the whole layout.
+ */
+export function navItemsFor(documentsEnabled: boolean): NavItem[] {
+  if (!documentsEnabled) return [VAULT_NAV_ITEM, ...REMAINING_NAV_ITEMS];
+  return [VAULT_NAV_ITEM, DOCUMENTS_NAV_ITEM, ...REMAINING_NAV_ITEMS];
+}
 
 export function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -78,6 +116,10 @@ export function AppLayout() {
   const [storageDegraded, setStorageDegraded] = useState(isStorageDegraded());
   const [decryptionFailureCount, setDecryptionFailureCount] = useState(0);
   const { user, logout, lock, isLocked } = useAuthStore();
+  // `null` until the server has answered, and the entry is rendered only for an
+  // explicit `true`: an entry that appeared and then vanished would be worse than
+  // one that appeared a beat late.
+  const documentsConfig = useDocumentsConfig();
   const { sidebarCollapsed, toggleSidebarCollapsed } = useUIStore();
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
@@ -249,7 +291,7 @@ export function AppLayout() {
 
         {/* Navigation */}
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
-          {navItems.map((item) => {
+          {navItemsFor(documentsConfig?.enabled === true).map((item) => {
             const active = isNavItemActive(item, location.pathname);
             return (
               <Link

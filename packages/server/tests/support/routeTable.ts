@@ -59,7 +59,14 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
  * seeding scenario, and a row naming a resource with no scenario fails there.
  */
 export type OwnedResource =
-  'vaultItem' | 'trashedVaultItem' | 'folder' | 'session' | 'trustedDevice';
+  | 'vaultItem'
+  | 'trashedVaultItem'
+  | 'folder'
+  | 'session'
+  | 'trustedDevice'
+  | 'document'
+  | 'trashedDocument'
+  | 'documentUpload';
 
 /**
  * When a route is mounted at all.
@@ -98,6 +105,7 @@ export const ROUTER_MOUNTS = [
   '/api/v1/user',
   '/api/v1/tools',
   '/api/v1/backup',
+  '/api/v1/documents',
   // Last: `healthRoutes` and `configRoutes` mount here, and a longer prefix
   // must be preferred when both would match. `collectAppRoutes` requires the
   // matched span to equal the candidate, so order is not load-bearing — but
@@ -149,6 +157,22 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     owned: null,
     when: 'metricsToken',
     note: 'Registered only when METRICS_TOKEN is set; the handler then requires a matching x-metrics-token. Unset, the endpoint must not exist at all.',
+  },
+  {
+    method: 'get',
+    path: '/sandbox.html',
+    auth: 'none',
+    csrf: 'exempt',
+    limiters: [],
+    owned: null,
+    when: 'production',
+    note:
+      'The isolated document every stored file is rendered inside. Mounted only when ' +
+      'NODE_ENV === production, BEFORE express.static and the SPA fallback, because its ' +
+      'whole isolation is the per-response Content-Security-Policy the route attaches ' +
+      '(config/sandboxCsp.ts) — a copy answered off disk would carry helmet’s application ' +
+      'policy instead. It is unauthenticated by design: it holds no data, receives every ' +
+      'byte it renders over a MessagePort, and its own policy denies it any network access.',
   },
   {
     method: 'get',
@@ -683,6 +707,191 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     owned: null,
     when: 'always',
     note: 'The 30 MB body parser ahead of the limiter is not a limiter.',
+  },
+
+  // ── /api/v1/documents (router-level `authenticate`, then `requireStorage`) ──
+  //
+  // `requireStorage` is router-level and answers 503 where the operator has
+  // configured no object storage, so it is not a limiter and does not appear in
+  // the column below. It sits AHEAD of every route-level limiter here, which is
+  // why an unconfigured deployment spends no rate-limit budget.
+  {
+    method: 'get',
+    // Trailing slash, as the two `/api/v1/folders/` rows carry: `collectAppRoutes`
+    // composes an observed path as mount + the router's own declaration, and a
+    // router root is declared as `'/'`.
+    path: '/api/v1/documents/',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/trash',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/usage',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'delete',
+    path: '/api/v1/documents/trash/empty',
+    auth: 'required',
+    csrf: 'required',
+    // The ONLY document route carrying `heavyOpLimiter`, and the only one that
+    // should: it is one genuinely unbounded operation, up to
+    // MAX_DOCUMENTS_PER_USER rows each with an object delete. Every per-row
+    // document route deliberately carries `generalAuthLimiter` instead, because
+    // this IP-keyed budget of 10 per 15 minutes is shared with export, backup
+    // download and every bulk vault operation.
+    limiters: ['heavyOpLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/uploads',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'post',
+    path: '/api/v1/documents/uploads',
+    auth: 'required',
+    csrf: 'required',
+    // `documentUploadLimiter`, deliberately NOT `heavyOpLimiter`: init, complete
+    // and abort are three requests per transfer, and the IP-keyed heavy-op budget
+    // of 10 per 15 minutes is shared with export, backup and every bulk vault
+    // operation.
+    limiters: ['documentUploadLimiter'],
+    owned: null,
+    when: 'always',
+    note: 'Takes an owned folderId in the BODY, which this table does not model; covered by document-uploads.test.ts.',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/uploads/:id',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'documentUpload' },
+    when: 'always',
+  },
+  {
+    method: 'delete',
+    path: '/api/v1/documents/uploads/:id',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['documentUploadLimiter'],
+    owned: { param: 'id', resource: 'documentUpload' },
+    when: 'always',
+  },
+  {
+    method: 'put',
+    path: '/api/v1/documents/uploads/:id/parts/:partNumber',
+    auth: 'required',
+    csrf: 'required',
+    // The ONLY route in this application whose body is not JSON. It carries a
+    // route-level `express.raw` for `application/octet-stream`, and two
+    // middlewares ahead of it that are not limiters and so do not appear in the
+    // column: a 411 guard, and the process-wide part semaphore — which has to be
+    // AHEAD of the parser, because a slot taken after the body is buffered bounds
+    // no memory at all.
+    limiters: ['documentPartLimiter'],
+    owned: { param: 'id', resource: 'documentUpload' },
+    when: 'always',
+    note: 'Takes a second path parameter, :partNumber, which authz-matrix.test.ts supplies through its scenario.',
+  },
+  {
+    method: 'post',
+    path: '/api/v1/documents/uploads/:id/complete',
+    auth: 'required',
+    csrf: 'required',
+    // The third request of one transfer, so it shares that transfer's budget with
+    // init and abort rather than carrying one of its own.
+    limiters: ['documentUploadLimiter'],
+    owned: { param: 'id', resource: 'documentUpload' },
+    when: 'always',
+    note: 'The only route that creates a documents row; a repeat completion is reported as the row the first one committed.',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/:id',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'document' },
+    when: 'always',
+  },
+  {
+    method: 'put',
+    path: '/api/v1/documents/:id',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'document' },
+    when: 'always',
+    note: 'Metadata and attributes only. The allowlist cannot reach a framing field, the wrapped key or the object key, and it is deliberately not rotation-fenced.',
+  },
+  {
+    method: 'delete',
+    path: '/api/v1/documents/:id',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'document' },
+    when: 'always',
+    note: 'Soft delete. The object stays in the bucket and the document still counts against the quota.',
+  },
+  {
+    method: 'post',
+    path: '/api/v1/documents/:id/restore',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'trashedDocument' },
+    when: 'always',
+  },
+  {
+    method: 'delete',
+    path: '/api/v1/documents/:id/permanent',
+    auth: 'required',
+    csrf: 'required',
+    // `generalAuthLimiter`, NOT `heavyOpLimiter`: this is a per-row route, and
+    // that IP-keyed budget of 10 per 15 minutes would 429 a user who purged
+    // eleven documents and then lock them out of emptying their vault trash.
+    limiters: ['generalAuthLimiter'],
+    owned: { param: 'id', resource: 'trashedDocument' },
+    when: 'always',
+    note: 'Marks purgePending, deletes the object, then deletes the row, so a crash between any two leaves a marker the collector finishes.',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/documents/:id/segments/:index',
+    auth: 'required',
+    csrf: 'exempt',
+    // `documentReadLimiter`, not `generalAuthLimiter`: one download is one
+    // request per segment, so this is the only read whose volume scales with the
+    // operator's own size cap, and its ceiling is derived from it.
+    limiters: ['documentReadLimiter'],
+    owned: { param: 'id', resource: 'document' },
+    when: 'always',
+    note: 'Takes a second path parameter, :index, which authz-matrix.test.ts supplies through its scenario. The only route in this application that answers with raw bytes rather than a JSON envelope.',
   },
 
   // ── /api/v1 (health, config) ──────────────────────────────────────────

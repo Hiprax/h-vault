@@ -1,10 +1,18 @@
 // @vitest-environment node
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_DEV_PORT,
+  NAVIGATE_FALLBACK_DENYLIST,
+  SANDBOX_ASSETS_DIR,
+  SANDBOX_HTML,
+  WORKBOX_GLOB_IGNORES,
+  WORKBOX_GLOB_PATTERNS,
   manualChunks,
   resolveDevHost,
   resolveDevPort,
-  DEFAULT_DEV_PORT,
+  sandboxManualChunks,
 } from '../vite.config.helpers';
 
 // T31 — the Vite dev-server host must be overridable via VITE_HOST so the dev
@@ -126,8 +134,9 @@ describe('manualChunks (T30 — vendor splitting)', () => {
     // (`react-markdown` makes the same point and is already asserted above.)
     expect(manualChunks('/repo/node_modules/react-window/dist/index.js')).toBeUndefined();
     // The router's own transitive dependency is not hoisted into an eager chunk.
-    // This is not idle: CLAUDE.md records "a blanket node_modules catch-all must
-    // never be added", and this is the assertion that would catch one.
+    // This is not idle: the project's chunking rules state that a blanket
+    // `node_modules` catch-all must never be added, and this is the assertion
+    // that would catch one.
     expect(manualChunks('/repo/node_modules/cookie-es/dist/index.mjs')).toBeUndefined();
   });
 
@@ -155,13 +164,131 @@ describe('manualChunks (T30 — vendor splitting)', () => {
   });
 });
 
+// The SANDBOX build's own strategy. Prettier is the only thing it groups, and
+// the four groups are what make formatting a README cost one plugin rather than
+// all of them: the per-type dynamic imports in
+// `src/sandbox/transform/formatEngine.ts` create the chunk boundaries, and these
+// names are what `scripts/ci/lib/bundle-budgets.mjs` puts a ceiling on.
+describe('sandboxManualChunks (the document sandbox build)', () => {
+  it('splits Prettier into one chunk per syntax, plus a shared core', () => {
+    expect(sandboxManualChunks('/repo/node_modules/prettier/standalone.mjs')).toBe(
+      'vendor-prettier-core',
+    );
+    // `estree` is the PRINTER for what `babel` parses and is equally needed by a
+    // Markdown or YAML run that never loads `babel`, so it belongs with the core.
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/estree.mjs')).toBe(
+      'vendor-prettier-core',
+    );
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/babel.mjs')).toBe(
+      'vendor-prettier-json',
+    );
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/markdown.mjs')).toBe(
+      'vendor-prettier-markdown',
+    );
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/yaml.mjs')).toBe(
+      'vendor-prettier-yaml',
+    );
+  });
+
+  it('matches Windows (backslash) module paths too', () => {
+    expect(sandboxManualChunks('C:\\repo\\node_modules\\prettier\\plugins\\yaml.mjs')).toBe(
+      'vendor-prettier-yaml',
+    );
+    expect(sandboxManualChunks('C:\\repo\\node_modules\\prettier\\standalone.mjs')).toBe(
+      'vendor-prettier-core',
+    );
+  });
+
+  it('anchors each plugin on its own FILE, not on a name it is a prefix of', () => {
+    // Prettier ships plugins as `plugins/<name>.mjs`, so the trailing dot is
+    // what stops `markdown.` also matching a `markdown-extra.mjs` — the same
+    // widening the application's `\/` anchors guard against.
+    expect(sandboxManualChunks('/repo/node_modules/prettier/plugins/markdown-extra.mjs')).toBe(
+      'vendor-prettier-core',
+    );
+  });
+
+  it('groups nothing else at all', () => {
+    // The renderers, the markdown substrate, `lowlight` and `jsonrepair` all keep
+    // Vite's per-dynamic-import chunking, which is what put each renderer in its
+    // own chunk. A blanket `node_modules` catch-all here would collapse the lot
+    // into a single eager download inside a frame that opens for a `.png`.
+    expect(sandboxManualChunks('/repo/node_modules/jsonrepair/lib/esm/index.js')).toBeUndefined();
+    expect(sandboxManualChunks('/repo/node_modules/lowlight/index.js')).toBeUndefined();
+    expect(sandboxManualChunks('/repo/node_modules/rehype-sanitize/index.js')).toBeUndefined();
+    expect(sandboxManualChunks('/repo/packages/client/src/sandbox/sandbox.ts')).toBeUndefined();
+    expect(
+      sandboxManualChunks('/repo/packages/client/src/sandbox/transform/formatEngine.ts'),
+    ).toBeUndefined();
+  });
+
+  it("is a SECOND function, so neither build carries the other's naming rules", () => {
+    // The application build must never name a Prettier chunk: if it did, the day
+    // an application module reached the format engine, both builds would emit
+    // chunks under the same budgeted base name and `bundle-gate.mjs` would have
+    // one ceiling covering two unrelated chunks.
+    expect(manualChunks('/repo/node_modules/prettier/standalone.mjs')).toBeUndefined();
+    expect(manualChunks('/repo/node_modules/prettier/plugins/babel.mjs')).toBeUndefined();
+    // And the sandbox's does not carry the application's.
+    expect(sandboxManualChunks('/repo/node_modules/react/index.js')).toBeUndefined();
+    expect(sandboxManualChunks('/repo/node_modules/zod/index.js')).toBeUndefined();
+  });
+
+  it('emits only names the bundle gate has a ceiling for, and every one of them', async () => {
+    const { CHUNK_BUDGETS_KB } = await import('../../../scripts/ci/lib/bundle-budgets.mjs');
+
+    // Both directions, over the FUNCTION'S OWN RETURN VALUES rather than over a
+    // list restated here, which is what makes this able to fail on the two
+    // mistakes that matter. A fifth branch returning an unbudgeted name would be
+    // measured against `DEFAULT_CHUNK_BUDGET_KB` (128 KiB) and break the build
+    // for a reason that reads as "a chunk is too big"; a budget key no branch
+    // ever returns is a ceiling that can never be exceeded and therefore a gate
+    // that can never fire.
+    const modules = [
+      'standalone.mjs',
+      'index.mjs',
+      'doc.mjs',
+      'plugins/babel.mjs',
+      'plugins/estree.mjs',
+      'plugins/markdown.mjs',
+      'plugins/yaml.mjs',
+      'plugins/acorn.mjs',
+      'plugins/glimmer.mjs',
+      'plugins/postcss.mjs',
+      'plugins/typescript.mjs',
+    ];
+    const emitted = new Set(
+      modules
+        .map((file) => sandboxManualChunks(`/repo/node_modules/prettier/${file}`))
+        .filter((name): name is string => name !== undefined),
+    );
+
+    expect([...emitted].sort()).toEqual([
+      'vendor-prettier-core',
+      'vendor-prettier-json',
+      'vendor-prettier-markdown',
+      'vendor-prettier-yaml',
+    ]);
+    const budgets: Record<string, number | undefined> = CHUNK_BUDGETS_KB;
+    for (const name of emitted) {
+      expect(budgets[name], `${name} has no budget`).toBeGreaterThan(0);
+    }
+    // And no budgeted `vendor-prettier-*` key is orphaned: every one of them is
+    // a name this function actually produces.
+    const budgeted = Object.keys(CHUNK_BUDGETS_KB).filter((key) =>
+      key.startsWith('vendor-prettier-'),
+    );
+    expect(budgeted.sort()).toEqual([...emitted].sort());
+  });
+});
+
 // Confirm the real Vite config wires the tested helpers (faithfulness) and the
 // chunk-size advisory limit that accommodates the lazy zxcvbn dictionary chunk.
 describe('vite.config wiring', () => {
   it('wires the dev host, manualChunks, and chunk-size limit', async () => {
     const mod = await import('../vite.config');
     const config = mod.default as {
-      server?: { host?: unknown; strictPort?: unknown; port?: unknown };
+      server?: { host?: unknown; strictPort?: unknown; port?: unknown; cors?: unknown };
       build?: {
         chunkSizeWarningLimit?: unknown;
         rollupOptions?: { output?: { manualChunks?: unknown } };
@@ -178,5 +305,289 @@ describe('vite.config wiring', () => {
     expect(config.server?.port).toBe(resolveDevPort());
     expect(config.build?.rollupOptions?.output?.manualChunks).toBe(manualChunks);
     expect(config.build?.chunkSizeWarningLimit).toBe(850);
+  });
+});
+
+// The document sandbox is a SECOND Vite build, and every setting below is one
+// that fails SILENTLY when it is missing: a blank frame, an unstyled viewer, or
+// an application deleted by the build that was meant to sit beside it. None of
+// them is observable in jsdom (which never loads an iframe's `src`) and none is
+// observable in the app's own build output, so they are pinned here, against the
+// real configs, before anything downstream depends on them.
+describe('the document sandbox build', () => {
+  it('routes chunks AND assets into sandbox-assets/ through the one setting that does both', async () => {
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as {
+      build?: {
+        assetsDir?: unknown;
+        emptyOutDir?: unknown;
+        copyPublicDir?: unknown;
+        outDir?: unknown;
+        rollupOptions?: { input?: unknown; output?: unknown };
+      };
+      plugins?: unknown;
+    };
+
+    // ONE setting, from which Vite derives `entryFileNames`, `chunkFileNames`
+    // AND `assetFileNames`. Setting only `assetFileNames` is the plausible
+    // mistake — it routes the stylesheet and leaves every JS chunk in
+    // `dist/assets/`, which is served with no `Access-Control-Allow-Origin`, so
+    // the opaque origin's module fetch fails and the frame is silently blank
+    // while every header assertion elsewhere still passes.
+    // Compared against the SHARED constant rather than the literal, because the
+    // service worker's ignore list is built from the same one. A literal here
+    // would let the build move its output while the exclusion kept naming the
+    // old directory, and a glob that matches nothing is a check that cannot fail.
+    expect(config.build?.assetsDir).toBe(SANDBOX_ASSETS_DIR);
+    // MANDATORY. `resolveEmptyOutDir` returns true whenever `outDir` is inside
+    // the project root, so the default would make this build delete the
+    // application it was just told to sit beside — surfacing as a missing app,
+    // not as anything about the sandbox.
+    expect(config.build?.emptyOutDir).toBe(false);
+    // The app build already copied `public/`; Vite re-copies it on every build.
+    expect(config.build?.copyPublicDir).toBe(false);
+    expect(config.build?.outDir).toBe('dist');
+    expect(String(config.build?.rollupOptions?.input).endsWith(SANDBOX_HTML)).toBe(true);
+    // The assertion that actually closes the failure the comment above
+    // describes. `assetsDir` only decides the filenames Vite DERIVES; an
+    // explicit `rollupOptions.output.chunkFileNames` (added, plausibly, to
+    // "match the app") overrides that derivation and puts every JS chunk back in
+    // `dist/assets/`, where it is served with no ACAO — a frame that is blank in
+    // production only, with every header assertion elsewhere still green.
+    //
+    // This was `output === undefined` until the build gained its own
+    // `manualChunks`, which lives at exactly that path. NARROWED rather than
+    // dropped: the concern was never "no output options", it was "no FILENAME
+    // option", so the key set is pinned exhaustively and the three names that
+    // would defeat `assetsDir` are named individually. A new key here is a
+    // deliberate edit, not something that arrives with a config tweak.
+    const output = config.build?.rollupOptions?.output as Record<string, unknown> | undefined;
+    expect(output).toBeDefined();
+    expect(Object.keys(output ?? {})).toEqual(['manualChunks']);
+    expect(output?.chunkFileNames).toBeUndefined();
+    expect(output?.entryFileNames).toBeUndefined();
+    expect(output?.assetFileNames).toBeUndefined();
+    // Identity, so the tested function is provably the one the build was handed.
+    expect(output?.manualChunks).toBe(sandboxManualChunks);
+  });
+
+  it('sets its size advisory to the ceiling the gate actually enforces', async () => {
+    // The advisory and the gate must name ONE number. `bundle.budgetKb.lowlight`
+    // is ratcheted `lower`, so tightening it without this would leave the
+    // sandbox build printing no warning until well past the point the gate
+    // fails — an advisory that has silently stopped advising.
+    //
+    // Read from the gate's own module rather than restated, which is the same
+    // thing `gate-surface.test.ts` does with `chunkBaseName`.
+    // Imported without a cast on purpose: `packages/client/tsconfig.test.json`
+    // sets `allowJs`, so the key is resolved against the real table and renaming
+    // `lowlight` there fails THIS file at type-check. A `Record<string, number>`
+    // cast would instead hand back `undefined` and compare it to the advisory.
+    const { CHUNK_BUDGETS_KB } = await import('../../../scripts/ci/lib/bundle-budgets.mjs');
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as { build?: { chunkSizeWarningLimit?: unknown } };
+    expect(config.build?.chunkSizeWarningLimit).toBe(CHUNK_BUDGETS_KB.lowlight);
+  });
+
+  it('emits no modulepreload polyfill, so the isolated document ships no dormant fetch()', async () => {
+    // Vite injects that polyfill into every entry by default, and it carries a
+    // `fetch()` and a document-wide `MutationObserver`. It is inert here — no
+    // preload links, and it early-returns on any modern engine — and it is inert
+    // twice over, because the document is served under `connect-src 'none'`,
+    // which blocks every way of reading a response. Both of those are properties
+    // of today's configuration rather than of the code, so the `fetch(` would sit
+    // in the chunk waiting on a policy change, and a reader auditing the built
+    // output would find it and be right to ask. `scripts/ci/bundle-gate.mjs`
+    // asserts the built output; this asserts the setting that produces it.
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as { build?: { modulePreload?: unknown } };
+    expect(config.build?.modulePreload).toEqual({ polyfill: false });
+  });
+
+  it('carries no plugin from the application build', async () => {
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as { plugins?: unknown[] };
+    // A second `VitePWA` would emit its own `sw.js` OVER the application's,
+    // replacing the app's service worker with one that precaches a preview
+    // document. React and Tailwind are absent for their own reasons (a smaller
+    // parser surface, and the plain-CSS constraint the sandbox stylesheet
+    // inherits). Asserted as "no plugins at all" rather than "not VitePWA",
+    // because the next plugin added here would be added without thought.
+    expect(config.plugins ?? []).toEqual([]);
+  });
+
+  it('builds the application FIRST and the sandbox SECOND', async () => {
+    // Order and `emptyOutDir` are one invariant, not two settings. Vite empties
+    // an `outDir` inside the project root, so with the default the sandbox
+    // build deletes the app; reverse the order and the app build would delete
+    // the sandbox instead. Read out of the runner rather than asserted about
+    // the config, because the runner is what decides it.
+    const runner = await readFile(
+      fileURLToPath(new URL('../scripts/build.mjs', import.meta.url)),
+      'utf8',
+    );
+    const appBuild = runner.indexOf("viteBuild('vite build')");
+    const sandboxBuild = runner.indexOf("viteBuild('vite build (sandbox)'");
+    expect(appBuild).toBeGreaterThan(-1);
+    expect(sandboxBuild).toBeGreaterThan(appBuild);
+    expect(runner).toContain('vite.config.sandbox.ts');
+    // Through the SAME retry wrapper, never a bare `spawnSync`: that wrapper
+    // exists for Rolldown's intermittent native teardown segfault on Windows,
+    // and a second build without it fails a Windows contributor's push for a
+    // reason the first build is already known to survive.
+    expect(runner.match(/spawnSync\(/g) ?? []).toHaveLength(1);
+  });
+
+  it('gives the isolated document ONE named landmark, because nothing else can check its skeleton', async () => {
+    // The gate this replaces does not exist, and that is the point. axe's
+    // page-level rules — `landmark-one-main`, `region`, `document-title`,
+    // `html-has-lang` — either carry `is-initiator-matches` or aggregate at the
+    // page level, so NONE of them runs against this document while it is framed.
+    // `test:a11y` therefore scans it a second time as a top-level page
+    // (`sandbox-rendered`), which is what found the two findings this markup
+    // answers; but all three of them are graded `moderate`, and that gate blocks
+    // on `serious` and `critical` only. So reverting this file to a bare
+    // `<div id="root">` leaves every gate in this repository green, and the two
+    // findings come back silently.
+    //
+    // Read as SOURCE rather than rendered, because this is the one document
+    // jsdom never loads: `document-sandbox.test.tsx` and `sandbox-renderers.test.ts`
+    // both build their own `<div id="root">` host by hand, so neither of them
+    // sees this file at all.
+    const source = await readFile(
+      fileURLToPath(new URL(`../${SANDBOX_HTML}`, import.meta.url)),
+      'utf8',
+    );
+    // COMMENTS STRIPPED FIRST. This file is heavily commented and its comments
+    // discuss the very markup below by name, so a pattern run over the raw text
+    // matches prose: measured, `/<main([^>]*)>/` found the `<main>` inside the
+    // sentence explaining why the element is a `<main>`, and reported it as an
+    // element with no attributes.
+    const html = source.replace(/<!--[\s\S]*?-->/g, '');
+
+    // The render target is a `<main>`, and it is the element `startSandbox`
+    // looks up: `renderTarget` asks for `#root` and only builds a `<div>` when
+    // the id is missing entirely, so the id and the tag have to travel together.
+    const target = /<main([^>]*)>/.exec(html);
+    expect(target, 'sandbox.html has no <main>').not.toBeNull();
+    const attributes = target?.[1] ?? '';
+    expect(attributes).toContain('id="root"');
+    // NAMED, because embedded this landmark sits beside the application's own
+    // `<main>` and two landmarks sharing a role and an accessible name is
+    // `landmark-unique` — measured, the moment this stopped being a `<div>`.
+    expect(/aria-label="[^"]+"/.test(attributes)).toBe(true);
+
+    // NEGATIVES. Exactly one `<main>`, so a second one added later cannot
+    // reintroduce `landmark-one-main` from the other direction; and no element
+    // still carries the id the renderers look up other than that landmark, so
+    // this cannot pass while the real target is a `<div>` beside it.
+    expect(html.match(/<main[\s>]/g) ?? []).toHaveLength(1);
+    expect(html.match(/id="root"/g) ?? []).toHaveLength(1);
+    // The two page-level rules that pass today and are checked by nothing else.
+    expect(html).toContain('<html lang="en">');
+    expect(/<title>[^<]+<\/title>/.test(html)).toBe(true);
+  });
+});
+
+// The dev server is what the e2e and a11y gates actually drive, and it serves
+// the sandbox's modules from `/src/sandbox/` rather than from `sandbox-assets/`,
+// so the production path-scoped header rule cannot reach them.
+describe('the dev server answers the sandbox frame', () => {
+  it("allows an Origin: null request without widening past Vite's own default", async () => {
+    const { defaultAllowedOrigins } = await import('vite');
+    const mod = await import('../vite.config');
+    const config = mod.default as { server?: { cors?: { origin?: unknown } } };
+    const origins = config.server?.cors?.origin;
+
+    expect(Array.isArray(origins)).toBe(true);
+    const list = origins as unknown[];
+    // This is the assertion that proves the addition is LOAD-BEARING rather
+    // than decorative: an opaque origin sends the literal string `null`, and
+    // Vite's default regex does not match it. Without the entry below, the
+    // module fetch gets no ACAO, fails as a network error, and the frame is
+    // blank in dev — which nothing earlier catches, because jsdom never loads
+    // an iframe's src.
+    expect(defaultAllowedOrigins.test('null')).toBe(false);
+    expect(list).toContain('null');
+    // And the default is KEPT rather than replaced. `origin: true` or `'*'`
+    // would also make the frame work, and would drop the restriction for every
+    // request rather than for the one the frame makes.
+    expect(list).toContain(defaultAllowedOrigins);
+    // Nothing wider than those two. `'null'` already re-admits every opaque
+    // origin (any page can mint one with a sandboxed `srcdoc` iframe), which is
+    // a cost the config records rather than hides — but `true`, `'*'` or a
+    // catch-all regex on top of it would take the dev server from "readable by
+    // an opaque origin" to "readable by name", and would do so without anyone
+    // having to write down why.
+    expect(list).toHaveLength(2);
+    expect(list).not.toContain(true);
+    expect(list).not.toContain('*');
+  });
+
+  it('keeps the service worker from answering the sandbox frame with the app shell', () => {
+    // `vite-plugin-pwa` defaults `navigateFallback` to `index.html` and this
+    // config sets none of its own, so a NavigationRoute covers every
+    // navigation — and an iframe load IS a navigation. Without the denylist the
+    // frame boots the application instead of the sandbox, never handshakes, and
+    // the viewer degrades to "download to view" with no failing request
+    // anywhere to explain it.
+    //
+    // The patterns are EXERCISED rather than compared to a literal: a pattern
+    // that is present but does not match (a missing escape, a stray anchor) is
+    // the whole failure mode, and it would survive any equality assertion.
+    const matches = (url: string): boolean =>
+      NAVIGATE_FALLBACK_DENYLIST.some((pattern) => pattern.test(url));
+
+    expect(matches('/sandbox.html')).toBe(true);
+    // Workbox tests a denylist entry against `pathname + search`, so a bare `$`
+    // anchor stops matching the moment the frame's src gains a query string —
+    // and the regression is invisible: installed clients only, after a deploy
+    // only, as a viewer that silently degrades to "download to view".
+    expect(matches('/sandbox.html?theme=dark')).toBe(true);
+    // Not so loose that it swallows the application's own routes, which would
+    // take the whole offline experience out with it.
+    expect(matches('/vault')).toBe(false);
+    expect(matches('/documents/abc')).toBe(false);
+    expect(matches('/sandbox.html.bak')).toBe(false);
+  });
+
+  it('excludes the sandbox from the precache with patterns that would match it', () => {
+    // This exclusion CANNOT FIRE today and the constant says so: the PWA plugin
+    // runs only in the application build, and workbox globs `dist` at the end of
+    // that build — before the sandbox build has written anything — so there is
+    // nothing there for these patterns to match. What actually keeps the sandbox
+    // out of the precache is the two-build layout, and `scripts/ci/bundle-gate.mjs`
+    // asserts the generated manifest as a canary against the two being merged.
+    //
+    // What IS asserted here is that the list is not decorative: if the builds are
+    // ever merged, these patterns have to match the paths they name. A typo'd
+    // ignore would otherwise sit in the config looking like protection.
+    const ignores = WORKBOX_GLOB_IGNORES;
+    expect(ignores).toContain(SANDBOX_HTML);
+    expect(ignores).toContain(`${SANDBOX_ASSETS_DIR}/**`);
+    // And the precache patterns still cover the application's own output, which
+    // is what an over-eager ignore would take with it.
+    expect(WORKBOX_GLOB_PATTERNS).toEqual(['**/*.{js,css,html,ico,png,svg,woff2}']);
+  });
+
+  it('wires the shared constants into the real config rather than restating them', async () => {
+    // Identity, not equality: the whole reason these constants were extracted is
+    // that `vite.config.ts` pulls React, Tailwind and the PWA plugin, so its
+    // options cannot be read back out of the plugin — and asserting its SOURCE
+    // TEXT proves nothing about what Vite was handed. The sandbox config CAN be
+    // read back, so the wiring is pinned where it is observable, and the
+    // behaviour of the constants is pinned above where it is pure.
+    const mod = await import('../vite.config.sandbox');
+    const config = mod.default as { build?: { assetsDir?: unknown } };
+    expect(config.build?.assetsDir).toBe(SANDBOX_ASSETS_DIR);
+    // A second literal `'sandbox-assets'` in `vite.config.ts` is exactly the
+    // drift this replaces; the app config imports the same binding.
+    const source = await readFile(
+      fileURLToPath(new URL('../vite.config.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(source).toContain('WORKBOX_GLOB_IGNORES');
+    expect(source).toContain('NAVIGATE_FALLBACK_DENYLIST');
+    expect(source).not.toContain("'sandbox-assets'");
   });
 });

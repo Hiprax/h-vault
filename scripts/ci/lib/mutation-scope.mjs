@@ -148,6 +148,13 @@ export const CORE_MODULES = [
   'packages/server/src/controllers/vaultController.ts',
   'packages/client/src/services/import/',
   'packages/server/src/utils/folderGraph.ts',
+  // The document controller joins them for the same reason the vault controller
+  // is here: it is the only thing standing between a mis-framed upload and a
+  // stored object nobody can ever open again. Its size rules are the kind of
+  // check a mutation survives quietly — an equality relaxed to a bound, a
+  // boundary moved by one — and the suites around it are exactly the suites that
+  // would keep passing.
+  'packages/server/src/controllers/documentController.ts',
 ];
 
 /**

@@ -14,6 +14,11 @@ import { createErrorMiddleware } from '@hiprax/errors';
 import { createRequestLogger } from '@hiprax/logger';
 import { createModuleLogger } from './utils/logger.js';
 import { config } from './config/index.js';
+import {
+  applySandboxAssetHeaders,
+  createSandboxDocumentHandler,
+  requireBuildArtifact,
+} from './config/sandboxCsp.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
 import swaggerUi from 'swagger-ui-express';
@@ -25,6 +30,7 @@ import './middleware/auth.js';
 // Import routes
 import authRoutes from './routes/auth.js';
 import vaultRoutes from './routes/vault.js';
+import documentRoutes from './routes/documents.js';
 import folderRoutes from './routes/folders.js';
 import userRoutes from './routes/user.js';
 import toolsRoutes from './routes/tools.js';
@@ -84,7 +90,18 @@ app.use(
         workerSrc: ["'self'"],
         objectSrc: ["'none'"],
         mediaSrc: ["'none'"],
-        frameSrc: ["'none'"],
+        // The application frames exactly one document: `/sandbox.html`, the
+        // isolated renderer every stored document's bytes are handed to. That
+        // document is same-origin BY URL (its opaque origin comes from the
+        // iframe's `sandbox` attribute, not from where it was fetched), so
+        // 'self' is the whole of what this needs. NEVER `blob:`, `data:` or a
+        // wildcard: those would let an injected iframe carry its own contents
+        // and inherit this page's CSP, which is the opposite of the isolation
+        // the sandbox exists for. The sandbox document's OWN, far stricter
+        // policy is `config/sandboxCsp.ts` and is attached by the route that
+        // serves it — a document fetched from an http(s) URL does not inherit
+        // its embedder's policy.
+        frameSrc: ["'self'"],
       },
     },
     // COEP disabled: no SharedArrayBuffer/cross-origin isolation needed;
@@ -201,6 +218,11 @@ app.use(
       'currentAuthHash',
       'newEncryptedVaultKey',
       'encryptedBWK',
+      // The wrapped document key. It crosses the wire TWICE — at upload init and
+      // again at completion, which is what makes a stale-vault-key 409
+      // recoverable without re-sending the file — so it is the one new secret
+      // this feature puts in a request body, and it is logged nowhere.
+      'encryptedDek',
     ],
     skip: (req) => {
       // Skip request logging for health probes. The logger's LoggableRequest
@@ -236,6 +258,7 @@ if (config.NODE_ENV !== 'production' || config.ENABLE_SWAGGER) {
 // API routes
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/vault', vaultRoutes);
+app.use('/api/v1/documents', documentRoutes);
 app.use('/api/v1/folders', folderRoutes);
 app.use('/api/v1/user', userRoutes);
 app.use('/api/v1/tools', toolsRoutes);
@@ -255,15 +278,48 @@ if (config.METRICS_TOKEN) {
 if (config.NODE_ENV === 'production') {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const publicPath = path.resolve(__dirname, '..', 'public');
-  app.use(express.static(publicPath));
 
-  // Read HTML once at startup; inject per-request CSP nonce into script tags
-  let indexHtml: string;
-  try {
-    indexHtml = readFileSync(path.join(publicPath, 'index.html'), 'utf-8');
-  } catch {
-    throw new Error('Production build missing client dist. Run: npm run build:client');
-  }
+  // Read both HTML documents once at startup, BEFORE anything is mounted, so a
+  // build missing either of them fails loudly at boot rather than 404ing one
+  // route in production. `sandbox.html` is emitted by its own Vite build
+  // (`packages/client/vite.config.sandbox.ts`), which runs after the app build.
+  const indexHtml = requireBuildArtifact(
+    () => readFileSync(path.join(publicPath, 'index.html'), 'utf-8'),
+    'Production build missing client dist. Run: npm run build:client',
+  );
+  const sandboxHtml = requireBuildArtifact(
+    () => readFileSync(path.join(publicPath, 'sandbox.html'), 'utf-8'),
+    'Production build missing the document sandbox (sandbox.html). Run: npm run build:client',
+  );
+
+  // The isolated render document, mounted BEFORE `express.static` and therefore
+  // before the SPA fallback.
+  //
+  // Its whole isolation is a per-RESPONSE policy: a copy of this file answered
+  // off disk by the static middleware would carry helmet's application policy
+  // instead, which permits `connect-src 'self'` and a nonce'd script — i.e. the
+  // isolation would quietly stop existing while every renderer kept working.
+  // Registering the route first is also what stops a case-insensitive
+  // filesystem answering `/SANDBOX.HTML` from static: Express's own matching is
+  // case-insensitive by default, so the route claims that spelling too. (It
+  // claims only the spellings Express matches, and the encoded `/sandbox%2Ehtml`
+  // is NOT one of them — that request falls through to static, which decodes it.
+  // Nothing is lost there: the SPA catch-all below already serves every
+  // non-`/api/` path with helmet's policy, so an encoded spelling grants a
+  // caller nothing it could not have had. The Docker `web-root` stage removes
+  // the file from Nginx's document root for the same class of reason.)
+  //
+  // The handler and the asset-header hook below both live in `config/
+  // sandboxCsp.ts`. That is not tidiness: this whole block is unreachable under
+  // test — `app.ts` can only be imported with `NODE_ENV=test`, because the
+  // production branch reads a client build a checkout does not have — so
+  // anything written inline here is production code that no fast-tier assertion
+  // can reach. Extracted, the policy, the three response headers and the
+  // directory predicate are all pinned directly.
+  app.get('/sandbox.html', createSandboxDocumentHandler(sandboxHtml));
+
+  app.use(express.static(publicPath, { setHeaders: applySandboxAssetHeaders }));
+
   app.get(/^(?!\/api\/).*/, (_req, res) => {
     const nonce = res.locals.cspNonce as string;
     // Match <script followed by whitespace or > to avoid false positives

@@ -3,8 +3,10 @@ import type { Request, Response, NextFunction } from 'express';
 import { MongoRateLimitStore } from './rateLimitStore.js';
 import { httpErrors } from '@hiprax/errors';
 import { createModuleLogger } from '../utils/logger.js';
-import { isProduction } from '../config/index.js';
+import { config, isProduction } from '../config/index.js';
 import {
+  DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+  MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
   MAX_ITEMS_PER_USER,
   HIBP_BATCH_MAX_PREFIXES,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
@@ -743,6 +745,188 @@ export const importLimiter =
         next(httpErrors.tooManyRequests('Too many import requests, please try again later'));
       },
     }),
+  );
+
+// ---------------------------------------------------------------------------
+// The document store's three limiters
+// ---------------------------------------------------------------------------
+
+/**
+ * One user-keyed limiter, built once and used by all three document limiters.
+ *
+ * Every limiter above it in this file is a near-identical block, and three more
+ * copies would have raised `duplication.clones` and `duplication.duplicatedLines`,
+ * both of which `.testfortress/baseline.json` ratchets DOWNWARD. Factoring is the
+ * answer that costs nothing, because the three differ only in their name, their
+ * counter prefix, their ceiling, their window and the sentence a 429 carries.
+ *
+ * TWO PROPERTIES OF THE CALL SITES ARE LOAD-BEARING, and neither is expressible
+ * here:
+ *
+ *   1. Each export must still call {@link noopIfNonProduction} ITSELF. That
+ *      function returns a FRESH pass-through closure per call, and outside
+ *      production that closure is the whole export — so hoisting the call into
+ *      this factory (or into a shared constant) would make all three exports the
+ *      same object. `tests/support/routeTable.ts` reads the limiter column by
+ *      FUNCTION IDENTITY through `LIMITER_NAMES`, a `Map` keyed by the function,
+ *      so three identical objects collapse to one entry and every document route
+ *      would report one arbitrary limiter name. `route-table.test.ts` asserts
+ *      `LIMITER_NAMES.size` equals the number of exported functions precisely to
+ *      catch that.
+ *   2. The key is `req.user?._id`, which exists because every document route sits
+ *      behind `authenticate`: it comes from a verified JWT, so nothing
+ *      caller-controlled enters a rate-limit key. The `resolveClientKey` fallback
+ *      is the same one every user-keyed limiter here carries, for a request that
+ *      somehow reached the limiter unauthenticated.
+ */
+function createUserKeyedLimiter(
+  name: string,
+  prefix: string,
+  limit: number,
+  windowMs: number,
+  message: string,
+): (req: Request, res: Response, next: NextFunction) => void {
+  const store = createStore(windowMs);
+  return withClientKeyGuard(
+    name,
+    rateLimit({
+      windowMs,
+      limit,
+      standardHeaders: true,
+      legacyHeaders: false,
+      validate: { singleCount: false },
+      keyGenerator: (req: Request) => {
+        const userId = req.user?._id ?? resolveClientKey(req) ?? '';
+        return `${prefix}${userId}`;
+      },
+      ...(store ? { store } : {}),
+      handler: (_req, _res, next, options) => {
+        logger.warn(`${name} rate limit exceeded`, {
+          windowMs: options.windowMs,
+          limit: options.limit,
+        });
+        next(httpErrors.tooManyRequests(message));
+      },
+    }),
+  );
+}
+
+/** Window every document limiter spends its budget over. */
+export const DOCUMENT_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
+
+/**
+ * Attempts one part is allowed before the budget stops covering it: one delivery
+ * plus three retries.
+ *
+ * A part upload is the one request in this feature that a client retries as a
+ * matter of course — a dropped socket mid-transfer is ordinary — and a budget
+ * that ignored retries would refuse a legitimate transfer PARTWAY THROUGH, which
+ * is the exact failure `BREACH_BATCH_RATE_LIMIT_MAX` exists to prevent.
+ */
+export const DOCUMENT_PART_RETRY_ALLOWANCE = 4;
+
+/**
+ * Floor under the derived part budget, and half the floor under the read budget.
+ *
+ * At the smallest configurable `MAX_DOCUMENT_SIZE_MB` (1 MB) the derivation yields
+ * 1 x 3 x 4 = 12 requests per fifteen minutes, which would throttle an operator
+ * who set a small cap into uselessness. The floor is the same 120 the upload
+ * limiter carries, so a small-cap deployment behaves like a default one.
+ */
+export const DOCUMENT_TRANSFER_RATE_LIMIT_FLOOR = 120;
+
+/**
+ * A user reads more than they write, and one download is one request PER SEGMENT,
+ * so the read budget is the part budget doubled — floor included, which is what
+ * makes the documented read floor 240.
+ */
+export const DOCUMENT_READ_BUDGET_MULTIPLIER = 2;
+
+/** Bytes in one megabyte, so the operator's MB-denominated cap is read once. */
+const BYTES_PER_MB = 1024 * 1024;
+
+/**
+ * Requests one user may spend uploading PARTS in a window, derived from the
+ * operator's own size cap at module load.
+ *
+ * `ceil(cap / DOCUMENT_PLAINTEXT_CHUNK_BYTES)` parts per transfer, times
+ * {@link MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER} transfers a user may run at
+ * once, times {@link DOCUMENT_PART_RETRY_ALLOWANCE}. Neither multiplier is
+ * decoration: a budget ignoring either one 429s a transfer that was already
+ * halfway through, and the bytes it had accepted are then stranded in the bucket
+ * until the garbage collector reclaims them.
+ *
+ * At the default 100 MB cap that is 13 x 3 x 4 = 156, rather than the 60 a naive
+ * `cap / chunk` derivation gives — a number five concurrent 100 MB uploads would
+ * already have exceeded.
+ *
+ * Exported as a FUNCTION as well as a value so `tests/document-limiter-budget.test.ts`
+ * can exercise the floor at a cap this deployment is not configured with, which is
+ * the branch no test could otherwise reach without rewriting the environment.
+ */
+export function documentPartBudgetFor(maxDocumentBytes: number): number {
+  const partsPerTransfer = Math.ceil(maxDocumentBytes / DOCUMENT_PLAINTEXT_CHUNK_BYTES);
+  return Math.max(
+    DOCUMENT_TRANSFER_RATE_LIMIT_FLOOR,
+    partsPerTransfer * MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER * DOCUMENT_PART_RETRY_ALLOWANCE,
+  );
+}
+
+/**
+ * Requests one user may spend on upload INITIATION, COMPLETION and ABORT in a
+ * window.
+ *
+ * A flat 120 rather than a derivation, because these three are one request each
+ * per transfer no matter how large the file is: 120 covers forty complete
+ * transfers per fifteen minutes, well above the
+ * {@link MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER} the server will run at once.
+ */
+export const DOCUMENT_UPLOAD_RATE_LIMIT_MAX = 120;
+
+/** {@link documentPartBudgetFor} at this deployment's configured size cap. */
+export const DOCUMENT_PART_RATE_LIMIT_MAX = documentPartBudgetFor(
+  config.MAX_DOCUMENT_SIZE_MB * BYTES_PER_MB,
+);
+
+/** The part budget doubled — see {@link DOCUMENT_READ_BUDGET_MULTIPLIER}. */
+export const DOCUMENT_READ_RATE_LIMIT_MAX =
+  DOCUMENT_PART_RATE_LIMIT_MAX * DOCUMENT_READ_BUDGET_MULTIPLIER;
+
+/**
+ * Upload initiation, completion and abort. Keyed by user, because a document
+ * upload is only ever made by an authenticated caller and IP rotation must not
+ * buy a second budget.
+ */
+export const documentUploadLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'documentUploadLimiter',
+    'docUpload:',
+    DOCUMENT_UPLOAD_RATE_LIMIT_MAX,
+    DOCUMENT_RATE_LIMIT_WINDOW_MS,
+    'Too many document upload requests, please try again later',
+  );
+
+/** One sealed segment per request — see {@link DOCUMENT_PART_RATE_LIMIT_MAX}. */
+export const documentPartLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'documentPartLimiter',
+    'docPart:',
+    DOCUMENT_PART_RATE_LIMIT_MAX,
+    DOCUMENT_RATE_LIMIT_WINDOW_MS,
+    'Too many document part uploads, please try again later',
+  );
+
+/** One segment read per request — see {@link DOCUMENT_READ_RATE_LIMIT_MAX}. */
+export const documentReadLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'documentReadLimiter',
+    'docRead:',
+    DOCUMENT_READ_RATE_LIMIT_MAX,
+    DOCUMENT_RATE_LIMIT_WINDOW_MS,
+    'Too many document read requests, please try again later',
   );
 
 /**

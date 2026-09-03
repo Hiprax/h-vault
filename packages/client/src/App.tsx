@@ -8,6 +8,7 @@ import { ToastProvider } from './components/ui/Toast';
 import { ReloadPrompt } from './components/layout/ReloadPrompt';
 import { useFavicon } from './hooks/useFavicon';
 import { useClipboardGuard } from './hooks/useClipboardGuard';
+import { useUploadUnloadGuard } from './hooks/useUploadUnloadGuard';
 import { resumeSession, shouldAttemptResume } from './services/auth/sessionResume';
 
 // Lazy-loaded page components
@@ -23,6 +24,8 @@ const ExportDataPage = lazy(() => import('./pages/ExportDataPage'));
 const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
 const GeneratorPage = lazy(() => import('./pages/GeneratorPage'));
 const FileEncryptionPage = lazy(() => import('./pages/FileEncryptionPage'));
+const DocumentsPage = lazy(() => import('./pages/DocumentsPage'));
+const DocumentPage = lazy(() => import('./pages/DocumentPage'));
 const VaultHealthPage = lazy(() => import('./pages/VaultHealthPage'));
 const VerifyEmailPage = lazy(() => import('./pages/VerifyEmailPage'));
 const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage'));
@@ -51,6 +54,12 @@ export function App() {
   // in a hidden tab is exactly the case where the erase was refused and still owed.
   // A guard below that boundary would lose its listeners at the worst moment.
   useClipboardGuard();
+
+  // Confirm before a tab holding a live document upload is closed. Mounted HERE
+  // for the same reason as the guard above: the documents store is module-level
+  // so a transfer survives navigation, and a guard inside the Documents page
+  // would be torn down by exactly the navigation that keeps the transfer alive.
+  useUploadUnloadGuard();
 
   // Cold-start "remember me" resume. When a remembered-session hint is present
   // (and the store is not already authenticated), silently re-establish the
@@ -101,6 +110,8 @@ export function App() {
                   <Route path="/vault" element={<VaultPage />} />
                   <Route path="/generator" element={<GeneratorPage />} />
                   <Route path="/tools/file-encryption" element={<FileEncryptionPage />} />
+                  <Route path="/documents" element={<DocumentsPage />} />
+                  <Route path="/documents/:id" element={<DocumentPage />} />
                   <Route path="/vault/health" element={<VaultHealthPage />} />
                   <Route path="/vault/:id" element={<VaultItemPage />} />
                   <Route path="/settings" element={<SettingsPage />} />

@@ -36,8 +36,9 @@ export interface A11yView {
  *
  * The order is not arbitrary: the two unauthenticated pages come first because
  * they need no session, the item form's five type tabs are scanned inside ONE
- * open create dialog, and the unlock screen comes last because reaching it locks
- * the vault, which ends the authenticated walk.
+ * open create dialog, the unlock screen comes near the end because reaching it
+ * locks the vault and ends the authenticated walk, and the isolated document
+ * comes after even that because it needs no session at all.
  */
 export const A11Y_VIEWS = [
   { id: 'login', description: 'the sign-in page, signed out' },
@@ -60,7 +61,65 @@ export const A11Y_VIEWS = [
   { id: 'settings', description: 'the settings page' },
   { id: 'vault-health', description: 'the vault health page after its checks have run' },
   { id: 'file-encryption', description: 'the file-encryption tool' },
+  { id: 'documents-list', description: 'the documents page with two documents stored' },
+  {
+    // NOT the panel at rest. At rest it is already inside `documents-list` — it
+    // is a plain `<section>` mounted unconditionally on that page, not a dialog
+    // that opens — so scanning it idle would be a duplicate of DOM this walk has
+    // already covered, inflating a count while covering nothing. The state below
+    // exists only after a file is picked and a transform is confirmed, and it is
+    // where the panel's controls actually are.
+    id: 'document-upload-review',
+    description:
+      'the documents page with a file selected, both transform controls ticked, and the prepare-and-review panel awaiting confirmation',
+  },
+  {
+    // The DECLINED half of the detail view: a PDF is `PREVIEW_MODES.none`, so
+    // the page draws its chrome, the reason and the download button, and creates
+    // no frame at all. Distinct DOM from the view below rather than a second
+    // look at the same page.
+    id: 'document-detail',
+    description: 'a stored PDF, which is download-only, so the detail view draws no frame',
+  },
+  {
+    id: 'document-viewer',
+    description: 'a stored markdown document, rendered inside the isolated frame',
+  },
   { id: 'unlock-screen', description: 'the unlock screen, vault locked' },
+  {
+    // THE FIFTH VIEW, and its reason is a property of axe rather than of this
+    // application, so it is written down here where somebody might otherwise
+    // delete it as redundant.
+    //
+    // The frame's CONTENTS are already scanned by `document-viewer`:
+    // `@axe-core/playwright` reaches a child frame through Playwright's own
+    // frame tree, which is not subject to the same-origin policy, so a serious
+    // finding inside the isolated document fails that view. This view is not a
+    // second look at the same nodes. It covers two things that one structurally
+    // cannot:
+    //
+    //   1. axe's PAGE-LEVEL rules never run on a framed document. `document-title`,
+    //      `html-has-lang`, `aria-hidden-body` and `meta-viewport` all carry
+    //      `matches: 'is-initiator-matches'`, so `packages/client/sandbox.html`'s
+    //      own skeleton — its `lang`, its `<title>` — is checked by nothing else
+    //      in this repository. It is built by its own Vite config and appears in
+    //      no other scan.
+    //   2. The framed leg is BEST-EFFORT. `runPartialRecursive` wraps its
+    //      child-frame injection in a bare `catch`, so a frame that was slow or
+    //      blank yields no partial and a parent run that reports zero violations
+    //      while appearing to have covered it. A top-level navigation needs no
+    //      handshake, no CORS and no port, so it cannot degrade that way.
+    //
+    // It is reachable only because both Playwright gates drive `npm run dev`,
+    // which serves this document with no Content-Security-Policy. In production
+    // the Express route attaches one carrying the `sandbox allow-scripts`
+    // DIRECTIVE, which makes the document opaque even at top level — so this is
+    // a way to exercise the RENDERERS' output, never evidence about the
+    // isolation.
+    id: 'sandbox-rendered',
+    description:
+      'the isolated document itself, navigated to directly and handed a rendered markdown document',
+  },
 ] as const satisfies readonly A11yView[];
 
 /** Every scanned view's id, in visit order. */

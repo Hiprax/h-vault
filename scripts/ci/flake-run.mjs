@@ -17,10 +17,12 @@
  * ---------------------------------------------------------------------------
  *
  * They bound the per-run flake rate. Ten independent runs with no failure put
- * the 95% upper bound on the per-run failure probability at roughly 26% by the
- * rule of three (3/n), and the point ESTIMATE at 0 — which is a bound of about
- * one in ten before you get to any confidence level at all. They do NOT
- * establish that the rate is zero, and no finite number of runs can. This gate
+ * the 95% upper bound on the per-run failure probability at 30% by the rule of
+ * three (3/n — the exact binomial bound is a little tighter, about 26%; the
+ * report below quotes the rule-of-three figure, as this sentence does), and the
+ * point ESTIMATE at 0 — which is a bound of about one in ten before you get to
+ * any confidence level at all. They do NOT establish that the rate is zero, and
+ * no finite number of runs can. This gate
  * therefore RECORDS the number of runs and the number of failures and ratchets
  * both — `flake.runs` upward so the sample can never quietly shrink, and
  * `flake.failures` downward so a failure can never quietly be normalised. It
@@ -418,10 +420,19 @@ const payload = {
   // artifact so a reader of `flake.json` alone cannot overstate it.
   // `failures` spans BOTH halves while `runs` counts only the shuffled full-suite
   // runs, so the sentence names each separately rather than implying one sample.
+  //
+  // IT BRANCHES ON THE FAILURE COUNT, and it has to. The rule of three is a bound
+  // for a sample that produced NO failures; a single template that recited "with 0
+  // failures" over a run that had one produced a self-contradicting sentence in a
+  // machine-readable report ("1 failing run(s) … With 0 failures this bounds …"),
+  // which is the one thing a report may never do. A run WITH a failure has not
+  // bounded a rate, it has measured one, and it says so.
   bound:
-    runs.length > 0
-      ? `${String(failedRuns)} failing run(s) in ${String(runs.length)} shuffled parallel run(s), plus ${String(failures - failedRuns)} failing end-to-end leg(s) over ${String(payloadE2eExecutions)} executions. With 0 failures this bounds the per-run flake rate near 1-in-${String(runs.length)} (95% upper bound ~${(300 / runs.length).toFixed(0)}% by the rule of three). It does not establish zero, and no finite number of runs can.`
-      : 'no full-suite runs were performed',
+    runs.length === 0
+      ? 'no full-suite runs were performed'
+      : failures === 0
+        ? `0 failures in ${String(runs.length)} shuffled parallel run(s) plus ${String(payloadE2eExecutions)} end-to-end execution(s). With no failures the rule of three puts the 95% upper bound on the per-run failure probability near ${(300 / runs.length).toFixed(0)}%, i.e. about 1-in-${String(runs.length)}. It does not establish zero, and no finite number of runs can.`
+        : `${String(failedRuns)} failing run(s) in ${String(runs.length)} shuffled parallel run(s), plus ${String(failures - failedRuns)} failing end-to-end leg(s) over ${String(payloadE2eExecutions)} executions. The rule of three does NOT apply to a sample that produced failures: this run MEASURED a flake rather than bounding one, at a point estimate of ${String(failedRuns)}-in-${String(runs.length)} per run. Fix the cause and re-run; a bound is only available from a clean sweep.`,
   e2e,
   perRun: runs,
   legs,

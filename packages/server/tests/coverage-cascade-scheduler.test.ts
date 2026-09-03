@@ -51,6 +51,30 @@ const { sizeOverride } = vi.hoisted(() => ({
   sizeOverride: { item: null as null | (() => number), folder: null as null | (() => number) },
 }));
 
+/**
+ * Counts every attempt to obtain a storage client, without changing what one is.
+ *
+ * This file mocks NO configuration, so the document store is genuinely off here.
+ * Both places that reach for storage on this deployment shape — the cascade's
+ * object sweep and `trashCleanup`'s document batch — guard on `storageConfigured`
+ * first, and in both the guard's ABSENCE would be nearly invisible: `getStorage()`
+ * throws 503, the cascade swallows it, and the cron's outer catch swallows it too,
+ * so every assertion about surviving rows would still pass. Counting the call is
+ * what makes the guards observable.
+ */
+const { storageAccess } = vi.hoisted(() => ({ storageAccess: { count: 0 } }));
+
+vi.mock('../src/services/storage/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/storage/index.js')>();
+  return {
+    ...actual,
+    getStorage: () => {
+      storageAccess.count += 1;
+      return actual.getStorage();
+    },
+  };
+});
+
 vi.mock('../src/utils/sizeEstimator.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/utils/sizeEstimator.js')>();
   return {
@@ -81,6 +105,9 @@ async function seedTrustedDevice(userId: string): Promise<void> {
   });
 }
 import { config } from '../src/config/index.js';
+import { Document } from '../src/models/Document.js';
+import { buildObjectKey } from '../src/utils/documentObjects.js';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
 import { cascadeDeleteUser, supportsTransactions } from '../src/utils/cascadeDelete.js';
 import { startBackupScheduler } from '../src/jobs/backupScheduler.js';
 import { startTokenCleanupJob } from '../src/jobs/tokenCleanup.js';
@@ -518,6 +545,62 @@ describe('trashCleanup — multi-batch purge', () => {
     expect(lightLogs).toHaveLength(1);
     expect((lightLogs[0]!.metadata as { itemCount: number }).itemCount).toBe(3);
   }, 60_000);
+
+  /**
+   * The OFF state of the document batch, which cannot be reached from
+   * `background-jobs.test.ts`: that file forces `storageConfigured` true for its
+   * whole module, and this one mocks no configuration at all, so the document
+   * store here is genuinely disabled — the state every deployment that has not
+   * opted in is in.
+   *
+   * What must not happen is the tempting simplification: purging the ROW anyway
+   * because "the object will be cleaned up later". The row holds the only wrapped
+   * copy of the key that decrypts the object, so deleting it while the bucket is
+   * unreachable turns a recoverable trashed document into ciphertext nobody —
+   * not the server, not the browser, not a backup — can ever open again.
+   *
+   * The row is seeded directly; the routes that would create one sit behind
+   * `requireStorage`, which is precisely the condition under test.
+   */
+  it('leaves an expired document untouched, without reaching for a storage client, when object storage is not configured', async () => {
+    startTrashCleanupJob();
+    const callback = getScheduledCallback();
+    storageAccess.count = 0;
+
+    const userId = new mongoose.Types.ObjectId();
+    const documentId = new mongoose.Types.ObjectId();
+    await Document.create({
+      _id: documentId,
+      userId,
+      objectKey: buildObjectKey(userId.toHexString(), documentId.toHexString()),
+      encryptedDek: 'dek-ciphertext',
+      dekIv: 'dek-iv',
+      dekTag: 'dek-tag',
+      streamSalt: Buffer.alloc(32, 7).toString('base64'),
+      noncePrefix: Buffer.alloc(7, 3).toString('base64'),
+      encryptedMeta: 'meta-ciphertext',
+      metaIv: 'meta-iv',
+      metaTag: 'meta-tag',
+      chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+      chunkCount: 1,
+      ciphertextBytes: 48,
+      plaintextBytes: 32,
+      deletedAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000),
+    });
+
+    await callback();
+
+    const survivor = await Document.findById(documentId).lean();
+    expect(survivor, 'the row must outlive a run with no bucket to delete from').not.toBeNull();
+    // Not even marked: a `purgePending` here would send a collector that is
+    // equally unable to reach the bucket after it on every future run.
+    expect(survivor!.purgePending).toBeUndefined();
+    expect(await AuditLog.countDocuments({ userId, action: 'trash_auto_purge' })).toBe(0);
+    // The negative that pins the guard. Without it the batch would ask for a
+    // client, get a 503, and have the cron's outer catch turn a nightly no-op
+    // into a nightly error on every deployment that never enabled the feature.
+    expect(storageAccess.count).toBe(0);
+  });
 });
 
 // ─── cascadeDelete: the REAL transactional branch (replica set) ──────────────

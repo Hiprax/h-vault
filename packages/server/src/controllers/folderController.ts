@@ -4,6 +4,7 @@ import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createModuleLogger } from '../utils/logger.js';
 import { Folder } from '../models/Folder.js';
 import { VaultItem } from '../models/VaultItem.js';
+import { Document } from '../models/Document.js';
 import { createAuditLog } from '../services/auditService.js';
 import {
   assertVaultNotRotating,
@@ -339,30 +340,30 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
 
   try {
     const execute = async (): Promise<void> => {
-      if (action === 'delete') {
-        // Soft-delete all items in this folder (move to trash)
-        await VaultItem.updateMany(
-          { folderId: id, userId, deletedAt: { $eq: null } },
-          { $set: { deletedAt: new Date() } },
-          sessionOpt,
-        );
-      } else {
-        // Move items to parent folder (or root if no parent)
-        const parentId = folder.parentId;
-        if (parentId) {
-          await VaultItem.updateMany(
-            { folderId: id, userId },
-            { $set: { folderId: parentId } },
-            sessionOpt,
-          );
-        } else {
-          await VaultItem.updateMany(
-            { folderId: id, userId },
-            { $unset: { folderId: 1 } },
-            sessionOpt,
-          );
-        }
-      }
+      // The folder's MEMBERS are vault items and documents, and both are treated
+      // identically: `action=delete` trashes them, `action=move` re-parents them
+      // to this folder's parent or to the root. Writing the filter and the update
+      // ONCE and applying them to both collections is what makes that identity
+      // structural rather than a coincidence of two copied blocks — a branch added
+      // to one copy and not the other would leave documents stranded in a folder
+      // that no longer exists.
+      //
+      // `deletedAt: { $eq: null }` matches an ABSENT field as well as a null one,
+      // which is what both models rely on: an already-trashed row keeps the
+      // timestamp it was trashed with rather than being re-stamped now.
+      const memberFilter =
+        action === 'delete'
+          ? { folderId: id, userId, deletedAt: { $eq: null } }
+          : { folderId: id, userId };
+      const memberUpdate =
+        action === 'delete'
+          ? { $set: { deletedAt: new Date() } }
+          : folder.parentId
+            ? { $set: { folderId: folder.parentId } }
+            : { $unset: { folderId: 1 } };
+
+      await VaultItem.updateMany(memberFilter, memberUpdate, sessionOpt);
+      await Document.updateMany(memberFilter, memberUpdate, sessionOpt);
 
       // Move child folders to the parent as well
       const parentUpdate = folder.parentId
@@ -394,22 +395,29 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
   // AWAITED, deliberately. This used to be a floating `void ....then()`, which
   // gave the mitigation the very failure mode it exists to mitigate: a process
   // that dies just after answering loses the sweep exactly as it lost the write
-  // the sweep was compensating for, and the orphan survives. One indexed
-  // `updateMany` before the audit row costs a single round trip and makes the
-  // reference provably gone by the time the caller is told the folder is.
+  // the sweep was compensating for, and the orphan survives. Two indexed
+  // `updateMany`s issued together before the audit row cost a single round trip
+  // of latency and make the reference provably gone by the time the caller is
+  // told the folder is.
   //
   // It also removed a race the suite could see but not control: whether the
   // floating promise resolved before the worker moved on decided whether this
   // branch was executed at all, so `packages/server` line and branch coverage
   // differed run to run (measured: 3012 vs 3013 lines, 1417 vs 1418 branches on
   // two runs of the same tree at the same seed) and the ratchet gate flickered.
+  //
+  // Documents are swept alongside items, and for the same reason: the window is
+  // the gap between the member update and the folder delete, which exists for
+  // both collections on a standalone deployment.
   try {
-    const cleanup = await VaultItem.updateMany(
-      { userId, folderId: id, deletedAt: null },
-      { $unset: { folderId: 1 } },
-    );
-    if (cleanup.modifiedCount > 0) {
-      logger.info(`Cleaned up ${String(cleanup.modifiedCount)} orphaned folderId references`, {
+    const orphaned = { userId, folderId: id, deletedAt: null };
+    const [itemCleanup, documentCleanup] = await Promise.all([
+      VaultItem.updateMany(orphaned, { $unset: { folderId: 1 } }),
+      Document.updateMany(orphaned, { $unset: { folderId: 1 } }),
+    ]);
+    const cleared = itemCleanup.modifiedCount + documentCleanup.modifiedCount;
+    if (cleared > 0) {
+      logger.info(`Cleaned up ${String(cleared)} orphaned folderId references`, {
         userId,
         folderId: id,
       });

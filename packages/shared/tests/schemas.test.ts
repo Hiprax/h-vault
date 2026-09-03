@@ -53,7 +53,13 @@ import {
   regenerateBackupCodesSchema,
   deleteAccountSchema,
 } from '../src/schemas/user.js';
-import { MAX_IMPORT_ITEMS, PASSWORD_HISTORY_MAX } from '../src/constants/index.js';
+import {
+  MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
+  MAX_DOCUMENTS_PER_ROTATION,
+  MAX_DOCUMENTS_PER_USER,
+  MAX_IMPORT_ITEMS,
+  PASSWORD_HISTORY_MAX,
+} from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
 
@@ -853,7 +859,14 @@ describe('bulkReEncryptSchema', () => {
   });
 
   it('rejects items over 10,000', () => {
-    const bigItems = Array.from({ length: 10_001 }, () => validReEncrypt.items[0]!);
+    // DISTINCT ids, and that is the whole point of the generator. Had this been
+    // built from 10,001 copies of ONE entry, the duplicate-id `.superRefine` would
+    // be what refuses the payload and the array cap would never be reached — so
+    // `.max(10_000)` could be deleted and this test would stay green.
+    const bigItems = Array.from({ length: 10_001 }, (_, index) => ({
+      ...validReEncrypt.items[0]!,
+      id: `507f1f77bcf86cd7994${String(index).padStart(5, '0')}`,
+    }));
     expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, items: bigItems }).success).toBe(
       false,
     );
@@ -904,6 +917,148 @@ describe('bulkReEncryptSchema', () => {
     expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, folders: bigFolders }).success).toBe(
       false,
     );
+  });
+
+  // ── the documents leg ────────────────────────────────────────────────
+  //
+  // A rotation rewraps the document key, never the file, so an entry is an id and
+  // a wrapped 256-bit key and nothing else. The cases below pin that shape, its
+  // optionality (an older client and an unconfigured server both send nothing)
+  // and the duplicate rejection all three legs now carry.
+
+  const rewrap = {
+    id: '507f1f77bcf86cd799439011',
+    encryptedDek: 'wrapped-dek',
+    dekIv: 'dek-iv',
+    dekTag: 'dek-tag',
+  };
+
+  it('accepts a documents leg of rewrapped document keys', () => {
+    expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, documents: [rewrap] }).success).toBe(
+      true,
+    );
+  });
+
+  it('defaults documents to an empty array when the field is absent', () => {
+    // An older client, or a server with no object storage configured, sends no
+    // documents leg at all and must rotate exactly as it did before.
+    const result = bulkReEncryptSchema.parse(validReEncrypt);
+    expect(result.documents).toEqual([]);
+  });
+
+  /** `count` documents-leg entries with DISTINCT ids, as a real payload has. */
+  function distinctRewraps(count: number): (typeof rewrap)[] {
+    return Array.from({ length: count }, (_, index) => ({
+      ...rewrap,
+      id: `507f1f77bcf86cd7994${String(index).padStart(5, '0')}`,
+    }));
+  }
+
+  it('accepts a documents leg naming every row an account can actually hold', () => {
+    // The bound that matters, and it is NOT `MAX_DOCUMENTS_PER_USER`. The server
+    // checks the document count only when a transfer is OPENED
+    // (`documentController`'s init), so three transfers opened against the same
+    // count all pass and all commit: an account can finish at
+    // `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1` rows past the advertised
+    // limit. A rotation must name EVERY row the account holds — the handler
+    // compares distinct ids against an unfiltered `countDocuments` — so a wire cap
+    // set to the advertised limit makes such an account unable to rotate its vault
+    // key ever again, in either direction: too long for the schema, too short for
+    // the coverage check. This case is the one that fails if the cap is set to the
+    // wrong number.
+    const atCeiling = distinctRewraps(
+      MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1,
+    );
+    expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, documents: atCeiling }).success).toBe(
+      true,
+    );
+  });
+
+  it('rejects a documents leg over MAX_DOCUMENTS_PER_ROTATION', () => {
+    // DISTINCT ids, deliberately. Had this been built from N+1 copies of one
+    // object, the duplicate-id `.superRefine` would refuse the payload and the
+    // array cap would never be reached, so the `.max()` could be deleted with this
+    // test still green — exactly the mutant `stryker`'s `ignoreStatic: false`
+    // exists to score.
+    const tooMany = distinctRewraps(MAX_DOCUMENTS_PER_ROTATION + 1);
+    expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, documents: tooMany }).success).toBe(
+      false,
+    );
+  });
+
+  it('drops a framing or size field smuggled into a documents entry rather than storing it', () => {
+    // STRIP mode, which is `z.object()`'s default: the rotation route must not be
+    // a way to reach a column that decides how a stored object is cut into sealed
+    // segments, and the parsed value is what the handler writes from.
+    const parsed = bulkReEncryptSchema.parse({
+      ...validReEncrypt,
+      documents: [{ ...rewrap, streamSalt: 'x', chunkCount: 99, objectKey: 'u/other/d/other' }],
+    });
+    expect(parsed.documents[0]).toEqual(rewrap);
+  });
+
+  it('checks for a repeat AFTER objectIdSchema has lowercased, not before', () => {
+    // The ORDERING is the property, not the input. `objectIdSchema` lowercases in
+    // a `.transform()`, and the parent `.superRefine` sees post-transform data, so
+    // `AABB…0001` and `aabb…0001` are ONE id by the time the duplicate check runs.
+    // Move that check ahead of the transform — or drop the lowercasing — and the
+    // pair sails through as two distinct entries: `[A, A, B]` with the right list
+    // length, which is exactly the payload the refusal exists to stop, wearing a
+    // different case. Mongo's `_id` comparison is byte-exact, but every id in this
+    // payload reaches it through this transform, so the two really are one row.
+    const upper = { ...validReEncrypt.items[0]!, id: 'AABBCCDDEEFF001122334455' };
+    const lower = { ...validReEncrypt.items[0]!, id: 'aabbccddeeff001122334455' };
+    const other = { ...validReEncrypt.items[0]!, id: '507f1f77bcf86cd799439012' };
+
+    const result = bulkReEncryptSchema.safeParse({
+      ...validReEncrypt,
+      items: [upper, lower, other],
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.path[0] === 'items')).toBe(true);
+    }
+  });
+
+  it('rejects a repeated id in any one leg, naming the leg that repeated it', () => {
+    // `[A, A, B]` against an account holding `{A, B, C}` would otherwise satisfy
+    // the server's missing-id abort and reach the right list length while leaving
+    // C sealed under the outgoing key.
+    const otherItem = { ...validReEncrypt.items[0]!, id: '507f1f77bcf86cd799439012' };
+    for (const [leg, payload] of [
+      ['items', { items: [validReEncrypt.items[0]!, validReEncrypt.items[0]!, otherItem] }],
+      [
+        'folders',
+        {
+          folders: [
+            { id: '507f1f77bcf86cd799439011', encryptedName: 'e', nameIv: 'i', nameTag: 't' },
+            { id: '507f1f77bcf86cd799439011', encryptedName: 'e2', nameIv: 'i2', nameTag: 't2' },
+          ],
+        },
+      ],
+      ['documents', { documents: [rewrap, { ...rewrap, encryptedDek: 'other' }] }],
+    ] as const) {
+      const result = bulkReEncryptSchema.safeParse({ ...validReEncrypt, ...payload });
+      expect(result.success, `${leg} accepted a repeated id`).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((issue) => issue.path[0] === leg)).toBe(true);
+      }
+    }
+  });
+
+  it('accepts each leg naming several DISTINCT ids', () => {
+    // The negative half of the case above: the duplicate check must not refuse a
+    // legitimate multi-row rotation.
+    const result = bulkReEncryptSchema.safeParse({
+      ...validReEncrypt,
+      items: [
+        validReEncrypt.items[0]!,
+        { ...validReEncrypt.items[0]!, id: '507f1f77bcf86cd799439012' },
+      ],
+      documents: [rewrap, { ...rewrap, id: '507f1f77bcf86cd799439013' }],
+    });
+    expect(result.success).toBe(true);
   });
 
   it('accepts optional idempotencyKey as valid UUID', () => {

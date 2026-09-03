@@ -1,9 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import mongoose from 'mongoose';
 import app from '../src/app.js';
-import { MAX_ITEMS_PER_USER, MAX_FOLDERS_PER_USER } from '@hvault/shared';
+import {
+  MAX_ITEMS_PER_USER,
+  MAX_FOLDERS_PER_USER,
+  DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+} from '@hvault/shared';
 import { Folder } from '../src/models/Folder.js';
 import { VaultItem } from '../src/models/VaultItem.js';
+import { Document } from '../src/models/Document.js';
+import { DocumentUpload } from '../src/models/DocumentUpload.js';
 import {
   createTestUser,
   authHeader,
@@ -723,5 +730,114 @@ describe('Backup restore — cross-account & repeat (_id collision fix)', () => 
     expect(String(res.body.message)).toMatch(/folder limit/i);
     // Rejected before any write — no duplicate created.
     expect(await Folder.countDocuments({ userId: userB.id })).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The backup boundary: a restore never creates a document
+//
+// Documents are deliberately out of a backup. That is a boundary rather than an
+// oversight, and it is only a boundary while nothing on the restore path crosses
+// it — so this block sends a payload that is actively TRYING to cross it: a
+// `documents` array of well-formed rows and a `documentSummary` that claims they
+// exist, exactly what a future "documents in backup" change, a hand-edited file
+// or a hostile one would look like.
+//
+// It runs under all three conflict strategies because they take different code
+// paths, and `keep_both` in particular ALWAYS inserts rather than matching — it
+// is the strategy under which an accidental documents loop would be guaranteed
+// to write. The positive half of each case (items and folders really did
+// restore) is what stops the assertion passing because the request was rejected.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Backup restore — documents are not part of a backup', () => {
+  let userA: TestUser;
+  let userB: TestUser;
+  let agent: request.Agent;
+
+  beforeEach(async () => {
+    agent = request(app);
+    userA = await createTestUser();
+    userB = await createTestUser();
+  });
+
+  /** A payload carrying A's rows plus a documents array the restore must ignore. */
+  async function payloadWithDocuments(): Promise<string> {
+    await seedFolder(userA.id, { encryptedName: 'fA1' });
+    await seedItem(userA.id, { encryptedName: 'iA1' });
+    const payload = await dbBackupPayload(userA.id);
+
+    const documentId = new mongoose.Types.ObjectId();
+    return JSON.stringify({
+      ...payload,
+      documentSummary: { count: 1, totalBytes: 4_096 },
+      documents: [
+        {
+          _id: String(documentId),
+          userId: userA.id,
+          objectKey: `u/${userA.id}/d/${documentId.toHexString()}`,
+          encryptedDek: 'dek-ciphertext',
+          dekIv: 'dek-iv',
+          dekTag: 'dek-tag',
+          streamSalt: Buffer.alloc(32, 7).toString('base64'),
+          noncePrefix: Buffer.alloc(7, 3).toString('base64'),
+          encryptedMeta: 'meta-ciphertext',
+          metaIv: 'meta-iv',
+          metaTag: 'meta-tag',
+          chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+          chunkCount: 1,
+          ciphertextBytes: 4_112,
+          plaintextBytes: 4_096,
+        },
+      ],
+    });
+  }
+
+  for (const conflictStrategy of ['skip', 'overwrite', 'keep_both'] as const) {
+    it(`creates no document row and no staging row under conflictStrategy=${conflictStrategy}`, async () => {
+      const data = await payloadWithDocuments();
+
+      const res = await restore(agent, userB.accessToken, { conflictStrategy, data });
+
+      // The request really succeeded and really restored the rows that ARE in a
+      // backup, so the counts below are about what the restore chose to write,
+      // not about a rejected request.
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.data.itemsRestored).toBe(1);
+      expect(res.body.data.foldersRestored).toBe(1);
+      expect(hasInvalidSkips(res)).toBe(false);
+      expect(await rawItems(userB.id)).toHaveLength(1);
+      expect(await rawFolders(userB.id)).toHaveLength(1);
+
+      // …and no document was created for ANYONE. Counted across the whole
+      // collection rather than per user, because a restore that honoured the
+      // payload's own `userId` would write the row under account A.
+      expect(await Document.countDocuments({})).toBe(0);
+      expect(await DocumentUpload.countDocuments({})).toBe(0);
+    });
+  }
+
+  it('restores a pre-document-store payload that has no documentSummary at all', async () => {
+    // The `upgrade` gate's shape: a file written by a server that predates this
+    // feature. The field is OPTIONAL on the wire precisely so this still works,
+    // and a restore that started requiring it would refuse every backup taken
+    // before 0.10.0.
+    await seedFolder(userA.id, { encryptedName: 'legacy-folder' });
+    await seedItem(userA.id, { encryptedName: 'legacy-item' });
+    const payload = await dbBackupPayload(userA.id);
+    expect(
+      (payload as Record<string, unknown>).documentSummary,
+      'the fixture must genuinely lack the field',
+    ).toBeUndefined();
+
+    const res = await restore(agent, userB.accessToken, {
+      conflictStrategy: 'skip',
+      data: JSON.stringify(payload),
+    });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.data.itemsRestored).toBe(1);
+    expect(res.body.data.foldersRestored).toBe(1);
+    expect(await Document.countDocuments({})).toBe(0);
   });
 });

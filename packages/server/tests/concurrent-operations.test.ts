@@ -6,6 +6,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { User } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
+import { AuditLog } from '../src/models/AuditLog.js';
 import {
   createTestUser,
   authHeader,
@@ -250,11 +251,40 @@ describe('Concurrent Operations', () => {
         })(),
       ]);
 
-      // With the distributed lock, one request acquires the lock and succeeds,
-      // the other is rejected with 409 (rotation already in progress).
-      // The client can safely retry, which will hit the idempotency check.
+      // TWO interleavings are legitimate here, and this case pins what is true of
+      // BOTH rather than the one it happened to observe when it was written:
+      //
+      //   * the second request reaches the handler while the first still holds the
+      //     per-user rotation lock, and is refused with 409; or
+      //   * it arrives after the first has committed, its `lastRotationKey` read
+      //     matches, and the idempotency short-circuit answers 200 having written
+      //     NOTHING — the documented behaviour a retrying client depends on.
+      //
+      // Which one happens is decided by scheduling, so the old `toEqual([200, 409])`
+      // was a coin toss dressed as an assertion; it lost the toss the first time the
+      // suite grew and the two requests stopped overlapping. Widening the accepted
+      // statuses on its own WOULD be a weakening, so the real invariant is asserted
+      // directly below instead: the rotation happened exactly once.
       const statuses = [first.status, second.status].sort();
-      expect(statuses).toEqual([200, 409]);
+      expect(statuses[0]).toBe(200);
+      expect([200, 409]).toContain(statuses[1]);
+
+      // EXACTLY ONE rotation, whichever interleaving ran. The audit row is written
+      // only on the path that actually rotates — the 409 never reaches it and the
+      // idempotent replay returns before it — so this catches a double rotation and
+      // a silently skipped one, neither of which the status tuple could see.
+      const auditRows = await AuditLog.find({ userId: user.id, action: 'password_change' }).lean();
+      const rotationRows = auditRows.filter(
+        (row) => row.metadata?.['action'] === 'vault_key_rotation',
+      );
+      expect(rotationRows).toHaveLength(1);
+
+      // The vault key was replaced, and the write fence that guards every
+      // ciphertext-creating handler was cleared on the way out, so a later write is
+      // not left conflicting with a rotation that has finished.
+      const rotatedUser = await User.findById(user.id).lean();
+      expect(rotatedUser?.encryptedVaultKey).toBe('new-vault-key');
+      expect(rotatedUser?.rotationInProgress).toBe(false);
 
       // Item should have the rotated data exactly once
       const item = await VaultItem.findById(itemId).lean();

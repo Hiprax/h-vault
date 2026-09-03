@@ -22,6 +22,8 @@ import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
 import { Migration } from '../src/models/Migration.js';
 import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
+import { Document } from '../src/models/Document.js';
+import { DocumentUpload } from '../src/models/DocumentUpload.js';
 
 export const indexedModels = [
   { name: 'User', model: User },
@@ -34,4 +36,6 @@ export const indexedModels = [
   { name: 'JobLock', model: JobLock },
   { name: 'Migration', model: Migration },
   { name: 'PwnedRangeCache', model: PwnedRangeCache },
+  { name: 'Document', model: Document },
+  { name: 'DocumentUpload', model: DocumentUpload },
 ];

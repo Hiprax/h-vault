@@ -33,10 +33,25 @@ import {
   secretDataSchema,
   vaultItemDataSchemas,
 } from '../../src/schemas/vault.js';
+import {
+  documentChunkCountFor,
+  documentMetaJsonByteLength,
+  documentMetaSchema,
+} from '../../src/schemas/document.js';
 import { normalizeUri } from '../../src/utils/index.js';
 import {
   CUSTOM_FIELD_TYPES,
+  DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   ITEM_TYPES,
+  MAX_DOCUMENT_CHUNK_COUNT,
+  MAX_DOCUMENT_EXT_LENGTH,
+  MAX_DOCUMENT_META_JSON_BYTES,
+  MAX_DOCUMENT_MIME_LENGTH,
+  MAX_DOCUMENT_NAME_LENGTH,
+  MAX_DOCUMENT_NOTE_LENGTH,
+  MAX_DOCUMENT_TAGS,
+  MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH,
+  MAX_TAG_LENGTH,
   MAX_ADDRESS_CITY_LENGTH,
   MAX_ADDRESS_COUNTRY_LENGTH,
   MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
@@ -261,6 +276,138 @@ const identityArbitrary = fc.record({
   ),
 });
 
+// ---------------------------------------------------------------------------
+// The document metadata blob
+//
+// Not a member of `SCHEMAS` below: that list is keyed by ITEM_TYPES and is
+// asserted against it. The document blob holds the same position in its own
+// feature that a vault item's data holds in the vault — sealed by the browser,
+// parsed on the way in and again on the way out — so it gets the same laws.
+// ---------------------------------------------------------------------------
+
+/**
+ * The EXPLICIT field enum the generator is built from.
+ *
+ * Explicit rather than derived from the schema, because the failure this guards
+ * against is a field added to the schema and NOT to the generator: derive the list
+ * and that field is generated as `undefined` forever while the suite still reports
+ * three green properties over it. The two assertions below close the loop in both
+ * directions — this list must equal the schema's own keys, and every entry must
+ * actually be populated in a real sample.
+ */
+const DOCUMENT_META_FIELDS = [
+  'name',
+  'mime',
+  'ext',
+  'plaintextBytes',
+  'sha256',
+  'chunkPlaintextBytes',
+  'chunkCount',
+  'tags',
+  'note',
+  'transform',
+  'capturedAt',
+] as const;
+
+/** A 32-byte digest, hex-encoded the way one really is: lower case by construction. */
+const digestArbitrary = fc
+  .uint8Array({ minLength: 32, maxLength: 32 })
+  .map((bytes) => Buffer.from(bytes).toString('hex'));
+
+/**
+ * A tag the schema accepts, measured the way the schema measures it: AFTER
+ * `.trim()`. Padded values are deliberately in the sample, because trimming is a
+ * transform and a non-idempotent one would move a document's metadata on every
+ * save.
+ */
+const documentTagArbitrary = fc.oneof(
+  {
+    weight: 8,
+    arbitrary: fc
+      .string({ unit: 'binary', minLength: 1, maxLength: 12 })
+      .filter((value) => value.trim().length >= 1),
+  },
+  { weight: 1, arbitrary: fc.constant('x'.repeat(MAX_TAG_LENGTH)) },
+  { weight: 1, arbitrary: fc.constant(`  ${'x'.repeat(MAX_TAG_LENGTH)}  `) },
+);
+
+/**
+ * A CONSISTENT framing triple, because the schema refuses an inconsistent one and
+ * a generator that produced inconsistent triples would test the refine rather than
+ * the fixed point.
+ *
+ * Built from whole segments plus a remainder rather than from a flat integer, so
+ * the sample lands on the three cases that matter: zero bytes, an exact multiple of
+ * the chunk size, and a partial final segment. The chunk size itself is drawn from
+ * several values, including 1 — the row carries this number, so a document written
+ * under a different constant must still frame.
+ */
+const documentFramingArbitrary = fc
+  .tuple(
+    fc.constantFrom(
+      DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+      Math.floor(DOCUMENT_PLAINTEXT_CHUNK_BYTES / 2),
+      4096,
+      1,
+    ),
+    fc.integer({ min: 0, max: 40 }),
+    fc.integer({ min: 0, max: 4096 }),
+  )
+  .map(([chunkPlaintextBytes, wholeSegments, remainder]) => {
+    const plaintextBytes =
+      wholeSegments * chunkPlaintextBytes + Math.min(remainder, chunkPlaintextBytes - 1);
+    return {
+      chunkPlaintextBytes,
+      plaintextBytes,
+      chunkCount: documentChunkCountFor(plaintextBytes, chunkPlaintextBytes),
+    };
+  });
+
+const documentMetaArbitrary = fc
+  .tuple(
+    documentFramingArbitrary,
+    fc.record({
+      // `.min(1)`: a nameless document has nothing to display.
+      name: boundedString(MAX_DOCUMENT_NAME_LENGTH).filter((value) => value.length >= 1),
+      mime: boundedString(MAX_DOCUMENT_MIME_LENGTH),
+      ext: boundedString(MAX_DOCUMENT_EXT_LENGTH),
+      sha256: digestArbitrary,
+      tags: fc.array(documentTagArbitrary, { maxLength: Math.min(MAX_DOCUMENT_TAGS, 4) }),
+      note: optional(boundedString(MAX_DOCUMENT_NOTE_LENGTH)),
+      transform: optional(
+        fc.record({
+          formatted: fc.boolean(),
+          repaired: fc.boolean(),
+          tool: boundedString(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH).filter(
+            (value) => value.length >= 1,
+          ),
+          toolVersion: boundedString(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH).filter(
+            (value) => value.length >= 1,
+          ),
+          originalSha256: digestArbitrary,
+        }),
+      ),
+      // A `Z` instant, which is the only form the schema accepts: an
+      // offset-bearing local time reads differently per zone, and this file runs
+      // in a DST-observing one as well as in UTC.
+      capturedAt: fc
+        .date({
+          min: new Date('2020-01-01T00:00:00.000Z'),
+          max: new Date('2030-12-31T23:59:59.999Z'),
+          noInvalidDate: true,
+        })
+        .map((value) => value.toISOString()),
+    }),
+  )
+  .map(([framing, fields]) => ({ ...fields, ...framing }))
+  // A safety net rather than a workaround, and it should essentially never fire:
+  // `boundedString` draws either a short binary string or the cap in ASCII, so the
+  // whole blob stays far inside the byte budget. It is here so that a future
+  // generator change which DOES exceed the budget fails as a filter-exhaustion
+  // error naming this line, rather than as a mystifying rejection inside a property
+  // whose subject is the fixed point.
+  .filter((meta) => documentMetaJsonByteLength(meta) <= MAX_DOCUMENT_META_JSON_BYTES);
+
 /** The five schemas, each with a generator over its own shape. */
 const SCHEMAS = [
   { itemType: 'login' as const, schema: loginDataSchema, arbitrary: loginArbitrary },
@@ -338,6 +485,97 @@ describe.each(SCHEMAS)('$itemType data schema', ({ schema, arbitrary }) => {
         const serialized = JSON.stringify(parsed);
         expect(serialized, propertyBanner()).toBeTypeOf('string');
         expect(JSON.parse(serialized), propertyBanner()).toEqual(parsed);
+      }),
+      propertyRun(),
+    );
+  });
+});
+
+describe('documentMetaSchema — the encrypted blob, as properties', () => {
+  it('has a generator for every field the schema declares, so a twelfth cannot be added untested', () => {
+    // Both directions. The schema's keys must be exactly the enum above (a field
+    // added to the schema and not here fails this), and every entry of that enum
+    // must be populated by a real sample (an enum entry the generator forgot fails
+    // the next assertion).
+    expect(Object.keys(documentMetaSchema.shape).sort()).toEqual([...DOCUMENT_META_FIELDS].sort());
+
+    const populated = new Set<string>();
+    const absent = new Set<string>();
+    fc.assert(
+      fc.property(documentMetaArbitrary, (meta) => {
+        for (const field of DOCUMENT_META_FIELDS) {
+          (meta[field] === undefined ? absent : populated).add(field);
+        }
+      }),
+      propertyRun({ numRuns: 200 }),
+    );
+
+    expect(
+      [...populated].sort(),
+      `${propertyBanner()} — a field no sample ever populated is generated by nothing`,
+    ).toEqual([...DOCUMENT_META_FIELDS].sort());
+    // And the fields that are ever ABSENT are exactly the two optional ones, which
+    // is the stronger statement: it pins that the optional branch is exercised AND
+    // that no required field is ever silently skipped.
+    expect([...absent].sort(), propertyBanner()).toEqual(['note', 'transform']);
+  });
+
+  it('parses its own output back to the identical value (the fixed point)', () => {
+    fc.assert(
+      fc.property(documentMetaArbitrary, (input) => {
+        const first = documentMetaSchema.parse(input);
+        const second = documentMetaSchema.safeParse(throughStorage(first));
+        expect(
+          second.success,
+          `${propertyBanner()} — re-parse rejected the schema's own output`,
+        ).toBe(true);
+        expect(second.success ? second.data : null).toEqual(first);
+      }),
+      propertyRun(),
+    );
+  });
+
+  it('is idempotent on a value that has already been parsed twice', () => {
+    fc.assert(
+      fc.property(documentMetaArbitrary, (input) => {
+        const once = documentMetaSchema.parse(input);
+        const twice = documentMetaSchema.parse(throughStorage(once));
+        const thrice = documentMetaSchema.parse(throughStorage(twice));
+        expect(thrice, propertyBanner()).toEqual(twice);
+      }),
+      propertyRun({ numRuns: Math.ceil(PROPERTY_RUNS / 2) }),
+    );
+  });
+
+  it('never returns a value JSON cannot carry, since the blob is sealed as JSON', () => {
+    fc.assert(
+      fc.property(documentMetaArbitrary, (input) => {
+        const parsed = documentMetaSchema.parse(input);
+        const serialized = JSON.stringify(parsed);
+        expect(serialized, propertyBanner()).toBeTypeOf('string');
+        expect(JSON.parse(serialized), propertyBanner()).toEqual(parsed);
+      }),
+      propertyRun(),
+    );
+  });
+
+  it('accepts exactly the segment count the plaintext size implies, and neither neighbour', () => {
+    // The framing refine, as a property rather than as three examples. One segment
+    // too few is a TRUNCATED document and one too many is a phantom final segment;
+    // both are what the index-and-last-flag nonce design exists to make
+    // undetectable-proof, so neither may parse.
+    fc.assert(
+      fc.property(documentMetaArbitrary, (meta) => {
+        expect(documentMetaSchema.safeParse(meta).success, propertyBanner()).toBe(true);
+        for (const delta of [-1, 1]) {
+          const chunkCount = meta.chunkCount + delta;
+          if (chunkCount < 1 || chunkCount > MAX_DOCUMENT_CHUNK_COUNT) continue;
+          const result = documentMetaSchema.safeParse({ ...meta, chunkCount });
+          expect(
+            result.success,
+            `${propertyBanner()} — accepted ${String(chunkCount)} segments for ${String(meta.plaintextBytes)} bytes`,
+          ).toBe(false);
+        }
       }),
       propertyRun(),
     );

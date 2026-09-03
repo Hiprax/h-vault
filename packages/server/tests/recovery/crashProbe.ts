@@ -22,15 +22,30 @@
  *      what makes its configuration identical to the parent's — the same JWT
  *      secrets (so a token minted here authenticates there), the same
  *      `NODE_ENV=test` (so rate limiters no-op and no log file is written), the
- *      same timezone and locale pins. Only `MONGODB_URI` is overridden, and the
- *      child connects explicitly to the URI it is handed anyway.
+ *      same timezone and locale pins. `MONGODB_URI` is overridden, and the child
+ *      connects explicitly to the URI it is handed anyway; the four `S3_*`
+ *      variables are added only for a probe that asked for the storage bridge.
+ *
+ *   4. THE STORAGE BRIDGE, for the document drills. A probe that passes a
+ *      `storage` provider gets an IPC channel, the `S3_*` environment that makes
+ *      `storageConfigured` true in the child, and a proxy installed over the
+ *      child's memoised provider — so the bucket the child writes to IS the
+ *      parent's double, and the parent can assert on what the crash left there.
+ *      See `storageBridge.ts`.
  */
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import mongoose from 'mongoose';
 import { expect } from 'vitest';
-import { CRASH_MARKERS, type CrashRequest, type CrashScenario } from './crashContract.js';
+import {
+  CRASH_MARKERS,
+  type CrashMethod,
+  type CrashRequest,
+  type CrashScenario,
+} from './crashContract.js';
+import type { StorageProvider } from '../../src/services/storage/types.js';
+import { serveStorageOverIpc } from './storageBridge.js';
 
 /** Resolved from this module's own URL, never `process.cwd()`. */
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -48,6 +63,31 @@ const PROBE_DEADLINE_MS = 30_000;
 
 /** SIGKILL's wait-status, and what Node reports as the child's signal. */
 const KILL_SIGNAL = 'SIGKILL';
+
+/**
+ * The four connection variables a bridged child needs, and only a bridged child.
+ *
+ * They are what make `storageConfigured` true (so `requireStorage` lets the request
+ * through) and what stop `getStorage()` throwing 503 before the bridge can be
+ * installed over the provider it returns. The endpoint is deliberately a port
+ * nothing listens on: the real `S3Client` this builds is never used, because
+ * `crashChild.ts` overwrites every method on the provider before the request runs,
+ * and a reachable endpoint would only hide a bridge that failed to install.
+ *
+ * The bounds are the config schema's own: `min(8)` on the key id, `min(16)` on the
+ * secret, and all four set together or `loadConfig` normalises them back to none.
+ * `S3_RPC_SECRET` is deliberately absent — the server does not declare it, only the
+ * storage container reads it, and setting it here would suggest otherwise.
+ */
+const STORAGE_ENV = (storage: StorageProvider | undefined): Record<string, string> =>
+  storage === undefined
+    ? {}
+    : {
+        S3_ENDPOINT: 'http://127.0.0.1:1',
+        S3_BUCKET: 'hvault-crash-drill',
+        S3_ACCESS_KEY_ID: 'crashdrillkey',
+        S3_SECRET_ACCESS_KEY: 'crash-drill-secret-key-32chars!!',
+      };
 
 export interface CrashOutcome {
   /** True when the process was terminated by SIGKILL and never exited on its own. */
@@ -74,14 +114,32 @@ export async function runCrashProbe(options: {
   scenario: CrashScenario;
   path: string;
   token: string;
-  body: Record<string, unknown>;
+  method?: CrashMethod;
+  body?: Record<string, unknown>;
+  bodyBase64?: string;
+  headers?: Record<string, string>;
+  /**
+   * The parent's storage double, served to the child over IPC.
+   *
+   * Supplying it does three things at once, and all three are needed together:
+   * the child is spawned with an IPC channel, the four `S3_*` variables are put
+   * into its environment (so `storageConfigured` is true and `getStorage()` does
+   * not throw 503), and every storage call the child makes lands on THIS object —
+   * which is how the parent gets to inspect the bucket a killed process left
+   * behind. See `storageBridge.ts` for why a bridge rather than a container.
+   */
+  storage?: StorageProvider;
 }): Promise<CrashOutcome> {
   const payload: CrashRequest = {
     uri: options.uri,
     scenario: options.scenario,
     path: options.path,
     token: options.token,
-    body: options.body,
+    ...(options.method === undefined ? {} : { method: options.method }),
+    ...(options.body === undefined ? {} : { body: options.body }),
+    ...(options.bodyBase64 === undefined ? {} : { bodyBase64: options.bodyBase64 }),
+    ...(options.headers === undefined ? {} : { headers: options.headers }),
+    ...(options.storage === undefined ? {} : { storageBridge: true }),
   };
 
   const started = Date.now();
@@ -91,18 +149,51 @@ export async function runCrashProbe(options: {
       ['--import', 'tsx', path.join(here, 'crashChild.ts'), JSON.stringify(payload)],
       {
         cwd: path.resolve(here, '..', '..'),
-        env: { ...process.env, MONGODB_URI: options.uri },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, MONGODB_URI: options.uri, ...STORAGE_ENV(options.storage) },
+        // The fourth slot is the storage bridge, and it exists only when a probe
+        // asked for one: the five vault scenarios spawn exactly as they always did.
+        stdio:
+          options.storage === undefined
+            ? ['ignore', 'pipe', 'pipe']
+            : ['ignore', 'pipe', 'pipe', 'ipc'],
+        // Buffers and Dates cross the port unchanged. Errors deliberately do NOT:
+        // v8 serialization drops own properties on built-in types, so `statusCode`
+        // would vanish — `storageBridge.ts` ships a status code instead.
+        ...(options.storage === undefined ? {} : { serialization: 'advanced' as const }),
       },
     );
 
+    const stopServing =
+      options.storage === undefined ? () => {} : serveStorageOverIpc(child, options.storage);
+
     let output = '';
     let timedOut = false;
+    // RESOLVE ONCE, and `close` must be the one that wins. A reply written into a
+    // channel the SIGKILL just closed raises `ERR_IPC_CHANNEL_CLOSED` on this
+    // `ChildProcess`, and the `error` listener below would otherwise report a
+    // correct crash as a spawn failure — a red with a message pointing at the
+    // wrong thing entirely.
+    let settled = false;
+    const settle = (outcome: CrashOutcome): void => {
+      if (settled) return;
+      settled = true;
+      stopServing();
+      resolve(outcome);
+    };
     const collect = (chunk: Buffer): void => {
       output += chunk.toString();
     };
-    child.stdout.on('data', collect);
-    child.stderr.on('data', collect);
+    // Narrowed rather than asserted. Both are `'pipe'` in both stdio shapes above,
+    // but the shapes are a UNION now that a bridged probe adds a fourth slot, and
+    // TypeScript resolves a union `stdio` to the general `ChildProcess` whose
+    // streams are nullable. A `!` here would be an unchecked claim about a value
+    // the compiler stopped being able to see; this is the same claim, checked.
+    const { stdout, stderr } = child;
+    if (!stdout || !stderr) {
+      throw new Error('the crash probe was spawned without piped stdout and stderr');
+    }
+    stdout.on('data', collect);
+    stderr.on('data', collect);
 
     const deadline = setTimeout(() => {
       timedOut = true;
@@ -114,9 +205,12 @@ export async function runCrashProbe(options: {
     // the test worker; with it, it is an outcome `expectKilled` can describe —
     // "never armed", with the reason in the transcript.
     child.on('error', (error) => {
+      // Only a failure BEFORE the child armed itself is a spawn failure; anything
+      // after that is the channel dying with a process that was supposed to die.
+      if (output.includes(CRASH_MARKERS.ready)) return;
       clearTimeout(deadline);
       output += `\nthe crash probe could not be spawned: ${error.message}\n`;
-      resolve({
+      settle({
         killed: false,
         signal: null,
         exitCode: null,
@@ -130,7 +224,7 @@ export async function runCrashProbe(options: {
 
     child.on('close', (exitCode, signal) => {
       clearTimeout(deadline);
-      resolve({
+      settle({
         // A probe killed by the DEADLINE also arrives here with SIGKILL, so the
         // two are separated explicitly: only a self-inflicted kill counts.
         killed: signal === KILL_SIGNAL && !timedOut,

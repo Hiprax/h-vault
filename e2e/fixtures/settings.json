@@ -1,0 +1,8 @@
+{
+  "theme": "dark",
+  "autoLockMinutes": 15,
+  "clipboard": {
+    "clearSeconds": 30
+  },
+  "folders": ["work", "personal"]
+}

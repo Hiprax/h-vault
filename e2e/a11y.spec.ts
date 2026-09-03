@@ -1,13 +1,32 @@
 import { test, expect, type Page } from '@playwright/test';
 import {
   describeA11y,
+  documentFixture,
+  documentFixtureBytes,
+  gotoDocuments,
+  openDocument,
   registerAndSignInViaUI,
+  renderInSandboxDirectly,
   scanA11y,
+  uploadDocument,
   writeA11yScans,
   gotoFileEncryptionTool,
   type A11yScan,
 } from './helpers';
 import { A11Y_VIEWS, A11Y_VIEW_IDS } from './a11yViews';
+
+/**
+ * The document fixtures this walk stores, named here because three steps read
+ * them and one of them twice.
+ *
+ * The PDF is the one whose preview is DECLINED (`PREVIEW_MODES` names `pdf` as
+ * `none`), the markdown document is the one that renders inside the frame, and
+ * the JSON document is the one the transform panel rewrites so the review state
+ * exists to be scanned.
+ */
+const DOCUMENT_PDF = 'handbook.pdf';
+const DOCUMENT_MARKDOWN = 'README.md';
+const DOCUMENT_UGLY_JSON = 'ugly.json';
 
 /**
  * Automated accessibility scanning of every primary view and modal, in the REAL
@@ -38,7 +57,7 @@ import { A11Y_VIEWS, A11Y_VIEW_IDS } from './a11yViews';
  * there and reported here. And the interesting views are all BEHIND a sign-in
  * that involves a 600,000-iteration key derivation, a vault key held only in
  * memory, and ciphertext that has to make a round trip; a scan of the logged-out
- * landing page would cover two of the fifteen views below.
+ * landing page would cover two of the twenty views below.
  *
  * ## One test, one registration
  *
@@ -46,16 +65,18 @@ import { A11Y_VIEWS, A11Y_VIEW_IDS } from './a11yViews';
  * wall clock and the suite runs single-worker, so the whole authenticated walk
  * shares one account. Each view is a `test.step`, and every scan asserts SOFTLY
  * (`expect.soft`) so one failing view does not hide the state of the other
- * fourteen — an accessibility report that stops at the first finding is a report
- * somebody has to run fifteen times.
+ * nineteen — an accessibility report that stops at the first finding is a report
+ * somebody has to run twenty times.
  */
 
 test.describe('accessibility: every primary view and modal', () => {
   test('has no serious or critical axe violations', async ({ page }, testInfo) => {
-    // Two 600k-iteration derivations for the sign-in, then fifteen axe runs over
-    // a fully rendered SPA. `registerAndSignInViaUI` raises the timeout to its
-    // own floor; this raises it further for the walk that follows.
-    testInfo.setTimeout(300_000);
+    // Two 600k-iteration derivations for the sign-in, twenty axe runs over a
+    // fully rendered SPA, and three real documents uploaded through the browser's
+    // own AES-GCM to the storage engine the harness starts.
+    // `registerAndSignInViaUI` raises the timeout to its own floor; this raises it
+    // further for the walk that follows.
+    testInfo.setTimeout(600_000);
 
     // Reduced motion, and it is a DETERMINISM pin rather than a preference.
     // Dialogs and the saved-address picker enter with a 200ms `animate-in`
@@ -72,7 +93,7 @@ test.describe('accessibility: every primary view and modal', () => {
     /**
      * Scans the current DOM and records it.
      *
-     * Soft, so the walk continues: fourteen more views are worth more than
+     * Soft, so the walk continues: nineteen more views are worth more than
      * failing fast on the first, and the run still fails at the end.
      */
     const scan = async (view: string): Promise<void> => {
@@ -124,7 +145,7 @@ test.describe('accessibility: every primary view and modal', () => {
         // have mounted yet. A scan of a spinner reports zero violations exactly
         // like a scan of a clean page, and the completeness check downstream
         // proves a scan EXISTS per view, never that the view had rendered. Wait
-        // for the item's own heading, as the other fourteen steps do.
+        // for the item's own heading, as every other step does.
         await expect(page.getByRole('heading', { name: 'Router admin', level: 1 })).toBeVisible({
           timeout: 60_000,
         });
@@ -200,12 +221,96 @@ test.describe('accessibility: every primary view and modal', () => {
         await scan('file-encryption');
       });
 
-      // Last, because reaching it locks the vault: the key lives in memory only,
-      // so everything above is unreachable afterwards without another derivation.
+      // --- The document store -------------------------------------------------
+      //
+      // Real documents, uploaded through the real path: the harness starts the
+      // object-storage engine in a container, so `test:a11y` declares `docker`
+      // as a prerequisite exactly as `test:e2e` does. There is no way to scan
+      // these four views against an empty store — the list would be its empty
+      // state, and the detail views would not exist at all.
+      await test.step('documents', async () => {
+        await gotoDocuments(page);
+        // The PDF first, so the list is not in its empty state when the markdown
+        // document lands and the two detail views below have something to open.
+        await uploadDocument(page, DOCUMENT_PDF);
+        await uploadDocument(page, DOCUMENT_MARKDOWN);
+        await scan('documents-list');
+
+        // The upload panel's own controls, which exist only once a file is
+        // picked and a transform has produced something to confirm. At rest the
+        // panel is already inside the scan above.
+        await page
+          .locator('#document-upload-input')
+          .setInputFiles(documentFixture(DOCUMENT_UGLY_JSON));
+        await page.locator('#document-transform-format').check();
+        await page.locator('#document-transform-repair').check();
+        await page.getByRole('button', { name: 'Prepare and review' }).click();
+        await expect(page.getByTestId('transform-review')).toBeVisible({ timeout: 90_000 });
+        // Expanded, because a collapsed `<details>` hides the diff from the
+        // scanner exactly as it hides it from a reader.
+        await page.getByText('Show what changed').click();
+        await expect(page.getByTestId('transform-diff')).toBeVisible();
+        await scan('document-upload-review');
+
+        // Put the panel back to rest before navigating: an unconfirmed review is
+        // a decision this walk has no business leaving open behind it.
+        await page.getByTestId('transform-review').getByRole('button', { name: 'Cancel' }).click();
+        await page.getByRole('button', { name: 'Clear selected file' }).click();
+        await expect(page.getByTestId('transform-review')).toHaveCount(0);
+
+        // The declined half of the detail view: a PDF is download-only, so this
+        // is the chrome, the reason and the download button with no frame at all.
+        await openDocument(page, DOCUMENT_PDF);
+        await expect(page.getByTestId('document-download-to-view')).toBeVisible({
+          timeout: 90_000,
+        });
+        await scan('document-detail');
+
+        // And the rendered half. The wait is on the RENDERER'S OWN shell inside
+        // the frame rather than on the frame element, because an iframe is
+        // visible the moment it is attached: a scan taken then would cover an
+        // empty rectangle and report it clean.
+        await page.getByRole('link', { name: 'Back to documents' }).click();
+        await expect(page).toHaveURL(/\/documents$/);
+        await openDocument(page, DOCUMENT_MARKDOWN);
+        await expect(
+          page.frameLocator('iframe[title^="Preview of "]').locator('.hv-doc-markdown'),
+        ).toBeVisible({ timeout: 90_000 });
+        // NOTE FOR ANYONE READING A FAILURE HERE: the frame's CONTENTS are part
+        // of this scan. `@axe-core/playwright` reaches a child frame through
+        // Playwright's own frame tree rather than through axe's same-origin
+        // frameMessenger, so a serious finding inside the isolated document
+        // fails this view — which is intended, and is why the frame is not
+        // excluded. Excluding it would drop the whole framed document from the
+        // run while leaving every number this gate reports unchanged.
+        await scan('document-viewer');
+      });
+
+      // Near-last, because reaching it locks the vault: the key lives in memory
+      // only, so everything above is unreachable afterwards without another
+      // derivation.
       await test.step('unlock screen', async () => {
         await page.keyboard.press('Control+l');
         await expect(page.getByText('Vault Locked')).toBeVisible({ timeout: 60_000 });
         await scan('unlock-screen');
+      });
+
+      // Truly last, and it needs no session at all: a top-level navigation to the
+      // isolated document, handed a rendered markdown document over a real port.
+      // See `a11yViews.ts` for why this is not a second look at the frame the
+      // `document-viewer` scan already covered.
+      await test.step('sandbox rendered', async () => {
+        const replies = await renderInSandboxDirectly(page, {
+          mode: 'markdown',
+          ext: 'md',
+          bytes: documentFixtureBytes(DOCUMENT_MARKDOWN),
+        });
+        // The document ANSWERED, and answered `rendered`. Without this a scan of
+        // a frame that had refused the request would report zero violations
+        // about an empty document — the same trap the completeness check exists
+        // for, one level down.
+        expect(replies).toEqual([{ kind: 'rendered' }]);
+        await scan('sandbox-rendered');
       });
     } finally {
       // Written even when a scan failed, and that is the point: the gate turns

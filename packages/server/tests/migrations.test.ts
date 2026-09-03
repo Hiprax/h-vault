@@ -4,6 +4,8 @@ import { runMigrations, type MigrationDefinition } from '../src/utils/migrations
 import { Migration } from '../src/models/Migration.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { JobLock } from '../src/models/JobLock.js';
+import { Document } from '../src/models/Document.js';
+import { DocumentUpload } from '../src/models/DocumentUpload.js';
 // Importing the production index registry both exercises it and registers every
 // listed model on the shared Mongoose instance.
 import { indexedModels } from '../scripts/indexedModels.js';
@@ -52,6 +54,48 @@ describe('Database migrations', () => {
       // — with `autoIndex` disabled — only gets from the create-indexes pass.
       const trustedDeviceIndexes = TrustedDevice.schema.indexes();
       expect(trustedDeviceIndexes.length).toBeGreaterThan(0);
+    });
+
+    it('includes the Document model so its UNIQUE objectKey index is built in production', () => {
+      const listed = new Set(indexedModels.map((m) => m.name));
+      expect(listed.has('Document')).toBe(true);
+
+      // The unique `objectKey` index is a correctness constraint, not a
+      // performance one: without it, nothing stops two rows naming one stored
+      // object, and a permanent purge would then delete the ciphertext another
+      // live document still points at. In production `autoIndex` is off, so the
+      // create-indexes pass is the ONLY thing that builds it.
+      // `schema.indexes()` is typed loosely by Mongoose; cast to the known
+      // `[keys, options]` tuple shape, exactly as `config/database.ts` does.
+      const documentIndexes = Document.schema.indexes() as [
+        Record<string, unknown>,
+        Record<string, unknown>,
+      ][];
+      expect(documentIndexes.length).toBeGreaterThan(0);
+      expect(
+        documentIndexes.some(
+          ([key, options]) => key['objectKey'] === 1 && options['unique'] === true,
+        ),
+      ).toBe(true);
+    });
+
+    it('includes the DocumentUpload model so its TTL index is built in production', () => {
+      const listed = new Set(indexedModels.map((m) => m.name));
+      expect(listed.has('DocumentUpload')).toBe(true);
+
+      // The staging row's TTL is what bounds an abandoned transfer's hold on the
+      // per-user quota and on the concurrency budget. Unbuilt, a cancelled upload
+      // would occupy both forever — and `jobs/documentCleanup.ts` only reclaims
+      // the OBJECT, on the assumption that this index has already taken the row.
+      const uploadIndexes = DocumentUpload.schema.indexes() as [
+        Record<string, unknown>,
+        Record<string, unknown>,
+      ][];
+      expect(
+        uploadIndexes.some(
+          ([key, options]) => key['expiresAt'] === 1 && options['expireAfterSeconds'] === 0,
+        ),
+      ).toBe(true);
     });
   });
 

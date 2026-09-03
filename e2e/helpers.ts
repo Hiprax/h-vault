@@ -1,6 +1,6 @@
 import { test, type Page, type APIRequestContext, expect } from '@playwright/test';
 import { AxeBuilder } from '@axe-core/playwright';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { seededRandom } from '../tests/harness/determinism.js';
 import { A11Y_BLOCKING_IMPACTS } from './a11yViews.js';
@@ -623,4 +623,232 @@ export async function createFolder(
   expect(res.ok()).toBe(true);
   const body = (await res.json()) as { data: { _id: string } };
   return body.data._id;
+}
+
+// ─── Documents ───────────────────────────────────────────────────────────────
+
+/**
+ * Where the document fixtures live.
+ *
+ * Anchored on `__dirname` for the two reasons the a11y report path above records:
+ * npm runs a workspace script from that workspace's directory, so a cwd-relative
+ * path resolves somewhere else depending on how the suite was invoked; and
+ * `import.meta` is a syntax error under the CommonJS require path Playwright
+ * loads these files through.
+ */
+const DOCUMENT_FIXTURES = path.resolve(__dirname, 'fixtures');
+
+/**
+ * The absolute path of one document fixture.
+ *
+ * These files are committed ARTEFACTS and never regenerated from the code under
+ * test: `broken.json` is deliberately unrepairable, `ugly.json` deliberately
+ * unformatted, `hostile.md` deliberately hostile, and `checker.png` /
+ * `handbook.pdf` are compared byte for byte. `.prettierignore` keeps the
+ * formatter off them and `.gitattributes` marks the directory `-text` so git
+ * cannot rewrite a line ending on checkout.
+ */
+export function documentFixture(name: string): string {
+  return path.join(DOCUMENT_FIXTURES, name);
+}
+
+/** One document fixture's bytes, for a byte-for-byte comparison after a download. */
+export function documentFixtureBytes(name: string): Buffer {
+  return readFileSync(documentFixture(name));
+}
+
+/**
+ * Remove the File System Access save dialog before any page script runs.
+ *
+ * NOT a convenience, and not a simplification of the code under test. Measured:
+ * headless Chromium at `http://127.0.0.1` reports `isSecureContext: true` and
+ * DOES expose `window.showSaveFilePicker`, so `saveDocument` takes its picker
+ * branch and opens a NATIVE save dialog — a window outside the page that no
+ * automation can drive, and the download journey would hang on it forever.
+ *
+ * Deleting the property makes the browser look like Firefox, Safari or any
+ * non-secure context, which is a shipped, supported configuration rather than a
+ * fiction: `saveDocument` then takes `saveThroughBlob`, which is the path those
+ * users get. The picker branch is covered where it CAN be driven honestly, in
+ * `packages/client/tests/documents-download.test.ts`, which stubs the API and
+ * asserts the streaming writes, the truncate-on-integrity-failure and the
+ * abort-on-anything-else.
+ *
+ * Called before the first navigation, because an init script applies to
+ * documents loaded afterwards and the app reads the property at click time.
+ */
+export async function disableSaveFilePicker(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    // `delete` rather than assigning undefined. `getSaveFilePicker` also checks
+    // `typeof window.showSaveFilePicker === 'function'`, so either spelling
+    // would work today — but the `in` half of that probe is the one that exists
+    // because the property is absent from the DOM types, and removing the
+    // property is the state this is meant to reproduce: a browser that never
+    // had it. Assigning `undefined` reproduces a browser that has it and broke.
+    delete (window as unknown as Record<string, unknown>)['showSaveFilePicker'];
+  });
+}
+
+/**
+ * Navigate to the Documents route through the sidebar and wait for it to mount.
+ *
+ * The upload input is the readiness signal rather than the heading, and the
+ * reason is the one `gotoFileEncryptionTool` records: the route is `lazy()`, so
+ * the heading can be on screen while the panel below it is still being
+ * transformed by Vite. It is also the element every caller goes on to use.
+ */
+export async function gotoDocuments(page: Page): Promise<void> {
+  await page.getByRole('link', { name: 'Documents', exact: true }).click();
+  await expect(page).toHaveURL(/\/documents$/);
+  await expect(page.getByRole('heading', { name: 'Documents', level: 1 })).toBeVisible({
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
+  await expect(page.locator('#document-upload-input')).toBeVisible({
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
+}
+
+/**
+ * Upload one fixture with no transform and wait until the stored row is listed.
+ *
+ * The row is the ONLY honest completion signal available from outside. The
+ * progress row disappears when the transfer leaves the registry, which happens
+ * on a failure as well as on a success, and the toast is transient; a listed row
+ * means the server committed the document and this client decrypted its metadata
+ * back with the vault key it sealed it under.
+ *
+ * `LAZY_ROUTE_TIMEOUT_MS` rather than the default assertion budget: an upload is
+ * a SHA-256 over the file, an AES-GCM seal per segment, a round trip per part
+ * and a re-listing, on a machine that is also running a Vite dev server, an
+ * in-memory mongod and a storage container.
+ */
+export async function uploadDocument(page: Page, fixture: string): Promise<void> {
+  await page.locator('#document-upload-input').setInputFiles(documentFixture(fixture));
+  await page.getByRole('button', { name: 'Upload', exact: true }).click();
+  await expect(page.getByTestId('document-name').filter({ hasText: fixture })).toBeVisible({
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
+}
+
+/** Open a listed document's detail view and wait for its own heading. */
+export async function openDocument(page: Page, fixture: string): Promise<void> {
+  await page.getByTestId('document-name').filter({ hasText: fixture }).click();
+  await expect(page).toHaveURL(/\/documents\/[0-9a-f]{24}/);
+  await expect(page.getByRole('heading', { name: fixture, level: 1 })).toBeVisible({
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
+}
+
+/**
+ * The isolated document, driven DIRECTLY as a top-level page.
+ *
+ * `startSandbox` posts `{ kind: 'ready' }` to `win.parent`, and at top level that
+ * IS the window itself; its window listener accepts only a message CARRYING A
+ * TRANSFERRED PORT and does not remove itself for one without. So an init script
+ * registered before the module — which is what `addInitScript` guarantees — can
+ * answer the frame's own announcement with a port and complete the real
+ * handshake. There is no race and no sleep: the listener exists before the
+ * message can be posted.
+ *
+ * WHY THIS IS AVAILABLE AT ALL, stated because it is a dev-server property and
+ * not a claim about production. Both Playwright gates drive `npm run dev`, which
+ * serves `/sandbox.html` with no Content-Security-Policy; the Express route that
+ * serves it in production attaches a policy carrying the `sandbox allow-scripts`
+ * DIRECTIVE, which makes the document opaque even at top level. This is
+ * therefore a way to exercise the RENDERERS, never evidence about the isolation
+ * — the isolation is proven against the real embedded frame in
+ * `document-viewer.spec.ts`.
+ */
+export interface SandboxRenderOptions {
+  /** A `PreviewMode` value. Passed as a string, exactly as the host posts it. */
+  mode: string;
+  /** The lowercased extension, a highlighting hint and nothing more. */
+  ext: string;
+  /** The document's bytes. */
+  bytes: Buffer;
+  theme?: 'light' | 'dark';
+}
+
+/** One reply the isolated document sent back on the port. */
+export interface SandboxReply {
+  kind: string;
+  reason?: string;
+  href?: string;
+}
+
+declare global {
+  interface Window {
+    /**
+     * The harness's end of the handshake, installed by
+     * {@link renderInSandboxDirectly}. Present only under that helper, and only
+     * on a top-level `/sandbox.html`.
+     */
+    __hvSandboxPort?: MessagePort;
+    /** Every reply the document has posted on that port, in order. */
+    __hvSandboxReplies?: SandboxReply[];
+  }
+}
+
+/**
+ * Navigate `page` to `/sandbox.html`, hand the document a port, post one render
+ * request, and return every reply it made.
+ *
+ * Resolves once the document has answered. It ALWAYS answers — `renderRequest`
+ * posts `rendered` or `failed` on every branch, which is the contract the host's
+ * own ten-second deadline depends on — so a caller can assert on the reply
+ * rather than on a timeout.
+ */
+export async function renderInSandboxDirectly(
+  page: Page,
+  options: SandboxRenderOptions,
+): Promise<SandboxReply[]> {
+  await page.addInitScript(() => {
+    window.addEventListener('message', (event: MessageEvent) => {
+      // The reply this very listener posts below carries the port, and the
+      // document's announcement does not. Ignoring the former is what stops the
+      // handshake answering itself in a loop.
+      if (event.ports.length > 0) return;
+      const data: unknown = event.data;
+      if (typeof data !== 'object' || data === null) return;
+      if ((data as { kind?: unknown }).kind !== 'ready') return;
+      const channel = new MessageChannel();
+      const replies: SandboxReply[] = [];
+      window.__hvSandboxPort = channel.port1;
+      window.__hvSandboxReplies = replies;
+      channel.port1.addEventListener('message', (message: MessageEvent) => {
+        replies.push(message.data as SandboxReply);
+      });
+      channel.port1.start();
+      window.postMessage({ kind: 'harness-handshake' }, '*', [channel.port2]);
+    });
+  });
+
+  await page.goto('/sandbox.html');
+  // The port, not the DOM, is the readiness signal: the module has to have run
+  // for the announcement to have been posted at all.
+  await page.waitForFunction(() => window.__hvSandboxPort !== undefined, undefined, {
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
+
+  await page.evaluate(
+    ({ mode, ext, theme, bytes }) => {
+      // A fresh buffer built inside the page. The bytes cross as an array of
+      // numbers because that is what survives Playwright's serialization, and
+      // the frame's own validator checks for a REAL ArrayBuffer by its internal
+      // slot — a typed-array view or a plain object of the same shape is refused.
+      const buffer = new Uint8Array(bytes).buffer;
+      window.__hvSandboxPort?.postMessage({ kind: 'render', mode, ext, theme, bytes: buffer });
+    },
+    {
+      mode: options.mode,
+      ext: options.ext,
+      theme: options.theme ?? 'light',
+      bytes: [...options.bytes],
+    },
+  );
+
+  await page.waitForFunction(() => (window.__hvSandboxReplies?.length ?? 0) > 0, undefined, {
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
+  return page.evaluate(() => window.__hvSandboxReplies ?? []);
 }

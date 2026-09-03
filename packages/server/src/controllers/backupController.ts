@@ -18,6 +18,7 @@ import {
   pickAllowedFields,
 } from '../utils/controllerHelpers.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
+import { collectDocumentSummary } from '../utils/documentSummary.js';
 import { hasCycle } from '../utils/folderGraph.js';
 import {
   APP_VERSION,
@@ -167,6 +168,8 @@ async function collectBackupData(
     items.push(item);
   }
 
+  const documentSummary = await collectDocumentSummary(userId);
+
   const backupPayload = {
     version: APP_VERSION,
     exportDate: new Date().toISOString(),
@@ -188,6 +191,11 @@ async function collectBackupData(
       itemCount: items.length,
       folderCount: folders.length,
     },
+    // The documents this backup does NOT contain. Optional and additive on the
+    // wire: a backup written before this field existed must still restore, which
+    // is why nothing downstream may require it. See `utils/documentSummary.ts`
+    // for why a backup mentions documents at all.
+    documentSummary,
   };
 
   return {

@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import mongoose from 'mongoose';
 import { config } from '../config/index.js';
+import { getStorageHealth } from '../utils/storageHealth.js';
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
@@ -46,6 +47,12 @@ export const getMetrics = catchAsync((req: Request, res: Response): void => {
         state: isConnected ? 'connected' : 'disconnected',
         readyState: dbState,
       },
+      // The object-storage gauge, read rather than measured: the boot preflight
+      // is what probes, once, and this endpoint reports what it learned. Nothing
+      // here touches the network, so a bucket that is down cannot slow the one
+      // endpoint an operator reaches for while it is down. `/api/v1/health`
+      // carries no equivalent block on purpose — see `utils/storageHealth.ts`.
+      storage: getStorageHealth(),
     },
   });
 });

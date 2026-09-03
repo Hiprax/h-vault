@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type winston from 'winston';
 import request from 'supertest';
@@ -6,6 +6,7 @@ import { APP_VERSION } from '@hvault/shared';
 import app from '../src/app.js';
 import { swaggerSpec } from '../src/config/swagger.js';
 import { warnIfSwaggerEnabledInProduction } from '../src/utils/swaggerWarning.js';
+import { ROUTE_TABLE } from './support/routeTable.js';
 
 describe('API Documentation', () => {
   describe('GET /api/docs', () => {
@@ -44,6 +45,7 @@ describe('API Documentation', () => {
       expect(tagNames).toContain('User');
       expect(tagNames).toContain('Tools');
       expect(tagNames).toContain('Backup');
+      expect(tagNames).toContain('Documents');
     });
 
     it('should include security schemes', async () => {
@@ -69,6 +71,18 @@ describe('API Documentation', () => {
       expect(paths).toContain('/user/profile');
       expect(paths).toContain('/tools/check-password-breach');
       expect(paths).toContain('/backup/setup');
+      expect(paths).toContain('/documents');
+      expect(paths).toContain('/documents/trash');
+      expect(paths).toContain('/documents/usage');
+      expect(paths).toContain('/documents/uploads');
+      expect(paths).toContain('/documents/uploads/{id}');
+      expect(paths).toContain('/documents/uploads/{id}/parts/{partNumber}');
+      expect(paths).toContain('/documents/uploads/{id}/complete');
+      expect(paths).toContain('/documents/{id}');
+      expect(paths).toContain('/documents/{id}/restore');
+      expect(paths).toContain('/documents/{id}/permanent');
+      expect(paths).toContain('/documents/trash/empty');
+      expect(paths).toContain('/documents/{id}/segments/{index}');
     });
   });
 
@@ -95,6 +109,7 @@ describe('API Documentation', () => {
       expect(responses.NotFound).toBeDefined();
       expect(responses.RateLimited).toBeDefined();
       expect(responses.ValidationError).toBeDefined();
+      expect(responses.StorageUnavailable).toBeDefined();
     });
 
     it('should have the API server defined', () => {
@@ -189,6 +204,192 @@ describe('API Documentation', () => {
       expect(typeof description).toBe('string');
       expect(description as string).not.toMatch(/csv/i);
       expect(description as string).toContain('JSON');
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // The document store, as a documentation CONTRACT
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * `audit:config` lints this document with Spectral, and Spectral's OpenAPI
+   * ruleset asks whether it is WELL-FORMED. It cannot ask whether an operation
+   * is USEFUL: one with no description, a bare path parameter and no documented
+   * failure passes it cleanly. These assertions are the other half.
+   *
+   * They are scoped to the document store on purpose. Its operations were all
+   * written at once, to one standard, which is exactly the shape that decays one
+   * addition at a time — and the surface is compared against `ROUTE_TABLE`
+   * rather than against a number, so a seventeenth route mounted in
+   * `routes/documents.ts` fails HERE until it is documented, and an operation
+   * documented for a route nobody mounts fails too. A count would have been
+   * satisfied by swapping one for another.
+   */
+  describe('the document store operations', () => {
+    interface DocumentedParameter {
+      name?: string;
+      in?: string;
+      description?: unknown;
+      schema?: { example?: unknown; enum?: unknown };
+    }
+    interface DocumentedOperation {
+      operationId?: unknown;
+      tags?: unknown;
+      summary?: unknown;
+      description?: unknown;
+      security?: unknown;
+      parameters?: DocumentedParameter[];
+      requestBody?: unknown;
+      responses?: Record<string, unknown>;
+    }
+
+    const HTTP_METHODS = ['get', 'post', 'put', 'delete', 'patch'] as const;
+
+    /** Every documented `/documents…` operation, keyed `METHOD /path`. */
+    const documented = new Map<string, DocumentedOperation>();
+    for (const [route, methods] of Object.entries(
+      swaggerSpec.paths as Record<string, Record<string, unknown>>,
+    )) {
+      if (!route.startsWith('/documents')) continue;
+      for (const method of HTTP_METHODS) {
+        const operation = methods[method] as DocumentedOperation | undefined;
+        if (operation) documented.set(`${method.toUpperCase()} ${route}`, operation);
+      }
+    }
+
+    /**
+     * The same key, built from the route table: strip the `/api/v1` mount,
+     * rewrite Express's `:param` as OpenAPI's `{param}`, and drop the router
+     * root's trailing slash (`collectAppRoutes` composes it as mount + `'/'`).
+     */
+    const mounted = ROUTE_TABLE.filter((row) => row.path.startsWith('/api/v1/documents')).map(
+      (row) => {
+        const path = row.path
+          .slice('/api/v1'.length)
+          .replace(/:([A-Za-z0-9_]+)/g, '{$1}')
+          .replace(/^(\/documents)\/$/, '$1');
+        return `${row.method.toUpperCase()} ${path}`;
+      },
+    );
+
+    // Every case below iterates `documented` and asserts an empty offender
+    // list, which is a shape that passes over nothing if the map is ever empty
+    // — a changed route prefix, a restructured `paths`. Only the surface case
+    // would catch that, so the guard runs first and makes each case honest on
+    // its own.
+    beforeAll(() => {
+      expect(documented.size).toBeGreaterThan(0);
+    });
+
+    it('documents every mounted document route, and no route it does not mount', () => {
+      expect([...documented.keys()].sort()).toEqual([...mounted].sort());
+    });
+
+    it('gives every one of them an id, a tag, a summary and a description', () => {
+      const thin = [...documented.entries()]
+        .filter(
+          ([, op]) =>
+            typeof op.operationId !== 'string' ||
+            !Array.isArray(op.tags) ||
+            !op.tags.includes('Documents') ||
+            typeof op.summary !== 'string' ||
+            op.summary === '' ||
+            typeof op.description !== 'string' ||
+            // A one-line restatement of the summary is what this is guarding
+            // against, so the bar is a real sentence rather than a non-empty
+            // string. Every description here is a paragraph today.
+            (op.description as string).length < 80,
+        )
+        .map(([key]) => key);
+      expect(thin).toEqual([]);
+    });
+
+    it('declares an authenticated security requirement on every one of them', () => {
+      // The NEGATIVE half matters more than the positive one: `security: []`
+      // is the OpenAPI spelling of "this endpoint is public", and it is one
+      // edit away. Every document route sits behind `authenticate`.
+      const unauthenticated = [...documented.entries()]
+        .filter(([, op]) => {
+          const security = op.security;
+          if (!Array.isArray(security) || security.length === 0) return true;
+          return !security.every(
+            (requirement) =>
+              typeof requirement === 'object' &&
+              requirement !== null &&
+              'bearerAuth' in (requirement as Record<string, unknown>),
+          );
+        })
+        .map(([key]) => key);
+      expect(unauthenticated).toEqual([]);
+    });
+
+    it('documents a 401, a 429 and the 503 the storage guard answers, on every one of them', () => {
+      // `requireStorage` is router-level, so 503 is an outcome of ALL sixteen
+      // rather than of the ones that touch storage — a caller against a
+      // deployment with no object storage sees it from the list endpoints too.
+      const missing: string[] = [];
+      for (const [key, op] of documented) {
+        for (const status of ['401', '429', '503']) {
+          if (!(status in (op.responses ?? {}))) missing.push(`${key} has no ${status}`);
+        }
+      }
+      expect(missing).toEqual([]);
+    });
+
+    // "at least one 4xx" is what this pair REPLACED, and the reason is worth
+    // keeping: every operation inherits 401 from DOCUMENT_BASE_ERRORS, so a
+    // filter over the whole 4xx range was satisfied before any operation-specific
+    // failure existed and pinned "these routes are authenticated" — which the
+    // case above already pins better. Two of the sixteen genuinely have no other
+    // 4xx (GET /documents/usage and GET /documents/uploads take no id and no
+    // body), so the honest form is conditional on the operation's own shape.
+
+    it('documents a 404 on every operation that names one row', () => {
+      const missing = [...documented.entries()]
+        .filter(([, op]) => (op.parameters ?? []).some((parameter) => parameter.in === 'path'))
+        .filter(([, op]) => !('404' in (op.responses ?? {})))
+        .map(([key]) => key);
+      // A foreign id earns the same 404 as one that never existed, which is what
+      // stops documents being enumerated — so an id-taking route that does not
+      // document it is documenting a different security posture than it has.
+      expect(missing).toEqual([]);
+    });
+
+    it('documents a 400 on every operation that accepts a request body', () => {
+      const missing = [...documented.entries()]
+        .filter(([, op]) => op.requestBody !== undefined)
+        .filter(([, op]) => !('400' in (op.responses ?? {})))
+        .map(([key]) => key);
+      // Zod rejections come from one middleware and are ALWAYS 400 in this
+      // codebase, never 422, so a body-taking operation without one is wrong
+      // about the shape of its own failures.
+      expect(missing).toEqual([]);
+    });
+
+    it('gives every parameter a description, and an example unless it is an enum', () => {
+      // The regression this pins actually shipped: the transfer-id parameter
+      // was declared as a bare `{ type: 'string' }` while the document-id one
+      // beside it carried an example, so "try it out" in the docs UI offered
+      // nothing to try on half the routes.
+      //
+      // Path, query AND header — scoping it to path parameters is what let
+      // `page`, `limit` and `x-hv-part-sha256` stay bare through the pass that
+      // was supposed to catch exactly that. An ENUM is exempt from the example
+      // and only from the example: its schema already shows a reader every
+      // value it accepts, and a `default` names the one it will get.
+      const bare: string[] = [];
+      for (const [key, op] of documented) {
+        for (const parameter of op.parameters ?? []) {
+          const label = `${key} ${parameter.in ?? '?'}:${parameter.name ?? '?'}`;
+          if (typeof parameter.description !== 'string' || parameter.description === '') {
+            bare.push(`${label} has no description`);
+          }
+          if (parameter.schema?.enum === undefined && parameter.schema?.example === undefined) {
+            bare.push(`${label} has no example`);
+          }
+        }
+      }
+      expect(bare).toEqual([]);
     });
   });
 

@@ -6,6 +6,7 @@ import { config } from './config/index.js';
 import { connectDatabase } from './config/database.js';
 import app from './app.js';
 import { startTrashCleanupJob } from './jobs/trashCleanup.js';
+import { startDocumentCleanupJob } from './jobs/documentCleanup.js';
 import { startTokenCleanupJob } from './jobs/tokenCleanup.js';
 import { startBackupScheduler } from './jobs/backupScheduler.js';
 import { initBreachRangeCache } from './jobs/breachSeed.js';
@@ -13,6 +14,7 @@ import { closeRateLimitStore } from './middleware/rateLimiter.js';
 import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
 import { createGracefulShutdown } from './utils/gracefulShutdown.js';
+import { runStoragePreflight } from './utils/storageHealth.js';
 
 const logger = createModuleLogger('server');
 
@@ -41,6 +43,10 @@ async function startServer(): Promise<void> {
     // the refresh cron. NEVER downloads the corpus on boot (that is the opt-in
     // `node dist/cli/seedBreaches.js` command). Primary worker only.
     const breachSeedTask = isPrimaryWorker ? await initBreachRangeCache() : null;
+    // Returns null when no object storage is configured, so a deployment that
+    // never enabled the document store schedules nothing at all rather than a
+    // lock acquisition an hour for ever.
+    const documentCleanupTask = isPrimaryWorker ? startDocumentCleanupJob() : null;
     if (!isPrimaryWorker) {
       logger.info(
         'Skipping background jobs on worker instance ' +
@@ -58,6 +64,24 @@ async function startServer(): Promise<void> {
       if (typeof process.send === 'function') {
         process.send('ready');
       }
+
+      // One-shot object-storage preflight, recorded in the gauge `/api/v1/metrics`
+      // reports. Three deliberate choices here, each explained in
+      // `utils/storageHealth.ts`:
+      //
+      //   * NOT awaited, and started only once the port is open. The S3 client is
+      //     pinned to a 5-second connect timeout and three attempts, so an endpoint
+      //     that resolves but never answers costs upwards of fifteen seconds —
+      //     which, awaited before `listen`, would eat the container healthcheck's
+      //     start period on exactly the deployment already in trouble. The function
+      //     never rejects, which is what makes the floating call safe.
+      //   * NOT gated on `isPrimaryWorker`. That gate exists to stop duplicate CRON
+      //     executions; a read-only `HeadBucket` has no such hazard, and `/metrics`
+      //     is a per-process endpoint, so under pm2's two instances a primary-only
+      //     probe would report "never measured" from whichever worker answered.
+      //   * NOT handed to `trackJob`. It is not a scheduled job, and putting it in
+      //     the running set would make graceful shutdown wait on it.
+      void runStoragePreflight();
     });
 
     // Track active connections for graceful shutdown
@@ -71,7 +95,16 @@ async function startServer(): Promise<void> {
     // Graceful shutdown (re-entrancy-safe; double signals run it once)
     const gracefulShutdown = createGracefulShutdown({
       logger,
-      tasks: [trashCleanupTask, tokenCleanupTask, backupSchedulerTask, breachSeedTask],
+      tasks: [
+        trashCleanupTask,
+        tokenCleanupTask,
+        backupSchedulerTask,
+        breachSeedTask,
+        // Must be here, not merely started above: `stop()` is what keeps a cron
+        // tick from firing during the drain, after the database connection has
+        // already been closed underneath it.
+        documentCleanupTask,
+      ],
       server,
       activeConnections,
       getRunningJobs,

@@ -15,21 +15,60 @@ export type CrashScenario =
   | 'rotation-before-vault-key-update'
   | 'import-before-insert'
   | 'import-after-insert-before-commit'
-  | 'import-after-commit';
+  | 'import-after-commit'
+  | 'document-part-before-ledger-write'
+  | 'document-complete-before-row-insert'
+  | 'document-purge-after-object-delete';
+
+/**
+ * The HTTP methods a probe can drive.
+ *
+ * The five original scenarios are all `POST` with a JSON body, which is why this
+ * did not exist at first. The document drills need the other two shapes: a part
+ * upload is a `PUT` carrying `application/octet-stream`, and a permanent delete is
+ * a `DELETE` with no body at all.
+ */
+export type CrashMethod = 'POST' | 'PUT' | 'DELETE';
 
 export interface CrashRequest {
   /** The mongod the child must use — the same database the parent is on. */
   uri: string;
   scenario: CrashScenario;
-  /** The path to POST, e.g. `/api/v1/vault/items/bulk-reencrypt`. */
+  /** Defaults to `POST` when absent, which is what the five original scenarios are. */
+  method?: CrashMethod;
+  /** The path to drive, e.g. `/api/v1/vault/items/bulk-reencrypt`. */
   path: string;
   /** A bearer token for the account under test. */
   token: string;
-  body: Record<string, unknown>;
+  /** A JSON body. Mutually exclusive with {@link bodyBase64}. */
+  body?: Record<string, unknown>;
+  /**
+   * A RAW body, base64 for the wire.
+   *
+   * Base64 rather than a byte array because the whole request crosses as one
+   * `JSON.stringify`d argv entry, and it is only ever used for a document part —
+   * which is why the drill that needs one sends the FINAL part of its transfer,
+   * the only part the framing rules allow to be short.
+   */
+  bodyBase64?: string;
+  /** Extra request headers, e.g. the part digest. Applied after the CSRF pair. */
+  headers?: Record<string, string>;
+  /**
+   * Install the storage bridge before the request runs.
+   *
+   * Off by default, and that default is load-bearing: the five original scenarios
+   * run with the four `S3_*` variables empty, where `getStorage()` throws 503, so
+   * an unconditional install would break every one of them.
+   */
+  storageBridge?: boolean;
 }
 
 /**
- * The child's two stdout markers.
+ * The child's stdout markers.
+ *
+ * They stay on STDOUT rather than moving to the IPC channel the storage bridge
+ * added: `expectKilled` reads them out of the captured output, and splitting one
+ * verdict across two transports buys nothing.
  *
  *   ready      the injection point is armed and the request is about to run, so
  *              a probe that died during startup cannot be mistaken for one that

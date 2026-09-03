@@ -37,7 +37,13 @@ const router = Router();
 // overrides the global 2 MB parser so a large-vault rotation is not rejected
 // with HTTP 413 before validation runs. The matching path is exempted from the
 // global parser in app.ts (CUSTOM_BODY_LIMIT_PATHS).
-const bulkReEncryptBodyParser = express.json({ limit: '30mb' });
+//
+// Exported as a number of BYTES because `tests/rotation-payload-budget.test.ts`
+// derives the worst-case rotation body from the shared constants and asserts it
+// fits inside this value. A limit written only as a string here would leave that
+// test restating the number, and a restated bound is the copy that drifts.
+export const BULK_REENCRYPT_BODY_LIMIT_BYTES = 30 * 1024 * 1024;
+const bulkReEncryptBodyParser = express.json({ limit: BULK_REENCRYPT_BODY_LIMIT_BYTES });
 
 // All vault routes require authentication
 router.use(authenticate);

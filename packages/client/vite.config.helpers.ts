@@ -103,3 +103,150 @@ export function manualChunks(id: string): string | undefined {
   // otpauth) — falls through to Vite's default on-demand chunking.
   return undefined;
 }
+
+/**
+ * Rollup `manualChunks` strategy for the DOCUMENT SANDBOX's build.
+ *
+ * A SECOND function rather than a branch inside {@link manualChunks}, and the
+ * separation is the point: the application build must never carry naming rules
+ * for a package it must never contain. If it did, the day somebody statically
+ * imported the format engine from an application module, Rollup would emit the
+ * app's own copy of Prettier under the same chunk names as the sandbox's — and
+ * `scripts/ci/bundle-gate.mjs` reports a base name that carries an explicit
+ * budget and is emitted into BOTH asset directories, so the two copies would
+ * share one ceiling that could be raised for either.
+ *
+ * As it stands, that mistake fails the gate on SIZE instead: the app's copies
+ * take Rollup's default names (`standalone`, `babel`, `estree`, …) and each is
+ * measured against `DEFAULT_CHUNK_BUDGET_KB`, which three of them breach on
+ * their own. Either way it is caught; this way the two builds' budgets stay
+ * independent. The assertion that actually fires FIRST, and reads as what it is,
+ * is `packages/client/tests/sandbox-boundary.test.ts`: no module outside
+ * `src/sandbox/` may reach into it at runtime.
+ *
+ * FOUR Prettier chunks, not one, because the per-type dynamic imports in
+ * `src/sandbox/transform/formatEngine.ts` are what makes formatting a README
+ * cost 288 KB instead of a megabyte:
+ *
+ *   - `vendor-prettier-core`   `standalone` + `estree`, needed by every syntax
+ *   - `vendor-prettier-json`   the `babel` parser, for the JSON family
+ *   - `vendor-prettier-markdown`
+ *   - `vendor-prettier-yaml`
+ *
+ * Everything else — the renderers, `lowlight`, `jsonrepair` — returns
+ * `undefined` and keeps Vite's per-dynamic-import chunking, which is what put
+ * each renderer in its own chunk in the first place. A blanket `node_modules`
+ * catch-all must never be added here for the same reason it must never be added
+ * to the application's: it would collapse every on-demand chunk into one eager
+ * download, and in this build that download happens inside a frame that opens
+ * for a `.png`.
+ *
+ * `id` is an absolute on-disk path in OS-native separators, so it is normalised
+ * to forward slashes before matching, exactly as the application's is.
+ */
+export function sandboxManualChunks(id: string): string | undefined {
+  const path = id.replace(/\\/g, '/');
+
+  if (!path.includes('/node_modules/prettier/')) {
+    // First-party source and every other dependency use Vite's default
+    // per-dynamic-import chunking.
+    return undefined;
+  }
+
+  // Anchored on the FILE each plugin is, not on a directory: Prettier ships its
+  // plugins as `plugins/<name>.mjs`, so the trailing dot is what stops
+  // `markdown.` from also matching a hypothetical `markdown-extra.mjs`.
+  if (path.includes('/prettier/plugins/babel.')) return 'vendor-prettier-json';
+  if (path.includes('/prettier/plugins/markdown.')) return 'vendor-prettier-markdown';
+  if (path.includes('/prettier/plugins/yaml.')) return 'vendor-prettier-yaml';
+  // `standalone` and `estree` and anything else Prettier pulls in. `estree` is
+  // the PRINTER for what the `babel` parser produces and is equally needed by
+  // Markdown and YAML runs that never load `babel`, so it belongs with the core
+  // rather than with the JSON parser.
+  return 'vendor-prettier-core';
+}
+
+// ---------------------------------------------------------------------------
+// The document sandbox's output layout, and the service worker's view of it
+// ---------------------------------------------------------------------------
+//
+// These are plain data, in this dependency-free module, for one reason: the
+// application's Vite config pulls React, Tailwind and the PWA plugin, so it
+// cannot be imported cheaply in a unit test — and asserting a config's SOURCE
+// TEXT proves nothing about what Vite was actually handed. Exported constants
+// can be asserted directly, and both configs import them, so the pattern that
+// excludes a directory and the setting that creates it cannot drift apart.
+
+/**
+ * The document sandbox's HTML entry, relative to the client package root.
+ *
+ * Named in three places that must agree: `vite.config.sandbox.ts` builds it, the
+ * service worker's navigation denylist has to exempt it, and the Express route
+ * that serves it attaches the sandbox's own Content-Security-Policy. The first
+ * two import this constant; the third is a different package and pins the same
+ * string in its own test.
+ */
+export const SANDBOX_HTML = 'sandbox.html';
+
+/**
+ * Where the sandbox build's chunks and assets are emitted.
+ *
+ * A DIRECTORY, and its own, because that directory alone is served with
+ * `Access-Control-Allow-Origin: *` and `Cross-Origin-Resource-Policy:
+ * cross-origin` — which a module script fetched by an opaque origin needs and
+ * which `assets/` deliberately does not carry. Setting `build.assetsDir` to this
+ * is the ONE setting from which Vite derives the entry, chunk and asset
+ * filenames alike.
+ */
+export const SANDBOX_ASSETS_DIR = 'sandbox-assets';
+
+/**
+ * What the service worker precaches: everything the application build emits.
+ *
+ * Unchanged in substance from the literal it replaces; it lives here so the
+ * pattern and the ignore below can be asserted together.
+ */
+export const WORKBOX_GLOB_PATTERNS = ['**/*.{js,css,html,ico,png,svg,woff2}'];
+
+/**
+ * The sandbox output, excluded from the precache.
+ *
+ * DEFENCE IN DEPTH THAT CANNOT CURRENTLY FIRE, and saying so is the point of
+ * this comment. The PWA plugin runs only in the APPLICATION build, and workbox
+ * globs the output directory at the END of that build — before the sandbox build
+ * has written anything — so `sandbox.html` and `sandbox-assets/` are not there to
+ * be matched. The exclusion that actually holds is the BUILD LAYOUT, not this
+ * list.
+ *
+ * It is kept anyway because the hazard it guards is real and silent. With
+ * `registerType: 'prompt'` an installed client keeps its old service worker until
+ * the user accepts an update, so a precached `sandbox.html` naming hashed asset
+ * URLs that were NOT precached would, after a deploy, hand every returning user a
+ * 404, a handshake timeout and "download to view". Under two separate builds that
+ * cannot happen; if the two are ever merged, it can, and this is what would
+ * already be in place.
+ *
+ * `scripts/ci/bundle-gate.mjs` asserts the generated manifest contains no sandbox
+ * entry. Label that for what it is: a CANARY against the builds being merged, not
+ * evidence that this list does anything today.
+ */
+export const WORKBOX_GLOB_IGNORES = [SANDBOX_HTML, `${SANDBOX_ASSETS_DIR}/**`];
+
+/**
+ * Navigations the service worker must NOT answer with the application shell.
+ *
+ * MANDATORY rather than conditional. `vite-plugin-pwa` ships
+ * `defaultWorkbox = { …, navigateFallback: 'index.html' }` and this project sets
+ * none of its own, so a NavigationRoute covers every navigation — and AN IFRAME
+ * LOAD IS A NAVIGATION. Without this the service worker answers `/sandbox.html`
+ * with the app shell: the frame boots the application instead of the sandbox,
+ * never completes a handshake, and the viewer degrades to "download to view"
+ * with no failing request anywhere to explain it.
+ *
+ * Anchored with `(?:\?|$)` rather than a bare `$`, because workbox tests a
+ * denylist entry against `pathname + search`. A bare `$` stops matching the
+ * moment the frame's `src` gains a query string — a theme hint, a cache-buster —
+ * and the failure is invisible: only an INSTALLED client, only after a deploy,
+ * and only as a viewer that quietly degrades.
+ */
+export const NAVIGATE_FALLBACK_DENYLIST = [/^\/sandbox\.html(?:\?|$)/];

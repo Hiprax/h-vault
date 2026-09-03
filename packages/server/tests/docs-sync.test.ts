@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { AUDIT_ACTIONS } from '@hvault/shared';
+import { AUDIT_ACTIONS, MAX_PREVIEW_BYTES, PREVIEW_MODES, formatBytes } from '@hvault/shared';
 import { TIER_BUDGET_SECONDS } from '../../../scripts/ci/lib/tiers.mjs';
 
 // Documentation-lint: the README API reference, rate-limit table, env table,
@@ -13,6 +13,26 @@ const testDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(testDir, '..', '..', '..');
 const readmePath = path.resolve(repoRoot, 'README.md');
 const readme = readFileSync(readmePath, 'utf-8');
+
+interface ListedGate {
+  id: string;
+  tier: number;
+}
+
+/**
+ * The gates the runner actually registers.
+ *
+ * `--list --json` reads NO manifest — that independence is what keeps
+ * `gate-surface.test.ts` a real check rather than the manifest compared with
+ * itself — so this is the gate set as it runs, and it is what both the README's
+ * gate table and CONTRIBUTING's prose below are compared against.
+ */
+const listedGates = JSON.parse(
+  execFileSync(process.execPath, ['scripts/ci/local-ci.mjs', '--list', '--json'], {
+    cwd: repoRoot,
+    encoding: 'utf-8',
+  }),
+) as ListedGate[];
 
 describe('README documentation sync', () => {
   it('does not reference the removed POST /tools/generate-password route (generation is client-side)', () => {
@@ -97,17 +117,7 @@ describe('README documentation sync', () => {
    * README against the gates that actually run.
    */
   describe('the pipeline gate table', () => {
-    interface ListedGate {
-      id: string;
-      tier: number;
-    }
-
-    const listed = JSON.parse(
-      execFileSync(process.execPath, ['scripts/ci/local-ci.mjs', '--list', '--json'], {
-        cwd: repoRoot,
-        encoding: 'utf-8',
-      }),
-    ) as ListedGate[];
+    const listed = listedGates;
 
     /** `| \`id\` | T1 | … |` rows of the gate table, as id → tier. */
     const documented = new Map<string, number>(
@@ -172,6 +182,155 @@ describe('README documentation sync', () => {
     // that would be fiction — `mutation` re-runs the suite once per mutant.
     expect(TIER_BUDGET_SECONDS[2]).toBeNull();
     expect(rows.get('T2')).toBe('unbounded');
+  });
+
+  /**
+   * The README's Documents section tells a reader which file types the app will
+   * display and which it will only hand back as a download, and every
+   * download-only case is given a REASON so it reads as a decision. That table
+   * is prose over a lookup table in `@hvault/shared`, which is the shape
+   * documentation rots in silently: adding one entry to `PREVIEW_MODES` is a
+   * one-line change that makes the README wrong, and nothing else would notice.
+   *
+   * Both directions are checked, and the second is the one that matters more.
+   * An extension the code renders but the README omits is a feature nobody
+   * knows about; an extension the README advertises and the code does not
+   * render is a promise the product breaks, and it is the failure a reader
+   * meets as "download to view" on a file the docs said would open.
+   */
+  describe('the document preview table', () => {
+    /** The `#### What renders, and what is download-only` subsection. */
+    const viewer = readme.slice(
+      readme.indexOf('#### What renders, and what is download-only'),
+      readme.indexOf('#### Documents are not in your backups'),
+    );
+
+    /** `mode -> the extensions the README lists for it`, from the first table. */
+    const documented = new Map<string, Set<string>>(
+      [...viewer.matchAll(/^\|\s*`([a-z]+)`\s*\|([^|]*)\|/gm)].map((row): [string, Set<string>] => [
+        row[1]!,
+        new Set([...row[2]!.matchAll(/`([a-z0-9]+)`/g)].map((m) => m[1]!)),
+      ]),
+    );
+
+    /** `mode -> the extensions the code actually maps to it`, minus `none`. */
+    const actual = new Map<string, Set<string>>();
+    for (const [extension, mode] of Object.entries(PREVIEW_MODES)) {
+      if (mode === 'none') continue;
+      const set = actual.get(mode) ?? new Set<string>();
+      set.add(extension);
+      actual.set(mode, set);
+    }
+
+    const sorted = (set: Set<string> | undefined): string[] => [...(set ?? [])].sort();
+
+    it('lists every render mode the code has, and no mode it does not', () => {
+      expect([...documented.keys()].sort()).toEqual([...actual.keys()].sort());
+    });
+
+    it.each([...actual.keys()].sort())(
+      'lists exactly the extensions PREVIEW_MODES maps to `%s`',
+      (mode) => {
+        expect(sorted(documented.get(mode))).toEqual(sorted(actual.get(mode)));
+      },
+    );
+
+    it('names every deliberately-unrendered extension in the download-only table', () => {
+      // `none` is a first-class answer in PREVIEW_MODES rather than the absence
+      // of one: it marks the types this project DECIDED against rendering, as
+      // distinct from the ones it merely does not recognise. Each of those owes
+      // the reader a reason, so each must appear below the split.
+      const downloadOnly = viewer.slice(viewer.indexOf('Everything else is **download-only'));
+      const decided = Object.entries(PREVIEW_MODES)
+        .filter(([, mode]) => mode === 'none')
+        .map(([extension]) => extension);
+      expect(decided.length).toBeGreaterThan(0);
+      for (const extension of decided) {
+        expect(downloadOnly, `the download-only table must name \`${extension}\``).toContain(
+          `\`${extension}\``,
+        );
+      }
+    });
+
+    it('quotes the size past which a document is download-only, as the app renders it', () => {
+      // The app builds its refusal with formatBytes(MAX_PREVIEW_BYTES), so the
+      // README has to quote the same string or a reader is told one number and
+      // shown another.
+      expect(viewer).toContain(`over ${formatBytes(MAX_PREVIEW_BYTES)}`);
+    });
+  });
+
+  /**
+   * CONTRIBUTING's "N gates whose failure asks for something specific" heading
+   * counts GATES, not bullets — one bullet names two of them, and one names no
+   * gate at all (the duplication ceiling, which belongs to `deadcode`).
+   *
+   * It is spelled out in words in two places, a heading and the sentence under
+   * it, which is why it has drifted twice: the phase that added the `storage`
+   * bullet moved it correctly, and the phase that added the `e2e`/`a11y` bullet
+   * did not, leaving "Ten" over twelve gates. A word is invisible to every
+   * numeric check in this repository, so it needs its own.
+   */
+  it('CONTRIBUTING counts the gates it singles out, in the words it spells them in', () => {
+    const contributing = readFileSync(path.resolve(repoRoot, 'CONTRIBUTING.md'), 'utf-8');
+    const WORDS = [
+      'Zero',
+      'One',
+      'Two',
+      'Three',
+      'Four',
+      'Five',
+      'Six',
+      'Seven',
+      'Eight',
+      'Nine',
+      'Ten',
+      'Eleven',
+      'Twelve',
+      'Thirteen',
+      'Fourteen',
+      'Fifteen',
+      'Sixteen',
+    ];
+
+    const heading = /^### ([A-Z][a-z]+) gates whose failure asks for something specific$/m.exec(
+      contributing,
+    );
+    expect(heading, 'the singled-out-gates heading must still exist').not.toBeNull();
+
+    const rest = contributing.slice(heading!.index + heading![0].length);
+    // Bounded at the next heading of ANY level, so the section can never
+    // silently run on into the escape-hatch table below it and count a gate
+    // named there.
+    const nextHeading = rest.search(/\n#{2,4} /);
+    const section = nextHeading === -1 ? rest : rest.slice(0, nextHeading);
+
+    // Only ids the runner actually registers count. A bullet naming something
+    // that is not a gate (the duplication ceiling) must not inflate the number,
+    // and a bullet naming a gate that no longer exists must fail rather than
+    // keep the arithmetic working.
+    const registered = new Set(listedGates.map((gate) => gate.id));
+    // `[a-z0-9-]`, not `[a-z-]`: two gate ids carry digits (`e2e`, `a11y`) and
+    // they share one bullet, so a class without them skipped that bullet
+    // ENTIRELY and made the expected number two too low — which is the shape of
+    // arithmetic that agrees with a wrong document.
+    const named = new Set(
+      [...section.matchAll(/^- \*\*`([a-z0-9-]+)`\*\*(?: and \*\*`([a-z0-9-]+)`\*\*)?/gm)]
+        .flatMap((match) => [match[1], match[2]])
+        .filter((id): id is string => id !== undefined),
+    );
+    const unregistered = [...named].filter((id) => !registered.has(id));
+    expect(unregistered, 'every gate this section singles out must still be registered').toEqual(
+      [],
+    );
+    expect(named.size).toBeGreaterThan(0);
+
+    const word = WORDS[named.size];
+    expect(word, `no word for ${String(named.size)} gates`).toBeDefined();
+    expect(heading![1]).toBe(word);
+    // The sentence under it repeats the number, and it is the copy that gets
+    // forgotten, so it is asserted separately rather than inferred.
+    expect(section).toContain(`These ${String(word).toLowerCase()} are worth reading`);
   });
 
   it('documents the portable plaintext export formats (Bitwarden JSON/CSV, Chrome/Edge CSV)', () => {

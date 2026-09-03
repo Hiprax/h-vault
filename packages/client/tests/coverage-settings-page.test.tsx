@@ -20,6 +20,13 @@ import type { Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
+// Imported rather than written out as a decimal literal. The framing sizes have
+// ONE definition, and `packages/shared/tests/constants.test.ts` scans this whole
+// repository for a second copy of either of them — including inside comments,
+// which is why this note does not quote the number — because a fixture that
+// drifts from the real value is a test asserting against a document layout that
+// does not exist.
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, MAX_DOCUMENTS_PER_ROTATION } from '@hvault/shared';
 
 vi.hoisted(() => {
   if (typeof globalThis.window !== 'undefined') {
@@ -55,6 +62,16 @@ const {
   mockApiPost,
   mockClearSettingsCache,
   mockWriteText,
+  mockGetDocumentsConfig,
+  mockListDocuments,
+  mockListDocumentTrash,
+  mockDeriveWrapKey,
+  mockUnwrapDek,
+  mockWrapDek,
+  mockZeroDek,
+  mockDeriveMetaKey,
+  mockDecryptMeta,
+  mockDeriveStreamKey,
 } = vi.hoisted(() => ({
   mockGetProfileApi: vi.fn(),
   mockUpdateSettingsApi: vi.fn(),
@@ -70,6 +87,16 @@ const {
   mockApiPost: vi.fn(),
   mockClearSettingsCache: vi.fn(),
   mockWriteText: vi.fn(),
+  mockGetDocumentsConfig: vi.fn(),
+  mockListDocuments: vi.fn(),
+  mockListDocumentTrash: vi.fn(),
+  mockDeriveWrapKey: vi.fn(),
+  mockUnwrapDek: vi.fn(),
+  mockWrapDek: vi.fn(),
+  mockZeroDek: vi.fn(),
+  mockDeriveMetaKey: vi.fn(),
+  mockDecryptMeta: vi.fn(),
+  mockDeriveStreamKey: vi.fn(),
 }));
 
 vi.mock('../src/stores/encryptedStorage', () => ({
@@ -115,6 +142,67 @@ vi.mock('../src/services/api/vaultApi', () => ({
   listFoldersApi: vi.fn(),
   bulkReEncryptApi: vi.fn(),
 }));
+
+/**
+ * The document store's two list endpoints, and nothing else in the module.
+ *
+ * `importActual` rather than a full replacement, deliberately: `DOCUMENT_PAGE_SIZE`
+ * and `MAX_DOCUMENT_PAGES` stay REAL, so the assertion that the rotation asks for
+ * `limit: DOCUMENT_PAGE_SIZE` is an assertion about the shared page size rather than
+ * about a number this file invented. It also keeps `documentsStore`, which imports a
+ * dozen other members of this module, loadable — `authStore` pulls it in.
+ */
+vi.mock('../src/services/api/documentsApi', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/api/documentsApi')>(
+    '../src/services/api/documentsApi',
+  );
+  return {
+    ...actual,
+    listDocumentsApi: (...args: unknown[]) => mockListDocuments(...args),
+    listDocumentTrashApi: (...args: unknown[]) => mockListDocumentTrash(...args),
+  };
+});
+
+/**
+ * Whether this server has a document store. Overridden per test, because
+ * `getDocumentsConfig` memoises its answer for the tab's lifetime and a real one
+ * resolved once would fix every later test in this file to the same server.
+ */
+vi.mock('../src/services/api/configApi', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/api/configApi')>(
+    '../src/services/api/configApi',
+  );
+  return { ...actual, getDocumentsConfig: (...args: unknown[]) => mockGetDocumentsConfig(...args) };
+});
+
+/**
+ * Document crypto, stubbed in the same distinguishable style as `cryptoService`
+ * above: every derived value carries the key and the document it came from, so a
+ * test can prove WHICH vault key wrapped WHICH document rather than merely that
+ * something was wrapped. The real primitives have their own suites
+ * (`document-crypto.test.ts` and the committed known-answer vectors); what is under
+ * test here is `SettingsPage`'s wiring of them.
+ *
+ * `importActual` again, because `documentsStore` imports nine other members of this
+ * module and a partial factory would leave them undefined at import time. The three
+ * METADATA functions are overridden too, even though the rotation must never reach
+ * them: that is exactly what makes "no metadata is decrypted" assertable.
+ */
+vi.mock('../src/services/crypto/documentCryptoService', async () => {
+  const actual = await vi.importActual<
+    typeof import('../src/services/crypto/documentCryptoService')
+  >('../src/services/crypto/documentCryptoService');
+  return {
+    ...actual,
+    deriveWrapKey: (...args: unknown[]) => mockDeriveWrapKey(...args),
+    unwrapDek: (...args: unknown[]) => mockUnwrapDek(...args),
+    wrapDek: (...args: unknown[]) => mockWrapDek(...args),
+    zeroDek: (...args: unknown[]) => mockZeroDek(...args),
+    deriveMetaKey: (...args: unknown[]) => mockDeriveMetaKey(...args),
+    decryptMeta: (...args: unknown[]) => mockDecryptMeta(...args),
+    deriveStreamKey: (...args: unknown[]) => mockDeriveStreamKey(...args),
+  };
+});
 
 vi.mock('../src/services/api/userApi', () => ({
   getProfileApi: (...args: unknown[]) => mockGetProfileApi(...args),
@@ -240,6 +328,7 @@ import {
   listFoldersApi,
   bulkReEncryptApi,
 } from '../src/services/api/vaultApi';
+import { DOCUMENT_PAGE_SIZE, MAX_DOCUMENT_PAGES } from '../src/services/api/documentsApi';
 
 // ---------------------------------------------------------------------------
 // Typed handles on the mocks
@@ -354,6 +443,109 @@ function installEmptyVaultRotationApis() {
   });
   mockListFolders.mockResolvedValue({ data: { success: true, data: [] } });
   mockBulkReEncrypt.mockResolvedValue({ data: { success: true } });
+  mockListDocuments.mockResolvedValue({
+    data: { success: true, data: [], pagination: { totalPages: 1 } },
+  });
+  mockListDocumentTrash.mockResolvedValue({
+    data: { success: true, data: [], pagination: { totalPages: 1 } },
+  });
+}
+
+/**
+ * The DEK handed out for each document, keyed by document id, so a test can prove
+ * every one of them was zeroed by the time the rotation finished or aborted.
+ */
+const issuedDeks = new Map<string, Uint8Array>();
+
+/**
+ * Distinguishable document-crypto stubs.
+ *
+ * A "wrap key" here is `{ wrapFor: <documentId>, under: <vault key name> }`, which
+ * is the pair the real `deriveWrapKey` binds together; `unwrapDek` REFUSES a key
+ * that is not the old one and `wrapDek` stamps both into its output, so a payload
+ * entry names the key it was wrapped under and the document it was bound to.
+ */
+function installDocumentCryptoStubs() {
+  issuedDeks.clear();
+  mockGetDocumentsConfig.mockResolvedValue({ enabled: false });
+
+  mockDeriveWrapKey.mockImplementation((vaultKey: { key: string }, documentId: string) =>
+    Promise.resolve({ wrapFor: documentId, under: vaultKey.key }),
+  );
+
+  mockUnwrapDek.mockImplementation(
+    (wrapped: { encryptedDek: string }, wrapKey: { wrapFor: string; under: string }) => {
+      // The stored wrapped key only ever opens under the key it was wrapped with.
+      if (wrapKey.under !== 'old-vault-key') {
+        return Promise.reject(new Error(`cannot unwrap ${wrapped.encryptedDek} under a new key`));
+      }
+      const dek = new Uint8Array(32).fill(7);
+      issuedDeks.set(wrapKey.wrapFor, dek);
+      return Promise.resolve(dek);
+    },
+  );
+
+  mockWrapDek.mockImplementation((_dek: Uint8Array, wrapKey: { wrapFor: string; under: string }) =>
+    Promise.resolve({
+      encryptedDek: `dek@${wrapKey.under}:${wrapKey.wrapFor}`,
+      dekIv: `dekIv:${wrapKey.under}`,
+      dekTag: `dekTag:${wrapKey.under}`,
+    }),
+  );
+
+  // The real one overwrites the buffer; so does this, because "every DEK was
+  // zeroed" is asserted on the buffers themselves rather than on a call count.
+  mockZeroDek.mockImplementation((dek: Uint8Array) => {
+    dek.fill(0);
+  });
+}
+
+/**
+ * A 24-hex ObjectId ending in the given number.
+ *
+ * Real-shaped rather than `'d1'`, because `deriveWrapKey` parses the id it is given
+ * and refuses anything that is not an ObjectId; a fixture the real function would
+ * reject would make every assertion here true of a request that cannot happen.
+ */
+function docId(n: number): string {
+  return `66c0f1a2b3c4d5e6f7a8b9${String(n).padStart(2, '0')}`;
+}
+
+/**
+ * One document row, carrying the four fields a rotation reads and the rest of the
+ * columns for shape.
+ *
+ * Deliberately NOT a row `documentResponseSchema` would accept: `streamSalt` and
+ * `noncePrefix` are not base64 of their exact byte counts. That is the stronger
+ * statement, and it is the invariant under test — a rotation validates nothing,
+ * because it needs only the id and the wrapped key, and refusing a row the DISPLAY
+ * path would refuse is exactly how a document gets left behind under a vault key
+ * that is about to stop existing.
+ */
+function documentRow(id: string) {
+  return {
+    _id: id,
+    favorite: false,
+    encryptedDek: `${id}-dek`,
+    dekIv: `${id}-dekIv`,
+    dekTag: `${id}-dekTag`,
+    streamSalt: `${id}-salt`,
+    noncePrefix: `${id}-prefix`,
+    encryptedMeta: `${id}-meta`,
+    metaIv: `${id}-metaIv`,
+    metaTag: `${id}-metaTag`,
+    chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+    chunkCount: 1,
+    ciphertextBytes: 16,
+    plaintextBytes: 0,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+/** One page of a document list response. */
+function documentPage(rows: ReturnType<typeof documentRow>[], totalPages = 1) {
+  return { data: { success: true, data: rows, pagination: { totalPages } } };
 }
 
 describe('SettingsPage — error paths and branches', () => {
@@ -363,6 +555,7 @@ describe('SettingsPage — error paths and branches', () => {
     // file runs against anything but the real import service.
     mockValidateImportOverride = null;
     installCryptoStubs();
+    installDocumentCryptoStubs();
     installEmptyVaultRotationApis();
     setProfile();
 
@@ -810,6 +1003,281 @@ describe('SettingsPage — error paths and branches', () => {
     expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
   });
 
+  // -------------------------------------------------------------------------
+  // Vault key rotation — the document leg
+  // -------------------------------------------------------------------------
+
+  it('rewraps every active AND trashed document key under the new vault key, in one request', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockListDocuments
+      .mockResolvedValueOnce(documentPage([documentRow(docId(1))], 2))
+      .mockResolvedValueOnce(documentPage([documentRow(docId(2))], 2));
+    mockListDocumentTrash.mockResolvedValue(documentPage([documentRow(docId(3))]));
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    const payload = mockBulkReEncrypt.mock.calls[0]![0] as {
+      documents: Record<string, unknown>[];
+    };
+
+    // Page 2 of the active list AND the trash are both enumerated. A trashed
+    // document is sealed under the same vault key and can still be restored, so
+    // leaving it out would restore a permanently unreadable file.
+    expect(payload.documents.map((d) => d.id)).toEqual([docId(1), docId(2), docId(3)]);
+
+    // Every entry carries EXACTLY the four rotation fields. The framing, the sizes
+    // and the sealed metadata blob on the row are not a rotation's to send.
+    for (const entry of payload.documents) {
+      expect(Object.keys(entry).sort()).toEqual(['dekIv', 'dekTag', 'encryptedDek', 'id']);
+    }
+    expect(payload.documents[0]).toEqual({
+      id: docId(1),
+      // Wrapped under the NEW key and bound to THIS document's id.
+      encryptedDek: `dek@new-vault-key:${docId(1)}`,
+      dekIv: 'dekIv:new-vault-key',
+      dekTag: 'dekTag:new-vault-key',
+    });
+
+    // Read with the old key, written with the new one — and the wrapped key that
+    // went in is the one that came off the row.
+    expect(mockDeriveWrapKey).toHaveBeenCalledWith(OLD_VAULT_KEY, docId(1));
+    expect(mockDeriveWrapKey).toHaveBeenCalledWith(NEW_VAULT_KEY, docId(1));
+    expect(mockUnwrapDek).toHaveBeenCalledWith(
+      expect.objectContaining({
+        encryptedDek: `${docId(1)}-dek`,
+        dekIv: `${docId(1)}-dekIv`,
+        dekTag: `${docId(1)}-dekTag`,
+      }),
+      { wrapFor: docId(1), under: 'old-vault-key' },
+    );
+
+    // Both lists are walked with the shared page size, so a >200-document account
+    // is paged rather than truncated at the server default.
+    expect(mockListDocuments).toHaveBeenCalledWith({ page: 1, limit: DOCUMENT_PAGE_SIZE });
+    expect(mockListDocuments).toHaveBeenCalledWith({ page: 2, limit: DOCUMENT_PAGE_SIZE });
+    expect(mockListDocumentTrash).toHaveBeenCalledWith({ page: 1, limit: DOCUMENT_PAGE_SIZE });
+
+    // No file was read: a rotation moves 32 bytes per document and never touches a
+    // stored object, which is the whole reason the store wraps its keys.
+    expect(mockDeriveStreamKey).not.toHaveBeenCalled();
+
+    // No metadata was decrypted. The blob is sealed under a key derived from the
+    // document's OWN key, which a rotation only rewraps, so opening it would be
+    // reading user plaintext for nothing.
+    expect(mockDeriveMetaKey).not.toHaveBeenCalled();
+    expect(mockDecryptMeta).not.toHaveBeenCalled();
+
+    // Every DEK the rotation held is zeroed by the time it finishes.
+    expect(issuedDeks.size).toBe(3);
+    for (const dek of issuedDeks.values()) {
+      expect(Array.from(dek)).toEqual(new Array(32).fill(0));
+    }
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().vaultKey).toBe(NEW_VAULT_KEY);
+    });
+  });
+
+  it('walks no more than the document page ceiling when the server inflates totalPages', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    // A server that keeps claiming there is another page. Without the clamp this
+    // walk never ends and the rotation never reaches the request at all.
+    mockListDocuments.mockResolvedValue(documentPage([documentRow(docId(1))], 99));
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    expect(mockListDocuments).toHaveBeenCalledTimes(MAX_DOCUMENT_PAGES);
+    // Read to the ceiling and no further: an account cannot hold more documents
+    // than the ceiling is derived from, so a `totalPages` past it is an inflated
+    // number rather than more rows.
+    expect(mockListDocuments).toHaveBeenCalledWith({
+      page: MAX_DOCUMENT_PAGES,
+      limit: DOCUMENT_PAGE_SIZE,
+    });
+    expect(mockListDocuments).not.toHaveBeenCalledWith({
+      page: MAX_DOCUMENT_PAGES + 1,
+      limit: DOCUMENT_PAGE_SIZE,
+    });
+  });
+
+  it('reads every page an account that is really at its ceiling would report', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    // The ceiling this walk clamps to has to be derived from how many rows an
+    // account can ACTUALLY hold, which is not the advertised per-user limit: the
+    // server checks the document count only when a transfer is opened, so three
+    // concurrent transfers can all pass the same reading and all commit. An
+    // account sitting at that real maximum reports one more page than a ceiling
+    // derived from the advertised limit allows, and the walk would stop a page
+    // short — dropping rows silently, in the one enumeration whose entire purpose
+    // is that it must never drop one, and leaving the account unable to rotate its
+    // vault key for ever.
+    const realPages = Math.ceil(MAX_DOCUMENTS_PER_ROTATION / DOCUMENT_PAGE_SIZE);
+    mockListDocuments.mockResolvedValue(documentPage([documentRow(docId(1))], realPages));
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    expect(mockListDocuments).toHaveBeenCalledTimes(realPages);
+    expect(mockListDocuments).toHaveBeenCalledWith({
+      page: realPages,
+      limit: DOCUMENT_PAGE_SIZE,
+    });
+  });
+
+  it('advances the progress bar across the document leg rather than stalling on the folders', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockListDocuments.mockResolvedValue(
+      documentPage([documentRow(docId(1)), documentRow(docId(2))]),
+    );
+
+    // The rotation is PARKED inside the document leg — after the first document is
+    // rewrapped, before the second — so React has actually rendered by the time the
+    // bar is read. Sampling from inside the loop without parking reads the value
+    // from before the handler started, because nothing has flushed yet.
+    let release!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let releaseCommit!: () => void;
+    const commitParked = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    mockBulkReEncrypt.mockImplementation(async () => {
+      await commitParked;
+      return { data: { success: true } };
+    });
+    const wrap = mockWrapDek.getMockImplementation()!;
+    let wrapped = 0;
+    mockWrapDek.mockImplementation(
+      async (dek: Uint8Array, wrapKey: { wrapFor: string; under: string }) => {
+        wrapped += 1;
+        if (wrapped === 2) await parked;
+        return wrap(dek, wrapKey);
+      },
+    );
+
+    await renderSettings();
+    await confirmRotation();
+
+    // What the button says while two documents are being re-keyed: the folder leg
+    // hands over at 60 and each document moves the bar by its share of the 30 the
+    // leg owns, so one of two documents reads 75. A leg that did no accounting
+    // would still read 60 here, and one that had been folded into the commit step
+    // would already read 95.
+    const midway = /Rotating\.\.\. (\d+)%/.exec(document.body.textContent ?? '');
+    expect(midway?.[1]).toBe('75');
+
+    // Released, the leg finishes and the handler parks again — this time inside the
+    // one request — so the commit marker is readable the same way.
+    await act(async () => {
+      release();
+    });
+    const atCommit = /Rotating\.\.\. (\d+)%/.exec(document.body.textContent ?? '');
+    // 95, not the 90 the last document left behind and not the 60 the folder leg
+    // handed over at: the bar has to move once more when the enumeration is done
+    // and the single atomic request goes out, or a large account looks stalled for
+    // the whole round trip.
+    expect(atCommit?.[1]).toBe('95');
+
+    await act(async () => {
+      releaseCommit();
+    });
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    expect(mockWrapDek).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts the whole rotation without touching the server when one document key will not unwrap', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockListDocuments.mockResolvedValue(
+      documentPage([documentRow(docId(1)), documentRow(docId(2))]),
+    );
+    const unwrap = mockUnwrapDek.getMockImplementation()!;
+    mockUnwrapDek.mockImplementation(
+      (wrapped: { encryptedDek: string }, wrapKey: { wrapFor: string; under: string }) =>
+        wrapKey.wrapFor === docId(2)
+          ? Promise.reject(new Error('GCM tag mismatch'))
+          : unwrap(wrapped, wrapKey),
+    );
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Rotation aborted: failed to re-wrap document 2 of 2',
+          type: 'error',
+        }),
+      );
+    });
+
+    // The negative that matters: nothing was sent. A payload committed without this
+    // document would replace the vault key and leave the file sealed under one the
+    // account no longer stores, which no later rotation could undo.
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(NEW_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+
+    // The DEK the first document DID yield is still zeroed on the way out.
+    expect(issuedDeks.size).toBe(1);
+    expect(Array.from(issuedDeks.get(docId(1))!)).toEqual(new Array(32).fill(0));
+  });
+
+  it('aborts before sending anything when a document list cannot be read', async () => {
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockListDocumentTrash.mockRejectedValue(new Error('network'));
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to rotate vault key', type: 'error' }),
+      );
+    });
+    // A half-enumerated account must never be committed: the documents this
+    // request did not name would be left under the superseded key.
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+  });
+
+  it('sends an empty document leg, and asks the document store nothing, on a server without one', async () => {
+    // The default from `installDocumentCryptoStubs`, restated here because it is
+    // the subject: an older server, or one with no object storage configured.
+    mockGetDocumentsConfig.mockResolvedValue({ enabled: false });
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    const payload = mockBulkReEncrypt.mock.calls[0]![0] as { documents: unknown[] };
+    // The leg is still named. The server refuses a payload that does not cover
+    // every row it holds, and it holds no documents, so an empty leg agrees.
+    expect(payload.documents).toEqual([]);
+
+    // Every document route sits behind `requireStorage`, whose 503 is redacted to
+    // its status text in production — so the client must learn the feature is
+    // absent from `GET /config` rather than by provoking an error it cannot read.
+    expect(mockListDocuments).not.toHaveBeenCalled();
+    expect(mockListDocumentTrash).not.toHaveBeenCalled();
+    expect(mockDeriveWrapKey).not.toHaveBeenCalled();
+  });
+
   it('refuses to rotate while the vault is locked', async () => {
     await renderSettings();
 
@@ -841,6 +1309,66 @@ describe('SettingsPage — error paths and branches', () => {
     expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
     // The dialog stays open so the user can retry.
     expect(screen.getByText('Confirm Rotation')).toBeInTheDocument();
+  });
+
+  it("shows the server's own 4xx refusal, so a completeness 409 is not collapsed into a generic failure", async () => {
+    // The completeness check names which leg fell short and, for documents, that a
+    // permanent deletion still awaiting the hourly cleanup keeps its row counted.
+    // A user who cannot read that retries for ever; the answer is to wait.
+    //
+    // Shortened here rather than quoted in full: the real one runs to 481
+    // characters and `getApiErrorMessage` caps a title at 200, so a verbatim copy
+    // would pin the TRUNCATION rather than the behaviour. What has to hold is that
+    // the server's own words reach the user; the leg and the counts, which are the
+    // part that identifies the failure, sit inside the first 200 either way.
+    const message =
+      'Vault key rotation failed: the request does not cover every row this account holds ' +
+      '(documents: 2 supplied, 3 stored).';
+    mockBulkReEncrypt.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 409'), {
+        isAxiosError: true,
+        response: { status: 409, data: { success: false, message, statusCode: 409 } },
+      }),
+    );
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: message, type: 'error' }),
+      );
+    });
+    // The generic title must NOT also have been shown: two toasts for one failure,
+    // one of them wrong, is worse than the message it was meant to replace.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to rotate vault key' }),
+    );
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+  });
+
+  it('keeps the generic failure for a 5xx, whose body is redacted to its status text', async () => {
+    // `createErrorMiddleware({ exposeServerErrors: false })` redacts a 5xx to its
+    // status text in production, so echoing one would replace a sentence a user can
+    // act on with "Internal Server Error".
+    mockBulkReEncrypt.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 500'), {
+        isAxiosError: true,
+        response: { status: 500, data: { success: false, message: 'Internal Server Error' } },
+      }),
+    );
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to rotate vault key', type: 'error' }),
+      );
+    });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Internal Server Error' }),
+    );
   });
 
   it('discards the typed passwords when the rotation dialog is cancelled', async () => {

@@ -28,6 +28,11 @@
       "file": "packages/server/src/controllers/authController.ts"
     },
     {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/documentController.ts::b2787cebd4b4590:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/documentController.ts"
+    },
+    {
       "fingerprint": "js/sql-injection::packages/server/src/controllers/folderController.ts::7a993502d9b00f9e:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/folderController.ts"
@@ -68,6 +73,16 @@
       "file": "packages/server/src/controllers/vaultController.ts"
     },
     {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::6a50ef035ac45bbb:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::7216de67c39b77ae:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
       "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::8da04d2988137e79:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/vaultController.ts"
@@ -83,12 +98,7 @@
       "file": "packages/server/src/controllers/vaultController.ts"
     },
     {
-      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::b2787cebd4b4590:2",
-      "rule": "js/sql-injection",
-      "file": "packages/server/src/controllers/vaultController.ts"
-    },
-    {
-      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::c673bac1e7219691:1",
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::d4a9fb49478507f:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/vaultController.ts"
     },
@@ -106,6 +116,21 @@
       "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::f22100b9725347f7:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::fce03d30218204f5:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/controllers/vaultController.ts"
+    },
+    {
+      "fingerprint": "js/sql-injection::packages/server/src/utils/controllerHelpers.ts::b1261a09b2b1c41d:1",
+      "rule": "js/sql-injection",
+      "file": "packages/server/src/utils/controllerHelpers.ts"
+    },
+    {
+      "fingerprint": "js/type-confusion-through-parameter-tampering::packages/server/src/controllers/documentController.ts::c7e42541384a4963:1",
+      "rule": "js/type-confusion-through-parameter-tampering",
+      "file": "packages/server/src/controllers/documentController.ts"
     },
     {
       "fingerprint": "js/user-controlled-bypass::packages/server/src/controllers/authController.ts::741054baf28e0c5e:1",

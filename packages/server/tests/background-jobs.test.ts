@@ -10,12 +10,64 @@ import { AuditLog } from '../src/models/AuditLog.js';
 import { JobLock } from '../src/models/JobLock.js';
 import { config } from '../src/config/index.js';
 
+// Capture logger output so the two failure cases can assert WHICH state the job
+// reported. A marked row is one the hourly collector will finish; an unmarked one
+// is not, and the difference is only ever visible in the message.
+const { loggerError, loggerInfo, loggerWarn, loggerDebug } = vi.hoisted(() => ({
+  loggerError: vi.fn(),
+  loggerInfo: vi.fn(),
+  loggerWarn: vi.fn(),
+  loggerDebug: vi.fn(),
+}));
+
+vi.mock('@hiprax/logger', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@hiprax/logger')>();
+  return {
+    ...original,
+    createLogger: () => ({
+      error: loggerError,
+      info: loggerInfo,
+      warn: loggerWarn,
+      debug: loggerDebug,
+    }),
+  };
+});
+
 // Mock node-cron BEFORE importing job modules
 vi.mock('node-cron', () => ({
   default: {
     schedule: vi.fn().mockReturnValue({ stop: vi.fn() }),
   },
 }));
+
+/**
+ * The document store is ON for this file, so `trashCleanup`'s second batch loop
+ * runs. Its OFF state — where the loop must not run at all, because deleting a
+ * document row without reaching its object destroys the only wrapped copy of the
+ * key that opens it — is pinned in `coverage-cascade-scheduler.test.ts`, which
+ * mocks no configuration and therefore has the feature genuinely disabled.
+ */
+vi.mock('../src/config/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config/index.js')>();
+  return { ...actual, storageConfigured: true };
+});
+
+const { storageRef } = vi.hoisted(() => ({
+  storageRef: { current: undefined as ReturnType<typeof createInMemoryStorage> | undefined },
+}));
+
+vi.mock('../src/services/storage/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/storage/index.js')>();
+  return {
+    ...actual,
+    getStorage: () => {
+      if (storageRef.current === undefined) {
+        throw new Error('the in-memory storage double was not installed for this test');
+      }
+      return storageRef.current;
+    },
+  };
+});
 
 // Mock email
 vi.mock('../src/utils/email.js', async (importOriginal) => {
@@ -31,6 +83,10 @@ import { startBackupScheduler } from '../src/jobs/backupScheduler.js';
 import { startTokenCleanupJob } from '../src/jobs/tokenCleanup.js';
 import { startTrashCleanupJob } from '../src/jobs/trashCleanup.js';
 import { sendEmail } from '../src/utils/email.js';
+import { Document } from '../src/models/Document.js';
+import { buildObjectKey } from '../src/utils/documentObjects.js';
+import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
 
 const mockedSchedule = vi.mocked(cron.schedule);
 const mockedSendEmail = vi.mocked(sendEmail);
@@ -117,8 +173,50 @@ async function createFolder(
   });
 }
 
+/**
+ * Helper: a trashed document row beside its object, as the trash holds the pair.
+ *
+ * `deletedAt` is the only interesting parameter — everything else is the minimum
+ * a `documents` row needs to be valid. Nothing here decrypts anything.
+ */
+async function createTrashedDocument(
+  userId: mongoose.Types.ObjectId,
+  deletedAt: Date,
+): Promise<{ id: mongoose.Types.ObjectId; objectKey: string }> {
+  const documentId = new mongoose.Types.ObjectId();
+  const objectKey = buildObjectKey(userId.toHexString(), documentId.toHexString());
+
+  await Document.create({
+    _id: documentId,
+    userId,
+    objectKey,
+    encryptedDek: 'dek-ciphertext',
+    dekIv: 'dek-iv',
+    dekTag: 'dek-tag',
+    streamSalt: Buffer.alloc(32, 7).toString('base64'),
+    noncePrefix: Buffer.alloc(7, 3).toString('base64'),
+    encryptedMeta: 'meta-ciphertext',
+    metaIv: 'meta-iv',
+    metaTag: 'meta-tag',
+    chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+    chunkCount: 1,
+    ciphertextBytes: 48,
+    plaintextBytes: 32,
+    deletedAt,
+  });
+
+  await storageRef.current!.putObject(objectKey, Buffer.alloc(48, 0x5a));
+  return { id: documentId, objectKey };
+}
+
+/** `n` days before now, as the cron's cutoff arithmetic sees it. */
+function daysAgo(n: number): Date {
+  return new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  storageRef.current = createInMemoryStorage();
   mockedSchedule.mockReturnValue({ stop: vi.fn() } as unknown as ReturnType<typeof cron.schedule>);
 });
 
@@ -165,6 +263,49 @@ describe('backupScheduler', () => {
     expect(backupData['folders']).toHaveLength(1);
     expect((backupData['items'] as { _id: string }[])[0]!._id).toBe(item._id.toString());
     expect((backupData['folders'] as { _id: string }[])[0]!._id).toBe(folder._id.toString());
+  });
+
+  it('carries the documentSummary breadcrumb in the SCHEDULED payload, not only in the download', async () => {
+    // The scheduled email is the backup most operators actually have. A
+    // breadcrumb present only on the manual download would leave it silently
+    // incomplete, so the two payload builders share one `collectDocumentSummary`
+    // and both emit the field.
+    startBackupScheduler();
+    const callback = getScheduledCallback();
+
+    const user = await createBackupUser();
+    await createVaultItem(user._id);
+    await createTrashedDocument(user._id, daysAgo(1));
+    const documentId = new mongoose.Types.ObjectId();
+    await Document.create({
+      _id: documentId,
+      userId: user._id,
+      objectKey: buildObjectKey(user._id.toHexString(), documentId.toHexString()),
+      encryptedDek: 'dek-ciphertext',
+      dekIv: 'dek-iv',
+      dekTag: 'dek-tag',
+      streamSalt: Buffer.alloc(32, 7).toString('base64'),
+      noncePrefix: Buffer.alloc(7, 3).toString('base64'),
+      encryptedMeta: 'meta-ciphertext',
+      metaIv: 'meta-iv',
+      metaTag: 'meta-tag',
+      chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+      chunkCount: 1,
+      ciphertextBytes: 1_016,
+      plaintextBytes: 1_000,
+    });
+
+    await callback();
+
+    const [, , , attachments] = mockedSendEmail.mock.calls[0]!;
+    const raw = attachments![0]!.content.toString('utf-8');
+    const backupData = JSON.parse(raw) as Record<string, unknown>;
+
+    // The trashed document is excluded, exactly as a trashed ITEM is.
+    expect(backupData['documentSummary']).toEqual({ count: 1, totalBytes: 1_000 });
+    // And the bytes stayed behind: a summary is a breadcrumb, never an export.
+    expect(raw).not.toContain('encryptedDek');
+    expect(raw).not.toContain('objectKey');
   });
 
   it('should never emit sourceRefId in the scheduled backup payload', async () => {
@@ -796,6 +937,286 @@ describe('trashCleanup', () => {
 
     const auditLogs = await AuditLog.find({ action: 'trash_auto_purge' });
     expect(auditLogs).toHaveLength(0);
+  });
+
+  // ── The document batch ──────────────────────────────────────────────────
+  //
+  // A document is a row beside an object, and the row holds the only wrapped copy
+  // of the key that decrypts it. So this loop is not the item loop with a second
+  // model substituted: it deletes the OBJECT first and the ROW second, per row,
+  // and a row whose object it cannot reach is deliberately left behind carrying
+  // `purgePending` for the hourly collector to finish.
+  //
+  // Every case below therefore asserts the pair — row and object — and the
+  // failure case asserts the marker, because the marker is the entire mechanism
+  // by which an interrupted purge is ever completed.
+  describe('the document batch', () => {
+    it('purges a document trashed past the cutoff, marking it and deleting the object BEFORE the row', async () => {
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const userId = new mongoose.Types.ObjectId();
+      const expired = await createTrashedDocument(userId, daysAgo(31));
+
+      // The order is the whole crash-safety argument, and no assertion about the
+      // END state can see it: row-first and object-first both finish with the
+      // same empty database and empty bucket. So record the sequence.
+      const order: string[] = [];
+      const realDeleteObject = storageRef.current!.deleteObject.bind(storageRef.current!);
+      const deleteObject = vi
+        .spyOn(storageRef.current!, 'deleteObject')
+        .mockImplementation(async (key: string) => {
+          order.push('object');
+          // What the row looks like AT THIS MOMENT is the point: the marker must
+          // already be committed, so a crash here leaves something the hourly
+          // collector can finish.
+          const midFlight = await Document.findById(expired.id).lean();
+          order.push(midFlight?.purgePending === true ? 'marked' : 'unmarked');
+          // Then do the real thing, so the end state below is still the real one.
+          await realDeleteObject(key);
+        });
+      const deleteOne = vi.spyOn(Document, 'deleteOne');
+
+      let deleteOneCalls = 0;
+      try {
+        await callback();
+      } finally {
+        // Counted BEFORE restoring: `mockRestore` clears the recorded calls as
+        // well as putting the original method back, so a count taken afterwards
+        // is always zero and reads exactly like "the row was never deleted".
+        deleteOneCalls = deleteOne.mock.calls.length;
+        deleteObject.mockRestore();
+        deleteOne.mockRestore();
+      }
+
+      expect(order).toEqual(['object', 'marked']);
+      expect(deleteOneCalls).toBe(1);
+
+      expect(await Document.findById(expired.id).lean()).toBeNull();
+      expect(storageRef.current!.storedKeys()).toEqual([]);
+
+      const audit = await AuditLog.findOne({ userId, action: 'trash_auto_purge' }).lean();
+      expect(audit, 'the purge must be audited under the existing action').not.toBeNull();
+      expect(audit!.metadata).toMatchObject({
+        documentCount: 1,
+        cutoffDays: 30,
+      });
+      expect(audit!.userAgent).toBe('system/trash-cleanup-job');
+    });
+
+    it('leaves a recently trashed document and its object completely alone', async () => {
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const userId = new mongoose.Types.ObjectId();
+      const recent = await createTrashedDocument(userId, daysAgo(1));
+
+      await callback();
+
+      const survivor = await Document.findById(recent.id).lean();
+      expect(survivor, 'a document one day in the trash is not expired').not.toBeNull();
+      // Not merely present: untouched. A `purgePending` marker here would send the
+      // collector after an object the user can still restore.
+      expect(survivor!.purgePending).toBeUndefined();
+      expect(storageRef.current!.storedKeys()).toEqual([recent.objectKey]);
+      expect(await AuditLog.countDocuments({ action: 'trash_auto_purge' })).toBe(0);
+    });
+
+    it('leaves purgePending behind for the collector when the object delete fails, and still finishes the batch', async () => {
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const userId = new mongoose.Types.ObjectId();
+      const first = await createTrashedDocument(userId, daysAgo(40));
+      const second = await createTrashedDocument(userId, daysAgo(35));
+
+      loggerError.mockClear();
+      const deleteSpy = vi
+        .spyOn(storageRef.current!, 'deleteObject')
+        .mockRejectedValue(new Error('storage engine unreachable') as never);
+
+      let deleteCalls = 0;
+      try {
+        await callback();
+      } finally {
+        deleteCalls = deleteSpy.mock.calls.length;
+        deleteSpy.mockRestore();
+      }
+
+      // Both rows survive, both carry the marker: the purge is DEFERRED, not lost.
+      for (const row of [first, second]) {
+        const survivor = await Document.findById(row.id).lean();
+        expect(survivor, 'a failed purge must not delete the row').not.toBeNull();
+        expect(survivor!.purgePending).toBe(true);
+      }
+      // Nothing was destroyed, so nothing may be claimed: an audit row here would
+      // tell a user their documents are gone when they are not.
+      expect(await AuditLog.countDocuments({ action: 'trash_auto_purge' })).toBe(0);
+      // …and the bytes are still in the bucket, which is the other half of
+      // "nothing was destroyed" and the half a surviving row cannot prove.
+      expect(storageRef.current!.storedKeys()).toEqual([first.objectKey, second.objectKey].sort());
+      // The message says the marker IS there, because it is: that is what tells
+      // an operator the hourly collector will finish these two.
+      expect(
+        loggerError.mock.calls.filter((call) =>
+          String(call[0]).includes('it keeps purgePending for the collector'),
+        ),
+      ).toHaveLength(2);
+
+      // Exactly one attempt per row. Two things fail here: a loop that abandoned
+      // the batch on the first failure would show one call, and a loop that
+      // re-read its own predicate instead of paging on `_id` would never return
+      // at all, because a failing row stays inside `deletedAt <= cutoff`.
+      expect(deleteCalls).toBe(2);
+    });
+
+    it('does not audit a row a concurrent request purged between the read and the delete', async () => {
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const userId = new mongoose.Types.ObjectId();
+      const raced = await createTrashedDocument(userId, daysAgo(31));
+
+      // The engine's own count is what the audit reports, never a bare `+= 1`.
+      // A row removed by whoever raced this job is not this job's purge, and
+      // claiming it would give the user a number nothing can be reconciled with.
+      const deleteOne = vi
+        .spyOn(Document, 'deleteOne')
+        .mockResolvedValueOnce({ acknowledged: true, deletedCount: 0 } as never);
+
+      try {
+        await callback();
+      } finally {
+        deleteOne.mockRestore();
+      }
+
+      expect(await AuditLog.countDocuments({ action: 'trash_auto_purge' })).toBe(0);
+      // The stubbed delete really did leave the row behind, so the assertion
+      // above is about the COUNT the job reported and not about a row that
+      // quietly went anyway.
+      expect(await Document.findById(raced.id).lean()).not.toBeNull();
+    });
+
+    it('leaves a document alone when its owner restores it between the page read and the claim', async () => {
+      // The race the claim exists for. The page is read at most a batch of network
+      // round trips before each row is processed, and in that gap the owner can
+      // pull a document back out of the trash — `restoreDocument` succeeds because
+      // nothing has marked the row yet. If the claim were an unconditional write,
+      // this job would then delete the object of a document the user had just
+      // recovered AND the row holding its only wrapped key: unrecoverable, silent,
+      // and reported as a successful nightly purge.
+      //
+      // Reproduced through the REAL claim: the restore is applied inside the very
+      // call that would otherwise mark the row, so the filter is what refuses it.
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const userId = new mongoose.Types.ObjectId();
+      const restored = await createTrashedDocument(userId, daysAgo(31));
+
+      const realUpdateOne = Document.updateOne.bind(Document);
+      const updateOne = vi.spyOn(Document, 'updateOne').mockImplementationOnce(((
+        ...args: unknown[]
+      ) => {
+        // The concurrent `POST /documents/:id/restore` lands here.
+        return realUpdateOne({ _id: restored.id }, { $unset: { deletedAt: 1 } }).then(() =>
+          (realUpdateOne as (...inner: unknown[]) => unknown)(...args),
+        );
+      }) as never);
+
+      const deleteObject = vi.spyOn(storageRef.current!, 'deleteObject');
+
+      try {
+        await callback();
+      } finally {
+        updateOne.mockRestore();
+        deleteObject.mockRestore();
+      }
+
+      const survivor = await Document.findById(restored.id).lean();
+      expect(survivor, 'the restored document must survive the nightly purge').not.toBeNull();
+      expect(survivor!.deletedAt, 'and it must still be out of the trash').toBeUndefined();
+      // The marker was refused, so nothing sent the collector after it either.
+      expect(survivor!.purgePending).toBeUndefined();
+      // The negative that matters most: its bytes were never touched.
+      expect(deleteObject).not.toHaveBeenCalled();
+      expect(storageRef.current!.storedKeys()).toEqual([restored.objectKey]);
+      // Not counted as a purge and not counted as a failure.
+      expect(await AuditLog.countDocuments({ action: 'trash_auto_purge' })).toBe(0);
+    });
+
+    it('reports that a document was never marked when the claim itself fails', async () => {
+      // The other arm of the failure log. A marked row is one the hourly collector
+      // will finish; an unmarked one is not, because the collector only looks at
+      // `purgePending` rows. Telling an operator triaging an outage that the GC
+      // will finish rows it will never see is a message that costs them a search.
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const userId = new mongoose.Types.ObjectId();
+      const stuck = await createTrashedDocument(userId, daysAgo(31));
+
+      loggerError.mockClear();
+      const updateOne = vi
+        .spyOn(Document, 'updateOne')
+        .mockRejectedValueOnce(new Error('write concern error') as never);
+      const deleteObject = vi.spyOn(storageRef.current!, 'deleteObject');
+
+      try {
+        await callback();
+      } finally {
+        updateOne.mockRestore();
+        deleteObject.mockRestore();
+      }
+
+      // The message must NOT promise the collector a row it will never see: the
+      // collector looks only at `purgePending`, and nothing set it here.
+      expect(
+        loggerError.mock.calls.some((call) =>
+          String(call[0]).includes('it was never marked, so the next run retries it'),
+        ),
+      ).toBe(true);
+      expect(
+        loggerError.mock.calls.some((call) =>
+          String(call[0]).includes('it keeps purgePending for the collector'),
+        ),
+      ).toBe(false);
+
+      const survivor = await Document.findById(stuck.id).lean();
+      expect(survivor).not.toBeNull();
+      expect(survivor!.purgePending, 'the marker was never written').toBeUndefined();
+      // Nothing after the claim ran, so the bytes are untouched.
+      expect(deleteObject).not.toHaveBeenCalled();
+      expect(storageRef.current!.storedKeys()).toEqual([stuck.objectKey]);
+      expect(await AuditLog.countDocuments({ action: 'trash_auto_purge' })).toBe(0);
+    });
+
+    it('purges expired documents for several users and audits each account separately', async () => {
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const first = new mongoose.Types.ObjectId();
+      const second = new mongoose.Types.ObjectId();
+      await createTrashedDocument(first, daysAgo(31));
+      await createTrashedDocument(first, daysAgo(45));
+      await createTrashedDocument(second, daysAgo(60));
+
+      await callback();
+
+      expect(await Document.countDocuments({})).toBe(0);
+      expect(storageRef.current!.storedKeys()).toEqual([]);
+
+      const firstAudit = await AuditLog.findOne({
+        userId: first,
+        action: 'trash_auto_purge',
+      }).lean();
+      const secondAudit = await AuditLog.findOne({
+        userId: second,
+        action: 'trash_auto_purge',
+      }).lean();
+      expect(firstAudit!.metadata).toMatchObject({ documentCount: 2 });
+      expect(secondAudit!.metadata).toMatchObject({ documentCount: 1 });
+    });
   });
 });
 

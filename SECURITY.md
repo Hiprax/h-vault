@@ -58,7 +58,14 @@ security posture, not a disclaimer.
   folder names and password history are encrypted client-side with AES-256-GCM under a
   key the server never sees. The master password never leaves the browser: the server
   stores only a bcrypt hash of a derived auth value, and the vault key only as ciphertext
-  it cannot unwrap. A full database dump yields ciphertext.
+  it cannot unwrap. A full database dump yields ciphertext. Stored documents are the same
+  bargain in a different shape: the bytes are sealed in the browser under a per-document
+  key the vault key only ever wraps, and the filename, type, tags and note are sealed with
+  them, so a dump of the database and the storage service together yields ciphertext, a
+  wrapped key and a set of sizes. **A hostile server cannot reorder, truncate, or splice one
+  document into another either** — a segment's position and an end-of-file marker are inside
+  its nonce, and the document's id is inside every key derivation, so each of those
+  tamperings makes the decryption fail rather than producing plausible bytes.
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
 - **Credential stuffing and online guessing.** Rate limiting, account lockout with
@@ -144,6 +151,26 @@ security posture, not a disclaimer.
   an import updates — an equivalence between imported entries and stored items it could not
   previously compute. That never leaves your own vault and exposes no plaintext, and `skip` (the
   default) and `keep both` send no updates at all.
+  For **documents** the same rule applies with one addition that is accepted rather than
+  mitigated: the server learns how many you have, when each was uploaded and last changed,
+  which folder it is in, whether it is a favourite, whether it is in the trash — and **its
+  size**, because the byte count is what range arithmetic and the storage quota are computed
+  from. It does not learn the filename, the extension, the MIME type, the tags, the note or a
+  byte of content: all six are sealed in one blob alongside the file's own SHA-256. Length is a
+  real leak and it is worth naming: a size can identify a well-known file, and a set of sizes can
+  characterise an account. Padding the ciphertext would hide it and is deliberately not done in
+  this version, because it would cost every user storage and bandwidth on every document.
+  `DOCUMENT_ALLOWED_EXTENSIONS` does **not** mitigate any of this, and is not a security control
+  at all: the server receives ciphertext and cannot see a filename, so the allowlist is applied
+  by the browser and any file type reaches the API.
+  Finally, some of the document store's own configuration is deliberately **public**.
+  `GET /api/v1/config` is unauthenticated — it always was, so a browser can size the File
+  Encryption tool's guardrail before anyone signs in — and it now also reports whether the
+  document store is enabled and, where it is, the per-document size cap, the per-user quota, the
+  document ceiling and the extension allowlist. Those are operator limits rather than user data,
+  and they are published to anonymous callers exactly as the File Encryption cap already was. If
+  the extension list would tell a stranger something about your organisation, leave it empty; it
+  buys no enforcement in exchange.
 - **Your deployment.** An exposed MongoDB port, a `TRUST_PROXY` set higher than the number
   of proxies actually in front of the app, secrets committed to a repository, or a missing
   TLS certificate will undo the guarantees above. The deployment checklist in the README
@@ -274,6 +301,136 @@ an unsaved form, so a cancelled edit cannot leave codes on disk with nothing in 
 and it takes a separate confirmation that states the file is unencrypted before anything is
 written. Delete it once you have stored the codes wherever you intended them to go.
 
+### Displaying a stored document
+
+A document store means arbitrary attacker-chosen files meeting third-party parsers — a markdown
+pipeline, an HTML sanitizer, a syntax highlighter, a formatter. The precedent that shaped this
+design is **CVE-2024-4367 in Mozilla's pdf.js**: opening a malicious PDF ran the document's own
+JavaScript _in the context of the hosting page_. In a password manager the hosting page is the one
+holding your unlocked vault key.
+
+So the answer here is structural rather than a promise that the parsers are correct: **no byte of
+a stored document is ever parsed in the application's own origin** — not when it is displayed, and
+not when the optional format-and-repair transforms run before an upload. Both happen inside one
+isolated document, embedded as
+
+```html
+<iframe src="/sandbox.html" sandbox="allow-scripts" referrerpolicy="no-referrer" allow=""></iframe>
+```
+
+- **`allow-scripts` without `allow-same-origin` gives it an opaque origin.** It fails every
+  same-origin check: it cannot read the embedding page's DOM, its `sessionStorage`, its IndexedDB,
+  `document.cookie`, or anything the application holds in memory. The two flags must never appear
+  together — that pair lets the framed document remove its own sandbox and is worth nothing. No
+  other flag is granted: no popups, forms, modals, downloads or top-level navigation, and `allow=""`
+  denies every delegated permission.
+- **It carries its own, far stricter policy.** A document fetched from an `http(s)` URL does not
+  inherit its embedder's CSP, so the route that serves it attaches one of its own:
+  `default-src 'none'`, `connect-src 'none'`, `worker-src 'none'`, `object-src 'none'`,
+  `base-uri 'none'`, `form-action 'none'`, and `sandbox allow-scripts` repeated as a directive so
+  the document sandboxes itself even if a future embedder forgets the attribute. **`connect-src
+'none'` is the containment, and it is worth being exact about what that buys**: it blocks
+  `fetch`, `XMLHttpRequest`, WebSockets, `EventSource` and `sendBeacon`, so a compromised renderer
+  can never READ a response; and no directive in the policy names an external host, so nothing it
+  emits can reach a third party. What it does not do is stop every packet — `script-src`,
+  `style-src`, `img-src` and `font-src` allow `'self'`, and inside a sandboxed document CSP
+  resolves `'self'` from the response's URL rather than from the document's opaque origin, so an
+  `<img src="/api/v1/…">` is a request this server would see. The honest bound is therefore **no
+  host but this one, and no readable answer**, not "no network at all" — the same bound residual
+  risk 1 below describes for self-navigation. All of it is affordable only because there is no PDF
+  renderer; see below.
+- **It is handed bytes and nothing else.** The application decrypts the file, verifies every
+  segment's authentication tag and the whole-file digest, and only then posts the plaintext, a
+  render mode, an extension hint and the current theme. Never the document key, the vault key, an
+  access token, the document's id, or its name. `referrerpolicy="no-referrer"` is there so the
+  embedder's URL — which contains the document id — is not handed over in `document.referrer`.
+- **The channel is one-shot.** The frame announces itself once on the window; the application
+  accepts that handshake **at most once per frame** and removes the listener at that moment,
+  then transfers a `MessagePort` and says everything else over it. One frame per document, created
+  fresh and destroyed when you navigate away, so one document can never observe the next. A link
+  clicked inside the frame is delivered as a message, checked against the same URL allowlist the
+  rest of the app uses (http, https and mailto only), and opened only after you confirm a dialog
+  showing the destination's origin — an unchecked `javascript:` URL opened by the application would
+  run in the application's origin, which is the whole compromise in one message.
+- **PDF and Office formats are download-only, deliberately.** Carrying a PDF renderer would have
+  meant a large parser with the history above, plus a worker and a WebAssembly module fetched by
+  URL — which would have forced `connect-src` and `worker-src` open for every other format too.
+  Downloading a PDF and opening it in the viewer the operating system already has is the better
+  trade, and the interface says exactly that rather than showing a broken frame.
+
+**Four residual risks, named rather than implied.** Isolation is a boundary, not a proof of
+correctness, and these are the things it does not buy:
+
+1. **A compromised renderer can leak the one file it was handed, by navigating itself away.** No
+   sandbox flag and no CSP directive stops a document navigating _itself_, so bytes can be put in
+   a URL and carried out. The sandbox flags follow the navigation — the new document is still
+   sandboxed and still opaque — so it reaches no vault data and no other document. But a navigated
+   document carries **no CSP** (a policy is per-response and does not survive a navigation), so it
+   does have network access, and it would be an exfiltration endpoint if the application ever spoke
+   to it again. What stops that is the one-shot handshake above: the port died with the previous
+   document and the listener that could grant a new one is gone. `window.name` survives a
+   navigation and is a second channel of the same shape and the same bounded impact — one file.
+2. **It can draw a convincing fake interface inside its own rectangle.** Nothing prevents a
+   renderer painting something that looks like a prompt. This is why the master password is asked
+   for **only on the full-page lock screen** and nowhere else, and why the document's title, its
+   toolbar and its download button are drawn by the application _outside_ the frame, where a
+   renderer cannot forge them.
+3. **Isolation does nothing about a renderer that displays something other than the file.** A bug
+   that renders the wrong text is invisible to every boundary described here, and it matters most
+   for exactly the documents someone reads in order to act on them — a recovery sheet, a set of
+   backup codes, a key. When the contents matter that much, download the file and check it.
+4. **The application still decrypts every byte in its own origin** before posting it to the frame.
+   The property this design buys is that untrusted input is never _parsed_ there — not that it
+   never exists there. A flaw in the application's own code is still a flaw in the application.
+
+### Deleting a document, and why it cannot be undone
+
+A stored document is two things: an entry in the database and a file of ciphertext in object
+storage. The entry holds the only wrapped copy of the key that decrypts that file — the key
+exists nowhere else, not on the server, not in the browser once the vault is locked, and not
+in a backup, because **documents are deliberately not part of a backup** (their bytes cannot
+fit a backup file, and metadata without bytes would restore entries pointing at files that do
+not exist; a backup therefore carries only a count, so a restored account cannot quietly look
+complete). Deleting the entry is therefore the act that destroys the document. Any file that
+somehow survives it is ciphertext under a key that no longer exists anywhere.
+
+That shapes the order every deletion path uses, and it is worth stating because the two
+orders look interchangeable and are not:
+
+- **Deleting one document permanently** marks the entry, deletes the file, then deletes the
+  entry. A crash in the middle leaves a marker the hourly clean-up finishes; the reverse
+  order would leave a file that nothing is left to name. Emptying the document trash and the
+  nightly purge of documents trashed beyond `TRASH_AUTO_PURGE_DAYS` do exactly the same
+  thing, one document at a time, and a file the storage service refuses to delete leaves its
+  entry marked for the next run rather than removing an entry whose file is still there.
+- **Deleting an account** is the one path that runs the other way round: every entry is
+  removed with the rest of the account's data first, and only then are the account's files
+  swept from storage by prefix. Because the entries are already gone, a file the sweep cannot
+  reach is already unreadable rather than a document still standing. The erasure is reported
+  as complete in that case — it is — and the failure is logged for the operator, with the
+  remainder reclaimed by the scheduled clean-up. On a deployment with no document store
+  configured the sweep does nothing at all.
+
+Neither deletion is recoverable, and neither is undone by restoring a backup. The same fact
+has an operational consequence that belongs to whoever runs the server rather than to whoever
+uses it: because documents are not in a backup, the **storage volume is the only copy of every
+uploaded file**, and it must be captured alongside the database and the deployment's `.env` —
+the wrapped keys live in the database, the ciphertext lives in the storage service, and neither
+half is usable without the other. The README's backup section gives the volumes and the
+procedure, including why a file-level copy of a running storage engine is not a backup.
+
+The hourly clean-up referred to above is the only thing in the system that deletes a stored
+file without a request having asked for it, so the rule it works to is stated in the negative:
+it deletes a file only when it can prove nothing refers to it. A file is left where it is
+whenever its name is not one this system wrote, whenever the storage service does not report
+how old it is, whenever it is less than a day old, whenever any entry at all names it —
+active, in the trash, or part-way through being purged — and whenever the transfer that
+created it could still be completed. Every one of those is a reason to do nothing, because an
+unreclaimed file costs storage while a file deleted in error costs a document that no backup
+and no key can bring back. The clean-up also stops early once the storage service has refused
+several operations in a row, so a failing service produces one short run an hour rather than a
+run that never ends.
+
 ### Auto-lock
 
 The vault locks after `autoLockTimeout` minutes without interaction (1 to 1440, default 15).
@@ -344,14 +501,15 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 
 ## Security practices in this repository
 
-- Every push runs `npm run ci` locally through the `pre-push` hook — twenty-eight gates,
+- Every push runs `npm run ci` locally through the `pre-push` hook — twenty-nine gates,
   including a dependency audit at moderate and above over the production tree, ESLint with
   `eslint-plugin-security`, static analysis (CodeQL where the CLI is installed, otherwise
   Semgrep CE or OpenGrep, and the gate reports which engine answered), container builds
   scanned with Trivy (zero fixable CRITICAL/HIGH), a secret scan over every tracked file
   **and every blob in git history**, the cross-user authorization matrix over the whole
-  route table, and a redaction suite that asserts no request value, audit row or production
-  error body carries a secret. Eight further gates run before a release, among them a fuzz
+  route table, a conformance run of the storage port against the real object-storage engine
+  in a container, and a redaction suite that asserts no request value, audit row or
+  production error body carries a secret. Eight further gates run before a release, among them a fuzz
   run over the seven import parsers, a crash-consistency drill that SIGKILLs a real process
   mid-write, the mutation oracle, and the deployment clean room.
 - The gates are themselves guarded, because a security gate that can be edited to pass is
@@ -376,3 +534,27 @@ put an instance in front of real data — in particular: set a dedicated
 `TWO_FACTOR_ENCRYPTION_KEY`, generate every secret randomly, terminate TLS, set
 `TRUST_PROXY_HOPS` to the true number of proxies, and keep the single published port bound
 to `127.0.0.1`.
+
+### The object storage service
+
+The bundled Docker stack runs an S3-compatible storage service for the document store. Three
+properties of it are load-bearing. The first two are asserted by the test suite rather than
+left to a reviewer's eye; the third is a measured behaviour of the engine, so it is written
+down and covered by the deployment drill rather than by a unit test:
+
+- **It publishes no port and sits on the internal network.** Its S3 API authenticates with a
+  static key pair and has none of the application's rate limiting, CSRF handling or session
+  management in front of it, so the app container is the only thing that can reach it. Do not
+  publish it "for tooling"; use `docker compose exec` instead.
+- **Its image is pinned by digest.** It is the one image in the stack this repository does not
+  build, and a tag is a mutable pointer.
+- **Its bucket credentials rotate as a pair.** Measured against the pinned engine: changing
+  the secret alone makes the service exit 1 and refuse to start rather than adopt the new
+  value, which under a restart policy is a crash loop. Change the access key id and the secret
+  together, then delete the superseded key. The README's secret-rotation table carries the
+  procedure.
+
+The service holds nothing but ciphertext: documents are sealed in the browser under a key the
+server never sees, so it holds no filename, no MIME type, no tag, no note and no content. That
+is what makes it safe for it to be a separate service at all — but it is also why its volume,
+and only its volume, holds your users' files. See the backup boundary above.

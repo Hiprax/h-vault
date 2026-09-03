@@ -10,6 +10,7 @@ import { APP_VERSION, maskEmail } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
+import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
 
 const logger = createModuleLogger('jobs/backup');
 
@@ -33,6 +34,13 @@ interface BackupPayload {
     bwkVaultKeyTag: string | undefined;
   };
   itemCount: number;
+  /**
+   * The documents this backup does NOT contain — see `utils/documentSummary.ts`.
+   * Carried by the SCHEDULED payload as well as the manual one, because a
+   * breadcrumb only the download had would leave the backup most users actually
+   * receive silently incomplete.
+   */
+  documentSummary: DocumentSummary;
 }
 
 async function processUserBackup(user: {
@@ -134,6 +142,7 @@ async function processUserBackup(user: {
         bwkVaultKeyTag: user.settings.backup.bwkVaultKeyTag,
       },
       itemCount: items.length,
+      documentSummary: await collectDocumentSummary(userId),
     };
 
     const backupJson = JSON.stringify(backupData);

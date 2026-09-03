@@ -2,6 +2,31 @@ import { describe, it, expect, vi } from 'vitest';
 import request from 'supertest';
 import crypto from 'node:crypto';
 import express, { type Request, type Response, type NextFunction } from 'express';
+
+/**
+ * Counts every attempt to obtain an object-storage client, so this file can assert
+ * the thing `/api/v1/health` must NOT do.
+ *
+ * The health endpoint is what the container healthcheck and the outer Nginx call.
+ * Probing storage from it would let an unreachable bucket time the healthcheck out
+ * and restart a server whose vault is answering every request — the same reason
+ * `healthLimiter` is the one limiter that is not backed by the Mongo instance it
+ * reports on. The probe therefore runs once at boot (`utils/storageHealth.ts`) and
+ * `/api/v1/metrics` reports what it learned; nothing on the health path asks.
+ */
+const { storageAccess } = vi.hoisted(() => ({ storageAccess: { count: 0 } }));
+
+vi.mock('../src/services/storage/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/storage/index.js')>();
+  return {
+    ...actual,
+    getStorage: () => {
+      storageAccess.count += 1;
+      return actual.getStorage();
+    },
+  };
+});
+
 import app from '../src/app.js';
 import { getMetrics } from '../src/controllers/metricsController.js';
 import { createTestUser } from './helpers.js';
@@ -18,6 +43,21 @@ describe('Health routes', () => {
       expect(typeof res.body.data.uptime).toBe('number');
       expect(res.body.data.database).toBe('connected');
       expect(res.body.data.timestamp).toBeDefined();
+    });
+
+    it('does not probe object storage, and reports nothing about it', async () => {
+      storageAccess.count = 0;
+
+      const res = await request(app).get('/api/v1/health');
+
+      expect(res.status).toBe(200);
+      // The negative this test exists for: no storage client was built and no
+      // request left for the bucket. A probe here is a timeout on the one endpoint
+      // that has to answer while dependencies are down.
+      expect(storageAccess.count).toBe(0);
+      // And the endpoint says nothing about storage either, so no orchestrator can
+      // come to depend on a field that is deliberately absent.
+      expect(res.body.data.storage).toBeUndefined();
     });
 
     it('should not expose detailed job/backup info even with ?detailed=true', async () => {
@@ -59,6 +99,30 @@ describe('Metrics controller', () => {
     expect(res.body.data.database).toBeDefined();
     expect(res.body.data.database.state).toBe('connected');
     expect(res.body.data.database.readyState).toBe(1);
+  });
+
+  it('reports the object-storage gauge as unmeasured until a preflight has run', async () => {
+    const { errorMiddleware } = await import('@hiprax/errors');
+    const metricsApp = express();
+    metricsApp.get('/metrics', getMetrics);
+    metricsApp.use(errorMiddleware);
+
+    storageAccess.count = 0;
+    const res = await request(metricsApp).get('/metrics');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.storage).toEqual({
+      // This file never runs the boot preflight, so the gauge is in its pristine
+      // state — and `null` is the assertion, not `false`. The two mean different
+      // things to an operator: "nobody asked" versus "asked, and the bucket is
+      // unreachable", and collapsing them into one boolean is how a misconfigured
+      // deployment reads as a broken one.
+      configured: false,
+      lastProbeAt: null,
+      lastProbeOk: null,
+    });
+    // Reading the gauge is a memory read: reporting it must not itself probe.
+    expect(storageAccess.count).toBe(0);
   });
 
   it('should reject requests with missing x-metrics-token when METRICS_TOKEN is configured', async () => {

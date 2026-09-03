@@ -29,6 +29,27 @@
 # holds. Revisit when the Alpine 3.24+ musl regression is resolved upstream.
 FROM node:24-alpine3.23 AS base
 WORKDIR /app
+# Patch the base image's OS packages before anything is built on top of them, for
+# the same reason and by the same means as the `web` stage below.
+#
+# node:24-alpine is rebuilt when NODE releases, not when Alpine publishes a
+# security release, so it lags its own branch: it shipped openssl 3.5.7-r0 while
+# Alpine v3.23/main carried 3.5.8-r0, and Trivy flagged libcrypto3/libssl3 as a
+# fixable HIGH (CVE-2026-14456, an unbounded pending-connection queue in the QUIC
+# listener) in BOTH `app` and `bootstrap`. Nothing here is a QUIC server, and
+# Node's prebuilt musl binary bundles its own OpenSSL — these two packages are
+# present because the Alpine rootfs itself needs them — but the fix is one apk
+# transaction away, so it is taken rather than argued about.
+#
+# It lives in `base` so every derived image inherits it from ONE instruction. It
+# cannot cross Alpine releases: /etc/apk/repositories in this base points at the
+# v3.23 branch, so the upgrade stays inside 3.23 and the 3.24 musl that SIGSEGVs
+# npm under WSL2 (see the tag pin above) is never pulled. Deliberately NOT
+# `apk add --upgrade <pkg>=<version>`: hadolint DL3018 would demand the pinned
+# revision, and a pinned apk revision breaks every build on the day Alpine
+# publishes the next one — a red gate for a reason that has nothing to do with
+# this repository.
+RUN apk upgrade --no-cache
 # mongodb-memory-server (a server devDependency) downloads a ~150 MB mongod
 # binary in its postinstall. Nothing in any image runs it — the unit tests do,
 # and they never run in a container — so skip the download entirely.
@@ -271,7 +292,7 @@ USER node
 CMD ["node", "packages/server/dist/server.js"]
 
 # -----------------------------------------------------------------------------
-# web-root — the SPA bundle, minus index.html
+# web-root — the SPA bundle, minus its two HTML documents
 # -----------------------------------------------------------------------------
 # The HTML document is ALWAYS served by Express, never by Nginx, because helmet
 # (inside Express) is what attaches the Content-Security-Policy with its
@@ -279,8 +300,17 @@ CMD ["node", "packages/server/dist/server.js"]
 # index.html sitting in Nginx's document root would be a header-free version of
 # the app one URL away, so the file is removed here: Nginx cannot serve what it
 # does not have, no matter how a future `try_files` edit is worded.
+#
+# sandbox.html goes for the same reason and with a sharper consequence. It is the
+# isolated document every stored file is rendered inside, and its whole isolation
+# IS the per-response policy Express attaches to it (packages/server/src/config/
+# sandboxCsp.ts). Served off this disk it would instead carry the doc-root's
+# `default-src 'self'` and none of the sandbox's own directives — no
+# `connect-src 'none'`, no `worker-src 'none'`, no `sandbox allow-scripts` — which
+# is the one way this isolation quietly stops existing while every renderer keeps
+# working. With the file absent, `try_files` falls through to `@app`.
 FROM build-client AS web-root
-RUN rm -f /app/packages/client/dist/index.html
+RUN rm -f /app/packages/client/dist/index.html /app/packages/client/dist/sandbox.html
 
 # -----------------------------------------------------------------------------
 # web — Nginx: the stack's single serving surface

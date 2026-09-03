@@ -1,0 +1,7 @@
+{
+  // a line comment
+  "a": 1,
+  /* a block
+     comment */
+  "b": 2
+}

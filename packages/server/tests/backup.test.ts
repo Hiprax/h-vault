@@ -6,6 +6,9 @@ import { AuditLog } from '../src/models/AuditLog.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { JobLock } from '../src/models/JobLock.js';
+import { Document } from '../src/models/Document.js';
+import { buildObjectKey } from '../src/utils/documentObjects.js';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES } from '@hvault/shared';
 import {
   createTestUser,
   authHeader,
@@ -45,6 +48,41 @@ async function setupBackupForUser(
     .set('Cookie', csrfCookie)
     .send({ ...bwkSetupData, authHash: rawAuthHash });
   return res;
+}
+
+/**
+ * A committed document row for `userId`, carrying `plaintextBytes` bytes.
+ *
+ * Seeded directly rather than uploaded: the upload endpoints sit behind
+ * `requireStorage`, and this file configures no object storage — which is itself
+ * part of what the summary cases assert, since counting rows must not depend on
+ * being able to reach the bucket.
+ */
+async function seedDocument(
+  userId: string,
+  plaintextBytes: number,
+  overrides: Record<string, unknown> = {},
+): Promise<Types.ObjectId> {
+  const documentId = new Types.ObjectId();
+  await Document.create({
+    _id: documentId,
+    userId,
+    objectKey: buildObjectKey(userId, documentId.toHexString()),
+    encryptedDek: 'dek-ciphertext',
+    dekIv: 'dek-iv',
+    dekTag: 'dek-tag',
+    streamSalt: Buffer.alloc(32, 7).toString('base64'),
+    noncePrefix: Buffer.alloc(7, 3).toString('base64'),
+    encryptedMeta: 'meta-ciphertext',
+    metaIv: 'meta-iv',
+    metaTag: 'meta-tag',
+    chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+    chunkCount: 1,
+    ciphertextBytes: plaintextBytes + DOCUMENT_TAG_BYTES,
+    plaintextBytes,
+    ...overrides,
+  });
+  return documentId;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -296,6 +334,75 @@ describe('Backup routes', () => {
   });
 
   // ── Download Backup ──────────────────────────────────────────────
+
+  // ── The documents a backup deliberately does NOT carry ─────────────
+  //
+  // Documents are out of scope for a backup: their bytes cannot fit a ~25 MiB
+  // JSON document, and metadata without bytes would restore rows pointing at
+  // objects that do not exist. The danger that creates is silent — a user
+  // restores, sees every item and folder return, and concludes the restore was
+  // complete. `documentSummary` is the breadcrumb that makes the boundary
+  // visible, so these cases pin what it counts and, just as importantly, that it
+  // is never mistaken for documents actually being IN the file.
+  describe('GET /api/v1/backup/download — the documentSummary breadcrumb', () => {
+    async function downloadPayload(): Promise<Record<string, unknown>> {
+      await setupBackupForUser(agent, user.accessToken);
+      const res = await agent
+        .get('/api/v1/backup/download')
+        .set('Authorization', authHeader(user.accessToken));
+      expect(res.status).toBe(200);
+      return JSON.parse(res.text) as Record<string, unknown>;
+    }
+
+    it('counts the account active documents and their plaintext bytes, and carries no document data', async () => {
+      await seedDocument(user.id, 1_000);
+      await seedDocument(user.id, 2_500);
+
+      const payload = await downloadPayload();
+
+      expect(payload.documentSummary).toEqual({ count: 2, totalBytes: 3_500 });
+      // The negative that matters: a summary is a breadcrumb, not a smuggled
+      // export. Nothing in the file may carry a document row, a wrapped document
+      // key or an object key.
+      expect(payload.documents).toBeUndefined();
+      const serialized = JSON.stringify(payload);
+      expect(serialized).not.toContain('encryptedDek');
+      expect(serialized).not.toContain('objectKey');
+      expect(serialized).not.toContain('noncePrefix');
+    });
+
+    it('counts only active documents, so a trashed one is not reported as missing from the backup', async () => {
+      await seedDocument(user.id, 1_000);
+      await seedDocument(user.id, 9_999, { deletedAt: new Date() });
+
+      const payload = await downloadPayload();
+
+      // Same rule the backup already applies to items (`deletedAt: {$exists:false}`),
+      // so the number matches what the user can actually see and re-upload.
+      expect(payload.documentSummary).toEqual({ count: 1, totalBytes: 1_000 });
+    });
+
+    it('counts no other account documents', async () => {
+      const stranger = await createTestUser();
+      await seedDocument(stranger.id, 5_000);
+      await seedDocument(user.id, 40);
+
+      const payload = await downloadPayload();
+
+      // A `$match` that lost its `userId` cast would silently match nothing and
+      // report a confident zero; one that lost the predicate would report 2.
+      expect(payload.documentSummary).toEqual({ count: 1, totalBytes: 40 });
+    });
+
+    it('carries a ZEROED summary, not an absent field, for an account holding no documents', async () => {
+      const payload = await downloadPayload();
+
+      // Absent means "written by a server that predates the document store";
+      // zero means "written by a server that has it, from an account with
+      // nothing to report". A restore must be able to tell those apart.
+      expect(payload.documentSummary).toEqual({ count: 0, totalBytes: 0 });
+    });
+  });
 
   describe('GET /api/v1/backup/download', () => {
     it('should return a JSON attachment', async () => {

@@ -16,6 +16,13 @@
  * ONE definition, shared by `scripts/ci/bundle-gate.mjs` (which enforces them)
  * and `scripts/ci/ratchet-check.mjs` (which pins them, direction `lower`, so a
  * ceiling can be tightened but never quietly raised).
+ *
+ * Two TypeScript suites also import this file directly, which is why both
+ * package test configs set `allowJs`: `packages/client/tests/vite-config.test.ts`
+ * pins the sandbox build's `chunkSizeWarningLimit` to `lowlight`, and
+ * `packages/server/tests/gate-surface.test.ts` exercises `chunkBaseName`. They
+ * read the real keys, so renaming one fails at type-check instead of silently
+ * comparing an advisory against `undefined`.
  */
 
 /** Chunk names are `<base>-<hash>.js`; budgets are keyed by `<base>`. */
@@ -40,6 +47,83 @@ export const CHUNK_BUDGETS_KB = {
   VaultItemForm: 230,
   /** Axios, zod and the other shared runtime. Measured at ~154 KiB. */
   'vendor-core': 220,
+
+  // -------------------------------------------------------------------------
+  // The document sandbox (dist/sandbox-assets/), a SECOND build with its own
+  // module graph.
+  // -------------------------------------------------------------------------
+  //
+  // Its renderers are DYNAMICALLY IMPORTED PER MODE, which is what makes each
+  // one a chunk at all — Rollup splits at a dynamic-import boundary and nowhere
+  // else — and is also what the numbers below are protecting: a static import in
+  // `src/sandbox/sandbox.ts` would collapse the whole set into the entry, so
+  // opening a `.txt` would download the markdown pipeline and 890 KiB of syntax
+  // grammars. Every one of these was MEASURED from a real build.
+  //
+  // Only the chunks that need more than `DEFAULT_CHUNK_BUDGET_KB` have an entry,
+  // plus the entry chunk, which needs LESS. The rest — `decode`, `dom`, `image`,
+  // `media`, `text`, `rehype-highlight`, `hast-util-to-dom`, all measured under
+  // 20 KiB — sit under the default ceiling, which is itself far below anything
+  // that could arrive there by accident.
+
+  /**
+   * The sandbox's entry chunk: the protocol, the sniffer and the mode switch.
+   * Measured at ~8 KiB, and held DELIBERATELY TIGHT rather than at the default.
+   *
+   * This is the one number that catches the regression the split exists to
+   * prevent, at the moment it happens rather than after it has been shipped: a
+   * renderer imported statically instead of dynamically lands here, and the
+   * smallest of them would already breach this.
+   *
+   * It also covers `sandbox.css`, which shares the base name and is measured at
+   * ~5 KiB; the gate checks each file against the ceiling separately.
+   */
+  sandbox: 24,
+  /**
+   * highlight.js's common language set, reached through `lowlight`. Measured at
+   * ~887 KiB, and by a wide margin the largest thing this document can load.
+   *
+   * It is loaded ON DEMAND twice over: `renderers/text.ts` imports it only for an
+   * extension its table maps to a real grammar, and the markdown pipeline imports
+   * it only for a document that actually contains a fenced block with a declared
+   * language. A README with no code never fetches it.
+   */
+  lowlight: 960,
+  /** remark, micromark and the markdown-to-hast pipeline. Measured at ~264 KiB. */
+  markdown: 300,
+  /** `rehype-parse` (parse5), which reads a stored `.html` file. Measured at ~164 KiB. */
+  html: 200,
+  /** The sanitize/highlight/to-DOM tail both markup renderers share. Measured at ~28 KiB. */
+  pipeline: 48,
+
+  // -------------------------------------------------------------------------
+  // Prettier, inside the sandbox, ONE CHUNK PER SYNTAX
+  // -------------------------------------------------------------------------
+  //
+  // The upload panel's optional format-and-repair transforms run in the same
+  // isolated document, which is why Prettier is here and not in a Web Worker: a
+  // worker is same-origin, so a parser bug inside one could `fetch` this
+  // application's API with the httpOnly refresh cookie attached.
+  //
+  // FOUR chunks rather than one, and these four numbers are what keeps it that
+  // way. `sandboxManualChunks` in `packages/client/vite.config.helpers.ts`
+  // splits them and the per-type dynamic imports in
+  // `src/sandbox/transform/formatEngine.ts` are what makes each one load on
+  // demand: formatting a README fetches the core and the Markdown plugin and
+  // neither of the other two. Collapse the split — one plugin list, one static
+  // import — and a single chunk of ~1 MB appears in place of all four, which is
+  // exactly the step change these ceilings exist to catch.
+  //
+  // Every number MEASURED from a real build, then given headroom.
+
+  /** `prettier/standalone` plus the `estree` printer, needed by every syntax. Measured at ~285 KiB. */
+  'vendor-prettier-core': 320,
+  /** The `babel` parser, which reads the whole JSON family. Measured at ~309 KiB. */
+  'vendor-prettier-json': 344,
+  /** The Markdown plugin. Measured at ~266 KiB. */
+  'vendor-prettier-markdown': 300,
+  /** The YAML plugin. Measured at ~138 KiB. */
+  'vendor-prettier-yaml': 160,
 };
 
 /**
@@ -62,7 +146,15 @@ export const DEFAULT_CHUNK_BUDGET_KB = 128;
  */
 export const INITIAL_PAYLOAD_BUDGET_KB = 700;
 
-/** `index.html` itself: a shell, not an asset store. Measured at ~1 KiB. */
+/**
+ * A PER-DOCUMENT ceiling on an HTML shell, applied to EACH of the two documents
+ * the client build emits: `index.html` (measured at ~1 KiB) and `sandbox.html`
+ * (~2 KiB, most of it the comment explaining what the isolated document is).
+ *
+ * Per-document rather than a total, deliberately: a shell is not an asset store,
+ * and that claim is about each document on its own. `bundle-gate.mjs` reports
+ * their SUM as `measured.htmlShellKb` — a record, not a second gate.
+ */
 export const HTML_SHELL_BUDGET_KB = 8;
 
 /**

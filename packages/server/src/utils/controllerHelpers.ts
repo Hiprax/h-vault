@@ -1,6 +1,7 @@
 import type { Request } from 'express';
 import { httpErrors } from '@hiprax/errors';
 import { User } from '../models/User.js';
+import { Folder } from '../models/Folder.js';
 import { JobLock } from '../models/JobLock.js';
 
 /**
@@ -77,6 +78,70 @@ export function pickAllowedFields(
 }
 
 /**
+ * Refuses a write that would file a row under a folder the caller does not own.
+ *
+ * The two "no folder named here" values are passed through rather than checked,
+ * and they mean different things to the caller: `undefined` is "leave the folder
+ * alone" and `null` is "clear it". Neither names a folder, so neither can name
+ * somebody else's.
+ *
+ * A folder that exists but belongs to another account is answered with the SAME
+ * 404 as one that never existed, so the status cannot be used to enumerate
+ * another account's folders.
+ *
+ * Shared by `vaultController.updateItem` and `documentController.updateDocument`
+ * because the check IS the same check: both file a row under `folderId`, and a
+ * second copy would be a second place for the status or the scoping to drift.
+ */
+export async function assertFolderOwned(
+  folderId: string | null | undefined,
+  userId: string,
+): Promise<void> {
+  if (folderId === undefined || folderId === null) return;
+
+  const folderExists = await Folder.exists({ _id: folderId, userId });
+  if (!folderExists) {
+    throw httpErrors.notFound('Target folder not found');
+  }
+}
+
+/**
+ * Turns an allowlisted update into the Mongo operator document that applies it,
+ * with `folderId: null` expressed as an `$unset` rather than a stored null.
+ *
+ * That distinction is not cosmetic. `vaultItemResponseSchema` and
+ * `documentResponseSchema` both declare `folderId` as `.optional()` and NOT
+ * `.nullable()`, so a stored null comes back as `folderId: null` and fails the
+ * client's pre-decryption shape check on every un-filed row: the row is intact
+ * and unreadable. `bulkMove` and the folder-deletion orphan sweep `$unset` for
+ * the same reason, so one predicate — `folderId: null`, which matches an ABSENT
+ * field — continues to mean one thing across every collection.
+ *
+ * It MUTATES `update`, deleting the `folderId` key it turned into an `$unset`,
+ * and that is deliberate: leaving it would put `folderId: null` back into `$set`
+ * and store the null this exists to avoid. A caller that needs the field names a
+ * request carried — `updateDocument` audits them — must therefore read them
+ * BEFORE calling this.
+ *
+ * An empty result is a legitimate outcome, not a failure: a body naming only
+ * fields the allowlist dropped produces `{}`, and each caller decides what that
+ * means for it.
+ */
+export function buildFolderAwareUpdate(update: Record<string, unknown>): Record<string, unknown> {
+  const updateOp: Record<string, unknown> = {};
+
+  if ('folderId' in update && update.folderId === null) {
+    delete update.folderId;
+    updateOp.$unset = { folderId: 1 };
+  }
+  if (Object.keys(update).length > 0) {
+    updateOp.$set = update;
+  }
+
+  return updateOp;
+}
+
+/**
  * Rejects a write that would persist NEW ciphertext under the caller's vault
  * key while a vault-key rotation is being processed for that user.
  *
@@ -141,6 +206,44 @@ export function vaultRotationLockName(userId: string): string {
  */
 export function vaultImportLockName(userId: string): string {
   return `vault-import:${userId}`;
+}
+
+/**
+ * The distributed-lock name one document completion holds, mirroring
+ * {@link vaultImportLockName} — but keyed by the UPLOAD, not by the user.
+ *
+ * That difference is the design. Completing a transfer touches exactly one
+ * staging row, one stored object and one `documents` row, all named by this id,
+ * so two completions of DIFFERENT uploads cannot interfere and must not queue
+ * behind each other: a user may legitimately run
+ * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` transfers and finish them at the
+ * same moment.
+ *
+ * What it does exclude is a completion racing ITSELF — a client retry after a
+ * timeout, or a double-clicked button. The unique `_id` on `documents` already
+ * makes a second ROW impossible, so this lock is not what guarantees that; what
+ * it prevents is the second run getting half-way (aborting a multipart upload the
+ * first is completing, deleting a staging row out from under it, re-charging the
+ * quota) before the primary key stops it. The two completions of one upload are
+ * therefore serialized, and the loser reports the winner's row rather than a
+ * conflict whenever that row already exists.
+ *
+ * Note what this lock deliberately does NOT overlap: the per-user
+ * {@link vaultRotationLockName}. The two are disjoint, which is exactly why
+ * completion needs {@link assertVaultNotRotating} as well as its vault-key
+ * version check — holding this lock says nothing at all about whether a rotation
+ * is running.
+ *
+ * The name carries the OWNER as well as the upload, even though an upload id is
+ * already globally unique and adding the owner changes nothing for the account that
+ * holds it. It closes a small oracle: the lock is taken before ownership is read, so
+ * an unscoped name would let a caller who somehow knew another account's upload id
+ * observe a "completion in progress" conflict where an unknown id answers "not
+ * found" — and this codebase's standing rule is that a foreign id and an id that
+ * never existed must be indistinguishable.
+ */
+export function documentCompleteLockName(userId: string, uploadId: string): string {
+  return `document-complete:${userId}:${uploadId}`;
 }
 
 /**

@@ -221,6 +221,626 @@ export const MAX_FILE_ENCRYPTION_SIZE_MB = 100;
 // download-name suffix.
 export const FILE_ENCRYPTION_FILE_EXTENSION = '.enc';
 
+// ---------------------------------------------------------------------------
+// Document store
+//
+// Bounds for the encrypted document store. Every one of them has THREE readers
+// that have to agree: the browser that seals a document, the server that
+// validates and stores the ciphertext, and the test that pins the boundary. They
+// are named here rather than written inline in a schema or a controller because
+// the server never sees a document's name, type, tags or bytes, so a
+// disagreement between the two sides cannot be diagnosed later by looking at the
+// stored data: it presents as a file that uploaded and will not open.
+// ---------------------------------------------------------------------------
+
+// The AES-GCM tag length of one document segment, and of the sealed metadata
+// blob. Deliberately its own constant rather than an alias of AUTH_TAG_BYTES:
+// this one is a parameter of the STORED container format, frozen for the life of
+// every document already in a bucket, whereas AUTH_TAG_BYTES describes the
+// account cryptography and is free to move if that ever changes cipher. They
+// hold the same value today because both are AES-256-GCM.
+export const DOCUMENT_TAG_BYTES = 16;
+// One crypto segment is one uploaded part is one downloaded range: the three
+// chunkings are the same number, so there is no mapping table between them that
+// could be wrong. 8 MiB satisfies three independent constraints at once: it is
+// above S3's 5 MiB floor for a non-final multipart part; it is an exact multiple
+// of 1 MiB, which engines that re-serialise an object's block list per block
+// need, and it is uniform, which engines such as Cloudflare R2 require; and it
+// keeps one buffered part small enough that MAX_IN_FLIGHT_PART_UPLOADS of them
+// fit inside a modest container memory limit.
+export const DOCUMENT_CIPHERTEXT_CHUNK_BYTES = 8_388_608;
+// The plaintext one segment holds: the ciphertext chunk MINUS one tag, which is
+// what makes every non-final uploaded part exactly DOCUMENT_CIPHERTEXT_CHUNK_BYTES
+// and segment `i` start at `i * DOCUMENT_CIPHERTEXT_CHUNK_BYTES`. It must never be
+// "rounded" up to a whole 8 MiB: that makes each non-final part 8 MiB plus 16
+// bytes, the parts stop being uniform, and every segment boundary after the first
+// is off by a growing multiple of 16 bytes. A test pins it as this subtraction
+// rather than as its own literal for exactly that reason. Decryption reads
+// `chunkPlaintextBytes` from the stored row and never from this constant, so
+// changing it later cannot mis-frame a document that already exists.
+export const DOCUMENT_PLAINTEXT_CHUNK_BYTES = 8_388_592;
+// Per-stream HKDF salt, 32 bytes like SALT_BYTES, and the 7-byte nonce prefix
+// that precedes the 4-byte big-endian segment index and the 1-byte last-segment
+// flag inside each 12-byte GCM IV. Both are stored in PLAINTEXT on the row (a
+// salt is not a secret), and both are covered by the segment's own
+// authentication: substituting either one makes the segment fail to decrypt.
+export const DOCUMENT_STREAM_SALT_BYTES = 32;
+export const DOCUMENT_NONCE_PREFIX_BYTES = 7;
+
+// Per-user ceiling on stored documents, trashed ones included. Half of
+// MAX_ITEMS_PER_USER on purpose: a document row is far heavier than a vault item
+// (it owns an object in the bucket and a metadata blob), and the binding limit an
+// operator actually tunes is the byte quota, not the count. This one exists so a
+// runaway client cannot mint rows without bound.
+export const MAX_DOCUMENTS_PER_USER = 5_000;
+// Ceiling on the segments of ONE document, which also bounds the part ledger the
+// server keeps for an upload and the number of range reads a download costs. At
+// DOCUMENT_PLAINTEXT_CHUNK_BYTES per segment this is far above the largest
+// configurable document, so the size cap binds first in every real
+// configuration; this is the structural guard that keeps a hostile
+// `declaredChunkCount` from asking the server to hold an unbounded ledger.
+export const MAX_DOCUMENT_CHUNK_COUNT = 10_000;
+// How many staging uploads one user may hold open at once. Three is enough for a
+// person dragging in a handful of files while one large transfer runs, and low
+// enough that the quota arithmetic (committed bytes plus in-flight declared
+// bytes) cannot be inflated by opening uploads that are never completed.
+export const MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER = 3;
+// How many documents ONE ROTATION payload may name, which is deliberately NOT
+// `MAX_DOCUMENTS_PER_USER`.
+//
+// The count is checked when a transfer is OPENED and never again
+// (`documentController`'s init: `documentCount >= MAX_DOCUMENTS_PER_USER`), so
+// three transfers opened against the same reading of 4,999 all pass and all
+// commit. The highest number of rows an account can actually hold is therefore
+// `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1`, and a
+// fourth transfer cannot be opened until it is back under the limit.
+//
+// A rotation must name EVERY row the account holds — the handler compares
+// distinct ids against an UNFILTERED `countDocuments`, because a trashed document
+// is sealed under the same vault key as an active one. So a wire cap set to the
+// advertised limit locks such an account out of rotating its vault key for ever,
+// in both directions at once: too long for the schema (400) and too short for the
+// coverage check (409), with permanently deleting documents the only way out.
+//
+// The extra unit of slack over the reachable maximum is deliberate. This cap
+// bounds a request BODY; it enforces nothing, because `assertRotationCoversEveryRow`
+// is what decides whether a rotation is legitimate. An over-generous cap therefore
+// admits nothing extra, while a cap one row short bricks a vault key — so the
+// asymmetry is resolved in favour of slack, and the slack is named rather than
+// accidental.
+export const MAX_DOCUMENTS_PER_ROTATION =
+  MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER;
+// Parts the SERVER buffers concurrently, PER WORKER PROCESS, across all users:
+// the semaphore the part handler takes before its body parser runs. Four parts at
+// DOCUMENT_CIPHERTEXT_CHUNK_BYTES is 32 MiB of buffered ciphertext per process,
+// which fits the Docker deployment's single node process inside its 1 GB memory
+// limit. A pm2 deployment runs two instances and has no memory limit of its own,
+// so its ceiling is 64 MiB across the pair. Raising this raises that product, so
+// it is a memory budget before it is a throughput knob.
+export const MAX_IN_FLIGHT_PART_UPLOADS = 4;
+
+// Plaintext metadata bounds. These live inside the ENCRYPTED metadata blob, so
+// they are enforced by a shared schema that runs in both directions (on the
+// browser's write pre-flight and again on read), never by the server, which sees
+// only the sealed bytes.
+//
+// 255 for the name and the MIME type, measured in UTF-16 code units, because that
+// is what a Zod `.max()` counts. 255 units is exactly NTFS's own filename limit;
+// ext4 bounds a filename at 255 BYTES instead, so a name of 255 multi-byte
+// characters is legal here and may still be shortened by the browser when it
+// writes the download to such a filesystem. That is the right trade for a store
+// whose names are ciphertext to the server: the bound protects the metadata blob,
+// and the filesystem gets the last word on its own directory entry. The longest
+// registered MIME type is comfortably shorter than this.
+export const MAX_DOCUMENT_NAME_LENGTH = 255;
+export const MAX_DOCUMENT_MIME_LENGTH = 255;
+// The lowercased segment after the last dot of the name. 32 is generous against
+// every real extension (`markdown`, `properties`, `sqlite3`) without admitting a
+// second filename in disguise.
+export const MAX_DOCUMENT_EXT_LENGTH = 32;
+// The user's own note about a document. Five times shorter than
+// MAX_NOTE_CONTENT_LENGTH because it annotates a file rather than being the
+// content itself, and because it is sealed into a blob whose own bound is
+// MAX_ENCRYPTED_DOCUMENT_META_LENGTH below.
+export const MAX_DOCUMENT_NOTE_LENGTH = 10_000;
+// Tags per document, matching MAX_TAGS_PER_ITEM so the two tag pickers behave the
+// same way. Each tag is bounded by MAX_TAG_LENGTH, which is the one definition of
+// how long a tag may be anywhere in this application.
+export const MAX_DOCUMENT_TAGS = 20;
+// The provenance labels the upload panel's optional transforms record inside the
+// metadata blob: `transform.tool` (the package that rewrote the bytes) and
+// `transform.toolVersion` (its exact version). ONE bound for both, because they
+// are the same kind of value and a package name and a semver are both short; 64
+// units is generous against `prettier`/`jsonrepair` and a version string, and
+// narrow enough that the pair costs at most 384 of the metadata budget's bytes
+// (measured: the whole worst-case blob is 35_472 bytes of the 36_864 below).
+// They are the only two free-text fields in the blob that no user types, so the
+// bound exists to keep a hostile or buggy writer from spending the budget here
+// rather than to accommodate anyone.
+export const MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH = 64;
+// The metadata blob's `capturedAt`, an ISO 8601 instant in UTC.
+//
+// A bound is needed here even though the field also carries an ISO format check,
+// because ISO 8601's fractional-second component is one-or-more digits with no
+// upper bound: measured, a bare datetime check accepts a 30,021-character instant,
+// and a blob whose every other field is minimal would then have most of the byte
+// budget available to spend on one timestamp. 40 units holds the longest instant
+// anyone can legitimately produce with room to spare — `Date.prototype.toISOString`
+// emits 24 (`2026-08-31T12:34:56.789Z`) and nanosecond precision reaches 30 — while
+// being far too short to be worth abusing. Only a `Z` instant is accepted, so no
+// allowance is made for a `+HH:MM` offset.
+export const MAX_DOCUMENT_TIMESTAMP_LENGTH = 40;
+// The metadata blob is bounded in TWO named steps, because the two sides measure
+// different things and only one of them is a byte count.
+//
+// MAX_DOCUMENT_META_JSON_BYTES bounds the UTF-8 BYTES of the serialized metadata
+// JSON, which is what the browser actually seals. Every field bound above is a Zod
+// `.max()` over UTF-16 CODE UNITS, and one code unit costs up to 3 UTF-8 bytes
+// (Cyrillic 2, CJK 3; an astral character is 2 units and 4 bytes, so 2 per unit),
+// so the worst case a real user can write is three times the code-unit budget:
+// (255 + 255 + 32 + 10_000 + 20 * 50) * 3 = 34_626 bytes, plus the 64-character
+// hex digest and the JSON structure itself. 36 KiB covers 34_626 + 64 and leaves
+// about 2.1 KiB for the keys, the numbers, the timestamp and the transform record.
+// MEASURED against the real schema rather than estimated: every string field at its
+// bound in 3-byte characters, both hex digests, an ISO instant, the three framing
+// numbers and the transform record serialize to 35_472 bytes, so 1_392 bytes are
+// spare and the budget provably admits a metadata object whose every field is
+// individually legal (`document-schema.test.ts` builds that object and asserts it,
+// which is what turns a new field or a raised field bound into a red test rather
+// than a document that refuses to seal). It deliberately does NOT cover a value
+// made of code units `JSON.stringify` ESCAPES, each of which costs six bytes: a
+// control character (`\u0007`) or a lone surrogate (`\ud800`, which is how a name
+// truncated mid-surrogate-pair by an upstream tool arrives). Sizing for those
+// would nearly triple every stored blob to serve input no human wrote, and the
+// refusal is loud rather than lossy.
+//
+// MAX_ENCRYPTED_DOCUMENT_META_LENGTH bounds the STORED string, which is base64 of
+// the ciphertext and therefore pure ASCII. AES-GCM ciphertext is exactly as long
+// as its plaintext, and the tag lives in its own column, so this is exactly the
+// base64 expansion of the byte budget: 36_864 / 3 * 4. A test pins that
+// derivation, because a stored bound that is merely "about right" is what refuses
+// a document whose every field is individually legal, on the write pre-flight,
+// with the file already chosen. A CODE-UNIT count is the wrong shape for either
+// number, which is why neither of them is one.
+export const MAX_DOCUMENT_META_JSON_BYTES = 36_864;
+export const MAX_ENCRYPTED_DOCUMENT_META_LENGTH = 49_152;
+
+// Ceiling past which the upload panel's optional format and repair transforms are
+// unavailable. Both run in the browser and hold the whole document plus its
+// reformatted copy in memory, and a formatter is superlinear on pathological
+// input, so this is a responsiveness budget rather than a correctness one: past
+// it the file still uploads, untransformed.
+export const MAX_FORMATTABLE_SIZE_BYTES = 5_242_880;
+
+/**
+ * A frozen lookup table keyed by a FILE EXTENSION, with no prototype.
+ *
+ * Every table this builds is read as `TABLE[extension]`, and `extension` is
+ * whatever follows the last dot of a name that was chosen by whoever handed the
+ * user the file. On an ordinary object literal that lookup walks the prototype
+ * chain, so `'constructor'` answers the `Object` FUNCTION and `'__proto__'`
+ * answers `Object.prototype` — neither of which is nullish, so the `?? fallback`
+ * every reader writes never fires and a value that is not a member of the table's
+ * own value type escapes into code that was typed as though it could not.
+ *
+ * Measured, before this existed: a document named `notes.constructor` was offered
+ * a preview, and the mode posted into the sandbox was a function, which structured
+ * clone refuses — the `postMessage` threw inside the host's handshake handler
+ * AFTER the window listener and the handshake deadline had already been torn
+ * down, so the viewer sat on its spinner for ever with no fallback and nothing to
+ * report. That is the one outcome the whole preview protocol is built never to
+ * have.
+ *
+ * Fixed at the DATA rather than at each reader, because the readers are the
+ * problem: there are seven of these tables across two packages, `sniff.ts` reads
+ * two of them directly, and a guard is a discipline every future call site has to
+ * remember. A null prototype makes the inherited names simply absent, so every
+ * present and future `TABLE[ext] ?? fallback` is correct by construction.
+ * `Object.create(null)` for exactly this hazard is already the house pattern —
+ * `packages/client/src/services/import/identity.ts` uses it so a `__proto__` key
+ * is hashed as data.
+ *
+ * Nothing else changes: `Object.keys`, `Object.entries`, `Object.freeze` and
+ * spread all behave identically on a null-prototype object, and every reader of
+ * these tables either indexes them or iterates them.
+ */
+export function extensionTable<T>(entries: Record<string, T>): Readonly<Record<string, T>> {
+  return Object.freeze(Object.assign(Object.create(null) as Record<string, T>, entries));
+}
+
+// The vocabulary of the two in-browser transforms: which extensions each one
+// understands, and which of them REPAIR can be offered for.
+//
+// It sits here, beside PREVIEW_MODES and shaped like it, because the same
+// question is asked by two different programs and their answers have to agree.
+// The application asks it to decide whether a checkbox is offered at all and, if
+// not, which reason to show; the isolated sandbox document asks it to pick a
+// Prettier parser and a plugin set. Two copies would diverge the day someone
+// teaches one of them about a new extension, and the symptom would be a checkbox
+// that is offered and then fails, or a file that could have been formatted and
+// silently was not.
+//
+// The KEY is what `documentExtension` returns: the lowercased segment after the
+// LAST dot. The VALUE is the SYNTAX rather than the extension, because that is
+// what actually decides handling: `.json`, `.jsonc` and `.json5` differ only in
+// which Prettier parser reads them, while `.jsonl` and `.ndjson` are a different
+// shape entirely (one document PER LINE, repaired and formatted line by line, so
+// a record may never be broken across lines).
+export const TRANSFORM_SYNTAX_NAMES = ['json', 'jsonl', 'markdown', 'yaml'] as const;
+export type TransformSyntax = (typeof TRANSFORM_SYNTAX_NAMES)[number];
+
+export const TRANSFORM_SYNTAXES: Readonly<Record<string, TransformSyntax>> = extensionTable({
+  json: 'json',
+  jsonc: 'json',
+  json5: 'json',
+  jsonl: 'jsonl',
+  ndjson: 'jsonl',
+  md: 'markdown',
+  markdown: 'markdown',
+  yaml: 'yaml',
+  yml: 'yaml',
+});
+
+// Repair is the JSON family and NOTHING else, and the omissions are decisions
+// rather than gaps. A heuristic that guessed at YAML indentation would change
+// meaning silently, which is the one failure mode a repair tool must never have;
+// and Markdown has no parse failure to repair, because every byte of it is
+// already valid Markdown. Both still get a PARSE CHECK through the formatter, so
+// a broken YAML is reported rather than uploaded blindly.
+export const REPAIRABLE_TRANSFORM_SYNTAXES: readonly TransformSyntax[] = Object.freeze([
+  'json',
+  'jsonl',
+]);
+
+// The two free-text fields a transform FAILURE carries across the port. Both are
+// built by the frame from the document's own bytes, so both are bounded: they are
+// displayed by the application's chrome, and an unbounded string chosen by the
+// least-trusted component in the system is a denial-of-service on the very panel
+// that has to explain what went wrong.
+//
+// The message is a formatter's or a repairer's own wording (Prettier's syntax
+// errors run to several lines with a source snippet); the excerpt is ONE line of
+// the offending document, which is what makes "line 4, column 12" actionable.
+export const MAX_TRANSFORM_MESSAGE_LENGTH = 2_000;
+export const MAX_TRANSFORM_EXCERPT_LENGTH = 200;
+
+// HKDF `info` prefixes, concatenated with the document id to bind every derived
+// key to ONE document: the stream key, the metadata key and the DEK wrapping key.
+// The trailing `|` is a separator that cannot appear in a 24-character hex
+// ObjectId, so no two (prefix, id) pairs can produce the same info string. These
+// are FORMAT constants: changing one makes every document already stored under it
+// undecryptable, which is why a committed known-answer vector pins them.
+export const DOCUMENT_STREAM_INFO_PREFIX = 'hvault/doc/stream/v1|';
+export const DOCUMENT_META_INFO_PREFIX = 'hvault/doc/meta/v1|';
+export const DOCUMENT_DEK_WRAP_INFO_PREFIX = 'hvault/doc/dek-wrap/v1|';
+
+// ---------------------------------------------------------------------------
+// DOCUMENT PREVIEW
+// ---------------------------------------------------------------------------
+// The application decides WHETHER a preview is offered; the isolated sandbox
+// document decides HOW to render it. Both read the numbers and the map below,
+// and neither restates them, because the two answers have to agree: an app that
+// offers a preview for a type the sandbox has no renderer for shows the user an
+// empty rectangle, and an app that declines one the sandbox could render shows a
+// needless download button.
+// ---------------------------------------------------------------------------
+
+// The seven ways a stored document can be presented. `none` is a first-class
+// answer rather than the absence of one: it is what the detail view reads to say
+// "download to view" with a reason, and PREVIEW_MODES names it explicitly for
+// the types this project has deliberately DECIDED not to render (PDF), as
+// distinct from the ones it simply does not recognise.
+export const PREVIEW_MODE_NAMES = [
+  'image',
+  'text',
+  'code',
+  'markdown',
+  'html',
+  'media',
+  'none',
+] as const;
+export type PreviewMode = (typeof PREVIEW_MODE_NAMES)[number];
+
+// The size past which a document is download-only.
+//
+// A MEMORY budget before it is a UI one, and the multiplier is what makes it
+// small: the application holds the whole decrypted plaintext, the channel hands
+// the SAME buffer to the sandbox, and a renderer then builds its own
+// representation on top of it, so the peak is a small multiple of the file. 25
+// MiB keeps that comfortably inside a tab on a modest machine, and it is the
+// same number this project already lives with for a backup restore
+// (MAX_RESTORE_DATA_LENGTH), so an operator meets one figure rather than two.
+export const MAX_PREVIEW_BYTES = 26_214_400;
+// Lines past which the text renderer truncates, with a notice and the byte count
+// rather than silently. A single-line 25 MiB file is one DOM text node and is
+// fine; 50,000 SEPARATE lines is 50,000 nodes, and it is the node count rather
+// than the byte count that stops a tab responding.
+export const MAX_PREVIEW_TEXT_LINES = 50_000;
+
+// Extension to render mode. The lookup key is what `documentExtension` returns:
+// the LOWERCASED segment after the LAST dot of the decrypted name. A name with
+// no dot, and a name whose only dot is leading, therefore has no extension and
+// resolves to `none` — `Dockerfile`, `Makefile`, `.bashrc` and `.env` are all
+// download-only, which is a decision rather than an oversight (recognising them
+// needs a second lookup keyed by whole filename, i.e. a second source of truth
+// for one question).
+//
+// Two consequences worth stating rather than discovering. UPLOADING is not
+// restricted by this map at all: every type uploads, and a type absent here is
+// simply download-only. And a `code` preview is NOT redacted in any way, which
+// is correct for a store whose whole content is sensitive by definition, but it
+// does mean a previewed `prod.env` shows its secrets on screen exactly as a
+// revealed password field would. (`prod.env` has the extension `env`; the file
+// `.env` has none, and is download-only, by the rule above.)
+//
+// ADDING AN EXTENSION HERE IS CHEAP AND SAFE, and that property should govern
+// the decision: every text-family renderer emits text nodes and executes
+// nothing, and an extension with no matching highlighter language degrades to
+// plain text. The worst outcome of a generous list is an unhighlighted preview;
+// the worst outcome of a stingy one is a needless download. Membership is pinned
+// by a test so an addition is a visible edit rather than a silent one.
+export const PREVIEW_MODES: Readonly<Record<string, PreviewMode>> = extensionTable({
+  // Raster and vector images, all through `<img>`. SVG is NEVER inlined: an
+  // `<img>` cannot run the script an inline SVG can.
+  png: 'image',
+  jpg: 'image',
+  jpeg: 'image',
+  gif: 'image',
+  webp: 'image',
+  avif: 'image',
+  bmp: 'image',
+  ico: 'image',
+  svg: 'image',
+
+  // Plain and tabular text, rendered as text nodes with no language grammar.
+  txt: 'text',
+  text: 'text',
+  log: 'text',
+  csv: 'text',
+  tsv: 'text',
+
+  // Highlightable source and structured data. Shell scripts and configuration
+  // files are deliberately included: they are among the things a person most
+  // often stores and most wants to read without downloading.
+  sh: 'code',
+  bash: 'code',
+  zsh: 'code',
+  fish: 'code',
+  ps1: 'code',
+  bat: 'code',
+  cmd: 'code',
+  py: 'code',
+  rb: 'code',
+  pl: 'code',
+  lua: 'code',
+  sql: 'code',
+  r: 'code',
+  js: 'code',
+  mjs: 'code',
+  cjs: 'code',
+  ts: 'code',
+  tsx: 'code',
+  jsx: 'code',
+  c: 'code',
+  h: 'code',
+  cpp: 'code',
+  hpp: 'code',
+  cs: 'code',
+  java: 'code',
+  kt: 'code',
+  go: 'code',
+  rs: 'code',
+  php: 'code',
+  swift: 'code',
+  diff: 'code',
+  patch: 'code',
+  conf: 'code',
+  cfg: 'code',
+  properties: 'code',
+  env: 'code',
+  service: 'code',
+  json: 'code',
+  jsonc: 'code',
+  json5: 'code',
+  jsonl: 'code',
+  ndjson: 'code',
+  yaml: 'code',
+  yml: 'code',
+  toml: 'code',
+  xml: 'code',
+  ini: 'code',
+
+  // Markdown through remark/rehype with the sanitizer's GitHub-derived schema,
+  // so a README renders the way GitHub renders one.
+  md: 'markdown',
+  markdown: 'markdown',
+  mdown: 'markdown',
+  mkd: 'markdown',
+
+  // Stored HTML through the SAME sanitizing pipeline. Never assigned to an
+  // element's innerHTML: the sanitized tree becomes DOM nodes directly, because
+  // serialising it back to a string and re-parsing it is the mutation-XSS shape.
+  html: 'html',
+  htm: 'html',
+  xhtml: 'html',
+
+  // Audio and video through `<video controls>` / `<audio controls>`, from a blob
+  // URL the sandbox mints itself (one minted by the application would not
+  // resolve in an opaque origin).
+  mp4: 'media',
+  m4v: 'media',
+  webm: 'media',
+  ogv: 'media',
+  mp3: 'media',
+  m4a: 'media',
+  aac: 'media',
+  wav: 'media',
+  flac: 'media',
+  opus: 'media',
+  ogg: 'media',
+  oga: 'media',
+
+  // Named, and DECIDED. A PDF renderer is a large third-party parser with a
+  // documented history of executing attacker JavaScript in its host page
+  // (CVE-2024-4367 in pdf.js), it is the only renderer that would have needed a
+  // worker and a WebAssembly module the isolated document cannot load by URL,
+  // and carrying it would have forced `connect-src` and `worker-src` open for
+  // every other format too. Listing it as `none` rather than omitting it is what
+  // lets the interface say "PDFs are download-only" instead of "unrecognised
+  // type".
+  pdf: 'none',
+});
+
+/**
+ * One leading-byte signature: the bytes a format begins with, with `null` for
+ * "any byte here".
+ *
+ * ---------------------------------------------------------------------------
+ * WHY A WILDCARD AND NOT AN OFFSET
+ * ---------------------------------------------------------------------------
+ *
+ * This interface used to carry an `offset` instead, so that `ftyp` could be
+ * declared "at byte 4 of an MP4". That shape could not express the format it was
+ * written for. WebP is `RIFF`, then a four-byte length, then `WEBP` — a
+ * CONJUNCTION of two constraints — while a GIF is `GIF87a` OR `GIF89a`, an
+ * ALTERNATION. A flat list of `{offset, bytes}` has exactly one operator, and
+ * whichever one is chosen the other format is handled wrongly: read as
+ * alternatives, every RIFF container matches both `webp` and `wav`, so the
+ * sniffer cannot answer "what does this file actually look like" for either;
+ * read as a conjunction, no GIF is ever recognised, because no file is both
+ * GIF87a and GIF89a.
+ *
+ * A wildcard collapses that to one operator. Every value below is a list of
+ * ALTERNATIVES, each of which is a run of bytes anchored at byte 0, and a
+ * "signature at byte 4" is written as four wildcards followed by the marker.
+ * That is also the notation this feature's design uses for it (`RIFF....WEBP`).
+ *
+ * The change pays for itself immediately on the ISO base-media family. Written
+ * with an offset, `ftyp` at byte 4 is four printable ASCII bytes and nothing
+ * constrains the first four; written from byte 0, the leading byte is the top
+ * octet of the box's big-endian size, which is `0x00` for every conformant file
+ * (an `ftyp` box is tens of bytes, and both special sizes — 0 for
+ * "to end of file" and 1 for "64-bit size follows" — also start `0x00`). Pinning
+ * it costs nothing and is what stops a CSV whose first cells are `col,ftyp`
+ * being reported as a video.
+ */
+export interface PreviewSignature {
+  /**
+   * The bytes, from byte 0. `null` matches any byte at that position.
+   *
+   * A signature must not begin or end with a wildcard: a leading one is an
+   * offset written the long way, and a trailing one constrains nothing at all.
+   * `packages/shared/tests/constants.test.ts` asserts both.
+   */
+  readonly bytes: readonly (number | null)[];
+}
+
+// What a file's first bytes must look like for its extension's claim to be
+// believed. The sandbox compares them before rendering anything, and a mismatch
+// refuses the preview and says what the file actually looks like.
+//
+// Deliberately PARTIAL, and its keys are a strict SUBSET of PREVIEW_MODES's: a
+// check can only exist for a format that HAS an unambiguous magic number. Text,
+// markdown, HTML, source code, SVG and INI have none, and inventing one for them
+// would refuse legitimate files.
+//
+// THE TABLE IS READ IN TWO DIRECTIONS, and the second is why `pdf` has a row
+// despite being a `none` mode that is never previewed. Forwards, it CONFIRMS a
+// claim: a `.png` whose bytes are not a PNG is refused. Backwards, it IDENTIFIES
+// an impostor: bytes that positively match some other format's signature are how
+// a PDF renamed `.md` is refused instead of being handed to the markdown parser.
+// A row here is therefore not dead weight merely because its own mode is never
+// rendered — it is the vocabulary the sniffer answers "what IS this" in.
+//
+// Every value is a list of ALTERNATIVES: a format may have more than one legal
+// opening (GIF87a and GIF89a; an MP3 with an ID3 tag and one without). Within an
+// alternative, every non-wildcard byte must match.
+export const PREVIEW_MAGIC_BYTES: Readonly<Record<string, readonly PreviewSignature[]>> =
+  extensionTable({
+    png: [{ bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] }],
+    jpg: [{ bytes: [0xff, 0xd8, 0xff] }],
+    jpeg: [{ bytes: [0xff, 0xd8, 0xff] }],
+    // 'GIF87a' and 'GIF89a'.
+    gif: [
+      { bytes: [0x47, 0x49, 0x46, 0x38, 0x37, 0x61] },
+      { bytes: [0x47, 0x49, 0x46, 0x38, 0x39, 0x61] },
+    ],
+    // 'RIFF', a four-byte little-endian length, then 'WEBP'. The length is the
+    // wildcard run, and the pair is ONE alternative: 'RIFF' alone is also a WAV,
+    // an AVI and half a dozen other containers.
+    webp: [
+      {
+        bytes: [0x52, 0x49, 0x46, 0x46, null, null, null, null, 0x57, 0x45, 0x42, 0x50],
+      },
+    ],
+    bmp: [{ bytes: [0x42, 0x4d] }],
+    ico: [{ bytes: [0x00, 0x00, 0x01, 0x00] }],
+    // ISO base media: a big-endian box size, then 'ftyp', then the major brand.
+    // The leading 0x00 is the size's top octet — see PreviewSignature above for
+    // why it is safe to pin and what it buys.
+    //
+    // THREE brands, because requiring exactly 'avif' refuses real files: 'avis'
+    // is the major brand of an AVIF image sequence, and 'mif1' is the MIAF
+    // compatibility brand that encoders in the wild emit for still AVIF. Being
+    // wrong in this direction refuses a picture the browser would have shown, so
+    // the list errs towards admitting; a file that is admitted and then will not
+    // decode is reported by the renderer, which is a better answer than a
+    // refusal that names the wrong reason.
+    avif: [
+      { bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66] },
+      { bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x73] },
+      { bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x69, 0x66, 0x31] },
+    ],
+    mp4: [{ bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70] }],
+    m4v: [{ bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70] }],
+    m4a: [{ bytes: [0x00, null, null, null, 0x66, 0x74, 0x79, 0x70] }],
+    // Matroska/WebM EBML header.
+    webm: [{ bytes: [0x1a, 0x45, 0xdf, 0xa3] }],
+    // 'OggS'.
+    ogg: [{ bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    oga: [{ bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    ogv: [{ bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    opus: [{ bytes: [0x4f, 0x67, 0x67, 0x53] }],
+    // 'ID3' for a tagged file, or a bare MPEG audio frame sync.
+    //
+    // The sync is eleven set bits: 0xFF, then a byte whose top three bits are
+    // set, whose next two encode the MPEG version and whose next two encode the
+    // layer. Only the SIX Layer III combinations are listed — MPEG-1 (0xFA,
+    // 0xFB), MPEG-2 (0xF2, 0xF3) and MPEG-2.5 (0xE2, 0xE3), with the low bit
+    // being the CRC flag. Listing only 0xFB, as this table did, refuses every
+    // untagged MPEG-2 file and every CRC-protected one.
+    //
+    // Do NOT "simplify" this to "0xFF followed by anything >= 0xE0". That admits
+    // 0xFF 0xFE, which is the UTF-16LE byte-order mark Windows PowerShell writes
+    // at the head of every redirected .log and .txt, and a genuine text file
+    // would then be reported as an MP3.
+    mp3: [
+      { bytes: [0x49, 0x44, 0x33] },
+      { bytes: [0xff, 0xfb] },
+      { bytes: [0xff, 0xfa] },
+      { bytes: [0xff, 0xf3] },
+      { bytes: [0xff, 0xf2] },
+      { bytes: [0xff, 0xe3] },
+      { bytes: [0xff, 0xe2] },
+    ],
+    // 'RIFF', a four-byte little-endian length, then 'WAVE' — the same shape as
+    // WebP and for the same reason.
+    wav: [
+      {
+        bytes: [0x52, 0x49, 0x46, 0x46, null, null, null, null, 0x57, 0x41, 0x56, 0x45],
+      },
+    ],
+    // 'fLaC'. A file that some Windows taggers produce carries an ID3v2 header in
+    // front of this, and is refused: that is a DECISION rather than an oversight,
+    // because such a file is not conformant and browsers do not decode it either,
+    // so admitting it would trade a clear refusal for a silent failure to play.
+    flac: [{ bytes: [0x66, 0x4c, 0x61, 0x43] }],
+    // '%PDF-'. Never previewed — `pdf` is a `none` mode — and present for the
+    // BACKWARDS direction described above: this row is what lets a PDF renamed
+    // `.md` be refused by name.
+    pdf: [{ bytes: [0x25, 0x50, 0x44, 0x46, 0x2d] }],
+  });
+
 export const ITEM_TYPES = ['login', 'secret', 'note', 'card', 'identity'] as const;
 export type ItemType = (typeof ITEM_TYPES)[number];
 
@@ -278,6 +898,17 @@ export const AUDIT_ACTIONS = [
   'trusted_device_grant',
   'trusted_device_revoke',
   'trusted_device_rejected',
+  // The document store's five mutations, and deliberately only five. There is no
+  // download action: no read is audited anywhere in this codebase, and one
+  // download is many segment requests, so auditing it would bury every other row
+  // in the log a user actually reads. The trash auto-purge cron reuses
+  // `trash_auto_purge` rather than adding a sixth, because it is the same
+  // scheduled operation reaching a second collection.
+  'document_create',
+  'document_update',
+  'document_delete',
+  'document_restore',
+  'document_purge',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

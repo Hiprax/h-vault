@@ -8,7 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /**
  * The `test:recovery` suite: the disaster cases.
  *
- * Both files also run under `test:integration`, which is the whole server suite
+ * All three files also run under `test:integration`, which is the whole server suite
  * — so this narrows NOTHING, and every assertion is on the push gate. What the
  * named run adds is a gate a reviewer can point at when the backup format, the
  * rotation fence or the import's transaction boundary changes, plus a
@@ -28,6 +28,11 @@ export const RECOVERY_SUITE = [
   // A real process killed mid-write, at five points around the rotation fence
   // and the import's transaction boundary.
   'tests/recovery/crash-consistency.test.ts',
+  // The same signal aimed at the document store, at the three points where its
+  // compensating paths live in a `catch` or a `finally` that a crash never runs —
+  // and the garbage collector afterwards, reclaiming what the crash stranded while
+  // leaving a live document's object alone.
+  'tests/recovery/document-crash.test.ts',
 ];
 
 /**

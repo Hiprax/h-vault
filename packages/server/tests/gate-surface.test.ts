@@ -43,6 +43,7 @@ import clientVitestConfig from '../../client/vitest.config';
 import clientFuzzConfig, { CLIENT_FUZZ_SUITE } from '../../client/vitest.fuzz.config';
 import serverFuzzConfig, { SERVER_FUZZ_SUITE } from '../vitest.fuzz.config';
 import resourceVitestConfig, { RESOURCE_SUITE } from '../vitest.resource.config';
+import storageVitestConfig, { STORAGE_SUITE } from '../vitest.storage.config';
 import upgradeVitestConfig, { UPGRADE_SUITE } from '../vitest.upgrade.config';
 import recoveryVitestConfig, { RECOVERY_SUITE } from '../vitest.recovery.config';
 import clientUpgradeConfig, { CLIENT_UPGRADE_SUITE } from '../../client/vitest.upgrade.config';
@@ -256,15 +257,19 @@ describe('manifest and runner agree', () => {
 
 describe('tiers', () => {
   it('keeps T0 to the seven gates that fit a 90-second pre-commit budget', () => {
-    // Measured end to end on the reference machine: engines 0.0s, secrets 0.1s,
-    // lint 30.7s, format 15.1s, type-check 36.4s, integrity 2.3s, ratchet 0.1s —
-    // 85 seconds against a 90-second budget. The two anti-cheat gates cost 2.4s
-    // between them; the unit suite alone is 105 seconds and the server suite
-    // 125, which is why both are T1. A tier over budget gets bypassed, and a
-    // bypassed hook gates nothing, so ADDING ANYTHING HERE REQUIRES RE-MEASURING.
-    // 5 seconds of headroom is the tightest this has been: the next thing added
-    // to T0 almost certainly has to buy its time back somewhere else (ESLint's
-    // --cache, or running the independent T0 gates in parallel).
+    // RE-MEASURED end to end on the reference machine over three runs: 2m 23s, 2m 10s
+    // and 1m 49s, so **T0 IS NOW OVER ITS 90-SECOND BUDGET** even on the quietest, and
+    // the runner prints OVER on every run. (It was 85s when this comment was written.)
+    // The quietest breakdown: engines 0.0s, secrets 0.2s, lint 39.2s, format 21.3s,
+    // type-check 44.8s, integrity 3.5s, ratchet 0.1s.
+    // The two anti-cheat gates cost 4.1s between them; the unit suite alone is
+    // ~3 minutes and the server suite ~5, which is why both are T1. A tier over
+    // budget gets bypassed, and a bypassed hook gates nothing, so ADDING ANYTHING
+    // HERE REQUIRES RE-MEASURING AND BUYING THE TIME BACK FIRST: there is no
+    // headroom left to spend. `lint` and `type-check` are ~100s of the total, so
+    // that is where it would have to come from (ESLint's --cache, or running the
+    // independent T0 gates in parallel). The 90 in `tiers.mjs` does NOT move: a
+    // budget raised to fit the measurement stops being a budget.
     //
     // The order matters as much as the membership: `ratchet` reads the report
     // `integrity` writes, so it must come after it. Running the cheap ratchet
@@ -415,6 +420,67 @@ describe('prerequisites are declared, not discovered', () => {
     for (const id of ['type-check', 'test', 'test-integration', 'security', 'e2e']) {
       expect(byId.get(id)?.requires, `gate ${id}`).toContain('build:shared');
     }
+  });
+
+  it('declares docker on the two browser gates, BESIDE the shared build and not instead of it', () => {
+    // `e2e/start-server.ts` starts the real object-storage engine in a container
+    // before it spawns the dev server, so both Playwright gates need a daemon —
+    // `test:a11y` as much as `test:e2e`, because `playwright.a11y.config.ts`
+    // spreads the base config's `webServer` and therefore boots the same
+    // harness. Pinned as the exact PAIR rather than with `toContain`, and in both
+    // places, for two reasons that have each cost this repository something:
+    // dropping `build:shared` would report a missing shared build as a broken
+    // browser journey, and dropping `docker` would report a missing daemon as a
+    // FAILED gate instead of one that could not run.
+    const byId = new Map(gates.map((gate) => [gate.id, gate]));
+    for (const [id, task] of [
+      ['e2e', 'test:e2e'],
+      ['a11y', 'test:a11y'],
+      // The flake gate runs the Playwright suite three times over, so the same
+      // reasoning reaches it: its ten vitest runs need no daemon, but its stated
+      // claim covers the E2E suite, and it cannot make that claim without one.
+      ['flake', 'test:flake'],
+    ] as const) {
+      expect(byId.get(id)?.requires, `gate ${id}`).toEqual(['build:shared', 'docker']);
+      expect(manifest.tasks[task]!.requires, task).toEqual(['build:shared', 'docker']);
+    }
+  });
+
+  it('lets the browser harness tear itself down instead of being killed along with it', () => {
+    // Two settings on one `webServer` block, each of which reads like boilerplate
+    // to anyone who has not watched a run without it, and each MEASURED here.
+    // `e2e/start-server.ts` owns a storage-engine CONTAINER and a RAM-backed
+    // mongod dbPath, and the teardown that reclaims both only runs if the harness
+    // is (a) signalled rather than killed, and (b) still alive while it works.
+    //
+    //  (a) Playwright's webServer REFUSES a graceful close unless
+    //      `gracefulShutdown` is set: its `attemptToGracefullyClose` throws
+    //      `skip graceful shutdown` and the fallback is
+    //      `process.kill(-pid, 'SIGKILL')` over the whole process group, which no
+    //      handler and no `process.on('exit')` hook survives.
+    //  (b) It then waits for THE PROCESS IT LAUNCHED to close. Behind
+    //      `npx tsx <file>` that is a wrapper which closes as soon as it has
+    //      forwarded the signal: the run was reported terminated 102 ms in, with
+    //      the harness's `docker rm -f` still in flight and the harness dying
+    //      with its parent. Launched as `node` it IS the harness, so the close
+    //      Playwright waits for is the teardown's own.
+    //
+    // Both shipped broken and the symptom was silent, which is why this is pinned
+    // rather than left to a comment: every green `test:e2e` and `test:a11y` run
+    // left an engine container running and a dbPath under /tmp.
+    const webServer = playwrightConfig.webServer;
+    if (webServer === undefined || Array.isArray(webServer)) {
+      throw new Error('the base Playwright config must declare exactly one webServer');
+    }
+    expect(webServer.gracefulShutdown).toEqual({ signal: 'SIGTERM', timeout: 30_000 });
+    // Not merely "set": this API reads `timeout: 0` as "wait for ever", and the
+    // gates behind it have no deadline of their own to fall back on.
+    expect(webServer.gracefulShutdown?.timeout).not.toBe(0);
+    // The property, not the exact string: node must be the process the shell
+    // execs, and the file it runs must be the harness. An added node flag is
+    // fine; another launcher in front of it is the defect.
+    expect(webServer.command).toMatch(/^node .*\be2e\/start-server\.ts$/);
+    expect(webServer.command).toContain('--import tsx');
   });
 
   it('stops a failed build from dragging the gates that consume it into failure', () => {
@@ -648,6 +714,69 @@ describe('machine-readable reports', () => {
     expect(declaredReports).not.toContain('junit-resource.xml');
   });
 
+  it('runs the storage conformance suite, and leaves none of its files to no gate at all', () => {
+    // The same contract `test:resource` has, and for the same reason: this is the
+    // OTHER suite the push tier's ordinary server run does not pick up. The base
+    // config excludes `tests/storage/**` because these cases start a real engine
+    // in a container, and a suite that fails when a Docker daemon is not running
+    // is a suite people learn to distrust — the honest answer to a missing
+    // prerequisite is the runner's "could not run", which is why the gate
+    // declares `docker`.
+    //
+    // That exclusion is exactly the shape a quietly retired suite has, so both
+    // halves are pinned: the base config excludes the directory, and the storage
+    // config claims every file in it.
+    expect(serverVitestConfig.test?.exclude).toContain('tests/storage/**');
+    expect(storageVitestConfig.test?.include).toEqual(STORAGE_SUITE);
+    expect(STORAGE_SUITE.length).toBeGreaterThan(0);
+    for (const file of STORAGE_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'packages', 'server', file)), file).toBe(true);
+    }
+
+    // Both directions. A file on disk that `STORAGE_SUITE` does not name would be
+    // run by NOTHING — excluded from the push tier and never included here —
+    // which is a test that exists and cannot fail. vitest errors only on an EMPTY
+    // match, so a list that has gone stale in part shrinks the gate in silence.
+    const dir = path.join(repoRoot, 'packages', 'server', 'tests', 'storage');
+    const onDisk = readdirSync(dir)
+      .filter((entry) => entry.endsWith('.test.ts'))
+      .map((entry) => `tests/storage/${entry}`)
+      .sort();
+    expect(onDisk).toEqual([...STORAGE_SUITE].sort());
+
+    // Its own JUnit report, never the server suite's — pointed there it would
+    // overwrite the artifact `audit:ratchet:full` reads the headcount from.
+    const output = junitOutputFile(storageVitestConfig.test?.reporters);
+    expect(path.resolve(output!)).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', 'junit-storage.xml'),
+    );
+    expect(output).not.toBe(junitOutputFile(serverVitestConfig.test?.reporters));
+
+    // And only the JSON report is DECLARED. Unlike `test:fuzz` and
+    // `test:resource`, this gate DOES run on every push — so the reason is the
+    // other one: these tests are its own rather than a re-run of the server
+    // suite's, and declaring the JUnit would put them in `tests.count`, making
+    // the headcount rise and fall with whether a Docker daemon was running. The
+    // task carries `countsTests: false` for the same reason.
+    expect(reportsOf(manifest.tasks['test:storage']!)).toEqual(['storage.json']);
+    expect(manifest.tasks['test:storage']!.countsTests).toBe(false);
+    const declaredReports = nonComposite.flatMap(([, task]) => reportsOf(task));
+    expect(declaredReports).not.toContain('junit-storage.xml');
+
+    // The prerequisite is DECLARED rather than discovered, in both places, and
+    // `build:shared` is beside it rather than replaced by it: the suite imports
+    // `@hvault/shared` for the framing constants, so a gate declaring only
+    // `docker` would report a missing shared build as a broken storage port.
+    const byId = new Map(gates.map((gate) => [gate.id, gate]));
+    expect(byId.get('storage')?.requires).toEqual(['docker', 'build:shared']);
+    expect(manifest.tasks['test:storage']!.requires).toEqual(['docker', 'build:shared']);
+    expect(byId.get('storage')?.dependsOn).toContain('build');
+    // Tier 1, and stated here as well as in the tier tests, because moving it to
+    // Tier 2 would be the quiet way to stop checking a silent data-loss class on
+    // every push while the gate still looked registered.
+    expect(byId.get('storage')?.tier).toBe(1);
+  });
+
   it('runs the upgrade suite from its own config, its own report and its own files', () => {
     // The same contract as every other named subset, plus one thing only this
     // gate has: two committed GOLDENS. A vault and a `.env` recorded from the
@@ -727,7 +856,7 @@ describe('machine-readable reports', () => {
 
   it('runs the recovery drills from their own config, their own report and their own files', () => {
     // The same contract as every other named subset. What is specific to this
-    // gate is the SHAPE of the thing it protects: the two files spawn real child
+    // gate is the SHAPE of the thing it protects: all three files spawn real child
     // processes and kill them, so a membership list that lost one would quietly
     // stop rehearsing an entire disaster while the gate kept reporting green.
     const output = junitOutputFile(recoveryVitestConfig.test?.reporters);
@@ -759,6 +888,7 @@ describe('machine-readable reports', () => {
     // in this test still passes.
     expect([...RECOVERY_SUITE].sort()).toEqual([
       'tests/recovery/crash-consistency.test.ts',
+      'tests/recovery/document-crash.test.ts',
       'tests/recovery/restore-drill.test.ts',
     ]);
 
@@ -867,7 +997,7 @@ describe('machine-readable reports', () => {
     // a typo in one is SILENT in both directions that matter: the gate never
     // writes a score for it, so the baseline never gains a floor for it, and the
     // "core modules carry the higher threshold" claim quietly applies to
-    // nothing. Existence on disk is what makes the six real.
+    // nothing. Existence on disk is what makes each of them real.
     expect(CORE_MODULES).toEqual([
       'packages/client/src/services/crypto/',
       'packages/shared/src/schemas/',
@@ -875,6 +1005,7 @@ describe('machine-readable reports', () => {
       'packages/server/src/controllers/vaultController.ts',
       'packages/client/src/services/import/',
       'packages/server/src/utils/folderGraph.ts',
+      'packages/server/src/controllers/documentController.ts',
     ]);
     for (const modulePath of CORE_MODULES) {
       expect(existsSync(path.join(repoRoot, modulePath)), modulePath).toBe(true);
@@ -1241,8 +1372,27 @@ describe('machine-readable reports', () => {
       'settings',
       'vault-health',
       'file-encryption',
+      'documents-list',
+      'document-upload-review',
+      'document-detail',
+      'document-viewer',
       'unlock-screen',
+      'sandbox-rendered',
     ]);
+    // The document views' ORDER is load-bearing in one place, and it is cheap to
+    // state: `sandbox-rendered` comes AFTER `unlock-screen` because the unlock
+    // step locks the vault and every view before it needs an unlocked one, while
+    // that last view is a top-level navigation to `/sandbox.html` and needs no
+    // session at all. A list that put them the other way round would fail in the
+    // spec rather than here, with a symptom that named neither.
+    expect(A11Y_VIEW_IDS.indexOf('sandbox-rendered')).toBeGreaterThan(
+      A11Y_VIEW_IDS.indexOf('unlock-screen'),
+    );
+    for (const view of ['documents-list', 'document-detail', 'document-viewer']) {
+      expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(
+        A11Y_VIEW_IDS.indexOf('unlock-screen'),
+      );
+    }
     // Every id is unique and every view says what state the page is in — the
     // description is what makes a report readable a year later.
     expect(new Set(A11Y_VIEW_IDS).size).toBe(A11Y_VIEW_IDS.length);

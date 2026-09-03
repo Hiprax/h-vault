@@ -17,8 +17,29 @@
     // reach for `process.env`, `node:crypto` and Node's timer types. It is added
     // ONLY here — `src/` stays browser-typed, so a Node-only global cannot slip
     // into shipped code without the build type-check catching it.
-    "types": ["vite/client", "vite-plugin-pwa/react", "node"]
+    "types": ["vite/client", "vite-plugin-pwa/react", "node"],
+    // `tests/vite-config.test.ts` reads the bundle gate's OWN budget table out of
+    // the repo-root `scripts/ci/lib/bundle-budgets.mjs`, so the sandbox build's
+    // size advisory and the ceiling the gate enforces cannot drift into naming
+    // two different numbers. Letting TS INFER that module's types from the real
+    // source beats a hand-written `.d.mts` sidecar, which would be free to drift
+    // from the module it describes without anything noticing — the same call
+    // `packages/server/tsconfig.test.json` already makes for the same directory.
+    // `checkJs` stays off (its default), so this only teaches the resolver to
+    // read those files; it relaxes nothing about the TypeScript it checks, and
+    // `src/` is unaffected because the build config does not set it.
+    "allowJs": true
   },
-  "include": ["src/**/*", "tests/**/*", "*.config.ts", "vite.config.helpers.ts", "scripts/**/*"],
+  "include": [
+    "src/**/*",
+    "tests/**/*",
+    "*.config.ts",
+    "vite.config.helpers.ts",
+    // `*.config.ts` does NOT match this name (it ends `.sandbox.ts`), and the
+    // sandbox build config would otherwise be type-checked only as a side effect
+    // of `tests/vite-config.test.ts` importing it.
+    "vite.config.sandbox.ts",
+    "scripts/**/*"
+  ],
   "references": [{ "path": "../shared" }]
 }

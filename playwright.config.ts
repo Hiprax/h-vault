@@ -106,10 +106,51 @@ export default defineConfig({
     ? {}
     : {
         webServer: {
-          command: 'npx tsx e2e/start-server.ts',
+          // `node --import tsx`, NOT `npx tsx`, and the difference is a leak
+          // rather than a preference. Playwright waits for the process it
+          // launched to close and then lets the run finish; `npx tsx <file>`
+          // puts TWO wrappers in front of the harness, and the outer one closes
+          // as soon as it has forwarded the signal — so the teardown below was
+          // reported as "Terminated the WebServer" 102 ms after the signal, with
+          // its `docker rm -f` still in flight and the harness then dying with
+          // its parent. MEASURED: `[e2e] signal received, tearing down` printed,
+          // `[e2e] teardown complete` never did, and a storage engine was left
+          // running. Run this way the harness IS the launched process, so the
+          // close Playwright waits for is the teardown's own.
+          command: 'node --import tsx e2e/start-server.ts',
           url: `${CLIENT_ORIGIN}/api/v1/health`,
           reuseExistingServer: !process.env.CI,
-          timeout: 180_000,
+          // RAISED from 180 s, and only in the direction that cannot hide a
+          // defect. `e2e/start-server.ts` now does three things before the dev
+          // server answers this URL: it starts an in-memory mongod, it starts the
+          // real object-storage engine in a container, and it waits for that
+          // engine to answer a HeadBucket through the server's own S3 client. On a
+          // machine that has never pulled the pinned image, `docker run` fetches
+          // it first — unbounded work that has nothing to do with this
+          // application — and the engine's own readiness deadline is 60 s on top.
+          // A budget is not a gate: expiring early would report a slow first pull
+          // as "the stack never came up", while a longer one costs nothing on a
+          // healthy run and only delays a genuine failure's report.
+          timeout: 420_000,
+          // WITHOUT THIS, PLAYWRIGHT SIGKILLS THE HARNESS AND EVERY RUN LEAKS.
+          // MEASURED, in `node_modules/playwright/lib/runner/index.js`: the
+          // webServer's `attemptToGracefullyClose` throws `skip graceful shutdown`
+          // unless this key is set, and the fallback is
+          // `process.kill(-pid, 'SIGKILL')` over the whole process group. Nothing
+          // survives that — not the SIGTERM handler in `e2e/start-server.ts`, not
+          // the dev server's `exit` handler, not the harness's synchronous
+          // `process.on('exit')` last resort. So the teardown that file was
+          // carefully written to perform never ran at all: `npm run ci` was
+          // stranding a mongod dbPath under RAM-backed /tmp AND a storage-engine
+          // container per run, twice over (`test:e2e` and `test:a11y`), on runs
+          // that ended green.
+          //
+          // With it, the group gets SIGTERM and the existing teardown runs. The
+          // timeout is the ceiling on that teardown before Playwright force-kills
+          // anyway, so it is sized for the slowest honest one (`mongod.stop()`
+          // plus `docker rm -f`, about two seconds) with room for a loaded
+          // machine, and NEVER 0 — which this API reads as "wait for ever".
+          gracefulShutdown: { signal: 'SIGTERM', timeout: 30_000 },
         },
       }),
 });

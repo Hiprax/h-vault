@@ -58,6 +58,24 @@ import {
   // Schemas — config
   publicConfigDataSchema,
   publicConfigResponseSchema,
+  fileEncryptionConfigResponseSchema,
+  documentsConfigResponseSchema,
+  // Schemas — document
+  documentMetaSchema,
+  documentKeyRewrapSchema,
+  initDocumentUploadSchema,
+  completeDocumentUploadSchema,
+  updateDocumentSchema,
+  listDocumentsSchema,
+  listDocumentTrashSchema,
+  documentPartParamsSchema,
+  documentSegmentParamsSchema,
+  documentResponseSchema,
+  documentUploadResponseSchema,
+  initDocumentUploadResponseSchema,
+  documentUsageResponseSchema,
+  documentChunkCountFor,
+  documentMetaJsonByteLength,
   // Constants
   APP_NAME,
   APP_VERSION,
@@ -87,6 +105,7 @@ import {
   formatBytes,
   generateId,
   normalizeUri,
+  documentExtension,
   MAX_LOGIN_BACKUP_CODES,
   MAX_LOGIN_BACKUP_CODE_LENGTH,
   MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH,
@@ -103,7 +122,14 @@ import {
   MAX_ADDRESS_ZIP_LENGTH,
   MAX_ADDRESS_COUNTRY_LENGTH,
   MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
+  MAX_PREVIEW_BYTES,
+  MAX_PREVIEW_TEXT_LINES,
+  PREVIEW_MODES,
+  PREVIEW_MODE_NAMES,
+  PREVIEW_MAGIC_BYTES,
+  previewModeForName,
 } from '../src/index.js';
+import type { SandboxFrameMessage, SandboxRenderRequest, SandboxTheme } from '../src/index.js';
 
 describe('barrel exports (src/index.ts)', () => {
   it('exports all common schemas', () => {
@@ -177,9 +203,43 @@ describe('barrel exports (src/index.ts)', () => {
     expect(importOperationsSchema).toBeDefined();
   });
 
-  it('exports config schemas', () => {
+  it('exports config schemas, including BOTH per-feature narrowings', () => {
     expect(publicConfigDataSchema).toBeDefined();
     expect(publicConfigResponseSchema).toBeDefined();
+    // One envelope carries two unrelated features, and each reader validates only
+    // its own block through its own `.pick()` narrowing. A narrowing the barrel did
+    // not re-export would be unreachable from the client, which would quietly send
+    // that reader back to the full schema — the exact coupling the pair exists to
+    // remove.
+    expect(fileEncryptionConfigResponseSchema).toBeDefined();
+    expect(documentsConfigResponseSchema).toBeDefined();
+  });
+
+  it('exports the document schemas and the framing helpers', () => {
+    // The package publishes only the "." subpath, so a schema the barrel does not
+    // re-export is unreachable from the server and the client no matter what
+    // `schemas/document.ts` exports — and the document store's whole point is that
+    // both sides read ONE definition of every bound.
+    expect(documentMetaSchema).toBeDefined();
+    // Composed into `bulkReEncryptSchema`'s documents leg, so the rotation's
+    // wrapped-key bounds are the SAME three the upload path declares.
+    expect(documentKeyRewrapSchema).toBeDefined();
+    expect(initDocumentUploadSchema).toBeDefined();
+    expect(completeDocumentUploadSchema).toBeDefined();
+    expect(updateDocumentSchema).toBeDefined();
+    expect(listDocumentsSchema).toBeDefined();
+    expect(listDocumentTrashSchema).toBeDefined();
+    expect(documentPartParamsSchema).toBeDefined();
+    expect(documentSegmentParamsSchema).toBeDefined();
+    expect(documentResponseSchema).toBeDefined();
+    expect(documentUploadResponseSchema).toBeDefined();
+    expect(initDocumentUploadResponseSchema).toBeDefined();
+    expect(documentUsageResponseSchema).toBeDefined();
+    // Reached through the barrel, not through a relative path: the browser computes
+    // `declaredChunkCount` with this exact function before it seals a byte, and the
+    // schema that validates the number calls the same one.
+    expect(documentChunkCountFor(0, 1024)).toBe(1);
+    expect(documentMetaJsonByteLength({ a: 'b' })).toBe(9);
   });
 
   it('exports constants', () => {
@@ -225,6 +285,46 @@ describe('barrel exports (src/index.ts)', () => {
     expect(typeof formatBytes).toBe('function');
     expect(typeof generateId).toBe('function');
     expect(typeof normalizeUri).toBe('function');
+    // The document store's extension rule has to be reachable from BOTH the
+    // application and the isolated render document, and those two share no module
+    // except this package — so a barrel that did not re-export it would guarantee a
+    // second copy of the rule rather than merely an awkward import.
+    expect(typeof documentExtension).toBe('function');
+  });
+
+  it('exports the document-preview map, its bounds and the rule that reads them', () => {
+    // The package publishes only the "." subpath, so anything the barrel does not
+    // re-export is unreachable from the client. That matters more here than for
+    // most exports: the application and the isolated render document share NO
+    // module except this package, so a missing re-export does not produce an
+    // import error to fix — it produces a second copy of the previewability rule,
+    // and the two disagreeing shows up as an empty rectangle rather than a crash.
+    expect(typeof previewModeForName).toBe('function');
+    expect(previewModeForName('README.md')).toBe('markdown');
+    expect(PREVIEW_MODES['png']).toBe('image');
+    expect(PREVIEW_MODE_NAMES).toContain('none');
+    expect(PREVIEW_MAGIC_BYTES['png']?.[0]?.bytes[0]).toBe(0x89);
+    expect(MAX_PREVIEW_BYTES).toBe(26_214_400);
+    expect(MAX_PREVIEW_TEXT_LINES).toBe(50_000);
+  });
+
+  it('exports the sandbox message types, which are the ONLY thing the two graphs share', () => {
+    // Type-only, and that is the whole design: `manualChunks` puts `zod` in
+    // `vendor-core` next to AXIOS, so a shared RUNTIME schema would drag an HTTP
+    // client into a document whose policy forbids it every request. These
+    // annotations compile away to nothing, and the file failing to type-check is
+    // what would report the re-export going missing.
+    const theme: SandboxTheme = 'dark';
+    const request: SandboxRenderRequest = {
+      kind: 'render',
+      mode: 'text',
+      ext: 'txt',
+      theme,
+      bytes: new ArrayBuffer(0),
+    };
+    const reply: SandboxFrameMessage = { kind: 'link', href: 'https://example.com' };
+    expect(request.mode).toBe('text');
+    expect(reply.kind).toBe('link');
   });
 
   it('exports the backup-code parser and its bounds', () => {

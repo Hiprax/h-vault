@@ -1,0 +1,420 @@
+/*
+ * The isolated render document's stylesheet.
+ *
+ * PLAIN CSS, and that is a constraint rather than a preference: the sandbox is
+ * built by `vite.config.sandbox.ts`, which carries no Tailwind plugin (a second
+ * plugin chain would also mean a second service worker and a second React), so a
+ * file of utility classes here would ship unstyled and report no error at all.
+ *
+ * It is also the reason the syntax-highlighting colours are written out below
+ * rather than imported from `highlight.js/styles/*.css`: one small block of
+ * token colours in both themes is cheaper than an extra stylesheet asset that
+ * has to be served with the CORS and CORP headers an opaque origin needs, and it
+ * is one fewer file whose absence would be invisible.
+ *
+ * Two themes, selected by `data-theme` on the root element, which the frame sets
+ * from the RESOLVED theme the host posts. The frame never resolves `system`
+ * itself: it cannot do so in a way the application would agree with, and a
+ * preview that disagreed with the chrome around it would look broken.
+ */
+
+:root {
+  --hv-bg: #ffffff;
+  --hv-fg: #1f2328;
+  --hv-muted: #59636e;
+  --hv-border: #d1d9e0;
+  --hv-surface: #f6f8fa;
+  --hv-link: #0969da;
+  --hv-notice-bg: #fff8c5;
+  --hv-notice-fg: #4a3f05;
+  --hv-notice-border: #d4a72c;
+  --hv-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --hv-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+
+  --hv-hl-keyword: #cf222e;
+  --hv-hl-string: #0a3069;
+  --hv-hl-number: #0550ae;
+  --hv-hl-comment: #59636e;
+  --hv-hl-name: #953800;
+  --hv-hl-literal: #0550ae;
+  --hv-hl-addition: #116329;
+  --hv-hl-deletion: #82071e;
+}
+
+[data-theme='dark'] {
+  --hv-bg: #0d1117;
+  --hv-fg: #e6edf3;
+  --hv-muted: #9198a1;
+  --hv-border: #3d444d;
+  --hv-surface: #151b23;
+  --hv-link: #4493f8;
+  --hv-notice-bg: #272115;
+  --hv-notice-fg: #f0d78c;
+  --hv-notice-border: #7d6a2b;
+
+  --hv-hl-keyword: #ff7b72;
+  --hv-hl-string: #a5d6ff;
+  --hv-hl-number: #79c0ff;
+  --hv-hl-comment: #9198a1;
+  --hv-hl-name: #ffa657;
+  --hv-hl-literal: #79c0ff;
+  --hv-hl-addition: #3fb950;
+  --hv-hl-deletion: #f85149;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--hv-bg);
+  color: var(--hv-fg);
+  font-family: var(--hv-sans);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+#root {
+  padding: 16px;
+}
+
+/* --------------------------------------------------------------------------
+ * Shared chrome
+ * ----------------------------------------------------------------------- */
+
+.hv-notice {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--hv-notice-border);
+  border-radius: 6px;
+  background: var(--hv-notice-bg);
+  color: var(--hv-notice-fg);
+  font-size: 13px;
+}
+
+.hv-toolbar {
+  margin: 0 0 8px;
+}
+
+.hv-toggle {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--hv-border);
+  border-radius: 6px;
+  background: var(--hv-surface);
+  color: var(--hv-fg);
+  cursor: pointer;
+}
+
+.hv-toggle:hover {
+  border-color: var(--hv-link);
+}
+
+.hv-toggle:focus-visible {
+  outline: 2px solid var(--hv-link);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+ * Text, code and tabular data
+ *
+ * The gutter is a SECOND `<pre>` beside the source rather than one element per
+ * line: 50,000 lines would otherwise be 50,000 elements, and it is the node
+ * count rather than the byte count that stops a tab responding. The two columns
+ * stay aligned because they share a font, a size and a line height, and because
+ * neither wraps.
+ * ----------------------------------------------------------------------- */
+
+.hv-source {
+  display: flex;
+  align-items: flex-start;
+  border: 1px solid var(--hv-border);
+  border-radius: 6px;
+  background: var(--hv-surface);
+  overflow: hidden;
+}
+
+.hv-gutter,
+.hv-lines,
+.hv-text {
+  margin: 0;
+  padding: 12px 0;
+  font-family: var(--hv-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.hv-gutter {
+  padding-left: 12px;
+  padding-right: 12px;
+  border-right: 1px solid var(--hv-border);
+  color: var(--hv-muted);
+  text-align: right;
+  user-select: none;
+  flex: none;
+}
+
+.hv-lines {
+  padding-left: 12px;
+  padding-right: 12px;
+  overflow-x: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.hv-plain .hv-lines {
+  border: 1px solid var(--hv-border);
+  border-radius: 6px;
+  background: var(--hv-surface);
+}
+
+.hv-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+.hv-table th,
+.hv-table td {
+  border: 1px solid var(--hv-border);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+}
+
+.hv-table th {
+  background: var(--hv-surface);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+ * Images and media
+ * ----------------------------------------------------------------------- */
+
+.hv-image,
+.hv-media {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.hv-image {
+  height: auto;
+  /* A checkerboard so a transparent PNG is distinguishable from a blank frame. */
+  background-image:
+    linear-gradient(45deg, var(--hv-surface) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--hv-surface) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--hv-surface) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--hv-surface) 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+}
+
+/* --------------------------------------------------------------------------
+ * Markdown and HTML
+ *
+ * Approximating GitHub's rendered-document typography, because that is the
+ * reference a reader has in their head for what a README looks like.
+ * ----------------------------------------------------------------------- */
+
+.hv-markdown {
+  max-width: 900px;
+  margin: 0 auto;
+  word-wrap: break-word;
+}
+
+.hv-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.hv-markdown h1,
+.hv-markdown h2,
+.hv-markdown h3,
+.hv-markdown h4,
+.hv-markdown h5,
+.hv-markdown h6 {
+  margin: 24px 0 16px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.hv-markdown h1 {
+  font-size: 2em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--hv-border);
+}
+
+.hv-markdown h2 {
+  font-size: 1.5em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--hv-border);
+}
+
+.hv-markdown h3 {
+  font-size: 1.25em;
+}
+
+.hv-markdown p,
+.hv-markdown ul,
+.hv-markdown ol,
+.hv-markdown blockquote,
+.hv-markdown table,
+.hv-markdown pre {
+  margin: 0 0 16px;
+}
+
+.hv-markdown ul,
+.hv-markdown ol {
+  padding-left: 2em;
+}
+
+.hv-markdown li + li {
+  margin-top: 0.25em;
+}
+
+.hv-markdown .contains-task-list {
+  list-style: none;
+  padding-left: 1em;
+}
+
+.hv-markdown blockquote {
+  padding: 0 1em;
+  border-left: 0.25em solid var(--hv-border);
+  color: var(--hv-muted);
+}
+
+.hv-markdown a {
+  color: var(--hv-link);
+  text-decoration: none;
+}
+
+.hv-markdown a:hover {
+  text-decoration: underline;
+}
+
+.hv-markdown img {
+  max-width: 100%;
+}
+
+.hv-markdown hr {
+  height: 1px;
+  border: 0;
+  background: var(--hv-border);
+  margin: 24px 0;
+}
+
+.hv-markdown table {
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: auto;
+}
+
+.hv-markdown th,
+.hv-markdown td {
+  border: 1px solid var(--hv-border);
+  padding: 6px 13px;
+}
+
+.hv-markdown tr:nth-child(2n) {
+  background: var(--hv-surface);
+}
+
+.hv-markdown code {
+  font-family: var(--hv-mono);
+  font-size: 85%;
+  padding: 0.2em 0.4em;
+  border-radius: 6px;
+  background: var(--hv-surface);
+}
+
+.hv-markdown pre {
+  padding: 16px;
+  border-radius: 6px;
+  background: var(--hv-surface);
+  overflow: auto;
+  line-height: 1.45;
+}
+
+.hv-markdown pre code {
+  padding: 0;
+  background: transparent;
+  font-size: 100%;
+}
+
+/* The footnote label GFM emits; GitHub hides it and shows the section heading. */
+.hv-markdown .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --------------------------------------------------------------------------
+ * Syntax highlighting tokens
+ * ----------------------------------------------------------------------- */
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-doctag,
+.hljs-name {
+  color: var(--hv-hl-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-symbol,
+.hljs-quote {
+  color: var(--hv-hl-string);
+}
+
+.hljs-number,
+.hljs-literal,
+.hljs-type {
+  color: var(--hv-hl-number);
+}
+
+.hljs-comment,
+.hljs-meta {
+  color: var(--hv-hl-comment);
+  font-style: italic;
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable {
+  color: var(--hv-hl-name);
+}
+
+.hljs-addition {
+  color: var(--hv-hl-addition);
+}
+
+.hljs-deletion {
+  color: var(--hv-hl-deletion);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}

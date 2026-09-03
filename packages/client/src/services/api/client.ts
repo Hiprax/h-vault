@@ -57,8 +57,24 @@ let csrfFetchPromise: Promise<string> | null = null;
  *
  * Uses promise deduplication so that concurrent callers share a single
  * in-flight fetch instead of triggering multiple parallel requests.
+ *
+ * **Exported for ONE caller, and for a reason worth stating precisely, because
+ * the obvious justification is wrong.** The request interceptor below already
+ * awaits this for every state-changing method, so a caller that awaits it first
+ * does not change which token the request carries, and it does not by itself
+ * prevent a replay: a refresh that lands mid-request clears the cache after the
+ * header was attached, and the 403 replay is what recovers that — correctly.
+ *
+ * What it does change is WHERE a failure to obtain a token surfaces. The document
+ * store sends one 8 MiB sealed segment per request under its own bounded retry
+ * policy. If the CSRF fetch fails inside the interceptor (offline, or the
+ * csrf-token endpoint rate-limited), the rejection arrives with no `response`,
+ * indistinguishable from the transport failing, and it arrives AFTER the part
+ * body has been handed to Axios. Awaiting the token first makes that failure a
+ * plain, classifiable step of the transfer that the store's own 1s/2s/4s backoff
+ * retries, before a byte of the segment is committed to a request.
  */
-async function ensureCsrfToken(): Promise<string> {
+export async function ensureCsrfToken(): Promise<string> {
   if (csrfToken) return csrfToken;
 
   // If a fetch is already in flight, piggy-back on it

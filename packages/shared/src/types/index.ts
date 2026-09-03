@@ -53,6 +53,20 @@ import type {
   regenerateBackupCodesSchema,
   deleteAccountSchema,
 } from '../schemas/user.js';
+import type {
+  completeDocumentUploadSchema,
+  documentMetaSchema,
+  documentPartParamsSchema,
+  documentResponseSchema,
+  documentSegmentParamsSchema,
+  documentUploadResponseSchema,
+  documentUsageResponseSchema,
+  initDocumentUploadResponseSchema,
+  initDocumentUploadSchema,
+  listDocumentTrashSchema,
+  listDocumentsSchema,
+  updateDocumentSchema,
+} from '../schemas/document.js';
 import type { paginationSchema } from '../schemas/common.js';
 import type { ItemType, AuditAction, BackupStatus, ErrorCode, Theme } from '../constants/index.js';
 
@@ -107,6 +121,25 @@ export type ImportInsertItem = z.infer<typeof importInsertItemSchema>;
 export type ImportUpdateItem = z.infer<typeof importUpdateItemSchema>;
 export type ImportOperations = z.infer<typeof importOperationsSchema>;
 export type PaginationInput = z.infer<typeof paginationSchema>;
+
+// Document store types.
+//
+// Every one of these is the schema's OUTPUT type, which is the shape a controller
+// or a store holds after `safeParse` has succeeded — note that the two params
+// types therefore carry `partNumber` and `index` as NUMBERS, because the path
+// schemas parse the string the router hands them.
+export type DocumentMeta = z.infer<typeof documentMetaSchema>;
+export type InitDocumentUploadInput = z.infer<typeof initDocumentUploadSchema>;
+export type CompleteDocumentUploadInput = z.infer<typeof completeDocumentUploadSchema>;
+export type UpdateDocumentInput = z.infer<typeof updateDocumentSchema>;
+export type ListDocumentsInput = z.infer<typeof listDocumentsSchema>;
+export type ListDocumentTrashInput = z.infer<typeof listDocumentTrashSchema>;
+export type DocumentPartParams = z.infer<typeof documentPartParamsSchema>;
+export type DocumentSegmentParams = z.infer<typeof documentSegmentParamsSchema>;
+export type DocumentResponse = z.infer<typeof documentResponseSchema>;
+export type DocumentUploadResponse = z.infer<typeof documentUploadResponseSchema>;
+export type InitDocumentUploadResponse = z.infer<typeof initDocumentUploadResponseSchema>;
+export type DocumentUsageResponse = z.infer<typeof documentUsageResponseSchema>;
 
 // API response types
 export type ApiResponse<T> =
@@ -388,6 +421,27 @@ export interface IBackupFile {
     itemCount: number;
     folderCount: number;
   };
+  /**
+   * How many documents the account held when the backup was taken, and their
+   * total plaintext size.
+   *
+   * Documents are deliberately NOT part of a backup: their bytes cannot fit a
+   * ~25 MiB JSON document, and metadata without bytes would restore rows pointing
+   * at objects that do not exist. This breadcrumb is what stops a restored account
+   * from silently looking complete — the restore surfaces it as "this backup was
+   * taken from an account holding N documents; documents are not part of a
+   * backup".
+   *
+   * OPTIONAL, and that is load-bearing in both directions: a backup written by a
+   * server that predates the document store has no such field and must still
+   * restore, and a client that predates it must still parse a payload that has
+   * one. Its ABSENCE means "written by an older server"; a zeroed summary means
+   * "written by a server that has the feature, from an account with no documents".
+   */
+  documentSummary?: {
+    count: number;
+    totalBytes: number;
+  };
   /** HMAC-SHA256 integrity signature computed client-side using BWK. Optional for backward compatibility with older backups. */
   integrity?: string;
 }
@@ -480,10 +534,31 @@ export type IIdentityAddress = NonNullable<IIdentityData['address']>;
 
 // Public (unauthenticated) server configuration surfaced via GET /config.
 // Contains only non-sensitive, operator-tunable values the client needs before
-// authentication — currently the File Encryption tool's client-side size cap.
+// authentication: the File Encryption tool's client-side size cap, and whether
+// the document store is available at all.
+//
+// Mirrors `publicConfigDataSchema`, which is the runtime half of this contract.
 export interface PublicConfig {
   fileEncryption: {
     maxSizeMB: number;
+  };
+  /**
+   * The document store's advertisement, in three states the client must tell
+   * apart: ABSENT (a server older than the feature), present with
+   * `enabled: false` (this server, no object storage configured), or present with
+   * `enabled: true` and the numbers.
+   *
+   * Optional on purpose. A current client must still be able to read an older
+   * server's config, which is the N-1 compatibility the `upgrade` gate checks.
+   */
+  documents?: {
+    enabled: boolean;
+    maxSizeMB?: number;
+    chunkPlaintextBytes?: number;
+    maxDocuments?: number;
+    quotaMB?: number;
+    /** Advisory only — the server sees ciphertext and cannot enforce it. */
+    allowedExtensions?: string[];
   };
 }
 

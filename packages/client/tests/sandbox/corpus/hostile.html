@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>this title must not become body text</title>
+    <style>
+      body {
+        --leaked: 'this must not be readable text';
+      }
+    </style>
+    <script src="/absolute.js"></script>
+    <meta http-equiv="refresh" content="0;url=https://example.invalid/" />
+  </head>
+  <body onload="window.__pwned = 1">
+    <h1>Stored page</h1>
+    <p>Ordinary text that must survive.</p>
+    <script>
+      window.__pwned = 2;
+    </script>
+    <img src="x" onerror="window.__pwned = 3" />
+    <a href="javascript:window.__pwned=4">javascript link</a>
+    <iframe src="https://example.invalid/"></iframe>
+    <object data="https://example.invalid/"></object>
+    <form action="https://example.invalid/"><input name="q" value="v" /></form>
+    <svg onload="window.__pwned = 5"><circle r="1" /></svg>
+    <p style="position: fixed; top: 0">styled</p>
+    <a id="body">clobber body</a>
+    <input name="getElementById" value="clobber lookup" />
+    <img src="https://example.invalid/pixel.png" alt="a tracking pixel" />
+    <pre><code class="language-js">const highlighted = 1;</code></pre>
+  </body>
+</html>

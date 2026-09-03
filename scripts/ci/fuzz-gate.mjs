@@ -2,9 +2,10 @@
 /**
  * `test:fuzz` — the untrusted-file suites, run under a wall-clock deadline.
  *
- * Two legs: the seven import parsers (client) and the backup-restore folder
- * graph (server). Both consume files a user supplies, which is the one place
- * this application turns attacker-chosen bytes into vault data.
+ * Two legs: the client's untrusted-file suites — the seven import parsers and
+ * the in-browser format-and-repair engine — and the backup-restore folder graph
+ * (server). All three consume files a user supplies, which is the one place this
+ * application turns attacker-chosen bytes into vault data.
  *
  *   node scripts/ci/fuzz-gate.mjs        the gate (this is what the pipeline runs)
  *   npm run test:fuzz                    the same thing
@@ -53,10 +54,14 @@ import { ensureReportDir, reportPath, writeJsonReport } from './lib/reports.mjs'
 /**
  * The wall-clock deadline for one leg.
  *
- * Measured on the reference machine: the client leg is ~33 s (dominated by the
- * million-column row, seven parsers over) and the server leg ~5 s. Five minutes
- * is an order of magnitude of headroom — far too coarse to fire on a loaded
- * machine, and far too tight for a genuinely wedged parser to hide behind.
+ * MEASURED on the reference machine, from this gate's own `fuzz.json`: the
+ * client leg is 36.1 s over 275 tests (dominated by the million-column row,
+ * seven parsers over, plus 5.5 s for the 98-test format corpus — most of that
+ * one generated ~900 KB JSON Lines record, which exists to prove the formatter
+ * refuses to break a record across lines rather than writing it out anyway) and
+ * the server leg is 5.6 s over 10. Five minutes is an order of magnitude of
+ * headroom — far too coarse to fire on a loaded machine, and far too tight for a
+ * genuinely wedged parser to hide behind.
  */
 const LEG_DEADLINE_MS = 300_000;
 
@@ -65,7 +70,7 @@ const LEGS = [
   {
     package: 'packages/client',
     report: 'junit-fuzz-client.xml',
-    subject: 'the seven import parsers',
+    subject: 'the seven import parsers and the format-and-repair engine',
   },
   {
     package: 'packages/server',

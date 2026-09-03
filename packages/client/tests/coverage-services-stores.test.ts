@@ -659,6 +659,7 @@ vi.mock('../src/pages/VaultItemPage', () => pageStub('vault-item'));
 vi.mock('../src/pages/VaultHealthPage', () => pageStub('vault-health'));
 vi.mock('../src/pages/GeneratorPage', () => pageStub('generator'));
 vi.mock('../src/pages/FileEncryptionPage', () => pageStub('file-encryption'));
+vi.mock('../src/pages/DocumentsPage', () => pageStub('documents'));
 vi.mock('../src/pages/SettingsPage', () => pageStub('settings'));
 vi.mock('../src/pages/BackupSettingsPage', () => pageStub('backup'));
 vi.mock('../src/pages/SessionsPage', () => pageStub('sessions'));
@@ -668,11 +669,84 @@ vi.mock('../src/pages/ResetPasswordPage', () => pageStub('reset-password'));
 vi.mock('../src/pages/UnlockAccountPage', () => pageStub('unlock-account'));
 vi.mock('../src/pages/NotFoundPage', () => pageStub('not-found'));
 
+import type { DocumentUploadProgress } from '../src/stores/documentsStore';
+
 async function renderAppAt(path: string): Promise<void> {
   window.history.pushState({}, '', path);
   const { App } = await import('../src/App');
   render(createElement(App));
 }
+
+describe('App — the document-upload unload guard is mounted above every route', () => {
+  /**
+   * Rewrite the uploads registry in the SAME module-registry generation
+   * `renderAppAt` will import `App` from.
+   *
+   * This file calls `vi.resetModules()` in several places, so a store imported at
+   * the top of it is a different instance from the one a later dynamic
+   * `import('../src/App')` resolves — seeding that one would leave the
+   * application reading an empty registry, and the assertions below would then
+   * pass or fail for a reason that has nothing to do with the guard.
+   */
+  async function setUploads(uploads: Record<string, DocumentUploadProgress>): Promise<void> {
+    const { useDocumentsStore } = await import('../src/stores/documentsStore');
+    useDocumentsStore.setState({ uploads });
+  }
+
+  beforeEach(async () => {
+    // `App` gates its first render on a cold-start session resume, which is
+    // asynchronous when a remembered-session hint is present — and the suites
+    // above this one leave things in `localStorage`. Clearing it makes the
+    // resume settle synchronously, so these tests measure the unload guard
+    // rather than a race with an unrelated feature.
+    localStorage.clear();
+    // The registry is emptied HERE rather than in an `afterEach`, and that is not
+    // interchangeable: an inner `afterEach` runs before Testing Library's own
+    // cleanup, so writing to the store there would flip `anyLive` while `App` is
+    // still mounted — a re-render outside `act`, and a warning that is entirely
+    // an artefact of the teardown order.
+    await setUploads({});
+  });
+
+  afterEach(() => {
+    window.history.pushState({}, '', '/');
+  });
+
+  function dispatchUnload(): Event {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event;
+  }
+
+  it('confirms before the tab closes while a transfer is live, from a route that is not Documents', async () => {
+    await setUploads({
+      'up-1': {
+        id: 'up-1',
+        fileName: 'holiday.zip',
+        totalBytes: 1000,
+        sentBytes: 250,
+        status: 'uploading',
+      },
+    });
+
+    // Deliberately NOT `/documents`: the transfer outlives that page, so the
+    // guard has to be armed by the APPLICATION rather than by the page. Deleting
+    // the `useUploadUnloadGuard()` call in `App` turns this red, which is the
+    // whole reason the guard does not live in the Documents panel.
+    await renderAppAt('/settings');
+    expect(await screen.findByTestId('page-settings')).toBeInTheDocument();
+
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+  });
+
+  it('does not confirm when no transfer is running', async () => {
+    await setUploads({});
+    await renderAppAt('/settings');
+    expect(await screen.findByTestId('page-settings')).toBeInTheDocument();
+
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+  });
+});
 
 describe('App route table', () => {
   afterEach(() => {
@@ -685,6 +759,7 @@ describe('App route table', () => {
     ['/vault/abc123', 'page-vault-item'],
     ['/generator', 'page-generator'],
     ['/tools/file-encryption', 'page-file-encryption'],
+    ['/documents', 'page-documents'],
     ['/settings', 'page-settings'],
     ['/settings/backup', 'page-backup'],
     ['/settings/sessions', 'page-sessions'],

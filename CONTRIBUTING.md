@@ -9,21 +9,37 @@ pipeline and about tests are not optional.
 
 ## Getting set up
 
-You need **Node 24+** (pinned in `.nvmrc`) and **Docker** (for MongoDB, and for the
-`docker` pipeline gate).
+You need **Node 24+** (pinned in `.nvmrc`) and **Docker** (for MongoDB and the object
+storage the document store uses, and for the `docker` pipeline gate).
 
 ```bash
 git clone https://github.com/Hiprax/h-vault.git
 cd h-vault
 npm install                                   # installs all workspaces
 cp .env.example .env                          # then set the three required secrets
-docker compose -f docker-compose.dev.yml up -d   # MongoDB
+docker compose -f docker-compose.dev.yml up -d   # MongoDB + object storage
 npm run build:shared                          # shared must be built before server/client
 npm run dev                                   # http://localhost:5173
 ```
 
 `packages/shared` is a build-time dependency of both other packages. If the server or
 client fails to resolve `@hvault/shared`, you skipped `npm run build:shared`.
+
+The dev stack also brings up the object storage the document store writes to, on
+`127.0.0.1:3900` with fixed development credentials. A host-run `npm run dev` does not pick
+those up on its own — the document store stays off until you add them to `.env`, which is
+why `.env.example` ships them empty:
+
+```bash
+S3_ENDPOINT=http://127.0.0.1:3900
+S3_BUCKET=hvault-documents
+S3_ACCESS_KEY_ID=hvaultdev
+S3_SECRET_ACCESS_KEY=dev-only-not-a-real-secret-key!!
+```
+
+All four or none: a partial set disables the feature with a warning. The values are the
+literals in `docker-compose.dev.yml`, and the endpoint is `127.0.0.1` rather than
+`hvault-s3` because your server is on the host, not inside the stack's network.
 
 The client dev server binds **5173** (Vite's default) and the API binds 5000. If 5173 is
 taken on your machine, override it through the process environment — Playwright's E2E
@@ -41,9 +57,10 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twenty-eight gates including the full test suite, the export-format
+pipeline locally — twenty-nine gates including the full test suite, the export-format
 goldens, patch coverage on the lines you changed, a smoke run of the built artifact, the
-browser bundle's size budgets, container builds with Trivy scanning, and a static-analysis
+browser bundle's size budgets, the storage port against a real object-storage engine in a
+container, container builds with Trivy scanning, and a static-analysis
 pass (CodeQL where its CLI is installed, otherwise Semgrep CE or OpenGrep, with the gate
 naming the engine that answered) — and refuses the push if any of them fail. A
 commit that reaches `main` has already passed everything. Eight further gates sit in the
@@ -61,7 +78,7 @@ computed in local time and every other gate runs where local time and UTC are th
 thing; `deploy`, the deployment clean room, which stands the whole Compose stack up from
 nothing and is far too heavy for a hook — its fast sibling `smoke` covers the built
 artifact on every push; `flake`, ten complete runs of every suite in ten different
-shuffled orders plus the Playwright suite three times over, which is about an hour; and
+shuffled orders plus the Playwright suite three times over, measured at 84 minutes; and
 `mutation`, the oracle, which re-runs the suite once per mutant and is measured in hours.
 All eight run in `npm run verify:full`.
 
@@ -85,8 +102,11 @@ the reference machine: **T0 90 s**, **T1 12 minutes**, **T2 unbounded**. Those a
 rather than gates, because the wall clock of your laptop is not a property of this repository and
 failing a push over it would only teach people to reach for `--no-verify`. They are still measured:
 every run records `budgetSeconds` beside its own `durationMs` in `summary.json` and prints the
-comparison. The numbers live in `scripts/ci/lib/tiers.mjs`. If you add a gate to T0, re-measure —
-the measured value is ~82 s against a 90 s budget, and there is not much room in it.
+comparison. The numbers live in `scripts/ci/lib/tiers.mjs`. If you add a gate to T0, re-measure, and
+know before you start that there is nothing left to spend: the measured value is now
+**1m 49s to 2m 23s** over three runs against that 90 s budget, so even the quietest is
+over it and the runner says so on every run. `lint` and `type-check` are about 85 s of
+the total between them.
 
 The runner **aggregates by default**: it runs every selected gate and reports all the
 failures, rather than costing you a round trip per failure. A gate whose dependency
@@ -110,9 +130,9 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
-### Eight gates whose failure asks for something specific
+### Twelve gates whose failure asks for something specific
 
-Most gates tell you what to fix. These eight are worth reading before you meet them,
+Most gates tell you what to fix. These twelve are worth reading before you meet them,
 because the obvious way past each of them is the wrong one.
 
 - **`coverage`** holds each package to the line, branch and function coverage already
@@ -167,6 +187,27 @@ because the obvious way past each of them is the wrong one.
   the matrix until the route is given a scenario. Neither deleting a row nor dropping a file
   from `SECURITY_SUITE` is an answer to a red run here; both are how this gate stops
   checking the thing it exists to check.
+- **`e2e`** and **`a11y`** drive Playwright against a stack `e2e/start-server.ts` starts
+  from nothing: the dev server, an in-memory MongoDB on the standard port, and the same
+  pinned object-storage engine, in a container. **Both declare the `docker` CLI**, and
+  the reason is worth stating because it is not obvious from the gate names: with no
+  engine the server reports `documents: { enabled: false }`, the client hides the whole
+  section, and the document journeys plus four of the twenty scanned accessibility views
+  fail with symptoms that say nothing about the code. Without a daemon both report **could
+  not run** rather than passing quietly. `flake` inherits the same requirement, because
+  the Playwright suite is three of the runs it makes.
+- **`storage`** runs the storage port against the real object-storage engine, in a
+  container, on a loopback port — the same `StorageProvider` contract the in-memory double
+  passes on every other gate, plus the cases only a real engine can answer. Read a red run
+  here as a disagreement between the double and the engine, and **the double is the
+  suspect**: everything else in the push tier asserts against it, so a belief encoded there
+  is a belief the rest of the suite cannot question. The one answer that is never right is
+  to relax a server-side rule until the engine's behaviour is acceptable — the gate's
+  headline case is that the engine STORES a non-final part that is one byte short, which
+  moves every later segment boundary and makes the document permanently unopenable, so the
+  server's refusal is the only thing there is. It needs the `docker` CLI; without it the
+  gate reports **could not run** rather than passing quietly, exactly like `docker` and
+  `deploy`.
 - **`property`** runs the property-based suites, which GENERATE their inputs, once in
   `UTC` and once in `America/New_York`. A failure names a counterexample and the seed that
   reproduces it. **The fix is never to narrow the generator.** Shrink the counterexample,
@@ -219,7 +260,7 @@ documenting its own defeat. The hatches themselves are unchanged and still work.
 | `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
 
 The first is the one to reach for: it is scoped, it is visible in the run summary, and it
-leaves the other twenty-six gates in place. **Say so in the pull request description
+leaves the other twenty-seven gates in place. **Say so in the pull request description
 whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
 a claim someone else now has to check.
 
@@ -290,6 +331,18 @@ gate.
   `## [Unreleased]` using the Keep a Changelog categories (`Added`, `Changed`,
   `Deprecated`, `Removed`, `Fixed`, `Security`). A `docs-sync` test asserts that parts of
   the README stay in step with the code, so it will tell you if you missed one.
+- **Nothing from a stored document may be parsed in the app's origin.** Every parser that
+  touches an uploaded file — the markdown pipeline, the HTML sanitizer, the highlighter,
+  Prettier, the JSON repairer — lives under `packages/client/src/sandbox/`, which is built
+  by its **own** Vite config into `sandbox-assets/` and runs inside an `<iframe
+sandbox="allow-scripts">` with an opaque origin and its own `connect-src 'none'` policy.
+  Two rules follow, and both fail quietly rather than loudly if you break them. The two
+  module graphs must share no chunk, so never import an app module from `src/sandbox/` or a
+  sandbox module from the app — the separate build is what makes that structural, and a
+  shared chunk would either be blocked by CORS in the frame or silently leave the app's
+  measured bundle. And `allow-same-origin` must never be added beside `allow-scripts`: the
+  pair lets the framed document remove its own sandbox, which is the entire boundary.
+  [SECURITY.md](SECURITY.md) explains why.
 - **Touching crypto, auth, or the backup/restore path?** Say so explicitly in the PR
   description and explain why the change is safe. These paths carry the whole product;
   they are reviewed on the assumption that a subtle mistake there is unrecoverable for a
@@ -326,9 +379,10 @@ An ordinary push publishes nothing and says so.
 packages/shared   # Zod schemas, TypeScript types, constants — built first
 packages/server   # Express 5 API, Mongoose models, background jobs
 packages/client   # React 19 SPA, Web Crypto, Zustand stores
+  src/sandbox/    #   the isolated document every stored file is rendered in — SEPARATE build
 e2e/              # Playwright specs
 scripts/ci/       # the local pipeline (this repo's real CI)
-docker/           # Dockerfile targets, internal + system Nginx configs
+docker/           # Dockerfile targets, internal + system Nginx configs, storage engine config
 ```
 
 ## Reporting bugs and requesting features
