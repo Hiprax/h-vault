@@ -29,8 +29,9 @@ import { SANDBOX_ASSETS_DIR, SANDBOX_HTML, sandboxManualChunks } from './vite.co
  *
  * Zod stays host-side for the same reason rather than merely for tidiness:
  * `manualChunks` puts `zod` in `vendor-core` alongside AXIOS, so a shared
- * runtime schema would drag an HTTP client into a document whose entire premise
- * is that it can issue no request. The message TYPES are shared as type-only
+ * runtime schema would drag an HTTP client into a document served under
+ * `connect-src 'none'`, where every call it could make is dead code waiting on a
+ * policy change. The message TYPES are shared as type-only
  * imports, which are erased at build time; the sandbox hand-rolls its own
  * validator for the handful of shapes it accepts.
  *
@@ -72,11 +73,14 @@ export default defineConfig({
     // Vite injects that polyfill into every entry by default, and it contains a
     // `fetch()` call and a `MutationObserver` over the whole document. It early-
     // returns on any browser that supports `modulepreload`, and `sandbox.html`
-    // declares no preload links, so it is dead in practice — but this document's
-    // own code says in two places that it fetches NOTHING, and a reader checking
-    // that claim against the built chunk would find a `fetch(` and be right to
-    // doubt it. Turning it off makes the claim structural instead of
-    // conditional, and reclaims ~700 bytes of a deliberately tight budget.
+    // declares no preload links, so it is dead in practice — dead twice over,
+    // in fact, because the document is served under `connect-src 'none'`, which
+    // blocks every way of reading a response. Both of those are properties of
+    // today's configuration rather than of the code, so the `fetch(` would sit in
+    // the chunk waiting on a change to either, and `sandbox.html` says this
+    // document fetches nothing. Turning the polyfill off makes that structural
+    // instead of conditional, and reclaims ~700 bytes of a deliberately tight
+    // budget.
     //
     // Nothing is lost: the application build keeps its polyfill, and this
     // document has one entry and no preload list for a polyfill to act on.

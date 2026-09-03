@@ -16,9 +16,10 @@ import type {
  * The application validates with Zod everywhere, and this file could have
  * shared a schema with it. It must not. The sandbox is built as its own Rollup
  * graph, and `manualChunks` puts `zod` in `vendor-core` next to AXIOS — so a
- * shared runtime schema would put an HTTP client inside a document whose whole
- * premise is that it can issue no request of any kind. It would do so silently:
- * the preview would still work, and no gate would report it.
+ * shared runtime schema would put an HTTP client inside a document served under
+ * `connect-src 'none'`, where every call it could make is dead code waiting on a
+ * policy change. It would do so silently: the preview would still work, and no
+ * gate would report it.
  *
  * What is actually needed here is smaller than a schema library, and saying so
  * is not a cost argument. The frame accepts exactly TWO message shapes — render

@@ -118,6 +118,7 @@ import {
   SANDBOX_CSP_EXPECTED,
   SANDBOX_DOCUMENT_CACHE_CONTROL,
   appAssetProblems,
+  assetResponseProblems,
   cspProblems,
   sandboxAssetProblems,
   sandboxAssetUrls,
@@ -759,20 +760,20 @@ try {
           fetch(new URL(appAsset, baseUrl)),
         ]);
         const assetProblems = [
-          // The status FIRST, because the negative half of this check is the half
-          // that can pass on nothing: a 404 for `/assets/main-*.js` carries no
-          // ACAO and no CORP either, so an image layout or an Nginx `location`
-          // that left the app bundle unreachable would be recorded here as a
-          // clean pass. Nothing else in the drill fetches it — `spa-shell` reads
-          // only the document and its nonce — so this is the only place that
-          // notices. Asserted on all three for the same reason.
-          ...[
-            { url: sandboxAsset, res: scriptRes },
-            { url: sandboxStyle, res: styleRes },
-            { url: appAsset, res: appRes },
-          ]
-            .filter(({ res }) => res.status !== 200)
-            .map(({ url, res }) => `${url} answered ${String(res.status)}, not 200`),
+          // WHAT ANSWERED, before what it carried, and through the SAME helper the
+          // smoke gate uses so the two cannot decide it differently. The negative
+          // half of this check is the half that can pass on nothing, and it can do
+          // so in two shapes: `location /assets/` serves from disk, so a missing
+          // file is a real 404 — which carries no ACAO and no CORP either, i.e. a
+          // clean pass — and its own `try_files $uri @app` means the same request
+          // can instead reach Express and come back as the SPA shell, 200, with
+          // the application's own two headers. Status and content type together
+          // are what tell either from the asset. Nothing else in the drill fetches
+          // the app bundle — `spa-shell` reads only the document and its nonce —
+          // so this is the only place that notices. Asserted on all three.
+          ...assetResponseProblems(sandboxAsset, scriptRes),
+          ...assetResponseProblems(sandboxStyle, styleRes),
+          ...assetResponseProblems(appAsset, appRes),
           ...sandboxAssetProblems(sandboxAsset, (name) => scriptRes.headers.get(name)),
           ...sandboxAssetProblems(sandboxStyle, (name) => styleRes.headers.get(name)),
           ...appAssetProblems(appAsset, (name) => appRes.headers.get(name), {

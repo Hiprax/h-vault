@@ -56,6 +56,7 @@ import {
   SANDBOX_CSP_EXPECTED,
   SANDBOX_DOCUMENT_CACHE_CONTROL,
   appAssetProblems,
+  assetResponseProblems,
   cspProblems,
   sandboxAssetProblems,
   sandboxAssetUrls,
@@ -645,6 +646,62 @@ describe('the gate-side restatement of the sandbox serving contract', () => {
     const problems = appAssetProblems('/assets/main-abc.js', leaked, { acao: null, corp: null });
     expect(problems).toHaveLength(2);
     expect(problems[0]).toContain('must stay inside sandbox-assets/');
+  });
+
+  it('refuses a probe that was answered by anything other than the asset itself', () => {
+    // The half of the asset check that can pass on nothing, and it can pass on
+    // nothing in two different shapes — one per gate, both of them reachable.
+    //
+    // Under Express (`test:smoke`) a path with no file behind it does NOT 404:
+    // `express.static` falls through and `app.ts`'s SPA catch-all answers 200
+    // with index.html, carrying the application's own CORS origin and helmet's
+    // same-origin CORP — which is EXACTLY what `appAssetProblems` is asked to
+    // expect for `/assets/`. So the header check alone reports a clean pass over
+    // a response that is not the bundle.
+    //
+    // Under Nginx (`test:deploy`) `/assets/` is served from disk, so the same
+    // request can be a real 404 — and a 404 carries neither header, which is a
+    // clean pass for the very same negative.
+    //
+    // Status and content type together are the only thing that tells either from
+    // the asset, which is why both live in one helper rather than one in each
+    // gate.
+    const respond = (status: number, contentType: string | null) => ({
+      status,
+      headers: { get: (name: string) => (name === 'content-type' ? contentType : null) },
+    });
+
+    // The positive control, and it is load-bearing: without it every assertion
+    // below is satisfied by a helper that reports a problem for everything.
+    expect(
+      assetResponseProblems('/assets/main-abc.js', respond(200, 'text/javascript; charset=UTF-8')),
+    ).toEqual([]);
+    expect(
+      assetResponseProblems('/sandbox-assets/sandbox-abc.css', respond(200, 'text/css')),
+    ).toEqual([]);
+
+    // The SPA shell, 200 and all. This is the Express shape.
+    const shell = assetResponseProblems(
+      '/assets/main-abc.js',
+      respond(200, 'text/html; charset=UTF-8'),
+    );
+    expect(shell).toHaveLength(1);
+    expect(shell[0]).toContain('HTML document');
+
+    // The Nginx shape, reported as the status alone: "it answered 404" already
+    // says everything there is to say about the body, so a second complaint about
+    // its content type would be noise in a failure report.
+    expect(assetResponseProblems('/assets/main-abc.js', respond(404, 'text/html'))).toEqual([
+      '/assets/main-abc.js answered 404, not 200',
+    ]);
+
+    // AND THE LIMIT OF THE CHECK, pinned so it reads as a decision. Only an HTML
+    // answer is refused, because that is the one shape a path with no file behind
+    // it actually takes; a 200 with no content type at all is accepted. Refusing
+    // that too would be a rule with no measured failure behind it, and the cost
+    // of getting it wrong is a release gate that fails on a proxy rather than on
+    // this application.
+    expect(assetResponseProblems('/sandbox-assets/sandbox-abc.js', respond(200, null))).toEqual([]);
   });
 
   it('finds the sandbox document’s own script and stylesheet, and neither in the SPA shell', () => {

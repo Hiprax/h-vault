@@ -140,8 +140,12 @@ writeJsonReport('storage.json', {
   // than the image is deliberate: a second copy of the image reference here is
   // exactly the drift the single-source read exists to prevent.
   engineService: ENGINE_SERVICE,
-  // What the run actually covers, so the report says what was checked against a
-  // real engine rather than "storage passed".
+  // A SUMMARY of what the run covers, not an enumeration of its cases: it says
+  // what was checked against a real engine rather than "storage passed", and the
+  // suite is free to grow a case without this list growing a line. What it may
+  // never do is omit a whole FILE of `STORAGE_SUITE`, because then the report
+  // describes a narrower gate than the one that ran — which is why the last entry
+  // is here at all.
   checks: [
     'the shared StorageProvider contract, unchanged, against the real engine — the same cases the in-memory double passes',
     'the engine STORES a short middle part, and the server refuses that same part through the real route while leaving nothing in the bucket',
@@ -149,6 +153,7 @@ writeJsonReport('storage.json', {
     'an open upload carries a real initiation date, which is the only thing the garbage collector may abort on',
     'a missing bucket is named on every operation that can carry an error body, so it reads as 503 rather than as a missing file',
     'a missing key, a missing upload and an already-deleted object are told apart, and a repeat delete is not an error',
+    'the harness that starts that engine removes its container on every exit path: a second stop() joins the first rather than resolving beside it, and its synchronous last-resort exit hook stays armed until the removal has completed',
   ],
   // (b) The suite's tests are its own, but the task carries `countsTests: false`
   // so this total is reporting only: it never enters the ratchet's headcount,

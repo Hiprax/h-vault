@@ -178,7 +178,7 @@ export const RESOURCE_BUDGETS = {
     durationMs: 8_000,
     /**
      * THE BUDGET WITH A MEASURED REGRESSION ON BOTH SIDES. The route as written
-     * grows RSS by 82.9-86.4 MB over five runs; making the storage double RETAIN
+     * grows RSS by 82.28-86.39 MB over six runs; making the storage double RETAIN
      * each part instead of hashing and dropping it — which is what a handler that
      * accumulated parts, or a double somebody "fixed" to store them, would cost —
      * grows it by 149-167 MB over five. 120 MB sits 1.39x above the highest good
@@ -251,7 +251,12 @@ export const NOISE_BAND = {
     'restore-volume.rssGrowthMb': { min: 111.36, median: 138.97, max: 143.49, spreadPct: 23.1 },
     // The two document scenarios, measured 2026-09-02 on the same host under the
     // same protocol: five consecutive runs of the whole suite, one scenario per
-    // forked worker, nothing else running.
+    // forked worker, nothing else running — plus the gate's own run, whose
+    // documents-part-upload rssGrowthMb of 82.28 MB came in BELOW the five-run
+    // minimum of 82.85 and widened that band rather than being left out of it. So
+    // its min and max are over SIX measurements, which is the sample size
+    // SUP-0027 quotes for it; the median stayed the five-run one, because a run
+    // recorded for its extreme does not re-centre a sample.
     'documents-part-upload.durationMs': { min: 790, median: 803, max: 809, spreadPct: 2.4 },
     'documents-part-upload.rssGrowthMb': { min: 82.28, median: 85.32, max: 86.39, spreadPct: 4.8 },
     'documents-list-volume.durationMs': { min: 650, median: 657, max: 683, spreadPct: 5.0 },

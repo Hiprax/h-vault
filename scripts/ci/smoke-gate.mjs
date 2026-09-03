@@ -82,6 +82,7 @@ import {
   SANDBOX_CSP_EXPECTED,
   SANDBOX_DOCUMENT_CACHE_CONTROL,
   appAssetProblems,
+  assetResponseProblems,
   cspProblems,
   sandboxAssetProblems,
   sandboxAssetUrls,
@@ -374,6 +375,16 @@ try {
         fetch(new URL(appAsset, baseUrl)),
       ]);
       const problems = [
+        // WHAT ANSWERED, before what it carried. Every header check below is a
+        // claim about a named file and every one of them is satisfiable by a
+        // response that is not that file: a path with no file behind it falls
+        // through `express.static` to the SPA catch-all, which answers 200 with
+        // index.html and the application's OWN CORS origin and same-origin CORP
+        // — exactly what `appAssetProblems` expects. Without this the negative
+        // half of this check passes on a build that stopped emitting the bundle.
+        ...assetResponseProblems(sandboxAsset, sandboxRes),
+        ...assetResponseProblems(sandboxStyle, styleRes),
+        ...assetResponseProblems(appAsset, appRes),
         ...sandboxAssetProblems(sandboxAsset, (name) => sandboxRes.headers.get(name)),
         ...sandboxAssetProblems(sandboxStyle, (name) => styleRes.headers.get(name)),
         // Exactly what the application's own bundle carries today: the single

@@ -22,13 +22,18 @@ import './sandbox.css';
  * `sessionStorage`, IndexedDB, cookies, nor any key in the app's memory. Its own
  * Content-Security-Policy — attached by the Express route that serves it, and
  * NOT inherited from the embedder, because a document fetched from an http(s)
- * URL never inherits one — denies it every network capability, `connect-src`
- * included.
+ * URL never inherits one — carries `connect-src 'none'`, so nothing running here
+ * can READ a response, and names no external host, so nothing it emits leaves
+ * this server.
  *
  * So a vulnerability in any parser this document runs lands somewhere holding no
- * key, no token, no cookie and no storage, that can open no socket. That is the
- * whole point of the isolation, and it is why every renderer lives here rather
- * than in the page that holds the unlocked vault.
+ * key, no token, no cookie and no storage, that can reach no host but this one
+ * and read no answer back from it. (Not "no socket at all": `script-src`,
+ * `style-src`, `img-src` and `font-src` allow `'self'`, which a sandboxed
+ * document resolves from the response URL — see the same-origin note in
+ * `packages/server/src/config/sandboxCsp.ts`.) That is the whole point of the
+ * isolation, and it is why every renderer lives here rather than in the page
+ * that holds the unlocked vault.
  *
  * It does TWO jobs, for that one reason. It RENDERS a stored document, and it
  * FORMATS or REPAIRS one on its way IN, before a byte of it is encrypted. The

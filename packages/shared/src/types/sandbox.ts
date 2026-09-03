@@ -8,9 +8,10 @@
  *
  * The sandbox is built as its OWN Rollup graph, and `manualChunks` puts `zod` in
  * `vendor-core` next to AXIOS. A shared runtime schema would therefore drag an
- * HTTP client into a document whose entire premise is that it can issue no
- * request at all (`connect-src 'none'`), and it would do so silently: the
- * document would still work, and nothing in the pipeline would report it.
+ * HTTP client into a document served under `connect-src 'none'`, where every
+ * call it could make is dead code waiting on a policy change, and it would do so
+ * silently: the document would still work, and nothing in the pipeline would
+ * report it.
  *
  * So the two sides validate with different tools and share only the SHAPE, which
  * is erased at build time. The host uses Zod, as the application does

@@ -27,16 +27,21 @@ const MONGO_URI = `mongodb://127.0.0.1:${String(MONGO_PORT)}/hvault`;
  * the dev server's boot: nothing a test does can change them afterwards, so the
  * only place they can be chosen is the process that spawns it.
  *
- * Both are deliberately TINY. Two of the journeys `e2e/documents.spec.ts` owns
- * are refusals — a file over the per-document cap, and an upload that would take
- * the account past its allowance — and at the shipped defaults (100 MB and
- * 2048 MB) reaching either would mean pushing gigabytes through a browser's
- * AES-GCM, a dev server and a container to prove an arithmetic comparison. The
- * numbers are the operator's to choose in any deployment, so choosing small ones
- * here tests the same code with the same branches.
+ * Both are deliberately TINY, and only ONE of them is here for a journey. The
+ * allowance is: `e2e/documents.spec.ts` owns a refusal that has to take an
+ * account past it, and at the shipped 2048 MB that would mean pushing gigabytes
+ * through a browser's AES-GCM, a dev server and a container to prove an
+ * arithmetic comparison. The number is the operator's to choose in any
+ * deployment, so choosing a small one exercises the same code and the same
+ * branch.
  *
- * `loadConfig` carries a `.refine` requiring the allowance to be at least the
- * per-document cap, so these two cannot be lowered independently.
+ * The per-document cap is here only BECAUSE of that: `loadConfig` carries a
+ * `.refine` requiring the allowance to be at least the cap, so a 1 MB allowance
+ * forces a cap no larger. There is deliberately no end-to-end journey for the
+ * cap itself — it is refused in the browser before a byte is read, so nothing
+ * reaches this harness at all, and it is covered where it can be observed
+ * directly, in `packages/client/tests/components/documents-upload.test.tsx`
+ * ("refuses a file over the advertised cap, reading none of it").
  *
  * The visible consequence, stated so it is a decision rather than a surprise:
  * with a 1 MB ceiling and an 8 MiB plaintext chunk, EVERY end-to-end upload is a

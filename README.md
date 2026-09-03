@@ -2224,7 +2224,7 @@ pass.
 
 ### Re-running only what failed
 
-Three failures out of thirty-six should not cost another day. The runner takes an
+Three failures out of thirty-seven should not cost another day. The runner takes an
 explicit gate list, and it **overrides the tier filter** rather than intersecting with
 it, so a release-tier gate can be re-run on its own:
 

@@ -389,14 +389,16 @@ describe('the document sandbox build', () => {
     expect(config.build?.chunkSizeWarningLimit).toBe(CHUNK_BUDGETS_KB.lowlight);
   });
 
-  it('emits no modulepreload polyfill, so "this document fetches nothing" is structural', async () => {
+  it('emits no modulepreload polyfill, so the isolated document ships no dormant fetch()', async () => {
     // Vite injects that polyfill into every entry by default, and it carries a
     // `fetch()` and a document-wide `MutationObserver`. It is inert here — no
-    // preload links, and it early-returns on any modern engine — but the
-    // sandbox's own source claims in two places that it makes no request of any
-    // kind, and a reader checking that against the built chunk would find a
-    // `fetch(` and be right to doubt it. `scripts/ci/bundle-gate.mjs` asserts the
-    // built output; this asserts the setting that produces it.
+    // preload links, and it early-returns on any modern engine — and it is inert
+    // twice over, because the document is served under `connect-src 'none'`,
+    // which blocks every way of reading a response. Both of those are properties
+    // of today's configuration rather than of the code, so the `fetch(` would sit
+    // in the chunk waiting on a policy change, and a reader auditing the built
+    // output would find it and be right to ask. `scripts/ci/bundle-gate.mjs`
+    // asserts the built output; this asserts the setting that produces it.
     const mod = await import('../vite.config.sandbox');
     const config = mod.default as { build?: { modulePreload?: unknown } };
     expect(config.build?.modulePreload).toEqual({ polyfill: false });

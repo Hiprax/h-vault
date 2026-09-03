@@ -92,16 +92,20 @@ describe('the document sandbox policy', () => {
     });
   });
 
-  it('denies the sandbox every network capability, which is what containment means', () => {
+  it('leaves the sandbox no host but this one and no readable answer, which is what containment means', () => {
     // Named separately from the whole-policy comparison above because these
     // three are the reason the design is affordable at all, and because a
     // future change is likeliest to arrive here: a renderer that "just needs to
     // fetch one thing" widens `connect-src`, and a parser moved off the main
-    // thread widens `worker-src`. The sandbox issues no request of any kind —
-    // it receives bytes over a MessagePort and renders them — so a
-    // vulnerability in any parser it runs cannot exfiltrate the document, reach
-    // this application's own API, or burn a user's rate-limit budget into a
-    // login lockout.
+    // thread widens `worker-src`. The bound is stated exactly rather than as a
+    // slogan, because the slogan is false and `config/sandboxCsp.ts` says so: the
+    // sandbox can READ no response at all, and the loop below proves no directive
+    // names an external host, so nothing it emits leaves this server. What it is
+    // NOT is "no request of any kind" — `script-src`, `style-src`, `img-src` and
+    // `font-src` allow `'self'`, which a sandboxed document resolves from the
+    // response URL. So a vulnerability in any parser it runs still cannot
+    // exfiltrate the document to a third party, read this application's own API,
+    // or burn a user's rate-limit budget into a login lockout.
     expect(SANDBOX_CSP_DIRECTIVES['connect-src']).toEqual(["'none'"]);
     expect(SANDBOX_CSP_DIRECTIVES['worker-src']).toEqual(["'none'"]);
     // `connect-src 'none'` also blocks fetch() and XMLHttpRequest against a

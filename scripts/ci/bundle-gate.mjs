@@ -66,9 +66,15 @@
  *     neither and an assertion about graphs would quietly mean nothing.
  *
  *  h. THE SANDBOX'S CHUNKS MUST CONTAIN NO NETWORK PRIMITIVE. The isolated
- *     render document is served under `connect-src 'none'` and its own source
- *     states in two places that it issues no request of any kind. That claim was
- *     briefly FALSE of the built artifact and true of the source: Vite injects a
+ *     render document is served under `connect-src 'none'`, which blocks every
+ *     way of READING a response — `fetch`, `XMLHttpRequest`, WebSockets,
+ *     `EventSource`, `sendBeacon` — so any one of those in its bundle is dead
+ *     code that a later policy change would silently bring to life. (It is only
+ *     those that the policy stops: `script-src`, `style-src`, `img-src` and
+ *     `font-src` allow `'self'`, so an `<img>` src is still a GET this server
+ *     sees. `packages/server/src/config/sandboxCsp.ts` states the bound.) The
+ *     rule exists because the absence was briefly FALSE of the built artifact
+ *     while true of the source: Vite injects a
  *     modulepreload polyfill into every entry by default, and it carries a
  *     `fetch()` and a document-wide `MutationObserver`. It was inert (no preload
  *     links, and it early-returns on any modern engine), which is exactly why
@@ -291,8 +297,9 @@ for (const shell of HTML_SHELLS) {
   }
 }
 
-// (h) The isolated document issues no request of any kind, checked against what
-// was actually emitted rather than against what its source says.
+// (h) The isolated document carries no primitive that could READ a response,
+// checked against what was actually emitted rather than against what its source
+// says.
 const NETWORK_PRIMITIVES = ['fetch(', 'XMLHttpRequest', 'navigator.sendBeacon', 'EventSource'];
 const sandboxDir = path.join(distDir, SANDBOX_ASSETS_DIR);
 if (existsSync(sandboxDir)) {
@@ -302,7 +309,7 @@ if (existsSync(sandboxDir)) {
     for (const primitive of NETWORK_PRIMITIVES) {
       if (!source.includes(primitive)) continue;
       problems.push(
-        `${SANDBOX_ASSETS_DIR}/${entry} contains ${primitive}, but the sandbox is served under a policy that forbids every network request`,
+        `${SANDBOX_ASSETS_DIR}/${entry} contains ${primitive}, but the sandbox is served under connect-src 'none', which blocks every way of reading a response`,
       );
     }
   }

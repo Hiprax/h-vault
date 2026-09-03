@@ -17,10 +17,12 @@
  * ---------------------------------------------------------------------------
  *
  * They bound the per-run flake rate. Ten independent runs with no failure put
- * the 95% upper bound on the per-run failure probability at roughly 26% by the
- * rule of three (3/n), and the point ESTIMATE at 0 — which is a bound of about
- * one in ten before you get to any confidence level at all. They do NOT
- * establish that the rate is zero, and no finite number of runs can. This gate
+ * the 95% upper bound on the per-run failure probability at 30% by the rule of
+ * three (3/n — the exact binomial bound is a little tighter, about 26%; the
+ * report below quotes the rule-of-three figure, as this sentence does), and the
+ * point ESTIMATE at 0 — which is a bound of about one in ten before you get to
+ * any confidence level at all. They do NOT establish that the rate is zero, and
+ * no finite number of runs can. This gate
  * therefore RECORDS the number of runs and the number of failures and ratchets
  * both — `flake.runs` upward so the sample can never quietly shrink, and
  * `flake.failures` downward so a failure can never quietly be normalised. It

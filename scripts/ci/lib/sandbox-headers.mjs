@@ -32,9 +32,17 @@
  * The policy, directive to its source list as one normalised string.
  *
  * Compared DIRECTIVE BY DIRECTIVE and in BOTH directions, never by substring.
- * `connect-src 'none'` and `worker-src 'none'` are the containment — the sandbox
- * opens no socket of any kind — and each is one appended word away from being
- * widened, which a `.includes("connect-src 'none'")` check stays green through.
+ * `connect-src 'none'` and `worker-src 'none'` are the containment, and the bound
+ * they buy is worth stating exactly rather than as a slogan: nothing the isolated
+ * document runs can READ a response (no `fetch`, `XMLHttpRequest`, WebSocket,
+ * `EventSource` or `sendBeacon`), and no directive here names an external host, so
+ * nothing it emits reaches a third party. It is NOT "opens no socket of any kind"
+ * — `script-src`, `style-src`, `img-src` and `font-src` all allow `'self'`, which
+ * a sandboxed document resolves from the response URL, so an `<img src="/api/v1/…">`
+ * is a GET this server would see. `packages/server/src/config/sandboxCsp.ts` names
+ * that wording as the one not to write. Each of the two is one appended word away
+ * from being widened, which a `.includes("connect-src 'none'")` check stays green
+ * through.
  * An ADDED directive matters as much as a widened one, which is why
  * {@link cspProblems} sweeps the served header's own keys as well.
  */
@@ -136,6 +144,49 @@ export function cspProblems(raw) {
     }
   }
   return problems;
+}
+
+/**
+ * Everything wrong with the RESPONSE that answered an asset probe, judged BEFORE
+ * a single header is compared.
+ *
+ * Every header check below is a claim about a named file, and each one is
+ * satisfiable by a response that is not that file at all — which makes this the
+ * half that can pass on nothing. Both gates need it, for two different reasons,
+ * and neither reason is hypothetical:
+ *
+ *   * Under EXPRESS (`test:smoke`) a missing asset is not a 404. `express.static`
+ *     falls through, and `app.ts`'s SPA catch-all — every path that does not
+ *     begin `/api/` — answers `/assets/main-abc.js` with 200 and index.html,
+ *     carrying exactly the CORS origin and the same-origin CORP that
+ *     {@link appAssetProblems} expects. A status check alone therefore closes
+ *     nothing there; the CONTENT TYPE is the only thing that tells the bundle
+ *     from the shell.
+ *   * Under NGINX (`test:deploy`) `/assets/` is served from disk, so a missing
+ *     file can be a real 404 — and a 404 carries neither header, which is a clean
+ *     pass for the same negative. There the STATUS is what tells them apart.
+ *
+ * So both are asserted, for both gates, in one place. A non-200 is reported alone
+ * rather than beside a content-type complaint, because "it answered 404" already
+ * says everything there is to say about the body.
+ *
+ * @param {string} label the URL, so a failure names which asset was not served
+ * @param {{ status: number, headers: { get: (name: string) => string | null } }} res
+ * @returns {string[]}
+ */
+export function assetResponseProblems(label, res) {
+  if (res.status !== 200) {
+    return [`${label} answered ${String(res.status)}, not 200`];
+  }
+  const type = (res.headers.get('content-type') ?? '').toLowerCase();
+  if (type.startsWith('text/html')) {
+    return [
+      `${label} answered 200 with an HTML document (content-type "${type}") rather than the ` +
+        'asset — a path with no file behind it is answered by the SPA fallback, whose headers ' +
+        "are the application's own and satisfy every header check on this response",
+    ];
+  }
+  return [];
 }
 
 /**

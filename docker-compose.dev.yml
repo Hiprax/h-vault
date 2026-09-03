@@ -59,9 +59,12 @@ services:
     entrypoint: /garage
     command: server --single-node --default-bucket
     ports:
-      # Published for host-side tooling (the AWS CLI, a bucket browser, the
-      # storage conformance suite), exactly as hvault-db is above — and, exactly
-      # as hvault-db is, bound to loopback and to loopback only.
+      # Published for host-side tooling (the AWS CLI, a bucket browser), exactly
+      # as hvault-db is above — and, exactly as hvault-db is, bound to loopback and
+      # to loopback only. NOT for `test:storage`: that gate starts its own container
+      # on a daemon-assigned port (`tests/harness/s3Server.ts`, decision (c)) so it
+      # needs no hand-started stack, no fixed credentials and no bucket that
+      # outlives the run.
       - '127.0.0.1:3900:3900'
     environment:
       # FIXED DEVELOPMENT CREDENTIALS, and they are safe to publish here for the

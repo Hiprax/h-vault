@@ -12,8 +12,9 @@
       it can reach neither that page's DOM nor its storage. Every byte it
       renders arrives over a transferred MessagePort; it fetches nothing, and its
       own Content-Security-Policy (attached by the Express route that serves it,
-      packages/server/src/config/sandboxCsp.ts) denies it every network
-      capability, including `connect-src`.
+      packages/server/src/config/sandboxCsp.ts) carries `connect-src 'none'`, so
+      nothing it runs can read a response, and names no external host, so nothing
+      it emits reaches a third party.
 
       There is deliberately NO Content-Security-Policy meta tag here. The policy
       is per-response and belongs to the route, for the same reason the app's

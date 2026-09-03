@@ -27,11 +27,14 @@ import {
  *
  * The two numbers the harness pins are `MAX_DOCUMENT_SIZE_MB=1` and
  * `DOCUMENT_STORAGE_QUOTA_MB_PER_USER=1`, and the reason is written where they
- * are set: two of the journeys below are REFUSALS, and at the shipped defaults
- * (100 MB and 2048 MB) reaching either would mean pushing gigabytes through a
- * browser's AES-GCM to prove an arithmetic comparison. They are the operator's to
- * choose in any deployment, so choosing small ones exercises the same code and
- * the same branches.
+ * are set. The allowance is small because one journey below is a refusal that has
+ * to take an account past it, and at the shipped 2048 MB that would mean pushing
+ * gigabytes through a browser's AES-GCM to prove an arithmetic comparison; it is
+ * the operator's to choose in any deployment, so a small one exercises the same
+ * code and the same branch. The per-document cap follows it only because
+ * `loadConfig` refuses an allowance smaller than the cap. No journey here is
+ * about the cap: that refusal happens in the browser before a byte is read, and
+ * it is covered in `packages/client/tests/components/documents-upload.test.tsx`.
  *
  * ## One account per journey
  *
