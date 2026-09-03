@@ -1577,7 +1577,7 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 | `npm run format`               | Prettier — write                                |
 | `npm run format:check`         | Prettier — verify only                          |
 | `npm run ci`                   | The whole pipeline (what `pre-push` runs)       |
-| `npm run verify:fast`          | The fast tier only (~80 s)                      |
+| `npm run verify:fast`          | The fast tier only (1m 49s-2m 23s)              |
 | `npm run verify:full`          | The whole pipeline plus the release tier        |
 | `npm run ci:list`              | List the pipeline's gates and their tiers       |
 | `npm run ci:docker`            | The container gate on its own                   |
