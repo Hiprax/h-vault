@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-04
+
 ### Added
 
 - **A folder, favorites and trash rail on the Documents page.** Documents now have the same navigation the vault has: All Documents, Favorites and Trash, plus the folder tree with a count per folder. Filing a document in a folder or marking it a favorite finally leads somewhere, and a document you deleted can be found, restored or destroyed for good from the trash view rather than only from a URL you happened to keep.
@@ -522,7 +524,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Hiprax/h-vault/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/Hiprax/h-vault/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Hiprax/h-vault/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Hiprax/h-vault/compare/v0.8.0...v0.9.0
