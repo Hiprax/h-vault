@@ -1,20 +1,50 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { useVaultStore } from '../../stores/vaultStore';
 
 /** ID used to link the search input's aria-controls to the vault results list. */
 export const VAULT_SEARCH_RESULTS_ID = 'vault-search-results';
 
+/** ID used to link the search input's aria-controls to the documents results list. */
+export const DOCUMENT_SEARCH_RESULTS_ID = 'document-search-results';
+
 interface SearchBarProps {
+  /** The COMMITTED query — what the store holds, not what is being typed. */
+  query: string;
+  onQueryChange: (query: string) => void;
+  /** How many rows currently match, or `null` when the caller cannot say. */
+  resultCount: number | null;
+  placeholder: string;
+  /** The input's accessible name. */
+  label: string;
+  /** The id of the list this input filters. */
+  controlsId: string;
   className?: string;
 }
 
-export function SearchBar({ className }: SearchBarProps) {
+/**
+ * The search field, rendered on both `/vault` and `/documents`.
+ *
+ * Everything route-specific arrives as a prop rather than being read from a
+ * store, for the reason the folder rail records: one component with two callers
+ * cannot reach for one caller's store. The debounce, the Ctrl+K shortcut and the
+ * external-clear sync are the same in both places and stay here.
+ *
+ * Only one instance is ever mounted, because the two routes are two pages, so
+ * the document-level Ctrl+K listener cannot collide with itself.
+ */
+export function SearchBar({
+  query,
+  onQueryChange,
+  resultCount,
+  placeholder,
+  label,
+  controlsId,
+  className,
+}: SearchBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const setSearchQuery = useVaultStore((s) => s.setSearchQuery);
-  const searchQuery = useVaultStore((s) => s.searchQuery);
-  const filteredItemCount = useVaultStore((s) => s.filteredItemCount);
+  const setSearchQuery = onQueryChange;
+  const searchQuery = query;
   const [localQuery, setLocalQuery] = useState(searchQuery);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -64,25 +94,21 @@ export function SearchBar({ className }: SearchBarProps) {
     inputRef.current?.focus();
   }, [setSearchQuery]);
 
-  // Read filtered count from the store (set by VaultList) to avoid
-  // duplicating the filtering logic.
-  const resultCount = filteredItemCount;
-
   return (
     <div className={cn('relative', className)}>
       <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
       <input
         ref={inputRef}
         type="search"
-        placeholder="Search vault... (Ctrl+K)"
+        placeholder={placeholder}
         value={localQuery}
         onChange={(e) => handleChange(e.target.value)}
         maxLength={200}
         className="w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] py-2 pl-9 pr-20 text-sm text-[hsl(var(--foreground))] placeholder:text-[hsl(var(--muted-foreground))] focus:outline-none focus:ring-2 focus:ring-[hsl(var(--ring))] focus:ring-offset-2"
         autoComplete="off"
-        aria-label="Search vault items"
+        aria-label={label}
         aria-autocomplete="list"
-        aria-controls={VAULT_SEARCH_RESULTS_ID}
+        aria-controls={controlsId}
       />
 
       <div className="absolute right-3 top-1/2 flex -translate-y-1/2 items-center gap-2">

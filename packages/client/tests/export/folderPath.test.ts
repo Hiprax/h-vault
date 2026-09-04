@@ -7,7 +7,7 @@ import type { IFolderResponse } from '@hvault/shared';
  * `buildFolderPaths` flattens the `parentId` pointer graph into slash-joined
  * paths. It must be cycle-safe (self-parent and longer cycles yield a truncated
  * path, never infinite recursion), treat an unresolvable `parentId` as a root
- * (matching `FolderSidebar.buildTree`), and escape a literal `/` in a name.
+ * (matching `FolderRail.buildTree`), and escape a literal `/` in a name.
  */
 
 function mkFolder(id: string, name: string, parentId?: string): DecryptedFolder {

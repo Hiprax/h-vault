@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
-import { ArrowLeft, FileText, ChevronLeft, ChevronRight, Loader2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, FileText, Loader2, RefreshCw } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useToast } from '../components/ui/Toast';
+import { Pagination } from '../components/ui/Pagination';
 import { getAuditLogApi } from '../services/api/userApi';
 import type { IAuditLogEntry } from '@hvault/shared';
 import { AUDIT_ACTIONS } from '@hvault/shared';
@@ -229,30 +230,12 @@ export default function AuditLogPage() {
             </table>
           </div>
 
-          {/* Pagination */}
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-[hsl(var(--muted-foreground))]">
-              Page {page} of {totalPages}
-            </span>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-                className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--input))] px-3 py-1.5 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50 transition-colors"
-              >
-                <ChevronLeft className="h-4 w-4" /> Prev
-              </button>
-              <button
-                type="button"
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-                className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--input))] px-3 py-1.5 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50 transition-colors"
-              >
-                Next <ChevronRight className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            label="audit log entries"
+            onPageChange={setPage}
+          />
         </>
       )}
     </div>

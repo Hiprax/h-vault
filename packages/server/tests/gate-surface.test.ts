@@ -1376,6 +1376,8 @@ describe('machine-readable reports', () => {
       'document-upload-review',
       'document-detail',
       'document-viewer',
+      'document-viewer-expanded',
+      'documents-trash',
       'unlock-screen',
       'sandbox-rendered',
     ]);
@@ -1388,7 +1390,13 @@ describe('machine-readable reports', () => {
     expect(A11Y_VIEW_IDS.indexOf('sandbox-rendered')).toBeGreaterThan(
       A11Y_VIEW_IDS.indexOf('unlock-screen'),
     );
-    for (const view of ['documents-list', 'document-detail', 'document-viewer']) {
+    for (const view of [
+      'documents-list',
+      'document-detail',
+      'document-viewer',
+      'document-viewer-expanded',
+      'documents-trash',
+    ]) {
       expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(
         A11Y_VIEW_IDS.indexOf('unlock-screen'),
       );

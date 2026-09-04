@@ -157,6 +157,15 @@ the sidebar and nothing to switch off.
   extension and does not pretend to. Set it and the upload panel will steer your users; leave it
   empty — the default — and every type uploads. Either way, a determined client can upload
   anything, and the docs say so rather than implying a server-side check that does not exist.
+- **Filed, favorited and findable.** Documents share the vault's folders, and the Documents page
+  has the same rail the vault does: all documents, favorites, the trash, and the folder tree with
+  a count per folder. A file uploaded while a folder is open is filed there. Search reaches a
+  document's name, its type, its tags and its note — every one of which is decrypted in your
+  browser, so what you searched for never leaves it.
+- **A trash you can actually open.** Deleting a document keeps it for thirty days, where it can be
+  restored or destroyed for good, and it still occupies storage until it is. Emptying the trash
+  tells you how many were destroyed, and says so plainly when the storage engine could not remove
+  every file.
 - **Rotating your vault key does not re-upload anything.** A rotation rewraps **32 bytes per
   document** instead of rewriting every file, which is the only way rotation stays possible once
   an account holds gigabytes. The request must name every item, folder and document the account
@@ -179,7 +188,9 @@ the sidebar and nothing to switch off.
   vault key, an access token, the document's id or even its name. The title, the toolbar and the
   download button are drawn outside the frame, so nothing a document renders can forge them, and
   a link inside a document asks for confirmation and shows you the destination's origin before it
-  opens.
+  opens. **Full screen expands the whole panel, never the frame alone** — the name and the
+  Download button stay outside it in both states, and the browser keeps its own address bar, which
+  is the one piece of chrome a document can never draw.
 
 #### What renders, and what is download-only
 
@@ -1251,13 +1262,17 @@ h-vault/
 │       ├── src/
 │       │   ├── components/
 │       │   │   ├── auth/        #   Login, Register, ForgotPassword, UnlockScreen
-│       │   │   ├── layout/      #   AppLayout, ProtectedRoute, PublicOnlyRoute,
-│       │   │   │                #   ErrorBoundary, OnboardingGuide, ReloadPrompt
+│       │   │   ├── documents/   #   DocumentList, DocumentDetail, DocumentSandbox,
+│       │   │   │                #   DocumentUploadPanel, DocumentTransfers
+│       │   │   ├── folders/     #   FolderRail, shared by /vault and /documents
+│       │   │   ├── layout/      #   AppLayout, RailLayout, ProtectedRoute,
+│       │   │   │                #   PublicOnlyRoute, ErrorBoundary, OnboardingGuide,
+│       │   │   │                #   ReloadPrompt
 │       │   │   ├── vault/       #   VaultList, VaultItemForm, VaultItemDetail,
-│       │   │   │                #   SearchBar, FolderSidebar, PasswordGenerator
+│       │   │   │                #   SearchBar, SavedAddressPicker, PasswordGenerator
 │       │   │   ├── tools/       #   FileEncryptPanel, FileDecryptPanel
 │       │   │   └── ui/          #   Button, Card, Input, Dialog, Toast, Tabs, Badge…
-│       │   ├── pages/           #   16 route pages, all lazy-loaded
+│       │   ├── pages/           #   19 route pages, all lazy-loaded
 │       │   ├── hooks/           #   useAutoLock, useClipboardGuard, useClipboardCountdown,
 │       │   │                    #   useKeyboardShortcuts, useUserSettings,
 │       │   │                    #   useConnectionStatus, useFavicon

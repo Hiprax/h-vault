@@ -24,6 +24,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../co
 import { useToast } from '../components/ui/Toast';
 import { getProfileApi } from '../services/api/userApi';
 import { api } from '../services/api/client';
+import { getBackupHistoryApi } from '../services/api/backupApi';
+import { Pagination } from '../components/ui/Pagination';
 import { cryptoService } from '../services/crypto/cryptoService';
 import { useAuthStore } from '../stores/authStore';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
@@ -47,6 +49,17 @@ const strengthColors: Record<number, string> = {
   4: 'bg-emerald-500',
 };
 
+/**
+ * Rows per page in the history card.
+ *
+ * Deliberately smaller than the server's own default of 20: this is a Card inside
+ * a settings page that already scrolls a long way, and thirty rows made it about
+ * two thousand pixels tall — which is the complaint that started this. Ten is a
+ * screenful. The server's default is a decision about an API with no client; this
+ * is a decision about a card.
+ */
+const HISTORY_PAGE_SIZE = 10;
+
 export default function BackupSettingsPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -60,6 +73,12 @@ export default function BackupSettingsPage() {
   const [confirmBackupPassword, setConfirmBackupPassword] = useState('');
   const [setupMasterPassword, setSetupMasterPassword] = useState('');
   const [history, setHistory] = useState<IBackupLogEntry[]>([]);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyTotalPages, setHistoryTotalPages] = useState(1);
+  const [historyTotal, setHistoryTotal] = useState<number | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState(false);
+  const [historyReload, setHistoryReload] = useState(0);
   const [triggering, setTriggering] = useState(false);
   const [saving, setSaving] = useState(false);
   const [settingUpEncryption, setSettingUpEncryption] = useState(false);
@@ -113,12 +132,6 @@ export default function BackupSettingsPage() {
             (typeof legacyEmail === 'string' && legacyEmail ? [legacyEmail] : []),
         );
         setIsConfigured(backup.isConfigured);
-        try {
-          const historyRes = await api.get<{ data: IBackupLogEntry[] }>('/backup/history');
-          setHistory(historyRes.data.data);
-        } catch {
-          // history endpoint may not exist yet
-        }
       } catch {
         toast({ title: 'Failed to load backup settings', type: 'error' });
       } finally {
@@ -127,6 +140,45 @@ export default function BackupSettingsPage() {
     };
     void load();
   }, [toast]);
+
+  // The history reads on its OWN schedule, not with the page's settings. It is
+  // keyed on the page number and on a reload token, and the token is what makes
+  // "read page one again" a single request: `setHistoryPage(1)` alone is a no-op
+  // when the reader is already on page one, and calling the fetch directly as
+  // well would fire two requests when they are on page three.
+  useEffect(() => {
+    let cancelled = false;
+    setHistoryLoading(true);
+    setHistoryError(false);
+    void getBackupHistoryApi({ page: historyPage, limit: HISTORY_PAGE_SIZE })
+      .then((res) => {
+        if (cancelled) return;
+        const result = res.data;
+        if (!result.success) throw new Error('Failed to load backup history');
+        setHistory(result.data);
+        setHistoryTotalPages(result.pagination.totalPages);
+        setHistoryTotal(result.pagination.total);
+      })
+      .catch(() => {
+        // Reported IN the card rather than as a toast, and reported at all — the
+        // silent `catch {}` this replaces made a broken endpoint look exactly
+        // like an account that has never run a backup, which is the one reading a
+        // reader must never be given. Everything else on this page still works.
+        if (!cancelled) setHistoryError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [historyPage, historyReload]);
+
+  /** Re-read the history from its FIRST page, where a newly written row is. */
+  const refreshHistory = useCallback(() => {
+    setHistoryPage(1);
+    setHistoryReload((n) => n + 1);
+  }, []);
 
   const handleSetupEncryption = useCallback(async () => {
     if (!backupPassword || backupPassword !== confirmBackupPassword) {
@@ -249,8 +301,12 @@ export default function BackupSettingsPage() {
       toast({ title: 'Failed to trigger backup', type: 'error' });
     } finally {
       setTriggering(false);
+      // In the `finally`: the server writes a `BackupLog` row on every path that
+      // reaches it, including the ones that then report a partial email failure,
+      // so a trigger that threw afterwards must still read the row back.
+      refreshHistory();
     }
-  }, [toast]);
+  }, [refreshHistory, toast]);
 
   const handleDownload = useCallback(async () => {
     if (!downloadBackupPassword) {
@@ -322,13 +378,17 @@ export default function BackupSettingsPage() {
       toast({ title: 'Backup downloaded with integrity signature', type: 'success' });
       setShowDownloadPassword(false);
       setDownloadBackupPassword('');
+      // `GET /backup/download` writes its own `{ status: 'success', sentTo:
+      // ['download'] }` row — the server has always logged downloads, and this
+      // page has never shown one without a full reload.
+      refreshHistory();
     } catch {
       toast({ title: 'Failed to download backup', type: 'error' });
     } finally {
       if (decryptedBwk) cryptoService.clearKey(decryptedBwk);
       setDownloading(false);
     }
-  }, [downloadBackupPassword, toast]);
+  }, [downloadBackupPassword, refreshHistory, toast]);
 
   const handleRestore = useCallback(async () => {
     if (!restoreFile || !restorePassword) return;
@@ -1367,16 +1427,44 @@ export default function BackupSettingsPage() {
           <CardTitle className="flex items-center gap-2">
             <History className="h-5 w-5" /> Backup History
           </CardTitle>
-          <CardDescription>Last 30 backup entries</CardDescription>
+          <CardDescription>
+            {historyTotal === null
+              ? 'Every backup and download, newest first'
+              : `${String(historyTotal)} ${historyTotal === 1 ? 'entry' : 'entries'}, newest first`}
+          </CardDescription>
         </CardHeader>
         <CardContent>
-          {history.length === 0 ? (
+          {historyLoading ? (
+            <div
+              role="status"
+              className="flex items-center justify-center gap-2 py-6 text-sm text-[hsl(var(--muted-foreground))]"
+            >
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading backup history…
+            </div>
+          ) : historyError ? (
+            <div className="flex flex-col items-center gap-2 py-6 text-center">
+              <p role="alert" className="text-sm text-[hsl(var(--destructive))]">
+                Backup history could not be loaded.
+              </p>
+              <button
+                type="button"
+                onClick={refreshHistory}
+                className="rounded-md border border-[hsl(var(--input))] px-3 py-1.5 text-sm text-[hsl(var(--foreground))] transition-colors hover:bg-[hsl(var(--accent))]"
+              >
+                Retry
+              </button>
+            </div>
+          ) : history.length === 0 ? (
             <p className="py-6 text-center text-sm text-[hsl(var(--muted-foreground))]">
               No backup history
             </p>
           ) : (
             <div className="space-y-2">
-              {history.slice(0, 30).map((entry) => (
+              {/* No `.slice()` here: the SERVER decides the page size, and slicing
+                  on top of it was what made everything past the first page
+                  unreachable. */}
+              {history.map((entry) => (
                 <div
                   key={entry._id}
                   className="flex items-center justify-between rounded-lg border border-[hsl(var(--border))] p-3"
@@ -1416,6 +1504,16 @@ export default function BackupSettingsPage() {
                   </span>
                 </div>
               ))}
+              {historyTotalPages > 1 && (
+                <Pagination
+                  page={historyPage}
+                  totalPages={historyTotalPages}
+                  label="backup history entries"
+                  onPageChange={setHistoryPage}
+                  {...(historyTotal === null ? {} : { total: historyTotal })}
+                  className="pt-2"
+                />
+              )}
             </div>
           )}
         </CardContent>

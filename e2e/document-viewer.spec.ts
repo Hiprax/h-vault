@@ -131,6 +131,33 @@ test.describe('document viewer: rendering inside the isolated frame', () => {
       );
     });
 
+    await test.step('full screen enlarges the panel without restarting the preview', async () => {
+      const frame = previewFrame(page);
+      // A mark set INSIDE the framed document. A remount reloads that document
+      // and takes the mark with it; a resize cannot. Deliberately NOT the scroll
+      // position, which only moves if the fixture happens to overflow its box —
+      // a probe that reads 0 before and 0 after proves nothing and fails anyway.
+      await frame.locator('.hv-doc-markdown').evaluate((el) => {
+        el.ownerDocument.documentElement.dataset.hvSurvives = 'before-full-screen';
+      });
+
+      await page.getByRole('button', { name: 'Full screen' }).click();
+      await expect(page.getByRole('dialog', { name: README })).toBeVisible();
+
+      // No fresh handshake, no re-post: the SAME browsing context is still there.
+      await expect(frame.locator('.hv-doc-markdown')).toBeVisible({ timeout: 5_000 });
+      expect(
+        await frame
+          .locator('.hv-doc-markdown')
+          .evaluate((el) => el.ownerDocument.documentElement.dataset.hvSurvives),
+      ).toBe('before-full-screen');
+
+      // The chrome a reader acts on stays OUTSIDE the frame in this state too.
+      await expect(page.getByRole('button', { name: /^Download/ })).toBeVisible();
+      await page.getByRole('button', { name: 'Exit full screen' }).click();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    });
+
     await test.step('a link inside the document asks before it opens', async () => {
       const before = page.url();
       await previewFrame(page).getByRole('link', { name: 'link out' }).click();

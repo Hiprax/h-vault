@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, PanelLeftClose, PanelLeft } from 'lucide-react';
-import { cn } from '../lib/utils';
 import { useVaultStore } from '../stores/vaultStore';
-import { SearchBar } from '../components/vault/SearchBar';
-import { FolderSidebar } from '../components/vault/FolderSidebar';
+import { SearchBar, VAULT_SEARCH_RESULTS_ID } from '../components/vault/SearchBar';
+import { FolderRail } from '../components/folders/FolderRail';
+import { RailLayout } from '../components/layout/RailLayout';
+import { useVaultFolderScope } from '../hooks/useVaultFolderScope';
 import { VaultList } from '../components/vault/VaultList';
 import { VaultItemForm } from '../components/vault/VaultItemForm';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
@@ -18,9 +18,15 @@ export default function VaultPage() {
   const showTrash = useVaultStore((s) => s.showTrash);
   const selectedType = useVaultStore((s) => s.selectedType);
   const selectedFolder = useVaultStore((s) => s.selectedFolder);
+  // One reader of the filter state, shared with the rail. Two independent readers
+  // is the split that made a document's folder and favorite do nothing visible.
+  const scope = useVaultFolderScope();
+  const searchQuery = useVaultStore((s) => s.searchQuery);
+  const setSearchQuery = useVaultStore((s) => s.setSearchQuery);
+  // Set by `VaultList` after it filters, so the field reports the same number the
+  // list is showing without either of them re-deriving the other's work.
+  const filteredItemCount = useVaultStore((s) => s.filteredItemCount);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const { toast } = useToast();
   const createDialogRef = useRef<HTMLDivElement>(null);
   const closeCreateDialog = useCallback(() => setShowCreateDialog(false), []);
@@ -79,78 +85,25 @@ export default function VaultPage() {
   }, []);
 
   return (
-    <div className="flex h-full -m-4 lg:-m-6">
-      {/* Desktop sidebar toggle */}
-      <button
-        type="button"
-        onClick={() => setSidebarOpen((p) => !p)}
-        className="absolute left-2 top-2 z-10 hidden rounded-md p-1.5 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--foreground))] lg:block"
-        aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
+    <>
+      <RailLayout
+        rail={(close) => <FolderRail scope={scope} className="flex-1" onClose={close} />}
+        toolbar={
+          <SearchBar
+            query={searchQuery}
+            onQueryChange={setSearchQuery}
+            resultCount={filteredItemCount}
+            placeholder="Search vault... (Ctrl+K)"
+            label="Search vault items"
+            controlsId={VAULT_SEARCH_RESULTS_ID}
+            className="max-w-lg flex-1"
+          />
+        }
       >
-        {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
-      </button>
-
-      {/* Mobile sidebar overlay */}
-      {mobileSidebarOpen && (
-        <button
-          type="button"
-          className="fixed inset-0 z-30 bg-black/50 lg:hidden cursor-default"
-          onClick={() => setMobileSidebarOpen(false)}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') setMobileSidebarOpen(false);
-          }}
-          aria-label="Close sidebar"
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
-        className={cn(
-          'shrink-0 border-r border-[hsl(var(--border))] bg-[hsl(var(--card))] transition-all duration-200',
-          sidebarOpen ? 'hidden w-64 lg:block' : 'hidden',
-          mobileSidebarOpen && 'fixed inset-y-0 left-0 z-40 block w-64 lg:static lg:z-auto',
-        )}
-      >
-        <div className="flex h-full flex-col">
-          {/* Mobile close button */}
-          <div className="flex items-center justify-between border-b border-[hsl(var(--border))] p-3 lg:hidden">
-            <span className="text-sm font-semibold text-[hsl(var(--foreground))]">Navigation</span>
-            <button
-              type="button"
-              onClick={() => setMobileSidebarOpen(false)}
-              className="rounded p-1 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]"
-              aria-label="Close sidebar"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-          <FolderSidebar className="flex-1" onClose={() => setMobileSidebarOpen(false)} />
-        </div>
-      </aside>
-
-      {/* Main content */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Top bar */}
-        <div className="flex items-center gap-3 border-b border-[hsl(var(--border))] p-4">
-          {/* Mobile sidebar trigger */}
-          <button
-            type="button"
-            onClick={() => setMobileSidebarOpen(true)}
-            className="rounded-md p-2 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] lg:hidden"
-            aria-label="Open sidebar"
-          >
-            <PanelLeft className="h-4 w-4" />
-          </button>
-          <SearchBar className="max-w-lg flex-1" />
-        </div>
-
-        {/* Items list */}
-        <div className="flex-1 overflow-y-auto p-4 lg:p-6">
-          <ErrorBoundary>
-            <VaultList onCreateNew={handleCreateNew} />
-          </ErrorBoundary>
-        </div>
-      </div>
+        <ErrorBoundary>
+          <VaultList onCreateNew={handleCreateNew} />
+        </ErrorBoundary>
+      </RailLayout>
 
       {/* Create item dialog */}
       {showCreateDialog && (
@@ -178,6 +131,6 @@ export default function VaultPage() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

@@ -865,7 +865,20 @@ export const getAuditLog = catchAsync(async (req: Request, res: Response): Promi
   const skip = (page - 1) * limit;
 
   const [logs, total] = await Promise.all([
-    AuditLog.find(filter).select('-userId').sort({ timestamp: -1 }).skip(skip).limit(limit).lean(),
+    // A TOTAL order, because the page is cut with `skip`/`limit`. `timestamp`
+    // alone is not one: `backupScheduler` writes a user's rows inside a single
+    // tick and an import writes N audit rows from one `Date.now()`, so ties are
+    // the normal case rather than a curiosity — and a row that moves across a
+    // page boundary between two requests is one the reader either sees twice or
+    // never sees at all. The reasoning, and why the index is deliberately left
+    // alone rather than extended with `_id`, is written out at
+    // `documentController.sendDocumentPage` and `vaultController`'s own sort.
+    AuditLog.find(filter)
+      .select('-userId')
+      .sort({ timestamp: -1, _id: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     AuditLog.countDocuments(filter),
   ]);
 

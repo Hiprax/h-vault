@@ -132,6 +132,24 @@ let abortFails = false;
 /** When true, the list and usage reads answer a `success: false` envelope on a 200. */
 let listEnvelopeFails = false;
 
+/** When true, the TRASH listing alone answers a `success: false` envelope. */
+let trashEnvelopeFails = false;
+
+/**
+ * Held open to keep a listing IN FLIGHT while something else happens.
+ *
+ * The only way to reproduce the window a delete can land in: `fetchAllPages`
+ * reads every page and writes once at the end, so a test needs the read to be
+ * unfinished at the moment the delete is issued.
+ */
+let listGate: Promise<void> | null = null;
+
+/** The same, for the TRASH listing. */
+let trashGate: Promise<void> | null = null;
+
+/** What `DELETE /documents/trash/empty` reports. */
+let emptyTrashResult = { deletedCount: 2, failedCount: 0 };
+
 /** When false, progress events carry no `total`, as a chunked transport's do not. */
 let progressReportsTotal = true;
 
@@ -289,29 +307,32 @@ const adapter: AxiosAdapter = (config) => {
     }
     const page = Number((config.params as { page?: number } | undefined)?.page ?? 1);
     const rows = listPages[page - 1] ?? [];
-    return Promise.resolve(
-      ok(
-        {
-          success: true,
-          data: rows,
-          pagination: { page, limit: 200, total: 0, totalPages: Math.max(1, listPages.length) },
-        },
-        config,
-      ),
+    const body = ok(
+      {
+        success: true,
+        data: rows,
+        pagination: { page, limit: 200, total: 0, totalPages: Math.max(1, listPages.length) },
+      },
+      config,
     );
+    const gate = listGate;
+    return gate === null ? Promise.resolve(body) : gate.then(() => body);
   }
 
   if (url === '/documents/trash' && method === 'GET') {
-    return Promise.resolve(
-      ok(
-        {
-          success: true,
-          data: trashRows,
-          pagination: { page: 1, limit: 200, total: trashRows.length, totalPages: 1 },
-        },
-        config,
-      ),
+    if (trashEnvelopeFails) {
+      return Promise.resolve(ok({ success: false, message: 'nope' }, config));
+    }
+    const body = ok(
+      {
+        success: true,
+        data: trashRows,
+        pagination: { page: 1, limit: 200, total: trashRows.length, totalPages: 1 },
+      },
+      config,
     );
+    const gate = trashGate;
+    return gate === null ? Promise.resolve(body) : gate.then(() => body);
   }
 
   if (url === '/documents/usage') {
@@ -335,9 +356,7 @@ const adapter: AxiosAdapter = (config) => {
   }
 
   if (url === '/documents/trash/empty') {
-    return Promise.resolve(
-      ok({ success: true, data: { deletedCount: 2, failedCount: 0 } }, config),
-    );
+    return Promise.resolve(ok({ success: true, data: emptyTrashResult }, config));
   }
 
   const single = /^\/documents\/([a-f0-9]{24})(\/restore|\/permanent)?$/.exec(url);
@@ -472,6 +491,8 @@ async function settleWithBackoff<T>(promise: Promise<T>): Promise<T> {
 
 const ID_A = '66c0f1a2b3c4d5e6f7a8b9c0';
 const ID_B = '66c0f1a2b3c4d5e6f7a8b9c1';
+/** A third id, standing in for the deleted folder's own parent. */
+const ID_C = '66c0f1a2b3c4d5e6f7a8b9c2';
 
 let vaultKey: CryptoKey;
 let mek: CryptoKey;
@@ -567,6 +588,10 @@ beforeEach(async () => {
   requests = [];
   listPages = [];
   trashRows = [];
+  trashEnvelopeFails = false;
+  listGate = null;
+  trashGate = null;
+  emptyTrashResult = { deletedCount: 2, failedCount: 0 };
   ledgerParts = [];
   partOutcomes = [];
   partAttempt = 0;
@@ -2347,5 +2372,369 @@ describe('documentsStore — writes on a committed document', () => {
     // The server-side write already happened; only the LOCAL write is suppressed,
     // which is what stops a lock leaving one decrypted row behind.
     expect(useDocumentsStore.getState().documents).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Filters, trash coherence and folder sweeps
+//
+// The three reported bugs — a favorite with nowhere to be used, a folder that
+// changed nothing visible, a "moved to trash" with no trash — were all one
+// missing surface over a store that already held the data. These cases pin the
+// state that surface reads, and the two coherence rules it depends on: a trash
+// list that knows whether it was ever read, and a listing that cannot resurrect
+// a row deleted while it was in flight.
+// ---------------------------------------------------------------------------
+
+describe('documentsStore — filters, trash coherence and folder sweeps', () => {
+  beforeEach(async () => {
+    listPages = [[await makeRow(ID_A, 'notes.txt')]];
+    await useDocumentsStore.getState().fetchDocuments();
+    requests = [];
+  });
+
+  it('records that the trash was read on success, and does not on failure', async () => {
+    trashRows = [await makeRow(ID_B, 'binned.txt')];
+    await useDocumentsStore.getState().fetchTrash();
+    expect(useDocumentsStore.getState().trashLoaded).toBe(true);
+
+    useDocumentsStore.getState().clearStore();
+    trashEnvelopeFails = true;
+    await expect(useDocumentsStore.getState().fetchTrash()).rejects.toThrow();
+
+    // The half that matters: a `finally` would set this on the failure path too,
+    // and a trash "read" that loaded nothing is what makes the optimistic move
+    // below render a trash holding exactly one row and hiding every other.
+    expect(useDocumentsStore.getState().trashLoaded).toBe(false);
+  });
+
+  it('does not let a listing in flight resurrect a document deleted under it', async () => {
+    // The list is still being read when the delete lands. Its pages predate the
+    // delete, and its own generation is untouched — a single-row write must not
+    // discard a listing the reader is waiting for — so without the in-flight set
+    // the terminal write puts the row straight back.
+    let releaseList: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    listPages = [[await makeRow(ID_A, 'notes.txt'), await makeRow(ID_B, 'doomed.txt')]];
+    useDocumentsStore.setState({ documents: [], trashLoaded: false });
+    listGate = held;
+
+    const listing = useDocumentsStore.getState().fetchDocuments();
+    await useDocumentsStore.getState().deleteDocument(ID_B);
+    releaseList?.();
+    await listing;
+
+    expect(useDocumentsStore.getState().documents.map((doc) => doc.id)).toEqual([ID_A]);
+  });
+
+  it('keeps a just-trashed row out of the ACTIVE listing and inside the trash listing', async () => {
+    // The two id sets are bound ONE-TO-ONE to their own fetches, and that pairing
+    // is the load-bearing part. Cross-filtering — the obvious "tidier"
+    // implementation — means the id `deleteDocument` records is also filtered out
+    // of the TRASH read, so a document is deleted and then simply absent from the
+    // trash: the exact bug report this work exists to answer, reintroduced by its
+    // own fix.
+    listPages = [[await makeRow(ID_A, 'notes.txt')]];
+    await useDocumentsStore.getState().fetchDocuments();
+    trashRows = [];
+    await useDocumentsStore.getState().fetchTrash();
+
+    await useDocumentsStore.getState().deleteDocument(ID_A);
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_A]);
+
+    // The server now reports it as trashed, and the trash read must KEEP it — a
+    // set that filtered both listings would drop it here.
+    trashRows = [await makeRow(ID_A, 'notes.txt')];
+    await useDocumentsStore.getState().fetchTrash();
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_A]);
+
+    // And the id does not haunt the ACTIVE listing for ever: each fetch clears
+    // its own set on the way in, because from that point the server's own answer
+    // already excludes what was deleted — which is what lets a restored document
+    // be listed again at all.
+    listPages = [[await makeRow(ID_A, 'notes.txt')]];
+    await useDocumentsStore.getState().fetchDocuments();
+    expect(useDocumentsStore.getState().documents.map((doc) => doc.id)).toEqual([ID_A]);
+  });
+
+  it('moves the deleted row into a trash that was read, stamped but never forged', async () => {
+    trashRows = [];
+    await useDocumentsStore.getState().fetchTrash();
+
+    await useDocumentsStore.getState().deleteDocument(ID_A);
+
+    const [trashed] = useDocumentsStore.getState().trashDocuments;
+    expect(useDocumentsStore.getState().documents).toEqual([]);
+    // An empty-but-READ trash still receives the row. A `trashDocuments.length > 0`
+    // guard — the proxy `vaultStore` uses — loses exactly this case, and the first
+    // delete on such an account vanishes from both lists.
+    expect(trashed?.id).toBe(ID_A);
+    expect(Number.isNaN(Date.parse(trashed?.deletedAt ?? ''))).toBe(false);
+    // The stamp goes on the decrypted wrapper and NEVER on `_raw`: that is the
+    // server's row, and a later metadata re-seal derives this document's key
+    // material from it.
+    expect(trashed?._raw.deletedAt).toBeUndefined();
+  });
+
+  it('leaves an unread trash alone, and prepends into a read one', async () => {
+    // Unread: nothing is pushed, because one row in a list that was never loaded
+    // is a trash that hides everything else in it.
+    await useDocumentsStore.getState().deleteDocument(ID_A);
+    expect(useDocumentsStore.getState().trashDocuments).toEqual([]);
+    expect(requestsFor('DELETE', `/documents/${ID_A}`)).toHaveLength(1);
+
+    listPages = [[await makeRow(ID_A, 'notes.txt')]];
+    await useDocumentsStore.getState().fetchDocuments();
+    trashRows = [await makeRow(ID_B, 'older.txt')];
+    await useDocumentsStore.getState().fetchTrash();
+
+    await useDocumentsStore.getState().deleteDocument(ID_A);
+
+    // Newest first, matching the order the trash endpoint itself returns. An
+    // append would drop the document a reader just deleted to the bottom of a
+    // list that virtualizes above fifty rows.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_A, ID_B]);
+  });
+
+  it('writes nothing locally when a lock lands between the delete and its response', async () => {
+    trashRows = [];
+    await useDocumentsStore.getState().fetchTrash();
+    const before = useDocumentsStore.getState().documents;
+
+    const pending = useDocumentsStore.getState().deleteDocument(ID_A);
+    useDocumentsStore.getState().clearStore();
+    await pending;
+
+    // The server-side delete already happened; only the LOCAL write is suppressed,
+    // and it must not repopulate a store that was just emptied.
+    expect(useDocumentsStore.getState().documents).toEqual([]);
+    expect(useDocumentsStore.getState().trashDocuments).toEqual([]);
+    expect(before).toHaveLength(1);
+  });
+
+  it('empties the trash in one pass when nothing failed', async () => {
+    trashRows = [await makeRow(ID_B, 'binned.txt')];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+
+    const result = await useDocumentsStore.getState().emptyTrash();
+
+    expect(result).toEqual({ deletedCount: 2, failedCount: 0 });
+    expect(useDocumentsStore.getState().trashDocuments).toEqual([]);
+    // The negative: a clean run needs no second read, and issuing one would
+    // decrypt the whole trash again for nothing.
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(0);
+  });
+
+  it('does not let a listing in flight repopulate a trash that was emptied under it', async () => {
+    // The reachable window, and the one no id set can close. A reader clicks
+    // Trash — the listing starts, empties the local list and then spends seconds
+    // unwrapping a key per row — and confirms Empty trash before it finishes.
+    //
+    // `emptyTrash` derives its suppression ids from the very list that listing has
+    // already emptied, so it has nothing to add; and on a CLEAN purge there is no
+    // re-read either. The listing then resolves and writes back the rows it read
+    // before the purge: a trash full of documents that no longer exist, each of
+    // which answers "not found" when opened, beside a quota bar reading zero.
+    const doomedA = await makeRow(ID_A, 'gone-a.txt');
+    const doomedB = await makeRow(ID_B, 'gone-b.txt');
+    trashRows = [doomedA, doomedB];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+    emptyTrashResult = { deletedCount: 2, failedCount: 0 };
+
+    let releaseTrash: (() => void) | undefined;
+    trashGate = new Promise<void>((resolve) => {
+      releaseTrash = resolve;
+    });
+    const listing = useDocumentsStore.getState().fetchTrash();
+    const result = await useDocumentsStore.getState().emptyTrash();
+    releaseTrash?.();
+    await listing;
+
+    expect(result).toEqual({ deletedCount: 2, failedCount: 0 });
+    expect(useDocumentsStore.getState().trashDocuments).toEqual([]);
+    // And the listing that lost the race must not have stranded the spinner.
+    expect(useDocumentsStore.getState().trashLoading).toBe(false);
+  });
+
+  it('reads the trash back when the engine could not delete every object', async () => {
+    trashRows = [await makeRow(ID_B, 'stuck.txt')];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+    emptyTrashResult = { deletedCount: 1, failedCount: 1 };
+
+    const result = await useDocumentsStore.getState().emptyTrash();
+
+    // A failed object delete leaves the row marked `purgePending` and still
+    // listed, so reporting "all gone" would be this client inventing a state the
+    // server never reached.
+    expect(result.failedCount).toBe(1);
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(1);
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_B]);
+  });
+
+  it('counts a trashed row whose key will not unwrap instead of dropping it silently', async () => {
+    trashRows = [await makeRow(ID_B, 'lost.txt', { wrapUnder: ID_A })];
+    await useDocumentsStore.getState().fetchTrash();
+
+    const state = useDocumentsStore.getState();
+    // Listed, with no metadata, and COUNTED. These numbers used to be computed
+    // and thrown away, which was invisible only because nothing rendered the
+    // trash: the row was simply absent with nothing said about it.
+    expect(state.trashDocuments).toHaveLength(1);
+    expect(state.trashDocuments[0]?.meta).toBeNull();
+    expect(state.trashDegradedCount).toBe(1);
+    // The active list's own counters are a different pair and stay where they were.
+    expect(state.degradedCount).toBe(0);
+  });
+
+  it('re-parents on a folder move, to the PARENT when there was one', async () => {
+    const foldered = await makeRow(ID_A, 'notes.txt');
+    listPages = [[{ ...foldered, folderId: ID_B }]];
+    await useDocumentsStore.getState().fetchDocuments();
+    useDocumentsStore.getState().setSelectedFolder(ID_B);
+
+    // The server's `move` update is `folder.parentId ? $set folderId=parentId :
+    // $unset folderId` — so a nested folder's members move UP a level, not to the
+    // root. A client that cleared the id would show them somewhere the server did
+    // not put them, and would go on disagreeing until the next full reload.
+    useDocumentsStore.getState().applyFolderDeleted(ID_B, 'move', ID_C);
+    expect(useDocumentsStore.getState().documents[0]?.folderId).toBe(ID_C);
+    // A view scoped to a folder that no longer exists would show nothing and
+    // explain nothing, so the selection goes with it.
+    expect(useDocumentsStore.getState().selectedFolder).toBeNull();
+  });
+
+  it('clears folderId on a folder move only when the folder had no parent', async () => {
+    const foldered = await makeRow(ID_A, 'notes.txt');
+    listPages = [[{ ...foldered, folderId: ID_B }]];
+    await useDocumentsStore.getState().fetchDocuments();
+
+    useDocumentsStore.getState().applyFolderDeleted(ID_B, 'move', undefined);
+    expect(useDocumentsStore.getState().documents[0]?.folderId).toBeUndefined();
+  });
+
+  it('takes the rows away on a folder delete, and reads a trash that was read', async () => {
+    const foldered = await makeRow(ID_A, 'notes.txt');
+    listPages = [[{ ...foldered, folderId: ID_B }]];
+    await useDocumentsStore.getState().fetchDocuments();
+    trashRows = [];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+
+    useDocumentsStore.getState().applyFolderDeleted(ID_B, 'delete', undefined);
+    expect(useDocumentsStore.getState().documents).toEqual([]);
+    // The swept rows are in the trash now, so a trash that WAS read is read again.
+    await until(() => requestsFor('GET', '/documents/trash').length === 1, 'the trash re-read');
+  });
+
+  it('does not read the trash back after a folder delete when it was never read', async () => {
+    const foldered = await makeRow(ID_A, 'notes.txt');
+    listPages = [[{ ...foldered, folderId: ID_B }]];
+    await useDocumentsStore.getState().fetchDocuments();
+    requests = [];
+
+    useDocumentsStore.getState().applyFolderDeleted(ID_B, 'delete', undefined);
+    await realTurn();
+    await realTurn();
+
+    // An unread trash is filled correctly by the next `fetchTrash`; reading it
+    // here would decrypt the whole trash for a view nobody has opened.
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(0);
+  });
+
+  it('follows the server into the trash on a MOVE, and stays out of it on a DELETE', async () => {
+    // The two branches are not symmetrical and copying one onto the other is how
+    // this goes wrong. `move` filters `{folderId, userId}` with NO `deletedAt`
+    // clause, so it reaches trashed rows; `delete` filters `deletedAt: null`, so
+    // a row already in the trash keeps the dead folder id and a restore lands it
+    // wherever that id pointed.
+    const binned = await makeRow(ID_B, 'binned.txt');
+    trashRows = [{ ...binned, folderId: ID_B }];
+    await useDocumentsStore.getState().fetchTrash();
+
+    useDocumentsStore.getState().applyFolderDeleted(ID_B, 'move', ID_C);
+    expect(useDocumentsStore.getState().trashDocuments[0]?.folderId).toBe(ID_C);
+  });
+
+  it('leaves a trashed row on the dead folder when the folder was DELETED', async () => {
+    // Read into the store WITHOUT marking the trash loaded, so the `delete`
+    // branch's own re-read does not race this assertion — the point here is the
+    // synchronous rule, not the refresh that follows it.
+    const binned = await makeRow(ID_B, 'binned.txt');
+    trashRows = [{ ...binned, folderId: ID_B }];
+    await useDocumentsStore.getState().fetchTrash();
+    // Read, then marked unread: the `delete` branch re-reads a trash it believes
+    // was loaded, and that read would empty the list before this assertion runs.
+    // The rule under test is the synchronous one, not the refresh after it.
+    useDocumentsStore.setState({ trashLoaded: false });
+
+    useDocumentsStore.getState().applyFolderDeleted(ID_B, 'delete', ID_C);
+
+    // `delete` filters `deletedAt: null` server-side, so a row already in the
+    // trash keeps the dead folder id — and a restore lands it wherever that id
+    // pointed, which is what the detail view's Folder row then reports.
+    expect(useDocumentsStore.getState().trashDocuments[0]?.folderId).toBe(ID_B);
+  });
+
+  it('keeps the four view modes mutually exclusive in every direction', () => {
+    const store = () => useDocumentsStore.getState();
+
+    store().toggleFavorites();
+    store().setSelectedFolder(ID_B);
+    expect(store().showFavorites).toBe(false);
+    expect(store().selectedFolder).toBe(ID_B);
+
+    store().toggleTrash();
+    expect(store().showTrash).toBe(true);
+    expect(store().showFavorites).toBe(false);
+    expect(store().selectedFolder).toBeNull();
+
+    store().toggleFavorites();
+    expect(store().showFavorites).toBe(true);
+    expect(store().showTrash).toBe(false);
+
+    store().toggleFavorites();
+    expect(store().showFavorites).toBe(false);
+
+    store().setSelectedFolder(ID_A);
+    store().clearFilters();
+    expect(store().selectedFolder).toBeNull();
+    expect(store().showFavorites).toBe(false);
+    expect(store().showTrash).toBe(false);
+  });
+
+  it('takes every filter and every trash flag down with the vault key', async () => {
+    trashRows = [await makeRow(ID_B, 'binned.txt', { wrapUnder: ID_A })];
+    await useDocumentsStore.getState().fetchTrash();
+    useDocumentsStore.getState().setSelectedFolder(ID_B);
+    useDocumentsStore.getState().setSearchQuery('tax');
+
+    useDocumentsStore.getState().clearStore();
+
+    const state = useDocumentsStore.getState();
+    // A folder id belonging to the account that just ended would drop the next
+    // sign-in on this tab into an empty folder view with no explanation, and a
+    // `showTrash` left true would open their unlock inside the trash.
+    expect({
+      selectedFolder: state.selectedFolder,
+      showFavorites: state.showFavorites,
+      showTrash: state.showTrash,
+      searchQuery: state.searchQuery,
+      trashLoaded: state.trashLoaded,
+      trashDegradedCount: state.trashDegradedCount,
+      trashInvalidCount: state.trashInvalidCount,
+    }).toEqual({
+      selectedFolder: null,
+      showFavorites: false,
+      showTrash: false,
+      searchQuery: '',
+      trashLoaded: false,
+      trashDegradedCount: 0,
+      trashInvalidCount: 0,
+    });
   });
 });

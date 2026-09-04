@@ -164,7 +164,17 @@ vi.mock('../src/services/api/authApi', () => ({
 
 vi.mock('../src/services/api/client', () => ({
   api: {
-    get: vi.fn(),
+    // A resolved paginated envelope rather than `undefined`, which is not a shape
+    // the real client can produce: `BackupSettingsPage` reads its history through
+    // `getBackupHistoryApi`, which returns this promise, and a bare `vi.fn()`
+    // handed the page an `undefined` to call `.then` on.
+    get: vi.fn().mockResolvedValue({
+      data: {
+        success: true,
+        data: [],
+        pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+      },
+    }),
     put: vi.fn(),
     delete: vi.fn(),
     post: vi.fn().mockResolvedValue({

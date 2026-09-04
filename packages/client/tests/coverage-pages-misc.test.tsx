@@ -360,7 +360,9 @@ describe('SessionsPage - revoking a single session', () => {
     expect(screen.getByText('Safari on macOS')).toBeInTheDocument();
     // And the button becomes usable again (the in-flight lock is released).
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /^revoke$/i })).not.toBeDisabled();
+      expect(screen.getByRole('button', { name: /^revoke$/i })).not.toHaveAttribute(
+        'aria-disabled',
+      );
     });
   });
 });
@@ -570,8 +572,8 @@ describe('AuditLogPage - pagination', () => {
     const prev = screen.getByRole('button', { name: /prev/i });
     const next = screen.getByRole('button', { name: /next/i });
 
-    expect(prev).toBeDisabled();
-    expect(next).not.toBeDisabled();
+    expect(prev).toHaveAttribute('aria-disabled', 'true');
+    expect(next).not.toHaveAttribute('aria-disabled');
 
     await act(async () => {
       fireEvent.click(next);
@@ -581,8 +583,8 @@ describe('AuditLogPage - pagination', () => {
     });
     expect(screen.getByText('Page 2 of 2')).toBeInTheDocument();
     // On the last page Next is clamped off, Prev becomes available.
-    expect(screen.getByRole('button', { name: /next/i })).toBeDisabled();
-    expect(screen.getByRole('button', { name: /prev/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /next/i })).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('button', { name: /prev/i })).not.toHaveAttribute('aria-disabled');
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /prev/i }));

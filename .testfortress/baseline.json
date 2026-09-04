@@ -185,7 +185,6 @@
           "src/components/vault/BackupCodeList.tsx",
           "src/components/vault/BackupCodesEditor.tsx",
           "src/components/vault/BackupCodesSection.tsx",
-          "src/components/vault/FolderSidebar.tsx",
           "src/components/vault/PasswordGenerator.tsx",
           "src/components/vault/SavedAddressPicker.tsx",
           "src/components/vault/SearchBar.tsx",

@@ -4,7 +4,7 @@
  * 8.1 — Dialog: ARIA attributes, focus trap, focus restoration
  * 8.2 — DropdownMenu: menuitem roles, aria-activedescendant
  * 8.3 — Tabs: aria-orientation, arrow key navigation, tabIndex management
- * 8.4 — FolderSidebar: keyboard alternative for folder reordering
+ * 8.4 — FolderRail: keyboard alternative for folder reordering
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -494,11 +494,11 @@ describe('8.3 — Tabs arrow key navigation', () => {
 });
 
 // ==========================================================================
-// 8.4 — FolderSidebar keyboard alternative for folder reordering
+// 8.4 — FolderRail keyboard alternative for folder reordering
 // ==========================================================================
 //
-// The former "8.4 — FolderSidebar keyboard reorder (source verification)" block
-// (4 tests) was removed here. Every one of them read FolderSidebar.tsx as text
+// The former "8.4 — FolderRail keyboard reorder (source verification)" block
+// (4 tests) was removed here. Every one of them read FolderRail.tsx as text
 // and asserted substrings — including a raw `onKeyboardReorder` occurrence count
 // (`>= 5`). None executed the component, so a handler that computed the wrong
 // swap index, dropped the boundary check, or never awaited `reorderFolderApi`
@@ -506,7 +506,7 @@ describe('8.3 — Tabs arrow key navigation', () => {
 // no behavioural reason.
 //
 // The keyboard-reorder behaviour is executed and asserted behaviourally in
-// sidebar-client-coverage.test.tsx ("FolderSidebar - keyboard reorder
+// sidebar-client-coverage.test.tsx ("FolderRail - keyboard reorder
 // (Ctrl+Up/Down)"): rendering the real component with sibling folders in the
 // store, firing Ctrl+ArrowUp / Ctrl+ArrowDown and asserting `reorderFolderApi`
 // runs, plus boundary presses at the first/last sibling being no-ops.

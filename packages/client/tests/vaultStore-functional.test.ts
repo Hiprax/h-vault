@@ -113,6 +113,7 @@ vi.mock('@hvault/shared', async () => {
 // ---------------------------------------------------------------------------
 
 import { useAuthStore } from '../src/stores/authStore';
+import { useDocumentsStore } from '../src/stores/documentsStore';
 import {
   useVaultStore,
   VaultItemDataInvalidError,
@@ -1118,6 +1119,78 @@ describe('vaultStore – CRUD actions', () => {
       expect(items.find((i) => i.id === 'item-2')!.folderId).toBe('folder-2');
       // item-3 should still have no folderId
       expect(items.find((i) => i.id === 'item-3')!.folderId).toBeUndefined();
+    });
+
+    it('sweeps the DOCUMENT store too, because a folder holds both kinds', async () => {
+      // `folderController.deleteFolder` builds ONE member filter and ONE update
+      // and applies both to `VaultItem` AND to `Document`. A client that reported
+      // the change for items only would leave every document in the folder
+      // pointing at a folder that no longer exists, with its counts wrong until
+      // the next full reload.
+      const folder = makeMockFolder({ id: 'folder-1' });
+      useVaultStore.setState({ folders: [folder], items: [] });
+      useDocumentsStore.setState({
+        documents: [
+          {
+            id: 'doc-1',
+            folderId: 'folder-1',
+            favorite: false,
+            createdAt: 'x',
+            updatedAt: 'x',
+            meta: null,
+            _raw: {},
+          },
+          {
+            id: 'doc-2',
+            folderId: 'folder-2',
+            favorite: false,
+            createdAt: 'x',
+            updatedAt: 'x',
+            meta: null,
+            _raw: {},
+          },
+        ] as never,
+      });
+
+      vi.mocked(deleteFolderApi).mockResolvedValue({
+        data: { success: true, data: null },
+      } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
+
+      await useVaultStore.getState().deleteFolder('folder-1');
+
+      const docs = useDocumentsStore.getState().documents;
+      expect(docs.find((d) => d.id === 'doc-1')?.folderId).toBeUndefined();
+      // The negative: a document filed elsewhere is not touched.
+      expect(docs.find((d) => d.id === 'doc-2')?.folderId).toBe('folder-2');
+    });
+
+    it('takes documents out of the list when the folder is deleted WITH its contents', async () => {
+      const folder = makeMockFolder({ id: 'folder-1' });
+      useVaultStore.setState({ folders: [folder], items: [] });
+      useDocumentsStore.setState({
+        documents: [
+          {
+            id: 'doc-1',
+            folderId: 'folder-1',
+            favorite: false,
+            createdAt: 'x',
+            updatedAt: 'x',
+            meta: null,
+            _raw: {},
+          },
+        ] as never,
+      });
+
+      vi.mocked(deleteFolderApi).mockResolvedValue({
+        data: { success: true, data: null },
+      } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
+
+      await useVaultStore.getState().deleteFolder('folder-1', 'delete');
+
+      // The action reaches the document store as itself. Passing a constant here
+      // — the easy slip — would clear `folderId` instead of removing the row, and
+      // the document would sit in the active list while the server had trashed it.
+      expect(useDocumentsStore.getState().documents).toEqual([]);
     });
 
     it('should reset selectedFolder when the deleted folder was selected', async () => {

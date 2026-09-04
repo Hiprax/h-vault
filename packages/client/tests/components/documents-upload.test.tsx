@@ -152,6 +152,7 @@ import {
   type DecryptedDocument,
   type DocumentUploadProgress,
 } from '../../src/stores/documentsStore';
+import { useVaultStore } from '../../src/stores/vaultStore';
 import { useUploadUnloadGuard } from '../../src/hooks/useUploadUnloadGuard';
 import DocumentsPage from '../../src/pages/DocumentsPage';
 import { DocumentList } from '../../src/components/documents/DocumentList';
@@ -163,6 +164,10 @@ import type { DocumentsConfig } from '../../src/services/api/configApi';
 /* -------------------------------------------------------------------------- */
 
 const pristineState = useDocumentsStore.getState();
+const pristineVault = useVaultStore.getState();
+
+/** The one folder the rail's tree is built from in these cases. */
+const FOLDER_ID = 'folder-1';
 
 const ENABLED_CONFIG: DocumentsConfig = {
   enabled: true,
@@ -313,6 +318,14 @@ beforeEach(() => {
   };
   harness.getDocumentsConfig.mockResolvedValue(ENABLED_CONFIG);
   useDocumentsStore.setState(pristineState, true);
+  // Seeded rather than fetched: `useVaultFolders` short-circuits on a non-empty
+  // list, so the rail renders its tree without this suite needing the vault API.
+  useVaultStore.setState(pristineVault, true);
+  useVaultStore.setState({
+    folders: [
+      { id: FOLDER_ID, name: 'Taxes', sortOrder: 0, createdAt: 'x', updatedAt: 'x' },
+    ] as never,
+  });
 });
 
 afterEach(() => {
@@ -424,14 +437,33 @@ describe('DocumentsPage — the surrounding notices', () => {
     expect(screen.queryByText(/of 5000 documents/)).not.toBeInTheDocument();
   });
 
-  it('names the documents that could not be opened, and says they are still listed', async () => {
+  it('names the documents that could not be opened, and which list it counted', async () => {
     useDocumentsStore.setState({ degradedCount: 2, invalidCount: 0 });
     renderPage();
 
     const notice = await screen.findByTestId('documents-degraded');
-    expect(notice).toHaveTextContent(/2 document\(s\) could not be opened/);
-    expect(notice).toHaveTextContent(/listed without their details/);
-    expect(notice).not.toHaveTextContent(/left out of the list/);
+    expect(notice).toHaveTextContent(/2 document\(s\) in your documents could not be opened/);
+    expect(notice).toHaveTextContent(/shown without their details/);
+    expect(notice).not.toHaveTextContent(/left out/);
+  });
+
+  it('counts the TRASH’s unopenable rows when the trash is what is on screen', async () => {
+    // The two lists are fetched separately and fail separately. A banner that
+    // reported the active list's numbers over a trash view would be counting rows
+    // the reader cannot see — and `fetchTrash` used to discard its own counts
+    // entirely, so an unopenable trashed row vanished with nothing said about it.
+    useDocumentsStore.setState({
+      degradedCount: 2,
+      invalidCount: 0,
+      trashDegradedCount: 1,
+      trashInvalidCount: 0,
+      showTrash: true,
+    });
+    renderPage();
+
+    const notice = await screen.findByTestId('documents-degraded');
+    expect(notice).toHaveTextContent(/1 document\(s\) in the trash could not be opened/);
+    expect(notice).not.toHaveTextContent(/2 document/);
   });
 
   it('names the rows that were rejected outright, separately from the degraded ones', async () => {
@@ -439,7 +471,7 @@ describe('DocumentsPage — the surrounding notices', () => {
     renderPage();
 
     const notice = await screen.findByTestId('documents-degraded');
-    expect(notice).toHaveTextContent(/4 row\(s\).*left out of the list entirely/);
+    expect(notice).toHaveTextContent(/4 row\(s\).*left out entirely/);
     expect(notice).not.toHaveTextContent(/could not be opened/);
   });
 
@@ -520,7 +552,16 @@ describe('DocumentList — its four states', () => {
   function renderList(props: Partial<React.ComponentProps<typeof DocumentList>> = {}) {
     return render(
       <MemoryRouter>
-        <DocumentList documents={[]} loading={false} error={null} onRetry={vi.fn()} {...props} />
+        <DocumentList
+          documents={[]}
+          loading={false}
+          error={null}
+          onRetry={vi.fn()}
+          mode={{ kind: 'all' }}
+          folderNames={new Map()}
+          searching={false}
+          {...props}
+        />
       </MemoryRouter>,
     );
   }
@@ -1565,5 +1606,400 @@ describe('DocumentUploadPanel — format and repair', () => {
     fireEvent.click(within(review).getByText(/Show what changed/));
     expect(review).toHaveTextContent(/too large to compare line by line/);
     expect(within(review).queryByTestId('transform-diff')).not.toBeInTheDocument();
+  });
+});
+
+/* ========================================================================== */
+/*  DocumentsPage — the rail, the four modes, and the trash                    */
+/* ========================================================================== */
+
+describe('DocumentsPage — the surface the folder, the favorite and the trash lead to', () => {
+  const filed = () =>
+    makeDocument({
+      id: 'doc-filed',
+      folderId: FOLDER_ID,
+      meta: { ...makeDocument().meta!, name: 'return.pdf' },
+    });
+  const starred = () =>
+    makeDocument({
+      id: 'doc-star',
+      favorite: true,
+      meta: { ...makeDocument().meta!, name: 'payslip.pdf' },
+    });
+  const loose = () =>
+    makeDocument({ id: 'doc-loose', meta: { ...makeDocument().meta!, name: 'notes.pdf' } });
+  const binned = () =>
+    makeDocument({
+      id: 'doc-binned',
+      deletedAt: '2026-03-01T00:00:00.000Z',
+      meta: { ...makeDocument().meta!, name: 'old.pdf' },
+    });
+
+  /**
+   * Seed the store, then render.
+   *
+   * The three fetches are stubbed because the page calls them on mount and the
+   * REAL `fetchDocuments` starts by emptying the list — which would wipe the rows
+   * these cases are about before the first paint.
+   */
+  async function renderWith(state: Partial<ReturnType<typeof useDocumentsStore.getState>>) {
+    useDocumentsStore.setState({
+      fetchDocuments: vi.fn().mockResolvedValue(undefined),
+      fetchTrash: vi.fn().mockResolvedValue(undefined),
+      fetchUsage: vi.fn().mockResolvedValue(undefined),
+      ...state,
+    });
+    renderPage();
+    await screen.findByRole('heading', { name: 'Documents' });
+  }
+
+  const names = () => screen.queryAllByTestId('document-name').map((n) => n.textContent);
+
+  it('counts every entry in the rail, and counts a folder by ACTIVE rows only', async () => {
+    await renderWith({
+      documents: [filed(), starred(), loose()],
+      // The second trashed row still NAMES the folder, exactly as the server
+      // leaves it: `deleteFolder`'s member filter excludes rows that already
+      // carry `deletedAt`, so a trashed document keeps a folder id that may no
+      // longer exist. That is what makes the badge's "active rows only" claim
+      // testable rather than incidental.
+      trashDocuments: [binned(), makeDocument({ id: 'x', deletedAt: 'y', folderId: FOLDER_ID })],
+      trashLoaded: true,
+    });
+
+    expect(screen.getByRole('button', { name: /^All Documents/ })).toHaveTextContent('3');
+    expect(screen.getByRole('button', { name: /^Favorites/ })).toHaveTextContent('1');
+    expect(screen.getByRole('button', { name: /^Trash/ })).toHaveTextContent('2');
+    // A badge that counted the trash would promise more than the folder shows.
+    expect(screen.getByRole('button', { name: /^Taxes/ })).toHaveTextContent('1');
+  });
+
+  it('shows the right rows in each of the four modes', async () => {
+    await renderWith({
+      documents: [filed(), starred(), loose()],
+      trashDocuments: [binned()],
+      trashLoaded: true,
+    });
+    expect(names()).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Favorites/ }));
+    expect(names()).toEqual(['payslip.pdf']);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Taxes/ }));
+    expect(names()).toEqual(['return.pdf']);
+    // Exclusive: choosing a folder turns Favorites off, so nothing is filtered twice.
+    expect(screen.getByRole('button', { name: /^Favorites/ })).not.toHaveAttribute('aria-current');
+
+    fireEvent.click(screen.getByRole('button', { name: /^Trash/ }));
+    expect(names()).toEqual(['old.pdf']);
+
+    fireEvent.click(screen.getByRole('button', { name: /^All Documents/ }));
+    expect(names()).toHaveLength(3);
+  });
+
+  it('shows where a document is filed, and nothing when it is filed nowhere', async () => {
+    await renderWith({ documents: [filed(), loose()] });
+
+    const chips = screen.getAllByTestId('document-folder');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent('Taxes');
+  });
+
+  it('dates an active row by when it changed and a trashed one by when it went', async () => {
+    await renderWith({ documents: [loose()], trashDocuments: [binned()], trashLoaded: true });
+    // Both directions, so an implementation keyed on the MODE rather than on the
+    // row's own `deletedAt` fails here.
+    expect(screen.getByTestId('document-row')).not.toHaveTextContent('Deleted');
+
+    fireEvent.click(screen.getByRole('button', { name: /^Trash/ }));
+    expect(screen.getByTestId('document-row')).toHaveTextContent(/Deleted/);
+  });
+
+  it('says a row already being destroyed is being destroyed', async () => {
+    await renderWith({
+      trashDocuments: [{ ...binned(), purgePending: true }],
+      trashLoaded: true,
+      showTrash: true,
+    });
+    expect(screen.getByTestId('document-row')).toHaveTextContent('Being deleted');
+  });
+
+  it('keeps every row a single link with no other control, in every mode', async () => {
+    await renderWith({ documents: [loose()], trashDocuments: [binned()], trashLoaded: true });
+
+    for (const mode of [/^All Documents/, /^Trash/]) {
+      fireEvent.click(screen.getByRole('button', { name: mode }));
+      const row = screen.getByTestId('document-row');
+      // The row is an anchor precisely so it gets keyboard activation,
+      // middle-click and open-in-a-new-tab for free; a control inside it would
+      // nest one interactive element in another and cost all three.
+      expect(within(row).getAllByRole('link')).toHaveLength(1);
+      expect(within(row).queryAllByRole('button')).toHaveLength(0);
+    }
+  });
+
+  it('explains an empty list differently in each mode', async () => {
+    await renderWith({ documents: [], trashDocuments: [], trashLoaded: true });
+    expect(screen.getByText('No documents yet')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Favorites/ }));
+    expect(screen.getByText('No favorite documents')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Taxes/ }));
+    expect(screen.getByText('Nothing in “Taxes”')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Trash/ }));
+    expect(screen.getByText('The trash is empty')).toBeInTheDocument();
+    expect(screen.getByText(/permanently removed after 30 days/)).toBeInTheDocument();
+  });
+
+  it('filters by name, tag and note, and finds nothing in a document it cannot open', async () => {
+    const tagged = makeDocument({
+      id: 'doc-tag',
+      meta: { ...makeDocument().meta!, name: 'invoice.pdf', tags: ['hmrc'], note: 'paid in April' },
+    });
+    await renderWith({
+      documents: [loose(), tagged, makeDocument({ id: 'doc-dead', meta: null })],
+    });
+    expect(names()).toHaveLength(3);
+
+    const search = screen.getByRole('searchbox', { name: 'Search documents' });
+    fireEvent.change(search, { target: { value: 'hmrc' } });
+    await waitFor(() => {
+      expect(names()).toEqual(['invoice.pdf']);
+    });
+
+    fireEvent.change(search, { target: { value: 'april' } });
+    await waitFor(() => {
+      expect(names()).toEqual(['invoice.pdf']);
+    });
+
+    // A document whose metadata will not open has no text to match — and says so
+    // through the count, rather than being quietly absent.
+    fireEvent.change(search, { target: { value: 'zzz' } });
+    await waitFor(() => {
+      expect(screen.getByText('No documents match')).toBeInTheDocument();
+    });
+  });
+
+  it('offers Empty trash only in the trash, and only when there is something in it', async () => {
+    await renderWith({ documents: [loose()], trashDocuments: [binned()], trashLoaded: true });
+    expect(screen.queryByRole('button', { name: 'Empty trash' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Trash/ }));
+    expect(screen.getByRole('button', { name: 'Empty trash' })).toBeInTheDocument();
+
+    act(() => {
+      useDocumentsStore.setState({ trashDocuments: [] });
+    });
+    expect(screen.queryByRole('button', { name: 'Empty trash' })).not.toBeInTheDocument();
+  });
+
+  it('does not draw the picker over the trash, but never hides a live transfer', async () => {
+    await renderWith({
+      documents: [loose()],
+      trashDocuments: [binned()],
+      trashLoaded: true,
+      uploads: {
+        u1: { id: 'u1', fileName: 'big.bin', totalBytes: 100, sentBytes: 50, status: 'uploading' },
+      },
+    });
+    expect(screen.getByLabelText('File to upload')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Trash/ }));
+
+    // Uploading into a view of deleted files is incoherent, so the picker goes.
+    expect(screen.queryByLabelText('File to upload')).not.toBeInTheDocument();
+    // But a transfer outlives the page that started it, and one that vanished
+    // here would read as a cancelled upload.
+    expect(screen.getByRole('list', { name: 'Uploads in progress' })).toBeInTheDocument();
+    expect(screen.getByText('big.bin')).toBeInTheDocument();
+  });
+
+  it('mounts the transfer list exactly once, whichever mode is showing', async () => {
+    // `DocumentTransfers` has TWO mount points — inside the upload panel, and on
+    // its own in trash mode — and it self-hides when the registry is empty, so a
+    // ternary that became an unconditional render would double it silently. The
+    // end-to-end suite counts `upload-row`, so the symptom there would be a
+    // confusing number rather than a named failure.
+    await renderWith({
+      documents: [loose()],
+      trashDocuments: [binned()],
+      trashLoaded: true,
+      uploads: {
+        u1: { id: 'u1', fileName: 'big.bin', totalBytes: 100, sentBytes: 50, status: 'uploading' },
+      },
+    });
+
+    for (const mode of [/^All Documents/, /^Favorites/, /^Taxes/, /^Trash/]) {
+      fireEvent.click(screen.getByRole('button', { name: mode }));
+      expect(screen.getAllByRole('list', { name: 'Uploads in progress' })).toHaveLength(1);
+      expect(screen.getAllByTestId('upload-row')).toHaveLength(1);
+    }
+  });
+
+  it('empties the trash, then re-reads the allowance it just released', async () => {
+    const emptyTrash = vi.fn().mockResolvedValue({ deletedCount: 2, failedCount: 0 });
+    const fetchUsage = vi.fn().mockResolvedValue(undefined);
+    await renderWith({
+      trashDocuments: [binned()],
+      trashLoaded: true,
+      showTrash: true,
+      emptyTrash: emptyTrash as unknown as ReturnType<
+        typeof useDocumentsStore.getState
+      >['emptyTrash'],
+      fetchUsage,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Empty trash' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('Nothing can bring them back');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete all forever' }));
+
+    await waitFor(() => {
+      expect(emptyTrash).toHaveBeenCalledTimes(1);
+    });
+    // The quota bar's own sentence says a trashed document still counts against
+    // the allowance, so leaving that number stale would contradict the text
+    // printed beside it.
+    await waitFor(() => {
+      expect(fetchUsage).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(harness.toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: '2 document(s) permanently deleted', type: 'success' }),
+      );
+    });
+    // And the dialog closes rather than sitting over an emptied list.
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+  });
+
+  it('destroys nothing when the reader backs out of the confirmation', async () => {
+    const emptyTrash = vi.fn().mockResolvedValue({ deletedCount: 0, failedCount: 0 });
+    await renderWith({
+      trashDocuments: [binned()],
+      trashLoaded: true,
+      showTrash: true,
+      emptyTrash: emptyTrash as unknown as ReturnType<
+        typeof useDocumentsStore.getState
+      >['emptyTrash'],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Empty trash' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    // The negative that matters on an irreversible action: backing out of the
+    // dialog destroys nothing, and the row is still listed afterwards.
+    expect(emptyTrash).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId('document-name')).toHaveLength(1);
+  });
+
+  it('says how many survived when the storage engine could not remove them all', async () => {
+    const emptyTrash = vi.fn().mockResolvedValue({ deletedCount: 1, failedCount: 1 });
+    await renderWith({
+      trashDocuments: [binned()],
+      trashLoaded: true,
+      showTrash: true,
+      emptyTrash: emptyTrash as unknown as ReturnType<
+        typeof useDocumentsStore.getState
+      >['emptyTrash'],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Empty trash' }));
+    fireEvent.click(
+      within(await screen.findByRole('dialog')).getByRole('button', {
+        name: 'Delete all forever',
+      }),
+    );
+
+    // A partial run reported as a clean one is the dishonesty the server's own
+    // `failedCount` exists to prevent — the rows it could not remove are still
+    // there, still listed and still occupying storage.
+    await waitFor(() => {
+      expect(harness.toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '1 deleted. 1 could not be removed and will be cleaned up automatically.',
+          type: 'warning',
+        }),
+      );
+    });
+  });
+
+  it('reports a refused empty rather than leaving the button spinning', async () => {
+    // Rejected with something carrying no usable message, so the page's own
+    // fallback is what is asserted rather than `getApiErrorMessage`'s passthrough.
+    const emptyTrash = vi.fn().mockRejectedValue({});
+    await renderWith({
+      trashDocuments: [binned()],
+      trashLoaded: true,
+      showTrash: true,
+      emptyTrash: emptyTrash as unknown as ReturnType<
+        typeof useDocumentsStore.getState
+      >['emptyTrash'],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Empty trash' }));
+    fireEvent.click(
+      within(await screen.findByRole('dialog')).getByRole('button', {
+        name: 'Delete all forever',
+      }),
+    );
+
+    await waitFor(() => {
+      expect(harness.toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'The trash could not be emptied', type: 'error' }),
+      );
+    });
+    // The `finally` runs on this path too: the dialog closes and the confirm
+    // button is not left disabled for ever.
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+  });
+
+  it('names the list after the mode it is showing', async () => {
+    // One row in EVERY mode, so each assertion is about the list's name rather
+    // than about an empty state that happens to have no list at all.
+    await renderWith({
+      documents: [loose(), starred(), filed()],
+      trashDocuments: [binned()],
+      trashLoaded: true,
+    });
+    expect(screen.getByRole('list', { name: 'Documents list' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Favorites/ }));
+    expect(screen.getByRole('list', { name: 'Favorite documents' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Taxes/ }));
+    expect(screen.getByRole('list', { name: 'Documents in Taxes' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Trash/ }));
+    expect(screen.getByRole('list', { name: 'Documents in the trash' })).toBeInTheDocument();
+  });
+
+  it('tells the uploader which folder a file will be filed in, and sends it', async () => {
+    const startUpload = vi.fn().mockResolvedValue('u1');
+    await renderWith({
+      documents: [],
+      startUpload: startUpload as unknown as ReturnType<
+        typeof useDocumentsStore.getState
+      >['startUpload'],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Taxes/ }));
+    expect(screen.getByTestId('upload-target-folder')).toHaveTextContent('Taxes');
+
+    pick('return.pdf', 1024);
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledWith(expect.objectContaining({ folderId: FOLDER_ID }));
+    });
   });
 });

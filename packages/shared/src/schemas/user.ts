@@ -4,6 +4,8 @@ import {
   AUDIT_ACTIONS,
   AUDIT_LOG_PAGE_LIMIT,
   AUDIT_LOG_MAX_LIMIT,
+  BACKUP_HISTORY_PAGE_LIMIT,
+  BACKUP_HISTORY_MAX_LIMIT,
   MAX_BACKUP_EMAILS,
   MAX_RESTORE_DATA_LENGTH,
   MAX_IMPORT_ITEMS,
@@ -198,7 +200,12 @@ export const auditLogQuerySchema = z.object({
 
 export const backupHistorySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(30).default(30),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(BACKUP_HISTORY_MAX_LIMIT)
+    .default(BACKUP_HISTORY_PAGE_LIMIT),
 });
 
 export const restoreBackupSchema = z.object({

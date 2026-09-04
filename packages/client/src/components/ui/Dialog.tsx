@@ -63,7 +63,10 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"]):not([disabled]):not([aria-disabled="true"])',
 ].join(', ');
 
-function useFocusTrap(containerRef: React.RefObject<HTMLDivElement | null>, active: boolean) {
+// `HTMLElement` rather than `HTMLDivElement`: the document viewer's expanded
+// panel is a `<section>`, and every existing caller passes a div ref, which stays
+// assignable. Widening the parameter is the whole change.
+function useFocusTrap(containerRef: React.RefObject<HTMLElement | null>, active: boolean) {
   useEffect(() => {
     if (!active || !containerRef.current) return;
 
@@ -331,7 +334,7 @@ DialogFooter.displayName = 'DialogFooter';
  * Provides focus trap, escape key handling, auto-focus, and body scroll lock.
  */
 function useInlineDialog(
-  ref: React.RefObject<HTMLDivElement | null>,
+  ref: React.RefObject<HTMLElement | null>,
   isOpen: boolean,
   onClose: () => void,
 ) {

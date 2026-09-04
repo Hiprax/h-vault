@@ -4,7 +4,7 @@ import { AlertTriangle, Loader2 } from 'lucide-react';
 import { getApiErrorMessage } from '../lib/utils';
 import { useDocumentsConfig } from '../hooks/useDocumentsConfig';
 import { useDocumentsStore } from '../stores/documentsStore';
-import { useVaultStore } from '../stores/vaultStore';
+import { useVaultFolders } from '../hooks/useVaultFolders';
 import { DocumentDetail } from '../components/documents/DocumentDetail';
 import { StorageUnavailable } from '../components/documents/StorageUnavailable';
 
@@ -42,12 +42,15 @@ export default function DocumentPage() {
   const trashDocuments = useDocumentsStore((s) => s.trashDocuments);
   const documentsLoading = useDocumentsStore((s) => s.documentsLoading);
   const trashLoading = useDocumentsStore((s) => s.trashLoading);
-  const folderCount = useVaultStore((s) => s.folders.length);
-  const fetchFolders = useVaultStore((s) => s.fetchFolders);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const enabled = config?.enabled === true;
   const requested = useRef(false);
+
+  // The folder names the move menu and the details row offer. They belong to the
+  // vault store, which this route does not otherwise use, so a reader who came
+  // straight here by URL has never loaded them.
+  useVaultFolders(enabled);
 
   // The decision to fetch is made ONCE, at mount, from what the store already
   // holds — read imperatively so this effect does not depend on the two arrays
@@ -73,18 +76,6 @@ export default function DocumentPage() {
       setLoadError(getApiErrorMessage(error, 'This document could not be loaded.'));
     });
   }, [enabled, id]);
-
-  // The folder names the move menu offers. They belong to the vault store, which
-  // this route does not otherwise use, so a user who came straight here by URL
-  // has never loaded them.
-  useEffect(() => {
-    if (!enabled || folderCount > 0) return;
-    void fetchFolders().catch(() => {
-      // A missing folder list costs the move menu its names and nothing else.
-      // Reporting it here would put an error in front of someone whose document
-      // loaded perfectly well.
-    });
-  }, [enabled, folderCount, fetchFolders]);
 
   if (config === null) return <Spinner />;
   if (!config.enabled) return <StorageUnavailable />;

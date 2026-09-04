@@ -8,6 +8,8 @@ import {
   FileWarning,
   FolderOpen,
   Loader2,
+  Maximize2,
+  Minimize2,
   Pencil,
   RotateCcw,
   Star,
@@ -35,6 +37,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  useInlineDialog,
 } from '../ui/Dialog';
 import {
   DropdownMenu,
@@ -111,6 +114,20 @@ const PREVIEW_LOADING_LABEL = 'Decrypting and verifying\u2026';
 
 /** What both the folder trigger and the first menu item call "outside every folder". */
 const NO_FOLDER_LABEL = 'No folder';
+
+/** The id of {@link PurgePendingNotice}'s body, so the inert Restore can describe itself. */
+const PURGE_PENDING_NOTICE_ID = 'document-purge-pending-notice';
+
+/**
+ * Why a document already being destroyed cannot be restored.
+ *
+ * `restoreDocument` filters on `purgePending: null` server-side, so a Restore
+ * here would answer 404 and read as a bug. The state became reachable the moment
+ * the trash gained an Empty-trash control: a run that could not delete every
+ * object leaves the rows it failed on marked and still listed.
+ */
+const PURGE_PENDING_HINT =
+  'This document is already being deleted for good. What remains of it is removed automatically, and it cannot be restored.';
 
 // ---------------------------------------------------------------------------
 // Tags
@@ -228,6 +245,19 @@ interface DocumentContentProps {
   refusal: string | null;
   onLink: (href: string) => void;
   onUnavailable: (reason: string) => void;
+  /** Whether the reader has ASKED for full screen. Honoured only when a frame exists. */
+  expanded: boolean;
+  onExpandedChange: (next: boolean) => void;
+  /**
+   * Whether one of this view's dialogs is open ON TOP of the panel.
+   *
+   * `Dialog` renders through `createPortal(…, document.body)`, i.e. OUTSIDE this
+   * section — and `aria-modal="true"` is precisely the assertion that everything
+   * outside its own container is inert. Left on, it would tell a screen reader to
+   * ignore the link-confirmation dialog, which is the control the whole
+   * link-safety design rests on. No axe rule catches this.
+   */
+  dialogOpen: boolean;
 }
 
 /**
@@ -256,22 +286,85 @@ function DocumentContent({
   refusal,
   onLink,
   onUnavailable,
+  expanded,
+  onExpandedChange,
+  dialogOpen,
 }: DocumentContentProps) {
   const theme = resolveEffectiveTheme(useUIStore((state) => state.theme));
+  const panelRef = useRef<HTMLElement | null>(null);
+
+  // The request is HONOURED only when there is actually a frame to enlarge, and
+  // that is DERIVED rather than stored: a frame that dies — a handshake that
+  // timed out, a renderer that reported failure — drops the panel out of full
+  // screen in the SAME commit, instead of stranding one paragraph of "download to
+  // view" on a full-viewport canvas.
+  const canExpand = refusal === null && !loading && bytes !== null;
+  const isExpanded = expanded && canExpand;
+  const collapse = useCallback(() => onExpandedChange(false), [onExpandedChange]);
+  useInlineDialog(panelRef, isExpanded, collapse);
 
   return (
     <section
+      ref={panelRef}
       aria-labelledby="document-open-heading"
       data-testid="document-content"
-      className="overflow-hidden rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]"
+      // Claimed only while the panel fills the viewport. A full-screen overlay
+      // that left the page behind it tabbable would send a keyboard user's focus
+      // to things they cannot see — the ARIA modal-dialog pattern, and WCAG 2.4.3
+      // (Focus Order); at rest this is a named `region` landmark and must stay
+      // one. The name is the document's own, drawn by the application — never by
+      // anything inside the frame.
+      role={isExpanded ? 'dialog' : undefined}
+      // The ROLE stays while expanded; only the modality is dropped, and only
+      // while a portalled dialog is open above it. See `dialogOpen`.
+      aria-modal={isExpanded && !dialogOpen ? true : undefined}
+      className={cn(
+        'bg-[hsl(var(--card))]',
+        isExpanded
+          ? // A CLASS CHANGE ON THE ELEMENT THAT WAS ALREADY THERE. Never a
+            // portal, never a second <section>, never a wrapper that exists in
+            // one branch only: all three move the iframe in the React tree, which
+            // detaches it, discards its browsing context, restarts the ten-second
+            // handshake and re-posts up to 25 MiB of verified plaintext.
+            //
+            // `fixed` resolves against the viewport here because no ancestor of
+            // AppLayout's <main> establishes a containing block — no `transform`,
+            // `filter`, `backdrop-filter`, `contain` or `will-change`. Adding one
+            // upstream would confine this panel to the content column, silently.
+            'animate-in fixed inset-0 z-50 flex flex-col'
+          : // `overflow-hidden` exists to clip the frame's square corners to the
+            // rounded border, so it goes with the border rather than separately.
+            'overflow-hidden rounded-lg border border-[hsl(var(--border))]',
+      )}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[hsl(var(--border))] p-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[hsl(var(--border))] p-3">
         <h2
           id="document-open-heading"
           className="min-w-0 flex-1 truncate text-sm font-semibold text-[hsl(var(--card-foreground))]"
         >
           {meta.name}
         </h2>
+        {/* FIRST in the action group, and that placement is load-bearing:
+            `useInlineDialog` focuses the first focusable element inside this
+            panel, so opening full screen puts focus on the control that gets the
+            reader back out. ONE button in both states — the same DOM node — so
+            collapsing leaves focus exactly where expanding put it and no focus
+            restoration is needed.
+
+            Neither `aria-pressed` nor `aria-expanded`: nothing is shown or
+            hidden, the same element changes size, and the visible text and the
+            accessible name change together. "Exit full screen, pressed" would
+            read backwards. */}
+        {canExpand && (
+          <button
+            type="button"
+            onClick={() => onExpandedChange(!isExpanded)}
+            className="inline-flex shrink-0 items-center gap-2 rounded-md border border-[hsl(var(--input))] px-3 py-1.5 text-sm font-medium text-[hsl(var(--foreground))] transition-colors hover:bg-[hsl(var(--accent))]"
+          >
+            {isExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+            {isExpanded ? 'Exit full screen' : 'Full screen'}
+          </button>
+        )}
         <button
           type="button"
           onClick={onDownload}
@@ -311,7 +404,12 @@ function DocumentContent({
           onLink={onLink}
           onUnavailable={onUnavailable}
           title={`Preview of ${meta.name}`}
-          className="h-[70vh] w-full border-0 bg-[hsl(var(--background))]"
+          className={cn(
+            'w-full border-0 bg-[hsl(var(--background))]',
+            // `min-h-0` defeats a flex item's default `min-height: auto`, which an
+            // iframe's intrinsic 150px would otherwise use to push the box open.
+            isExpanded ? 'min-h-0 flex-1' : 'h-[70vh]',
+          )}
         />
       )}
     </section>
@@ -375,6 +473,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
   const deleteDocument = useDocumentsStore((s) => s.deleteDocument);
   const restoreDocument = useDocumentsStore((s) => s.restoreDocument);
   const purgeDocument = useDocumentsStore((s) => s.purgeDocument);
+  const clearFilters = useDocumentsStore((s) => s.clearFilters);
 
   const [downloading, setDownloading] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
@@ -390,6 +489,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
   const [previewBytes, setPreviewBytes] = useState<ArrayBuffer | null>(null);
   const [previewUnavailable, setPreviewUnavailable] = useState<string | null>(null);
   const [pendingLink, setPendingLink] = useState<string | null>(null);
+  const [previewExpanded, setPreviewExpanded] = useState(false);
 
   const meta = doc.meta;
   const degraded = meta === null;
@@ -453,6 +553,10 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
     setPreviewBytes(null);
     setPreviewUnavailable(null);
     setPendingLink(null);
+    // Full screen is a viewing mode for THIS document. Carried forward, the next
+    // file opens filling the viewport without anyone having asked it to — and
+    // does so over a spinner, because `previewBytes` above has just been cleared.
+    setPreviewExpanded(false);
   }
 
   useEffect(() => {
@@ -504,6 +608,27 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
    * belt-and-braces for its own sake: this callback is a public prop, so the
    * check that protects it belongs where the window is actually opened.
    */
+  /**
+   * Collapse only when no dialog is open on top of the panel.
+   *
+   * `useInlineDialog` and `Dialog` both listen for Escape on `document` and
+   * neither stops propagation, so one keypress would close the link dialog AND
+   * collapse the panel underneath it. A dialog opened on top owns Escape. The
+   * BUTTON is unaffected: while a modal is open it sits behind the overlay and
+   * outside that modal's focus trap, so it cannot be reached.
+   */
+  // ONE expression for two rules that must never disagree: which surface owns
+  // Escape, and which surface assistive technology is allowed to read.
+  const dialogOpen = pendingLink !== null || showEdit || showDelete;
+
+  const setPreviewExpandedSafely = useCallback(
+    (next: boolean) => {
+      if (!next && dialogOpen) return;
+      setPreviewExpanded(next);
+    },
+    [dialogOpen],
+  );
+
   const handleLink = useCallback((href: string) => {
     if (!isSafeUrl(href)) return;
     setPendingLink(href);
@@ -649,6 +774,10 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
     void restoreDocument(doc.id)
       .then(() => {
         toast({ title: 'Document restored', type: 'success' });
+        // Land where the document now IS. A reader who reached this page from the
+        // trash would otherwise be returned to the trash — the one view the row
+        // they just restored is, correctly, no longer in.
+        clearFilters();
         void navigate('/documents');
       })
       .catch((error: unknown) => {
@@ -657,7 +786,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
       .finally(() => {
         setRestoreLoading(false);
       });
-  }, [doc.id, navigate, restoreDocument, toast]);
+  }, [clearFilters, doc.id, navigate, restoreDocument, toast]);
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -689,6 +818,18 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
         </div>
       </div>
 
+      {isTrashed && doc.purgePending === true && (
+        <p
+          role="alert"
+          id={PURGE_PENDING_NOTICE_ID}
+          data-testid="document-purge-pending"
+          className="flex items-start gap-2 rounded-md border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{PURGE_PENDING_HINT}</span>
+        </p>
+      )}
+
       {isTrashed && (
         <p
           data-testid="document-trashed-note"
@@ -705,11 +846,17 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
       <div className="flex flex-wrap items-center gap-2">
         {isTrashed ? (
           <>
+            {/* `aria-disabled` rather than `disabled`, for the reason the Edit
+                control records below: a `disabled` control leaves the tab order,
+                so the people who most need the explanation cannot reach it. */}
             <button
               type="button"
-              onClick={handleRestore}
+              onClick={doc.purgePending === true ? undefined : handleRestore}
               disabled={restoreLoading}
-              className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] transition-opacity hover:opacity-90 disabled:opacity-50"
+              aria-disabled={doc.purgePending === true ? true : undefined}
+              aria-describedby={doc.purgePending === true ? PURGE_PENDING_NOTICE_ID : undefined}
+              title={doc.purgePending === true ? PURGE_PENDING_HINT : undefined}
+              className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] transition-opacity hover:opacity-90 disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:opacity-100"
             >
               {restoreLoading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -833,6 +980,9 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
           refusal={previewRefusal}
           onLink={handleLink}
           onUnavailable={setPreviewUnavailable}
+          expanded={previewExpanded}
+          onExpandedChange={setPreviewExpandedSafely}
+          dialogOpen={dialogOpen}
         />
       )}
 
@@ -858,6 +1008,14 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
         )}
         <DetailRow label="Added">{formatTimestamp(doc.createdAt)}</DetailRow>
         <DetailRow label="Modified">{formatTimestamp(doc.updatedAt)}</DetailRow>
+        {/* Rendered unconditionally, and that is not redundancy with the move
+            menu above: the menu exists only in the ACTIVE toolbar, so a trashed
+            document showed its folder nowhere at all. The menu is a control; this
+            is a fact. */}
+        <DetailRow label="Folder">{currentFolder?.name ?? NO_FOLDER_LABEL}</DetailRow>
+        {isTrashed && doc.deletedAt !== undefined && (
+          <DetailRow label="Deleted">{formatTimestamp(doc.deletedAt)}</DetailRow>
+        )}
         {!degraded && meta.note !== undefined && (
           <div className="col-span-2">
             <p className="text-xs text-[hsl(var(--muted-foreground))]">Note</p>

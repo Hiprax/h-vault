@@ -278,7 +278,14 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
 
     mockGetProfileApi.mockResolvedValue(profileWith(CONFIGURED_BACKUP));
     mockApiGet.mockImplementation((url: string) => {
-      if (url === '/backup/history') return Promise.resolve({ data: { data: [] } });
+      if (url === '/backup/history')
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [],
+            pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+          },
+        });
       return Promise.resolve({ data: {} });
     });
     mockApiPut.mockResolvedValue({ data: { success: true } });
@@ -516,7 +523,14 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
   it('signs the downloaded backup with an HMAC integrity field computed over the unsigned payload', async () => {
     const serverBackup = { items: [SAMPLE_ITEM], folders: [], version: 1 };
     mockApiGet.mockImplementation((url: string) => {
-      if (url === '/backup/history') return Promise.resolve({ data: { data: [] } });
+      if (url === '/backup/history')
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [],
+            pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+          },
+        });
       if (url === '/backup/download')
         return Promise.resolve({ data: JSON.stringify(serverBackup) });
       return Promise.resolve({ data: {} });
@@ -619,7 +633,14 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
 
   it('triggers the download from the Enter key in the password prompt', async () => {
     mockApiGet.mockImplementation((url: string) => {
-      if (url === '/backup/history') return Promise.resolve({ data: { data: [] } });
+      if (url === '/backup/history')
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [],
+            pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+          },
+        });
       if (url === '/backup/download') return Promise.resolve({ data: '{"items":[]}' });
       return Promise.resolve({ data: {} });
     });
@@ -650,7 +671,14 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
 
   it('reports a download failure when the backup endpoint rejects', async () => {
     mockApiGet.mockImplementation((url: string) => {
-      if (url === '/backup/history') return Promise.resolve({ data: { data: [] } });
+      if (url === '/backup/history')
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [],
+            pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+          },
+        });
       if (url === '/backup/download') return Promise.reject(new Error('500'));
       return Promise.resolve({ data: {} });
     });

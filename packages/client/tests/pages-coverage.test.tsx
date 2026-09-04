@@ -7,7 +7,7 @@
  * 2 - ForgotPasswordPage (form, submission, success/error states)
  * 3 - VaultList (empty state, items, sort, type badges, search filtering)
  * 4 - VaultItemDetail (all item types, copy, masking, favorite, trashed)
- * 5 - FolderSidebar (folder tree, selection, type filters, favorites)
+ * 5 - FolderRail (folder tree, selection, type filters, favorites)
  * 6 - SettingsPage (sections rendering, theme selector, profile)
  * 7 - SessionsPage (session list, current session marker, error/empty states)
  * 8 - AuditLogPage (table rendering, pagination, filter)
@@ -316,13 +316,25 @@ import { useUIStore } from '../src/stores/uiStore';
 // Component imports
 // ---------------------------------------------------------------------------
 
-import { FolderSidebar } from '../src/components/vault/FolderSidebar';
+import { FolderRail } from '../src/components/folders/FolderRail';
+import { useVaultFolderScope } from '../src/hooks/useVaultFolderScope';
 import { VaultItemDetail } from '../src/components/vault/VaultItemDetail';
 import { VaultList } from '../src/components/vault/VaultList';
 import { ForgotPasswordPage } from '../src/components/auth/ForgotPasswordPage';
 import VerifyEmailPage from '../src/pages/VerifyEmailPage';
 import UnlockAccountPage from '../src/pages/UnlockAccountPage';
 import ResetPasswordPage from '../src/pages/ResetPasswordPage';
+
+/**
+ * The shared rail, bound to the VAULT scope — which is what every case below is
+ * about. `FolderRail` now renders on `/vault` and on `/documents`, and takes the
+ * counts, the active filter and the selection callbacks as a `scope` prop; this
+ * binding supplies the vault's, so each assertion still runs against the real
+ * `useVaultStore` exactly as it did when the component read it directly.
+ */
+function VaultRail(props: { className?: string; onClose?: () => void }) {
+  return <FolderRail scope={useVaultFolderScope()} {...props} />;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1349,10 +1361,10 @@ describe('VaultItemDetail - additional coverage', () => {
 });
 
 // ==========================================================================
-// 5 - FolderSidebar (additional coverage)
+// 5 - FolderRail (additional coverage)
 // ==========================================================================
 
-describe('FolderSidebar - additional coverage', () => {
+describe('FolderRail - additional coverage', () => {
   it('calls setSelectedFolder(null) and clears filters when "All Items" is clicked', () => {
     const setSelectedFolder = vi.fn();
     const setSelectedType = vi.fn();
@@ -1366,7 +1378,7 @@ describe('FolderSidebar - additional coverage', () => {
       setShowTrash,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('All Items'));
 
@@ -1381,7 +1393,7 @@ describe('FolderSidebar - additional coverage', () => {
     const setSelectedType = vi.fn();
     useVaultStore.setState({ toggleFavorites, setSelectedType });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('Favorites'));
 
@@ -1393,7 +1405,7 @@ describe('FolderSidebar - additional coverage', () => {
     const setSelectedType = vi.fn();
     useVaultStore.setState({ toggleTrash, setSelectedType });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('Trash'));
 
@@ -1408,7 +1420,7 @@ describe('FolderSidebar - additional coverage', () => {
 
     useVaultStore.setState({ setSelectedType, setSelectedFolder, setShowFavorites, setShowTrash });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('Logins'));
 
@@ -1430,7 +1442,7 @@ describe('FolderSidebar - additional coverage', () => {
       setShowTrash,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('Logins'));
 
@@ -1445,7 +1457,7 @@ describe('FolderSidebar - additional coverage', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     expect(screen.getByText('Parent')).toBeInTheDocument();
     expect(screen.getByText('Child')).toBeInTheDocument();
@@ -1459,7 +1471,7 @@ describe('FolderSidebar - additional coverage', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // The trash count badge should show 2
     expect(screen.getByText('2')).toBeInTheDocument();
@@ -1470,7 +1482,7 @@ describe('FolderSidebar - additional coverage', () => {
       items: [makeDecryptedItem({ id: 'i1', name: 'Fav', favorite: true })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // All Items count = 1, favorites count = 1
     const badges = screen.getAllByText('1');
@@ -1487,7 +1499,7 @@ describe('FolderSidebar - additional coverage', () => {
       setSelectedType,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('Work'));
 
@@ -1495,7 +1507,7 @@ describe('FolderSidebar - additional coverage', () => {
   });
 
   it('cancels new folder dialog when Cancel is clicked', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     expect(screen.getByText('New Folder')).toBeInTheDocument();
@@ -2011,7 +2023,7 @@ describe('AuditLogPage', () => {
 
     await waitFor(() => {
       const prevButton = screen.getByText('Prev').closest('button');
-      expect(prevButton).toBeDisabled();
+      expect(prevButton).toHaveAttribute('aria-disabled', 'true');
     });
   });
 

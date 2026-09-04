@@ -88,6 +88,7 @@ import type {
   PaginatedResponse,
   UpdateDocumentInput,
 } from '@hvault/shared';
+import type { EmptyDocumentTrashResult } from '../services/api/documentsApi.js';
 import {
   DOCUMENT_PAGE_SIZE,
   MAX_DOCUMENT_PAGES,
@@ -207,14 +208,14 @@ export interface DocumentUploadProgress {
  *
  * The ONE definition of the question, because two readers ask it for decisions
  * that must never disagree: the unload guard uses it to decide whether closing
- * the tab costs anything, and the upload panel uses it to decide whether to say
- * so. A failed transfer holds no socket and is reading nothing from its file —
+ * the tab costs anything, and `DocumentTransfers` uses it to decide whether to
+ * say so. A failed transfer holds no socket and is reading nothing from its file —
  * its parts are already stored and a retry re-sends only what the server does
  * not hold — so closing the tab on one costs nothing a confirmation would save.
  *
  * A predicate rather than two `!== 'failed'` comparisons, so a fourth status
- * cannot be added in a way that leaves the guard and the panel answering
- * differently. {@link DocumentUploadStatus} stays unexported deliberately, which
+ * cannot be added in a way that leaves the guard and the transfer list
+ * answering differently. {@link DocumentUploadStatus} stays unexported deliberately, which
  * is why this is the shape the answer travels in.
  */
 export function isLiveTransfer(transfer: DocumentUploadProgress): boolean {
@@ -288,10 +289,46 @@ interface DocumentsState {
   documentsLoading: boolean;
   trashLoading: boolean;
   usageLoading: boolean;
+  /**
+   * Whether a `fetchTrash` has SUCCEEDED in this session.
+   *
+   * The trash list has to be told apart from a trash list that was never read,
+   * and `trashDocuments.length > 0` cannot do it: an account whose trash was
+   * loaded and is empty looks exactly like one whose trash was never loaded, so
+   * the first delete would vanish from both lists and the Trash count would stay
+   * at zero. `deleteDocument` reads this flag instead.
+   */
+  trashLoaded: boolean;
   /** Rows in the most recent fetch whose metadata would not open. */
   degradedCount: number;
   /** Rows dropped entirely because the response did not satisfy the shared schema. */
   invalidCount: number;
+  /**
+   * The same two counts for the TRASH listing.
+   *
+   * Separate fields rather than one pair, because the two lists are fetched
+   * independently and the reader is only ever looking at one of them: a banner
+   * that reported the active list's failures over a trash view would be counting
+   * rows that are not on screen. `fetchTrash` used to discard these numbers
+   * entirely, which meant a trashed row whose key will not unwrap disappeared
+   * from the trash with nothing said about it.
+   */
+  trashDegradedCount: number;
+  trashInvalidCount: number;
+
+  /**
+   * Which rows the list is showing. The four are MUTUALLY EXCLUSIVE, which is
+   * what lets the page render one `switch` and exactly four empty states.
+   *
+   * Deliberately stricter than `vaultStore`, where a folder and the favorites
+   * filter can be on together. The divergence lives in the two scope hooks, so
+   * the shared rail behaves identically in both places and no vault behaviour
+   * changes.
+   */
+  selectedFolder: string | null;
+  showFavorites: boolean;
+  showTrash: boolean;
+  searchQuery: string;
 
   fetchDocuments: () => Promise<void>;
   fetchTrash: () => Promise<void>;
@@ -305,7 +342,25 @@ interface DocumentsState {
   deleteDocument: (id: string) => Promise<void>;
   restoreDocument: (id: string) => Promise<void>;
   purgeDocument: (id: string) => Promise<void>;
-  emptyTrash: () => Promise<void>;
+  emptyTrash: () => Promise<EmptyDocumentTrashResult>;
+  setSelectedFolder: (folderId: string | null) => void;
+  toggleFavorites: () => void;
+  toggleTrash: () => void;
+  setSearchQuery: (query: string) => void;
+  clearFilters: () => void;
+  /**
+   * Reconcile local rows after `vaultStore.deleteFolder` swept the server.
+   *
+   * The server applies ONE `updateMany` to `VaultItem` and to `Document`
+   * (`folderController.deleteFolder`), so a folder deletion changes documents
+   * whether or not the reader was looking at them. `parentId` is the deleted
+   * folder's own parent, because that is where `move` puts its members.
+   */
+  applyFolderDeleted: (
+    folderId: string,
+    action: 'move' | 'delete',
+    parentId: string | undefined,
+  ) => void;
   clearStore: () => void;
 }
 
@@ -353,6 +408,43 @@ let mutationGeneration = 0;
 let fetchDocumentsInFlight: Promise<void> | null = null;
 let fetchTrashInFlight: Promise<void> | null = null;
 let fetchUsageInFlight: Promise<void> | null = null;
+
+/**
+ * Rows deleted while a listing was still in flight.
+ *
+ * `fetchAllPages` reads every page and writes the whole list in ONE terminal
+ * `set`, guarded only by its own fetch generation — which a single-row delete
+ * does not bump, because bumping it would discard a listing the reader is
+ * waiting for. So without these, a document deleted mid-load is put back by the
+ * pages that were read before it went: it reappears in the list, and the trash
+ * it was optimistically moved into disagrees with the list beside it.
+ *
+ * The mechanism is `vaultStore`'s, for the same reason and with the same
+ * lifetime: an id is recorded on the delete, filtered out of any listing that
+ * lands afterwards, and forgotten when a FRESH fetch starts — by which point the
+ * server's own answer already excludes it.
+ */
+const inFlightDeletedDocumentIds = new Set<string>();
+const inFlightDeletedTrashIds = new Set<string>();
+
+/**
+ * Bumped when the trash is emptied, so a listing already in flight cannot write
+ * back the rows that purge destroyed.
+ *
+ * The id sets above cannot cover this one, and the reason is worth stating.
+ * `purgeDocument` and `restoreDocument` record their id AFTER the running listing
+ * cleared the set, so the set still holds it when that listing resolves.
+ * `emptyTrash` has no id to record: it derives them from the very list the
+ * running listing emptied on its way in, so it finds nothing to suppress — and on
+ * a clean purge it does not re-read either. Without this counter the listing then
+ * writes back everything it read before the purge.
+ *
+ * A separate counter rather than a bump of `fetchTrashGeneration`, because that
+ * generation also guards the `finally` that clears `trashLoading` and releases
+ * `fetchTrashInFlight`: bumping it from outside the run would strand the spinner
+ * on and the handle set for the life of the tab.
+ */
+let trashInvalidatedAt = 0;
 
 /**
  * The live transfers' handles and keys.
@@ -583,7 +675,16 @@ async function openDocumentRow(
   }
 }
 
-export const useDocumentsStore = create<DocumentsState>((set, get) => ({
+/**
+ * The state a fresh document store holds — and the state a lock returns it to.
+ *
+ * ONE definition, spread at creation and re-applied by `clearStore()`, because
+ * these two were the same object written twice and drifting apart was a silent
+ * failure: a field added here but forgotten in the teardown survives a lock, and
+ * a decrypted row or a previous account's folder id outliving a lock is exactly
+ * what this store exists to prevent.
+ */
+const EMPTY_DOCUMENTS_STATE = {
   documents: [],
   trashDocuments: [],
   usage: null,
@@ -591,8 +692,41 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
   documentsLoading: false,
   trashLoading: false,
   usageLoading: false,
+  trashLoaded: false,
   degradedCount: 0,
   invalidCount: 0,
+  trashDegradedCount: 0,
+  trashInvalidCount: 0,
+  selectedFolder: null,
+  showFavorites: false,
+  showTrash: false,
+  searchQuery: '',
+} as const satisfies Omit<
+  DocumentsState,
+  | 'fetchDocuments'
+  | 'fetchTrash'
+  | 'fetchUsage'
+  | 'startUpload'
+  | 'retryUpload'
+  | 'cancelUpload'
+  | 'updateDocumentMeta'
+  | 'setFavorite'
+  | 'moveToFolder'
+  | 'deleteDocument'
+  | 'restoreDocument'
+  | 'purgeDocument'
+  | 'emptyTrash'
+  | 'setSelectedFolder'
+  | 'toggleFavorites'
+  | 'toggleTrash'
+  | 'setSearchQuery'
+  | 'clearFilters'
+  | 'applyFolderDeleted'
+  | 'clearStore'
+>;
+
+export const useDocumentsStore = create<DocumentsState>((set, get) => ({
+  ...EMPTY_DOCUMENTS_STATE,
 
   // -----------------------------------------------------------------------
   // Reads
@@ -606,6 +740,11 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     const run = async (): Promise<void> => {
       try {
         const vaultKey = getVaultKey();
+        // Cleared HERE, at the start of a fresh read: from this point the
+        // server's own answer already excludes anything deleted before now, so
+        // remembering those ids longer would filter rows out of a listing that
+        // never contained them.
+        inFlightDeletedDocumentIds.clear();
         set({ documentsLoading: true, documents: [], degradedCount: 0, invalidCount: 0 });
         const opened = await fetchAllPages(
           (page) => listDocumentsApi({ page, limit: DOCUMENT_PAGE_SIZE }),
@@ -617,7 +756,10 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
         // just-emptied store would be repopulated with plaintext.
         if (myGeneration !== fetchDocumentsGeneration) return;
         set({
-          documents: opened.documents,
+          // A row deleted while these pages were being read is NOT put back. The
+          // pages predate the delete, and a generation guard cannot help: a
+          // single-row write must not discard a listing the reader is waiting for.
+          documents: opened.documents.filter((doc) => !inFlightDeletedDocumentIds.has(doc.id)),
           degradedCount: opened.degraded,
           invalidCount: opened.invalid,
         });
@@ -637,16 +779,41 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     fetchTrashGeneration += 1;
     const myGeneration = fetchTrashGeneration;
 
+    // Captured with the generation, and checked beside it: this run is stale if
+    // the trash was emptied while it was reading.
+    const myInvalidation = trashInvalidatedAt;
+
     const run = async (): Promise<void> => {
       try {
         const vaultKey = getVaultKey();
-        set({ trashLoading: true, trashDocuments: [] });
+        inFlightDeletedTrashIds.clear();
+        set({
+          trashLoading: true,
+          trashDocuments: [],
+          trashDegradedCount: 0,
+          trashInvalidCount: 0,
+        });
         const opened = await fetchAllPages(
           (page) => listDocumentTrashApi({ page, limit: DOCUMENT_PAGE_SIZE }),
           vaultKey,
         );
-        if (myGeneration !== fetchTrashGeneration) return;
-        set({ trashDocuments: opened.documents });
+        if (myGeneration !== fetchTrashGeneration || myInvalidation !== trashInvalidatedAt) return;
+        // `trashLoaded` is set HERE, in the success path, and never in the
+        // `finally` below: the `finally` also runs when the request failed, and a
+        // failed read has loaded nothing. `deleteDocument` moves a row into this
+        // list only when it was genuinely read, so a flag set on failure would
+        // produce a trash holding exactly one document and hiding the rest.
+        //
+        // The two counts are recorded rather than discarded. They used to be
+        // thrown away, which was invisible only because nothing rendered the
+        // trash: a trashed row whose key will not unwrap was simply absent, with
+        // nothing said about it.
+        set({
+          trashDocuments: opened.documents.filter((doc) => !inFlightDeletedTrashIds.has(doc.id)),
+          trashDegradedCount: opened.degraded,
+          trashInvalidCount: opened.invalid,
+          trashLoaded: true,
+        });
       } finally {
         if (myGeneration === fetchTrashGeneration) set({ trashLoading: false });
       }
@@ -912,11 +1079,37 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     await patchDocument(set, id, { folderId });
   },
 
+  /**
+   * Soft-delete a document, and move the row it removes into the trash.
+   *
+   * `DELETE /documents/:id` answers `{ success, message }` with NO data, so the
+   * row captured before the request is the only copy there will be until the
+   * next `fetchTrash`. The timestamp is stamped on the DECRYPTED wrapper and
+   * never on `_raw`: `_raw` is the server's row, it is what a later metadata
+   * re-seal derives this document's key material from (`updateDocumentMeta`
+   * reads `_raw.streamSalt`), and inventing a field on it would be inventing
+   * server state inside key derivation.
+   *
+   * Prepended rather than appended, because `listDocumentTrashSchema` sorts
+   * `deletedAt` descending: appending would drop the document a reader has just
+   * deleted to the bottom of a list that virtualizes above fifty rows.
+   */
   deleteDocument: async (id: string): Promise<void> => {
     const myGeneration = mutationGeneration;
+    const doomed = get().documents.find((doc) => doc.id === id);
     await deleteDocumentApi(id);
+    inFlightDeletedDocumentIds.add(id);
     if (myGeneration !== mutationGeneration) return;
-    set((state) => ({ documents: state.documents.filter((doc) => doc.id !== id) }));
+    const deletedAt = new Date().toISOString();
+    set((state) => ({
+      documents: state.documents.filter((doc) => doc.id !== id),
+      // Only when the trash has actually been READ. Pushing one row into a list
+      // that was never loaded would render a trash containing exactly that row
+      // and hiding every other.
+      ...(state.trashLoaded && doomed
+        ? { trashDocuments: [{ ...doomed, deletedAt }, ...state.trashDocuments] }
+        : {}),
+    }));
   },
 
   restoreDocument: async (id: string): Promise<void> => {
@@ -924,6 +1117,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     const myGeneration = mutationGeneration;
     const row = payloadOf(await restoreDocumentApi(id), 'restore the document');
     const opened = await openDocumentRow(row, vaultKey);
+    inFlightDeletedTrashIds.add(id);
     if (myGeneration !== mutationGeneration) return;
     set((state) => ({
       trashDocuments: state.trashDocuments.filter((doc) => doc.id !== id),
@@ -934,15 +1128,134 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
   purgeDocument: async (id: string): Promise<void> => {
     const myGeneration = mutationGeneration;
     await purgeDocumentApi(id);
+    inFlightDeletedTrashIds.add(id);
     if (myGeneration !== mutationGeneration) return;
     set((state) => ({ trashDocuments: state.trashDocuments.filter((doc) => doc.id !== id) }));
   },
 
-  emptyTrash: async (): Promise<void> => {
+  /**
+   * Destroy every document that was in the trash when the request arrived.
+   *
+   * The result is RETURNED rather than swallowed, and a partial run is read
+   * back. The server counts a failed object delete instead of throwing: the row
+   * keeps `deletedAt`, is left marked `purgePending`, and `GET /documents/trash`
+   * still returns it. Emptying the local list unconditionally would therefore
+   * report "all gone" about documents that are still there.
+   */
+  emptyTrash: async (): Promise<EmptyDocumentTrashResult> => {
     const myGeneration = mutationGeneration;
-    await emptyDocumentTrashApi();
-    if (myGeneration !== mutationGeneration) return;
+    const result = payloadOf(await emptyDocumentTrashApi(), 'empty the document trash');
+    if (myGeneration !== mutationGeneration) return result;
+
+    // The suppression set is populated ONLY when the purge was total. Its job is
+    // to stop a listing that was already in flight from putting back rows that no
+    // longer exist — which is exactly right when everything went, and pointless
+    // when it did not: on the partial path the very next thing this does is read
+    // the list again, and a set of ids can only subtract from what that read
+    // returns. The server leaves a row it could not delete marked `purgePending`
+    // and still listed, so those rows have to survive the read.
+    // Bumped BEFORE the write, so a listing that is mid-flight right now is
+    // already stale by the time it resolves. See `trashInvalidatedAt`.
+    trashInvalidatedAt += 1;
+
+    if (result.failedCount === 0) {
+      for (const doc of get().trashDocuments) inFlightDeletedTrashIds.add(doc.id);
+      set({ trashDocuments: [] });
+      return result;
+    }
+
     set({ trashDocuments: [] });
+    await get().fetchTrash();
+    return result;
+  },
+
+  // -----------------------------------------------------------------------
+  // Filters
+  //
+  // No generation guard on any of these. The counters exist to suppress a stale
+  // ASYNCHRONOUS write — a response that lands after a lock, a logout or a newer
+  // fetch. A synchronous user gesture cannot be stale.
+  // -----------------------------------------------------------------------
+
+  setSelectedFolder: (folderId: string | null): void => {
+    set({ selectedFolder: folderId, showFavorites: false, showTrash: false });
+  },
+
+  toggleFavorites: (): void => {
+    set((state) => ({
+      showFavorites: !state.showFavorites,
+      showTrash: false,
+      selectedFolder: null,
+    }));
+  },
+
+  toggleTrash: (): void => {
+    set((state) => ({
+      showTrash: !state.showTrash,
+      showFavorites: false,
+      selectedFolder: null,
+    }));
+  },
+
+  setSearchQuery: (query: string): void => {
+    set({ searchQuery: query });
+  },
+
+  clearFilters: (): void => {
+    set({ selectedFolder: null, showFavorites: false, showTrash: false });
+  },
+
+  /**
+   * Mirror `folderController.deleteFolder`'s sweep onto the local rows.
+   *
+   * The server's two branches are NOT symmetrical, and copying one onto the other
+   * is how this goes wrong (`folderController.ts:354-363`):
+   *
+   *   - `delete` filters `{ folderId, userId, deletedAt: null }` — ACTIVE rows
+   *     only — and stamps `deletedAt`. A row already in the trash keeps the dead
+   *     folder id, which is why `trashDocuments` is untouched on this branch.
+   *   - `move` filters `{ folderId, userId }` with NO `deletedAt` clause, so it
+   *     reaches trashed rows too, and it re-parents to the deleted folder's OWN
+   *     PARENT rather than to the root. A client that cleared `folderId` here
+   *     would show a document at the root that the server has filed one level up,
+   *     and would disagree with it until the next full reload.
+   */
+  applyFolderDeleted: (
+    folderId: string,
+    action: 'move' | 'delete',
+    parentId: string | undefined,
+  ): void => {
+    const reparent = (doc: DecryptedDocument): DecryptedDocument =>
+      doc.folderId !== folderId
+        ? doc
+        : parentId === undefined
+          ? { ...doc, folderId: undefined }
+          : { ...doc, folderId: parentId };
+    set((state) => ({
+      documents:
+        action === 'delete'
+          ? state.documents.filter((doc) => doc.folderId !== folderId)
+          : state.documents.map(reparent),
+      // `move` reaches the trash; `delete` does not.
+      trashDocuments:
+        action === 'delete' ? state.trashDocuments : state.trashDocuments.map(reparent),
+      selectedFolder: state.selectedFolder === folderId ? null : state.selectedFolder,
+    }));
+    // The swept rows are in the trash now — but read it back only if it was
+    // already read. An unread trash is filled correctly by the next `fetchTrash`.
+    //
+    // The rejection is swallowed deliberately. This is a background refresh of a
+    // list the reader may not even be looking at, fired from a synchronous
+    // handler that has already reported the folder deletion; an unhandled
+    // rejection here would surface a failure nobody can act on, and the next
+    // `fetchTrash` corrects the list anyway.
+    if (action === 'delete' && get().trashLoaded) {
+      void get()
+        .fetchTrash()
+        .catch(() => {
+          /* see above */
+        });
+    }
   },
 
   // -----------------------------------------------------------------------
@@ -978,6 +1291,9 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     fetchDocumentsInFlight = null;
     fetchTrashInFlight = null;
     fetchUsageInFlight = null;
+    inFlightDeletedDocumentIds.clear();
+    inFlightDeletedTrashIds.clear();
+    trashInvalidatedAt += 1;
 
     for (const [uploadId, session] of sessions) {
       session.controller.abort();
@@ -986,17 +1302,13 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     }
     sessions.clear();
 
-    set({
-      documents: [],
-      trashDocuments: [],
-      usage: null,
-      uploads: {},
-      documentsLoading: false,
-      trashLoading: false,
-      usageLoading: false,
-      degradedCount: 0,
-      invalidCount: 0,
-    });
+    // The filters reset with everything else, and that is not tidiness.
+    // `selectedFolder` is a folder id belonging to the account that just ended:
+    // leaving it would carry one bit of the previous account's structure into the
+    // next sign-in on this tab and drop that user into an empty folder view with
+    // no explanation, and a `showTrash` left true would open their unlock
+    // straight into the trash.
+    set({ ...EMPTY_DOCUMENTS_STATE });
   },
 }));
 

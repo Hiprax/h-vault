@@ -194,10 +194,41 @@ body {
  * Images and media
  * ----------------------------------------------------------------------- */
 
+/*
+ * The two modes whose content has an INTRINSIC SIZE, centred in whatever box the
+ * frame happens to be — which, since the viewer gained a full-screen mode, is
+ * anything from a narrow column to the whole display.
+ *
+ * `100vh` here is the IFRAME'S OWN viewport. The guest sizes itself to its box
+ * without the host sending a height and without reporting one back; there is
+ * deliberately no height message in this protocol and this rule does not need
+ * one. The 32px is `#root`'s padding, so the shell fills the frame exactly and
+ * never invents a scrollbar.
+ *
+ * `display: flex` is safe because each of these shells holds EXACTLY ONE child:
+ * `renderImage` and `renderMedia` both REPLACE their content with the notice on a
+ * decode failure rather than appending it. A shell that could hold a notice AND
+ * the media would need `flex-direction: column` here.
+ */
+.hv-doc-image,
+.hv-doc-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - 32px);
+}
+
 .hv-image,
 .hv-media {
   display: block;
   max-width: 100%;
+  /*
+   * Bounded in BOTH axes so a tall image fits the frame instead of scrolling.
+   * There is deliberately no `width: 100%`: a 32x32 favicon blown up to fill the
+   * display is blurry nonsense, so the cap FITS a large file to the box and
+   * leaves a small one at its natural size, merely centred.
+   */
+  max-height: calc(100vh - 32px);
   margin: 0 auto;
 }
 

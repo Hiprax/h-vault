@@ -22,6 +22,30 @@ vi.mock('../../src/stores/vaultStore', () => ({
 // Re-import so we can mutate the mock per-test
 import { useVaultStore } from '../../src/stores/vaultStore';
 
+/**
+ * The shared search field, bound to the VAULT — which is what every case below is
+ * about. `SearchBar` now renders on `/vault` and on `/documents` and takes its
+ * query, its result count and its labels as props; this binding supplies the
+ * vault's from the real store, so each assertion still exercises the same wiring
+ * it did when the component read the store directly.
+ */
+function VaultSearchBar(props: { className?: string }) {
+  const query = useVaultStore((s) => s.searchQuery);
+  const setQuery = useVaultStore((s) => s.setSearchQuery);
+  const count = useVaultStore((s) => s.filteredItemCount);
+  return (
+    <SearchBar
+      query={query}
+      onQueryChange={setQuery}
+      resultCount={count}
+      placeholder="Search vault... (Ctrl+K)"
+      label="Search vault items"
+      controlsId={VAULT_SEARCH_RESULTS_ID}
+      {...props}
+    />
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -62,7 +86,7 @@ describe('SearchBar', () => {
   // 1. Renders search input with correct placeholder
   // -------------------------------------------------------------------------
   it('renders search input with correct placeholder', () => {
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     const input = screen.getByPlaceholderText('Search vault... (Ctrl+K)');
     expect(input).toBeInTheDocument();
@@ -73,7 +97,7 @@ describe('SearchBar', () => {
   // 1b. Search input has aria-autocomplete and aria-controls attributes
   // -------------------------------------------------------------------------
   it('has aria-autocomplete="list" and aria-controls attributes', () => {
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     const input = screen.getByLabelText('Search vault items');
     expect(input).toHaveAttribute('aria-autocomplete', 'list');
@@ -84,7 +108,7 @@ describe('SearchBar', () => {
   // 2. Typing updates local input value immediately
   // -------------------------------------------------------------------------
   it('typing updates local input value immediately', () => {
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     const input = screen.getByLabelText('Search vault items');
     fireEvent.change(input, { target: { value: 'github' } });
@@ -96,7 +120,7 @@ describe('SearchBar', () => {
   // 3. Debounced store update after 300ms
   // -------------------------------------------------------------------------
   it('calls setSearchQuery in the store after 300ms debounce', () => {
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     const input = screen.getByLabelText('Search vault items');
     fireEvent.change(input, { target: { value: 'test query' } });
@@ -117,7 +141,7 @@ describe('SearchBar', () => {
   // 4. Clear button appears and works
   // -------------------------------------------------------------------------
   it('shows clear button when input has text and clears on click', () => {
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     const input = screen.getByLabelText('Search vault items');
 
@@ -146,7 +170,7 @@ describe('SearchBar', () => {
       filteredItemCount: 2,
     });
 
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     // filteredItemCount = 2 => "2 results"
     expect(screen.getByText('2 results')).toBeInTheDocument();
@@ -158,7 +182,7 @@ describe('SearchBar', () => {
       filteredItemCount: 1,
     });
 
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     expect(screen.getByText('1 result')).toBeInTheDocument();
   });
@@ -169,7 +193,7 @@ describe('SearchBar', () => {
       filteredItemCount: null,
     });
 
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     expect(screen.queryByText(/result/)).not.toBeInTheDocument();
   });
@@ -178,7 +202,7 @@ describe('SearchBar', () => {
   // 6. Keyboard shortcut: Ctrl+K focuses the input
   // -------------------------------------------------------------------------
   it('focuses input on Ctrl+K keyboard shortcut', () => {
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     const input = screen.getByLabelText('Search vault items');
     expect(document.activeElement).not.toBe(input);
@@ -189,7 +213,7 @@ describe('SearchBar', () => {
   });
 
   it('focuses input on Cmd+K (metaKey) keyboard shortcut', () => {
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     const input = screen.getByLabelText('Search vault items');
     expect(document.activeElement).not.toBe(input);
@@ -201,7 +225,7 @@ describe('SearchBar', () => {
 
   // L30: maxLength on search input
   it('has maxLength attribute on the search input', () => {
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
     const input = screen.getByLabelText('Search vault items');
     expect(input).toHaveAttribute('maxLength', '200');
   });

@@ -3,7 +3,7 @@
  *
  * Vault folders form a tree via `parentId` pointers only — there is no stored
  * path anywhere (the sole existing tree builder is the private `buildTree` in
- * `components/vault/FolderSidebar.tsx`). Portable formats (Bitwarden, Chrome)
+ * `components/folders/FolderRail.tsx`). Portable formats (Bitwarden, Chrome)
  * express hierarchy as a slash-joined path string, so this module flattens the
  * pointer graph into `parent/child` paths.
  *

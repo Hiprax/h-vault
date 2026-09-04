@@ -50,6 +50,7 @@ vi.mock('../src/services/api/client', () => ({
 import * as authApi from '../src/services/api/authApi';
 import * as userApi from '../src/services/api/userApi';
 import * as vaultApi from '../src/services/api/vaultApi';
+import * as backupApi from '../src/services/api/backupApi';
 
 // ---------------------------------------------------------------------------
 // The real server route table, mirrored from packages/server/src/routes/*.ts.
@@ -88,6 +89,9 @@ const SERVER_ROUTES = new Set<string>([
   'DELETE /user/trusted-devices/:id',
   'GET /user/audit-log',
   'DELETE /user',
+  // routes/backup.ts — only the read this module wraps so far; the rest of the
+  // backup calls are still inline in `BackupSettingsPage` and belong here too.
+  'GET /backup/history',
   // routes/vault.ts
   'GET /vault/items',
   'GET /vault/items/trash',
@@ -565,14 +569,29 @@ describe('vaultApi wire contract — folders', () => {
 // Whole-surface guard
 // ===========================================================================
 
+describe('backupApi wire contract', () => {
+  it('passes backup-history pagination through as query params, not a body', async () => {
+    mockGet.mockResolvedValue({ data: { success: true, data: [], pagination: {} } });
+    await backupApi.getBackupHistoryApi({ page: 2, limit: 10 });
+    expectCall(mockGet, 'GET', '/backup/history', { params: { page: 2, limit: 10 } });
+  });
+
+  it('omits the params entirely when none are given', async () => {
+    mockGet.mockResolvedValue({ data: { success: true, data: [], pagination: {} } });
+    await backupApi.getBackupHistoryApi();
+    expectCall(mockGet, 'GET', '/backup/history', { params: undefined });
+  });
+});
+
 describe('API surface', () => {
   // Guards against a function being added to a service module without a
   // contract test — the exact way an untested wrong URL slips in.
-  it('has a contract test for every exported function of the three services', () => {
+  it('has a contract test for every exported function of the four services', () => {
     const exported = [
       ...Object.keys(authApi),
       ...Object.keys(userApi),
       ...Object.keys(vaultApi),
+      ...Object.keys(backupApi),
     ].filter((k) => k.endsWith('Api'));
 
     // Every function exercised above, by name.
@@ -622,6 +641,7 @@ describe('API surface', () => {
       'updateFolderApi',
       'reorderFolderApi',
       'deleteFolderApi',
+      'getBackupHistoryApi',
     ]);
 
     const untested = exported.filter((name) => !covered.has(name));

@@ -78,6 +78,14 @@ export const PASSWORD_HISTORY_MAX = 10;
 export const LOCKOUT_DURATION_MINUTES = 30;
 export const AUDIT_LOG_PAGE_LIMIT = 20;
 export const AUDIT_LOG_MAX_LIMIT = 100;
+// The BACKUP history's page bounds, and they are the AUDIT log's on purpose.
+// `swagger.ts` documents both log endpoints from ONE `pageParams(100, 20)` call,
+// because how a log is paged is one decision rather than two. Written as bare
+// literals in the schema, the backup half had drifted to 30/30 — so the server
+// refused, with a 400, requests its own published contract permits. Naming them
+// here is what stops that happening again.
+export const BACKUP_HISTORY_PAGE_LIMIT = 20;
+export const BACKUP_HISTORY_MAX_LIMIT = 100;
 export const MAX_FOLDER_NESTING_DEPTH = 50;
 export const MAX_IMPORT_ITEMS = 10_000;
 export const MAX_SESSIONS = 50;

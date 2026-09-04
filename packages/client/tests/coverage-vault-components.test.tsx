@@ -6,7 +6,7 @@
  *     selection while in multi-select mode, bulk move/tag/delete error paths,
  *     the sort menu (dateModified / type) and the sort-order toggle, the trash
  *     bulk-permanent-delete path and the empty-trash failure path.
- * 2 - FolderSidebar: the delete-folder "move vs delete items" choice, the
+ * 2 - FolderRail: the delete-folder "move vs delete items" choice, the
  *     context-menu roving focus, the upward drag-reorder direction and the
  *     type-filter toggle-off.
  * 3 - PasswordGenerator: clipboard failure paths (main + history) and using a
@@ -185,9 +185,45 @@ Object.defineProperty(navigator, 'clipboard', {
 
 import { useVaultStore, type DecryptedVaultItem } from '../src/stores/vaultStore';
 import { VaultList } from '../src/components/vault/VaultList';
-import { FolderSidebar } from '../src/components/vault/FolderSidebar';
+import { FolderRail } from '../src/components/folders/FolderRail';
+import { useVaultFolderScope } from '../src/hooks/useVaultFolderScope';
 import { PasswordGenerator } from '../src/components/vault/PasswordGenerator';
-import { SearchBar } from '../src/components/vault/SearchBar';
+import { SearchBar, VAULT_SEARCH_RESULTS_ID } from '../src/components/vault/SearchBar';
+
+/**
+ * The shared search field, bound to the VAULT — which is what every case below is
+ * about. `SearchBar` now renders on `/vault` and on `/documents` and takes its
+ * query, its result count and its labels as props; this binding supplies the
+ * vault's from the real store, so each assertion still exercises the same wiring
+ * it did when the component read the store directly.
+ */
+function VaultSearchBar(props: { className?: string }) {
+  const query = useVaultStore((s) => s.searchQuery);
+  const setQuery = useVaultStore((s) => s.setSearchQuery);
+  const count = useVaultStore((s) => s.filteredItemCount);
+  return (
+    <SearchBar
+      query={query}
+      onQueryChange={setQuery}
+      resultCount={count}
+      placeholder="Search vault... (Ctrl+K)"
+      label="Search vault items"
+      controlsId={VAULT_SEARCH_RESULTS_ID}
+      {...props}
+    />
+  );
+}
+
+/**
+ * The shared rail, bound to the VAULT scope — which is what every case below is
+ * about. `FolderRail` now renders on `/vault` and on `/documents`, and takes the
+ * counts, the active filter and the selection callbacks as a `scope` prop; this
+ * binding supplies the vault's, so each assertion still runs against the real
+ * `useVaultStore` exactly as it did when the component read it directly.
+ */
+function VaultRail(props: { className?: string; onClose?: () => void }) {
+  return <FolderRail scope={useVaultFolderScope()} {...props} />;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -838,12 +874,12 @@ describe('VaultList — progressive loading badge', () => {
 });
 
 // ===========================================================================
-// FolderSidebar
+// FolderRail
 // ===========================================================================
 
-describe('FolderSidebar — delete folder "move vs delete items" choice', () => {
+describe('FolderRail — delete folder "move vs delete items" choice', () => {
   function openDeleteDialog() {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     fireEvent.contextMenu(screen.getByText('Work').closest('button')!, {
       clientX: 10,
       clientY: 10,
@@ -858,9 +894,9 @@ describe('FolderSidebar — delete folder "move vs delete items" choice', () => 
 
     const dialog = openDeleteDialog();
     // Default is the non-destructive "move to root".
-    expect(within(dialog).getByLabelText('Move items to root (no folder)')).toBeChecked();
+    expect(within(dialog).getByLabelText(/Move them out of the folder/)).toBeChecked();
 
-    fireEvent.click(within(dialog).getByLabelText('Delete items with the folder'));
+    fireEvent.click(within(dialog).getByLabelText(/Move them to the trash/));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
@@ -896,10 +932,10 @@ describe('FolderSidebar — delete folder "move vs delete items" choice', () => 
     resetVaultStore({ folders: [makeFolder({ id: 'f1', name: 'Work' })] as never, deleteFolder });
 
     const dialog = openDeleteDialog();
-    fireEvent.click(within(dialog).getByLabelText('Delete items with the folder'));
-    fireEvent.click(within(dialog).getByLabelText('Move items to root (no folder)'));
+    fireEvent.click(within(dialog).getByLabelText(/Move them to the trash/));
+    fireEvent.click(within(dialog).getByLabelText(/Move them out of the folder/));
 
-    expect(within(dialog).getByLabelText('Delete items with the folder')).not.toBeChecked();
+    expect(within(dialog).getByLabelText(/Move them to the trash/)).not.toBeChecked();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
@@ -917,13 +953,13 @@ describe('FolderSidebar — delete folder "move vs delete items" choice', () => 
       deleteFolder,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // First delete: choose the destructive option.
     fireEvent.contextMenu(screen.getByText('Work').closest('button')!, { clientX: 1, clientY: 1 });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
     let dialog = screen.getByRole('alertdialog');
-    fireEvent.click(within(dialog).getByLabelText('Delete items with the folder'));
+    fireEvent.click(within(dialog).getByLabelText(/Move them to the trash/));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
     await waitFor(() => {
       expect(deleteFolder).toHaveBeenCalledWith('f1', 'delete');
@@ -933,7 +969,7 @@ describe('FolderSidebar — delete folder "move vs delete items" choice', () => 
     fireEvent.contextMenu(screen.getByText('Home').closest('button')!, { clientX: 1, clientY: 1 });
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
     dialog = screen.getByRole('alertdialog');
-    expect(within(dialog).getByLabelText('Move items to root (no folder)')).toBeChecked();
+    expect(within(dialog).getByLabelText(/Move them out of the folder/)).toBeChecked();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
@@ -942,7 +978,7 @@ describe('FolderSidebar — delete folder "move vs delete items" choice', () => 
   });
 });
 
-describe('FolderSidebar — nested tree ordering', () => {
+describe('FolderRail — nested tree ordering', () => {
   it('renders a parent’s children in sortOrder, independent of the array order', () => {
     resetVaultStore({
       folders: [
@@ -951,7 +987,7 @@ describe('FolderSidebar — nested tree ordering', () => {
         { ...makeFolder({ id: 'c1', name: 'Yankee', sortOrder: 0 }), parentId: 'p' },
       ] as never,
     });
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const body = document.body.textContent ?? '';
     // Yankee (sortOrder 0) must precede Zulu (sortOrder 1) even though the
@@ -961,13 +997,13 @@ describe('FolderSidebar — nested tree ordering', () => {
   });
 });
 
-describe('FolderSidebar — context menu roving focus', () => {
+describe('FolderRail — context menu roving focus', () => {
   beforeEach(() => {
     resetVaultStore({ folders: [makeFolder({ id: 'f1', name: 'Work' })] as never });
   });
 
   function openMenu() {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     fireEvent.contextMenu(screen.getByText('Work').closest('button')!, { clientX: 5, clientY: 5 });
     return screen.getByRole('menu');
   }
@@ -995,7 +1031,7 @@ describe('FolderSidebar — context menu roving focus', () => {
   });
 });
 
-describe('FolderSidebar — drag reorder direction', () => {
+describe('FolderRail — drag reorder direction', () => {
   it('dragging a folder UP inserts it before the drop target', async () => {
     const fetchFolders = vi.fn().mockResolvedValue(undefined);
     resetVaultStore({
@@ -1006,7 +1042,7 @@ describe('FolderSidebar — drag reorder direction', () => {
       ] as never,
       fetchFolders,
     });
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn(), getData: vi.fn() };
     fireEvent.dragStart(screen.getByText('Three').closest('button')!, { dataTransfer });
@@ -1030,7 +1066,7 @@ describe('FolderSidebar — drag reorder direction', () => {
         { ...makeFolder({ id: 'f2', name: 'Child', sortOrder: 0 }), parentId: 'f1' },
       ] as never,
     });
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn(), getData: vi.fn() };
     // Root is not in Child's sibling set, so the insertion index cannot be found.
@@ -1041,11 +1077,11 @@ describe('FolderSidebar — drag reorder direction', () => {
   });
 });
 
-describe('FolderSidebar — filter toggles', () => {
+describe('FolderRail — filter toggles', () => {
   it('clicking the already-active type filter clears it', () => {
     const setSelectedType = vi.fn();
     resetVaultStore({ selectedType: 'login', setSelectedType });
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('Logins'));
 
@@ -1060,18 +1096,18 @@ describe('FolderSidebar — filter toggles', () => {
         makeItem({ id: 'c', name: 'C', favorite: false }),
       ],
     });
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const favBtn = screen.getByText('Favorites').closest('button')!;
     expect(within(favBtn).getByText('2')).toBeInTheDocument();
   });
 });
 
-describe('FolderSidebar — new folder dialog dismissal', () => {
+describe('FolderRail — new folder dialog dismissal', () => {
   it('closes and discards the typed name when the backdrop is clicked', () => {
     const createFolder = vi.fn().mockResolvedValue(undefined);
     resetVaultStore({ createFolder });
-    const { container } = renderWithRouter(<FolderSidebar />);
+    const { container } = renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     fireEvent.change(screen.getByPlaceholderText('Folder name'), { target: { value: 'Draft' } });
@@ -1089,7 +1125,7 @@ describe('FolderSidebar — new folder dialog dismissal', () => {
   it('Cancel discards the typed name', () => {
     const createFolder = vi.fn().mockResolvedValue(undefined);
     resetVaultStore({ createFolder });
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     fireEvent.change(screen.getByPlaceholderText('Folder name'), { target: { value: 'Draft' } });
@@ -1183,7 +1219,7 @@ describe('SearchBar — debounce and external clear', () => {
     vi.useFakeTimers();
     resetVaultStore();
 
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
     const input = screen.getByLabelText('Search vault items');
 
     fireEvent.change(input, { target: { value: 'gi' } });
@@ -1210,7 +1246,7 @@ describe('SearchBar — debounce and external clear', () => {
   it('mirrors the store query into the input on mount, and clears it when the store is cleared', () => {
     resetVaultStore({ searchQuery: 'github' });
 
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
     const input = screen.getByLabelText('Search vault items');
     expect(input).toHaveValue('github');
 
@@ -1224,7 +1260,7 @@ describe('SearchBar — debounce and external clear', () => {
 
   it('renders the filtered result count published by VaultList', () => {
     resetVaultStore({ searchQuery: 'a', filteredItemCount: 0 });
-    render(<SearchBar />);
+    render(<VaultSearchBar />);
 
     expect(screen.getByText('0 results')).toBeInTheDocument();
   });

@@ -459,6 +459,46 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
       expect(res.body.data.some((l: { itemCount: number }) => l.itemCount === 99)).toBe(false);
       expect(res.body.data.every((l: Record<string, unknown>) => !('userId' in l))).toBe(true);
     });
+
+    it('pages a tie-heavy history without losing or repeating a row', async () => {
+      // Ties are the NORMAL case here, not a curiosity: `backupScheduler` writes a
+      // user's rows inside one tick, so several can share a millisecond. With
+      // `skip`/`limit` and a sort that is not a total order, a row that shifts
+      // between two requests is one the reader either sees twice or never sees at
+      // all — and which it is, is up to the storage engine.
+      const shared = new Date('2026-03-01T00:00:00.000Z');
+      const seeded: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const log = await BackupLog.create({
+          userId: user.id,
+          status: 'success',
+          itemCount: i,
+          sentTo: ['download'],
+          timestamp: shared,
+        });
+        seeded.push(String(log._id));
+      }
+
+      const seen: string[] = [];
+      for (let page = 1; page <= 3; page++) {
+        const res = await agent
+          .get(`/api/v1/backup/history?page=${String(page)}&limit=2`)
+          .set('Authorization', authHeader(user.accessToken));
+        expect(res.status).toBe(200);
+        for (const row of res.body.data as { _id: string }[]) seen.push(row._id);
+      }
+
+      // Every seeded row exactly once...
+      expect(new Set(seen).size).toBe(seen.length);
+      expect([...seen].sort()).toEqual([...seeded].sort());
+      // ...and in the order the tiebreak DEFINES. This is the half with teeth:
+      // ObjectIds rise monotonically, so these five were created in ascending
+      // order and `{ timestamp: -1, _id: -1 }` must walk them backwards. Without
+      // the tiebreak the engine is free to answer in its own order — which for a
+      // collection scan is insertion order, i.e. exactly the reverse — and the
+      // set assertion above cannot tell the two apart.
+      expect(seen).toEqual([...seeded].reverse());
+    });
   });
 
   // ── folderController: E11000 → 409 on create AND update ────────────────

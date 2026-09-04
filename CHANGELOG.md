@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **A folder, favorites and trash rail on the Documents page.** Documents now have the same navigation the vault has: All Documents, Favorites and Trash, plus the folder tree with a count per folder. Filing a document in a folder or marking it a favorite finally leads somewhere, and a document you deleted can be found, restored or destroyed for good from the trash view rather than only from a URL you happened to keep.
+- **A search box on Documents**, over a document's name, its type, its tags and its note — all decrypted in your browser, so the server is never told what you searched for.
+- **Empty trash**, for documents. It reports how many were destroyed, and says so honestly when the storage engine could not remove every file.
+- **A full-screen mode for the document viewer.** The panel expands to fill the window and comes back with a button or Escape. The document's name and its Download button stay outside the frame in both states, so nothing a document renders can forge them, and the browser's own address bar stays visible.
+- **New uploads are filed into the folder you have open**, and the upload panel says which one before it starts.
+- **A document's folder is now visible** on its row in the list and in its details, and a trashed document shows when it was deleted.
+- Images and video are centred in the viewer rather than sitting at the top of it.
+
+### Changed
+
+- **Backup History pages from the server**, ten entries at a time, with the total and Prev/Next controls. It previously showed only the newest thirty and made everything older unreachable.
+- The folder-delete dialog now says that **documents in the folder are affected too**, and that "delete" moves them to the trash for thirty days rather than destroying them — both of which the server has always done and the dialog never said.
+- `GET /backup/history` now accepts the page size its own published API contract advertises, instead of refusing anything above thirty.
+
+### Fixed
+
+- **A document sent to the trash could not be found anywhere in the app.** The message said it had been moved to the trash; there was no trash to move it to.
+- **A document's folder and its favorite flag had no surface that used them.** Both were stored correctly and neither changed anything you could see.
+- **The Backup History section silently swallowed a failed load**, showing "No backup history" — indistinguishable from an account that had never run a backup.
+- A backup you downloaded did not appear in the history until the page was reloaded, although the server had always recorded it.
+- A document deleted while its list was still loading could reappear in the list when that load finished.
+- Paging the backup history or the audit log can no longer show one entry twice, or skip one, when several were written in the same instant.
+- Deleting a folder no longer leaves an unhandled error behind when the vault has since been locked.
+
 ## [0.10.1] - 2026-09-03
 
 ### Fixed

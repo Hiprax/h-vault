@@ -59,6 +59,9 @@ import {
   MAX_DOCUMENTS_PER_USER,
   MAX_IMPORT_ITEMS,
   PASSWORD_HISTORY_MAX,
+  AUDIT_LOG_MAX_LIMIT,
+  BACKUP_HISTORY_PAGE_LIMIT,
+  BACKUP_HISTORY_MAX_LIMIT,
 } from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
@@ -2959,7 +2962,7 @@ describe('backupHistorySchema', () => {
   it('provides defaults for page and limit', () => {
     const result = backupHistorySchema.parse({});
     expect(result.page).toBe(1);
-    expect(result.limit).toBe(30);
+    expect(result.limit).toBe(BACKUP_HISTORY_PAGE_LIMIT);
   });
 
   it('coerces string values', () => {
@@ -2976,8 +2979,19 @@ describe('backupHistorySchema', () => {
     expect(backupHistorySchema.safeParse({ page: -1 }).success).toBe(false);
   });
 
-  it('rejects limit above 30', () => {
-    expect(backupHistorySchema.safeParse({ limit: 31 }).success).toBe(false);
+  it('accepts the ceiling its own published contract advertises', () => {
+    // `swagger.ts` documents this endpoint with `LOG_PAGE_PARAMS`, the SAME
+    // `pageParams(100, 20)` the audit log uses, and the committed OpenAPI
+    // snapshot has always published `maximum: 100, default: 20`. The schema said
+    // 30/30, so the server answered 400 to requests its own contract permits.
+    // Pinned by PARSING at the bound and one past it, never by comparing two
+    // constants, so this fails if either endpoint's ceiling drifts again.
+    expect(backupHistorySchema.safeParse({ limit: 31 }).success).toBe(true);
+    expect(backupHistorySchema.safeParse({ limit: AUDIT_LOG_MAX_LIMIT }).success).toBe(true);
+  });
+
+  it('rejects a limit past the ceiling', () => {
+    expect(backupHistorySchema.safeParse({ limit: AUDIT_LOG_MAX_LIMIT + 1 }).success).toBe(false);
   });
 
   it('rejects limit below 1', () => {
@@ -2986,7 +3000,9 @@ describe('backupHistorySchema', () => {
 
   it('accepts boundary values', () => {
     expect(backupHistorySchema.safeParse({ page: 1, limit: 1 }).success).toBe(true);
-    expect(backupHistorySchema.safeParse({ page: 1, limit: 30 }).success).toBe(true);
+    expect(
+      backupHistorySchema.safeParse({ page: 1, limit: BACKUP_HISTORY_MAX_LIMIT }).success,
+    ).toBe(true);
   });
 
   it('rejects non-integer page', () => {

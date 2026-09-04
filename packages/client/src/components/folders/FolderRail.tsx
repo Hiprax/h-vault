@@ -4,24 +4,93 @@ import {
   FolderPlus,
   Star,
   Trash2,
-  Key,
-  FileText,
-  CreditCard,
-  User,
-  Lock,
   ChevronRight,
   Inbox,
   Pencil,
   Palette,
   GripVertical,
   Loader2,
+  type LucideIcon,
 } from 'lucide-react';
+import { TRASH_AUTO_PURGE_DAYS } from '@hvault/shared';
 import { cn } from '../../lib/utils';
 import { useVaultStore, type DecryptedFolder } from '../../stores/vaultStore';
 import { reorderFolderApi } from '../../services/api/vaultApi';
 import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
-import type { ItemType } from '@hvault/shared';
+
+/**
+ * The navigation rail, rendered on BOTH `/vault` and `/documents`.
+ *
+ * ---------------------------------------------------------------------------
+ * ONE RAIL, TWO SCOPES, AND THE SEAM BETWEEN THEM
+ * ---------------------------------------------------------------------------
+ *
+ * The seam is one sentence: **the scope answers "which rows am I counting and
+ * filtering"; `vaultStore` answers "what folders exist".**
+ *
+ * Folders are a SINGLE collection shared by vault items and documents —
+ * `folderController.deleteFolder` builds one member filter and applies it to
+ * both models — so a rail rendered on either route has to be able to create,
+ * rename, recolour, reorder and delete the same folders. That half stays bound
+ * to `vaultStore` here. Everything that differs between the two routes — the
+ * counts, which filter is active, what selecting one does — arrives pre-computed
+ * and pre-bound in {@link FolderScope}, so this component holds no business
+ * logic and each scope hook is the only place its store is touched.
+ *
+ * It is ONE component rather than two on purpose. A second rail would be the
+ * same buttons, the same tree, the same drag-and-drop, the same three dialogs
+ * and the same context menu, written twice — and two copies of a navigation
+ * surface drift into two different interaction models for one idea.
+ */
+
+/** One entry in the rail's optional secondary filter group (the vault's item types). */
+export interface FolderScopeOption {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  count: number;
+  selected: boolean;
+  /** Bound by the scope's own hook, so the rail never learns what an `ItemType` is. */
+  onSelect: () => void;
+}
+
+/** What one route's rows look like to the rail. */
+export interface FolderScope {
+  /** The first button's label: "All Items" / "All Documents". */
+  allLabel: string;
+  counts: {
+    all: number;
+    favorites: number;
+    trash: number;
+    /**
+     * ACTIVE rows per folder id — trashed rows excluded.
+     *
+     * A badge that counted the trash would tell a reader a folder holds five
+     * things and then show them three.
+     */
+    perFolder: ReadonlyMap<string, number>;
+  };
+  selectedFolder: string | null;
+  showFavorites: boolean;
+  showTrash: boolean;
+  /**
+   * Whether nothing at all is filtered.
+   *
+   * Supplied rather than derived, because the rail cannot compute it: the vault
+   * is also "not all" when a TYPE is selected, and the documents scope has no
+   * types.
+   */
+  showingAll: boolean;
+  onSelectAll: () => void;
+  onSelectFolder: (folderId: string) => void;
+  onToggleFavorites: () => void;
+  onToggleTrash: () => void;
+  /** Absent for a scope with no secondary group. */
+  options?: readonly FolderScopeOption[] | undefined;
+  /** Heading above that group. Required whenever `options` is present. */
+  optionsLabel?: string | undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,14 +109,6 @@ interface ContextMenuState {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-const TYPE_FILTERS: { type: ItemType; label: string; icon: typeof Key }[] = [
-  { type: 'login', label: 'Logins', icon: Key },
-  { type: 'secret', label: 'Secrets', icon: Lock },
-  { type: 'note', label: 'Notes', icon: FileText },
-  { type: 'card', label: 'Cards', icon: CreditCard },
-  { type: 'identity', label: 'Identities', icon: User },
-];
 
 const FOLDER_COLORS = [
   '#3b82f6',
@@ -95,7 +156,7 @@ interface FolderTreeItemProps {
   selectedFolder: string | null;
   onSelect: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, id: string) => void;
-  itemCounts: Map<string, number>;
+  itemCounts: ReadonlyMap<string, number>;
   onDragStart: (e: React.DragEvent, id: string) => void;
   onDragOver: (e: React.DragEvent, id: string) => void;
   onDrop: (e: React.DragEvent, id: string) => void;
@@ -217,27 +278,26 @@ function FolderTreeItem({
 // Main sidebar component
 // ---------------------------------------------------------------------------
 
-interface FolderSidebarProps {
+interface FolderRailProps {
+  scope: FolderScope;
   className?: string;
+  /**
+   * Closes the mobile drawer. The RAIL calls it after every selection, so no
+   * scope hook has to know a drawer exists.
+   */
   onClose?: () => void;
 }
 
-export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
+export function FolderRail({ scope, className, onClose }: FolderRailProps) {
+  // Folders themselves, and only folders: what is filed IN them arrives through
+  // `scope`. See the docblock at the top of this file.
   const folders = useVaultStore((s) => s.folders);
-  const items = useVaultStore((s) => s.items);
-  const trashItems = useVaultStore((s) => s.trashItems);
-  const selectedFolder = useVaultStore((s) => s.selectedFolder);
-  const selectedType = useVaultStore((s) => s.selectedType);
-  const showFavorites = useVaultStore((s) => s.showFavorites);
-  const showTrash = useVaultStore((s) => s.showTrash);
-  const setSelectedFolder = useVaultStore((s) => s.setSelectedFolder);
-  const setSelectedType = useVaultStore((s) => s.setSelectedType);
-  const toggleFavorites = useVaultStore((s) => s.toggleFavorites);
-  const toggleTrash = useVaultStore((s) => s.toggleTrash);
   const createFolder = useVaultStore((s) => s.createFolder);
   const updateFolder = useVaultStore((s) => s.updateFolder);
   const deleteFolder = useVaultStore((s) => s.deleteFolder);
   const { toast } = useToast();
+
+  const { selectedFolder, showFavorites, showTrash } = scope;
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false);
@@ -265,38 +325,21 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
   }, []);
   useInlineDialog(renameDialogRef, renamingFolder !== null, closeRenameDialog);
 
+  // Where `move` actually puts this folder's contents: its own parent, or the
+  // root when it has none. Read here so the dialog can name the destination.
+  const deletingParentName = useMemo(() => {
+    if (deletingFolderId === null) return undefined;
+    const parentId = folders.find((f) => f.id === deletingFolderId)?.parentId;
+    if (parentId === undefined) return undefined;
+    return folders.find((f) => f.id === parentId)?.name;
+  }, [deletingFolderId, folders]);
+
   const deleteFolderDialogRef = useRef<HTMLDivElement>(null);
   const closeDeleteFolderDialog = useCallback(() => setDeletingFolderId(null), []);
   useInlineDialog(deleteFolderDialogRef, deletingFolderId !== null, closeDeleteFolderDialog);
 
   // Build folder tree
   const tree = useMemo(() => buildTree(folders), [folders]);
-
-  // Count items per folder (items no longer contain trash items)
-  const itemCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const item of items) {
-      if (item.folderId) {
-        counts.set(item.folderId, (counts.get(item.folderId) ?? 0) + 1);
-      }
-    }
-    return counts;
-  }, [items]);
-
-  // Count items per type
-  const typeCounts = useMemo(() => {
-    const counts = new Map<ItemType, number>();
-    for (const item of items) {
-      counts.set(item.itemType, (counts.get(item.itemType) ?? 0) + 1);
-    }
-    return counts;
-  }, [items]);
-
-  const favoriteCount = useMemo(() => items.filter((i) => i.favorite).length, [items]);
-
-  const trashCount = useMemo(() => trashItems.length, [trashItems]);
-
-  const allItemCount = useMemo(() => items.length, [items]);
 
   // Close context menu on outside click
   useEffect(() => {
@@ -320,48 +363,39 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
     }
   }, [contextMenu]);
 
-  const setShowFavorites = useVaultStore((s) => s.setShowFavorites);
-  const setShowTrash = useVaultStore((s) => s.setShowTrash);
-
+  // Every selection is `scope` doing the work and the RAIL closing the drawer.
+  // Keeping `onClose` here is what lets a scope hook stay a pure binding to its
+  // store, with no knowledge of how the rail happens to be presented.
   const handleSelectAllItems = useCallback(() => {
-    setSelectedFolder(null);
-    setSelectedType(null);
-    setShowFavorites(false);
-    setShowTrash(false);
+    scope.onSelectAll();
     onClose?.();
-  }, [setSelectedFolder, setSelectedType, setShowFavorites, setShowTrash, onClose]);
+  }, [scope, onClose]);
 
   const handleSelectFolder = useCallback(
     (id: string) => {
-      setSelectedFolder(id);
-      setSelectedType(null);
+      scope.onSelectFolder(id);
       onClose?.();
     },
-    [setSelectedFolder, setSelectedType, onClose],
+    [scope, onClose],
   );
 
-  const handleSelectType = useCallback(
-    (type: ItemType) => {
-      setSelectedType(selectedType === type ? null : type);
-      setSelectedFolder(null);
-      setShowFavorites(false);
-      setShowTrash(false);
+  const handleSelectOption = useCallback(
+    (option: FolderScopeOption) => {
+      option.onSelect();
       onClose?.();
     },
-    [setSelectedType, setSelectedFolder, setShowFavorites, setShowTrash, selectedType, onClose],
+    [onClose],
   );
 
   const handleToggleFavorites = useCallback(() => {
-    toggleFavorites();
-    setSelectedType(null);
+    scope.onToggleFavorites();
     onClose?.();
-  }, [toggleFavorites, setSelectedType, onClose]);
+  }, [scope, onClose]);
 
   const handleToggleTrash = useCallback(() => {
-    toggleTrash();
-    setSelectedType(null);
+    scope.onToggleTrash();
     onClose?.();
-  }, [toggleTrash, setSelectedType, onClose]);
+  }, [scope, onClose]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, folderId: string) => {
     e.preventDefault();
@@ -420,7 +454,9 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
     setDeletingFolder(true);
     try {
       await deleteFolder(deletingFolderId, deleteFolderAction);
-      if (selectedFolder === deletingFolderId) setSelectedFolder(null);
+      // A view scoped to a folder that no longer exists shows nothing and
+      // explains nothing, so the selection goes with it.
+      if (selectedFolder === deletingFolderId) scope.onSelectAll();
       toast({ title: 'Folder deleted', type: 'success' });
     } catch {
       toast({ title: 'Failed to delete folder', type: 'error' });
@@ -429,14 +465,7 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
       setDeletingFolderId(null);
       setDeleteFolderAction('move');
     }
-  }, [
-    deletingFolderId,
-    deleteFolderAction,
-    deleteFolder,
-    selectedFolder,
-    setSelectedFolder,
-    toast,
-  ]);
+  }, [deletingFolderId, deleteFolderAction, deleteFolder, selectedFolder, scope, toast]);
 
   // Drag and drop state
   const [dragOverId, setDragOverId] = useState<string | null>(null);
@@ -560,8 +589,6 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
     [folders, updateFolder, toast],
   );
 
-  const isAllActive = !selectedFolder && !showFavorites && !showTrash && !selectedType;
-
   return (
     <div className={cn('flex flex-col h-full overflow-y-auto', className)}>
       {/* All Items */}
@@ -571,16 +598,16 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
           onClick={handleSelectAllItems}
           className={cn(
             'flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors',
-            isAllActive
+            scope.showingAll
               ? 'bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]'
               : 'text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]',
           )}
-          aria-current={isAllActive ? 'page' : undefined}
+          aria-current={scope.showingAll ? 'page' : undefined}
         >
           <Inbox className="h-4 w-4" />
-          <span className="flex-1 text-left">All Items</span>
+          <span className="flex-1 text-left">{scope.allLabel}</span>
           <span className="rounded-full bg-[hsl(var(--muted))] px-1.5 py-0.5 text-xs text-[hsl(var(--muted-foreground))]">
-            {allItemCount}
+            {scope.counts.all}
           </span>
         </button>
 
@@ -598,9 +625,9 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
         >
           <Star className="h-4 w-4" />
           <span className="flex-1 text-left">Favorites</span>
-          {favoriteCount > 0 && (
+          {scope.counts.favorites > 0 && (
             <span className="rounded-full bg-[hsl(var(--muted))] px-1.5 py-0.5 text-xs text-[hsl(var(--muted-foreground))]">
-              {favoriteCount}
+              {scope.counts.favorites}
             </span>
           )}
         </button>
@@ -619,9 +646,9 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
         >
           <Trash2 className="h-4 w-4" />
           <span className="flex-1 text-left">Trash</span>
-          {trashCount > 0 && (
+          {scope.counts.trash > 0 && (
             <span className="rounded-full bg-[hsl(var(--muted))] px-1.5 py-0.5 text-xs text-[hsl(var(--muted-foreground))]">
-              {trashCount}
+              {scope.counts.trash}
             </span>
           )}
         </button>
@@ -630,41 +657,43 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
       {/* Divider */}
       <div className="mx-3 border-t border-[hsl(var(--border))]" />
 
-      {/* Type filters */}
-      <div className="space-y-1 p-3">
-        <p className="px-3 text-xs font-semibold uppercase tracking-wider text-[hsl(var(--muted-foreground))]">
-          Types
-        </p>
-        {TYPE_FILTERS.map(({ type, label, icon: Icon }) => {
-          const isActive = selectedType === type;
-          const count = typeCounts.get(type) ?? 0;
-          return (
-            <button
-              key={type}
-              type="button"
-              onClick={() => handleSelectType(type)}
-              className={cn(
-                'flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors',
-                isActive
-                  ? 'bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]'
-                  : 'text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]',
-              )}
-              aria-current={isActive ? 'page' : undefined}
-            >
-              <Icon className="h-4 w-4" />
-              <span className="flex-1 text-left">{label}</span>
-              {count > 0 && (
-                <span className="rounded-full bg-[hsl(var(--muted))] px-1.5 py-0.5 text-xs text-[hsl(var(--muted-foreground))]">
-                  {count}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
+      {/* The scope's own secondary group — the vault's item types. Absent for a
+          scope that has none, along with its divider, so the documents rail is
+          not a vault rail with a hole in it. */}
+      {scope.options !== undefined && scope.options.length > 0 && (
+        <>
+          <div className="space-y-1 p-3">
+            <p className="px-3 text-xs font-semibold uppercase tracking-wider text-[hsl(var(--muted-foreground))]">
+              {scope.optionsLabel}
+            </p>
+            {scope.options.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => handleSelectOption(option)}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors',
+                  option.selected
+                    ? 'bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]'
+                    : 'text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]',
+                )}
+                aria-current={option.selected ? 'page' : undefined}
+              >
+                <option.icon className="h-4 w-4" />
+                <span className="flex-1 text-left">{option.label}</span>
+                {option.count > 0 && (
+                  <span className="rounded-full bg-[hsl(var(--muted))] px-1.5 py-0.5 text-xs text-[hsl(var(--muted-foreground))]">
+                    {option.count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
 
-      {/* Divider */}
-      <div className="mx-3 border-t border-[hsl(var(--border))]" />
+          {/* Divider */}
+          <div className="mx-3 border-t border-[hsl(var(--border))]" />
+        </>
+      )}
 
       {/* Folders */}
       <div className="flex-1 space-y-1 p-3" onDragEnd={handleDragEnd}>
@@ -690,7 +719,7 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
             selectedFolder={selectedFolder}
             onSelect={handleSelectFolder}
             onContextMenu={handleContextMenu}
-            itemCounts={itemCounts}
+            itemCounts={scope.counts.perFolder}
             onDragStart={handleDragStart}
             onDragOver={handleDragOver}
             onDrop={(e, id) => void handleDrop(e, id)}
@@ -837,31 +866,61 @@ export function FolderSidebar({ className, onClose }: FolderSidebarProps) {
               Are you sure you want to delete the folder{' '}
               <strong>&quot;{folders.find((f) => f.id === deletingFolderId)?.name}&quot;</strong>?
             </p>
+            {/* The copy names BOTH kinds, because the server does: `deleteFolder`
+                builds one member filter and applies it to vault items and to
+                documents alike. A dialog that said "items" let a reader delete
+                documents they were never warned about — and "delete" here is a
+                SOFT delete, which for a document frees no storage at all. */}
+            <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
+              Vault items and documents are both filed in folders, so this choice applies to both.
+              {folders.some((f) => f.parentId === deletingFolderId) &&
+                ' Its sub-folders move up a level; what is filed inside them is not affected.'}
+            </p>
             <fieldset className="mt-3 space-y-2">
               <legend className="text-sm font-medium text-[hsl(var(--foreground))]">
-                What should happen to items in this folder?
+                What should happen to everything filed in this folder?
               </legend>
-              <label className="flex items-center gap-2 cursor-pointer text-sm text-[hsl(var(--foreground))]">
+              <label className="flex items-start gap-2 cursor-pointer text-sm text-[hsl(var(--foreground))]">
                 <input
                   type="radio"
                   name="deleteFolderAction"
                   value="move"
                   checked={deleteFolderAction === 'move'}
                   onChange={() => setDeleteFolderAction('move')}
-                  className="accent-[hsl(var(--primary))]"
+                  className="mt-1 accent-[hsl(var(--primary))]"
                 />
-                Move items to root (no folder)
+                <span>
+                  {deletingParentName === undefined
+                    ? 'Move them out of the folder'
+                    : `Move them into ${deletingParentName}`}
+                  {/* Named, because the server does not move them to the root: its
+                      update is `folder.parentId ? $set folderId = parentId :
+                      $unset folderId`, so a nested folder's contents go UP one
+                      level. Copy that said "to root" was wrong for every folder
+                      that has a parent. */}
+                  <span className="block text-xs text-[hsl(var(--muted-foreground))]">
+                    {deletingParentName === undefined
+                      ? 'They stay in your vault and in your documents, filed nowhere.'
+                      : `They stay in your vault and in your documents, filed one level up in ${deletingParentName}.`}
+                  </span>
+                </span>
               </label>
-              <label className="flex items-center gap-2 cursor-pointer text-sm text-[hsl(var(--destructive))]">
+              <label className="flex items-start gap-2 cursor-pointer text-sm text-[hsl(var(--destructive))]">
                 <input
                   type="radio"
                   name="deleteFolderAction"
                   value="delete"
                   checked={deleteFolderAction === 'delete'}
                   onChange={() => setDeleteFolderAction('delete')}
-                  className="accent-[hsl(var(--destructive))]"
+                  className="mt-1 accent-[hsl(var(--destructive))]"
                 />
-                Delete items with the folder
+                <span>
+                  Move them to the trash
+                  <span className="block text-xs text-[hsl(var(--muted-foreground))]">
+                    Recoverable for {TRASH_AUTO_PURGE_DAYS} days. A trashed document still occupies
+                    storage until it is deleted for good.
+                  </span>
+                </span>
               </label>
             </fieldset>
             <div className="mt-4 flex justify-end gap-2">

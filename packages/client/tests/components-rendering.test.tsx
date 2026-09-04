@@ -6,7 +6,7 @@
  * 2 - ProtectedRoute (redirect, unlock, children)
  * 3 - OnboardingGuide (visibility, step navigation, close)
  * 4 - AppLayout (nav links, user email, lock/logout buttons, degraded storage)
- * 5 - FolderSidebar (All Items, Favorites, Trash, type filters, New Folder dialog)
+ * 5 - FolderRail (All Items, Favorites, Trash, type filters, New Folder dialog)
  * 6 - VaultItemDetail (item name, action buttons, type-specific fields)
  * 7 - VaultList (empty state, item rendering, loading skeleton)
  */
@@ -267,9 +267,21 @@ import NotFoundPage from '../src/pages/NotFoundPage';
 import { ProtectedRoute } from '../src/components/layout/ProtectedRoute';
 import { PublicOnlyRoute } from '../src/components/layout/PublicOnlyRoute';
 import { AppLayout } from '../src/components/layout/AppLayout';
-import { FolderSidebar } from '../src/components/vault/FolderSidebar';
+import { FolderRail } from '../src/components/folders/FolderRail';
+import { useVaultFolderScope } from '../src/hooks/useVaultFolderScope';
 import { VaultItemDetail } from '../src/components/vault/VaultItemDetail';
 import { VaultList } from '../src/components/vault/VaultList';
+
+/**
+ * The shared rail, bound to the VAULT scope — which is what every case below is
+ * about. `FolderRail` now renders on `/vault` and on `/documents`, and takes the
+ * counts, the active filter and the selection callbacks as a `scope` prop; this
+ * binding supplies the vault's, so each assertion still runs against the real
+ * `useVaultStore` exactly as it did when the component read it directly.
+ */
+function VaultRail(props: { className?: string; onClose?: () => void }) {
+  return <FolderRail scope={useVaultFolderScope()} {...props} />;
+}
 
 // Import OnboardingGuide from the REAL module (unmock for its own tests)
 // We use a dynamic import trick: import the actual component for standalone tests
@@ -930,10 +942,10 @@ describe('AppLayout', () => {
 });
 
 // ==========================================================================
-// 5 - FolderSidebar
+// 5 - FolderRail
 // ==========================================================================
 
-describe('FolderSidebar', () => {
+describe('FolderRail', () => {
   beforeEach(() => {
     useVaultStore.setState({
       items: [],
@@ -953,22 +965,22 @@ describe('FolderSidebar', () => {
   });
 
   it('renders "All Items" button', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     expect(screen.getByText('All Items')).toBeInTheDocument();
   });
 
   it('renders "Favorites" button', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     expect(screen.getByText('Favorites')).toBeInTheDocument();
   });
 
   it('renders "Trash" button', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     expect(screen.getByText('Trash')).toBeInTheDocument();
   });
 
   it('renders type filter buttons', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     expect(screen.getByText('Logins')).toBeInTheDocument();
     expect(screen.getByText('Secrets')).toBeInTheDocument();
     expect(screen.getByText('Notes')).toBeInTheDocument();
@@ -977,18 +989,18 @@ describe('FolderSidebar', () => {
   });
 
   it('renders "Folders" heading and "Create folder" button', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     expect(screen.getByText('Folders')).toBeInTheDocument();
     expect(screen.getByLabelText('Create folder')).toBeInTheDocument();
   });
 
   it('shows "No folders yet" when there are no folders', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     expect(screen.getByText('No folders yet')).toBeInTheDocument();
   });
 
   it('opens the "New Folder" dialog when the create button is clicked', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
 
@@ -1037,7 +1049,7 @@ describe('FolderSidebar', () => {
       ],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     expect(screen.getByText('Work')).toBeInTheDocument();
     expect(screen.getByText('Personal')).toBeInTheDocument();
     expect(screen.queryByText('No folders yet')).not.toBeInTheDocument();
@@ -1052,7 +1064,7 @@ describe('FolderSidebar', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
     // All Items count = 3
     expect(screen.getByText('3')).toBeInTheDocument();
     // Logins count = 2

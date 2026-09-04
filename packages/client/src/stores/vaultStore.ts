@@ -14,6 +14,12 @@ import { clearScoreCache } from '../services/health/strengthCache.js';
 import { logger } from '../lib/logger.js';
 import { useAuthStore } from './authStore.js';
 import { useUIStore } from './uiStore.js';
+// Folders are ONE collection shared by vault items and documents, so deleting a
+// folder has to reach both stores. The cycle this closes (`documentsStore`
+// imports `mapWithConcurrency` from here) is the shape `authStore` already has
+// with both of these, and it is safe for the same reason: neither side reads the
+// other at module scope, only inside a function that runs later.
+import { useDocumentsStore } from './documentsStore.js';
 import {
   listItemsApi,
   createItemApi,
@@ -1509,6 +1515,10 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
   },
 
   deleteFolder: async (id: string, action?: 'move' | 'delete'): Promise<void> => {
+    // Captured BEFORE the folder leaves local state: `move` re-parents this
+    // folder's members to ITS OWN PARENT rather than to the root, so reconciling
+    // the local rows needs to know what that parent was.
+    const deleted = get().folders.find((f) => f.id === id);
     await deleteFolderApi(id, action);
     set((state) => {
       const base = {
@@ -1534,10 +1544,32 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
       };
     });
 
-    // If items were soft-deleted, refresh trash to show them
+    // A folder holds vault items AND documents: `folderController.deleteFolder`
+    // builds ONE member filter and ONE update and applies both to `VaultItem` and
+    // to `Document`. So the document store has to be told, or its rows keep
+    // pointing at a folder that no longer exists and its counts stay wrong until
+    // the next full reload.
+    //
+    // Reached through `getState()` inside this body and never through a
+    // module-scope destructure — the rule `documentsStore.getVaultKey` records.
+    // These two stores already reference each other (`documentsStore` imports
+    // `mapWithConcurrency` from here), and reading late is what keeps that safe.
+    useDocumentsStore
+      .getState()
+      .applyFolderDeleted(id, action === 'delete' ? 'delete' : 'move', deleted?.parentId);
+
+    // If items were soft-deleted, refresh trash to show them.
+    //
+    // The rejection is swallowed deliberately, and it is not decoration: this is
+    // a background refresh fired from a handler that has already reported the
+    // deletion, so a locked vault or a dropped connection here produced an
+    // UNHANDLED rejection that no caller could ever have caught. The next
+    // `fetchTrashItems` corrects the list.
     if (action === 'delete') {
       const { fetchTrashItems } = get();
-      void fetchTrashItems();
+      void fetchTrashItems().catch(() => {
+        /* see above */
+      });
     }
   },
 

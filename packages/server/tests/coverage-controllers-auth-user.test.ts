@@ -866,6 +866,41 @@ describe('userController — sessions and audit log', () => {
     expect(atCap.body.pagination.limit).toBe(100);
   });
 
+  it('pages audit entries written in one tick without losing or repeating one', async () => {
+    // An import writes N `item_create` rows from a single `Date.now()`, and the
+    // audit log is exactly the list a reader then pages through. With `skip`/
+    // `limit` over a sort that is not a total order, a row that shifts between
+    // two requests is one they either see twice or never see at all.
+    const shared = new Date('2026-04-01T00:00:00.000Z');
+    const seeded: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const row = await AuditLog.create({
+        userId: user.id,
+        action: 'item_create' as const,
+        ipAddress: '127.0.0.1',
+        userAgent: 'test-agent',
+        timestamp: shared,
+      });
+      seeded.push(String(row._id));
+    }
+
+    const seen: string[] = [];
+    for (let page = 1; page <= 3; page++) {
+      const res = await agent
+        .get(`${API}/user/audit-log?page=${String(page)}&limit=2&action=item_create`)
+        .set('Authorization', authHeader(user.accessToken));
+      expect(res.status).toBe(200);
+      for (const row of res.body.data as { _id: string }[]) seen.push(row._id);
+    }
+
+    expect(new Set(seen).size).toBe(seen.length);
+    // The order the tiebreak DEFINES: ObjectIds rise monotonically, so these five
+    // were created in ascending order and `{ timestamp: -1, _id: -1 }` walks them
+    // backwards. Without it the engine answers in its own order — insertion
+    // order for a scan, i.e. the reverse — which no set assertion could catch.
+    expect(seen).toEqual([...seeded].reverse());
+  });
+
   it('paginates audit entries and never returns another user’s rows', async () => {
     const other = await createTestUser();
 

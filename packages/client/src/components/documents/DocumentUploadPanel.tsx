@@ -1,11 +1,6 @@
 import { useState } from 'react';
-import { AlertTriangle, Loader2, RefreshCw, Upload, X } from 'lucide-react';
-import {
-  DOCUMENT_PLAINTEXT_CHUNK_BYTES,
-  documentChunkCountFor,
-  documentExtension,
-  formatBytes,
-} from '@hvault/shared';
+import { AlertTriangle, Upload, X } from 'lucide-react';
+import { documentExtension, formatBytes } from '@hvault/shared';
 import { cn, getApiErrorMessage } from '../../lib/utils';
 import {
   DocumentTransformControls,
@@ -21,12 +16,8 @@ import {
 } from '../../services/documents/transform';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { useToast } from '../ui/Toast';
-import {
-  UploadCancelledError,
-  isLiveTransfer,
-  useDocumentsStore,
-  type DocumentUploadProgress,
-} from '../../stores/documentsStore';
+import { DocumentTransfers } from './DocumentTransfers';
+import { UploadCancelledError, useDocumentsStore } from '../../stores/documentsStore';
 import type { DocumentsConfig } from '../../services/api/configApi';
 
 const BYTES_PER_MB = 1024 * 1024;
@@ -60,89 +51,6 @@ function describeDuration(seconds: number): string {
 // ---------------------------------------------------------------------------
 // One transfer in progress
 // ---------------------------------------------------------------------------
-
-/** The sentence under one transfer's bar, for each of the three states it has. */
-function describeTransfer(upload: DocumentUploadProgress): string {
-  if (upload.status === 'failed') {
-    return `Upload failed. ${upload.error ?? 'Retry to send only the parts the server does not already hold.'}`;
-  }
-  if (upload.status === 'finalizing') return 'Sealing the file details and finishing…';
-
-  // One crypto segment is one uploaded part, so the part numbers are DERIVED
-  // from the byte counts the store already keeps rather than reported beside
-  // them: a second field carrying the same fact is a second field that can
-  // disagree with the first.
-  const totalParts = documentChunkCountFor(upload.totalBytes, DOCUMENT_PLAINTEXT_CHUNK_BYTES);
-  const currentPart = Math.min(
-    totalParts,
-    Math.floor(upload.sentBytes / DOCUMENT_PLAINTEXT_CHUNK_BYTES) + 1,
-  );
-  return `Part ${String(currentPart)} of ${String(totalParts)} — ${formatBytes(upload.sentBytes)} of ${formatBytes(upload.totalBytes)}`;
-}
-
-interface UploadRowProps {
-  upload: DocumentUploadProgress;
-  onCancel: (id: string) => void;
-  onRetry: (id: string) => void;
-}
-
-function UploadRow({ upload, onCancel, onRetry }: UploadRowProps) {
-  // A zero-byte document has nothing to send, so it is complete the moment it
-  // starts; dividing by its size would report NaN and render an empty bar.
-  const percent =
-    upload.totalBytes === 0 ? 100 : Math.round((upload.sentBytes / upload.totalBytes) * 100);
-  const failed = upload.status === 'failed';
-
-  return (
-    <li
-      data-testid="upload-row"
-      className="rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-3"
-    >
-      <div className="flex items-center gap-3">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[hsl(var(--card-foreground))]">
-          {upload.fileName}
-        </span>
-        {failed && (
-          <button
-            type="button"
-            onClick={() => onRetry(upload.id)}
-            className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium text-[hsl(var(--primary))] hover:bg-[hsl(var(--accent))]"
-          >
-            <RefreshCw className="h-3 w-3" />
-            Retry
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => onCancel(upload.id)}
-          aria-label={`Cancel upload of ${upload.fileName}`}
-          className="shrink-0 rounded p-1 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))]"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-
-      <div
-        role="progressbar"
-        aria-label={`Upload progress for ${upload.fileName}`}
-        aria-valuenow={percent}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[hsl(var(--muted))]"
-      >
-        <div
-          className={cn(
-            'h-full transition-all',
-            failed ? 'bg-red-500' : 'bg-[hsl(var(--primary))]',
-          )}
-          style={{ width: `${String(percent)}%` }}
-        />
-      </div>
-
-      <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{describeTransfer(upload)}</p>
-    </li>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // The panel
@@ -193,6 +101,15 @@ type TransformPhase =
 interface DocumentUploadPanelProps {
   /** The server's advertisement, already known to carry `enabled: true`. */
   config: DocumentsConfig;
+  /**
+   * Where a new upload is filed, or `undefined` for the root.
+   *
+   * The NAME travels with the id, deliberately unlike `VaultItemForm`'s
+   * `defaultFolderId`: that form renders a folder picker, so the id alone is
+   * enough to preselect a control the reader can see. This panel has no picker,
+   * so it has to SAY where the file is going or the destination is invisible.
+   */
+  folder?: { id: string; name: string } | undefined;
 }
 
 /**
@@ -217,11 +134,8 @@ interface DocumentUploadPanelProps {
  * cancels it, and that is stated unconditionally before the user starts — ahead
  * of the estimate, which can be wrong, rather than inside it.
  */
-export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
+export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps) {
   const startUpload = useDocumentsStore((s) => s.startUpload);
-  const cancelUpload = useDocumentsStore((s) => s.cancelUpload);
-  const retryUpload = useDocumentsStore((s) => s.retryUpload);
-  const uploads = useDocumentsStore((s) => s.uploads);
   const { toast } = useToast();
   const { autoLockTimeout, lockOnHidden, lockOnHiddenDelay } = useUserSettings();
 
@@ -244,13 +158,11 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
   const maxSizeBytes = config.maxSizeMB === undefined ? null : config.maxSizeMB * BYTES_PER_MB;
   const allowedExtensions = config.allowedExtensions ?? [];
 
-  const transfers = Object.values(uploads);
-  // The store's own definition of "still moving bytes", shared with the unload
-  // guard so the note below and the confirmation dialog cannot disagree. The
-  // confirmation ITSELF lives in `useUploadUnloadGuard`, mounted in `App`: a
-  // transfer outlives this panel, so a guard armed here would be disarmed by
-  // exactly the navigation the store is module-level to permit.
-  const anyLive = transfers.some(isLiveTransfer);
+  // The transfers themselves — their rows, their progress, their retry and their
+  // cancel — live in `DocumentTransfers`, which this panel renders below and the
+  // Documents page also renders on its own in trash mode. A transfer outlives
+  // this panel, so the registry it reads is module-level and the confirmation
+  // that guards a tab close lives in `useUploadUnloadGuard`, mounted in `App`.
 
   /**
    * Why this file cannot be uploaded, or `null` when it can.
@@ -311,6 +223,10 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
       source,
       name: picked.name,
       mime: picked.type,
+      // The folder the rail has open. The store and the server have always
+      // accepted this; nothing was ever sending it, so every upload landed
+      // outside every folder and had to be moved by hand.
+      ...(folder === undefined ? {} : { folderId: folder.id }),
       ...(transform === undefined ? {} : { transform }),
     }).catch(reportFailure('The upload could not be started.', toast));
   }
@@ -358,10 +274,6 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
         });
       },
     );
-  }
-
-  function handleRetry(id: string): void {
-    void retryUpload(id).catch(reportFailure('The upload could not be resumed.', toast));
   }
 
   // WHICH deadline the transfer is racing, not just how long it is. `useAutoLock`
@@ -413,6 +325,18 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
       >
         Add a document
       </h2>
+
+      {/* Said out loud, because this panel has no folder picker: without a
+          sentence the destination would be invisible and a reader would have no
+          way to know their upload was about to be filed somewhere. */}
+      {folder !== undefined && (
+        <p
+          data-testid="upload-target-folder"
+          className="text-xs text-[hsl(var(--muted-foreground))]"
+        >
+          This file will be filed in <strong>{folder.name}</strong>.
+        </p>
+      )}
 
       <div
         data-testid="document-dropzone"
@@ -573,25 +497,12 @@ export function DocumentUploadPanel({ config }: DocumentUploadPanelProps) {
         </p>
       )}
 
-      {transfers.length > 0 && (
-        <ul aria-label="Uploads in progress" className="space-y-2">
-          {transfers.map((transfer) => (
-            <UploadRow
-              key={transfer.id}
-              upload={transfer}
-              onCancel={cancelUpload}
-              onRetry={handleRetry}
-            />
-          ))}
-        </ul>
-      )}
-
-      {anyLive && (
-        <p className="flex items-center gap-2 text-xs text-[hsl(var(--muted-foreground))]">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          Moving to another page keeps the transfer running; closing the tab does not.
-        </p>
-      )}
+      {/* The transfers themselves are rendered by `DocumentTransfers`, which the
+          Documents page ALSO renders on its own in trash mode — where this panel
+          is not drawn, because uploading into a view of deleted files is
+          incoherent, but a transfer already running must not become invisible
+          just because someone glanced at the trash. */}
+      <DocumentTransfers />
     </section>
   );
 }

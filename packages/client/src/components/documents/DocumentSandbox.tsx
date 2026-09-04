@@ -237,6 +237,13 @@ export function DocumentSandbox({
       // Deny every delegated permission rather than trusting each feature's
       // default.
       allow=""
+      // In the tab order, DECLARED. An iframe is sequentially focusable anyway,
+      // but the application's own focus trap works from a selector list that has
+      // no `iframe` in it — so while the viewer's expanded panel is trapping
+      // focus, a keyboard user would be cycled between its two header buttons and
+      // could never reach the document itself. This changes no security property:
+      // it makes an existing capability visible to the trap, and grants nothing.
+      tabIndex={0}
     />
   );
 }

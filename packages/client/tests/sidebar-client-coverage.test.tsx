@@ -1,7 +1,7 @@
 /**
  * Comprehensive coverage tests for:
  *
- * 1 - FolderSidebar.tsx (tree building, selection, expand/collapse, context menu,
+ * 1 - FolderRail.tsx (tree building, selection, expand/collapse, context menu,
  *     create/rename/delete folder, drag-and-drop, keyboard reorder, color change)
  * 2 - client.ts (CSRF management, request/response interceptors, token refresh,
  *     queuing, cross-tab CSRF invalidation, force logout)
@@ -199,12 +199,24 @@ import { useToast } from '../src/components/ui/Toast';
 // Component imports
 // ---------------------------------------------------------------------------
 
-import { FolderSidebar } from '../src/components/vault/FolderSidebar';
+import { FolderRail } from '../src/components/folders/FolderRail';
+import { useVaultFolderScope } from '../src/hooks/useVaultFolderScope';
 import {
   AppLayout,
   isNavItemActive,
   isVaultSectionActive,
 } from '../src/components/layout/AppLayout';
+
+/**
+ * The shared rail, bound to the VAULT scope — which is what every case below is
+ * about. `FolderRail` now renders on `/vault` and on `/documents`, and takes the
+ * counts, the active filter and the selection callbacks as a `scope` prop; this
+ * binding supplies the vault's, so each assertion still runs against the real
+ * `useVaultStore` exactly as it did when the component read it directly.
+ */
+function VaultRail(props: { className?: string; onClose?: () => void }) {
+  return <FolderRail scope={useVaultFolderScope()} {...props} />;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -345,10 +357,10 @@ afterEach(() => {
 });
 
 // ==========================================================================
-// 1 - FolderSidebar
+// 1 - FolderRail
 // ==========================================================================
 
-describe('FolderSidebar - tree building and nested hierarchy', () => {
+describe('FolderRail - tree building and nested hierarchy', () => {
   it('builds a tree from a flat list of folders with parent-child relationships', () => {
     useVaultStore.setState({
       folders: [
@@ -359,7 +371,7 @@ describe('FolderSidebar - tree building and nested hierarchy', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     expect(screen.getByText('Root A')).toBeInTheDocument();
     expect(screen.getByText('Child of A')).toBeInTheDocument();
@@ -375,7 +387,7 @@ describe('FolderSidebar - tree building and nested hierarchy', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderButtons = screen
       .getAllByRole('button')
@@ -393,27 +405,27 @@ describe('FolderSidebar - tree building and nested hierarchy', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     expect(screen.getByText('Orphan')).toBeInTheDocument();
   });
 });
 
-describe('FolderSidebar - folder selection and highlighting', () => {
+describe('FolderRail - folder selection and highlighting', () => {
   it('highlights the selected folder with aria-current="page"', () => {
     useVaultStore.setState({
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
       selectedFolder: 'f1',
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button');
     expect(folderBtn).toHaveAttribute('aria-current', 'page');
   });
 
   it('highlights "All Items" when no folder, type, favorite, or trash is selected', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const allItemsBtn = screen.getByText('All Items').closest('button');
     expect(allItemsBtn).toHaveAttribute('aria-current', 'page');
@@ -425,7 +437,7 @@ describe('FolderSidebar - folder selection and highlighting', () => {
       selectedFolder: 'f1',
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const allItemsBtn = screen.getByText('All Items').closest('button');
     expect(allItemsBtn).not.toHaveAttribute('aria-current');
@@ -437,7 +449,7 @@ describe('FolderSidebar - folder selection and highlighting', () => {
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar onClose={onClose} />);
+    renderWithRouter(<VaultRail onClose={onClose} />);
 
     fireEvent.click(screen.getByText('Work'));
 
@@ -445,7 +457,7 @@ describe('FolderSidebar - folder selection and highlighting', () => {
   });
 });
 
-describe('FolderSidebar - expand/collapse nested folders', () => {
+describe('FolderRail - expand/collapse nested folders', () => {
   it('shows children of a folder by default (expanded)', () => {
     useVaultStore.setState({
       folders: [
@@ -454,7 +466,7 @@ describe('FolderSidebar - expand/collapse nested folders', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     expect(screen.getByText('Child')).toBeInTheDocument();
   });
@@ -467,7 +479,7 @@ describe('FolderSidebar - expand/collapse nested folders', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     expect(screen.getByText('Child')).toBeInTheDocument();
 
@@ -485,7 +497,7 @@ describe('FolderSidebar - expand/collapse nested folders', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const collapseBtn = screen.getByLabelText('Collapse folder');
     fireEvent.click(collapseBtn);
@@ -497,11 +509,11 @@ describe('FolderSidebar - expand/collapse nested folders', () => {
   });
 });
 
-describe('FolderSidebar - type filter buttons', () => {
+describe('FolderRail - type filter buttons', () => {
   it('highlights type filter with aria-current when selected', () => {
     useVaultStore.setState({ selectedType: 'note' });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const noteBtn = screen.getByText('Notes').closest('button');
     expect(noteBtn).toHaveAttribute('aria-current', 'page');
@@ -519,7 +531,7 @@ describe('FolderSidebar - type filter buttons', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // Scope each count to its own type-filter row so a mis-mapped count (e.g.
     // Cards showing 2 and Logins showing 1) is caught — a free-floating
@@ -536,7 +548,7 @@ describe('FolderSidebar - type filter buttons', () => {
 
   it('calls onClose when a type filter is clicked', () => {
     const onClose = vi.fn();
-    renderWithRouter(<FolderSidebar onClose={onClose} />);
+    renderWithRouter(<VaultRail onClose={onClose} />);
 
     fireEvent.click(screen.getByText('Notes'));
 
@@ -544,11 +556,11 @@ describe('FolderSidebar - type filter buttons', () => {
   });
 });
 
-describe('FolderSidebar - favorites toggle', () => {
+describe('FolderRail - favorites toggle', () => {
   it('highlights Favorites when showFavorites is true', () => {
     useVaultStore.setState({ showFavorites: true });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const favBtn = screen.getByText('Favorites').closest('button');
     expect(favBtn).toHaveAttribute('aria-current', 'page');
@@ -557,7 +569,7 @@ describe('FolderSidebar - favorites toggle', () => {
   it('does not show favorites badge when count is 0', () => {
     useVaultStore.setState({ items: [] });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // All Items shows "0", but Favorites should not show a badge
     const favBtn = screen.getByText('Favorites').closest('button');
@@ -571,7 +583,7 @@ describe('FolderSidebar - favorites toggle', () => {
 
   it('calls onClose when favorites is toggled', () => {
     const onClose = vi.fn();
-    renderWithRouter(<FolderSidebar onClose={onClose} />);
+    renderWithRouter(<VaultRail onClose={onClose} />);
 
     fireEvent.click(screen.getByText('Favorites'));
 
@@ -579,11 +591,11 @@ describe('FolderSidebar - favorites toggle', () => {
   });
 });
 
-describe('FolderSidebar - trash toggle', () => {
+describe('FolderRail - trash toggle', () => {
   it('highlights Trash when showTrash is true', () => {
     useVaultStore.setState({ showTrash: true });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const trashBtn = screen.getByText('Trash').closest('button');
     expect(trashBtn).toHaveAttribute('aria-current', 'page');
@@ -598,14 +610,14 @@ describe('FolderSidebar - trash toggle', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     expect(screen.getByText('3')).toBeInTheDocument();
   });
 
   it('calls onClose when trash is toggled', () => {
     const onClose = vi.fn();
-    renderWithRouter(<FolderSidebar onClose={onClose} />);
+    renderWithRouter(<VaultRail onClose={onClose} />);
 
     fireEvent.click(screen.getByText('Trash'));
 
@@ -613,7 +625,7 @@ describe('FolderSidebar - trash toggle', () => {
   });
 });
 
-describe('FolderSidebar - item count badges per folder', () => {
+describe('FolderRail - item count badges per folder', () => {
   it('shows item count for folders that contain items', () => {
     useVaultStore.setState({
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
@@ -623,7 +635,7 @@ describe('FolderSidebar - item count badges per folder', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // The folder should show count badge = 2
     // (All items = 2 also shows 2, so there should be two "2" badges)
@@ -637,7 +649,7 @@ describe('FolderSidebar - item count badges per folder', () => {
       items: [],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // The folder button exists but must render NO count badge at all. The badge
     // is the only `.rounded-full` descendant of a folder row, so querying for it
@@ -649,14 +661,14 @@ describe('FolderSidebar - item count badges per folder', () => {
   });
 });
 
-describe('FolderSidebar - create folder dialog', () => {
+describe('FolderRail - create folder dialog', () => {
   it('creates a folder when name is entered and Create is clicked', async () => {
     const createFolder = vi.fn().mockResolvedValue(undefined);
     useVaultStore.setState({ createFolder });
     const mockToast = vi.fn();
     vi.mocked(useToast).mockReturnValue({ toast: mockToast, dismiss: vi.fn(), update: vi.fn() });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     const input = screen.getByPlaceholderText('Folder name');
@@ -672,7 +684,7 @@ describe('FolderSidebar - create folder dialog', () => {
     const createFolder = vi.fn().mockResolvedValue(undefined);
     useVaultStore.setState({ createFolder });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     // Leave the input empty
@@ -689,7 +701,7 @@ describe('FolderSidebar - create folder dialog', () => {
       folders: [makeFolder({ id: 'f1', name: 'Existing' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     const input = screen.getByPlaceholderText('Folder name');
@@ -707,7 +719,7 @@ describe('FolderSidebar - create folder dialog', () => {
     const createFolder = vi.fn().mockResolvedValue(undefined);
     useVaultStore.setState({ createFolder });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     const input = screen.getByPlaceholderText('Folder name');
@@ -720,7 +732,7 @@ describe('FolderSidebar - create folder dialog', () => {
   });
 
   it('closes dialog when Escape is pressed in the input', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     expect(screen.getByPlaceholderText('Folder name')).toBeInTheDocument();
@@ -736,7 +748,7 @@ describe('FolderSidebar - create folder dialog', () => {
     vi.mocked(useToast).mockReturnValue({ toast: mockToast, dismiss: vi.fn(), update: vi.fn() });
     useVaultStore.setState({ createFolder });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByLabelText('Create folder'));
     fireEvent.change(screen.getByPlaceholderText('Folder name'), { target: { value: 'New' } });
@@ -750,13 +762,13 @@ describe('FolderSidebar - create folder dialog', () => {
   });
 });
 
-describe('FolderSidebar - context menu', () => {
+describe('FolderRail - context menu', () => {
   it('opens context menu on right-click of a folder', () => {
     useVaultStore.setState({
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 200, clientY: 300 });
@@ -771,7 +783,7 @@ describe('FolderSidebar - context menu', () => {
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 200, clientY: 300 });
@@ -788,7 +800,7 @@ describe('FolderSidebar - context menu', () => {
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 200, clientY: 300 });
@@ -805,7 +817,7 @@ describe('FolderSidebar - context menu', () => {
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 200, clientY: 300 });
@@ -823,7 +835,7 @@ describe('FolderSidebar - context menu', () => {
   });
 });
 
-describe('FolderSidebar - edit/rename folder', () => {
+describe('FolderRail - edit/rename folder', () => {
   it('opens rename dialog from context menu and renames a folder', async () => {
     const updateFolder = vi.fn().mockResolvedValue(undefined);
     const mockToast = vi.fn();
@@ -833,7 +845,7 @@ describe('FolderSidebar - edit/rename folder', () => {
       updateFolder,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // Right-click to open context menu
     const folderBtn = screen.getByText('Work').closest('button')!;
@@ -861,7 +873,7 @@ describe('FolderSidebar - edit/rename folder', () => {
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -881,7 +893,7 @@ describe('FolderSidebar - edit/rename folder', () => {
       updateFolder,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -901,7 +913,7 @@ describe('FolderSidebar - edit/rename folder', () => {
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -923,7 +935,7 @@ describe('FolderSidebar - edit/rename folder', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -949,7 +961,7 @@ describe('FolderSidebar - edit/rename folder', () => {
       updateFolder,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -966,7 +978,7 @@ describe('FolderSidebar - edit/rename folder', () => {
   });
 });
 
-describe('FolderSidebar - delete folder', () => {
+describe('FolderRail - delete folder', () => {
   it('deletes a folder from context menu', async () => {
     const deleteFolder = vi.fn().mockResolvedValue(undefined);
     const mockToast = vi.fn();
@@ -976,7 +988,7 @@ describe('FolderSidebar - delete folder', () => {
       deleteFolder,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -1002,7 +1014,7 @@ describe('FolderSidebar - delete folder', () => {
       selectedFolder: 'f1',
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -1026,7 +1038,7 @@ describe('FolderSidebar - delete folder', () => {
       deleteFolder,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -1044,7 +1056,7 @@ describe('FolderSidebar - delete folder', () => {
   });
 });
 
-describe('FolderSidebar - folder color change', () => {
+describe('FolderRail - folder color change', () => {
   it('applies color to a folder via context menu color picker', async () => {
     const updateFolder = vi.fn().mockResolvedValue(undefined);
     const mockToast = vi.fn();
@@ -1054,7 +1066,7 @@ describe('FolderSidebar - folder color change', () => {
       updateFolder,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -1073,7 +1085,7 @@ describe('FolderSidebar - folder color change', () => {
       folders: [makeFolder({ id: 'f1', name: 'Colored', color: '#ef4444' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Colored').closest('button')!;
     // Browser normalizes hex to rgb format
@@ -1081,7 +1093,7 @@ describe('FolderSidebar - folder color change', () => {
   });
 });
 
-describe('FolderSidebar - drag-and-drop reordering', () => {
+describe('FolderRail - drag-and-drop reordering', () => {
   it('handles dragStart, dragOver, and drop events on folder items', async () => {
     const fetchFolders = vi.fn().mockResolvedValue(undefined);
     useVaultStore.setState({
@@ -1092,7 +1104,7 @@ describe('FolderSidebar - drag-and-drop reordering', () => {
       fetchFolders,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const firstBtn = screen.getByText('First').closest('button')!;
     const secondBtn = screen.getByText('Second').closest('button')!;
@@ -1122,7 +1134,7 @@ describe('FolderSidebar - drag-and-drop reordering', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const firstBtn = screen.getByText('First').closest('button')!;
     const secondBtn = screen.getByText('Second').closest('button')!;
@@ -1149,7 +1161,7 @@ describe('FolderSidebar - drag-and-drop reordering', () => {
   });
 });
 
-describe('FolderSidebar - keyboard reorder (Ctrl+Up/Down)', () => {
+describe('FolderRail - keyboard reorder (Ctrl+Up/Down)', () => {
   it('reorders a folder up on Ctrl+ArrowUp', async () => {
     const fetchFolders = vi.fn().mockResolvedValue(undefined);
     useVaultStore.setState({
@@ -1160,7 +1172,7 @@ describe('FolderSidebar - keyboard reorder (Ctrl+Up/Down)', () => {
       fetchFolders,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const secondBtn = screen.getByText('Second').closest('button')!;
     fireEvent.keyDown(secondBtn, { key: 'ArrowUp', ctrlKey: true });
@@ -1180,7 +1192,7 @@ describe('FolderSidebar - keyboard reorder (Ctrl+Up/Down)', () => {
       fetchFolders,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const firstBtn = screen.getByText('First').closest('button')!;
     fireEvent.keyDown(firstBtn, { key: 'ArrowDown', ctrlKey: true });
@@ -1195,7 +1207,7 @@ describe('FolderSidebar - keyboard reorder (Ctrl+Up/Down)', () => {
       folders: [makeFolder({ id: 'f1', name: 'First', sortOrder: 0 })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const firstBtn = screen.getByText('First').closest('button')!;
     fireEvent.keyDown(firstBtn, { key: 'ArrowUp', ctrlKey: true });
@@ -1209,7 +1221,7 @@ describe('FolderSidebar - keyboard reorder (Ctrl+Up/Down)', () => {
       folders: [makeFolder({ id: 'f1', name: 'Last', sortOrder: 0 })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const lastBtn = screen.getByText('Last').closest('button')!;
     fireEvent.keyDown(lastBtn, { key: 'ArrowDown', ctrlKey: true });
@@ -1218,7 +1230,7 @@ describe('FolderSidebar - keyboard reorder (Ctrl+Up/Down)', () => {
   });
 });
 
-describe('FolderSidebar - "All Items" selection clears all filters', () => {
+describe('FolderRail - "All Items" selection clears all filters', () => {
   it('clears selectedFolder, selectedType, showFavorites, showTrash on "All Items" click', () => {
     const setSelectedFolder = vi.fn();
     const setSelectedType = vi.fn();
@@ -1236,7 +1248,7 @@ describe('FolderSidebar - "All Items" selection clears all filters', () => {
       setShowTrash,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('All Items'));
 
@@ -1247,16 +1259,16 @@ describe('FolderSidebar - "All Items" selection clears all filters', () => {
   });
 });
 
-describe('FolderSidebar - className and empty state', () => {
+describe('FolderRail - className and empty state', () => {
   it('accepts and applies a custom className', () => {
-    const { container } = renderWithRouter(<FolderSidebar className="my-custom-class" />);
+    const { container } = renderWithRouter(<VaultRail className="my-custom-class" />);
 
     const root = container.firstElementChild;
     expect(root?.classList.contains('my-custom-class')).toBe(true);
   });
 
   it('shows "No folders yet" message when folders array is empty', () => {
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     expect(screen.getByText('No folders yet')).toBeInTheDocument();
   });
@@ -1274,8 +1286,8 @@ describe('FolderSidebar - className and empty state', () => {
 // refresh-multitab.test.ts (neither mocks the client module).
 // ==========================================================================
 
-// Additional FolderSidebar tests targeting uncovered lines
-describe('FolderSidebar - additional edge cases', () => {
+// Additional FolderRail tests targeting uncovered lines
+describe('FolderRail - additional edge cases', () => {
   it('does not call onClose when onClose is not provided', () => {
     const setSelectedFolder = vi.fn();
     const setSelectedType = vi.fn();
@@ -1290,7 +1302,7 @@ describe('FolderSidebar - additional edge cases', () => {
     });
 
     // Render without onClose prop - should not throw
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('All Items'));
     expect(setSelectedFolder).toHaveBeenCalledWith(null);
@@ -1301,7 +1313,7 @@ describe('FolderSidebar - additional edge cases', () => {
       folders: [makeFolder({ id: 'f1', name: 'Only', sortOrder: 0 })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Only').closest('button')!;
     const dataTransfer = {
@@ -1331,7 +1343,7 @@ describe('FolderSidebar - additional edge cases', () => {
       ] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     // All Items badge should show 5
     expect(screen.getByText('5')).toBeInTheDocument();
@@ -1352,7 +1364,7 @@ describe('FolderSidebar - additional edge cases', () => {
       setShowTrash,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('Secrets'));
 
@@ -1373,7 +1385,7 @@ describe('FolderSidebar - additional edge cases', () => {
       setSelectedType,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     fireEvent.click(screen.getByText('Work'));
 
@@ -1395,7 +1407,7 @@ describe('FolderSidebar - additional edge cases', () => {
       fetchFolders,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const secondBtn = screen.getByText('Second').closest('button')!;
     fireEvent.keyDown(secondBtn, { key: 'ArrowUp', ctrlKey: true });
@@ -1421,7 +1433,7 @@ describe('FolderSidebar - additional edge cases', () => {
       fetchFolders,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const firstBtn = screen.getByText('First').closest('button')!;
     const secondBtn = screen.getByText('Second').closest('button')!;
@@ -1453,7 +1465,7 @@ describe('FolderSidebar - additional edge cases', () => {
       updateFolder,
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -1473,7 +1485,7 @@ describe('FolderSidebar - additional edge cases', () => {
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     fireEvent.contextMenu(folderBtn, { clientX: 100, clientY: 100 });
@@ -1498,7 +1510,7 @@ describe('FolderSidebar - additional edge cases', () => {
       folders: [makeFolder({ id: 'f1', name: 'Leaf' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     expect(screen.queryByLabelText('Collapse folder')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Expand folder')).not.toBeInTheDocument();
@@ -1509,7 +1521,7 @@ describe('FolderSidebar - additional edge cases', () => {
       folders: [makeFolder({ id: 'f1', name: 'Work' })] as never[],
     });
 
-    renderWithRouter(<FolderSidebar />);
+    renderWithRouter(<VaultRail />);
 
     const folderBtn = screen.getByText('Work').closest('button')!;
     expect(folderBtn).toHaveAttribute('aria-description', 'Use Ctrl+Up or Ctrl+Down to reorder');

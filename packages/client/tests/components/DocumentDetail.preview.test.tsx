@@ -23,6 +23,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
+import { _resetScrollLockCount } from '../../src/components/ui/Dialog';
 import React from 'react';
 import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
@@ -88,6 +89,8 @@ import { DocumentDetail } from '../../src/components/documents/DocumentDetail';
 /* -------------------------------------------------------------------------- */
 
 const DOC_ID = '66c0f1a2b3c4d5e6f7a8b9c0';
+/** A second document, for the case that navigates from one detail view to another. */
+const OTHER_ID = '66c0f1a2b3c4d5e6f7a8b9ff';
 
 const pristineDocuments = useDocumentsStore.getState();
 const pristineVault = useVaultStore.getState();
@@ -524,56 +527,56 @@ describe('DocumentDetail — the chrome around the frame', () => {
 /*  The link-confirmation dialog                                               */
 /* ========================================================================== */
 
+/**
+ * Complete the host's handshake the way a real frame would, and return the
+ * frame's end of the channel.
+ *
+ * The stub is what makes this possible at all: jsdom never loads an iframe's
+ * `src`, so `contentWindow` is a real about:blank window that will never run
+ * the sandbox — and a `MessageEvent` constructed in a test cannot name a
+ * cross-document window as its `source`, which is exactly the identity the
+ * host compares against.
+ */
+function handshake(): MessagePort {
+  const iframe = frame()!;
+  const stub = { postMessage: vi.fn() };
+  Object.defineProperty(iframe, 'contentWindow', { configurable: true, get: () => stub });
+
+  const event = new MessageEvent('message', { data: { kind: 'ready' }, origin: 'null' });
+  Object.defineProperty(event, 'source', { configurable: true, get: () => stub });
+  act(() => {
+    window.dispatchEvent(event);
+  });
+
+  const port = stub.postMessage.mock.calls[0]?.[2]?.[0] as MessagePort | undefined;
+  expect(port, 'the host transferred no port').toBeDefined();
+  return port!;
+}
+
+/**
+ * A known-good link, posted BEHIND the one under test.
+ *
+ * `MessagePort` delivery is asynchronous and FIFO. A test that posted one
+ * message and then slept would be asserting on whatever had happened by an
+ * arbitrary deadline — which is a flake, and it was one here before this
+ * helper existed. Posting a second, valid link and waiting for ITS dialog is a
+ * deterministic proof that the first was delivered and processed, which is
+ * what turns "no dialog yet" into "no dialog, ever".
+ */
+const TRAILER = 'https://trailer.example/after';
+
+async function postAndSettle(port: MessagePort, href: string): Promise<void> {
+  await act(async () => {
+    port.postMessage({ kind: 'link', href });
+    port.postMessage({ kind: 'link', href: TRAILER });
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    expect(screen.getByTestId('document-link-origin')).toBeInTheDocument();
+  });
+}
+
 describe('DocumentDetail — a link clicked inside the frame', () => {
-  /**
-   * Complete the host's handshake the way a real frame would, and return the
-   * frame's end of the channel.
-   *
-   * The stub is what makes this possible at all: jsdom never loads an iframe's
-   * `src`, so `contentWindow` is a real about:blank window that will never run
-   * the sandbox — and a `MessageEvent` constructed in a test cannot name a
-   * cross-document window as its `source`, which is exactly the identity the
-   * host compares against.
-   */
-  function handshake(): MessagePort {
-    const iframe = frame()!;
-    const stub = { postMessage: vi.fn() };
-    Object.defineProperty(iframe, 'contentWindow', { configurable: true, get: () => stub });
-
-    const event = new MessageEvent('message', { data: { kind: 'ready' }, origin: 'null' });
-    Object.defineProperty(event, 'source', { configurable: true, get: () => stub });
-    act(() => {
-      window.dispatchEvent(event);
-    });
-
-    const port = stub.postMessage.mock.calls[0]?.[2]?.[0] as MessagePort | undefined;
-    expect(port, 'the host transferred no port').toBeDefined();
-    return port!;
-  }
-
-  /**
-   * A known-good link, posted BEHIND the one under test.
-   *
-   * `MessagePort` delivery is asynchronous and FIFO. A test that posted one
-   * message and then slept would be asserting on whatever had happened by an
-   * arbitrary deadline — which is a flake, and it was one here before this
-   * helper existed. Posting a second, valid link and waiting for ITS dialog is a
-   * deterministic proof that the first was delivered and processed, which is
-   * what turns "no dialog yet" into "no dialog, ever".
-   */
-  const TRAILER = 'https://trailer.example/after';
-
-  async function postAndSettle(port: MessagePort, href: string): Promise<void> {
-    await act(async () => {
-      port.postMessage({ kind: 'link', href });
-      port.postMessage({ kind: 'link', href: TRAILER });
-      await Promise.resolve();
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId('document-link-origin')).toBeInTheDocument();
-    });
-  }
-
   beforeEach(async () => {
     renderDetail(makeDocument());
     await waitFor(() => {
@@ -717,5 +720,234 @@ describe('DocumentDetail — a link clicked inside the frame', () => {
         'mailto:someone@example.com',
       );
     });
+  });
+});
+
+/* ========================================================================== */
+/*  Full screen                                                                */
+/* ========================================================================== */
+
+describe('DocumentDetail — full screen', () => {
+  const section = (): HTMLElement => screen.getByTestId('document-content');
+  const toggle = (): HTMLElement => screen.getByRole('button', { name: /full screen/i });
+
+  async function renderExpandable() {
+    renderDetail(makeDocument());
+    await waitFor(() => {
+      expect(frame()).not.toBeNull();
+    });
+  }
+
+  afterEach(() => {
+    _resetScrollLockCount();
+  });
+
+  it('keeps the very same frame element, and re-reads nothing, across the toggle', async () => {
+    await renderExpandable();
+    const before = frame();
+    expect(harness.readDocumentPlaintext).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(toggle());
+    // THE regression this feature could most easily introduce. A portal, a
+    // wrapper element that exists in only one branch, or two `<section>` branches
+    // would each move the iframe in the React tree — detaching it, discarding its
+    // browsing context, restarting the ten-second handshake and re-posting the
+    // whole verified plaintext.
+    expect(frame()).toBe(before);
+    expect(harness.readDocumentPlaintext).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: /exit full screen/i }));
+    expect(frame()).toBe(before);
+    expect(harness.readDocumentPlaintext).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the live channel open, so the frame can still speak after expanding', async () => {
+    await renderExpandable();
+    const port = handshake();
+
+    fireEvent.click(toggle());
+
+    // The stronger form of the case above: a remount would have taken the port
+    // with it, and this message would reach nothing at all. Posted directly
+    // rather than through `postAndSettle`, whose trailing message exists to prove
+    // a NEGATIVE and would be the one on screen at the end.
+    await act(async () => {
+      port.postMessage({ kind: 'link', href: 'https://example.com/after-expanding' });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('document-link-origin')).toHaveTextContent('https://example.com');
+    });
+  });
+
+  it('fills the viewport and claims a dialog only while expanded', async () => {
+    await renderExpandable();
+
+    expect(section().className).toContain('rounded-lg');
+    expect(section()).not.toHaveAttribute('role');
+    expect(frame()!.className).toContain('h-[70vh]');
+
+    fireEvent.click(toggle());
+
+    expect(section().className).toContain('fixed');
+    expect(section().className).toContain('inset-0');
+    expect(section().className).not.toContain('rounded-lg');
+    expect(section()).toHaveAttribute('role', 'dialog');
+    expect(section()).toHaveAttribute('aria-modal', 'true');
+    // `min-h-0` defeats a flex item's default `min-height: auto`, which an
+    // iframe's intrinsic 150px would otherwise use to push the box open.
+    expect(frame()!.className).toContain('flex-1');
+    expect(frame()!.className).toContain('min-h-0');
+    expect(frame()!.className).not.toContain('h-[70vh]');
+
+    fireEvent.click(screen.getByRole('button', { name: /exit full screen/i }));
+    expect(section()).not.toHaveAttribute('role');
+    expect(frame()!.className).toContain('h-[70vh]');
+  });
+
+  it('names the dialog after the document, from the application’s own DOM', async () => {
+    await renderExpandable();
+    fireEvent.click(toggle());
+
+    // The accessible name of a full-screen surface hosting an untrusted document
+    // must come from the application, never from anything the document rendered.
+    expect(section()).toHaveAttribute('aria-labelledby', 'document-open-heading');
+    expect(screen.getByRole('dialog')).toHaveAccessibleName('notes.md');
+  });
+
+  it('puts focus on the way out, and leaves it there on the way back', async () => {
+    await renderExpandable();
+    fireEvent.click(toggle());
+
+    // `useInlineDialog` focuses the FIRST focusable element in the panel, so the
+    // toggle has to be the first control in the header. Moving it after Download
+    // is a one-line reorder that this is the only thing to catch.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: /exit full screen/i }),
+      );
+    });
+
+    const exitButton = screen.getByRole('button', { name: /exit full screen/i });
+    fireEvent.click(exitButton);
+    // The same DOM node in both states, so no focus restoration is needed.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^full screen$/i }));
+  });
+
+  it('collapses on Escape, and locks then releases the body scroll', async () => {
+    await renderExpandable();
+    fireEvent.click(toggle());
+    expect(document.body.style.overflow).toBe('hidden');
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(section()).not.toHaveAttribute('role');
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('releases the scroll lock when the view goes away while still expanded', async () => {
+    await renderExpandable();
+    fireEvent.click(toggle());
+    expect(document.body.style.overflow).toBe('hidden');
+
+    cleanup();
+    // A lock swaps this whole subtree out; a lock counter left held would freeze
+    // scrolling on the unlock screen with nothing on screen to explain it.
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('stops claiming modality while a dialog is open above it', async () => {
+    await renderExpandable();
+    const port = handshake();
+    fireEvent.click(toggle());
+    expect(section()).toHaveAttribute('aria-modal', 'true');
+
+    await postAndSettle(port, 'https://example.com/somewhere');
+
+    // `Dialog` portals to <body>, OUTSIDE this section, and `aria-modal="true"`
+    // declares everything outside its container inert — so leaving it on would
+    // tell a screen reader to ignore the very confirmation the link-safety design
+    // rests on. The ROLE stays; only the modality is dropped.
+    expect(section()).toHaveAttribute('role', 'dialog');
+    expect(section()).not.toHaveAttribute('aria-modal');
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => {
+      expect(section()).toHaveAttribute('aria-modal', 'true');
+    });
+  });
+
+  it('gives Escape to a dialog opened on top, and only then to the panel', async () => {
+    await renderExpandable();
+    const port = handshake();
+    fireEvent.click(toggle());
+    await postAndSettle(port, 'https://example.com/somewhere');
+    expect(screen.getByTestId('document-link-origin')).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    // Both listeners are on `document` and neither stops propagation, so without
+    // the guard this ONE keypress closes the dialog and collapses the panel
+    // underneath it — leaving the reader two steps back from where they were.
+    await waitFor(() => {
+      expect(screen.queryByTestId('document-link-origin')).not.toBeInTheDocument();
+    });
+    expect(section()).toHaveAttribute('role', 'dialog');
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(section()).not.toHaveAttribute('role');
+  });
+
+  it('offers no toggle for a document it is not going to draw', async () => {
+    // A PDF is download-only by decision, so there is no frame to enlarge and a
+    // control that filled the screen with one paragraph would be worse than none.
+    renderDetail(makeDocument({ meta: makeMeta({ name: 'handbook.pdf', ext: 'pdf' }) }));
+    await screen.findByTestId('document-download-to-view');
+    expect(screen.queryByRole('button', { name: /full screen/i })).not.toBeInTheDocument();
+  });
+
+  it('drops out of full screen when the frame it was showing dies', async () => {
+    await renderExpandable();
+    fireEvent.click(toggle());
+    expect(section()).toHaveAttribute('role', 'dialog');
+
+    // A renderer that reports failure. Stored rather than derived, `expanded`
+    // would leave the refusal paragraph stranded on a full-viewport canvas.
+    const port = handshake();
+    await act(async () => {
+      port.postMessage({ kind: 'failed', reason: 'This file could not be displayed.' });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('document-download-to-view')).toBeInTheDocument();
+    });
+    expect(section()).not.toHaveAttribute('role');
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('does not carry full screen from one document to the next', async () => {
+    const view = renderDetail(makeDocument());
+    await waitFor(() => {
+      expect(frame()).not.toBeNull();
+    });
+    fireEvent.click(toggle());
+    expect(section()).toHaveAttribute('role', 'dialog');
+
+    const next = makeDocument({ id: OTHER_ID, meta: makeMeta({ name: 'other.md' }) });
+    view.rerender(
+      <MemoryRouter initialEntries={[`/documents/${next.id}`]}>
+        <Routes>
+          <Route
+            path="/documents/:id"
+            element={<DocumentDetail document={next} isTrashed={false} />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    // The next file must not open filling the viewport without anyone asking —
+    // over a spinner, at that, because its bytes have just been cleared.
+    expect(screen.getByTestId('document-content')).not.toHaveAttribute('role');
   });
 });

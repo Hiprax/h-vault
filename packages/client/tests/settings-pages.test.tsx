@@ -2234,6 +2234,8 @@ describe('BackupSettingsPage', () => {
       if (url === '/backup/history') {
         return Promise.resolve({
           data: {
+            success: true,
+            pagination: { page: 1, limit: 10, total: 2, totalPages: 1 },
             data: [
               {
                 _id: 'h1',
@@ -2500,7 +2502,14 @@ describe('BackupSettingsPage', () => {
     // The server returns the backup document as text; handleDownload parses,
     // canonicalizes, HMAC-signs, and re-serializes it.
     mockApiGet.mockImplementation((url: string) => {
-      if (url === '/backup/history') return Promise.resolve({ data: { data: [] } });
+      if (url === '/backup/history')
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [],
+            pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+          },
+        });
       if (url === '/backup/download')
         return Promise.resolve({ data: JSON.stringify({ items: [], folders: [] }) });
       return Promise.resolve({ data: {} });
@@ -2586,7 +2595,13 @@ describe('BackupSettingsPage', () => {
         return Promise.reject(new Error('Download failed'));
       }
       if (url === '/backup/history') {
-        return Promise.resolve({ data: { data: [] } });
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [],
+            pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+          },
+        });
       }
       return Promise.resolve({ data: {} });
     });
@@ -3329,11 +3344,129 @@ describe('BackupSettingsPage', () => {
 
   // ---- Backup History ----
 
+  /** A history page as the server really sends one. */
+  function historyPage(page: number, totalPages: number, total: number) {
+    return {
+      success: true,
+      data: Array.from({ length: Math.min(10, total) }, (_, i) => ({
+        _id: `p${String(page)}-${String(i)}`,
+        status: 'success' as const,
+        timestamp: '2026-02-20T03:00:00Z',
+        itemCount: i,
+        sentTo: ['backup@example.com'],
+      })),
+      pagination: { page, limit: 10, total, totalPages },
+    };
+  }
+
+  it('asks the server for one page and reads the envelope it answers with', async () => {
+    mockApiGet.mockImplementation((url: string) => {
+      if (url === '/backup/history') return Promise.resolve({ data: historyPage(1, 4, 37) });
+      return Promise.resolve({ data: {} });
+    });
+
+    await renderBackup();
+
+    // The original defect in one assertion: the request was sent with no params
+    // at all and the response was typed so that `pagination` did not exist, so
+    // everything past the first page was unreachable and nothing could say so.
+    await waitFor(() => {
+      expect(mockApiGet).toHaveBeenCalledWith('/backup/history', {
+        params: { page: 1, limit: 10 },
+      });
+    });
+    expect(await screen.findByText('37 entries, newest first')).toBeInTheDocument();
+    expect(screen.getByText(/Page 1 of 4/)).toBeInTheDocument();
+    // Ten rows at most, because the SERVER decided the page size.
+    expect(screen.getAllByText('success')).toHaveLength(10);
+  });
+
+  it('walks forward and back, and stops at both ends', async () => {
+    let served = 1;
+    mockApiGet.mockImplementation((url: string, config?: { params?: { page?: number } }) => {
+      if (url === '/backup/history') {
+        served = config?.params?.page ?? 1;
+        return Promise.resolve({ data: historyPage(served, 3, 25) });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    await renderBackup();
+    await screen.findByText(/Page 1 of 3/);
+    expect(screen.getByRole('button', { name: /previous page/i })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /next page/i }));
+    await waitFor(() => {
+      expect(served).toBe(2);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /previous page/i }));
+    await waitFor(() => {
+      expect(served).toBe(1);
+    });
+  });
+
+  it('draws no pagination at all when everything fits on one page', async () => {
+    mockApiGet.mockImplementation((url: string) => {
+      if (url === '/backup/history') return Promise.resolve({ data: historyPage(1, 1, 3) });
+      return Promise.resolve({ data: {} });
+    });
+
+    await renderBackup();
+    await screen.findByText('3 entries, newest first');
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+  });
+
+  it('re-reads page one exactly once after a backup is triggered', async () => {
+    let historyCalls = 0;
+    let lastPage = 0;
+    mockApiGet.mockImplementation((url: string, config?: { params?: { page?: number } }) => {
+      if (url === '/backup/history') {
+        historyCalls += 1;
+        lastPage = config?.params?.page ?? 1;
+        return Promise.resolve({ data: historyPage(lastPage, 3, 25) });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    mockApiPost.mockResolvedValue({ data: { success: true, message: 'ok', data: {} } });
+
+    await renderBackup();
+    await screen.findByText(/Page 1 of 3/);
+
+    // FROM PAGE ONE, which is the case with teeth. `setHistoryPage(1)` alone is a
+    // no-op here — the state does not change, so the effect does not re-run and
+    // the row the server just wrote is never read back. Only the reload token
+    // makes this a request.
+    const beforeFirst = historyCalls;
+    fireEvent.click(screen.getByRole('button', { name: /Backup Now/ }));
+    await waitFor(() => {
+      expect(historyCalls).toBe(beforeFirst + 1);
+    });
+
+    // AND FROM PAGE TWO, which is the other half: it must land back on page one,
+    // and it must do so with ONE request rather than two.
+    fireEvent.click(screen.getByRole('button', { name: /next page/i }));
+    await waitFor(() => {
+      expect(lastPage).toBe(2);
+    });
+    const beforeSecond = historyCalls;
+
+    fireEvent.click(screen.getByRole('button', { name: /Backup Now/ }));
+
+    await waitFor(() => {
+      expect(lastPage).toBe(1);
+    });
+    expect(historyCalls).toBe(beforeSecond + 1);
+  });
+
   it('renders Backup History section', async () => {
     await renderBackup();
     await waitFor(() => {
       expect(screen.getByText('Backup History')).toBeInTheDocument();
-      expect(screen.getByText('Last 30 backup entries')).toBeInTheDocument();
+      expect(screen.getByText(/entries, newest first/)).toBeInTheDocument();
     });
   });
 
@@ -3364,7 +3497,13 @@ describe('BackupSettingsPage', () => {
   it('shows "No backup history" when history is empty', async () => {
     mockApiGet.mockImplementation((url: string) => {
       if (url === '/backup/history') {
-        return Promise.resolve({ data: { data: [] } });
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [],
+            pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+          },
+        });
       }
       return Promise.resolve({ data: {} });
     });
@@ -3375,7 +3514,12 @@ describe('BackupSettingsPage', () => {
     });
   });
 
-  it('handles history endpoint failure gracefully', async () => {
+  it('reports a failed history load instead of showing an empty one', async () => {
+    // This case used to assert the OPPOSITE — that a rejected request rendered
+    // "No backup history" — which is the defect rather than the behaviour: it
+    // makes a broken endpoint indistinguishable from an account that has never
+    // run a backup. The same rule is already written down one directory over, on
+    // the document list: a failure is a state of the section, not a silence.
     mockApiGet.mockImplementation((url: string) => {
       if (url === '/backup/history') {
         return Promise.reject(new Error('History not available'));
@@ -3385,12 +3529,13 @@ describe('BackupSettingsPage', () => {
 
     await renderBackup();
 
-    // Page should still render without crashing
+    // The rest of the page still works — the failure is contained to its card.
     await waitFor(() => {
       expect(screen.getByText('Backup Settings')).toBeInTheDocument();
-      // History should show no entries
-      expect(screen.getByText('No backup history')).toBeInTheDocument();
+      expect(screen.getByRole('alert')).toHaveTextContent('Backup history could not be loaded.');
     });
+    expect(screen.queryByText('No backup history')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
   it('shows restore button even when backup is not configured (for restoring from backup file with embedded metadata)', async () => {

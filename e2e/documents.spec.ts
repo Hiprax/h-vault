@@ -242,6 +242,49 @@ test.describe('documents: the encrypted document store', () => {
     await expect(page.getByRole('button', { name: 'Upload the original unchanged' })).toBeVisible();
   });
 
+  test('files a document in a folder and favorites it, and both lead somewhere', async ({
+    page,
+  }) => {
+    test.setTimeout(300_000);
+    await registerAndSignInViaUI(page);
+    await gotoDocuments(page);
+
+    // A folder made from the DOCUMENTS rail. Folders are one collection shared
+    // with the vault, so this is the same tree the vault shows.
+    await page.getByRole('button', { name: 'Create folder' }).click();
+    await page.getByPlaceholder('Folder name').fill('Taxes');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(page.getByRole('button', { name: /^Taxes/ })).toBeVisible({ timeout: 60_000 });
+
+    // Selected, so the upload is filed there — the panel says so before it starts.
+    await page.getByRole('button', { name: /^Taxes/ }).click();
+    await expect(page.getByTestId('upload-target-folder')).toContainText('Taxes');
+    await uploadDocument(page, CSV);
+
+    // BUG 2, end to end: the folder now leads somewhere. The row says where it is
+    // filed and the rail counts it.
+    await expect(page.getByTestId('document-folder')).toContainText('Taxes');
+    await expect(page.getByRole('button', { name: /^Taxes/ })).toContainText('1');
+
+    // BUG 1, end to end: a favorite now leads somewhere too.
+    await openDocument(page, CSV);
+    await page.getByRole('button', { name: 'Favorite' }).click();
+    await expect(page.getByRole('button', { name: 'Favorited' })).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('link', { name: 'Back to documents' }).click();
+    await page.getByRole('button', { name: /^Favorites/ }).click();
+    await expect(page.getByTestId('document-name').filter({ hasText: CSV })).toBeVisible({
+      timeout: 60_000,
+    });
+
+    // The NEGATIVE that makes the filter a filter: a document that is not a
+    // favorite is not listed under Favorites.
+    await page.getByRole('button', { name: /^All Documents/ }).click();
+    await uploadDocument(page, README);
+    await page.getByRole('button', { name: /^Favorites/ }).click();
+    await expect(page.getByTestId('document-name').filter({ hasText: README })).toHaveCount(0);
+    await expect(page.getByTestId('document-name')).toHaveCount(1);
+  });
+
   test('sends a document to the trash, restores it, and then deletes it for good', async ({
     page,
   }) => {
@@ -250,9 +293,8 @@ test.describe('documents: the encrypted document store', () => {
     await gotoDocuments(page);
     await uploadDocument(page, CSV);
     await openDocument(page, CSV);
-    // Captured BEFORE the delete, because there is no trash ROUTE: a trashed
-    // document is reachable only at its own URL, which `DocumentPage` answers by
-    // reading both the active list and the trash.
+    // Still captured, because the LAST assertion of this test needs it: only the
+    // id route can prove a purged document is gone from BOTH lists.
     const id = documentIdFromUrl(page);
 
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
@@ -264,8 +306,18 @@ test.describe('documents: the encrypted document store', () => {
     await expect(page).toHaveURL(/\/documents$/);
     await expect(page.getByTestId('document-name')).toHaveCount(0);
 
+    // THE SURFACE THE BUG REPORT WAS ABOUT. The message said the document had
+    // been moved to the trash; until now there was no trash to move it to, and
+    // this walk reached it by reloading its URL from memory.
+    await page.getByRole('button', { name: /^Trash/ }).click();
+    const trashedRow = page.getByTestId('document-name').filter({ hasText: CSV });
+    await expect(trashedRow).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('document-row').filter({ hasText: CSV })).toContainText(
+      'Deleted',
+    );
+
     // In the trash: still stored, still counted, and restorable.
-    await reopenByUrl(page, `/documents/${id}`, password);
+    await trashedRow.click();
     await expect(page.getByTestId('document-trashed-note')).toBeVisible({ timeout: 60_000 });
     await expect(page.getByTestId('document-trashed-note')).toContainText('still occupies storage');
     // NEGATIVE: a trashed document offers no way to trash it again, so a UI that
@@ -274,6 +326,8 @@ test.describe('documents: the encrypted document store', () => {
 
     await page.getByRole('button', { name: 'Restore' }).click();
     await expect(page).toHaveURL(/\/documents$/);
+    // Restoring lands the reader where the document now IS, rather than back in
+    // the trash it has just left.
     await expect(page.getByTestId('document-name').filter({ hasText: CSV })).toBeVisible({
       timeout: 60_000,
     });
@@ -287,7 +341,8 @@ test.describe('documents: the encrypted document store', () => {
       .click();
     await expect(page).toHaveURL(/\/documents$/);
 
-    await reopenByUrl(page, `/documents/${id}`, password);
+    await page.getByRole('button', { name: /^Trash/ }).click();
+    await page.getByTestId('document-name').filter({ hasText: CSV }).click();
     await expect(page.getByRole('button', { name: 'Delete Forever' })).toBeVisible({
       timeout: 60_000,
     });

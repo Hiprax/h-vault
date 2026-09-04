@@ -284,6 +284,33 @@ test.describe('accessibility: every primary view and modal', () => {
         // excluded. Excluding it would drop the whole framed document from the
         // run while leaving every number this gate reports unchanged.
         await scan('document-viewer');
+
+        // The expanded state. The wait is on the ROLE rather than on the
+        // button's new label, because the class change and the role change land
+        // in one commit and only the second is what this view is about.
+        await page.getByRole('button', { name: 'Full screen' }).click();
+        await expect(page.getByRole('dialog', { name: DOCUMENT_MARKDOWN })).toBeVisible();
+        await scan('document-viewer-expanded');
+        await page.getByRole('button', { name: 'Exit full screen' }).click();
+        await expect(page.getByRole('dialog')).toHaveCount(0);
+
+        // And the trash, which needs something in it. The PDF goes, because the
+        // two detail scans above are already done with it.
+        await page.getByRole('link', { name: 'Back to documents' }).click();
+        await expect(page).toHaveURL(/\/documents$/);
+        await openDocument(page, DOCUMENT_PDF);
+        await page.getByRole('button', { name: 'Delete', exact: true }).click();
+        await page
+          .getByRole('dialog', { name: 'Move to trash' })
+          .getByRole('button', { name: 'Move to trash' })
+          .click();
+        await expect(page).toHaveURL(/\/documents$/);
+        await page.getByRole('button', { name: /^Trash/ }).click();
+        await expect(page.getByRole('button', { name: 'Empty trash' })).toBeVisible();
+        await scan('documents-trash');
+        // Put the rail back, so the walk does not abandon a filtered view behind
+        // the unlock step.
+        await page.getByRole('button', { name: /^All Documents/ }).click();
       });
 
       // Near-last, because reaching it locks the vault: the key lives in memory

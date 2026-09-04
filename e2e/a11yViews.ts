@@ -85,6 +85,21 @@ export const A11Y_VIEWS = [
     id: 'document-viewer',
     description: 'a stored markdown document, rendered inside the isolated frame',
   },
+  {
+    // The SAME <section>, promoted to `fixed inset-0` and re-labelled. Not a
+    // second look at `document-viewer`: this is the only surface in the
+    // application that carries a dialog role on an element which is NOT portalled
+    // to <body>, the only one whose accessible name comes from a heading rather
+    // than a `DialogTitle`, and the only dialog anywhere that CONTAINS a
+    // cross-origin frame — so `aria-allowed-role`, `aria-dialog-name` and the
+    // landmark rules all see a shape no other view in this list produces.
+    id: 'document-viewer-expanded',
+    description: 'the same markdown document with the viewer expanded to full screen',
+  },
+  {
+    id: 'documents-trash',
+    description: 'the documents page in trash mode, with one trashed document and Empty trash',
+  },
   { id: 'unlock-screen', description: 'the unlock screen, vault locked' },
   {
     // THE FIFTH VIEW, and its reason is a property of axe rather than of this
