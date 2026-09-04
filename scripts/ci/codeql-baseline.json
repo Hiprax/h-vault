@@ -48,7 +48,7 @@
       "file": "packages/server/src/controllers/toolsController.ts"
     },
     {
-      "fingerprint": "js/sql-injection::packages/server/src/controllers/userController.ts::e27c13edf88f3689:1",
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/userController.ts::b47c58a05c350bc4:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/userController.ts"
     },
