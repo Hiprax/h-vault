@@ -16,7 +16,12 @@
     // real sources beats hand-written `.d.mts` sidecars, which would be free to
     // drift from the modules they describe without anything noticing. `checkJs`
     // stays off (its default), so this only teaches the resolver to read them.
-    "allowJs": true
+    "allowJs": true,
+    // Its own build info, never the build config's and never shared with another
+    // project: see `packages/shared/tsconfig.test.json` for both rules and why the
+    // configs that EMIT must not carry these two keys.
+    "incremental": true,
+    "tsBuildInfoFile": "../../.cache/tsbuildinfo/server.tests.tsbuildinfo"
   },
   "include": ["src/**/*", "tests/**/*", "scripts/**/*"],
   "references": [{ "path": "../shared" }]

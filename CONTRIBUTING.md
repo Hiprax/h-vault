@@ -103,10 +103,13 @@ rather than gates, because the wall clock of your laptop is not a property of th
 failing a push over it would only teach people to reach for `--no-verify`. They are still measured:
 every run records `budgetSeconds` beside its own `durationMs` in `summary.json` and prints the
 comparison. The numbers live in `scripts/ci/lib/tiers.mjs`. If you add a gate to T0, re-measure, and
-know before you start that there is nothing left to spend: the measured value is now
-**1m 49s to 2m 23s** over three runs against that 90 s budget, so even the quietest is
-over it and the runner says so on every run. `lint` and `type-check` are about 85 s of
-the total between them.
+know before you start that there is very little left to spend: the measured value is now
+**1m 19s to 2m 44s** over six runs against that 90 s budget, the spread being contention on
+a shared machine rather than anything in the tree — the quietest run fits and the busiest is
+nearly double, and the runner says which on every run. `lint` moved between 40 s and 1m 20s
+across those runs and `format` between 22 s and 47 s. `type-check` is 13 to 32 s only
+because every tsc invocation keeps incremental build information in `.cache/tsbuildinfo/`;
+a cold run — a fresh clone, or the clean room — measures about 1m 24s instead.
 
 The runner **aggregates by default**: it runs every selected gate and reports all the
 failures, rather than costing you a round trip per failure. A gate whose dependency

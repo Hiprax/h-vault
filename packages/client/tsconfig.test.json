@@ -28,7 +28,12 @@
     // `checkJs` stays off (its default), so this only teaches the resolver to
     // read those files; it relaxes nothing about the TypeScript it checks, and
     // `src/` is unaffected because the build config does not set it.
-    "allowJs": true
+    "allowJs": true,
+    // Its own build info, never the build config's and never shared with another
+    // project: see `packages/shared/tsconfig.test.json` for both rules and why the
+    // configs that EMIT must not carry these two keys.
+    "incremental": true,
+    "tsBuildInfoFile": "../../.cache/tsbuildinfo/client.tests.tsbuildinfo"
   },
   "include": [
     "src/**/*",

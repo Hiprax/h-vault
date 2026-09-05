@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Changed
+
+- **Type-checking reuses its previous work.** Each of the seven `tsc` invocations behind `npm run type-check` now keeps its own incremental build information under `.cache/tsbuildinfo/`, so a check of an unchanged tree takes about 25 seconds instead of 1 minute 12. The first check after a fresh clone is slower by about ten seconds, because it writes that state as well as computing it. No strictness setting, library or file list changed. The build information is gitignored, describes one machine's tree, is never copied into an image, and `npm run clean` now removes it.
+- **The Docker build context now excludes `.cache/` at any depth**, so a local CodeQL bundle, its database, or the type-checker's state on the machine doing the build can no longer ride into an image layer.
+
+### Fixed
+
+- **`npm run build` could produce nothing at all, and still report success.** A TypeScript build that keeps incremental state does not check whether the files it previously emitted still exist, so deleting a package's `dist/` while that state survived — which is exactly what `npm run clean` did — left the next build exiting 0 having written no output. The shared package's state now lives inside the directory it describes, so removing that directory is always a correct rebuild from scratch, and `npm run clean` clears the remaining state files as well.
+
 ## [0.11.0] - 2026-09-04
 
 ### Added

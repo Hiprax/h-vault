@@ -14,7 +14,7 @@
     "test:fuzz": "vitest run --config vitest.fuzz.config.ts",
     "test:snapshot": "vitest run --config vitest.snapshot.config.ts",
     "test:upgrade": "vitest run --config vitest.upgrade.config.ts",
-    "type-check": "tsc --noEmit && tsc -p tsconfig.test.json"
+    "type-check": "tsc --noEmit --incremental --tsBuildInfoFile ../../.cache/tsbuildinfo/client.src.tsbuildinfo && tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "@hiprax/crypto": "^1.5.0",

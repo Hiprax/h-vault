@@ -76,7 +76,7 @@
     "typecheck": {
       "cmd": "npm run type-check",
       "tier": 0,
-      "gate": "0 type errors across all 4 tsc projects",
+      "gate": "0 type errors across all 7 tsc projects",
       "report": "tsc.log",
       "requires": ["build:shared"]
     },

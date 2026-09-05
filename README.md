@@ -1355,11 +1355,11 @@ npm run ci -- --json            # one JSON document describing the run
 
 Each tier has a stated time budget on the reference machine:
 
-| Tier   | Entry point           | Budget        | Why that number                                                                                                                                                                                                                                                                                            |
-| ------ | --------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **T0** | `npm run verify:fast` | **90 s**      | It is meant to be run without thinking about it. Last measured at 1m 49s to 2m 23s over three runs, so T0 is now OVER this budget and the runner says so on every run: `lint` and `type-check` are ~100 s of it between them. Read that as the reason a gate is not added to T0, not as a number to raise. |
-| **T1** | `npm run ci`          | **12 min**    | Playwright alone is ~7.5 minutes and the server suite 3 to 4.5, and the tier measures 22 to 24 across two clean runs. Twelve rather than a rounder ten, because a budget nobody meets is a budget nobody respects.                                                                                         |
-| **T2** | `npm run verify:full` | **unbounded** | `mutation` re-runs the whole suite once per mutant. Any number written here would be fiction.                                                                                                                                                                                                              |
+| Tier   | Entry point           | Budget        | Why that number                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------ | --------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **T0** | `npm run verify:fast` | **90 s**      | It is meant to be run without thinking about it. Measured at 1m 19s to 2m 44s over six runs with the type-check build info warm, on four cores shared with unrelated work: the quietest run fits this budget and the busiest is nearly double it, and the runner says which on every run. The spread is contention, not the tree — `lint` moved between 40 s and 1m 20s across those same runs, and `format` between 22 s and 47 s; a COLD `type-check` adds about a minute more. Read that as the reason a gate is not added to T0, not as a number to raise. |
+| **T1** | `npm run ci`          | **12 min**    | Playwright alone is ~7.5 minutes and the server suite 3 to 4.5, and the tier measures 22 to 24 across two clean runs. Twelve rather than a rounder ten, because a budget nobody meets is a budget nobody respects.                                                                                                                                                                                                                                                                                                                                             |
+| **T2** | `npm run verify:full` | **unbounded** | `mutation` re-runs the whole suite once per mutant. Any number written here would be fiction.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 The budgets are **design budgets, not gates**, and both halves of that are deliberate. They are not
 gates because the wall clock of the machine you happen to be on is not a property of this
@@ -1578,40 +1578,40 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ### Scripts
 
-| Command                        | Description                                     |
-| ------------------------------ | ----------------------------------------------- |
-| `npm run dev`                  | Server + client together, hot-reloading         |
-| `npm run build`                | Build all packages (shared → server → client)   |
-| `npm run start`                | Start the production server                     |
-| `npm run test`                 | Every workspace's tests                         |
-| `npm run test:unit`            | The hermetic suites (shared, client)            |
-| `npm run test:integration`     | The server suite, against a real `mongod`       |
-| `npm run test:e2e`             | Playwright E2E tests                            |
-| `npm run lint`                 | ESLint, warnings are errors                     |
-| `npm run type-check`           | Type-check all packages, tests and `e2e/`       |
-| `npm run format`               | Prettier — write                                |
-| `npm run format:check`         | Prettier — verify only                          |
-| `npm run ci`                   | The whole pipeline (what `pre-push` runs)       |
-| `npm run verify:fast`          | The fast tier only (1m 49s-2m 23s)              |
-| `npm run verify:full`          | The whole pipeline plus the release tier        |
-| `npm run ci:list`              | List the pipeline's gates and their tiers       |
-| `npm run ci:docker`            | The container gate on its own                   |
-| `npm run ci:sast`              | The static-analysis gate on its own             |
-| `npm run audit:bundle`         | The client bundle size budgets on their own     |
-| `npm run test:resource`        | The volume and memory budgets on their own      |
-| `npm run test:upgrade`         | The previous release's vault and `.env`, read   |
-| `npm run test:recovery`        | The backup-restore and crash-consistency drills |
-| `npm run test:dst`             | The whole suite again, in a DST-observing zone  |
-| `npm run test:flake`           | Ten shuffled runs, plus E2E three times over    |
-| `npm run report`               | Collect the gates' warning counts               |
-| `npm run verify:selftest`      | Prove every registered gate can still fail      |
-| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger  |
-| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline   |
-| `npm run audit:ratchet:full`   | Every gated number, against the baseline        |
-| `npm run secret-scan`          | Scan every tracked file for committed secrets   |
-| `npm run audit:prod`           | Dependency audit, production deps only          |
-| `npm run release:next-version` | Compute the next release tag                    |
-| `npm run clean`                | Remove `dist/`, `node_modules/` and `logs/`     |
+| Command                        | Description                                              |
+| ------------------------------ | -------------------------------------------------------- |
+| `npm run dev`                  | Server + client together, hot-reloading                  |
+| `npm run build`                | Build all packages (shared → server → client)            |
+| `npm run start`                | Start the production server                              |
+| `npm run test`                 | Every workspace's tests                                  |
+| `npm run test:unit`            | The hermetic suites (shared, client)                     |
+| `npm run test:integration`     | The server suite, against a real `mongod`                |
+| `npm run test:e2e`             | Playwright E2E tests                                     |
+| `npm run lint`                 | ESLint, warnings are errors                              |
+| `npm run type-check`           | Type-check all packages, tests and `e2e/`                |
+| `npm run format`               | Prettier — write                                         |
+| `npm run format:check`         | Prettier — verify only                                   |
+| `npm run ci`                   | The whole pipeline (what `pre-push` runs)                |
+| `npm run verify:fast`          | The fast tier only (1m 19s-2m 44s)                       |
+| `npm run verify:full`          | The whole pipeline plus the release tier                 |
+| `npm run ci:list`              | List the pipeline's gates and their tiers                |
+| `npm run ci:docker`            | The container gate on its own                            |
+| `npm run ci:sast`              | The static-analysis gate on its own                      |
+| `npm run audit:bundle`         | The client bundle size budgets on their own              |
+| `npm run test:resource`        | The volume and memory budgets on their own               |
+| `npm run test:upgrade`         | The previous release's vault and `.env`, read            |
+| `npm run test:recovery`        | The backup-restore and crash-consistency drills          |
+| `npm run test:dst`             | The whole suite again, in a DST-observing zone           |
+| `npm run test:flake`           | Ten shuffled runs, plus E2E three times over             |
+| `npm run report`               | Collect the gates' warning counts                        |
+| `npm run verify:selftest`      | Prove every registered gate can still fail               |
+| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger           |
+| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline            |
+| `npm run audit:ratchet:full`   | Every gated number, against the baseline                 |
+| `npm run secret-scan`          | Scan every tracked file for committed secrets            |
+| `npm run audit:prod`           | Dependency audit, production deps only                   |
+| `npm run release:next-version` | Compute the next release tag                             |
+| `npm run clean`                | Remove `dist/`, `node_modules/`, `logs/`, tsc build info |
 
 ---
 
@@ -1637,14 +1637,18 @@ Measured on the reference machine, from the reports each run leaves behind:
 
 | Command               | Gates | Measured          | What dominates it                                                                                      |
 | --------------------- | ----- | ----------------- | ------------------------------------------------------------------------------------------------------ |
-| `npm run verify:fast` | 7     | **1m 49s-2m 23s** | ESLint and the type check, ~85 s of it between them                                                    |
+| `npm run verify:fast` | 7     | **1m 19s-2m 44s** | ESLint at 40 s to 1m 20s and Prettier at 22 to 47 s; the type check is 13 to 32 s with build info      |
 | `npm run ci`          | 29    | **22-24 min**     | Playwright at ~7.5 min, then CodeQL at ~4.5, the server suite at 3-4.5 and the client suite at 2.5-3.5 |
 | `npm run verify:full` | 37    | **hours**         | `flake`, then `mutation`, which has no honest estimate                                                 |
 
-**The fast tier no longer fits its own budget, and the table is the honest number rather
-than the target.** T0's design budget is 90 seconds; three runs of it came in at
-2m 23s, 2m 10s and 1m 49s, so even the quietest is over, and the runner prints `OVER` and
-exits 0, because the budget is a design budget and not a gate. Twenty-five phases of new source is what happened to it.
+**The fast tier fits its own budget only on a quiet machine, and the table is the honest
+number rather than the target.** T0's design budget is 90 seconds. Six runs on four cores
+shared with unrelated work spanned 1m 19s to 2m 44s — the same commit, the same gates, the
+quietest run inside the budget and the busiest nearly twice it — and the runner prints
+`OVER` or does not, accordingly, exiting 0 either way because the budget is a design budget
+and not a gate. Twenty-five phases of new source is what put it near the line; the machine
+you are on decides which side of it you land. All six had the type check's build info warm;
+a cold one — a fresh clone, or the clean room — adds about a minute to every figure here.
 Take it as the reason not to add a gate to T0, not as a licence to raise the number.
 
 The push tier is a range for the same reason every figure here is a measurement rather
@@ -1833,7 +1837,8 @@ Semgrep CE or OpenGrep and says so in its report; with no analyser at all it rep
 
 **Budget about 20 GB on the filesystem holding the checkout.** Almost none of it is the
 project. Measured on this checkout immediately before a full pass: `.cache/` holds
-**3.7 GB** (the CodeQL bundle at 2.5 GB plus the database it builds at 1.1 GB),
+**3.7 GB** (the CodeQL bundle at 2.5 GB plus the database it builds at 1.1 GB, alongside
+the type-checker's incremental build info in `.cache/tsbuildinfo/` at 1.3 MB),
 `node_modules` is **759 MB**, the three `packages/*/dist` directories come to 8 MB, `.git`
 is 5.6 MB, and the whole working directory is **6.0 GB** before `mutation` runs. The
 mutation gate's Stryker sandboxes then land in `.stryker-tmp/` inside the repository and
@@ -2069,13 +2074,19 @@ in the run is seconds.
 | `test-integration` | 4m 53s   | none                                         |
 | `sast`             | 4m 46s   | none                                         |
 | `test`             | 3m 11s   | none                                         |
+| `type-check`       | 1m 24s   | none                                         |
 | `deploy`           | 1m 25s   | 120 s per health wait                        |
 | `resource`         | 1m 06s   | 15 min                                       |
 | `a11y`             | 57s      | none                                         |
-| `type-check`       | 54s      | none                                         |
 | `lint`             | 48s      | none                                         |
 | `fuzz`             | 41s      | 5 min per leg                                |
 | `property`         | 31s      | none                                         |
+
+`type-check` is the one row that depends on what the machine already knows: **1m 24s is a
+COLD run**, which is what a fresh clone and the clean room always get. Every one of its
+seven tsc invocations keeps incremental build information in `.cache/tsbuildinfo/`, so a
+run over an unchanged tree measured **25s** when the gate was timed on its own, and 13s to
+32s inside whole `verify:fast` runs — the spread being what else the machine was doing.
 
 Everything else in the run measured under half a minute, and two of those are worth a
 word. `docker` came in at 14.5 s only because its layer cache and Trivy's database were
