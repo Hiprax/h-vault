@@ -103,13 +103,26 @@ rather than gates, because the wall clock of your laptop is not a property of th
 failing a push over it would only teach people to reach for `--no-verify`. They are still measured:
 every run records `budgetSeconds` beside its own `durationMs` in `summary.json` and prints the
 comparison. The numbers live in `scripts/ci/lib/tiers.mjs`. If you add a gate to T0, re-measure, and
-know before you start that there is very little left to spend: the measured value is now
-**1m 19s to 2m 44s** over six runs against that 90 s budget, the spread being contention on
-a shared machine rather than anything in the tree — the quietest run fits and the busiest is
-nearly double, and the runner says which on every run. `lint` moved between 40 s and 1m 20s
-across those runs and `format` between 22 s and 47 s. `type-check` is 13 to 32 s only
-because every tsc invocation keeps incremental build information in `.cache/tsbuildinfo/`;
-a cold run — a fresh clone, or the clean room — measures about 1m 24s instead.
+know before you start that there is very little left to spend. The measurement splits
+by what else the machine was doing: on an idle four-core box it is
+**1m 18s**, five runs spanning a single second, which is twelve seconds inside
+the 90 s budget; on the same four cores running unrelated work it is
+**1m 19s to 2m 44s**. The runner says which on every run. `lint` and `format` are 61 s of
+the idle 78 s and 1m 42s to 2m 00s of a busy run — more than the whole budget between
+them — so that is where any new gate's time would have to come from. `type-check` is 13
+to 32 s only because every tsc invocation keeps incremental build information in
+`.cache/tsbuildinfo/`; a cold run — a fresh clone, or the clean room — measures about
+1m 24s instead.
+
+The obvious way to buy that back has already been tried and rejected: ESLint's
+`concurrency: 'auto'` measured 4-4 on wall clock over eight interleaved pairs of runs
+while costing +37.5 % CPU and +0.95 GB of peak memory in every one of them, because
+`projectService: true` makes each worker thread build its own TypeScript program. It is
+backwards for this tier twice over — the extra CPU only turns into wall clock when cores
+are idle, which is when the tier already fits, and it costs most when the machine is
+busy, which is the only time the tier needs help. The measurement is recorded beside the
+constructor in `scripts/ci/lint-gate.mjs`, so please read it before spending an afternoon
+reproducing it.
 
 The runner **aggregates by default**: it runs every selected gate and reports all the
 failures, rather than costing you a round trip per failure. A gate whose dependency

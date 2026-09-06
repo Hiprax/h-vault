@@ -1355,11 +1355,11 @@ npm run ci -- --json            # one JSON document describing the run
 
 Each tier has a stated time budget on the reference machine:
 
-| Tier   | Entry point           | Budget        | Why that number                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ------ | --------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **T0** | `npm run verify:fast` | **90 s**      | It is meant to be run without thinking about it. Measured at 1m 19s to 2m 44s over six runs with the type-check build info warm, on four cores shared with unrelated work: the quietest run fits this budget and the busiest is nearly double it, and the runner says which on every run. The spread is contention, not the tree — `lint` moved between 40 s and 1m 20s across those same runs, and `format` between 22 s and 47 s; a COLD `type-check` adds about a minute more. Read that as the reason a gate is not added to T0, not as a number to raise. |
-| **T1** | `npm run ci`          | **12 min**    | Playwright alone is ~7.5 minutes and the server suite 3 to 4.5, and the tier measures 22 to 24 across two clean runs. Twelve rather than a rounder ten, because a budget nobody meets is a budget nobody respects.                                                                                                                                                                                                                                                                                                                                             |
-| **T2** | `npm run verify:full` | **unbounded** | `mutation` re-runs the whole suite once per mutant. Any number written here would be fiction.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Tier   | Entry point           | Budget        | Why that number                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------ | --------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **T0** | `npm run verify:fast` | **90 s**      | It is meant to be run without thinking about it, and it fits — on a machine doing nothing else. Measured with the type-check build info warm: on an idle four-core box, **1m 18s**, over five runs spanning a single second. On the same four cores running unrelated work, 1m 19s to 2m 44s over ten. The spread is contention, not the tree — `lint` and `format` are 61 s of the idle 78 s and 1m 42s to 2m 00s of a busy run, more than this whole budget between them, while a COLD `type-check` adds about a minute more. Twelve seconds of headroom is what is left to spend before a gate is added here. |
+| **T1** | `npm run ci`          | **12 min**    | Playwright alone is ~7.5 minutes and the server suite 3 to 4.5, and the tier measures 22 to 24 across two clean runs. Twelve rather than a rounder ten, because a budget nobody meets is a budget nobody respects.                                                                                                                                                                                                                                                                                                                                                                                               |
+| **T2** | `npm run verify:full` | **unbounded** | `mutation` re-runs the whole suite once per mutant. Any number written here would be fiction.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 The budgets are **design budgets, not gates**, and both halves of that are deliberate. They are not
 gates because the wall clock of the machine you happen to be on is not a property of this
@@ -1592,7 +1592,7 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 | `npm run format`               | Prettier — write                                         |
 | `npm run format:check`         | Prettier — verify only                                   |
 | `npm run ci`                   | The whole pipeline (what `pre-push` runs)                |
-| `npm run verify:fast`          | The fast tier only (1m 19s-2m 44s)                       |
+| `npm run verify:fast`          | The fast tier only (1m 18s idle, 1m 19s-2m 44s busy)     |
 | `npm run verify:full`          | The whole pipeline plus the release tier                 |
 | `npm run ci:list`              | List the pipeline's gates and their tiers                |
 | `npm run ci:docker`            | The container gate on its own                            |
@@ -1635,21 +1635,40 @@ to do with the answer.
 
 Measured on the reference machine, from the reports each run leaves behind:
 
-| Command               | Gates | Measured          | What dominates it                                                                                      |
-| --------------------- | ----- | ----------------- | ------------------------------------------------------------------------------------------------------ |
-| `npm run verify:fast` | 7     | **1m 19s-2m 44s** | ESLint at 40 s to 1m 20s and Prettier at 22 to 47 s; the type check is 13 to 32 s with build info      |
-| `npm run ci`          | 29    | **22-24 min**     | Playwright at ~7.5 min, then CodeQL at ~4.5, the server suite at 3-4.5 and the client suite at 2.5-3.5 |
-| `npm run verify:full` | 37    | **hours**         | `flake`, then `mutation`, which has no honest estimate                                                 |
+| Command               | Gates | Measured                            | What dominates it                                                                                                                      |
+| --------------------- | ----- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info |
+| `npm run ci`          | 29    | **22-24 min**                       | Playwright at ~7.5 min, then CodeQL at ~4.5, the server suite at 3-4.5 and the client suite at 2.5-3.5                                 |
+| `npm run verify:full` | 37    | **hours**                           | `flake`, then `mutation`, which has no honest estimate                                                                                 |
 
-**The fast tier fits its own budget only on a quiet machine, and the table is the honest
-number rather than the target.** T0's design budget is 90 seconds. Six runs on four cores
-shared with unrelated work spanned 1m 19s to 2m 44s — the same commit, the same gates, the
-quietest run inside the budget and the busiest nearly twice it — and the runner prints
-`OVER` or does not, accordingly, exiting 0 either way because the budget is a design budget
-and not a gate. Twenty-five phases of new source is what put it near the line; the machine
-you are on decides which side of it you land. All six had the type check's build info warm;
-a cold one — a fresh clone, or the clean room — adds about a minute to every figure here.
-Take it as the reason not to add a gate to T0, not as a licence to raise the number.
+**The fast tier fits its own budget on a machine doing nothing else, and not
+otherwise. The table is the honest number rather than the target.** T0's design
+budget is 90 seconds. Across fifteen runs on the same tree and the same gates, the
+answer splits cleanly by what else the four cores were doing:
+
+- **idle: 1m 18s**, five runs spanning a single second — `lint` 39.4 to 39.7 s,
+  `format` 21.7 to 21.8 s, `type-check` 12.9 to 13.3 s, everything else 3.8 s.
+  Twelve seconds of headroom.
+- **busy: 1m 19s to 2m 44s**, over the other ten — the same gates measuring `lint` at
+  1m 05s to 1m 16s and `format` at 36.7 to 44.1 s, which is more than the whole budget
+  between them.
+
+The runner prints `OVER` or does not, accordingly, exiting 0 either way because the
+budget is a design budget and not a gate. Twenty-five phases of new source is what took
+the headroom down to twelve seconds; the machine you are on decides whether you have it.
+All fifteen had the type check's build info warm; a cold one — a fresh clone, or the
+clean room — adds about a minute to every figure here.
+
+Making `lint` cheaper has been tried and rejected on measurement, which is worth knowing
+before you try it again: ESLint's `concurrency: 'auto'` was measured over eight
+interleaved pairs of whole-repository runs and finished 4-4 on wall clock while costing
++37.5 % CPU and +0.95 GB of peak memory in every single run, because `projectService: true`
+makes each worker thread build its own TypeScript program. That trade is backwards for
+this tier twice over: the extra CPU only converts into wall clock when cores are idle,
+which is exactly when the tier already fits, and it costs the most when the machine is
+busy, which is the only time the tier needs the help. The reasoning and the numbers are
+recorded beside the constructor in `scripts/ci/lint-gate.mjs`. Take the twelve seconds
+as what is left before a gate is added here, not as a licence to raise the number.
 
 The push tier is a range for the same reason every figure here is a measurement rather
 than a constant: two clean runs of it on the same commit came in at 22m 12s and 24m 16s,
@@ -2088,10 +2107,15 @@ seven tsc invocations keeps incremental build information in `.cache/tsbuildinfo
 run over an unchanged tree measured **25s** when the gate was timed on its own, and 13s to
 32s inside whole `verify:fast` runs — the spread being what else the machine was doing.
 
-Everything else in the run measured under half a minute, and two of those are worth a
-word. `docker` came in at 14.5 s only because its layer cache and Trivy's database were
-warm, as the pull table above says. `build` (24 s), `format` (25 s), `recovery` (20 s),
-`upgrade` (13 s) and `storage` (10 s) are genuinely that cheap. The datastore gates are
+Everything else in the run measured under half a minute, and three of those are worth
+a word. `docker` came in at 14.5 s only because its layer cache and Trivy's database
+were warm, as the pull table above says. `build` (24 s), `recovery` (20 s), `upgrade`
+(13 s) and `storage` (10 s) are genuinely that cheap. `format` at 25 s and the 48 s in
+the `lint` row above it are cheap **on a quiet machine only**: like `type-check`, both
+are single figures from one idle run, and on contended cores they measure 22 to 47 s and
+40 s to 1m 20s respectively — which is the whole reason the fast tier overruns its budget
+on a busy box while every row here still reads as cheap. Take the two figures in the tier
+section, not these, as what they cost you in practice. The datastore gates are
 the ones contention moves: `test-integration` measured 3m 16s on an idle box and 4m 53s
 on the same commit while something else was reading the tree, which is the whole argument
 for a machine doing nothing else.

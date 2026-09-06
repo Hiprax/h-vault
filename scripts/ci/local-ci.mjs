@@ -30,7 +30,7 @@
  * Tiers, aggregation, reports
  * ---------------------------------------------------------------------------
  *
- *   npm run verify:fast             T0 only — under 90 seconds
+ *   npm run verify:fast             T0 only — a 90 s budget it now exceeds
  *   npm run ci                      T0 + T1 — the whole push gate
  *   npm run verify:full             T0 + T1 + T2 — before a release
  *
@@ -212,9 +212,10 @@ const PREREQUISITES = {
         return false;
       }
     },
-    // T0 deliberately excludes `build` (18 s of an 82 s budget), so verify:fast
-    // consumes the shared build rather than producing it. `npm run ci` runs the
-    // build gate first and satisfies this on its own.
+    // T0 deliberately excludes `build` (18 s against a 90 s budget the tier
+    // already overruns), so verify:fast consumes the shared build rather than
+    // producing it. `npm run ci` runs the build gate first and satisfies this on
+    // its own.
     fix: 'npm run build:shared',
   },
   // The smoke gate runs the EMITTED JavaScript, so it needs both halves of the

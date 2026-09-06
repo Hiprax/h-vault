@@ -185,6 +185,103 @@ describe('README documentation sync', () => {
   });
 
   /**
+   * The MEASURED cost of the fast tier, as opposed to its budget.
+   *
+   * The test above pins the budget, which `tiers.mjs` exports and a reader can
+   * therefore never disagree with silently. The measured span is the opposite
+   * shape of problem: it is prose, it lives in three files at once, and nothing
+   * exports it. It has already drifted once — `tiers.mjs` spent twenty-five
+   * phases claiming "the measured value is ~82 s" with "eight seconds of
+   * headroom" while the README published 1m 19s to 2m 44s and CONTRIBUTING
+   * agreed with the README, so the file the RUNNER lives in was the one telling
+   * contributors the tier still fit. Two documents agreeing is not a check when
+   * the third is the one that matters.
+   *
+   * The production change that turns this red is the one that caused the drift:
+   * re-measuring the tier and updating one copy of the number without the
+   * others. Every `Xm YYs to Xm YYs` span in these three files is a statement
+   * about T0 — verified by inspection, and enforced here by requiring them all
+   * to be the same span — so a stale copy has nowhere to hide.
+   */
+  it('quotes ONE measured fast-tier cost, in tiers.mjs, the README and CONTRIBUTING alike', () => {
+    const tiersSource = readFileSync(
+      path.resolve(repoRoot, 'scripts', 'ci', 'lib', 'tiers.mjs'),
+      'utf-8',
+    );
+    const contributing = readFileSync(path.resolve(repoRoot, 'CONTRIBUTING.md'), 'utf-8');
+
+    const toSeconds = (value: string): number => {
+      const parts = /^(\d+)m (\d+)s$/.exec(value)!;
+      return Number(parts[1]) * 60 + Number(parts[2]);
+    };
+
+    /**
+     * A duration range that STRADDLES the budget is a claim about what the whole
+     * tier costs — nothing else in these documents can straddle it, because the
+     * per-gate figures quoted beside it sit wholly on one side or the other
+     * (`lint` + `format` busy is 1m 42s to 2m 00s, both above; `lint` alone is
+     * 1m 05s to 1m 16s, both below). That is what makes this checkable without
+     * pinning anyone's prose: find every range of that shape and require them to
+     * agree. `1m 19s to 2m 44s` and `1m 19s-2m 44s` are the same claim.
+     */
+    const tierSpans = (text: string): string[] =>
+      [...text.matchAll(/(\d+m \d+s) ?(?:to|-|–) ?(\d+m \d+s)/g)]
+        .filter(
+          (m) =>
+            toSeconds(m[1]!) < TIER_BUDGET_SECONDS[0] && toSeconds(m[2]!) > TIER_BUDGET_SECONDS[0],
+        )
+        .map((m) => `${m[1]!} to ${m[2]!}`);
+
+    // `tiers.mjs` is the source of truth: it sits beside the runner that does the
+    // measuring, and it is the copy that went stale last time while the two
+    // Markdown files agreed with each other.
+    const declared = new Set(tierSpans(tiersSource));
+    expect(
+      [...declared],
+      'scripts/ci/lib/tiers.mjs must state the measured busy-machine T0 span exactly once',
+    ).toHaveLength(1);
+    const span = [...declared][0]!;
+
+    for (const [name, text] of [
+      ['README.md', readme],
+      ['CONTRIBUTING.md', contributing],
+    ] as const) {
+      const found = tierSpans(text);
+      expect(found.length, `${name} must quote the measured T0 span`).toBeGreaterThan(0);
+      for (const quoted of found) {
+        expect(quoted, `${name} quotes a fast-tier span that tiers.mjs does not`).toBe(span);
+      }
+    }
+
+    /**
+     * The idle figure is the other half of the measurement and the half a reader
+     * acts on, because it is the one that says whether the budget is met at all.
+     * It is a point value, so the straddle rule above cannot see it, and it would
+     * drift on its own.
+     */
+    const idle = /idle machine: \*\*(\d+m \d+s)\*\*/.exec(tiersSource)?.[1];
+    expect(idle, 'scripts/ci/lib/tiers.mjs must state the idle T0 figure').toBeDefined();
+    for (const [name, text] of [
+      ['README.md', readme],
+      ['CONTRIBUTING.md', contributing],
+    ] as const) {
+      expect(text, `${name} must quote the idle T0 figure ${idle!}`).toContain(idle!);
+    }
+
+    // The point of splitting the measurement in two is that the halves fall on
+    // opposite sides of the budget. If they ever stop doing so, every sentence
+    // built on that split is wrong wherever it appears.
+    expect(
+      toSeconds(idle!),
+      'the idle measurement no longer fits the budget — the prose saying it does is now wrong',
+    ).toBeLessThanOrEqual(TIER_BUDGET_SECONDS[0]);
+    expect(
+      toSeconds(span.split(' to ')[1]!),
+      'the slowest measured T0 run now fits the budget — re-word the prose that says it does not',
+    ).toBeGreaterThan(TIER_BUDGET_SECONDS[0]);
+  });
+
+  /**
    * The README's Documents section tells a reader which file types the app will
    * display and which it will only hand back as a download, and every
    * download-only case is given a REASON so it reads as a decision. That table

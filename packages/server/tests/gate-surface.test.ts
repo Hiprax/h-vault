@@ -257,19 +257,38 @@ describe('manifest and runner agree', () => {
 
 describe('tiers', () => {
   it('keeps T0 to the seven gates that fit a 90-second pre-commit budget', () => {
-    // RE-MEASURED end to end on the reference machine over three runs: 2m 23s, 2m 10s
-    // and 1m 49s, so **T0 IS NOW OVER ITS 90-SECOND BUDGET** even on the quietest, and
-    // the runner prints OVER on every run. (It was 85s when this comment was written.)
-    // The quietest breakdown: engines 0.0s, secrets 0.2s, lint 39.2s, format 21.3s,
-    // type-check 44.8s, integrity 3.5s, ratchet 0.1s.
-    // The two anti-cheat gates cost 4.1s between them; the unit suite alone is
+    // RE-MEASURED end to end on the reference machine (four cores) over fifteen
+    // runs, 2026-09-06, and the answer is BIMODAL — which is the finding, because
+    // a single number hid it for twenty-five phases. IDLE: **1m 18s**, five runs
+    // spanning ONE second (engines 0.0s, secrets 0.2s, lint 39.6s, format 21.8s,
+    // type-check 12.9s, integrity 3.5s, ratchet 0.1s), i.e. TWELVE SECONDS
+    // INSIDE the budget. BUSY, the same cores running unrelated
+    // work: 1m 19s to 2m 44s, and the runner prints OVER accordingly. (It was 85s
+    // when this comment was first written.)
+    // The two anti-cheat gates cost 3.6s between them; the unit suite alone is
     // ~3 minutes and the server suite ~5, which is why both are T1. A tier over
     // budget gets bypassed, and a bypassed hook gates nothing, so ADDING ANYTHING
-    // HERE REQUIRES RE-MEASURING AND BUYING THE TIME BACK FIRST: there is no
-    // headroom left to spend. `lint` and `type-check` are ~100s of the total, so
-    // that is where it would have to come from (ESLint's --cache, or running the
-    // independent T0 gates in parallel). The 90 in `tiers.mjs` does NOT move: a
-    // budget raised to fit the measurement stops being a budget.
+    // HERE REQUIRES RE-MEASURING AND BUYING THE TIME BACK FIRST: twelve seconds
+    // is the whole of what is left. The time is in `lint` and `format` — 61s of
+    // the idle 78s, and 1m 42s to 2m 00s when busy, more than this entire budget
+    // between them — while `type-check` fell to 13-32s once every tsc invocation
+    // started keeping incremental build information.
+    //
+    // Two ways of buying it back have already been tried and must not be
+    // re-proposed from this comment. ESLint's `--cache` is refused on
+    // CORRECTNESS, not speed: with `projectService: true` the cache keys on the
+    // linted file rather than on the files its types come from, so a type-aware
+    // rule can go stale when a DEPENDENCY changes. ESLint's worker concurrency
+    // was measured over eight interleaved pairs of runs and finished level on
+    // wall clock while costing +37.5% CPU and +0.95 GB of peak memory every
+    // time, because each worker builds its own TypeScript program — a trade
+    // that is backwards here twice over, since the extra CPU only becomes wall
+    // clock when cores are idle (when this tier already fits) and costs most
+    // when they are not (the only time it needs help). Both
+    // measurements are recorded beside the constructor in
+    // `scripts/ci/lint-gate.mjs`; read them before spending an afternoon.
+    // The 90 in `tiers.mjs` does NOT move: a budget raised to fit the
+    // measurement stops being a budget.
     //
     // The order matters as much as the membership: `ratchet` reads the report
     // `integrity` writes, so it must come after it. Running the cheap ratchet
