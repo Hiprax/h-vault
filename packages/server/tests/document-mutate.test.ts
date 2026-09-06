@@ -63,22 +63,38 @@ vi.mock('../src/config/index.js', async (importOriginal) => {
  * trash was never attempted" exists at all. A signal nothing asserts is a signal
  * the next refactor deletes.
  */
-const { loggerError, loggerInfo, loggerWarn, loggerDebug } = vi.hoisted(() => ({
+const { loggerError, loggerInfo, loggerWarn, loggerDebug, loggerLog } = vi.hoisted(() => ({
   loggerError: vi.fn(),
   loggerInfo: vi.fn(),
   loggerWarn: vi.fn(),
   loggerDebug: vi.fn(),
+  loggerLog: vi.fn(),
 }));
 
 vi.mock('@hiprax/logger', async (importOriginal) => {
   const original = await importOriginal<typeof import('@hiprax/logger')>();
   return {
     ...original,
+    // `log` is not decoration and is not one of the four levels above. This mock
+    // replaces `createLogger` for the WHOLE process, and `app.ts` builds the
+    // request logger from the same factory (`createRequestLogger({ logger:
+    // createModuleLogger('http') })`); that logger's last act on every response
+    // is `logger.log({ level, message, http })`, a winston call the four
+    // level-shorthands do not provide. A double without it makes every request
+    // in this supertest file throw inside @hiprax/logger's own try/catch, which
+    // swallows the error and prints `request logger failed while logging <METHOD>
+    // <url>: r.log is not a function`. That costs nothing but a flooded
+    // transcript today — and it silently disables the application's request log
+    // in this file, so anything written here to assert on it would be asserting
+    // on a logger that never ran. Kept as its own spy rather than aliased to
+    // `loggerInfo`, so `emptiedLogPayload()` below still filters only the
+    // controller's own `info` lines.
     createLogger: () => ({
       error: loggerError,
       info: loggerInfo,
       warn: loggerWarn,
       debug: loggerDebug,
+      log: loggerLog,
     }),
   };
 });

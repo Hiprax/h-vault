@@ -1316,10 +1316,18 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                         |
 | ---------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Server** | 166   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
+| **Server** | 168   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants |
 | **Client** | 139   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                    |
 | **Shared** | 13    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                          |
 | **E2E**    | 21    | Playwright (Chromium): full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame                     |
+
+**Files** counts every test file each suite owns on disk, which is not the same as the number the
+command above runs: the server's default Vitest config excludes `tests/resource/**` and
+`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 168 on disk and
+those two directories run under their own gates (`test:resource`, `test:storage`). The number of
+test _cases_ is a third figure again, and it is ratcheted rather than written down here —
+`.testfortress/baseline.json`'s `tests.count` is a floor fed from the JUnit reports, and it only
+ever moves up.
 
 **Coverage** is measured with `@vitest/coverage-v8` and enforced as a build gate — a regression
 fails the push rather than being quietly absorbed. `server` and `client` must clear **90%** on all

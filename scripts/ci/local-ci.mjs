@@ -30,7 +30,7 @@
  * Tiers, aggregation, reports
  * ---------------------------------------------------------------------------
  *
- *   npm run verify:fast             T0 only — a 90 s budget it now exceeds
+ *   npm run verify:fast             T0 only — 90 s, met on an idle machine only
  *   npm run ci                      T0 + T1 — the whole push gate
  *   npm run verify:full             T0 + T1 + T2 — before a release
  *
@@ -213,7 +213,8 @@ const PREREQUISITES = {
       }
     },
     // T0 deliberately excludes `build` (18 s against a 90 s budget the tier
-    // already overruns), so verify:fast consumes the shared build rather than
+    // meets only on an idle machine — see `lib/tiers.mjs` for the measured
+    // bimodal figure), so verify:fast consumes the shared build rather than
     // producing it. `npm run ci` runs the build gate first and satisfies this on
     // its own.
     fix: 'npm run build:shared',

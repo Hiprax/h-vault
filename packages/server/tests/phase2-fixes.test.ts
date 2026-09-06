@@ -128,7 +128,14 @@ describe('Phase 2 Fixes', () => {
       const csrf2 = await getCsrf(agent, `refreshToken=${newRefreshValue}`);
       const res2 = await agent
         .post(`${AUTH_BASE}/refresh`)
-        .set('Cookie', `${csrf2.cookie}; ${newRefreshCookie!}`)
+        // The name=value PAIR, never the whole `Set-Cookie` line. A request
+        // `Cookie` header carries pairs only, so sending the response's
+        // attributes back — `HttpOnly`, `Path`, `SameSite` — hands the agent's
+        // cookie jar tokens it cannot parse (`Invalid cookie header
+        // encountered. Header: 'HttpOnly'`) and hands the server three junk
+        // cookies alongside the real one. It happened to pass because the pair
+        // comes first; it was never a well-formed request.
+        .set('Cookie', `${csrf2.cookie}; refreshToken=${newRefreshValue}`)
         .set('x-csrf-token', csrf2.token);
       expect(res2.status).toBe(200);
       expect(res2.body.data).toHaveProperty('accessToken');
