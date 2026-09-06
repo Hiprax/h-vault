@@ -595,16 +595,59 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     throw httpErrors.unauthorized('Invalid email or password');
   }
 
-  // Reset failed attempts on successful credential check. The throttle reset is
-  // UNCONDITIONAL: attempts recorded while the account was locked never touched
-  // `failedLoginAttempts`, so gating it on the database counter would let a
-  // stale in-memory count survive a successful login and delay the next typo.
+  // The process-local throttle drives ONLY the progressive sleep on THIS step —
+  // `login2fa` never reads it, taking its own delay from the durable counter
+  // instead — so a verified password clears it here even when a second factor is
+  // still owed: a correct password is proof that the password guessing this
+  // counter exists to slow has ended, and clearing it hands a password-holding
+  // attacker nothing at the second step. It is emphatically NOT the durable
+  // lockout counter, which is handled separately below and in `finishLogin`.
+  // The reset is also UNCONDITIONAL: attempts recorded while the account was
+  // locked never touched `failedLoginAttempts`, so gating it on the database
+  // counter would let a stale in-memory count survive a successful login and
+  // delay the next typo.
   resetLoginAttempts(email);
 
-  if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
+  // A lockout that was actually SERVED is discharged here, before the
+  // `twoFactorEnabled` branch — the one and only case in which a password alone
+  // clears the durable counter.
+  //
+  // It is reachable only after a real 30-minute wait: `lockoutUntil` is written
+  // solely by the two threshold crossings below and in `login2fa`, and while it
+  // is in the FUTURE both doors refuse — this handler 403s above with the
+  // correct password, and `login2fa` 403s before it reads the code. So the
+  // budget it restores is ten guesses per half hour, which is the designed
+  // lockout rate, not a bypass of it.
+  //
+  // Without this, a 2FA account would be discharged only by a completed second
+  // factor, and the first fumbled TOTP code after any lockout would `$inc` 10 to
+  // 11 and re-lock for another half hour — silently, because the unlock mail
+  // fires on `=== MAX_FAILED_ATTEMPTS` and 11 is not equal. Worse, that re-lock
+  // REWRITES `lockoutUntil`, and the emailed unlock token's `stateHash` is bound
+  // to that exact value, so the one recovery link the user was ever sent dies
+  // with it and no replacement is issued. TOTP fails systematically rather than
+  // randomly — a phone clock drifted past the ±1 step window fails every code,
+  // and a code entered twice is refused as a replay and counted as a failure —
+  // and this product's password reset MINTS A NEW VAULT KEY, so "just reset your
+  // password" is total data loss, not a recovery path. The remaining exit would
+  // be a backup code, if one is left. Discharging a served lockout keeps
+  // `README.md`'s "30 minutes after 10 failed attempts" true for accounts with a
+  // second factor as well as without, matches what a non-2FA account has always
+  // done, and re-arms the alert: each cycle crosses the threshold exactly once,
+  // so a victim under a grinding attack keeps being mailed instead of being
+  // told once and then left in silence.
+  //
+  // Atomic update rather than `user.save()` on the document loaded before the
+  // bcrypt compare, mirroring `login2fa`: a concurrent `$inc` must not be
+  // clobbered by a stale in-memory zero. The in-memory copy is corrected too, so
+  // `finishLogin`'s own guarded reset below does not repeat the write.
+  if (user.lockoutUntil && user.lockoutUntil <= new Date()) {
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { failedLoginAttempts: 0 }, $unset: { lockoutUntil: 1 } },
+    );
     user.failedLoginAttempts = 0;
     user.lockoutUntil = undefined;
-    await user.save();
   }
 
   // Detect and recover from interrupted vault key rotation. If rotationInProgress
@@ -661,6 +704,57 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // it with the SAME `rememberMe` from the request, so an unchecked box never
   // silently produces a 30-day session on either path.
   const finishLogin = async (auditMetadata?: Record<string, unknown>): Promise<void> => {
+    // Discharge the durable counter, FIRST — before any token is minted, so a
+    // failure here cannot 500 a request that has already written a session row
+    // and shipped a refresh cookie.
+    //
+    // `failedLoginAttempts` / `lockoutUntil` are ONE brake shared by both
+    // authentication steps, and they are the ONLY per-account brake on the
+    // second one: `routes/auth.ts` gives `/login/2fa` `authLimiter` and
+    // `tokenVerifyLimiter`, both keyed by IP, never by account. So the reset
+    // belongs to a COMPLETED authentication and not merely to a verified
+    // password. Clearing it before the `twoFactorEnabled` branch below — which
+    // is what this handler used to do — let an attacker who already held the
+    // master password replay this step between batches of wrong codes and reset
+    // the second factor's only brake for ever: nine guesses, one `/auth/login`,
+    // nine more, never reaching the threshold. The residual bound was
+    // `accountLimiter` at 20 per email per 15 minutes, i.e. roughly 180 TOTP
+    // guesses a quarter hour instead of ten a half hour, and worse still on a
+    // self-hosted instance not running `NODE_ENV=production`, where every
+    // limiter is a no-op and this counter is the only brake there is.
+    //
+    // `finishLogin` is the right home because BOTH paths that complete a login
+    // without a submitted TOTP code run through it: the ordinary non-2FA
+    // completion, and the trusted-device 2FA skip. The skip resets deliberately.
+    // It is a completed authentication, not a replayable oracle: it presents two
+    // factors — the password, and a device-bound trust token minted at exactly
+    // one site, inside `login2fa` AFTER a code verified — and `findOneAndDelete`
+    // burns that token as it is spent, scoped to this user and an unexpired
+    // grant. Anyone who reaches it has already been handed an access token, a
+    // refresh cookie and the wrapped vault key, so there is nothing left to
+    // brute-force. A cookie that does NOT match resets nothing: it falls through
+    // to the 2FA challenge below. Refusing to reset here would be its own bug,
+    // in the other direction — a user sitting at nine from earlier typos who
+    // then signs in on a trusted device would carry that nine indefinitely, and
+    // their next single mistake would lock them out.
+    //
+    // The counterpart for a real second factor lives at the end of `login2fa`,
+    // once the code verifies. A challenge that is issued and abandoned resets
+    // nothing, so a lockout survives until an authentication completes, a served
+    // lockout is discharged above, the emailed unlock link is used, or the
+    // password is reset.
+    //
+    // Atomic update rather than `user.save()` on the document loaded before the
+    // bcrypt compare, mirroring `login2fa`: a concurrent `$inc` must not be
+    // clobbered by a stale in-memory zero, and a login is not the place to run
+    // whole-document validators.
+    if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
+      await User.updateOne(
+        { _id: user._id },
+        { $set: { failedLoginAttempts: 0 }, $unset: { lockoutUntil: 1 } },
+      );
+    }
+
     const accessToken = generateAccessToken(user._id.toString());
     const refreshTokenRaw = generateRefreshToken();
     const refreshTokenHash = hashToken(refreshTokenRaw);

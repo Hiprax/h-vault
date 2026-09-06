@@ -68,22 +68,27 @@ security posture, not a disclaimer.
   tamperings makes the decryption fail rather than producing plausible bytes.
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
-- **Credential stuffing and online guessing.** Rate limiting, account lockout with
-  progressive delays, and 2FA — with the lockout and 2FA paths deliberately built so they
-  do not leak whether an account exists. The credential budget is kept separate from the
-  budgets for token refresh and vault unlock, so that ordinary use of the app can never spend
-  the allowance you need in order to sign in. A caller-supplied value (a header, a cookie, a
-  rotating token) appears in a rate-limit key only where an IP-keyed tier bounds the same route
-  regardless — the per-account tier keys on the submitted email for that reason, and the
-  refresh tier, which has no such companion, keys on the address alone. Getting either wrong
-  turns a limiter into a lockout of the legitimate user, an open door for the attacker, or both.
-  Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by the individual address,
-  because a single routed IPv6 allocation hands one attacker 18 quintillion addresses: keyed on the
-  full `/128`, an IP-keyed limiter is not a limiter at all, it is a counter that never reaches two.
-  That aggregation happens inside the library that parses the address, so it is a dependency this
-  project deliberately keeps current — the advisory that stood in exactly that code path
-  (`ip-address`, reachable from every rate-limit key) is cleared, and the `/64` bucketing is pinned
-  by a test rather than left to a default.
+- **Credential stuffing and online guessing.** Rate limiting, account lockout with progressive
+  delays, and 2FA — with the lockout and 2FA paths deliberately built so they do not leak
+  whether an account exists. The failed-attempt count behind that lockout is **one counter
+  shared by both sign-in steps**, and it is the only per-account limit on the second factor, so
+  it is discharged only by a sign-in that actually **completes** — never merely by a correct
+  password, which would let anyone already holding one reset the second factor's only brake
+  between batches of guesses. A lockout that has genuinely been waited out is the single
+  exception, and reaching it costs the full lockout duration. The credential budget is kept
+  separate from the budgets for token refresh and vault unlock, so that ordinary use of the app
+  can never spend the allowance you need in order to sign in. A caller-supplied value (a
+  header, a cookie, a rotating token) appears in a rate-limit key only where an IP-keyed tier
+  bounds the same route regardless — the per-account tier keys on the submitted email for that
+  reason, and the refresh tier, which has no such companion, keys on the address alone. Getting
+  either wrong turns a limiter into a lockout of the legitimate user, an open door for the
+  attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
+  the individual address, because a single routed IPv6 allocation hands one attacker 18
+  quintillion addresses: keyed on the full `/128`, an IP-keyed limiter is not a limiter at all,
+  it is a counter that never reaches two. That aggregation happens inside the library that
+  parses the address, so it is a dependency this project deliberately keeps current — the
+  advisory that stood in exactly that code path (`ip-address`, reachable from every rate-limit
+  key) is cleared, and the `/64` bucketing is pinned by a test rather than left to a default.
 - **One account reading or changing another's data.** Every route that takes an id scopes its query
   to the authenticated user, and that is asserted **exhaustively rather than by sampling**: the
   route table is built from the real Express router — so a route added tomorrow appears in it

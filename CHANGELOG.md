@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **`npm run build` could produce nothing at all, and still report success.** A TypeScript build that keeps incremental state does not check whether the files it previously emitted still exist, so deleting a package's `dist/` while that state survived — which is exactly what `npm run clean` did — left the next build exiting 0 having written no output. The shared package's state now lives inside the directory it describes, so removing that directory is always a correct rebuild from scratch, and `npm run clean` clears the remaining state files as well.
 
+### Security
+
+- **Signing in again no longer clears the two-factor lockout count.** One failed-attempt counter serves both sign-in steps, and it is the only _per-account_ limit on the two-factor code — the other limits on that step count per address, not per account. It used to be cleared the moment the password was accepted, which is before the code is even asked for, so anyone who already held the master password could re-enter it between batches of wrong codes and reset the count indefinitely: ten guesses per half hour became roughly a hundred and eighty per quarter hour, and on a self-hosted instance not running in production mode, where the rate limiters are inactive, it became unlimited. The count is now cleared only when a sign-in actually completes — an ordinary sign-in with no second factor, a recognised trusted device, or a verified code — and a two-factor prompt that is issued and then abandoned clears nothing. A lockout you have already waited out is still cleared by entering your password, for accounts with a second factor as well as without, so a code mistyped after the wait does not immediately re-lock you.
+
 ## [0.11.0] - 2026-09-04
 
 ### Added
