@@ -952,7 +952,7 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
     expect(cancelUpload).toHaveBeenCalledWith('up-2');
   });
 
-  it('offers a resume for a failed transfer, and explains what a resume re-sends', () => {
+  it('offers a resume for a failed transfer, and explains what a resume re-sends', async () => {
     const retryUpload = vi.fn().mockResolvedValue('up-1');
     useDocumentsStore.setState({
       retryUpload,
@@ -963,8 +963,67 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
     expect(
       screen.getByText(/Retry to send only the parts the server does not already hold/),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    // Awaited, because the click now settles a pending state on the way back:
+    // firing it bare leaves that update outside `act` and React says so.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
+    });
     expect(retryUpload).toHaveBeenCalledWith('up-1');
+  });
+
+  it('will not start a second resume while the first is still being prepared', async () => {
+    // The store refuses a second resume outright — a second transfer over the same
+    // parts ends with a document sealed under a key nobody holds. This is the
+    // affordance in front of that refusal: the button must say what is happening
+    // and must not hand the store a click it is going to reject.
+    //
+    // The resume is DEFERRED here, and that is the whole test: the real window is
+    // one round trip to the staging ledger, and a mock that resolves at once would
+    // never leave the button in the state being asserted.
+    let release = (): void => {};
+    const retryUpload = vi.fn().mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          release = () => {
+            resolve('up-1');
+          };
+        }),
+    );
+    useDocumentsStore.setState({
+      retryUpload: retryUpload as unknown as ReturnType<
+        typeof useDocumentsStore.getState
+      >['retryUpload'],
+      uploads: { 'up-1': makeUpload({ status: 'failed' }) },
+    });
+    renderPanel();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
+
+    // The accessible name changes with the state and still names the file: two
+    // failed transfers otherwise offer two controls both called "Retry".
+    const pendingRetry = await screen.findByRole('button', {
+      name: 'Retrying upload of holiday.zip',
+    });
+    expect(pendingRetry).toBeDisabled();
+    expect(pendingRetry).toHaveTextContent('Retrying');
+
+    fireEvent.click(pendingRetry);
+    fireEvent.click(pendingRetry);
+
+    // THE NEGATIVE: the two further clicks never reached the handler, so the store
+    // was never asked to start a resume it would have had to refuse.
+    expect(retryUpload).toHaveBeenCalledTimes(1);
+    expect(retryUpload).toHaveBeenCalledWith('up-1');
+    // And a refused click is not an error: nothing was said to the user about it.
+    expect(harness.toast).not.toHaveBeenCalled();
+
+    // The pending state settles rather than sticking: this row is still `failed`
+    // in the store, so the control comes back offering the resume again.
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'Retry upload of holiday.zip' })).toBeEnabled();
   });
 
   it('reports why a resume could not start, and stays silent when it was cancelled', async () => {
@@ -976,7 +1035,7 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
     renderPanel();
 
     expect(screen.getByText(/Upload failed\. the socket dropped/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
     await waitFor(() => {
       expect(harness.toast).toHaveBeenCalledWith({
         title: 'That upload has expired.',
@@ -986,7 +1045,17 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
 
     harness.toast.mockClear();
     retryUpload.mockRejectedValue(new UploadCancelledError());
-    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    // The button is DISABLED while a resume is pending, and `/retry/i` matches
+    // "Retrying" as well as "Retry" — so a second click issued against the
+    // pending name would silently no-op and this test would report a mystery.
+    // Waiting for the IDLE name is what makes the refusal it settled into
+    // observable, instead of resting on the order two microtask chains happen to
+    // land in.
+    const idleRetry = await screen.findByRole('button', {
+      name: 'Retry upload of holiday.zip',
+    });
+    expect(idleRetry).toBeEnabled();
+    fireEvent.click(idleRetry);
     await waitFor(() => {
       expect(retryUpload).toHaveBeenCalledTimes(2);
     });

@@ -2148,6 +2148,169 @@ describe('documentsStore — cancel and teardown', () => {
     releasePart();
     await expect(pending).rejects.toBeInstanceOf(UploadCancelledError);
   });
+
+  /**
+   * Two Retries taken inside the ledger round trip, and the wrap that must never
+   * be sent.
+   *
+   * The status flip to `'uploading'` happens AFTER `GET /uploads/:id` returns, so
+   * `status !== 'failed'` cannot refuse a second call taken while that request is
+   * still on the wire. Both calls then reach `session.controller = new
+   * AbortController()`, and the SECOND one overwrites the first's — which leaves
+   * the first loop running with a controller nothing in this module can reach any
+   * more.
+   *
+   * What that costs is not a duplicated request. `cancelUpload` aborts
+   * `session.controller` — the surviving one — and zeroes the DEK, and the
+   * orphaned loop, whose signal was never aborted, walks on to `wrapDek` and
+   * commits a key made of 32 zero bytes. `completeTransfer`'s own abort check
+   * cannot help: it reads the orphan's own signal. The metadata key is derived
+   * from the same zeroes, so the row LISTS with its real name and its segments —
+   * sealed under the stream key derived from the REAL DEK — can never be opened
+   * again by anyone, including the account that stored them.
+   *
+   * The barrier below is deterministic rather than timed. Both calls await the
+   * SAME gate promise, so their continuations run in registration order, and the
+   * first thing each does on resuming is set its controller and enter
+   * `runTransfer` synchronously up to `deriveStreamKey`. A part request costs
+   * several more real awaits, so by the time ONE part has reached the transport,
+   * a second call — if it was admitted at all — has already installed its
+   * controller. Waiting on the part is therefore waiting on the exact state the
+   * defect needs.
+   */
+  it('refuses a second resume taken inside the ledger read, and commits no key made of zeroes', async () => {
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    // 400 is the `fail` verdict: no backoff, and the session is KEPT, which is
+    // the only state a Retry is offered from.
+    partOutcomes = [400];
+
+    let ledgerReads = 0;
+    let resumedParts = 0;
+    let gatesArmed = false;
+    let openLedger = (): void => {};
+    let openPart = (): void => {};
+    const ledgerGate = new Promise<void>((resolve) => {
+      openLedger = resolve;
+    });
+    const partGate = new Promise<void>((resolve) => {
+      openPart = resolve;
+    });
+
+    api.defaults.adapter = async (config) => {
+      const url = config.url ?? '';
+      const method = (config.method ?? 'get').toUpperCase();
+      if (gatesArmed) {
+        if (method === 'GET' && /^\/documents\/uploads\/[a-f0-9]{24}$/.test(url)) {
+          ledgerReads += 1;
+          await ledgerGate;
+        } else if (method === 'PUT' && url.includes('/parts/')) {
+          resumedParts += 1;
+          await partGate;
+        }
+      }
+      return adapter(config);
+    };
+
+    // The refusal is named, not merely counted: "something was raised" would pass
+    // on a typo in the fixture and leave the row in a state this test then reads.
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow(/status code 400/);
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+
+    gatesArmed = true;
+    const first = useDocumentsStore.getState().retryUpload(ID_A);
+    const firstOutcome = first.then(
+      () => 'resolved' as unknown,
+      (error: unknown) => error,
+    );
+    await until(() => ledgerReads === 1, 'the ledger read to reach the transport');
+
+    // The second click, inside the window the status flip does not cover. It is
+    // NOT awaited here: an unguarded second call parks on the same gate, so
+    // awaiting it before the gate opens would hang instead of failing.
+    const second = useDocumentsStore.getState().retryUpload(ID_A);
+    const secondOutcome = second.then(
+      () => 'resolved' as unknown,
+      (error: unknown) => error,
+    );
+
+    openLedger();
+    await until(() => resumedParts >= 1, 'the resumed part to reach the transport');
+
+    useDocumentsStore.getState().cancelUpload(ID_A);
+    openPart();
+
+    const [firstResult, secondResult] = await Promise.all([firstOutcome, secondOutcome]);
+    await until(
+      () => Object.keys(useDocumentsStore.getState().uploads).length === 0,
+      'the teardown',
+    );
+
+    // THE NEGATIVE THAT MATTERS, asserted FIRST because it is the one that costs a
+    // user their file: no completion the server was ever given carries a DEK that
+    // opens to zeroes. Stated as the shape rather than as a count, because the
+    // count alone would not say WHICH body was wrong. With a second loop running,
+    // this is the body that commits a permanently unopenable document and blocks
+    // every future vault key rotation of the account.
+    const wrapKey = await deriveWrapKey(vaultKey, ID_A);
+    const zeroedWraps: number[] = [];
+    for (const [index, body] of completeBodies.entries()) {
+      const opened = await unwrapDek(
+        {
+          encryptedDek: String(body.encryptedDek),
+          dekIv: String(body.dekIv),
+          dekTag: String(body.dekTag),
+        },
+        wrapKey,
+      ).catch(() => null);
+      if (opened !== null && isAllZero(opened)) zeroedWraps.push(index);
+    }
+    expect(zeroedWraps).toEqual([]);
+    // And nothing was committed at all: the transfer the user cancelled did not
+    // quietly finish behind the cancellation.
+    expect(completeBodies).toHaveLength(0);
+
+    // The refusal is the second caller's answer, and it is not the cancellation
+    // that came later: a caller that cannot tell them apart shows the user an
+    // error about a vault they locked on purpose.
+    expect(secondResult).toBeInstanceOf(Error);
+    expect((secondResult as Error).message).toMatch(/already being retried/i);
+    expect(secondResult).not.toBeInstanceOf(UploadCancelledError);
+    // Only ONE transfer was ever prepared: the refused call never read the ledger.
+    expect(ledgerReads).toBe(1);
+    // The one that was admitted is the one the cancel reached.
+    expect(firstResult).toBeInstanceOf(UploadCancelledError);
+  });
+
+  it('lets a resume that failed again be resumed once more', async () => {
+    // The claim taken by a retry is RELEASED once the transfer is running, and
+    // this is what says so: without the release the row goes back to `failed`,
+    // offers its Retry button, and the button refuses for the rest of the
+    // session. Two failures in a row, two accepted retries.
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [400, 400, null];
+
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow(/status code 400/);
+
+    // The FIRST retry is admitted — it is the part that fails again, not the
+    // claim, which is what makes the second retry below a test of the release
+    // rather than of a refusal that never happened.
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(/status code 400/);
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+
+    // The second retry is admitted and this time the part lands, so the document
+    // commits and leaves the registry.
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).resolves.toBe(ID_A);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+  });
 });
 
 // ===========================================================================

@@ -225,6 +225,22 @@ export function isLiveTransfer(transfer: DocumentUploadProgress): boolean {
 /** The handles, key material and inputs one transfer needs, kept out of the state tree. */
 interface UploadSession {
   controller: AbortController;
+  /**
+   * Whether a resume is being PREPARED for this transfer right now.
+   *
+   * The claim {@link DocumentsState.retryUpload} takes before its first `await`,
+   * and the reason it is a field on the session rather than a second module-level
+   * registry: `endSession` removes the session, so the claim cannot outlive the
+   * thing it describes, and a retry that finds no session is already refused for
+   * a different and more accurate reason.
+   *
+   * It covers exactly the window `status` cannot. The flip to `'uploading'`
+   * happens only once the staging ledger has answered, and a second Retry taken
+   * inside that round trip would pass the `status !== 'failed'` guard, install its
+   * own `controller` over the first one's, and leave the first loop running with a
+   * controller nothing in this module can reach any more.
+   */
+  retrying: boolean;
   dek: DocumentBytes;
   source: Blob;
   /**
@@ -947,6 +963,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
 
     sessions.set(uploadId, {
       controller: new AbortController(),
+      retrying: false,
       dek,
       source: input.source,
       sourceSize: totalBytes,
@@ -985,46 +1002,75 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     if (progress.status !== 'failed') {
       throw new Error('Only a failed upload can be retried.');
     }
-
-    // Two different plaintexts under one (key, nonce) pair is the catastrophic
-    // failure this whole design is arranged to prevent, and a resume is the one
-    // moment a slice is read a second time. If the file on disk moved underneath
-    // us, the safe answer is to refuse rather than to re-seal segment `i` over
-    // different bytes.
-    if (
-      session.source.size !== session.sourceSize ||
-      sourceLastModifiedOf(session.source) !== session.sourceLastModified
-    ) {
-      endSession(set, uploadId, { zero: true });
-      throw new Error('The file changed since the upload started; start it again.');
+    // THE CLAIM, and it is taken here — synchronously, before the first `await` —
+    // rather than left to the status flip at the bottom, which cannot happen until
+    // the ledger has answered. A second Retry taken inside that round trip would
+    // pass every guard above it, and the cost is not a duplicated request: both
+    // calls reach `session.controller = new AbortController()` and the second
+    // OVERWRITES the first's, so the first loop keeps running against a controller
+    // nothing in this module holds. `cancelUpload` then aborts the surviving
+    // controller and zeroes the DEK, while the orphan — whose own signal was never
+    // aborted, so `completeTransfer`'s abort check cannot help it — walks on to
+    // `wrapDek` and commits a key made of 32 zero bytes. The metadata key derives
+    // from the same zeroes, so the row LISTS with its real name while its segments,
+    // sealed under the stream key derived from the REAL DEK, can never be opened
+    // by anyone again; and the account cannot rotate its vault key at all until
+    // that row is destroyed, because the rotation aborts on the first row it
+    // cannot unwrap.
+    if (session.retrying) {
+      throw new Error('That upload is already being retried.');
     }
+    session.retrying = true;
 
     // The ledger, not a local guess, decides what still has to be sent. A part the
     // server already holds is skipped, but its slice is still read and hashed
     // below: the whole-file digest has to cover bytes that are not being re-sent.
     const held = new Set<number>();
     try {
-      // Validated, like every committed row this client reads: the part numbers
-      // below decide which segments are re-sent, so a malformed ledger would
-      // silently re-send everything or throw somewhere less obvious than here.
-      const staging = documentUploadResponseSchema.parse(
-        payloadOf(await getDocumentUploadApi(uploadId), 'read the upload'),
-      );
-      for (const part of staging.parts) held.add(part.partNumber);
-    } catch (error) {
-      // The staging row is gone — its TTL fired, or it was cancelled elsewhere — so
-      // there is nothing to resume onto and the DEK must not outlive the attempt.
-      endSession(set, uploadId, { zero: true });
-      throw error;
-    }
+      // Two different plaintexts under one (key, nonce) pair is the catastrophic
+      // failure this whole design is arranged to prevent, and a resume is the one
+      // moment a slice is read a second time. If the file on disk moved underneath
+      // us, the safe answer is to refuse rather than to re-seal segment `i` over
+      // different bytes.
+      if (
+        session.source.size !== session.sourceSize ||
+        sourceLastModifiedOf(session.source) !== session.sourceLastModified
+      ) {
+        endSession(set, uploadId, { zero: true });
+        throw new Error('The file changed since the upload started; start it again.');
+      }
 
-    session.controller = new AbortController();
-    updateProgress(set, uploadId, (current) => ({
-      ...current,
-      status: 'uploading',
-      error: undefined,
-      sentBytes: 0,
-    }));
+      try {
+        // Validated, like every committed row this client reads: the part numbers
+        // below decide which segments are re-sent, so a malformed ledger would
+        // silently re-send everything or throw somewhere less obvious than here.
+        const staging = documentUploadResponseSchema.parse(
+          payloadOf(await getDocumentUploadApi(uploadId), 'read the upload'),
+        );
+        for (const part of staging.parts) held.add(part.partNumber);
+      } catch (error) {
+        // The staging row is gone — its TTL fired, or it was cancelled elsewhere — so
+        // there is nothing to resume onto and the DEK must not outlive the attempt.
+        endSession(set, uploadId, { zero: true });
+        throw error;
+      }
+
+      session.controller = new AbortController();
+      updateProgress(set, uploadId, (current) => ({
+        ...current,
+        status: 'uploading',
+        error: undefined,
+        sentBytes: 0,
+      }));
+    } finally {
+      // Released on EVERY exit, including both of the throwing ones above. On the
+      // way out through the bottom the status is already `'uploading'`, so the
+      // guard above takes over from here — which is what lets a resume that fails
+      // again be resumed once more, instead of leaving a Retry button that refuses
+      // for the rest of the session. `runTransfer` is deliberately started OUTSIDE
+      // this block: the claim covers the preparation, never the transfer.
+      session.retrying = false;
+    }
 
     return runTransfer(set, uploadId, held);
   },
