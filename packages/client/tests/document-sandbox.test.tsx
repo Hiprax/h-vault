@@ -1121,6 +1121,109 @@ describe('the frame’s program', () => {
     delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   });
 
+  it('still DECODES a valid percent escape, which the malformed-escape guard must not cost', async () => {
+    // The guard's failure mode in the other direction: returning the raw
+    // fragment unconditionally, or catching by not decoding at all, would leave
+    // `#a%20b` looking for an id spelled `a%20b` — and a heading anchor written
+    // by `remark-rehype` is spelled with the space.
+    const { host } = await bootFrame();
+    const rendered = nextReply(host);
+    host.postMessage({
+      kind: 'render',
+      mode: 'text',
+      ext: 'txt',
+      theme: 'dark',
+      bytes: bytesOf('x'),
+    });
+    await rendered;
+
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+
+    const root = document.getElementById('root')!;
+    const target = document.createElement('h2');
+    target.id = 'user-content-a b';
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#a%20b');
+    anchor.textContent = 'an escaped space';
+    root.append(target, anchor);
+
+    anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it('survives a fragment that is not a valid escape, and still resolves it literally', async () => {
+    // `<a href="#%">` is an ordinary href to write and a MALFORMED escape.
+    // `decodeURIComponent` throws `URIError` on it, and the throw left a
+    // DELEGATED click handler. The listener is reported against rather than
+    // removed, so the cost is that THIS click does nothing and the report lands
+    // in a document with no error surface — the frame's own program never learns
+    // it happened, and the reader is given no reason.
+    //
+    // The fallback is the RAW fragment rather than an early return, so an id
+    // that genuinely contains a stray `%` still resolves, which is what makes
+    // this assertable as a scroll rather than only as an absence of noise.
+    const { host } = await bootFrame();
+    const rendered = nextReply(host);
+    host.postMessage({
+      kind: 'render',
+      mode: 'text',
+      ext: 'txt',
+      theme: 'dark',
+      bytes: bytesOf('x'),
+    });
+    await rendered;
+
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+
+    const root = document.getElementById('root')!;
+    const target = document.createElement('h2');
+    target.id = '%';
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#%');
+    anchor.textContent = 'a malformed escape';
+    // A second anchor, clicked afterwards: the guard must leave the handler
+    // working for every later click, which is the property the raw-fallback
+    // return is there to keep rather than merely the absence of a throw.
+    const missing = document.createElement('a');
+    missing.setAttribute('href', '#%E0%A4%A');
+    missing.textContent = 'a malformed escape naming nothing';
+    root.append(target, anchor, missing);
+
+    let posted = false;
+    host.addEventListener('message', () => {
+      posted = true;
+    });
+
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    anchor.dispatchEvent(click);
+    const second = new MouseEvent('click', { bubbles: true, cancelable: true });
+    missing.dispatchEvent(second);
+    await Promise.resolve();
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(second.defaultPrevented).toBe(true);
+    // Once, for the anchor whose id exists. The one naming nothing scrolls
+    // nowhere, which is the same outcome every unresolvable fragment gets.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    // And a fragment is never handed to the host: `isSafeUrl` admits http, https
+    // and mailto only, so it would be dropped there with nothing to explain it.
+    expect(posted).toBe(false);
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
   it('posts nothing for a relative link, which resolves to nothing for a stored file', async () => {
     const { host } = await bootFrame();
     const rendered = nextReply(host);

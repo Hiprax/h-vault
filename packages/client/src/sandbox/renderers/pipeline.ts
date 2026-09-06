@@ -138,16 +138,75 @@ function hasHighlightableCode(node: Root | Element): boolean {
 }
 
 /**
- * An absolute http(s) or protocol-relative URL, i.e. one the browser would fetch.
+ * A reference the browser would fetch from an origin other than this document's.
  *
- * Prefix comparisons rather than one regular expression: the obvious pattern
- * here is flagged by `eslint-plugin-security` as potentially super-linear, and
- * arguing with an analyzer over an input this document does not control is a
- * worse trade than three `startsWith` calls that cannot be wrong.
+ * RESOLVED rather than prefix-matched, and that is a correction rather than a
+ * refinement. The three `startsWith` calls this replaces read `//`, `http://`
+ * and `https://`, which is not the grammar the URL parser implements: after a
+ * special scheme's colon, ANY two characters drawn from `/` and `\` enter the
+ * authority, so `https:\\host/x` and `https:/\host/x` are the same request as
+ * `https://host/x`. `hast-util-sanitize` passes all three, because its protocol
+ * check reads only as far as the colon (measured against the installed
+ * library), so those spellings survived into the document and the sweep did not
+ * see them — the reader got a broken image and no sentence. ONE slash is a
+ * relative path and stays local, which is the boundary both spellings sit a
+ * single character from, and which is why a wider prefix list would have been
+ * another guess rather than a fix.
+ *
+ * Asking `URL` is exact where any prefix list is an approximation, and it needs
+ * no regular expression — which is what the note this replaces was really about
+ * (the obvious pattern is flagged by `eslint-plugin-security` as potentially
+ * super-linear, and arguing with an analyzer over an input this document does
+ * not control is a bad trade).
+ *
+ * Scoped to `http:`/`https:` and to a DIFFERENT origin, because the notice is
+ * about a third party learning you opened your copy. `data:` and `blob:` are
+ * named by `img-src` and DO render, so announcing them as blocked would be a
+ * lie; the document's own origin is what `img-src 'self'` admits, and tells
+ * nobody anything. A value `URL` refuses is not a request either.
  */
-function isRemoteUrl(value: string): boolean {
-  const lower = value.toLowerCase();
-  return lower.startsWith('//') || lower.startsWith('http://') || lower.startsWith('https://');
+function isRemoteUrl(value: string, base: URL): boolean {
+  let resolved: URL;
+  try {
+    resolved = new URL(value, base);
+  } catch {
+    return false;
+  }
+  if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return false;
+  return resolved.origin !== base.origin;
+}
+
+/**
+ * What separates one `srcset` candidate from the next, and a candidate from its
+ * descriptor.
+ *
+ * A candidate URL may not contain whitespace — that is what makes `srcset`
+ * parseable at all — so splitting on runs of whitespace and commas together
+ * yields every URL, plus the descriptors (`2x`, `640w`), and a descriptor can
+ * never be mistaken for an absolute URL. A URL containing a comma splits into
+ * pieces, and the first piece still carries the scheme, which is all
+ * {@link isRemoteUrl} reads.
+ */
+const SRCSET_SEPARATOR = /[\s,]+/;
+
+/**
+ * Does this element ask the browser for something off the network?
+ *
+ * Both attributes on every element, rather than one attribute per tag name,
+ * because the pairing is what a per-tag rule keeps getting wrong: `srcset` is a
+ * LIST, and its remote candidate is very often not the first one, so testing the
+ * whole attribute value finds nothing for `srcset="local.png 1x, https://… 2x"`.
+ *
+ * `HTMLElement` and not `Element`: this module imports `Element` FROM HAST, so
+ * the bare name means a syntax tree node here — the same trap
+ * {@link checkboxLabel} carries the note for, and one `tsc` catches while the
+ * vitest suite never could.
+ */
+function referencesRemoteContent(element: HTMLElement, base: URL): boolean {
+  if (isRemoteUrl(element.getAttribute('src') ?? '', base)) return true;
+  return (element.getAttribute('srcset') ?? '')
+    .split(SRCSET_SEPARATOR)
+    .some((candidate) => isRemoteUrl(candidate, base));
 }
 
 /**
@@ -320,10 +379,34 @@ export async function renderSanitizedMarkup(doc: Document, tree: Root): Promise<
 
   nameCheckboxes(fragment);
 
-  let remoteContent = false;
-  for (const image of fragment.querySelectorAll('img')) {
-    if (isRemoteUrl(image.getAttribute('src') ?? '')) remoteContent = true;
-  }
+  // Every element carrying either attribute, not `img[src]` alone. The default
+  // sanitize schema allows `<picture>` and `<source>`, allows `source: ['srcSet']`,
+  // and applies NO protocol filter to `srcSet` (its `protocols` map names `src`,
+  // `href`, `cite` and `longDesc` only) — so a remote `<picture><source srcset>`
+  // survives whole, is refused by `img-src`, and used to leave the reader a
+  // broken image and no sentence explaining it, which is the exact outcome the
+  // notice below exists to prevent.
+  //
+  // An ATTRIBUTE selector rather than a list of tag names, because the schema is
+  // the thing that decides which elements can carry these and it is not ours: it
+  // allows `source[srcSet]` today and admits nothing else, but a version that
+  // also allowed `source[src]`, or `img[srcSet]`, would silently reopen this. The
+  // sweep costs one pass. `blob:`, `data:`, every relative path and the
+  // document's OWN origin all fail {@link isRemoteUrl}, so an ordinary README
+  // raises nothing. The one shape it can over-report is a `data:` candidate in a
+  // `srcset` whose payload carries a raw comma — which is not a legal candidate,
+  // and which a browser splits the same way, so the banner would sit beside an
+  // image it had already failed to select.
+  //
+  // Telling the reader is the ENTIRE fix. `img-src` in
+  // `packages/server/src/config/sandboxCsp.ts` names no host and must not gain
+  // one; the request is already blocked, and what was missing was the sentence.
+  // Parsed once. Every candidate is resolved against it, and that resolution is
+  // the only per-element cost in this loop.
+  const base = new URL(doc.baseURI);
+  const remoteContent = [...fragment.querySelectorAll<HTMLElement>('[src], [srcset]')].some(
+    (element) => referencesRemoteContent(element, base),
+  );
 
   return { fragment, remoteContent };
 }

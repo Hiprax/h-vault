@@ -274,9 +274,30 @@ function isAbsoluteUrl(href: string): boolean {
  *
  * A fragment that resolves to nothing scrolls nowhere and is not reported. That
  * is the honest outcome for a link into a document that has no such anchor.
+ *
+ * The decode is GUARDED because the fragment is a stored document's bytes.
+ * `decodeURIComponent` throws `URIError` on a malformed escape, and `<a
+ * href="#%">` is a perfectly ordinary href to write — so an unguarded decode
+ * threw out of a DELEGATED click handler. The listener survives that (a throwing
+ * listener is reported, not removed), so the cost is narrower than "links stop
+ * working" and worse than it sounds: the rest of THAT dispatch is abandoned, the
+ * click does nothing, and the report goes to a document with no error surface,
+ * so the frame's own program never learns it happened and the reader is given no
+ * reason. Falling back to the RAW fragment rather than returning early is what
+ * keeps an id that genuinely contains a stray `%` resolvable; a fragment that
+ * names nothing then does nothing, which is the same outcome this function
+ * already gives every anchor it cannot find.
  */
+function decodeFragment(fragment: string): string {
+  try {
+    return decodeURIComponent(fragment);
+  } catch {
+    return fragment;
+  }
+}
+
 function scrollToFragment(doc: Document, fragment: string): void {
-  const id = decodeURIComponent(fragment);
+  const id = decodeFragment(fragment);
   const target = doc.getElementById(id) ?? doc.getElementById(`user-content-${id}`);
   target?.scrollIntoView();
 }

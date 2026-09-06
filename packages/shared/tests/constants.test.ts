@@ -108,6 +108,8 @@ import {
   TRANSFORM_SYNTAXES,
   TRANSFORM_SYNTAX_NAMES,
   MAX_PREVIEW_BYTES,
+  MAX_PREVIEW_TABLE_CELLS,
+  MAX_PREVIEW_TABLE_COLUMNS,
   MAX_PREVIEW_TEXT_LINES,
   PREVIEW_MODES,
   PREVIEW_MODE_NAMES,
@@ -1363,5 +1365,20 @@ describe('TRANSFORM_SYNTAXES, transformSyntaxForName and canRepairSyntax', () =>
     // between them is worth pinning rather than assuming.
     expect(MAX_PREVIEW_BYTES).toBeGreaterThan(MAX_FORMATTABLE_SIZE_BYTES);
     expect(MAX_PREVIEW_TEXT_LINES).toBe(50_000);
+    // The row cap is not a NODE budget on its own, because a table's node count
+    // is rows TIMES columns and the width comes from the file: a 25 MiB line of
+    // commas is under MAX_PREVIEW_BYTES and asks for twenty-six million cells in
+    // one row. The width cap and the product cap are what bound it, and the
+    // ordering between the three is the property worth pinning rather than the
+    // three numbers on their own.
+    expect(MAX_PREVIEW_TABLE_COLUMNS).toBe(1_000);
+    expect(MAX_PREVIEW_TABLE_CELLS).toBe(250_000);
+    // A budget smaller than one full-width row would render no table at all.
+    expect(MAX_PREVIEW_TABLE_CELLS).toBeGreaterThan(MAX_PREVIEW_TABLE_COLUMNS);
+    // And the product cap has to be the binding one, or it is decoration: the
+    // other two together still permit fifty million cells.
+    expect(MAX_PREVIEW_TABLE_CELLS).toBeLessThan(
+      MAX_PREVIEW_TEXT_LINES * MAX_PREVIEW_TABLE_COLUMNS,
+    );
   });
 });

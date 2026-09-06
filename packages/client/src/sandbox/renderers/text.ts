@@ -1,7 +1,7 @@
 import { MAX_PREVIEW_TEXT_LINES, extensionTable } from '@hvault/shared';
 import { decodeDocumentText } from '../decode';
 import { documentShell, el, notice, viewToggle } from '../dom';
-import { delimiterFor, parseDelimited, renderTable } from './table';
+import { delimiterFor, describeTableTruncation, parseDelimited, renderTable } from './table';
 
 /**
  * The renderer for the `text` and `code` modes: plain text, source code,
@@ -296,11 +296,16 @@ export async function renderText(
   const delimiter = delimiterFor(ext);
   if (delimiter !== null) {
     const parsed = parseDelimited(decoded.text, delimiter);
-    if (parsed.truncated) {
+    // Rows AND columns, from the parse rather than from the row cap: a table is
+    // budgeted on its cell count, so a wide file is cut in a dimension the row
+    // cap cannot describe, and a file cut by the cell budget keeps fewer rows
+    // than the row cap names.
+    const cut = describeTableTruncation(parsed);
+    if (cut !== null) {
       shell.append(
         notice(
           doc,
-          `Showing the first ${String(MAX_PREVIEW_TEXT_LINES)} of ${String(parsed.totalRows)} rows (${describeBytes(bytes.byteLength)}). Download the file to see all of it.`,
+          `${cut} (${describeBytes(bytes.byteLength)}). Download the file to see all of it.`,
         ),
       );
     }

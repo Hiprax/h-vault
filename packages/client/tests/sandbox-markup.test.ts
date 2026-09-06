@@ -295,6 +295,142 @@ describe('the markdown renderer, on a corpus of hostile documents', () => {
         (i.getAttribute('src') ?? '').startsWith('https://'),
       ),
     ).toBe(true);
+    // The corpus's second remote vector, and the one an `img[src]` sweep cannot
+    // see: `<picture><source srcset>` survives whole, because the default schema
+    // allows `source: ['srcSet']` and filters no protocol on it.
+    const candidates = rendered.querySelector('picture source')?.getAttribute('srcset') ?? '';
+    expect(candidates).toContain('https://example.invalid/wide.png');
+    expect(candidates.startsWith('https://')).toBe(false);
+  });
+
+  it('tells the reader about a <picture> whose only remote reference is a srcset candidate', async () => {
+    // The sweep used to read `img[src]` and nothing else, so this document —
+    // whose every `src` is relative — produced a broken image and no sentence
+    // explaining it, which is the exact outcome the notice exists to prevent.
+    //
+    // The remote candidate is deliberately SECOND. `srcset` is a list, and
+    // testing the whole attribute value instead of each candidate finds nothing
+    // here, which is the mistake the descriptor syntax invites.
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="local-narrow.png 1x, https://example.invalid/wide.png 2x">' +
+          '<img src="local-narrow.png" alt="a responsive image"></picture>\n',
+      ),
+    );
+
+    expect(rendered.textContent).toContain(REMOTE_CONTENT_NOTICE);
+    // Nothing here is a remote `img[src]`, which is what makes the case
+    // discriminate rather than ride on the corpus's tracking pixel.
+    expect(
+      [...rendered.querySelectorAll('img')].every(
+        (image) => !(image.getAttribute('src') ?? '').startsWith('http'),
+      ),
+    ).toBe(true);
+    // The URL survives sanitisation with its descriptor intact: the default
+    // schema allows `source: ['srcSet']` and lists no protocol filter for
+    // `srcSet` at all. What refuses the request is `img-src`, which names no
+    // host — pinned in `packages/server/tests/sandbox-document.test.ts`. Telling
+    // the reader is the whole of the fix; widening the policy would BE the leak.
+    expect(rendered.querySelector('source')?.getAttribute('srcset')).toContain(
+      'https://example.invalid/wide.png 2x',
+    );
+  });
+
+  it('recognises every spelling of a remote reference the sanitizer lets through', async () => {
+    // The prefix test this replaces read `//`, `http://` and `https://` and
+    // nothing else, which is not what the URL parser does. A special scheme
+    // followed by ANY two slash-or-backslash characters enters the authority,
+    // whichever the document's own scheme is — so every one of these resolves
+    // to a third-party host (measured with `new URL(value, base)`), and every
+    // one survives `hast-util-sanitize`, whose protocol check reads only up to
+    // the colon (measured against the installed library).
+    //
+    // Nothing here is fetched — `img-src` names no host — so this is entirely
+    // about whether the reader is told. Being told for the wrong reason costs a
+    // banner; not being told costs the explanation the notice exists to give.
+    for (const src of [
+      '//example.invalid/p.png',
+      'http://example.invalid/p.png',
+      'https://example.invalid/p.png',
+      String.raw`https:\\example.invalid/p.png`,
+      String.raw`https:/\example.invalid/p.png`,
+      String.raw`https:\/example.invalid/p.png`,
+    ]) {
+      const rendered = await renderMarkdown(document, bytesOf(`<img src="${src}" alt="x">\n`));
+      expect(rendered.textContent, src).toContain(REMOTE_CONTENT_NOTICE);
+    }
+  });
+
+  it('says nothing for the references that reach no third party', async () => {
+    // The negatives that keep the notice meaningful, and the ones the fix could
+    // most easily break. A `data:` image renders — `img-src` allows it — so
+    // announcing it as blocked would be a lie; a relative path is this
+    // document's own; and a scheme with no host is not a request at all.
+    for (const src of [
+      'local.png',
+      './nested/local.png',
+      '/rooted.png',
+      'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+      // A scheme with no host at all. The sanitizer passes it (its check stops
+      // at the colon) and `URL` refuses it — which must read as "no request",
+      // never as an exception out of the sweep.
+      'http://',
+    ]) {
+      const rendered = await renderMarkdown(document, bytesOf(`<img src="${src}" alt="x">\n`));
+      expect(rendered.textContent, src).not.toContain(REMOTE_CONTENT_NOTICE);
+    }
+  });
+
+  it('reads ONE slash after the document’s own scheme as a relative path', async () => {
+    // The boundary the two-slash spellings above sit a single character from,
+    // and the case that makes resolving the right answer rather than a tidier
+    // one: `scheme:` plus ONE slash-or-backslash is an authority when the scheme
+    // DIFFERS from the document's and a relative path when it matches, so no
+    // hard-coded fixture is correct both in a frame served over http and in one
+    // served over https. Taking the scheme from the document is what makes the
+    // case stable — and a list of prefixes could not have expressed it at all,
+    // which is the whole argument for the change.
+    const own = new URL(document.baseURI).protocol;
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(`<img src="${own}\\relative.png" alt="x">\n`),
+    );
+
+    expect(rendered.textContent).not.toContain(REMOTE_CONTENT_NOTICE);
+    expect(rendered.querySelector('img')?.getAttribute('src')).toBe(`${own}\\relative.png`);
+  });
+
+  it('splits srcset candidates on a bare comma, which needs no space after it', async () => {
+    // `srcset="a.png 1x,https://…/b.png 2x"` is valid and common, and the
+    // separator is the comma rather than the whitespace: a split on whitespace
+    // alone leaves `1x,https://…/b.png` as one token, which begins with neither
+    // a scheme nor a slash and is therefore invisible.
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="local.png 1x,https://example.invalid/wide.png 2x">' +
+          '<img src="local.png" alt="a responsive image"></picture>\n',
+      ),
+    );
+
+    expect(rendered.textContent).toContain(REMOTE_CONTENT_NOTICE);
+  });
+
+  it('says nothing about a <picture> whose candidates are all local', async () => {
+    // The other side of the same parse: `2x` and `640w` are descriptors, not
+    // URLs, and a sweep that flagged either would put the banner on every
+    // responsive image in every README.
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="narrow.png 1x, wide.png 2x, huge.png 640w">' +
+          '<img src="narrow.png" alt="a local responsive image"></picture>\n',
+      ),
+    );
+
+    expect(rendered.textContent).not.toContain(REMOTE_CONTENT_NOTICE);
+    expect(rendered.querySelector('source')?.getAttribute('srcset')).toContain('640w');
   });
 
   it('says nothing about remote content for a document that asks for none', async () => {

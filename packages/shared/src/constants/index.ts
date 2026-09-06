@@ -584,6 +584,27 @@ export const MAX_PREVIEW_BYTES = 26_214_400;
 // than the byte count that stops a tab responding.
 export const MAX_PREVIEW_TEXT_LINES = 50_000;
 
+// The widest a previewed delimited file is rendered, in columns.
+//
+// The row cap above is not a node budget on its own: a table's node count is
+// rows TIMES columns, and the width of a CSV is decided by the file rather than
+// by the reader. A 25 MiB line of nothing but commas is comfortably under
+// MAX_PREVIEW_BYTES and asks for twenty-six million cells in one row, which
+// stops the tab before it can show anything at all. Real delimited data is a
+// few dozen columns wide, so this is a bound on the pathological case and not a
+// limit anybody's spreadsheet meets. Fields past it are COUNTED and not kept,
+// exactly as rows past the row cap are, so the notice can name the real width.
+export const MAX_PREVIEW_TABLE_COLUMNS = 1_000;
+// The total number of cells a previewed delimited file may render.
+//
+// The column cap alone still permits 50,000 x 1,000, so the product needs its
+// own ceiling. This one is what today's ordinary worst case already costs: a
+// five-column file at the row cap. Past it, ROWS are dropped rather than
+// columns, because a table missing its right-hand columns is unreadable while
+// one missing its later rows is simply shorter — and the reader is told which
+// of the two happened.
+export const MAX_PREVIEW_TABLE_CELLS = 250_000;
+
 // Extension to render mode. The lookup key is what `documentExtension` returns:
 // the LOWERCASED segment after the LAST dot of the decrypted name. A name with
 // no dot, and a name whose only dot is leading, therefore has no extension and

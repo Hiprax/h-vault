@@ -123,6 +123,8 @@ import {
   MAX_ADDRESS_COUNTRY_LENGTH,
   MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
   MAX_PREVIEW_BYTES,
+  MAX_PREVIEW_TABLE_CELLS,
+  MAX_PREVIEW_TABLE_COLUMNS,
   MAX_PREVIEW_TEXT_LINES,
   PREVIEW_MODES,
   PREVIEW_MODE_NAMES,
@@ -306,6 +308,8 @@ describe('barrel exports (src/index.ts)', () => {
     expect(PREVIEW_MAGIC_BYTES['png']?.[0]?.bytes[0]).toBe(0x89);
     expect(MAX_PREVIEW_BYTES).toBe(26_214_400);
     expect(MAX_PREVIEW_TEXT_LINES).toBe(50_000);
+    expect(MAX_PREVIEW_TABLE_COLUMNS).toBe(1_000);
+    expect(MAX_PREVIEW_TABLE_CELLS).toBe(250_000);
   });
 
   it('exports the sandbox message types, which are the ONLY thing the two graphs share', () => {
