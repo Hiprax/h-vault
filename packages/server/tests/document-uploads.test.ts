@@ -237,7 +237,12 @@ describe('POST /documents/uploads opens a transfer', () => {
     expect(storageRef.current!.storedKeys()).toEqual([]);
   });
 
-  it('echoes the caller’s current vault-key version, so completion can be checked against it', async () => {
+  it('records and echoes the account’s vault-key generation as it stood when the transfer opened', async () => {
+    // An OBSERVATION, on the row and in the response, and NOT what the completion
+    // is checked against: that compares the number the client sends, because only
+    // the client knows which vault key it wrapped with. The row's copy is what a
+    // stranded transfer can be reasoned about from afterwards, and the response's
+    // copy is part of the staging row a resume re-reads and validates.
     await User.updateOne({ _id: user.id }, { $set: { vaultKeyVersion: 4 } });
 
     const res = await call('post', UPLOADS_PATH, user, initBody(1));
@@ -252,8 +257,9 @@ describe('POST /documents/uploads opens a transfer', () => {
   it('ignores every server-assigned field a client tries to supply', async () => {
     // The allowlist, over the wire. A client that could choose `objectKey` could
     // address another account's object; one that could choose `chunkPlaintextBytes`
-    // could frame its own segments; one that could choose `vaultKeyVersion` could
-    // defeat the rotation check at completion.
+    // could frame its own segments; and one that could choose `vaultKeyVersion`
+    // could write its own answer into a column that exists to record what the
+    // SERVER observed — an observation a client can set is not one.
     const foreignId = new mongoose.Types.ObjectId().toHexString();
     const res = await call('post', UPLOADS_PATH, user, {
       ...initBody(1),

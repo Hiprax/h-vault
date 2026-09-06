@@ -279,6 +279,27 @@ describe('Auth API', () => {
       expect(hasRefreshCookie).toBe(true);
     });
 
+    it('says WHICH vault key it just handed over, not merely that there is one', async () => {
+      // The wrapped vault key and the generation it belongs to leave together,
+      // because a rotation performed anywhere else revokes no session and
+      // refreshes no key already held in one: a browser given this key has no
+      // other way to find out, later, that the account has moved past it. Pinned
+      // against a non-zero stored value so a hardcoded default cannot pass.
+      const testUser = await createTestUser({ emailVerified: true });
+      await User.updateOne({ _id: testUser.id }, { $set: { vaultKeyVersion: 3 } });
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login`).send({
+          email: testUser.email,
+          authHash: testUser.rawPassword,
+        }),
+        csrf,
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.vaultKeyVersion).toBe(3);
+    });
+
     it('should return 401 for an invalid password', async () => {
       const testUser = await createTestUser({ emailVerified: true });
 
@@ -968,6 +989,50 @@ describe('Auth API', () => {
       expect(res.body.data.accessToken).toBeDefined();
       expect(typeof res.body.data.accessToken).toBe('string');
       expect(res.body.data.encryptedVaultKey).toBeDefined();
+    });
+
+    it('says WHICH vault key it handed over on this leg too', async () => {
+      // A second response builder, in a different handler, delivering the same
+      // wrapped key — so the pairing has to be asserted twice or half the
+      // sign-ins in the product go out without it and nothing notices.
+      const { CryptoManager } = await import('@hiprax/crypto');
+      const { TOTP, Secret } = await import('otpauth');
+
+      const cm = new CryptoManager();
+      const secret = new Secret().base32;
+      const encryptedSecret = cm.encryptTextSync(
+        secret,
+        process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345',
+      );
+
+      const testUser = await createTestUser();
+      await User.findByIdAndUpdate(testUser.id, {
+        $set: {
+          twoFactorEnabled: true,
+          twoFactorSecret: encryptedSecret,
+          vaultKeyVersion: 2,
+        },
+      });
+
+      const tempToken = jwt.sign(
+        { userId: testUser.id, purpose: '2fa_temp' },
+        deriveTestPurposeKey('2fa_temp'),
+        { expiresIn: '5m' },
+      );
+      const code = new TOTP({
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: Secret.fromBase32(secret),
+      }).generate();
+
+      const res = await withCsrf(
+        agent.post(`${API}/auth/login/2fa`).send({ tempToken, code }),
+        csrf,
+      );
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.data.vaultKeyVersion).toBe(2);
     });
 
     it('completes login with a 2FA secret stored in the legacy v0 (pre-1.0) crypto format', async () => {

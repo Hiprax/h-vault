@@ -291,3 +291,24 @@ export function getRequestContext(req: Request): { ip: string; userAgent: string
       : rawUserAgent;
   return { ip, userAgent };
 }
+
+/**
+ * The account's vault-key generation, as a definite number.
+ *
+ * `vaultKeyVersion` is typed optional on `IUser` on purpose (see the field's own
+ * docblock): a hydrated read applies the schema default and always yields a
+ * number, while a `.lean()` read of an account created before the column existed
+ * yields nothing at all — and the hot paths use `.lean()`. Zero is the correct
+ * answer for that account, because zero is what "has never rotated" means and
+ * what MongoDB's `$inc` will treat a missing value as.
+ *
+ * A named, exported function rather than four inline `?? 0`s, for the reason
+ * `authController`'s `countBackupCodes` exists in the same shape: inline at a hydrated call
+ * site the fallback arm is unreachable from any route, so it would sit for ever
+ * as an uncovered branch nobody could honestly exercise. Here the missing value
+ * and the missing user are ordinary boundary cases of a pure function, and are
+ * tested as ones.
+ */
+export function vaultKeyVersionOf(user: { vaultKeyVersion?: number | undefined } | null): number {
+  return user?.vaultKeyVersion ?? 0;
+}

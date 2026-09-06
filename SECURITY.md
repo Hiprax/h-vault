@@ -421,6 +421,23 @@ correctness, and these are the things it does not buy:
    The property this design buys is that untrusted input is never _parsed_ there — not that it
    never exists there. A flaw in the application's own code is still a flaw in the application.
 
+### Rotating your vault key while another session is open
+
+Rotating your vault key does not sign out your other sessions, and that is deliberate: it is a
+key operation, not a credential change, and forcing every device to re-authenticate would make a
+routine hygiene step feel like a breach. The consequence is that a browser tab left open
+elsewhere goes on holding the key it was given when it signed in, and nothing tells it the
+account has moved past that key.
+
+Everything encrypted under the vault key is re-encrypted by the rotation itself, so an older
+session only matters when it writes something new. Uploading a document is that case, because a
+document's own key is wrapped in the browser under the vault key the browser holds. Each sign-in
+is therefore told which generation of the vault key it received, and an upload says which one it
+used; if that is no longer the current one the upload is refused, the browser fetches the current
+key, re-wraps the document's key and finishes — without re-sending the file. A document is never
+stored under a key the account no longer has. If you would rather not rely on that at all, sign
+out of your other devices from the Sessions page before rotating.
+
 ### Deleting a document, and why it cannot be undone
 
 A stored document is two things: an entry in the database and a file of ciphertext in object

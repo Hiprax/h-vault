@@ -41,6 +41,7 @@ import {
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 
 const logger = createModuleLogger('document-controller');
@@ -56,10 +57,15 @@ const BYTES_PER_MB = 1024 * 1024;
  * What it keeps OUT is the point. `objectKey`, `chunkPlaintextBytes`,
  * `vaultKeyVersion`, `_id`, `parts`, `receivedBytes` and `expiresAt` are all
  * SERVER-assigned — a client that could set `objectKey` could address another
- * user's object, one that could set `chunkPlaintextBytes` could choose its own
- * framing, and one that could set `vaultKeyVersion` could defeat the rotation
- * check at completion. `z.object()` already strips an unknown key, so this is the
- * second of two independent filters rather than the only one.
+ * user's object, and one that could set `chunkPlaintextBytes` could choose its
+ * own framing. `vaultKeyVersion` is here because the staging row's copy is a
+ * SERVER observation — what this account's vault-key generation was when the
+ * transfer opened — and a column recording an observation must not be writable
+ * by the thing being observed. It is NOT what the completion checks: that reads
+ * the number from the completion body, because the body's number says which key
+ * the client wrapped with and the staging row's says nothing about the client at
+ * all. `z.object()` already strips an unknown key, so this is the second of two
+ * independent filters rather than the only one.
  */
 const ALLOWED_INIT_FIELDS = new Set([
   'encryptedDek',
@@ -470,7 +476,19 @@ async function releaseTransfer(
  */
 type CompletionOutcome =
   | { readonly kind: 'document'; readonly document: HydratedDocument<IDocument> }
-  | { readonly kind: 'staleVaultKey'; readonly vaultKeyVersion: number };
+  | {
+      readonly kind: 'staleVaultKey';
+      readonly vaultKeyVersion: number;
+      /**
+       * WHY the version did not match, which the two cases do not share.
+       * `rotated` is the ordinary one the recovery path exists for. `unreached`
+       * is a version above anything this account has ever held, which no
+       * rotation can explain — the same refusal, because refusing costs the
+       * client one retry and a 400 would cost it the whole transfer, but a
+       * different thing to be told.
+       */
+      readonly reason: 'rotated' | 'unreached';
+    };
 
 /**
  * One page of documents and the pagination envelope that describes it, for the
@@ -610,7 +628,7 @@ export const initUpload = catchAsync(async (req: Request, res: Response): Promis
   // Read as 0 when absent: an account created before this column existed, and the
   // `upgrade` gate's 0.7.0 fixture, both carry no value at all.
   const user = await User.findById(userId).select('vaultKeyVersion').lean();
-  const vaultKeyVersion = user?.vaultKeyVersion ?? 0;
+  const vaultKeyVersion = vaultKeyVersionOf(user);
 
   const uploadId = new mongoose.Types.ObjectId();
   const objectKey = buildObjectKey(userId, uploadId.toHexString());
@@ -1071,6 +1089,12 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
  *     cover.
  *   * The **`vaultKeyVersion` check** catches a rotation that has already
  *     COMMITTED, which the fence cannot see because the flag is cleared by then.
+ *     It compares the number the CLIENT sent — its own record of which vault key
+ *     it holds, published to it at sign-in — against the account's current one.
+ *     That distinction is the whole guard: a number this server echoed back at
+ *     init would agree with itself no matter which key the client actually held,
+ *     so a session still holding a superseded key would sail through, and the row
+ *     it committed would list, charge the quota and never open.
  *
  * The lock and the rotation lock are DISJOINT — one is keyed by upload, the other
  * by user — so holding this one says nothing whatever about whether a rotation is
@@ -1156,9 +1180,16 @@ export const completeUpload = catchAsync(async (req: Request, res: Response): Pr
     // instead of the entire file.
     res.status(409).json({
       success: false,
+      // The remedy is the same sentence either way — rewrap under this number and
+      // retry — but the diagnosis is not, and saying "rotated" to a client that
+      // reported a generation this account has never held would send whoever
+      // reads it looking for a rotation that never happened.
       message:
-        `The vault key was rotated during this upload. Rewrap the document key under vault ` +
-        `key version ${String(outcome.vaultKeyVersion)} and retry the completion.`,
+        (outcome.reason === 'rotated'
+          ? 'The vault key was rotated during this upload. '
+          : 'This upload reported a vault key version this account has never had. ') +
+        `Rewrap the document key under vault key version ` +
+        `${String(outcome.vaultKeyVersion)} and retry the completion.`,
       data: { vaultKeyVersion: outcome.vaultKeyVersion },
     });
     return;
@@ -1312,9 +1343,31 @@ async function completeUnderLock(
   // see because the flag is cleared by then.
   await assertVaultNotRotating(userId);
   const user = await User.findById(userId).select('vaultKeyVersion').lean();
-  const currentVaultKeyVersion = user?.vaultKeyVersion ?? 0;
+  const currentVaultKeyVersion = vaultKeyVersionOf(user);
+  // ABOVE the current version is named separately from merely different, even
+  // though the comparison below would refuse it anyway, because the two mean
+  // opposite things and only one of them is a rotation. The number in this body
+  // is the client's own record of which vault key it holds — not an echo of
+  // something this server said — and no client can hold a generation the account
+  // has never reached. So this is a bookkeeping fault or a forged body, it is
+  // worth saying so in the log, and it must stay refused if anyone ever decides
+  // the comparison below should only look for a version that is BEHIND.
+  //
+  // Answered with the same recoverable refusal rather than a hard 400: what
+  // matters is that nothing is committed, and handing back the current number
+  // lets a confused client rewrap and finish instead of losing a transfer that
+  // has already crossed the network in full.
+  if (body.vaultKeyVersion > currentVaultKeyVersion) {
+    logger.warn('A completion claimed a vault key version this account has never reached', {
+      userId,
+      uploadId: id,
+      claimed: body.vaultKeyVersion,
+      current: currentVaultKeyVersion,
+    });
+    return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion, reason: 'unreached' };
+  }
   if (body.vaultKeyVersion !== currentVaultKeyVersion) {
-    return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion };
+    return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion, reason: 'rotated' };
   }
 
   // Re-checked because the init-to-completion window is as long as the transfer. A

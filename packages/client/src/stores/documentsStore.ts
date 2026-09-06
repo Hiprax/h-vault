@@ -250,7 +250,6 @@ interface UploadSession {
   noncePrefix: DocumentBytes;
   chunkCount: number;
   chunkPlaintextBytes: number;
-  vaultKeyVersion: number;
 }
 
 /** What {@link DocumentsState.startUpload} needs to seal and store a file. */
@@ -460,19 +459,30 @@ const sessions = new Map<string, UploadSession>();
 // ---------------------------------------------------------------------------
 
 /**
- * The unlocked vault key, or a throw.
+ * The unlocked vault key AND the generation it belongs to, or a throw.
  *
  * Read from `authStore` at CALL time, never at module evaluation. The two stores
  * import each other — `authStore` needs this one for its lock and logout teardown,
  * this one needs the vault key — and a module-scope read would resolve to whatever
  * the bundler happened to evaluate first.
+ *
+ * The two come out of ONE snapshot, never two reads. The number is only
+ * meaningful as a statement about the key beside it, and a lock or a rotation
+ * landing between two separate `getState()` calls would pair a key with a version
+ * that names a different one — precisely the confusion the version exists to
+ * prevent.
  */
-function getVaultKey(): CryptoKey {
-  const { vaultKey } = useAuthStore.getState();
+function requireVaultKey(): { vaultKey: CryptoKey; vaultKeyVersion: number } {
+  const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
   if (!vaultKey) {
     throw new Error('Vault is locked. Unlock it before performing document operations.');
   }
-  return vaultKey;
+  return { vaultKey, vaultKeyVersion };
+}
+
+/** The unlocked vault key alone, for the callers that bind nothing to its generation. */
+function getVaultKey(): CryptoKey {
+  return requireVaultKey().vaultKey;
 }
 
 /** `length` cryptographically random bytes. */
@@ -908,7 +918,10 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       throw error;
     }
 
-    const { uploadId, vaultKeyVersion, chunkPlaintextBytes } = init;
+    // `init.vaultKeyVersion` is deliberately NOT kept: it is the SERVER's current
+    // generation, which says nothing about the key this session holds, and the
+    // completion needs the one thing it cannot answer. See `completeTransfer`.
+    const { uploadId, chunkPlaintextBytes } = init;
 
     // A lock, a logout or a teardown landed while this transfer was being opened.
     // Registering it now would put a live key and a progress row into a store that
@@ -948,7 +961,6 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       noncePrefix,
       chunkCount,
       chunkPlaintextBytes,
-      vaultKeyVersion,
     });
     set((state) => ({
       uploads: {
@@ -1602,7 +1614,10 @@ async function runTransfer(
   const { signal } = session.controller;
 
   try {
-    const vaultKey = getVaultKey();
+    // The key and the generation it belongs to, read together — the completion
+    // has to say WHICH vault key it wrapped with, and only a pair read from one
+    // snapshot can say that truthfully.
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const streamKey = await deriveStreamKey(session.dek, session.streamSalt, uploadId);
     const createSHA256 = await getSha256Factory();
     const hasher = await createSHA256();
@@ -1661,7 +1676,14 @@ async function runTransfer(
       meta,
     );
 
-    const row = await completeTransfer(session, uploadId, sealedMeta, vaultKey, signal);
+    const row = await completeTransfer(
+      session,
+      uploadId,
+      sealedMeta,
+      vaultKey,
+      vaultKeyVersion,
+      signal,
+    );
     endSession(set, uploadId, { zero: true });
     // The document IS committed, so this is not a failure and nothing is thrown —
     // but opening it for the list is a LOCAL write, and a lock or a logout that
@@ -1730,6 +1752,17 @@ async function runTransfer(
  * rewraps the DEK it still holds, and retries THIS request alone — no part is
  * re-sent, and the negative that proves it is that no part request is issued.
  *
+ * `vaultKeyVersion` is THIS SESSION'S — the generation `authStore` recorded
+ * alongside the wrapped vault key it signed in with — and never the number init
+ * echoed back. The echo is the SERVER's own current version, so sending it back
+ * asks the server to compare a number with itself: it agrees no matter which key
+ * this session is actually holding. A rotation performed from another session
+ * revokes nothing and refreshes no key here, so "still holding the superseded
+ * key" is an ordinary state, not an exotic one — and the row that would commit is
+ * one that lists, charges the quota, never opens, and blocks every future
+ * rotation of the account. Sending the session's own number turns that silent
+ * loss into the 409 below, which costs one request.
+ *
  * Exactly one retry. A second 409 means a second rotation landed inside the
  * recovery, which is a race for the user to resolve by retrying, not one to spin
  * on.
@@ -1739,6 +1772,7 @@ async function completeTransfer(
   uploadId: string,
   sealedMeta: { encryptedMeta: string; metaIv: string; metaTag: string },
   vaultKey: CryptoKey,
+  vaultKeyVersion: number,
   signal: AbortSignal,
 ): Promise<unknown> {
   const send = async (key: CryptoKey, version: number): Promise<unknown> => {
@@ -1762,7 +1796,7 @@ async function completeTransfer(
   };
 
   try {
-    return await send(vaultKey, session.vaultKeyVersion);
+    return await send(vaultKey, vaultKeyVersion);
   } catch (error) {
     // Discriminated on the PRESENCE of an integer `data.vaultKeyVersion`, never on
     // the message: this is the one refusal in the surface that carries a number,

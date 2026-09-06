@@ -32,6 +32,7 @@ import {
   isVaultRotationLockHeld,
   MAX_USER_AGENT_LENGTH,
   pickAllowedFields,
+  vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 import { readStringCookie } from '../utils/cookies.js';
 import { clearCsrfCookie } from '../middleware/csrf.js';
@@ -788,6 +789,12 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
         vaultKeyTag: user.vaultKeyTag,
         kdfIterations: user.kdfIterations,
         kdfAlgorithm: user.kdfAlgorithm,
+        // Which vault key the wrapped key above IS. A rotation revokes nothing
+        // and refreshes no key already resident in a running session, so this is
+        // the only moment the client can learn which generation the key it is
+        // about to decrypt belongs to — and without that it cannot tell a server
+        // asking "is this the current key?" from one asking "is this YOUR key?".
+        vaultKeyVersion: vaultKeyVersionOf(user),
       },
     });
   };
@@ -1214,6 +1221,9 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
       vaultKeyTag: user.vaultKeyTag,
       kdfIterations: user.kdfIterations,
       kdfAlgorithm: user.kdfAlgorithm,
+      // The 2FA leg completes a sign-in exactly as the direct one does, so it
+      // publishes the same pairing. See the note on the other response.
+      vaultKeyVersion: vaultKeyVersionOf(user),
     },
   });
 });

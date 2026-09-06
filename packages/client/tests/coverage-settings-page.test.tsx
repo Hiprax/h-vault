@@ -567,6 +567,9 @@ describe('SettingsPage — error paths and branches', () => {
       vaultKey: OLD_VAULT_KEY,
       mek: MEK,
       encryptedVaultKeyData: null,
+      // Deliberately NOT zero: the generation this session records has to move
+      // WITH its key, and a base of 0 would let an off-by-one pass as a default.
+      vaultKeyVersion: 4,
     } as never);
     useUIStore.setState({ theme: 'dark', setTheme: mockSetTheme });
 
@@ -943,6 +946,11 @@ describe('SettingsPage — error paths and branches', () => {
       iv: 'newIv',
       tag: 'newTag',
     });
+    // …and says WHICH key it now holds. The number travels with the key or it is
+    // a lie: an upload from this session sends it so the server can tell a
+    // superseded key from the current one, and a session left claiming the
+    // generation it has just replaced would have every completion refused.
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(5);
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Vault key rotated successfully', type: 'success' }),
     );

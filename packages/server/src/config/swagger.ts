@@ -348,6 +348,12 @@ export const swaggerSpec: JsonObject = {
               vaultKeyTag: { type: 'string' },
               kdfIterations: { type: 'integer' },
               kdfAlgorithm: { type: 'string' },
+              vaultKeyVersion: {
+                type: 'integer',
+                minimum: 0,
+                description:
+                  "Which vault key the wrapped key above IS — the account's vault-key generation when this response was built. A rotation revokes no session and refreshes no key already held in a running one, so this is where a client learns which generation the key it is about to decrypt belongs to. Anything binding data to the vault key sends this number back, rather than a number the server told it later, so the server can tell a stale key from a current one.",
+              },
             },
           },
         },
@@ -661,6 +667,7 @@ export const swaggerSpec: JsonObject = {
           kdfIterations: { type: 'integer' },
           kdfAlgorithm: { type: 'string' },
           encryptionVersion: { type: 'integer' },
+          vaultKeyVersion: { type: 'integer', minimum: 0 },
           settings: { $ref: '#/components/schemas/UserSettings' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
@@ -1090,7 +1097,7 @@ export const swaggerSpec: JsonObject = {
             type: 'integer',
             minimum: 0,
             description:
-              "The caller's vault-key version at init. Completion is refused with 409 when it no longer matches, which is what stops a rotation mid-transfer from committing a key nothing can unwrap.",
+              "The account's vault-key generation as it stood when this transfer opened. Informational: the completion checks the number the CLIENT sends against the account's current one, not this echo, because only the client knows which key it actually wrapped with.",
             example: 0,
           },
           chunkPlaintextBytes: {
@@ -1187,7 +1194,7 @@ export const swaggerSpec: JsonObject = {
             type: 'integer',
             minimum: 0,
             description:
-              "The vault-key version the wrapped key above was produced under. Refused with 409 when it is no longer the account's current version.",
+              "The vault-key version the wrapped key above was produced under — the number this session received alongside the wrapped vault key it signed in with, NOT the one echoed by init. Refused with 409, carrying the current version, when it is not the account's current one; the client then rewraps and retries this request alone.",
             example: 0,
           },
         },
@@ -1656,7 +1663,7 @@ export const swaggerSpec: JsonObject = {
           ...DOCUMENT_ITEM_WRITE_ERRORS,
           409: {
             description:
-              'The completion cannot proceed yet. A stale vaultKeyVersion carries the current one in `data`, so the client rewraps the document key it still holds and retries this request alone rather than re-sending the file; a rotation in progress or a completion already in flight carry no data and are retried unchanged.',
+              "The completion cannot proceed yet. A vaultKeyVersion that is not the account's current one carries the current one in `data`, so the client rewraps the document key it still holds and retries this request alone rather than re-sending the file; the message distinguishes a key superseded by a rotation from a version the account has never had, which no rotation can explain. A rotation in progress or a completion already in flight carry no data and are retried unchanged.",
             content: {
               'application/json': {
                 schema: {

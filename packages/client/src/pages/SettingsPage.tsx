@@ -1553,6 +1553,24 @@ export default function SettingsPage() {
       useAuthStore.setState({
         vaultKey: newVaultKey,
         encryptedVaultKeyData: { encrypted, iv, tag },
+        // The generation moves with the key, or this session would keep claiming
+        // the one it has just replaced — and an upload from it would then be
+        // refused for ever rather than recovered from.
+        //
+        // `+ 1` rather than a re-read, and the DIRECTION of any error is what
+        // makes that safe. The server increments once per committing rotation, so
+        // a request that returns 200 here has moved the account by at least one
+        // and this is a FLOOR. A floor that is short self-heals: the next upload
+        // sends it, takes the recoverable 409 carrying the true number, rewraps
+        // and finishes. A number ABOVE the account's own would have nothing to
+        // recover from, so being short is the error to prefer.
+        //
+        // The one 200 that does NOT increment is the idempotent replay — a repeat
+        // carrying a `lastRotationKey` already recorded — and it cannot make this
+        // an over-estimate, because `idempotencyKey` is minted fresh per attempt
+        // just above. A replay can therefore only be a retransmission of THIS
+        // request, whose first delivery did the increment.
+        vaultKeyVersion: useAuthStore.getState().vaultKeyVersion + 1,
       });
 
       toast({ title: 'Vault key rotated successfully', type: 'success' });

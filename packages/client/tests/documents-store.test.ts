@@ -635,7 +635,17 @@ beforeEach(async () => {
 
   vaultKey = await cryptoService.importVaultKey(cryptoService.generateVaultKey());
   mek = await cryptoService.importVaultKey(cryptoService.generateVaultKey());
-  useAuthStore.setState({ accessToken: 'access-token', vaultKey, mek, isAuthenticated: true });
+  // `vaultKeyVersion` is set EXPLICITLY, beside the key it names: the completion
+  // sends this session's number, so leaving it to a default would make every
+  // assertion about that number incidental — and would let a rotated version leak
+  // from a neighbouring test under the suite's shuffled order.
+  useAuthStore.setState({
+    accessToken: 'access-token',
+    vaultKey,
+    mek,
+    vaultKeyVersion: 0,
+    isAuthenticated: true,
+  });
   useDocumentsStore.setState({
     documents: [],
     trashDocuments: [],
@@ -1784,6 +1794,73 @@ describe('documentsStore — a vault key rotated mid-upload', () => {
       await deriveWrapKey(rotatedKey, ID_A),
     );
     expect(dek).toHaveLength(32);
+  });
+
+  it('sends the version its OWN key is, not the one init echoed, and self-heals from the 409', async () => {
+    // The S1 arrangement, which the case above does not reach: the rotation
+    // happened BEFORE this transfer opened, from another session. A rotation
+    // revokes nothing and refreshes no key already held here, so this session is
+    // still holding the superseded vault key — and init, reading the server's own
+    // counter, echoes the NEW generation back.
+    //
+    // Echoing that number onward is what committed a row wrapped under a key the
+    // account no longer stores: the server would be comparing its own number with
+    // itself and agreeing. The document then lists, charges the quota, never
+    // opens, and — because the rotation screen aborts on the first row it cannot
+    // unwrap — blocks every future rotation of the account.
+    advertisedVaultKeyVersion = 1;
+    useAuthStore.setState({ vaultKeyVersion: 0 });
+    const content = bytes(9, 8, 7);
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: content.length });
+    completeOutcomes = [
+      { status: 409, data: { success: false, data: { vaultKeyVersion: 1 } } },
+      'ok',
+    ];
+    const rotatedRaw = cryptoService.generateVaultKey();
+    const rotatedKey = await cryptoService.importVaultKey(rotatedRaw);
+    const wrapped = await cryptoService.encryptVaultKey(rotatedKey, mek);
+    profileBody = {
+      encryptedVaultKey: wrapped.encrypted,
+      vaultKeyIv: wrapped.iv,
+      vaultKeyTag: wrapped.tag,
+    };
+
+    await useDocumentsStore.getState().startUpload({
+      source: new Blob([content]),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+
+    // THE ASSERTION THIS TEST EXISTS FOR: the first completion carried 0 — what
+    // this session's key IS — and not the 1 the init response advertised.
+    expect(completeBodies[0]?.vaultKeyVersion).toBe(0);
+    expect(advertisedVaultKeyVersion).toBe(1);
+    // …so the server could refuse, and the existing recovery ran: one retry,
+    // carrying the number the refusal handed back.
+    expect(completeBodies).toHaveLength(2);
+    expect(completeBodies[1]?.vaultKeyVersion).toBe(1);
+    // One part for two completions — the recovery costs a request, not the file.
+    expect(partRequests()).toHaveLength(1);
+    // And the committed key really is the DEK under the account's CURRENT vault
+    // key, which is the whole point of refusing the first attempt.
+    const dek = await unwrapDek(
+      {
+        encryptedDek: completeBodies[1]?.encryptedDek as string,
+        dekIv: completeBodies[1]?.dekIv as string,
+        dekTag: completeBodies[1]?.dekTag as string,
+      },
+      await deriveWrapKey(rotatedKey, ID_A),
+    );
+    expect(dek).toHaveLength(32);
+
+    // THE NEGATIVES, and the second is easy to get wrong. The session did not
+    // adopt the rotated key — every item already decrypted in memory belongs to
+    // the old one — and it must not adopt the rotated NUMBER either. A version
+    // moved forward while the key stayed behind is the original defect rebuilt
+    // from the client side: the next upload would send 1, the server would agree,
+    // and the row would commit under a key nothing can unwrap.
+    expect(useAuthStore.getState().vaultKey).toBe(vaultKey);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(0);
   });
 
   it('does not adopt the rotated key into the auth store', async () => {

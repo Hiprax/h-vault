@@ -412,6 +412,45 @@ describe('authStore.login', () => {
     expect(state.isLoading).toBe(false);
   });
 
+  it('records the vault key generation the response delivered, beside the key itself', async () => {
+    // The join the whole rotation guard rests on. `authStore` is the only place
+    // that knows WHICH vault key this session holds; an upload sends that number
+    // so the server can tell a superseded key from the current one. A rotated
+    // account is served here (generation 2, not 0) precisely so that dropping
+    // this line cannot pass as a default.
+    vi.mocked(loginApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: { ...mockLoginResponse.data.data, vaultKeyVersion: 2 },
+      },
+    } as never);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    const state = useAuthStore.getState();
+    expect(state.vaultKeyVersion).toBe(2);
+    // It names the key that arrived with it, so the two must be set together.
+    expect(state.encryptedVaultKeyData).toEqual({
+      encrypted: 'enc-vk',
+      iv: 'vk-iv',
+      tag: 'vk-tag',
+    });
+  });
+
+  it('records generation 0 when the server does not publish one at all', async () => {
+    // A server older than the field. Zero is the safe reading: it can only make a
+    // later upload look BEHIND, which is refused and recovered from, never
+    // current, which would commit under a key nothing could unwrap.
+    vi.mocked(loginApi).mockResolvedValue(mockLoginResponse as never);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+    useAuthStore.setState({ vaultKeyVersion: 9 });
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(0);
+  });
+
   it('should handle 2FA required flow', async () => {
     const mock2faResponse = {
       data: {
@@ -617,6 +656,29 @@ describe('authStore.verify2fa', () => {
     expect(state.twoFactorRequired).toBe(false);
     expect(state.tempToken).toBeNull();
     expect(state.isLoading).toBe(false);
+  });
+
+  it('records the vault key generation on this leg too', async () => {
+    // A separate response builder on the server and a separate `set` here, so the
+    // pairing has to be asserted twice or half the sign-ins in the product record
+    // nothing and every upload from them pays the recovery round trip.
+    vi.mocked(login2faApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: { ...mock2faSuccessResponse.data.data, vaultKeyVersion: 3 },
+      },
+    } as never);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+
+    await useAuthStore.getState().verify2fa('123456');
+
+    const state = useAuthStore.getState();
+    expect(state.vaultKeyVersion).toBe(3);
+    expect(state.encryptedVaultKeyData).toEqual({
+      encrypted: 'enc-vk-2fa',
+      iv: 'vk-iv-2fa',
+      tag: 'vk-tag-2fa',
+    });
   });
 
   it('should throw if no tempToken is available', async () => {
