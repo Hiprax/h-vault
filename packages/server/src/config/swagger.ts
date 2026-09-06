@@ -1504,7 +1504,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Open a transfer',
         description:
-          'Reserves an upload id, records the wrapped document key and the framing, and opens an engine-side multipart upload when more than one segment is declared. The id it returns is the future document id: the browser binds its key derivation to it before sealing the first byte, so it can never be reassigned without re-encrypting the file. Refused with 400 when the declared size exceeds the operator cap, the document count or concurrent-transfer cap is reached, or the storage quota would be exceeded, and with 409 while a vault-key rotation is running.',
+          'Reserves an upload id, records the wrapped document key and the framing, and opens an engine-side multipart upload when more than one segment is declared. The id it returns is the future document id: the browser binds its key derivation to it before sealing the first byte, so it can never be reassigned without re-encrypting the file. Refused with 400 when the declared size exceeds the operator cap, the document count or concurrent-transfer cap is reached, or the storage quota would be exceeded, and with 409 while a vault-key rotation is running or while another transfer is already being opened for the same account. Those per-account budgets are decided under a per-user lock, so an account can never hold more than the concurrent-transfer cap allows however many opens arrive at once.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -1520,7 +1520,8 @@ export const swaggerSpec: JsonObject = {
           }),
           ...DOCUMENT_ITEM_WRITE_ERRORS,
           409: {
-            description: 'A vault-key rotation is in progress; retry when it finishes',
+            description:
+              'A vault-key rotation is in progress, or another transfer is already being opened for this account; retry when it finishes',
             content: {
               'application/json': {
                 schema: { $ref: '#/components/schemas/ErrorResponse' },

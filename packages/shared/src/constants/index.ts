@@ -303,6 +303,25 @@ export const MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER = 3;
 // `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1`, and a
 // fourth transfer cannot be opened until it is back under the limit.
 //
+// That "and a fourth cannot be opened" is the whole derivation, and it is a
+// property of the SERVER rather than of arithmetic. TWO things in
+// `documentController`'s init establish it, and either one alone is not enough:
+//
+//   1. The per-user `document-init:<userId>` JobLock. The concurrency check is
+//      itself a read followed by a write, so unserialized, N simultaneous opens
+//      all read zero live transfers and all commit — the overshoot has no bound
+//      at all, and an account carried past this constant can never rotate its
+//      vault key again.
+//   2. The ORDER of the two counts: live transfers first, committed documents
+//      second. A completion holds a DIFFERENT lock (per upload) and can land
+//      between them, so reading documents first pairs a count taken before three
+//      completions with a live-transfer count of zero taken after them — both
+//      pass, and the account finishes on exactly this constant, leaving the
+//      slack described below at zero.
+//
+// Anything that removes that lock, or swaps those two reads, invalidates the
+// number below rather than merely the comment above it.
+//
 // A rotation must name EVERY row the account holds — the handler compares
 // distinct ids against an UNFILTERED `countDocuments`, because a trashed document
 // is sealed under the same vault key as an active one. So a wire cap set to the

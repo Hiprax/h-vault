@@ -209,6 +209,43 @@ export function vaultImportLockName(userId: string): string {
 }
 
 /**
+ * The distributed-lock name one transfer OPEN holds for its user, mirroring
+ * {@link vaultImportLockName} — and keyed by the USER, unlike
+ * {@link documentCompleteLockName} below.
+ *
+ * That difference is the design. `documentController.initUpload` decides three
+ * per-user budgets — the document count, the concurrent-transfer count and the
+ * byte quota — by reading a count and then writing a staging row, which is the
+ * same read-then-write an import performs against `MAX_ITEMS_PER_USER`. Two
+ * opens that each individually fit can therefore both pass the read and both
+ * write, and the budgets they breach are per-user, so the lock has to be too. As
+ * there, a transaction alone would not close it on every topology: a standalone
+ * deployment (and the default test harness) rejects multi-document transactions
+ * outright, while `acquireJobLock` is an atomic upsert against the unique
+ * `jobName` index and holds either way.
+ *
+ * The concurrency cap is the one that makes this load-bearing rather than tidy.
+ * The document count is read from `documents`, where only a COMPLETION writes, so
+ * a burst of opens cannot move it. What a burst CAN move is the number of live
+ * staging rows, and `MAX_DOCUMENTS_PER_ROTATION` is derived on the assumption
+ * that this number is bounded: an account can finish at most
+ * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1` documents past the advertised
+ * limit. Unserialized, nothing enforced that — N simultaneous opens all read zero
+ * live transfers and all commit — and an account carried past
+ * `MAX_DOCUMENTS_PER_ROTATION` can never rotate its vault key again, because the
+ * payload that must name every row is at once too long for the schema's `.max()`
+ * and, if trimmed, too short for the handler's coverage check.
+ *
+ * The 409 a loser receives is reachable by a real user, but only just: the upload
+ * panel sends one file at a time, so producing it means confirming a second file
+ * inside the milliseconds the first open takes. It is reported to them verbatim
+ * as "retry", and a scripted client can produce it at will.
+ */
+export function documentInitLockName(userId: string): string {
+  return `document-init:${userId}`;
+}
+
+/**
  * The distributed-lock name one document completion holds, mirroring
  * {@link vaultImportLockName} — but keyed by the UPLOAD, not by the user.
  *
@@ -229,7 +266,8 @@ export function vaultImportLockName(userId: string): string {
  * conflict whenever that row already exists.
  *
  * Note what this lock deliberately does NOT overlap: the per-user
- * {@link vaultRotationLockName}. The two are disjoint, which is exactly why
+ * {@link documentInitLockName} that the OTHER end of the same transfer takes, nor
+ * the per-user {@link vaultRotationLockName}. All three are disjoint, which is exactly why
  * completion needs {@link assertVaultNotRotating} as well as its vault-key
  * version check — holding this lock says nothing at all about whether a rotation
  * is running.
