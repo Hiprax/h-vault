@@ -179,6 +179,12 @@ app.use((_req: Request, _res: Response, next: NextFunction) => {
   //   so operator injection via query strings is not possible.
   // - Zod validation on all endpoints catches any unexpected shapes downstream
   //   as a defense-in-depth measure.
+  // - COOKIES are the one other source, and they are handled elsewhere rather
+  //   than here: `cookieParser()` below JSON-decodes any `j:`-prefixed value, so
+  //   `req.cookies[x]` really can be an object or a number. Nothing reads one
+  //   except through `utils/cookies.ts` `readStringCookie`, which yields a value
+  //   only when it is a non-empty string, so no cookie ever reaches a query as an
+  //   operand. Narrow there, not here — see that file for why.
   //
   // Additionally, req.query and req.params are read-only getters in Express 5.
   next();

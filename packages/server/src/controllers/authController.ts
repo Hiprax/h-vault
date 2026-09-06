@@ -33,6 +33,7 @@ import {
   MAX_USER_AGENT_LENGTH,
   pickAllowedFields,
 } from '../utils/controllerHelpers.js';
+import { readStringCookie } from '../utils/cookies.js';
 import { clearCsrfCookie } from '../middleware/csrf.js';
 import {
   ERROR_CODES,
@@ -800,7 +801,7 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     // pointless `Set-Cookie` — on every ordinary 2FA login. The check sits here,
     // strictly AFTER the bcrypt compare and lockout evaluation above, so a cookie
     // can never become an authentication bypass or an account-enumeration oracle.
-    const trustedCookie = req.cookies[TRUSTED_DEVICE_COOKIE_NAME] as string | undefined;
+    const trustedCookie = readStringCookie(req, TRUSTED_DEVICE_COOKIE_NAME);
     if (trustedCookie) {
       // Consume the record atomically: `findOneAndDelete` recognises and burns
       // the token in one step, so a replayed (already-consumed) cookie simply
@@ -1167,7 +1168,7 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
 // ─── Refresh ─────────────────────────────────────────────────────────────────
 
 export const refresh = catchAsync(async (req: Request, res: Response): Promise<void> => {
-  const token: string | undefined = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
+  const token = readStringCookie(req, REFRESH_COOKIE_NAME);
 
   if (!token) {
     throw httpErrors.unauthorized('Refresh token not provided');
@@ -1357,7 +1358,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
 
 export const logout = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = (req as AuthenticatedRequest).user._id;
-  const token: string | undefined = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
+  const token = readStringCookie(req, REFRESH_COOKIE_NAME);
 
   if (token) {
     const tokenHash = hashToken(token);
@@ -1406,7 +1407,7 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
   const userId = (req as AuthenticatedRequest).user._id;
 
   // Exclude the current session's refresh token so the caller stays logged in
-  const currentToken: string | undefined = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
+  const currentToken = readStringCookie(req, REFRESH_COOKIE_NAME);
   const filter: Record<string, unknown> = { userId };
 
   if (currentToken) {

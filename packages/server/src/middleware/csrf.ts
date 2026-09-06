@@ -26,6 +26,7 @@ import { httpErrors } from '@hiprax/errors';
 import { config, isProduction } from '../config/index.js';
 import { REFRESH_COOKIE_NAME } from '../constants/index.js';
 import { hashToken } from '../utils/token.js';
+import { readStringCookie } from '../utils/cookies.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const CSRF_COOKIE = '__csrf';
@@ -42,8 +43,8 @@ const ANON_SESSION_PREFIX = 'anon:';
  * present so that the resulting token is bound to a single anonymous flow.
  */
 function resolveSessionId(req: Request): string {
-  const refreshToken: unknown = req.cookies[REFRESH_COOKIE_NAME];
-  if (typeof refreshToken === 'string' && refreshToken.length > 0) {
+  const refreshToken = readStringCookie(req, REFRESH_COOKIE_NAME);
+  if (refreshToken !== undefined) {
     return hashToken(refreshToken);
   }
   return `${ANON_SESSION_PREFIX}${crypto.randomBytes(16).toString('hex')}`;
@@ -151,11 +152,9 @@ export function doubleCsrfProtection(req: Request, _res: Response, next: NextFun
   // payload and require the token to verify against itself. This prevents an
   // anonymous token from continuing to validate after the refresh cookie
   // appears (e.g. after login/refresh in the same agent).
-  const refreshToken: unknown = req.cookies[REFRESH_COOKIE_NAME];
+  const refreshToken = readStringCookie(req, REFRESH_COOKIE_NAME);
   const expectedSessionId =
-    typeof refreshToken === 'string' && refreshToken.length > 0
-      ? hashToken(refreshToken)
-      : extractAnonSessionId(headerToken);
+    refreshToken !== undefined ? hashToken(refreshToken) : extractAnonSessionId(headerToken);
 
   if (!verifyToken(headerToken, expectedSessionId)) {
     next(httpErrors.forbidden('invalid csrf token'));

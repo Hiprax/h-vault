@@ -14,6 +14,7 @@ import { createAuditLog } from '../services/auditService.js';
 import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
 import { getRequestContext, getUserId } from '../utils/controllerHelpers.js';
+import { readStringCookie } from '../utils/cookies.js';
 import { cryptoManager } from '../utils/cryptoManager.js';
 import { config, isProduction, twoFactorEncryptionKey } from '../config/index.js';
 import { REFRESH_COOKIE_NAME } from '../constants/index.js';
@@ -526,6 +527,35 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
     throw httpErrors.badRequest('Invalid verification code');
   }
 
+  // Disabling 2FA is a downgrade in account security. Every refresh token
+  // issued under the 2FA-enabled regime must be revoked so those sessions
+  // cannot continue under reduced authentication, all except the caller's own
+  // — mirroring the logoutAll pattern.
+  //
+  // ORDERING IS LOAD-BEARING, and this is the whole reason the filter is built
+  // here rather than beside the `deleteMany` it feeds. The flag OFF, the sessions
+  // gone, the trusted devices gone and the `2fa_disable` row are one security
+  // downgrade, and the cookie read is the only step among them that can fail for
+  // a reason that has nothing to do with the database — so it goes FIRST. With it
+  // sitting after the write, a caller who sent a malformed cookie left the account
+  // with 2FA off, every pre-downgrade session still live, every trusted device
+  // still honoured, and no audit row saying any of it happened.
+  //
+  // What this does NOT claim is a transaction. `createAuditLog` swallows its own
+  // persistence errors on purpose (`services/auditService.ts`) so that auditing
+  // can never break a request, and a `deleteMany` that fails still leaves the flag
+  // cleared. The property bought here is narrower and is the one that was broken:
+  // nothing whose failure depends on what the CLIENT sent runs after the write.
+  //
+  // `readStringCookie` now makes that particular throw impossible; the ordering
+  // is kept because "read what the request carries before you write" is the
+  // property, not a patch for one known throw.
+  const currentToken = readStringCookie(req, REFRESH_COOKIE_NAME);
+  const revokeFilter: Record<string, unknown> = { userId };
+  if (currentToken) {
+    revokeFilter.tokenHash = { $ne: hashToken(currentToken) };
+  }
+
   // Use findByIdAndUpdate to reliably unset fields. The user document was
   // fetched with .select('+authHash +twoFactorSecret +backupCodes') which
   // may not persist $unset correctly via user.save() on partially-selected docs.
@@ -534,16 +564,7 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
     $unset: { twoFactorSecret: 1, backupCodes: 1, lastTotpTimestamp: 1 },
   });
 
-  // Disabling 2FA is a downgrade in account security. Revoke all refresh
-  // tokens (except the caller's current one) so previously-issued sessions
-  // from the 2FA-enabled regime cannot continue under reduced authentication.
-  // Mirrors the logoutAll pattern.
-  const currentToken: string | undefined = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
-  const filter: Record<string, unknown> = { userId };
-  if (currentToken) {
-    filter.tokenHash = { $ne: hashToken(currentToken) };
-  }
-  await RefreshToken.deleteMany(filter);
+  await RefreshToken.deleteMany(revokeFilter);
 
   // Disabling 2FA removes the second factor entirely, so every trusted-device
   // record — which exists solely to skip that factor — is now meaningless and
@@ -712,7 +733,7 @@ export const listSessions = catchAsync(async (req: Request, res: Response): Prom
     .lean();
 
   // Identify the current session by comparing refresh token hashes
-  const currentToken: string | undefined = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
+  const currentToken = readStringCookie(req, REFRESH_COOKIE_NAME);
   const currentTokenHash = currentToken ? hashToken(currentToken) : null;
 
   const sessions = tokens.map((token) => ({

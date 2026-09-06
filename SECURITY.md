@@ -96,6 +96,12 @@ security posture, not a disclaimer.
   account's credentials against the first account's resource. Both halves are checked, because only
   the second one is the security property: the request is refused, **and** the target is unchanged
   afterwards. A 404 that deleted the row on the way out would pass the first check on its own.
+- **A value you control selecting a code path on the server.** Cookies are decoded before they
+  reach the application, and a specially shaped value arrives as a number or an object rather than
+  the text that was sent — so a cookie is treated as a value only where it is genuinely text, and
+  that narrowing has exactly one definition that every reader goes through. A cookie the server
+  cannot read behaves **exactly as an absent one**, everywhere: not as a server error, and not as a
+  distinguishable rejection that would confirm the probe was understood.
 - **Backup theft.** Emailed and downloaded backups are encrypted under a _separate_
   backup password and carry an HMAC-SHA256 integrity signature that is verified on restore.
 - **Tampered backup files.** Restore validates the signature, rejects dangling and
@@ -223,7 +229,15 @@ The trusted-device model is built to fail safely:
   reuse detection**, and account deletion. So trust can never outlive the second factor it was
   granted against, and an attacker who steals a refresh cookie cannot then skip 2FA. Ordinary
   single-session logout deliberately does **not** revoke trust — that would defeat the feature — and
-  you can revoke any or all trusted devices yourself from the Sessions page.
+  you can revoke any or all trusted devices yourself from the Sessions page. Because that revocation
+  is what makes the sentence above true, turning off the second factor **reads everything the
+  request carries before it changes anything**, so nothing you send can interrupt the switch-off
+  between the setting and the revocations that must accompany it — which is what used to leave an
+  account with the second factor off and every device it had been granted against still skipping
+  it. That is a statement about your input, and deliberately not a claim of atomicity: the four
+  writes are sequential rather than a single transaction, so a database failure part-way through
+  can still leave the setting cleared ahead of the revocations. If that happens, "log out
+  everywhere" on the Sessions page drops every other session and every trusted device on its own.
 
 **The real time bound.** Because a trusted-device login mints a fresh 30-day session while the trust
 record keeps its own 30-day expiry, a user who keeps returning can go up to
