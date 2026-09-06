@@ -203,8 +203,10 @@ export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
 // range data (survives restarts, shared across workers). Zero-knowledge is
 // preserved: the server only ever receives the 5-char prefix, never a suffix or
 // full hash, and nothing user-linked is stored. Fail-safe: a cache miss falls
-// through to HIBP, and an HIBP failure with no cache surfaces as 500 (single) /
-// errors[] (batch) — never a false "not breached".
+// through to HIBP, and an HIBP failure with no cache surfaces as a 5xx (single)
+// / errors[] (batch) — never a false "not breached". The single endpoint's
+// status is whatever the error middleware maps the rejection to: a real
+// `AxiosError` with no `.response` becomes 502, a non-axios rejection 500.
 
 /** Per-process coalescing of concurrent duplicate L3 fetches (thundering-herd guard). */
 export const rangeInFlight = new Map<string, Promise<string>>();

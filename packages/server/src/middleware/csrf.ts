@@ -10,9 +10,16 @@
  *   nonce plus a session identifier so the token is bound to the requesting
  *   session and cannot ride into a different session after logout/login.
  * - For authenticated requests the session identifier is the SHA-256 hash of
- *   the active refresh-token cookie. For unauthenticated requests it is a
- *   random per-token value with an `anon:` prefix so anonymous tokens are
- *   single-session by construction.
+ *   the active refresh-token cookie, so the token stops validating when the
+ *   refresh token rotates or the session ends.
+ * - For unauthenticated requests it is a random per-token value carrying an
+ *   `anon:` prefix. Be precise about what that buys, because it is less than it
+ *   looks: the verifier reads the anonymous identifier back OUT of the presented
+ *   token (`extractAnonSessionId`), so an anonymous token is NOT bound to one
+ *   particular anonymous caller — it is unforgeable (it carries the server's
+ *   HMAC) and it is single-PHASE: the `anon:` prefix is refused the moment a
+ *   refresh cookie is present, so a token minted before login cannot ride into
+ *   the authenticated session that follows.
  * - Only same-origin code can read the token from the `/csrf-token` response
  *   (enforced by the browser's same-origin policy), so a cross-origin
  *   attacker cannot obtain a valid token.
@@ -33,14 +40,24 @@ const CSRF_COOKIE = '__csrf';
 const CSRF_TOKEN_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 const ANON_SESSION_PREFIX = 'anon:';
 
+/**
+ * Length of the token's HMAC segment in hex characters. A SHA-256 digest is
+ * always 32 bytes, so its hex encoding is always exactly 64 characters — the
+ * value is a property of the digest, not a tunable.
+ */
+const HMAC_HEX_LENGTH = 64;
+
 // ---------------------------------------------------------------------------
 // Token helpers
 // ---------------------------------------------------------------------------
 
 /**
  * Derives a stable session identifier from the active refresh-token cookie.
- * Falls back to a random anonymous identifier when no refresh cookie is
- * present so that the resulting token is bound to a single anonymous flow.
+ * Falls back to a fresh random `anon:` identifier when no refresh cookie is
+ * present. As the header explains, that identifier is later read back out of
+ * the presented token, so it does not tie the token to one anonymous caller —
+ * what it buys is that the token stops validating as soon as a refresh cookie
+ * appears.
  */
 function resolveSessionId(req: Request): string {
   const refreshToken = readStringCookie(req, REFRESH_COOKIE_NAME);
@@ -80,7 +97,6 @@ function verifyToken(token: string, currentSessionId: string): boolean {
     .digest('hex');
 
   // Pad to equal length for timingSafeEqual (which requires equal-length buffers)
-  const HMAC_HEX_LENGTH = 64; // SHA-256 hex digest is always 64 chars
   const a = Buffer.alloc(HMAC_HEX_LENGTH);
   const b = Buffer.alloc(HMAC_HEX_LENGTH);
   Buffer.from(expectedHmac, 'utf8').copy(a);
@@ -88,8 +104,19 @@ function verifyToken(token: string, currentSessionId: string): boolean {
 
   const hmacMatch = crypto.timingSafeEqual(a, b);
 
-  // Validate structure
-  const formatValid = dotIndex > 0 && receivedHmac.length > 0 && payload.length > 0;
+  // Validate structure.
+  //
+  // The HMAC segment must be EXACTLY `HMAC_HEX_LENGTH` characters, not merely
+  // non-empty. The comparison above reads only the first 64 characters of it,
+  // so a token whose HMAC segment is 64 correct characters followed by anything
+  // at all would otherwise still verify — one issued token expanding into an
+  // unbounded family of accepted strings. That malleability is not itself a
+  // forgery (the digest still has to be right), but a token meant to be
+  // unforgeable must have exactly one accepted encoding: anything looser makes
+  // the token unusable as an identity anywhere it is compared, logged or
+  // de-duplicated by value. Checked here rather than by narrowing the slice so
+  // that the length test stays off the timing-sensitive comparison path.
+  const formatValid = dotIndex > 0 && receivedHmac.length === HMAC_HEX_LENGTH && payload.length > 0;
 
   // Parse payload — format: timestamp:sessionId:randomValue
   const firstColon = payload.indexOf(':');

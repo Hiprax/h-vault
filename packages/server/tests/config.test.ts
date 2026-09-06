@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MAX_DOCUMENT_EXT_LENGTH, publicConfigResponseSchema } from '@hvault/shared';
+import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../src/constants/index.js';
 
 // Must mock dotenv to prevent .env file dependency during dynamic imports
 vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
@@ -1108,6 +1109,29 @@ describe('Server Config Validation', () => {
       await expect(loadConfigWithEnv({ HIBP_CACHE_MAX_BYTES: '1048575' })).rejects.toThrow(
         /Invalid environment configuration/,
       );
+    });
+
+    // `HIBP_MAX_RANGE_RESPONSE_BYTES` bounds a single fetched range, and its
+    // comment justifies the value partly by claiming it equals the SMALLEST L1
+    // budget an operator may configure. That matters: `evictHibpToWithinLimits`
+    // never evicts below one entry, so a range larger than the whole budget would
+    // sit in L1 permanently over it. Pinned by PARSING at bound and bound-1 —
+    // comparing the two constants to each other would stay green if both moved
+    // together and would prove nothing about the schema. Two tests, not one,
+    // because `loadConfigWithEnv` re-imports a module registry that is reset per
+    // test: a second call inside one test returns the first call's cached module.
+
+    it('accepts HIBP_MAX_RANGE_RESPONSE_BYTES as an L1 budget, so one range always fits', async () => {
+      const { config } = await loadConfigWithEnv({
+        HIBP_CACHE_MAX_BYTES: String(HIBP_MAX_RANGE_RESPONSE_BYTES),
+      });
+      expect(config.HIBP_CACHE_MAX_BYTES).toBe(HIBP_MAX_RANGE_RESPONSE_BYTES);
+    });
+
+    it('rejects an L1 budget one byte below HIBP_MAX_RANGE_RESPONSE_BYTES', async () => {
+      await expect(
+        loadConfigWithEnv({ HIBP_CACHE_MAX_BYTES: String(HIBP_MAX_RANGE_RESPONSE_BYTES - 1) }),
+      ).rejects.toThrow(/Invalid environment configuration/);
     });
 
     it('invalid NODE_ENV value is rejected', async () => {

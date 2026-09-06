@@ -1,4 +1,5 @@
 import mongoose, { Schema, type Model, type Types } from 'mongoose';
+import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../constants/index.js';
 
 /**
  * Provenance of a cached range.
@@ -49,7 +50,21 @@ const pwnedRangeCacheSchema = new Schema<IPwnedRangeCache>(
       maxlength: 5,
       match: /^[0-9A-F]{5}$/,
     },
-    range: { type: String, required: true, default: '' },
+    // Bounded to the same ceiling the outbound fetch enforces
+    // (`HIBP_MAX_RANGE_RESPONSE_BYTES`), so an oversized body cannot be stored
+    // even if it somehow reaches the model. Read what this is worth precisely:
+    // BOTH production write sites (`toolsController.getRange`'s upsert and
+    // `breachSeed`'s `bulkWrite`) deliberately omit `runValidators`, for the
+    // reason recorded at each — `required` rejects '', and an EMPTY range is a
+    // legitimate value. So the BINDING bound is `maxContentLength` on the fetch;
+    // this one runs on `save()`/`create()` and on any update that opts into
+    // validators, and exists to catch a future write site that forgets.
+    range: {
+      type: String,
+      required: true,
+      default: '',
+      maxlength: HIBP_MAX_RANGE_RESPONSE_BYTES,
+    },
     source: { type: String, required: true, enum: ['hibp', 'seed'] },
     fetchedAt: { type: Date, required: true, default: Date.now },
   },

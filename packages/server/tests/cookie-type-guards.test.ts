@@ -276,13 +276,14 @@ describe('A2 — a malformed cookie must behave exactly as an absent one', () =>
    * clause leaves the whole suite green.
    *
    * What it would break is not this handler — `if (token)` rejects `''` either
-   * way — but `middleware/csrf.ts`. `resolveSessionId` (`:46`) binds a token
-   * minted with no cookie to a random `anon:` id; `validateCsrf` (`:155`) would
-   * then see `''` as a STRING and derive `hashToken('')` instead, which is a
-   * CONSTANT shared by every caller presenting an empty cookie. The token stops
-   * validating (403 here), and the "anonymous tokens are single-session by
-   * construction" property at `csrf.ts:13-15` is gone. So the request succeeding
-   * is the assertion.
+   * way — but `middleware/csrf.ts`. `resolveSessionId` binds a token minted with
+   * no cookie to a random `anon:` id; `doubleCsrfProtection` would then see `''`
+   * as a STRING and derive `hashToken('')` instead, which is a CONSTANT shared
+   * by every caller presenting an empty cookie. The token stops validating (403
+   * here), and the single-PHASE property the module header describes — an `anon:`
+   * token is refused the moment a refresh cookie is present, so a pre-login token
+   * cannot ride into the session that follows — is gone, replaced by a shared
+   * pseudo-session. So the request succeeding is the assertion.
    */
   it('treats an EMPTY refresh cookie as absent, at the CSRF binding and at the handler', async () => {
     const user = await createTestUser();

@@ -264,7 +264,15 @@ characters** of the hash to the server, which proxies the query to HIBP and retu
 list of matching hash suffixes; the full-suffix comparison happens **in the browser**. A
 password, or a hash that could identify one, never reaches the server. Outbound requests
 to HIBP set `Add-Padding` (so the queried prefix cannot be inferred from the response
-size on the wire) and follow no redirects.
+size on the wire), follow no redirects, and are **size-bounded**: the reply is capped at
+1 MiB — roughly ten times the largest legitimate padded range — enforced incrementally so
+the connection is dropped on the chunk that crosses the cap rather than after the body is
+already resident. This is the only outbound HTTP call the server makes, its reply is
+buffered whole before anything parses it, and the batch endpoint opens eight at once, so
+an unbounded reply from an unhealthy or hostile upstream would be a memory-exhaustion
+vector against a container with a 1 GB limit. An oversized reply is refused and reported
+as a failed check — never as a "not breached" result. The stored copy carries the same
+bound.
 
 - **Server-side breach cache (`pwned_range_cache`).** To avoid re-querying the third
   party, the server persists the range responses it fetches, keyed by that 5-char prefix,
