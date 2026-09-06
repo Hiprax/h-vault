@@ -740,12 +740,28 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 46 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 47 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("46 distinct operations"). If a new audit action is added, bump both
+    // ("47 distinct operations"). If a new audit action is added, bump both
     // this assertion and the README number together.
-    expect(AUDIT_ACTIONS.length).toBe(46);
+    expect(AUDIT_ACTIONS.length).toBe(47);
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
+  });
+
+  it('audits spending a backup code, separately from regenerating the batch', () => {
+    // Two distinct events that the log used to conflate into one — and, before
+    // that, into none: spending a code produced a server log line and no row at
+    // all. They must stay separate, because "someone used a recovery credential
+    // on my account" and "someone replaced my recovery credentials" call for
+    // different reactions from the person reading the log.
+    expect(AUDIT_ACTIONS).toContain('2fa_backup_code_used');
+    expect(AUDIT_ACTIONS).toContain('2fa_backup_codes_regenerated');
+    expect(AUDIT_ACTIONS.filter((action) => action.startsWith('2fa_'))).toEqual([
+      '2fa_enable',
+      '2fa_disable',
+      '2fa_backup_codes_regenerated',
+      '2fa_backup_code_used',
+    ]);
   });
 
   it('includes the trusted-device audit actions', () => {

@@ -898,6 +898,14 @@ export const AUDIT_ACTIONS = [
   'backup_download',
   'trash_auto_purge',
   '2fa_backup_codes_regenerated',
+  // Spending one of those codes. A backup code is a RECOVERY credential — issued
+  // in a batch, kept where the authenticator app is not — so its use is a thing
+  // the account owner needs to see, and it used to produce a server log line and
+  // nothing else. It is its own action rather than a field on the `login` row
+  // because the audit log's UI renders the action and never the metadata, so a
+  // marker alone would be invisible to the only person it is written for; the
+  // `login` row carries `backupCode` as well, for anything reading the API.
+  '2fa_backup_code_used',
   'rotation_recovery',
   'deletion_cleanup',
   'settings_update',

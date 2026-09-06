@@ -984,16 +984,37 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
       // backupCodes array contains matchedCode". The Mongoose types expect
       // `backupCodes` to be the full array type, not a single element value.
       // This is a known Mongoose typing limitation (not a runtime concern).
+      //
+      // `backupCodes` is `select: false` on the model, so the post-update
+      // document only carries the surviving codes if they are asked for. The
+      // count is what the audit row below reports, and it must come from the
+      // document the atomic pull actually produced rather than from
+      // `user.backupCodes.length - 1`: that in-memory array was read before the
+      // update and a concurrent code redemption would make the arithmetic lie.
       const result = await User.findOneAndUpdate(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument
         { _id: user._id, backupCodes: matchedCode } as any,
         { $pull: { backupCodes: matchedCode } },
         { returnDocument: 'after' },
-      );
+      ).select('+backupCodes');
       if (result) {
         isValid = true;
         usedBackupCode = true;
         logger.info('Backup code used for 2FA', { userId: user._id.toString() });
+        // Audited HERE, at the point of consumption, rather than beside the
+        // `login` row below: the code is spent whatever happens next, and a
+        // failure between here and the response would otherwise burn a recovery
+        // credential leaving no record the owner can see. The server log line
+        // above is not that record — it is not theirs to read. `remaining` is
+        // the actionable half: the row that says `0` is the one telling a user
+        // to regenerate before they are locked out of their own account.
+        await createAuditLog(
+          user._id.toString(),
+          '2fa_backup_code_used',
+          { remaining: countBackupCodes(result) },
+          ip,
+          userAgent,
+        );
       }
       // If result is null, the code was already consumed by a concurrent request
     }
@@ -1141,14 +1162,46 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   clearCsrfCookie(res);
 
   // Grant a trusted device so this device may skip the 2FA step until the grant
-  // expires. Minted only on a remembered login; the raw token lives solely in the
-  // Set-Cookie header. Done before the response is written so the cookie ships.
-  if (remember) {
+  // expires. Minted only on a remembered login completed with a REAL second
+  // factor; the raw token lives solely in the Set-Cookie header. Done before the
+  // response is written so the cookie ships.
+  //
+  // `!usedBackupCode` is the load-bearing half. A TOTP code proves the second
+  // factor is present on this device right now, which is the thing trust is
+  // being extended to. A backup code proves the opposite: it is the recovery
+  // credential, issued eight at a time and kept precisely where the
+  // authenticator is not — on paper, in another password manager, in an email to
+  // oneself. Minting a grant from it turned one line off that sheet into a
+  // `TRUSTED_DEVICE_DAYS` (30) standing skip of the second factor, and because a
+  // trusted-device login mints a fresh remembered session while the record keeps
+  // its own expiry, up to `REFRESH_TOKEN_REMEMBER_DAYS + TRUSTED_DEVICE_DAYS`
+  // (60) days without a TOTP code ever being presented again. Whoever loses the
+  // sheet also needs the master password, which is why this is a hardening fix
+  // and not an open door — but a recovery credential must buy exactly one
+  // recovery, not a month of them, and the account owner had no way to see it
+  // had bought more.
+  //
+  // The remembered SESSION is deliberately still honoured above: `remember`
+  // drives `resolveRefreshLifetime`, and this condition does not. "Remember me"
+  // and "skip the second factor on this device" are two promises, and only the
+  // second one depends on which credential was presented.
+  if (remember && !usedBackupCode) {
     await grantTrustedDevice(res, user._id, sanitizedDeviceInfo);
     await createAuditLog(user._id.toString(), 'trusted_device_grant', undefined, ip, userAgent);
   }
 
-  await createAuditLog(user._id.toString(), 'login', { twoFactor: true }, ip, userAgent);
+  // `backupCode` discriminates the two credentials on the row itself. The
+  // audit-log UI renders the action and not the metadata, so the user-visible
+  // record of a spent code is the `2fa_backup_code_used` row written at the
+  // point of consumption; this field is for anything reading the API, where
+  // `{ twoFactor: true }` alone could not tell the two logins apart.
+  await createAuditLog(
+    user._id.toString(),
+    'login',
+    { twoFactor: true, backupCode: usedBackupCode },
+    ip,
+    userAgent,
+  );
 
   logger.info('User logged in via 2FA', { userId: user._id.toString() });
 
@@ -1837,6 +1890,25 @@ function sanitizeDeviceInfo(
     ip: ip.slice(0, DEVICE_INFO_LIMITS.ip),
     fingerprint: rawFingerprint.slice(0, DEVICE_INFO_LIMITS.fingerprint),
   };
+}
+
+/**
+ * How many 2FA backup codes a loaded user document still holds.
+ *
+ * `backupCodes` is `select: false` on the model, so it is absent unless a query
+ * explicitly asks for it — which makes its type `string[] | undefined` at every
+ * call site, and makes "the field was not projected" a case this has to answer
+ * for. Zero is the safe answer: it is what an account with no codes left would
+ * report, so a caller that forgets the projection under-reports rather than
+ * throwing inside a login.
+ *
+ * It is a named, exported function rather than an inline `?.length ?? 0` for one
+ * reason: inline, the not-projected arm is unreachable from any route and would
+ * sit forever as an uncovered branch that nobody could honestly exercise. Here
+ * it is an ordinary boundary case of a pure function, and is tested as one.
+ */
+export function countBackupCodes(user: { backupCodes?: string[] | undefined }): number {
+  return user.backupCodes?.length ?? 0;
 }
 
 export async function findMatchingBackupCodeIndex(

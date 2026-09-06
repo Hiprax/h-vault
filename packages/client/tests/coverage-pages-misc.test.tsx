@@ -247,6 +247,7 @@ function auditOk(
     ipAddress: string;
     userAgent: string;
     timestamp: string;
+    metadata?: Record<string, unknown>;
   }[],
   totalPages = 1,
 ) {
@@ -597,6 +598,61 @@ describe('AuditLogPage - pagination', () => {
 });
 
 describe('AuditLogPage - row rendering', () => {
+  it('shows how many backup codes are left beside a spent-code entry, and nowhere else', async () => {
+    // `remaining` lives in `metadata`, which this page renders for exactly one
+    // action and no other. The count is the actionable half of the entry: the
+    // row that reads "0 left" is the one telling a user to regenerate before
+    // the authenticator app is the only way in. Both negatives matter — a
+    // different action must not grow a count from its own metadata, and a
+    // spent-code row whose metadata never arrived must render the label alone
+    // rather than "undefined left".
+    mockGetAuditLogApi.mockResolvedValue(
+      auditOk([
+        {
+          _id: 'b1',
+          action: '2fa_backup_code_used',
+          ipAddress: '10.0.0.1',
+          userAgent: 'Chrome/120',
+          timestamp: '2025-06-01T12:00:00.000Z',
+          metadata: { remaining: 0 },
+        },
+        {
+          _id: 'b2',
+          action: '2fa_backup_code_used',
+          ipAddress: '10.0.0.2',
+          userAgent: 'Chrome/120',
+          timestamp: '2025-06-02T12:00:00.000Z',
+          // No metadata at all: an older row, or one whose write lost the field.
+        },
+        {
+          _id: 'b3',
+          action: 'login',
+          ipAddress: '10.0.0.3',
+          userAgent: 'Chrome/120',
+          timestamp: '2025-06-03T12:00:00.000Z',
+          // A `login` row carries `backupCode`, never `remaining` — but even if
+          // it carried one, this page must not render a count for it.
+          metadata: { twoFactor: true, backupCode: true, remaining: 7 },
+        },
+      ]),
+    );
+
+    renderPage(<AuditLogPage />);
+
+    const table = await screen.findByRole('table');
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(3);
+
+    expect(within(rows[0]!).getByText('Backup Code Used')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('0 left')).toBeInTheDocument();
+
+    expect(within(rows[1]!).getByText('Backup Code Used')).toBeInTheDocument();
+    expect(within(rows[1]!).queryByText(/left$/)).toBeNull();
+
+    expect(within(rows[2]!).getByText('Login')).toBeInTheDocument();
+    expect(within(rows[2]!).queryByText(/left$/)).toBeNull();
+  });
+
   it('renders the mapped label for a known action and the raw action for an unknown one', async () => {
     mockGetAuditLogApi.mockResolvedValue(
       auditOk([

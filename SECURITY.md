@@ -210,6 +210,17 @@ The trusted-device model is built to fail safely:
   appears only in the `Set-Cookie` header — scoped to `/api/v1/auth`, `httpOnly`, `secure` and
   `sameSite=strict` in production — and never in a response body, a log, or the database. A
   client-asserted "I am trusted" flag would be forgeable; a stored hash is not.
+- **Granted only against a real second factor.** A remembered login that completes the 2FA step with
+  a **backup code** registers no trusted device. A TOTP code proves the second factor is on the
+  device right now; a backup code proves the opposite, since the batch of eight is kept precisely
+  where the authenticator app is not — printed, in another password manager, mailed to yourself.
+  Granting trust from one turned a single line off that sheet into a 30-day skip of the second
+  factor on that browser, and, because each trusted-device login mints a fresh remembered session
+  while the record keeps its own expiry, into up to 60 days without a TOTP code being presented
+  again. The remembered **session** is unaffected: signing in with a backup code and "Remember me"
+  still gives you the full 30 days. Only the 2FA skip is withheld. Spending a code is also audited
+  as `2fa_backup_code_used`, and the audit log shows how many codes are left beside that entry, so
+  you can see it happened and regenerate before the last one is gone.
 - **Checked only after the password.** The trusted-device cookie is read **strictly after** the
   bcrypt comparison and lockout evaluation succeed, and only when the cookie is actually present.
   Checking it earlier would turn the cookie into an authentication bypass and an

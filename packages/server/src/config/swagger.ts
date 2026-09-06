@@ -1955,7 +1955,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Complete 2FA verification',
         description:
-          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body), a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires.',
+          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body) AND the code submitted was a TOTP code, a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires. A **backup code** never sets that cookie, whatever the remember-me setting: it is a single-use recovery credential, so it completes this login (and still opens the longer remembered session) without registering the device as trusted.',
         requestBody: {
           required: true,
           content: {
@@ -1967,11 +1967,11 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: {
             description:
-              '2FA verification successful. Sets a httpOnly refresh-token cookie, and — only when the login opted into "remember me" — a httpOnly `trustedDevice` cookie (scoped to `/api/v1/auth`) whose raw value is never returned in the response body.',
+              '2FA verification successful. Sets a httpOnly refresh-token cookie, and — only when the login opted into "remember me" and the code was a TOTP code rather than a backup code — a httpOnly `trustedDevice` cookie (scoped to `/api/v1/auth`) whose raw value is never returned in the response body.',
             headers: {
               'Set-Cookie': {
                 description:
-                  'Sets `refreshToken` (httpOnly, path `/api/v1`) and, for a remembered login, `trustedDevice` (httpOnly, path `/api/v1/auth`). Only the SHA-256 of the trusted-device token is stored server-side.',
+                  'Sets `refreshToken` (httpOnly, path `/api/v1`) and, for a remembered login completed with a TOTP code, `trustedDevice` (httpOnly, path `/api/v1/auth`). Only the SHA-256 of the trusted-device token is stored server-side.',
                 schema: { type: 'string' },
               },
             },

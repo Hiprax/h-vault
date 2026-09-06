@@ -33,6 +33,12 @@ const ACTION_COLORS: Record<string, string> = {
   backup_restored: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
   backup_password_changed:
     'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
+  // Amber, not green: spending a recovery credential is a thing to notice on a
+  // page you are reading precisely to notice things. Replacing the whole batch
+  // is the same kind of event, so it shares the colour rather than staying grey.
+  '2fa_backup_code_used': 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+  '2fa_backup_codes_regenerated':
+    'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -56,6 +62,8 @@ const ACTION_LABELS: Record<string, string> = {
   backup_failed: 'Backup Failed',
   backup_restored: 'Backup Restored',
   backup_password_changed: 'Backup Password Changed',
+  '2fa_backup_codes_regenerated': 'Backup Codes Regenerated',
+  '2fa_backup_code_used': 'Backup Code Used',
   trusted_device_grant: 'Trusted Device Added',
   trusted_device_revoke: 'Trusted Device Revoked',
   trusted_device_rejected: 'Trusted Device Rejected',
@@ -65,6 +73,27 @@ const ACTION_LABELS: Record<string, string> = {
   document_restore: 'Document Restored',
   document_purge: 'Document Deleted Permanently',
 };
+
+/**
+ * The count of backup codes still available, for the one action that carries it.
+ *
+ * This page renders the action, the IP, the User-Agent and the time; `metadata`
+ * is deliberately not shown, because most of it is machine context that would
+ * only crowd the row. `remaining` is the exception, and the reason is that it is
+ * the only part of an entry a user can act on: the row that reads "0 left" is
+ * the one telling them to regenerate before the authenticator app becomes the
+ * only way into the account.
+ *
+ * Narrow on BOTH the action and the value's type. Another action's metadata must
+ * never grow a count, and an entry written before this field existed — or one
+ * whose audit write lost it — must render the label alone rather than
+ * "undefined left".
+ */
+function remainingBackupCodes(entry: IAuditLogEntry): number | null {
+  if (entry.action !== '2fa_backup_code_used') return null;
+  const remaining = entry.metadata?.remaining;
+  return typeof remaining === 'number' ? remaining : null;
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -199,33 +228,41 @@ export default function AuditLogPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[hsl(var(--border))]">
-                {entries.map((entry) => (
-                  <tr
-                    key={entry._id}
-                    className="hover:bg-[hsl(var(--accent)/0.3)] transition-colors"
-                  >
-                    <td className="p-3">
-                      <span
-                        className={cn(
-                          'inline-block rounded px-2 py-1 text-xs font-medium',
-                          ACTION_COLORS[entry.action] ??
-                            'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400',
+                {entries.map((entry) => {
+                  const remaining = remainingBackupCodes(entry);
+                  return (
+                    <tr
+                      key={entry._id}
+                      className="hover:bg-[hsl(var(--accent)/0.3)] transition-colors"
+                    >
+                      <td className="p-3">
+                        <span
+                          className={cn(
+                            'inline-block rounded px-2 py-1 text-xs font-medium',
+                            ACTION_COLORS[entry.action] ??
+                              'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400',
+                          )}
+                        >
+                          {ACTION_LABELS[entry.action] ?? entry.action}
+                        </span>
+                        {remaining !== null && (
+                          <span className="ml-2 text-xs text-[hsl(var(--muted-foreground))]">
+                            {remaining} left
+                          </span>
                         )}
-                      >
-                        {ACTION_LABELS[entry.action] ?? entry.action}
-                      </span>
-                    </td>
-                    <td className="hidden p-3 font-mono text-xs text-[hsl(var(--muted-foreground))] md:table-cell">
-                      {entry.ipAddress}
-                    </td>
-                    <td className="hidden max-w-[200px] truncate p-3 text-xs text-[hsl(var(--muted-foreground))] lg:table-cell">
-                      {entry.userAgent}
-                    </td>
-                    <td className="p-3 text-xs text-[hsl(var(--muted-foreground))]">
-                      {new Date(entry.timestamp).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="hidden p-3 font-mono text-xs text-[hsl(var(--muted-foreground))] md:table-cell">
+                        {entry.ipAddress}
+                      </td>
+                      <td className="hidden max-w-[200px] truncate p-3 text-xs text-[hsl(var(--muted-foreground))] lg:table-cell">
+                        {entry.userAgent}
+                      </td>
+                      <td className="p-3 text-xs text-[hsl(var(--muted-foreground))]">
+                        {new Date(entry.timestamp).toLocaleString()}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
