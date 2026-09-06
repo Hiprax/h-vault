@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { AlertTriangle, Upload, X } from 'lucide-react';
 import { documentExtension, formatBytes } from '@hvault/shared';
 import { cn, getApiErrorMessage } from '../../lib/utils';
@@ -85,18 +85,38 @@ function reportFailure(
 }
 
 /**
- * Where the optional transforms have got to for the currently selected file.
+ * Where the optional transforms have got to, and WHICH FILE they got there for.
  *
  * A state machine rather than three booleans, because the states are mutually
  * exclusive and the one that matters most is the one that must never be
  * skipped: while a review is open the Upload button is GONE, and the only ways
  * forward are the two the review offers.
+ *
+ * Every state but `idle` carries the `source` file it was computed FROM, and
+ * that field is half the fix for a defect this panel shipped. A transform is an
+ * in-flight promise that NOTHING cancels: picking a second file while the first
+ * was still being prepared left the first one's answer to land afterwards, and
+ * it landed as a review of a file that was no longer selected. Confirming it
+ * called the store with the CURRENT file's name and MIME type and the STALE
+ * file's bytes and provenance — so the document was stored under the wrong name,
+ * and the `originalSha256` sealed into its metadata described a file nobody had
+ * uploaded.
+ *
+ * Carrying the source is what lets the confirmation take the name from the
+ * review's OWN file rather than from the panel's `file` state. They are the same
+ * file, and that is the point: one value instead of a pair means there is
+ * nothing left for a later change to let drift apart. The other half of the fix,
+ * which keeps a stale answer from being recorded at all, is the generation token
+ * in {@link DocumentUploadPanel}.
  */
 type TransformPhase =
   | { status: 'idle' }
-  | { status: 'running' }
-  | { status: 'ready'; review: TransformReview }
-  | { status: 'failed'; failure: TransformFailure };
+  | { status: 'running'; source: File }
+  | { status: 'ready'; source: File; review: TransformReview }
+  | { status: 'failed'; source: File; failure: TransformFailure };
+
+/** The one `idle` value, so every place that returns to it agrees by construction. */
+const IDLE_PHASE: TransformPhase = { status: 'idle' };
 
 interface DocumentUploadPanelProps {
   /** The server's advertisement, already known to carry `enabled: true`. */
@@ -147,7 +167,24 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
   // picked after a `.json` must not inherit a ticked Format box, and a review of
   // the file before it must never be confirmable against the file after it.
   const [transforms, setTransforms] = useState({ format: false, repair: false });
-  const [phase, setPhase] = useState<TransformPhase>({ status: 'idle' });
+  const [phase, setPhase] = useState<TransformPhase>(IDLE_PHASE);
+  /**
+   * Which SELECTION is current, so an answer for an older one can be dropped.
+   *
+   * Bumped by both of the two functions that move the selection on — `select`
+   * and `clearSelection` — which between them are the ONLY callers of `setFile`,
+   * so there is no third way for the selection to change without this moving. A
+   * ref rather than state because it is read from a promise callback that has
+   * long since closed over its render: state would give that callback the value
+   * it was created with, which is the stale one, and refs are never read here
+   * during rendering.
+   *
+   * Deliberately NOT `pickerGeneration` below, though the two are bumped
+   * together in `clearSelection`: that one is the file input's `key`, and
+   * bumping it on every `select` would remount the control mid-selection and
+   * blank the file name the browser had just put in it.
+   */
+  const transformGeneration = useRef(0);
   // Bumped to remount the file input, which is how a file input is cleared: a
   // `value` prop is illegal on one, and without the reset, re-picking the SAME
   // file after an upload fires no `change` event at all because the control's
@@ -165,6 +202,36 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
   // that guards a tab close lives in `useUploadUnloadGuard`, mounted in `App`.
 
   /**
+   * Why `size` bytes cannot be uploaded to this server, or `null` when they can.
+   *
+   * Its own function because the cap has to be applied TWICE, to two different
+   * things. The picked file is measured below; the bytes a transform PRODUCES
+   * are measured beside the review, because THOSE are what `send` uploads.
+   * Formatting a minified document routinely doubles it, so a file comfortably
+   * inside the cap when it was chosen can be outside it by the time it would be
+   * sent. Before this the only thing that noticed was the server, which refused
+   * the request with its own size sentence — but only AFTER the user had
+   * confirmed the rewrite, and `send` clears the selection before it starts, so
+   * that answer arrived beside no file and no comparison, naming the limit but
+   * not the size that broke it.
+   *
+   * One sentence, so the limit is named the same way whichever check refuses;
+   * only the SUBJECT is the caller's, and it has to be, because the review shows
+   * both numbers at once. Telling a reader "that file is 2 MB" directly beneath
+   * a summary reading `500 B → 2 MB` would name the file they picked and quote
+   * the size of the one they did not, which is the only reading of that sentence
+   * they can act on wrongly.
+   *
+   * `maxSizeBytes` is genuinely nullable — a server need not advertise a cap at
+   * all — and the null guard is FIRST for that reason: `size > null` coerces to
+   * `size > 0`, which would refuse every transformed upload on such a server.
+   */
+  function oversizeRefusal(subject: string, size: number): string | null {
+    if (maxSizeBytes === null || size <= maxSizeBytes) return null;
+    return `${subject} is ${formatBytes(size)}. This server accepts documents up to ${formatBytes(maxSizeBytes)}.`;
+  }
+
+  /**
    * Why this file cannot be uploaded, or `null` when it can.
    *
    * Reads only the handle's metadata. Returning the reason rather than a boolean
@@ -172,9 +239,8 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
    * between a refusal a user can act on and one they can only be annoyed by.
    */
   function refusalFor(candidate: File): string | null {
-    if (maxSizeBytes !== null && candidate.size > maxSizeBytes) {
-      return `That file is ${formatBytes(candidate.size)}. This server accepts documents up to ${formatBytes(maxSizeBytes)}.`;
-    }
+    const oversize = oversizeRefusal('That file', candidate.size);
+    if (oversize !== null) return oversize;
     if (
       allowedExtensions.length > 0 &&
       !allowedExtensions.includes(documentExtension(candidate.name))
@@ -188,30 +254,31 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
     setFile(candidate);
     setRefusal(candidate === null ? null : refusalFor(candidate));
     setTransforms({ format: false, repair: false });
-    setPhase({ status: 'idle' });
+    setPhase(IDLE_PHASE);
+    transformGeneration.current += 1;
   }
 
   function clearSelection(): void {
     setFile(null);
     setRefusal(null);
     setTransforms({ format: false, repair: false });
-    setPhase({ status: 'idle' });
+    setPhase(IDLE_PHASE);
+    transformGeneration.current += 1;
     setPickerGeneration((generation) => generation + 1);
   }
 
   /**
-   * Send the selected file.
-   *
-   * Takes the file as an ARGUMENT rather than reading the state it was called
-   * beside, because the button that calls it renders only inside
-   * `file !== null && refusal === null` — so the narrowing is already done at the
-   * call site, and a defensive re-check here would be a branch nothing could ever
-   * take.
-   */
-  /**
    * Send bytes, under the picked file's NAME.
    *
-   * `source` and `name` are separate arguments to the store for exactly this
+   * Takes the file as an ARGUMENT rather than reading the `file` state it sits
+   * beside, and both kinds of caller now depend on that. The button that sends
+   * an untouched file renders only inside `file !== null && refusal === null`,
+   * so its narrowing is already done at the call site and a defensive re-check
+   * here would be a branch nothing could ever take. The review's two buttons
+   * pass `phase.source` — the file the review was computed FROM — so the bytes
+   * and the name they are stored under come from one value rather than a pair.
+   *
+   * `source` and `name` are separate arguments to the store for the matching
    * reason: a transformed upload is a `Blob` held in memory, and the store
    * deliberately never reads `File.name`, so a rewritten document cannot end up
    * named after the file it no longer is. The MIME type comes from the picked
@@ -245,26 +312,39 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
       send(picked, picked);
       return;
     }
-    setPhase({ status: 'running' });
+    // The selection this run belongs to, read BEFORE the promise starts and
+    // compared against the live counter when it answers. Nothing cancels a
+    // transform, so an answer can arrive at any time after the user has moved
+    // on; this is what makes such an answer nothing at all rather than a review
+    // of one file offered against another.
+    const started = transformGeneration.current;
+    setPhase({ status: 'running', source: picked });
+
     void transformDocument(picked, {
       ext: documentExtension(picked.name),
       format: transforms.format,
       repair: transforms.repair,
     }).then(
       (attempt) => {
+        if (transformGeneration.current !== started) return;
         setPhase(
           attempt.status === 'ready'
-            ? { status: 'ready', review: attempt.review }
-            : { status: 'failed', failure: attempt.failure },
+            ? { status: 'ready', source: picked, review: attempt.review }
+            : { status: 'failed', source: picked, failure: attempt.failure },
         );
       },
       // `transformDocument` resolves on every failure it can name; a rejection
       // here is something it could not — the file could not be read at all.
       // Refusing to upload silently would be the one unacceptable outcome, so
-      // this lands in the same panel as every other failure.
+      // this lands in the same panel as every other failure. It is bound to its
+      // selection exactly as the answer above is: "this file could not be read"
+      // is a sentence about a particular file, and reported against the file
+      // that replaced it, it would simply be untrue.
       () => {
+        if (transformGeneration.current !== started) return;
         setPhase({
           status: 'failed',
+          source: picked,
           failure: {
             message: 'This file could not be read, so it was not changed or uploaded.',
             line: null,
@@ -449,14 +529,17 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
           {phase.status === 'ready' && (
             <TransformReviewPanel
               review={phase.review}
+              // Measured on the bytes that would be UPLOADED, not on the ones
+              // that were picked. A `null` here is what offers the confirm.
+              refusal={oversizeRefusal('The formatted file', phase.review.blob.size)}
               onConfirm={() => {
-                send(file, phase.review.blob, phase.review.transform);
+                send(phase.source, phase.review.blob, phase.review.transform);
               }}
               onUploadOriginal={() => {
-                send(file, file);
+                send(phase.source, phase.source);
               }}
               onCancel={() => {
-                setPhase({ status: 'idle' });
+                setPhase(IDLE_PHASE);
               }}
             />
           )}
@@ -465,10 +548,10 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
             <TransformFailurePanel
               failure={phase.failure}
               onUploadOriginal={() => {
-                send(file, file);
+                send(phase.source, phase.source);
               }}
               onCancel={() => {
-                setPhase({ status: 'idle' });
+                setPhase(IDLE_PHASE);
               }}
             />
           )}
