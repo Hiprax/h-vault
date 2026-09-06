@@ -462,6 +462,24 @@ const inFlightDeletedTrashIds = new Set<string>();
 let trashInvalidatedAt = 0;
 
 /**
+ * The `trashInvalidatedAt` the run currently holding `fetchTrashInFlight` captured.
+ *
+ * The dedup handle alone is not enough to answer "is this run still worth waiting
+ * for". A run that started before an `emptyTrash` has already been superseded: its
+ * terminal write is suppressed, so handing it back to a new caller resolves that
+ * caller on a read which writes NOTHING. `emptyTrash`'s partial path is exactly
+ * that caller — it bumps the counter and then asks for the list again — and the
+ * result was a trash rendered EMPTY while `purgePending` rows were still listed,
+ * still charged to the quota, and named by a toast pointing at this very list as
+ * the authoritative answer.
+ *
+ * So a run is shared only while the invalidation it captured is still current.
+ * Recorded beside the handle rather than derived from it, because the value lives
+ * in the run's closure and nothing outside can read it there.
+ */
+let inFlightTrashInvalidation = 0;
+
+/**
  * The live transfers' handles and keys.
  *
  * The AUTHORITY on which transfers exist: `clearStore()` iterates this rather than
@@ -801,13 +819,23 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
   },
 
   fetchTrash: async (): Promise<void> => {
-    if (fetchTrashInFlight) return fetchTrashInFlight;
+    // Shared only while it can still answer. A run that captured an older
+    // `trashInvalidatedAt` was superseded by an `emptyTrash` after it started, so
+    // its terminal write is already suppressed below and handing it back would
+    // resolve this caller on a read that writes nothing — leaving the list exactly
+    // as `emptyTrash` emptied it. Starting a second run instead is safe by the same
+    // guards: the older run's generation no longer matches, so neither its write nor
+    // its `finally` can touch the state or the handle this one owns.
+    if (fetchTrashInFlight && inFlightTrashInvalidation === trashInvalidatedAt) {
+      return fetchTrashInFlight;
+    }
     fetchTrashGeneration += 1;
     const myGeneration = fetchTrashGeneration;
 
     // Captured with the generation, and checked beside it: this run is stale if
     // the trash was emptied while it was reading.
     const myInvalidation = trashInvalidatedAt;
+    inFlightTrashInvalidation = myInvalidation;
 
     const run = async (): Promise<void> => {
       try {
@@ -1125,7 +1153,22 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
 
     const row = payloadOf(await updateDocumentApi(id, sealed), 'update the document');
     const opened = await openDocumentRow(row, vaultKey);
-    if (myGeneration !== mutationGeneration || !opened) return;
+    // The id check is `patchDocument`'s, for the same reason and with a second one
+    // of its own. `_raw` is what a later re-seal derives this document's metadata
+    // key from, so writing another document's row into an entry would produce a
+    // rename sealed under keys that row was never sealed with. And here the write
+    // lands by id, so a response about a different document would not even correct
+    // the entry that was renamed: it would overwrite an UNTOUCHED document — with a
+    // row this vault key may well fail to open, since the metadata key is derived
+    // from the id, replacing a healthy entry with a degraded one the reader never
+    // asked about. Dropped; the next fetch reads the truth.
+    //
+    // `opened?.id !== id` covers the SCHEMA-INVALID row as well, because `id` is a
+    // string: `openDocumentRow` answers `null` for a row it cannot vouch for, and
+    // `undefined` never equals a string. (A row that is well-formed but will not
+    // OPEN is a different outcome — it comes back non-null with `meta: null` — and
+    // is deliberately still applied, exactly as a listing lists it.)
+    if (myGeneration !== mutationGeneration || opened?.id !== id) return;
     applyUpdatedDocument(set, opened);
   },
 
@@ -1222,6 +1265,12 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       return result;
     }
 
+    // The re-read is guaranteed to be a FRESH one. `fetchTrash` shares a run only
+    // while the `trashInvalidatedAt` it captured is still current, and the bump
+    // above has just made any run started before this point stale — so this cannot
+    // be answered by the listing that was already in flight, whose own terminal
+    // write is suppressed. It used to be, and the trash then rendered empty with
+    // every `purgePending` row still on the server and still charged to the quota.
     set({ trashDocuments: [] });
     await get().fetchTrash();
     return result;
@@ -1352,6 +1401,12 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     inFlightDeletedDocumentIds.clear();
     inFlightDeletedTrashIds.clear();
     trashInvalidatedAt += 1;
+    // Reset with the counter it is compared against, not because a stale value
+    // could be read — the share guard is conjunctive with `fetchTrashInFlight`,
+    // which is nulled three lines up — but because a teardown list that does not
+    // name every module-level variable is exactly the drift `EMPTY_DOCUMENTS_STATE`
+    // exists to prevent, and the omission would be silent.
+    inFlightTrashInvalidation = trashInvalidatedAt;
 
     for (const [uploadId, session] of sessions) {
       session.controller.abort();

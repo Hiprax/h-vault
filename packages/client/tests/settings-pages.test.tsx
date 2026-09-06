@@ -343,6 +343,33 @@ const EMPTY_ITEMS_PAGE = {
   },
 };
 
+/**
+ * Answer `GET /config` for a server that stores no documents.
+ *
+ * The rotation asks `readDocumentsConfigFresh` whether this server has a document
+ * store, and refuses to go on when the answer cannot be determined: an empty
+ * documents leg is a CLAIM that the account holds none, and only a server that
+ * actually said so licenses it. Without an answer here the rotation aborts before
+ * the backup-key step these tests are about — correctly, which is why the fix is to
+ * answer rather than to loosen anything.
+ *
+ * `{ enabled: false }` because these tests hold no documents. The document leg
+ * itself is covered in `coverage-settings-page.test.tsx`, which stubs the reader
+ * per test.
+ */
+function answerConfigWithoutDocuments(): void {
+  mockApiGet.mockImplementation((url: string) =>
+    url === '/config'
+      ? Promise.resolve({
+          data: {
+            success: true,
+            data: { fileEncryption: { maxSizeMB: 100 }, documents: { enabled: false } },
+          },
+        })
+      : Promise.resolve({ data: {} }),
+  );
+}
+
 describe('SettingsPage', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -975,6 +1002,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce({ data: { success: true, data: defaultProfile } })
       .mockResolvedValueOnce({ data: backupProfile });
 
+    answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
 
     await renderSettings();
@@ -1038,6 +1066,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce({ data: backupProfile })
       .mockResolvedValueOnce({ data: backupProfile });
 
+    answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
 
     await renderSettings();
@@ -1111,6 +1140,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce({ data: backupProfile })
       .mockResolvedValueOnce({ data: backupProfile });
 
+    answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
 
     await renderSettings();

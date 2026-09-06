@@ -15,11 +15,19 @@
  * the same sense and for a sharper reason: the server receives ciphertext, so it
  * cannot see a file's type or its unencrypted length, and the docs say so.
  *
- * The two readers below each validate the ONE block they act on, through their own
+ * The readers below each validate the ONE block they act on, through their own
  * `.pick()` narrowing of the single full shape. Neither validates the other's
  * block, because one envelope carries two unrelated features and a strict read of
  * the whole document would let a bad value in either one silently disable the
  * other.
+ *
+ * The document store has TWO readers over that one narrowing, and the difference
+ * between them is the difference between deciding what to DISPLAY and deciding
+ * what to DO. {@link getDocumentsConfig} is memoised and never rejects, which is
+ * right for a navigation entry. {@link readDocumentsConfigFresh} never consults the
+ * memo and answers `null` when the server did not say, which is what the vault-key
+ * rotation needs, because for it "I could not tell" and "there are none" are not
+ * the same answer.
  */
 
 import type { AxiosResponse } from 'axios';
@@ -67,8 +75,8 @@ let cachedMaxBytes: Promise<number> | null = null;
  * the same envelope also carries the document store's block, and validating a
  * block this function does not read would let one bad value there — an operator's
  * mistyped extension, a field a newer server adds — silently revert this cap to
- * its default. {@link getDocumentsConfig} narrows the other way for the mirror
- * reason.
+ * its default. {@link getDocumentsConfig} and {@link readDocumentsConfigFresh}
+ * narrow the other way for the mirror reason.
  */
 export function getFileEncryptionMaxBytes(): Promise<number> {
   if (cachedMaxBytes) return cachedMaxBytes;
@@ -129,6 +137,12 @@ let cachedDocumentsConfig: Promise<DocumentsConfig> | null = null;
  * transient outage cannot re-hit the endpoint on every interaction because the
  * FALLBACK is cached too. It never rejects.
  *
+ * That cached fallback is a DISPLAY decision and nothing more: the cost of getting
+ * it wrong during an outage is a navigation entry that is missing until the tab is
+ * reloaded. Nothing that acts on the answer may read it — see
+ * {@link readDocumentsConfigFresh}, which is also the only thing that can replace
+ * this memo once it holds one.
+ *
  * Three server states collapse into two answers here, and that is the whole
  * contract: the `documents` block ABSENT (a server older than the feature) and the
  * block present with `enabled: false` (this server, storage unconfigured) both
@@ -161,4 +175,51 @@ export function getDocumentsConfig(): Promise<DocumentsConfig> {
   })();
 
   return cachedDocumentsConfig;
+}
+
+/**
+ * Read the document store's configuration WITHOUT the memo, and say so when the
+ * server did not answer.
+ *
+ * Three answers rather than {@link getDocumentsConfig}'s two, and the third is the
+ * whole point. `{ enabled: false }` is a DETERMINATE answer — the `documents` block
+ * absent means a server older than the feature, the block present saying
+ * `enabled: false` means this server has no object storage configured, and in both
+ * cases the account provably holds no documents. `null` means the server did not
+ * tell: the request failed, or its answer did not satisfy the schema. Collapsing
+ * that into "there are none" is what the memoised reader does, and it is safe only
+ * because its consumers merely decide what to show.
+ *
+ * The vault-key rotation is not one of those consumers. It uses this answer to
+ * decide whether to enumerate and re-wrap every document key the account holds, and
+ * a cached failure would make it commit a payload naming NO documents — which the
+ * server refuses with a completeness 409 whose diagnosis blames a pending purge or
+ * absent storage, neither of which happened. One transient `/config` failure, on
+ * some other page, minutes earlier, must not be able to reach that decision, so
+ * this reader consults no memo and writes no failure into one.
+ *
+ * A SUCCESSFUL read does seed the memo, which is a repair rather than a new
+ * coupling: the next consumer to ASK gets the truth instead of the fallback an
+ * outage left behind. It is not a broadcast — a component that already holds an
+ * answer keeps it until it asks again, so the navigation entry, whose effect runs
+ * once for the life of the app shell, is unaffected until that shell remounts. A
+ * failed read leaves the memo exactly as it was: this reader's failure belongs to
+ * its caller and must not become everyone else's.
+ *
+ * Unlike its neighbours this one is not cached, so it costs a round trip per call.
+ * That is affordable precisely because its caller is rare and consequential.
+ */
+export async function readDocumentsConfigFresh(): Promise<DocumentsConfig | null> {
+  let resolved: DocumentsConfig | null = null;
+  try {
+    const res = await getPublicConfigApi();
+    const parsed = documentsConfigResponseSchema.safeParse(res.data);
+    if (parsed.success) resolved = parsed.data.data.documents ?? DOCUMENTS_DISABLED;
+  } catch {
+    return null;
+  }
+  if (resolved === null) return null;
+
+  cachedDocumentsConfig = Promise.resolve(resolved);
+  return resolved;
 }

@@ -172,7 +172,9 @@ the sidebar and nothing to switch off.
   document** instead of rewriting every file, which is the only way rotation stays possible once
   an account holds gigabytes. The request must name every item, folder and document the account
   has, and is refused if it does not, so a row created while you were preparing the rotation
-  cannot be left behind under the superseded key.
+  cannot be left behind under the superseded key. Whether this server stores documents at all is
+  re-read from it at the moment of the rotation; if that answer cannot be obtained the rotation
+  stops before it sends anything, rather than claiming there are none.
 - **Format and repair before uploading, optionally.** Two checkboxes on the upload panel tidy a
   document before it is encrypted — **format** for `json`, `jsonc`, `json5`, `jsonl`, `ndjson`,
   `md`, `markdown`, `yaml` and `yml`, and **repair** for the JSON family only (a heuristic that

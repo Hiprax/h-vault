@@ -84,7 +84,7 @@ import {
   listDocumentTrashApi,
   listDocumentsApi,
 } from '../services/api/documentsApi';
-import { getDocumentsConfig } from '../services/api/configApi';
+import { readDocumentsConfigFresh } from '../services/api/configApi';
 import {
   deriveWrapKey,
   unwrapDek,
@@ -1417,7 +1417,30 @@ export default function SettingsPage() {
       // and so carries nothing to parse. A server without one holds no documents,
       // the payload's `documents` leg is empty, and the completeness check the
       // server runs against its own count agrees.
-      const documentsConfig = await getDocumentsConfig();
+      //
+      // Read FRESH, and refused on anything but an answer. `getDocumentsConfig`
+      // memoises whatever it resolved first — INCLUDING the `{ enabled: false }` it
+      // falls back to when the request fails — for the life of the tab, and nothing
+      // invalidates it. Reading it here would let one transient `/config` failure,
+      // minutes earlier, on a page this one never opened, silently turn every later
+      // rotation into one that names no documents at all. The server refuses that
+      // payload with a completeness 409 whose diagnosis blames a pending purge or
+      // absent storage, so the account would be told two things that are not true
+      // and given no way to act on either. `null` — the request failed, or its
+      // answer did not satisfy the schema — is therefore NOT read as "there are
+      // none": it aborts here, before a single row is enumerated and before
+      // anything is sent, which changes nothing at all and can be retried.
+      const documentsConfig = await readDocumentsConfigFresh();
+      if (documentsConfig === null) {
+        await cryptoService.clearCryptoKey(newVaultKey);
+        toast({
+          title:
+            'Rotation aborted: could not confirm whether this server stores documents. Check your connection and try again.',
+          type: 'error',
+        });
+        return;
+      }
+
       if (documentsConfig.enabled) {
         const documentRows = [
           ...(await enumerateDocumentRows((page) =>

@@ -25,13 +25,16 @@ function describeTransfer(upload: DocumentUploadProgress): string {
   // from the byte counts the store already keeps rather than reported beside
   // them: a second field carrying the same fact is a second field that can
   // disagree with the first.
-  // `Math.max(1, …)` for the same reason `UploadRow` special-cases a zero-byte
-  // document below: `documentChunkCountFor(0, …)` is 0, and "Part 0 of 0" is not
-  // a sentence about anything. A file with no bytes is still one transfer.
-  const totalParts = Math.max(
-    1,
-    documentChunkCountFor(upload.totalBytes, DOCUMENT_PLAINTEXT_CHUNK_BYTES),
-  );
+  //
+  // Nothing is clamped here. `documentChunkCountFor` is already
+  // `max(1, ceil(bytes / chunk))`, and that floor is part of the FRAMING rather
+  // than presentation: a zero-byte document is one segment holding a tag and no
+  // plaintext, which is what the container format stores and what every other
+  // caller of that helper derives. Re-flooring it here would be a second copy of
+  // a rule the shared helper documents as having exactly one — and a copy that
+  // would go on quietly reporting "Part 1 of 1" if the real one were ever
+  // removed, hiding a framing change behind a sentence that still read correctly.
+  const totalParts = documentChunkCountFor(upload.totalBytes, DOCUMENT_PLAINTEXT_CHUNK_BYTES);
   const currentPart = Math.min(
     totalParts,
     Math.floor(upload.sentBytes / DOCUMENT_PLAINTEXT_CHUNK_BYTES) + 1,

@@ -932,7 +932,14 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
       'aria-valuenow',
       '100',
     );
-    expect(screen.getByText(/Part 1 of 1/)).toBeInTheDocument();
+    // The WHOLE sentence, not just its first half, because the part numbers are
+    // where a zero-byte document goes wrong. `documentChunkCountFor` floors its
+    // answer at 1 — a file with no bytes is still one segment, holding a tag and no
+    // plaintext — and this row states that floor rather than re-applying one of its
+    // own. A local clamp would keep printing "Part 1 of 1" even if the framing rule
+    // were removed from the shared helper, so the assertion here is the only thing
+    // that can notice.
+    expect(screen.getByText('Part 1 of 1 — 0 B of 0 B')).toBeInTheDocument();
   });
 
   it('says when a transfer has moved past its parts and is being committed', () => {

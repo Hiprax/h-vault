@@ -2345,6 +2345,15 @@ describe('documentsStore — writes on a committed document', () => {
     // Nothing that frames the file crossed the wire: content is immutable, so a
     // rename cannot reach a framing field, the wrapped key or the object key.
     expect(Object.keys(body).sort()).toEqual(['encryptedMeta', 'metaIv', 'metaTag']);
+
+    // And the row the server answered with IS adopted, because it names this
+    // document. Without this the whole write could be dropped — by an over-eager
+    // identity guard, or by losing the apply altogether — and every assertion
+    // above would still pass, since they only describe the request.
+    const after = useDocumentsStore.getState().documents[0];
+    expect(after?.updatedAt).toBe('2026-02-02T00:00:00.000Z');
+    expect(after?._raw).not.toBe(before?._raw);
+    expect(after?.id).toBe(ID_A);
   });
 
   it('refuses to rename a document whose metadata will not open', async () => {
@@ -2463,6 +2472,45 @@ describe('documentsStore — writes on a committed document', () => {
     // was never sealed with. Nothing local changed.
     expect(useDocumentsStore.getState().documents[0]?.favorite).toBe(false);
     expect(useDocumentsStore.getState().documents[0]?._raw).toBe(before?._raw);
+  });
+
+  it('ignores a rename response that describes a different document', async () => {
+    // The sibling check `patchDocument` has carried all along, and it is needed
+    // here for a second reason on top of the shared one. The shared one: `_raw` is
+    // what the NEXT rename derives this document's metadata key from, so adopting a
+    // foreign row would seal that rename under keys the row was never sealed with.
+    // The one that is particular to this path: the write lands by id, so a foreign
+    // response does not even mis-apply the rename that was asked for — it rewrites
+    // an entry nobody touched, with a row whose keys are derived from ITS id, which
+    // this vault key may well fail to open. A healthy document then goes degraded,
+    // and a degraded document is one this client refuses to rename at all.
+    listPages = [[await makeRow(ID_A, 'notes.txt'), await makeRow(ID_B, 'contract.pdf')]];
+    await useDocumentsStore.getState().fetchDocuments();
+    requests = [];
+    const [beforeA, beforeB] = useDocumentsStore.getState().documents;
+    expect(beforeB?.meta?.name).toBe('contract.pdf');
+
+    // A row about ID_B, and one this vault key cannot open: its DEK is wrapped
+    // under a third document's key.
+    committedRow = await makeRow(ID_B, 'someone-elses.txt', { wrapUnder: ID_C });
+
+    await useDocumentsStore.getState().updateDocumentMeta(ID_A, { name: 'renamed.txt' });
+
+    // The request was legitimate and was made; only the answer is refused.
+    expect(requestsFor('PUT', `/documents/${ID_A}`)).toHaveLength(1);
+
+    const [afterA, afterB] = useDocumentsStore.getState().documents;
+    // The symptom first: the untouched document is neither degraded nor renamed.
+    // Adopting the foreign row put a `meta: null` entry here — a document this
+    // client then refuses to rename at all — for a file nobody asked about.
+    expect(afterB?.meta).not.toBeNull();
+    expect(afterB?.meta?.name).toBe('contract.pdf');
+    expect(afterB?._raw).toBe(beforeB?._raw);
+    // And the document that WAS renamed keeps the row it had. The server-side
+    // rename may well have happened — this client simply will not adopt a row that
+    // does not name it, and the next fetch reads the truth.
+    expect(afterA?._raw).toBe(beforeA?._raw);
+    expect(afterA?.meta?.name).toBe('notes.txt');
   });
 
   it('moves a document to the trash and back', async () => {
@@ -2852,6 +2900,131 @@ describe('documentsStore — filters, trash coherence and folder sweeps', () => 
       ID_B,
       ID_C,
     ]);
+    expect(useDocumentsStore.getState().trashLoading).toBe(false);
+  });
+
+  it('reads the trash back for real when a listing was already in flight', async () => {
+    // The window that made the partial path lie. A reader opens Trash — the
+    // listing starts, empties the local list and then spends seconds unwrapping a
+    // key per row — and confirms Empty trash before it finishes. `emptyTrash`
+    // invalidates that listing, which is correct, and then asks for the list
+    // again; if that request is answered by the very run it just invalidated, the
+    // run's terminal write is suppressed and NOTHING is written. The trash then
+    // renders empty while the row the engine refused is still on the server, still
+    // listed, still charged to the quota — and the toast beside it points at this
+    // list as the authoritative answer.
+    const stuck = await makeRow(ID_A, 'stuck.txt');
+    const destroyed = await makeRow(ID_B, 'destroyed.txt');
+    trashRows = [stuck, destroyed];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+    emptyTrashResult = { deletedCount: 1, failedCount: 1 };
+
+    let releaseTrash: (() => void) | undefined;
+    trashGate = new Promise<void>((resolve) => {
+      releaseTrash = resolve;
+    });
+    // Parked in the adapter, so it cannot resolve until this test says so — and
+    // waited for explicitly, because the premise of the whole test is that this
+    // listing's body, BOTH rows, was fixed before the trash changed underneath it.
+    // The adapter builds a response at request time, so gating on the request
+    // itself makes that premise self-checking rather than a hope about turns.
+    const listing = useDocumentsStore.getState().fetchTrash();
+    await until(
+      () => requestsFor('GET', '/documents/trash').length === 1,
+      'the listing to reach the server',
+    );
+
+    // What the server still has once its walk is over: the row it could not delete,
+    // marked and still listed. The listing parked above predates all of this and
+    // would answer with both rows, so a store that let it win would put back a
+    // document that really is gone.
+    trashRows = [{ ...stuck, deletedAt: '2026-02-01T00:00:00.000Z', purgePending: true }];
+
+    const emptied = useDocumentsStore.getState().emptyTrash();
+    // One turn of the event loop, which drains the whole microtask queue: every
+    // step between the DELETE going out and `emptyTrash` asking for the list again
+    // is a promise continuation, so after this the re-read has been requested
+    // whichever way the store chose to answer it. Nothing is being waited ON — the
+    // listing is held by the gate, not by time — and turning too FEW times cannot
+    // produce a false pass either: under the unfixed store the re-read is answered
+    // by the suppressed run, so the assertions below fail however long this waits.
+    await realTurn();
+    releaseTrash?.();
+
+    const result = await emptied;
+    await listing;
+
+    expect(result).toEqual({ deletedCount: 1, failedCount: 1 });
+    // The row the engine refused is on screen — the symptom, stated first, because
+    // an empty list here is what the reader was shown.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_A]);
+    // And it is there because a genuinely fresh read fetched it, not because a
+    // suppressed one happened to leave it behind.
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(2);
+    expect(useDocumentsStore.getState().trashDocuments[0]?.purgePending).toBe(true);
+    // The negatives: the destroyed row was not resurrected by the stale listing,
+    // and no spinner was stranded by the run that lost.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).not.toContain(ID_B);
+    expect(useDocumentsStore.getState().trashLoading).toBe(false);
+  });
+
+  it('brings back every row a stopped-early walk never reached, even mid-listing', async () => {
+    // Phase 10's breaker turned the partial path from the rare one into the
+    // ORDINARY shape of a storage outage: after enough refusals in a row the
+    // server's walk stops, so `failedCount` is non-zero on a run that attempted
+    // only the first few rows and never touched the rest. Those untouched rows
+    // carry no `purgePending` marker at all — the collector will never look at
+    // them — so the re-read is the only thing that can tell the reader they are
+    // still there. Combined with a listing in flight, this is the state that used
+    // to render as an empty trash beside a warning saying the list had just been
+    // refreshed to show what remained.
+    const attempted = await makeRow(ID_A, 'attempted.txt');
+    const neverReached = await makeRow(ID_B, 'never-reached.txt');
+    const alsoNeverReached = await makeRow(ID_C, 'also-never-reached.txt');
+    trashRows = [attempted, neverReached, alsoNeverReached];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+    // Nothing was destroyed and the walk gave up part-way through.
+    emptyTrashResult = { deletedCount: 0, failedCount: 5 };
+
+    let releaseTrash: (() => void) | undefined;
+    trashGate = new Promise<void>((resolve) => {
+      releaseTrash = resolve;
+    });
+    const listing = useDocumentsStore.getState().fetchTrash();
+    await until(
+      () => requestsFor('GET', '/documents/trash').length === 1,
+      'the listing to reach the server',
+    );
+
+    // The marker lands only on the row the walk actually attempted; the two it
+    // never reached are simply still there, exactly as they were.
+    trashRows = [
+      { ...attempted, deletedAt: '2026-02-01T00:00:00.000Z', purgePending: true },
+      neverReached,
+      alsoNeverReached,
+    ];
+
+    const emptied = useDocumentsStore.getState().emptyTrash();
+    await realTurn();
+    releaseTrash?.();
+
+    const result = await emptied;
+    await listing;
+
+    expect(result).toEqual({ deletedCount: 0, failedCount: 5 });
+    // Every row is back, including the two the server never attempted, and only
+    // the one it did attempt carries the marker.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([
+      ID_A,
+      ID_B,
+      ID_C,
+    ]);
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(2);
+    expect(
+      useDocumentsStore.getState().trashDocuments.map((doc) => doc.purgePending ?? false),
+    ).toEqual([true, false, false]);
     expect(useDocumentsStore.getState().trashLoading).toBe(false);
   });
 
