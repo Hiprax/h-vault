@@ -488,7 +488,7 @@
   "duplication": {
     "percentage": 1.98,
     "clones": 122,
-    "duplicatedLines": 1434,
+    "duplicatedLines": 1456,
     "totalLines": 52849,
     "ceiling": 2.89,
     "sources": 190

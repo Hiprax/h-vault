@@ -9,6 +9,7 @@ import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { getStorage, isStorageNotFound } from '../services/storage/index.js';
 import { parseObjectKey } from '../utils/documentObjects.js';
+import { createStorageBreaker, type StorageBreaker } from '../utils/storageBreaker.js';
 import type { StorageProvider } from '../services/storage/types.js';
 
 const logger = createModuleLogger('jobs/documentCleanup');
@@ -152,23 +153,6 @@ const PURGE_PENDING_MAX_PER_RUN = 1_000;
 const PURGE_PENDING_PAGE_SIZE = 500;
 
 /**
- * How many storage calls may fail BACK TO BACK before the run gives up.
- *
- * The account-cascade helper makes this argument for its own sweep and it is the
- * same argument here: an engine that refuses one delete is almost always refusing
- * all of them. Without a breaker the arithmetic is unforgiving — the S3 client is
- * pinned to a 5-second connect timeout and three attempts, so a thousand doomed
- * deletes is over four hours, which blows the fifteen-minute lock TTL, lets the
- * next tick start a second concurrent run, and buries the log in a thousand copies
- * of one message. Whatever is left is reclaimed on the next run, which is what a
- * backstop is for.
- *
- * The counter is shared across all three sweeps and reset by any success, so it
- * measures "the engine is down right now" rather than "this run has had a bad day".
- */
-const MAX_CONSECUTIVE_STORAGE_FAILURES = 5;
-
-/**
  * The prefix every object this system writes lives under (`u/<userId>/d/<id>`).
  *
  * Both listing sweeps are scoped to it so that an object some other tool put in
@@ -184,20 +168,14 @@ interface CleanupTotals {
   purgesFinished: number;
   orphansDeleted: number;
   keysExamined: number;
-  failures: number;
-  /** Reset by every storage call that succeeds; see {@link MAX_CONSECUTIVE_STORAGE_FAILURES}. */
-  consecutiveFailures: number;
-}
-
-/** Records a storage failure against the breaker. */
-function recordFailure(totals: CleanupTotals): void {
-  totals.failures += 1;
-  totals.consecutiveFailures += 1;
-}
-
-/** Whether the engine has refused often enough in a row to abandon this run. */
-function engineIsRefusing(totals: CleanupTotals): boolean {
-  return totals.consecutiveFailures >= MAX_CONSECUTIVE_STORAGE_FAILURES;
+  /**
+   * ONE breaker for the whole run, deliberately shared by all three sweeps and
+   * reset by any success, so it measures "the engine is down right now" rather
+   * than "this run has had a bad day". Whatever a stopped run leaves behind is
+   * reclaimed on the next one, which is what a backstop is for. The reasoning,
+   * and the arithmetic that sets the threshold, live in {@link createStorageBreaker}.
+   */
+  breaker: StorageBreaker;
 }
 
 function describe(error: unknown): string {
@@ -259,21 +237,21 @@ async function abortAbandonedUploads(
 
   for (const candidate of candidates) {
     if (claimed.has(candidate.documentId)) continue;
-    if (engineIsRefusing(totals)) return;
+    if (totals.breaker.isRefusing()) return;
     try {
       await storage.abortMultipartUpload(candidate.key, candidate.uploadId);
       totals.uploadsAborted += 1;
-      totals.consecutiveFailures = 0;
+      totals.breaker.recordSuccess();
     } catch (error: unknown) {
       if (isStorageNotFound(error)) {
         // The engine has already forgotten this upload, which is the outcome this
         // sweep wanted. Routine rather than exotic: a lock that expires mid-run
         // lets the next tick reach the same candidates.
         totals.uploadsAborted += 1;
-        totals.consecutiveFailures = 0;
+        totals.breaker.recordSuccess();
         continue;
       }
-      recordFailure(totals);
+      totals.breaker.recordFailure();
       logger.error(
         `Document cleanup could not abort abandoned upload ${candidate.uploadId} ` +
           `for ${candidate.key}: ${describe(error)}`,
@@ -306,7 +284,7 @@ async function finishPendingPurges(storage: StorageProvider, totals: CleanupTota
   let lastId: mongoose.Types.ObjectId | undefined;
   let examined = 0;
 
-  while (examined < PURGE_PENDING_MAX_PER_RUN && !engineIsRefusing(totals)) {
+  while (examined < PURGE_PENDING_MAX_PER_RUN && !totals.breaker.isRefusing()) {
     // Scoped to the PAGE, not to the run. See the insert at the end of this loop.
     const finishedByUser = new Map<string, number>();
     const pending = { purgePending: true };
@@ -323,10 +301,10 @@ async function finishPendingPurges(storage: StorageProvider, totals: CleanupTota
     for (const row of page) {
       lastId = row._id;
       examined += 1;
-      if (engineIsRefusing(totals)) break;
+      if (totals.breaker.isRefusing()) break;
       try {
         await storage.deleteObject(row.objectKey);
-        totals.consecutiveFailures = 0;
+        totals.breaker.recordSuccess();
         // `userId` beside `_id`, the same defense-in-depth every other delete on
         // this collection applies. The engine's own count, never a bare `+= 1`: a
         // row removed by a concurrent request is not this run's purge to claim.
@@ -337,7 +315,7 @@ async function finishPendingPurges(storage: StorageProvider, totals: CleanupTota
           totals.purgesFinished += deletedCount;
         }
       } catch (error: unknown) {
-        recordFailure(totals);
+        totals.breaker.recordFailure();
         logger.error(
           `Document cleanup could not finish the interrupted purge of document ` +
             `${String(row._id)}; it keeps purgePending for the next run: ${describe(error)}`,
@@ -465,7 +443,7 @@ async function sweepOrphanedObjects(
   while (
     totals.keysExamined < ORPHAN_SWEEP_MAX_KEYS_PER_RUN &&
     pagesRead < ORPHAN_SWEEP_MAX_PAGES_PER_RUN &&
-    !engineIsRefusing(totals)
+    !totals.breaker.isRefusing()
   ) {
     pagesRead += 1;
     const remaining = ORPHAN_SWEEP_MAX_KEYS_PER_RUN - totals.keysExamined;
@@ -511,13 +489,13 @@ async function sweepOrphanedObjects(
 
       for (const candidate of candidates) {
         if (named.has(candidate.documentId)) continue;
-        if (engineIsRefusing(totals)) break;
+        if (totals.breaker.isRefusing()) break;
         try {
           await storage.deleteObject(candidate.key);
           totals.orphansDeleted += 1;
-          totals.consecutiveFailures = 0;
+          totals.breaker.recordSuccess();
         } catch (error: unknown) {
-          recordFailure(totals);
+          totals.breaker.recordFailure();
           logger.error(
             `Document cleanup could not delete orphaned object ${candidate.key}: ${describe(error)}`,
           );
@@ -566,8 +544,7 @@ async function runDocumentCleanup(carriedCursor: string | undefined): Promise<st
       purgesFinished: 0,
       orphansDeleted: 0,
       keysExamined: 0,
-      failures: 0,
-      consecutiveFailures: 0,
+      breaker: createStorageBreaker(),
     };
 
     await abortAbandonedUploads(storage, now, totals);
@@ -578,13 +555,13 @@ async function runDocumentCleanup(carriedCursor: string | undefined): Promise<st
       totals.uploadsAborted > 0 ||
       totals.purgesFinished > 0 ||
       totals.orphansDeleted > 0 ||
-      totals.failures > 0
+      totals.breaker.failures > 0
     ) {
       logger.info(
         `Document cleanup complete: aborted ${String(totals.uploadsAborted)} abandoned upload(s), ` +
           `finished ${String(totals.purgesFinished)} interrupted purge(s), ` +
           `deleted ${String(totals.orphansDeleted)} orphaned object(s) from ` +
-          `${String(totals.keysExamined)} key(s) examined, ${String(totals.failures)} failure(s)`,
+          `${String(totals.keysExamined)} key(s) examined, ${String(totals.breaker.failures)} failure(s)`,
       );
     }
   } catch (error: unknown) {

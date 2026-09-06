@@ -165,7 +165,9 @@ the sidebar and nothing to switch off.
 - **A trash you can actually open.** Deleting a document keeps it for thirty days, where it can be
   restored or destroyed for good, and it still occupies storage until it is. Emptying the trash
   tells you how many were destroyed, and says so plainly when the storage engine could not remove
-  every file.
+  every file. If the engine refuses several files in a row it stops there rather than spending hours
+  on a service that is plainly down, reports what it actually attempted, and reloads the trash so
+  what you see is what is really still in it. Nothing is destroyed on that path and nothing is lost.
 - **Rotating your vault key does not re-upload anything.** A rotation rewraps **32 bytes per
   document** instead of rewriting every file, which is the only way rotation stays possible once
   an account holds gigabytes. The request must name every item, folder and document the account

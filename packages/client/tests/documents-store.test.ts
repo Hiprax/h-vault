@@ -2653,6 +2653,45 @@ describe('documentsStore — filters, trash coherence and folder sweeps', () => 
     expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_B]);
   });
 
+  it('puts back the rows the server never reached when its walk stopped on a refusing engine', async () => {
+    // The server's empty-trash walk shares the collector's circuit breaker: after
+    // enough storage refusals in a row it STOPS, having attempted only some of the
+    // set, and answers with the counts it actually accumulated. So the response can
+    // report a handful of failures while the trash still holds rows nothing tried
+    // to purge — rows that carry no `purgePending` marker at all and are simply
+    // still there.
+    //
+    // This is the case that decides whether the server change needs a client
+    // change, and it does NOT: the store already refetches whenever `failedCount`
+    // is non-zero, and tripping the breaker costs several recorded failures, so
+    // `failedCount` can never be zero on the path that stops early. The read is
+    // what makes the list true again, and it returns MORE rows than the response
+    // accounted for — which is exactly the state a client that trusted the counts
+    // instead of re-reading would get wrong.
+    const attempted = await makeRow(ID_A, 'attempted.txt');
+    const neverReached = await makeRow(ID_B, 'never-reached.txt');
+    const alsoNeverReached = await makeRow(ID_C, 'also-never-reached.txt');
+    trashRows = [attempted, neverReached, alsoNeverReached];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+    // Nothing was destroyed and the walk gave up part-way through.
+    emptyTrashResult = { deletedCount: 0, failedCount: 5 };
+
+    const result = await useDocumentsStore.getState().emptyTrash();
+
+    expect(result).toEqual({ deletedCount: 0, failedCount: 5 });
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(1);
+    // Every row is back, including the two the server never attempted. The
+    // suppression set must stay EMPTY on this path — populating it would subtract
+    // exactly these ids from the read that is meant to restore them.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([
+      ID_A,
+      ID_B,
+      ID_C,
+    ]);
+    expect(useDocumentsStore.getState().trashLoading).toBe(false);
+  });
+
   it('counts a trashed row whose key will not unwrap instead of dropping it silently', async () => {
     trashRows = [await makeRow(ID_B, 'lost.txt', { wrapUnder: ID_A })];
     await useDocumentsStore.getState().fetchTrash();

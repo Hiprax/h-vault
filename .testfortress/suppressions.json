@@ -514,6 +514,19 @@
       "created": "2026-09-04",
       "expires": "2026-12-03",
       "approvedBy": ["judge:readonly"]
+    },
+    {
+      "id": "SUP-0046",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "duplication.duplicatedLines 1434 -> 1456",
+      "maxHits": 1,
+      "reason": "The duplication RATCHET moved the wrong way while the duplication itself went DOWN, and the discriminator is in jscpd's own report. Measured on the tree at the recorded baseline commit af609ee (reconstructed with `git archive af609ee packages/*/src .jscpd.json`) versus HEAD: duplicatedLines 1434 -> 1456, but duplicatedTokens 8630 -> 8580, percentageTokens 2.98 -> 2.90, percentage 1.98 -> 1.94 and clones 122 -> 121. Every token-based measure IMPROVED; only the line count rose. The cause is that jscpd's matcher does not tokenize comments but its clone report counts a clone's whole LINE SPAN, so a long explanatory comment written INSIDE a region that is already a clone inflates duplicatedLines without duplicating one statement. That is exactly what happened: the clone-set diff is userController.ts<>userController.ts 22 -> 42 lines, authController.ts<>authController.ts 14 -> 20 and authStore.ts 15 -> 16, offset by the FolderSidebar.tsx -> FolderRail.tsx rename losing 6; the userController clone's SECOND fragment is 17 lines both before and after, so only the first fragment's span grew, and 31 of the 46 lines added to userController.ts since the baseline are comments. Those comments were written by commits 6fc6aef, 5f3d7d6 and 3855747 and are load-bearing security rationale (the read-the-request-before-the-write ordering in disable2fa, among others). NOTHING GOT WORSE: the jscpd gate's own ceiling (.jscpd.json threshold 2.89%) is untouched and passes at 1.94%, and the three other duplication fields are ratcheted normally and improved. The underlying duplication is real but OLD and unchanged - the TOTP verify plus lastTotpTimestamp replay check is copy-pasted across userController disable2fa/regenerateBackupCodes/deleteAccount and two authController sites - and it was deliberately NOT refactored here: two sandboxed read-only judges independently advised against folding security-sensitive 2FA surgery into an unrelated phase, and the token measurement shows there is no regression to pay down. Shaping the comments to fit the metric was likewise rejected: it buys one release, since the next long comment written inside any of the 121 surviving clones re-trips it, and it costs the comment locality this codebase treats as load-bearing everywhere else. REMOVAL CONDITION: add duplicatedTokens (already present in jscpd's statistics.total and simply not read at deadcode-gate.mjs:162-169) to the duplication report object with direction `lower` in ratchet-check.mjs. A token count cannot be moved by a comment under any mode, which permanently removes this class of false regression; that edit touches two files under scripts/ci/ and so moves integrity.gateFilesHash, a `pin`, which is why it needs its own change rather than riding along here. Verified by two sandboxed read-only judges (claude-opus-5 and claude-sonnet-5, maximum effort) against ratchet-check.mjs:66-70 and :1009-1023, which refuse a bare --accept for a worsening field and name this ledger entry as the sanctioned route.",
+      "owner": "maintainer",
+      "created": "2026-09-06",
+      "expires": "2026-12-05",
+      "approvedBy": ["judge:readonly"]
     }
   ]
 }

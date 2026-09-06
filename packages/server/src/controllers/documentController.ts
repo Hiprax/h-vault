@@ -33,6 +33,7 @@ import { getStorage, isStorageNotFound } from '../services/storage/index.js';
 import type { StoragePart, StorageRangeRead } from '../services/storage/types.js';
 import { buildObjectKey, expectedPartSize, segmentRange } from '../utils/documentObjects.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
+import { createStorageBreaker } from '../utils/storageBreaker.js';
 import {
   assertFolderOwned,
   assertVaultNotRotating,
@@ -2181,6 +2182,25 @@ export const purgeDocument = catchAsync(async (req: Request, res: Response): Pro
  * counts and the request succeeds even when every delete failed, because in that
  * state nothing has been lost — the work is deferred, and the marker is what
  * defers it.
+ *
+ * ## …but a refusing ENGINE stops the walk, and the counts stay honest
+ *
+ * Carrying on is right for one bad key and wrong for an engine that is not
+ * answering at all: at the client's pinned five-second connect timeout and three
+ * attempts, walking a full trash against a dead engine holds this request open
+ * for hours against a caller that gave up long ago. So the walk shares the
+ * collector's circuit breaker (`utils/storageBreaker.ts`), and the two counts it
+ * answers with are the ones it ACTUALLY accumulated, never the size of the set it
+ * set out to empty — a walk that stopped early and claimed the whole trash would
+ * tell the user their documents are gone while every one of them is still there.
+ *
+ * Rows past the stopping point are left completely alone: still trashed, and
+ * deliberately UNMARKED, because a marker written without an attempt would send
+ * the collector after a document nothing tried to purge and would block its owner
+ * from restoring it (`restoreDocument` requires `purgePending: null`). They stay
+ * in the trash, they stay listed, and the client refetches the listing whenever
+ * `failedCount` is non-zero — which it always is when the breaker trips, since
+ * tripping it costs five recorded failures.
  */
 export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -2188,11 +2208,11 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
   const startTime = new Date();
   const trashed = { userId, deletedAt: { $exists: true, $ne: null, $lte: startTime } };
 
+  const breaker = createStorageBreaker();
   let deletedCount = 0;
-  let failedCount = 0;
   let lastId: mongoose.Types.ObjectId | undefined;
 
-  for (;;) {
+  while (!breaker.isRefusing()) {
     const page = await Document.find(
       lastId === undefined ? trashed : { ...trashed, _id: { $gt: lastId } },
     )
@@ -2206,6 +2226,9 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
     }
 
     for (const row of page) {
+      // Checked BEFORE the cursor moves, so the cursor names the last row this
+      // walk actually examined rather than one it skipped past.
+      if (breaker.isRefusing()) break;
       // The cursor advances BEFORE the work, not after it, and that is what makes
       // the walk monotonic: a row whose purge throws is left behind for the
       // collector and must not be read again, or the loop that is supposed to
@@ -2230,6 +2253,7 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
           continue;
         }
         await getStorage().deleteObject(row.objectKey);
+        breaker.recordSuccess();
         // The engine's own count, never a bare `+= 1`. A row purged by a
         // concurrent request between this page's read and this delete is removed
         // by that request and not by this one, so reporting it here would be a
@@ -2238,7 +2262,20 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
         const { deletedCount: removed } = await Document.deleteOne({ _id: row._id, userId });
         deletedCount += removed;
       } catch (error) {
-        failedCount += 1;
+        // Counted against the breaker whichever of the three steps threw. The
+        // claim is Mongo rather than storage, but a database that is refusing
+        // writes is no better a reason to walk a whole trash than a bucket that
+        // is refusing deletes, and stopping is the conservative direction:
+        // report, and leave everything recoverable.
+        //
+        // Note what this therefore does NOT bound: only the CLAIM and the object
+        // delete can ever trip it. `recordSuccess` fires between the object
+        // delete and the row delete, so a Mongo that accepts every claim and
+        // refuses every `deleteOne` never gets two failures in a row and walks
+        // the whole trash. That is unchanged from before this breaker existed
+        // and is very nearly unreachable — a database in that state fails the
+        // claim first, which does trip it — but it is not a bound this code has.
+        breaker.recordFailure();
         logger.error('Failed to purge a trashed document while emptying the trash', {
           userId,
           documentId: String(row._id),
@@ -2248,6 +2285,7 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
     }
   }
 
+  const failedCount = breaker.failures;
   const emptyCtx = getRequestContext(req);
   await createAuditLog(
     userId,
@@ -2260,7 +2298,23 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
     emptyCtx.userAgent,
   );
 
-  logger.info('Document trash emptied', { userId, deletedCount, failedCount });
+  // `stoppedEarly` is in the LOG and NOT in the response, and the reason is who
+  // needs it rather than what it would cost. Adding an optional property to the
+  // body would be cheap — an addition is never an oasdiff-breaking change and the
+  // pinned snapshot would not move — but no client has a use for it. A caller
+  // already knows the walk may have stopped, because `failedCount` is non-zero
+  // whenever it did (tripping the breaker costs five recorded failures), and the
+  // authoritative answer to "what is left" is the trash listing it re-reads, not a
+  // third number in this body. The OPERATOR is the one who cannot get it anywhere
+  // else: five failures and a stopped walk are the same two counts as five
+  // failures and a finished one, so without this line an outage that left a whole
+  // account's trash unattempted reads exactly like five unreachable keys.
+  logger.info('Document trash emptied', {
+    userId,
+    deletedCount,
+    failedCount,
+    stoppedEarly: breaker.isRefusing(),
+  });
 
   res.status(200).json({
     success: true,

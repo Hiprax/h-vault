@@ -1921,14 +1921,26 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
     // A partial run reported as a clean one is the dishonesty the server's own
     // `failedCount` exists to prevent — the rows it could not remove are still
     // there, still listed and still occupying storage.
+    //
+    // The sentence promises nothing about the residue, and that is the assertion.
+    // The server's walk gives up once storage has refused several deletes in a
+    // row, so `failedCount` counts only what it ATTEMPTED; the rows past that
+    // point carry no `purgePending` marker and the hourly collector will never
+    // look at them. A message saying they "will be cleaned up automatically"
+    // would be a promise this system does not keep, told to a user who is at that
+    // moment looking at a refreshed list that still holds every one of them.
     await waitFor(() => {
       expect(harness.toast).toHaveBeenCalledWith(
         expect.objectContaining({
-          title: '1 deleted. 1 could not be removed and will be cleaned up automatically.',
+          title:
+            '1 deleted. 1 could not be removed — the trash has been refreshed to show what is still there.',
           type: 'warning',
         }),
       );
     });
+    expect(harness.toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining('cleaned up automatically') }),
+    );
   });
 
   it('reports a refused empty rather than leaving the button spinning', async () => {

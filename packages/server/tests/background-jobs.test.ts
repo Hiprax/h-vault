@@ -209,6 +209,15 @@ async function createTrashedDocument(
   return { id: documentId, objectKey };
 }
 
+/**
+ * How many storage refusals in a row abandon a bulk walk over object storage.
+ *
+ * A LITERAL, not an import: `utils/storageBreaker.ts` keeps its own constant
+ * module-private precisely so a test cannot agree with it by construction. If the
+ * threshold moves, this goes red and somebody has to decide whether it should have.
+ */
+const BREAKER_THRESHOLD = 5;
+
 /** `n` days before now, as the cron's cutoff arithmetic sees it. */
 function daysAgo(n: number): Date {
   return new Date(Date.now() - n * 24 * 60 * 60 * 1000);
@@ -1189,6 +1198,148 @@ describe('trashCleanup', () => {
       expect(deleteObject).not.toHaveBeenCalled();
       expect(storageRef.current!.storedKeys()).toEqual([stuck.objectKey]);
       expect(await AuditLog.countDocuments({ action: 'trash_auto_purge' })).toBe(0);
+    });
+
+    // ── The circuit breaker ──────────────────────────────────────────────
+    //
+    // Pressing on past a failing engine is the right answer for ONE unreachable
+    // key and the wrong answer for an engine that is down. The S3 client is
+    // pinned to a 5-second connect timeout and three attempts, so a nightly run
+    // that walked a full trash against a dead engine would spend hours inside a
+    // fifteen-minute lock — and the moment that TTL expires, the next tick can
+    // acquire the same lock and start a SECOND run alongside the first, both
+    // walking the same rows. The bound is therefore the ATTEMPT COUNT, which is
+    // what the spy below measures; the clock is a consequence of it and not
+    // something a test can assert without becoming a timing test that cannot
+    // fail.
+
+    it('stops the nightly walk after five refusals in a row, leaving the rest of the trash untouched', async () => {
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const userId = new mongoose.Types.ObjectId();
+      const seeded: { id: mongoose.Types.ObjectId; objectKey: string }[] = [];
+      for (let index = 0; index < 9; index += 1) {
+        seeded.push(await createTrashedDocument(userId, daysAgo(31 + index)));
+      }
+      // The walk reads its pages in `_id` order, so the split between the rows it
+      // attempts and the rows it never reaches is in that order, not seeding order.
+      seeded.sort((left, right) => (left.id.toHexString() < right.id.toHexString() ? -1 : 1));
+      const attempted = seeded.slice(0, BREAKER_THRESHOLD);
+      const untouched = seeded.slice(BREAKER_THRESHOLD);
+
+      loggerError.mockClear();
+      const deleteSpy = vi
+        .spyOn(storageRef.current!, 'deleteObject')
+        .mockRejectedValue(new Error('storage engine unreachable') as never);
+
+      let deleteCalls = 0;
+      try {
+        await callback();
+      } finally {
+        deleteCalls = deleteSpy.mock.calls.length;
+        deleteSpy.mockRestore();
+      }
+
+      // Exactly the threshold. Nine is the unbounded walk this case refuses.
+      expect(deleteCalls).toBe(BREAKER_THRESHOLD);
+
+      // The five it tried keep their marker, so the hourly collector finishes
+      // exactly those — and the log line says so, which is what tells an operator
+      // triaging the outage that those five are already accounted for.
+      for (const row of attempted) {
+        const survivor = await Document.findById(row.id).lean();
+        expect(survivor, 'a row the walk attempted must not be deleted').not.toBeNull();
+        expect(survivor!.purgePending).toBe(true);
+      }
+      expect(
+        loggerError.mock.calls.filter((call) =>
+          String(call[0]).includes('it keeps purgePending for the collector'),
+        ),
+      ).toHaveLength(BREAKER_THRESHOLD);
+
+      // THE NEGATIVE: a row past the stopping point was never even claimed. A
+      // marker written without an attempt would send the collector after a
+      // document nothing tried to purge, and `restoreDocument` refuses a marked
+      // row, so its owner could no longer pull it back out of the trash either.
+      for (const row of untouched) {
+        const survivor = await Document.findById(row.id).lean();
+        expect(survivor, 'a row past the stopping point must survive').not.toBeNull();
+        expect(survivor!.purgePending, 'and must carry no marker at all').toBeUndefined();
+        expect(survivor!.deletedAt, 'and must still be in the trash').toBeInstanceOf(Date);
+      }
+
+      // Nothing was destroyed, so nothing may be claimed: every object is still
+      // in the bucket and no account was told its documents are gone.
+      expect(storageRef.current!.storedKeys().sort()).toEqual(
+        seeded.map((row) => row.objectKey).sort(),
+      );
+      expect(await AuditLog.countDocuments({ action: 'trash_auto_purge' })).toBe(0);
+
+      // And the run SAYS it gave up. The two counts alone cannot carry that: five
+      // failures and a stopped walk look exactly like five failures and a
+      // finished one, so without this line a night on which the bucket was dead
+      // reads as a quiet night on which five keys were unreachable.
+      expect(
+        loggerError.mock.calls.filter((call) =>
+          String(call[0]).includes('stopped its document walk'),
+        ),
+      ).toHaveLength(1);
+
+      // And the lock is DOWN. A run that abandoned its walk but held the lock
+      // would leave the next tick skipping for the rest of the TTL, which is the
+      // same outage the breaker exists to shorten.
+      expect(await JobLock.find({ jobName: 'trash-cleanup' })).toHaveLength(0);
+    });
+
+    it('finishes the whole nightly batch through scattered failures, counting consecutive ones only', async () => {
+      startTrashCleanupJob();
+      const callback = getScheduledCallback();
+
+      const userId = new mongoose.Types.ObjectId();
+      const seeded: { id: mongoose.Types.ObjectId; objectKey: string }[] = [];
+      for (let index = 0; index < 12; index += 1) {
+        seeded.push(await createTrashedDocument(userId, daysAgo(31 + index)));
+      }
+      seeded.sort((left, right) => (left.id.toHexString() < right.id.toHexString() ? -1 : 1));
+      const doomed = new Set(
+        seeded.filter((_row, index) => index % 2 === 0).map((row) => row.objectKey),
+      );
+
+      const realDelete = storageRef.current!.deleteObject.bind(storageRef.current!);
+      const deleteSpy = vi
+        .spyOn(storageRef.current!, 'deleteObject')
+        .mockImplementation(async (key: string) => {
+          if (doomed.has(key)) throw new Error('this one key is unreachable');
+          await realDelete(key);
+        });
+
+      let deleteCalls = 0;
+      try {
+        await callback();
+      } finally {
+        deleteCalls = deleteSpy.mock.calls.length;
+        deleteSpy.mockRestore();
+      }
+
+      // Six failures — more than the threshold — but never two in a row, so the
+      // engine is plainly up and the batch finishes. A counter that was not reset
+      // by a success would have abandoned this run after the ninth row and left
+      // three expired documents in the trash for another night.
+      expect(deleteCalls).toBe(12);
+      expect(await Document.countDocuments({ purgePending: true })).toBe(6);
+      expect(storageRef.current!.storedKeys().sort()).toEqual([...doomed].sort());
+      // Six really were destroyed, and the account is told about exactly those.
+      const audit = await AuditLog.findOne({ userId, action: 'trash_auto_purge' }).lean();
+      expect(audit!.metadata).toMatchObject({ documentCount: 6 });
+      // SIX failures and no giving up. A `gaveUp` derived from `failed > 0`
+      // rather than from the breaker would fire here and tell an operator the
+      // rest of the trash went unattempted when every row of it was walked.
+      expect(
+        loggerError.mock.calls.filter((call) =>
+          String(call[0]).includes('stopped its document walk'),
+        ),
+      ).toHaveLength(0);
     });
 
     it('purges expired documents for several users and audits each account separately', async () => {
