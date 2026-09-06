@@ -570,6 +570,23 @@ describe('rendering text and code', () => {
     const rendered = await renderText(document, new ArrayBuffer(0), 'txt');
     expect(rendered.querySelector('.hv-lines code')?.textContent).toBe('');
   });
+
+  it('renders an empty file whose extension DOES have a grammar, highlighter and all', async () => {
+    // `.txt` above never reaches the highlighter, so it cannot cover this. An
+    // empty `.js` does, and it is the one input for which lowlight returns a
+    // root with NO CHILDREN (measured: `''` -> 0 children, `' '` -> 1). An empty
+    // hast root is exactly the tree for which `hast-util-to-dom` builds a
+    // `Document` instead of a fragment regardless of `fragment: true`, and
+    // `replaceChildren` on a `Document` throws `HierarchyRequestError` — which
+    // `sourceView`'s best-effort catch swallowed, silently downgrading the file
+    // to the unhighlighted presentation.
+    const rendered = await renderText(document, new ArrayBuffer(0), 'js');
+    const code = rendered.querySelector('.hv-lines code');
+    expect(code?.textContent).toBe('');
+    // The SAME presentation an empty file gets in every other highlightable
+    // language, rather than one that silently lost its code styling.
+    expect(code?.className).toBe('hljs');
+  });
 });
 
 // ---------------------------------------------------------------------------

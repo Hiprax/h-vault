@@ -230,6 +230,56 @@ function nameCheckboxes(fragment: DocumentFragment): void {
 }
 
 /**
+ * Make `toDom`'s return usable as a fragment, whatever shape it came back in.
+ *
+ * There WAS an `as DocumentFragment` here, and the cast was wrong rather than
+ * merely lazy. `hast-util-to-dom` decides the root's shape from the TREE and not
+ * from the options: `lib/index.js:142` sets `rootIsDocument = children.length
+ * === 0`, and `:168-172` then builds a `Document` — WITHOUT consulting
+ * `fragment: true` at all. Appending a `Document` to an element throws
+ * `HierarchyRequestError`, `sandbox.ts` catches it, and the reader is told "The
+ * document could not be displayed."
+ *
+ * Two entirely benign documents land there, and both were measured rather than
+ * imagined:
+ *
+ *   * a `.md` whose only content is an HTML comment. The default sanitize schema
+ *     sets no `allowComments`, so the one node the file has is dropped and the
+ *     root is left empty.
+ *   * a `.html` of `<html><head><title>x</title></head><body></body></html>`.
+ *     `head` and `title` are removed whole by {@link RAW_TEXT_ELEMENTS}, and
+ *     `html` and `body` are absent from the default schema's tag list so they
+ *     are unwrapped. Again: a root with no children.
+ *
+ * An empty document is a document. It renders as an empty page, which is the
+ * truth about the file, and never as a failure.
+ *
+ * Written as a normalisation rather than as an `if (sanitized.children.length
+ * === 0)` short-circuit, because the emptiness is not the invariant worth
+ * depending on — the LIBRARY's choice of root is, and it makes that choice for a
+ * second reason too (a tree whose first child is an `html` element). That branch
+ * is unreachable through this pipeline today, since the default schema does not
+ * allow `html` and unwraps it, but a normalisation costs one comparison and
+ * survives a schema that later does.
+ *
+ * `instanceof` rather than a `nodeType` comparison because it NARROWS: the
+ * declared return is a six-member union, and narrowing is what lets the common
+ * path stay a zero-copy return of the very object the library built. It is
+ * realm-correct here because `doc` is always the CURRENT realm's document — the
+ * frame's own in production, jsdom's own under vitest — so the nodes and the
+ * `DocumentFragment` being compared against come from one realm. A `doc` from
+ * somewhere else would be a different call site than this file has ever had.
+ */
+function asFragment(doc: Document, rendered: ReturnType<typeof toDom>): DocumentFragment {
+  if (rendered instanceof DocumentFragment) return rendered;
+  const fragment = doc.createDocumentFragment();
+  // Spread first: `childNodes` is LIVE, and `append` moves each node out of the
+  // list it is being read from.
+  fragment.append(...rendered.childNodes);
+  return fragment;
+}
+
+/**
  * Sanitize a hast tree, highlight it, and turn it into DOM nodes.
  *
  * The one entry point both markup renderers use. Anything added here reaches
@@ -256,7 +306,7 @@ export async function renderSanitizedMarkup(doc: Document, tree: Root): Promise<
     sanitized = unified().use(rehypeHighlight, { detect: false }).runSync(sanitized) as Root;
   }
 
-  const fragment = toDom(sanitized, { fragment: true, document: doc }) as DocumentFragment;
+  const fragment = asFragment(doc, toDom(sanitized, { fragment: true, document: doc }));
 
   // Every link is opened by the APPLICATION, after the user confirms, and this
   // frame is granted neither `allow-popups` nor `allow-top-navigation`, so it

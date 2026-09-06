@@ -378,3 +378,63 @@ describe('the HTML renderer', () => {
     expect(rendered.textContent).toContain('just text, no tags');
   });
 });
+
+// ---------------------------------------------------------------------------
+// A document that sanitises down to nothing
+// ---------------------------------------------------------------------------
+
+/**
+ * The empty page, which is a real document and not an edge case worth shrugging
+ * at.
+ *
+ * `hast-util-to-dom` decides its return type from the tree it was handed, and
+ * `fragment: true` does NOT settle it: `lib/index.js:142` sets
+ * `rootIsDocument = children.length === 0` and `:168-172` then builds a
+ * `Document` without consulting the option at all (measured against the
+ * installed copy: `nodeType` 9, an `XMLDocument`). Appending a `Document` to an
+ * element throws `HierarchyRequestError`, `sandbox.ts` catches it, and the
+ * reader is told "The document could not be displayed." — for a file that is
+ * perfectly well-formed and simply has nothing visible in it.
+ *
+ * Both inputs below are ordinary. Neither is hostile, and that is what makes
+ * them worth pinning: the failure looked like a corrupt document.
+ */
+/** A title string no other text in the rendered page could contain. */
+const TITLE_CANARY = 'this-title-must-not-become-body-text';
+
+describe('a document whose sanitized tree is empty', () => {
+  it('renders an empty markdown page for a file that is only an HTML comment', async () => {
+    // `rehype-sanitize`'s default schema has no `allowComments`, so the one node
+    // this document contains is dropped and the root is left with no children.
+    const rendered = await renderMarkdown(document, bytesOf('<!-- nothing to see -->\n'));
+
+    const article = rendered.querySelector('article.hv-markdown');
+    expect(article).not.toBeNull();
+    expect(article?.childNodes).toHaveLength(0);
+    // The comment did not survive as text, which is the other way this could
+    // have been made to "work".
+    expect(rendered.textContent).not.toContain('nothing to see');
+  });
+
+  it('renders an empty page for an HTML document with nothing in its body', async () => {
+    // `<head>` and `<title>` are removed whole by the raw-text step; `html` and
+    // `body` are not in the default schema's tag list and are unwrapped. What
+    // reaches `toDom` is a root with no children.
+    const rendered = await renderHtml(
+      document,
+      bytesOf(`<html><head><title>${TITLE_CANARY}</title></head><body></body></html>`),
+    );
+
+    const article = rendered.querySelector('article.hv-markdown');
+    expect(article).not.toBeNull();
+    expect(article?.childNodes).toHaveLength(0);
+    // The persistent banner still stands: an empty page is still a stored page,
+    // and the reader is still owed the sentence explaining what is disabled.
+    expect(rendered.textContent).toContain(HTML_PREVIEW_NOTICE);
+    // A DISTINCTIVE canary rather than a one-letter title: `<title>x</title>`
+    // would have made this assertion pass because `HTML_PREVIEW_NOTICE` happens
+    // to contain no letter `x`, so editing that sentence — which says nothing
+    // about `<head>` — could turn this red for a reason nobody cares about.
+    expect(rendered.textContent).not.toContain(TITLE_CANARY);
+  });
+});

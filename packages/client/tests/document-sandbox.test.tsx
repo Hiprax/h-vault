@@ -504,6 +504,183 @@ describe('one frame per document', () => {
     expect(screen.getByTitle('Document preview')).not.toBe(first);
     expect(handles.onUnavailable).not.toHaveBeenCalled();
   });
+
+  /**
+   * A rename, which is the case neither test above can reach.
+   *
+   * Every case below holds `bytes` at ONE reference on purpose. The two remount
+   * tests above call `bytesOf(...)` a second time, which allocates a second
+   * buffer and so takes the host's `seenBytes !== bytes` branch — they pass
+   * whatever the element key says, and would go on passing against a host that
+   * reused the frame for every prop except the payload. Renaming `notes.md` to
+   * `notes.markdown`, or `.txt` to `.log`, changes `mode` and/or `ext` with the
+   * same plaintext still in hand, and that is the shape the key has to survive.
+   *
+   * The two dimensions are exercised SEPARATELY as well as together, so that
+   * dropping either one from the key fails a case of its own. `mode` and `ext`
+   * are both derived from the document's name at the only call site today, so
+   * the mode-only case pins the component's own contract rather than a journey
+   * a user can take right now — which is the point: the rule is "every input the
+   * effect reads", and a key that lists only the props someone happened to think
+   * of is a key that will be wrong again.
+   */
+  describe('a rename, with the same bytes', () => {
+    /**
+     * Model the browser, because without this the cases below cannot fail for
+     * the right reason.
+     *
+     * An iframe loads `/sandbox.html` and announces itself with exactly one
+     * `ready` — per ELEMENT, at its load. An element that has ALREADY handshaked
+     * never speaks again, which is the whole fact the remount rule exists to
+     * respect. A helper that re-announced the same element would hand a reused
+     * frame a second handshake no browser could produce, and the defect these
+     * cases pin would present as a green suite.
+     */
+    let announced: WeakSet<HTMLIFrameElement>;
+    beforeEach(() => {
+      announced = new WeakSet<HTMLIFrameElement>();
+    });
+
+    function currentFrame(): HTMLIFrameElement {
+      return screen.getByTitle('Document preview') as HTMLIFrameElement;
+    }
+
+    /** Let the CURRENT element announce itself, once and only once, ever. */
+    function announceIfNew(): StubWindow | null {
+      const frame = currentFrame();
+      if (announced.has(frame)) return null;
+      announced.add(frame);
+      const stub = stubFrameWindow(frame);
+      postFromFrame(stub, { kind: 'ready' });
+      return stub;
+    }
+
+    /** What the frame was told to render, read off its own channel. */
+    async function renderRequestOn(stub: StubWindow): Promise<Record<string, unknown>> {
+      const port = transferredPort(stub);
+      expect(port).toBeInstanceOf(MessagePort);
+      const received: unknown[] = [];
+      port!.onmessage = (event) => received.push(event.data);
+      port!.start();
+      await waitFor(() => {
+        expect(received).toHaveLength(1);
+      });
+      return received[0] as Record<string, unknown>;
+    }
+
+    interface Naming {
+      mode: React.ComponentProps<typeof DocumentSandbox>['mode'];
+      ext: string;
+    }
+
+    it.each<[string, Naming, Naming]>([
+      ['the mode alone', { mode: 'text', ext: 'md' }, { mode: 'markdown', ext: 'md' }],
+      ['the extension alone', { mode: 'text', ext: 'txt' }, { mode: 'text', ext: 'log' }],
+      [
+        'both, which is what a rename does',
+        { mode: 'text', ext: 'txt' },
+        { mode: 'markdown', ext: 'md' },
+      ],
+    ])('replaces the frame when %s changes, and never times out', async (_label, before, after) => {
+      const bytes = bytesOf('# hello');
+      const handles = mountHost({ bytes, ...before });
+      const first = currentFrame();
+      announced.add(first);
+      postFromFrame(handles.stub, { kind: 'ready' });
+      expect(handles.onUnavailable).not.toHaveBeenCalled();
+
+      act(() => {
+        handles.rerender(
+          <DocumentSandbox
+            bytes={bytes}
+            mode={after.mode}
+            ext={after.ext}
+            theme="dark"
+            onLink={handles.onLink}
+            onUnavailable={handles.onUnavailable}
+          />,
+        );
+      });
+
+      // ELEMENT IDENTITY. A reused element means a listener registered for a
+      // handshake that has already happened and can never happen again.
+      const second = currentFrame();
+      expect(second).not.toBe(first);
+
+      // The new element is told what it is now rendering, over its own channel:
+      // the payload is the ONLY thing that carries the mode and the extension,
+      // and it crosses exactly once, so a frame cannot be corrected later.
+      const stub = announceIfNew();
+      expect(stub).not.toBeNull();
+      const payload = await renderRequestOn(stub!);
+      expect(payload['kind']).toBe('render');
+      expect(payload['mode']).toBe(after.mode);
+      expect(payload['ext']).toBe(after.ext);
+      expect((payload['bytes'] as ArrayBuffer).byteLength).toBe(bytes.byteLength);
+
+      // And the SYMPTOM, which is what the reader would have seen: a frame that
+      // has already handshaked never speaks again, so re-running the protocol
+      // against it can only end in the ten-second timeout, replacing a working
+      // preview with "The document preview did not load."
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(handles.onUnavailable).not.toHaveBeenCalled();
+      expect(screen.queryByTitle('Document preview')).not.toBeNull();
+    });
+
+    it('KEEPS the element when nothing the protocol reads changed', async () => {
+      // The converse, and the half that had nothing holding it. The key must
+      // contain everything the effect reads — and NOTHING ELSE, because a key
+      // that moves on an ordinary re-render tears down a healthy frame and
+      // re-handshakes mid-preview, which is the same ten-second death from the
+      // other direction.
+      //
+      // Two things are deliberately changed here and neither may move the key.
+      // `title` is one the caller really does change on a rename
+      // (`Preview of <name>` in `DocumentDetail`), and the effect does not read
+      // it. The callbacks are the other: they are passed as fresh inline arrows,
+      // which is what a caller writes by default, and they are held in refs
+      // precisely so they stay out of the dependency list. Delete that refs
+      // indirection, or give `giveUp`'s `useCallback` a dependency, and this
+      // goes red — which nothing in this suite could do before.
+      const bytes = bytesOf('plain text');
+      const handles = mountHost({ bytes, mode: 'text', ext: 'txt' });
+      const first = currentFrame();
+      announced.add(first);
+      postFromFrame(handles.stub, { kind: 'ready' });
+
+      act(() => {
+        handles.rerender(
+          <DocumentSandbox
+            bytes={bytes}
+            mode="text"
+            ext="txt"
+            theme="dark"
+            title="Preview of notes.md"
+            onLink={(href) => handles.onLink(href)}
+            onUnavailable={(reason) => handles.onUnavailable(reason)}
+          />,
+        );
+      });
+
+      // SAME element. The frame is mid-preview and must not be disturbed. Found
+      // by tag rather than by title, because the title is one of the two things
+      // this case changes.
+      const after = document.querySelector('iframe');
+      expect(after).toBe(first);
+      expect(screen.getByTitle('Preview of notes.md')).toBe(first);
+      // And no second handshake was even attempted, so nothing is left waiting
+      // on a frame that has already spoken. `announced` already holds this
+      // element, so the helper posts nothing — which is the whole point.
+      if (after !== null) announced.add(after);
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(handles.onUnavailable).not.toHaveBeenCalled();
+      expect(document.querySelector('iframe')).not.toBeNull();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

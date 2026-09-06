@@ -171,7 +171,28 @@ async function sourceView(doc: Document, text: string, ext: string): Promise<HTM
       import('hast-util-to-dom'),
     ]);
     const tree = createLowlight(common).highlight(language, text);
-    code.replaceChildren(toDom(tree, { fragment: true, document: doc }));
+    const highlighted = toDom(tree, { fragment: true, document: doc });
+    // `fragment: true` is a REQUEST, not a guarantee. `hast-util-to-dom` decides
+    // the root's shape from the TREE, and for a root with NO CHILDREN it builds
+    // a `Document`, which `replaceChildren` refuses with
+    // `HierarchyRequestError`. `renderers/pipeline.ts` holds the measurement and
+    // the library's line numbers; the handling is repeated here rather than
+    // imported from there because that module pulls `unified` and
+    // `rehype-sanitize`, and this one is the chunk that has to stay small enough
+    // for a `.log` file to be worth opening.
+    //
+    // An empty file is the whole of the reachable case: lowlight returns a
+    // childless root for `''` and for nothing else (measured — a single space
+    // returns one child). Until this, the throw landed in the catch below and an
+    // empty `.js` quietly lost its code styling, recorded as a highlighter
+    // failure when the highlighter had worked perfectly.
+    //
+    // Spreading the CHILDREN rather than handing over the root is the one form
+    // correct for both shapes, and it needs no branch — so there is no arm a
+    // test could miss. It is exactly equivalent for a fragment, which
+    // `replaceChildren` empties into the target either way. `childNodes` is
+    // live, and the spread reads it before anything moves.
+    code.replaceChildren(...highlighted.childNodes);
     code.className = 'hljs';
   } catch {
     // The plain text node is already rendered. A highlighter that could not run
