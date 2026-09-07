@@ -91,6 +91,14 @@ beforeEach((ctx) => {
  * Handing rseq back to glibc deactivates TCMalloc's per-CPU cache and it starts. The
  * spawned mongod inherits `process.env`, so setting it here is enough. It MERGES
  * rather than overwrites — see mongoKernelCompat.ts for why `??=` was not enough.
+ *
+ * This call is belt to `mongoHarness.ts`'s braces, and the braces are the load-bearing
+ * half: the harness is where mongod is actually CONSTRUCTED, so it applies the tunable
+ * itself rather than trusting this file to have run. That is what lets
+ * `docker-hardening.test.ts` enumerate the launch sites. Every specialised config in
+ * this package does inherit these `setupFiles` (they all spread `...baseTest`), so this
+ * call is not redundant-by-accident; it is redundant on purpose, and the merge is
+ * idempotent, so both cost nothing.
  */
 applyMongoKernelCompat();
 

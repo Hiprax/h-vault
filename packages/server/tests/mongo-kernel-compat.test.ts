@@ -1,8 +1,9 @@
 /**
  * SERVER-121912 regression guard.
  *
- * The production stack pins mongo:8.0 and both Node test harnesses spawn a real
- * mongod 8.x through mongodb-memory-server, so `glibc.pthread.rseq=1` is what keeps
+ * The production stack pins mongo:8.0 and three Node programs spawn a real mongod
+ * 8.x through mongodb-memory-server — `tests/mongoHarness.ts`, `e2e/start-server.ts`
+ * and `scripts/ci/smoke-gate.mjs` — so `glibc.pthread.rseq=1` is what keeps
  * MongoDB starting at all on a Linux 6.19+ kernel (Ubuntu 26.04 and newer). The
  * failure it prevents is a startup abort — a crash-loop in production, and a test run
  * that dies before its first assertion on a developer's machine.

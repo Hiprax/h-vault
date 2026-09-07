@@ -13,22 +13,9 @@ import { createAuditLog } from '../services/auditService.js';
 import { getStorage } from '../services/storage/index.js';
 import { userObjectPrefix } from './documentObjects.js';
 import { revokeTrustedDevices } from './trustedDevices.js';
+import { supportsTransactions } from './transactionSupport.js';
 
 const logger = createModuleLogger('cascade-delete');
-
-/**
- * Check if the current MongoDB topology supports multi-document transactions
- * (requires a replica set or sharded cluster).
- *
- * Exported for tests so the transactional path can be exercised against a
- * standalone in-memory MongoDB by stubbing this helper.
- */
-export function supportsTransactions(): boolean {
-  return (
-    mongoose.connection.readyState === mongoose.ConnectionStates.connected &&
-    Boolean(mongoose.connection.getClient().options.replicaSet)
-  );
-}
 
 /**
  * Erase every stored object the user owns, AFTER their rows are gone.

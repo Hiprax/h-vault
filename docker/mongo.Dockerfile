@@ -16,10 +16,16 @@
 # 8.0 is also the line affected by SERVER-121912 — its TCMalloc violates the rseq
 # ABI as it changed in Linux 6.19 (Ubuntu 26.04), and mongod aborts at startup on
 # such a host unless `GLIBC_TUNABLES=glibc.pthread.rseq=1` is set. That variable is
-# set on EVERY mongod launch site in this repo (docker-compose.yml,
-# docker-compose.dev.yml, the server test setup, and the E2E harness — the last two
-# because mongodb-memory-server downloads and spawns a real mongod). Never set it
-# to 0: that is mongod's own default and precisely the value that crash-loops.
+# set on EVERY mongod launch site in this repo, and there are five: the two compose
+# files (docker-compose.yml, docker-compose.dev.yml) set it in the container's
+# environment, and three Node programs set it in their own before spawning one,
+# because mongodb-memory-server downloads and spawns a real mongod —
+# packages/server/tests/mongoHarness.ts (the server suite), e2e/start-server.ts and
+# scripts/ci/smoke-gate.mjs. Those three share one merge implementation,
+# scripts/ci/lib/mongo-rseq.mjs, and packages/server/tests/docker-hardening.test.ts
+# enumerates the launch sites rather than listing them, so a sixth cannot be added
+# without it. Never set it to 0: that is mongod's own default and precisely the
+# value that crash-loops.
 FROM mongo:8.0
 
 # 0755 is set explicitly rather than inherited: the repo may be checked out on a

@@ -2034,6 +2034,36 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
     });
     renderPage();
     await screen.findByRole('heading', { name: 'Documents' });
+    // Then SETTLE, and this is load-bearing rather than tidy. `findBy*` returns
+    // the moment the heading appears, which is before the page's mount work is
+    // done. The straggler is ONE setter, and naming it precisely matters because
+    // the obvious suspects are innocent: the three fetches stubbed above resolve
+    // to `undefined` and `DocumentsPage`'s `load()` only `.catch()`es them, so
+    // they write no state at all. It is `useDocumentsConfig`'s
+    // `getDocumentsConfig().then((resolved) => setConfig(resolved))` that lands in
+    // a microtask, after the heading is on screen, outside any `act(...)`. A
+    // `fireEvent.click` immediately afterwards flushes THAT pending work inside
+    // its own `act`, and React is then free to defer the render caused by the
+    // click itself — so a synchronous `getBy*` on the next line reads a DOM one
+    // render behind while the store is already correct.
+    //
+    // Measured, because it presented as an ordinary flake and not as a bug: four
+    // failures in about fifty single-file runs, landing on three different cases
+    // in this block (the four-modes case, the row-date case, and the
+    // upload-target-folder case). Instrumenting the failing run showed
+    // `showTrash: true` with one trashed row loaded and the DOM still showing the
+    // active one — state right, paint behind. Forty consecutive runs after this
+    // line went in, with no failure.
+    //
+    // The await below yields one microtask checkpoint, which is exactly enough for
+    // a single `.then` and no more; a future mount that chains two ticks would
+    // need another. `waitFor` on each post-click assertion was the alternative and
+    // is worse twice over: it is polling with a timeout, which this project treats
+    // as synchronisation-by-retry, and it would have hidden how many renders
+    // behind the DOM was rather than removing the lag.
+    await act(async () => {
+      await Promise.resolve();
+    });
   }
 
   const names = () => screen.queryAllByTestId('document-name').map((n) => n.textContent);

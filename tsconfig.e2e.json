@@ -16,6 +16,18 @@
     "declarationMap": false,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["node"],
+    // `e2e/start-server.ts` reaches `packages/server/tests/mongoKernelCompat.ts`,
+    // which reaches the repo-root `scripts/ci/lib/mongo-rseq.mjs` — the ONE
+    // implementation of the mongod rseq merge, kept in plain JavaScript because
+    // `scripts/ci/smoke-gate.mjs` is a third launch site with no build step in front
+    // of it and cannot import a `.ts` module. Same reason and same shape as
+    // `packages/server/tsconfig.test.json` and `packages/client/tsconfig.test.json`,
+    // which already carry this for the pipeline helpers: letting TS INFER the types
+    // from the real source beats a hand-written `.d.mts` sidecar free to drift from
+    // the module it describes. This relaxes NO strictness — `checkJs` stays off (its
+    // default), so this only teaches the resolver to read the file, and `include`
+    // below names `.ts` only, so no JavaScript is added to the program's roots.
+    "allowJs": true,
     // Incremental build info: see `packages/shared/tsconfig.test.json` for why
     // every invocation pins its own file and why the configs that EMIT must not
     // carry these two keys. This config sits at the repo root, so the path is

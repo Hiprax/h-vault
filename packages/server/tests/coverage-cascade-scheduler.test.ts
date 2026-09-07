@@ -108,7 +108,12 @@ import { config } from '../src/config/index.js';
 import { Document } from '../src/models/Document.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
 import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
-import { cascadeDeleteUser, supportsTransactions } from '../src/utils/cascadeDelete.js';
+import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
+// The predicate `cascadeDeleteUser` branches on, imported from its ONE definition.
+// `cascadeDelete.ts` used to re-export a copy of it under this same name; the
+// no-argument call below is the shared function's default-connection form, which
+// is exactly how `cascadeDeleteUser` itself calls it.
+import { supportsTransactions } from '../src/utils/transactionSupport.js';
 import { startBackupScheduler } from '../src/jobs/backupScheduler.js';
 import { startTokenCleanupJob } from '../src/jobs/tokenCleanup.js';
 import { startTrashCleanupJob } from '../src/jobs/trashCleanup.js';

@@ -26,7 +26,7 @@
  * adding a service, not an afterthought.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -46,6 +46,8 @@ type NetworkAttachment =
 
 interface ServiceConfig {
   image?: string;
+  /** Long form only in this repo; the short `build: .` form is typed for completeness. */
+  build?: string | { context?: string; dockerfile?: string };
   container_name?: string;
   stop_signal?: string;
   security_opt?: string[];
@@ -909,37 +911,232 @@ describe('Docker deployment', () => {
       expect(db?.environment?.['GLIBC_TUNABLES']).toBe('glibc.pthread.rseq=1');
     });
 
-    it('sets that tunable at EVERY mongod launch site in the repo, not just this one', () => {
-      // `npm test` and the E2E harness both spawn a REAL mongod (mongodb-memory-server
-      // downloads the binary), so a developer or CI box on Ubuntu 26.04 hits the same
-      // abort — a compose-only fix leaves the test suite unrunnable on a modern
-      // kernel, which is exactly the kind of half-fix that gets rediscovered a year
-      // later.
+    it('sets that tunable at EVERY mongod launch site in the repo, enumerated not listed', () => {
+      // `npm test`, the E2E harness and the smoke gate all spawn a REAL mongod
+      // (mongodb-memory-server downloads the binary), so a developer or CI box on
+      // Ubuntu 26.04 hits the same abort — a compose-only fix leaves the test suite
+      // unrunnable on a modern kernel, which is exactly the kind of half-fix that
+      // gets rediscovered a year later.
       //
-      // The two compose files carry the literal; the two Node harnesses go through the
-      // shared merge-safe helper (mongoKernelCompat.ts), so assert the CALL there
-      // rather than the string — the point is that the tunable reaches the spawned
-      // mongod, not how it is spelled.
-      const devCompose = readFileSync(path.join(repoRoot, 'docker-compose.dev.yml'), 'utf-8');
-      expect(devCompose).toContain('glibc.pthread.rseq=1');
-      expect(devCompose).not.toContain('glibc.pthread.rseq=0');
+      // This test used to be a LIST: two Node harnesses by name, and it was named
+      // "EVERY launch site" while missing `scripts/ci/smoke-gate.mjs`, which spawns
+      // a mongod of its own. Proved, before it was rewritten, by deleting that
+      // gate's tunable call outright and watching this test pass. So both halves
+      // below DISCOVER their launch sites and then check each one; the literal names
+      // that remain are a FLOOR — they exist so a discovery pattern that stops
+      // matching is a red test rather than a vacuous green one — and a fourth site
+      // is checked when it appears, with no edit here.
+      //
+      // "When it appears" is a claim about the discovery patterns, so read what
+      // each one actually keys on before trusting it. The container half PARSES the
+      // compose files rather than grepping them, and classifies from the effective
+      // entrypoint+command (see `startsMongod` below) rather than from the presence
+      // of the word `mongod`, so a service that passes mongod its flags through
+      // `command:` is caught while `hvault-db-init` — the mongo IMAGE running
+      // `mongosh` — is correctly not one. The Node half keys on a VALUE IMPORT of
+      // the memory-server package, which an aliased import cannot dodge, and not on
+      // the construction call, which it trivially could.
+      //
+      // What neither half reaches, stated so a green run is not read as more than
+      // it is: a mongod started by something other than that package (a raw
+      // `spawn('mongod')`, or a `docker run` inside a future gate) is outside both
+      // mechanisms, and so is a compose file living outside the repository root.
+      //
+      // Note for a future editor: the container half is checked from the parsed
+      // compose files rather than from a substring, so a service that starts a
+      // mongod under an overridden entrypoint is still caught, and `hvault-db-init`
+      // — the mongo IMAGE running `mongosh`, not mongod — is correctly not one.
 
-      const helper = readFileSync(
-        path.join(repoRoot, 'packages', 'server', 'tests', 'mongoKernelCompat.ts'),
-        'utf-8',
+      // ── 1. Container launch sites ──────────────────────────────────────────
+      const composeFiles = readdirSync(repoRoot)
+        .filter((name) => /^docker-compose(?:\..+)?\.ya?ml$/.test(name))
+        .sort();
+      expect(composeFiles).toEqual(
+        expect.arrayContaining(['docker-compose.yml', 'docker-compose.dev.yml']),
       );
-      expect(helper).toContain("'glibc.pthread.rseq=1'");
 
-      for (const harness of [
-        path.join(repoRoot, 'packages', 'server', 'tests', 'setup.ts'),
-        path.join(repoRoot, 'e2e', 'start-server.ts'),
-      ]) {
-        const contents = readFileSync(harness, 'utf-8');
-        expect(contents, harness).toMatch(/import\s*\{[^}]*applyMongoKernelCompat[^}]*\}/);
-        // Called at module scope — BEFORE mongodb-memory-server spawns mongod, since
-        // the child inherits process.env at spawn time and not a moment later.
-        expect(contents, harness).toMatch(/^applyMongoKernelCompat\(\);$/m);
+      /**
+       * Whether a compose service actually starts a mongod.
+       *
+       * The asymmetry between `command` and `entrypoint` is the whole of it, and
+       * getting it backwards is how a real service escapes. Compose's `entrypoint`
+       * REPLACES the image's; `command` only replaces its CMD. On a mongo image —
+       * whose ENTRYPOINT chain ends in `exec mongod` (this repo's
+       * `docker/mongo.Dockerfile` execs the official one) — a `command:` is
+       * therefore read as ARGUMENTS TO mongod, not as a different program. So the
+       * ordinary shape
+       *
+       *     hvault-db:
+       *       image: hvault-db:8.0
+       *       command: ["--replSet", "rs0", "--bind_ip_all"]
+       *
+       * launches a mongod while containing no `mongod` token anywhere. An earlier
+       * draft of this helper bailed out on any non-empty `command`, which excluded
+       * exactly that service and left its missing tunable checked by nothing.
+       *
+       * The rule is therefore: name `mongod` and you are one; otherwise, be a mongo
+       * image and let the image's own entrypoint run, and you are one. Only an
+       * `entrypoint` naming a DIFFERENT program takes you out — which is what
+       * `hvault-db-init` does with `mongosh`, and why it is correctly not a mongod
+       * launch site despite being built from the same Dockerfile.
+       */
+      const startsMongod = (service: ServiceConfig): boolean => {
+        const flat = (value: string[] | string | undefined): string =>
+          Array.isArray(value) ? value.join(' ') : (value ?? '');
+        const entrypoint = flat(service.entrypoint);
+        const command = flat(service.command);
+        if (/\bmongod\b/.test(`${entrypoint} ${command}`)) return true;
+
+        const dockerfile =
+          typeof service.build === 'object' ? (service.build.dockerfile ?? '') : '';
+        const isMongoImage = /^mongo(?::|$)/.test(service.image ?? '') || /mongo/i.test(dockerfile);
+        if (!isMongoImage) return false;
+
+        // An `entrypoint` that names another program is the only thing that stops a
+        // mongo image being a mongod. Listed rather than inferred, because guessing
+        // from "is it an absolute path" would classify a wrapper script — which is
+        // how THIS repo's image starts mongod — as not-mongod.
+        const ANOTHER_PROGRAM =
+          /\b(?:mongosh|mongo|bash|sh|node|npm|npx|python[23]?|mongodump|mongorestore|mongoexport|mongoimport|sleep|true)\b/;
+        return !(entrypoint !== '' && ANOTHER_PROGRAM.test(entrypoint));
+      };
+
+      const containerSites: string[] = [];
+      const misconfigured: string[] = [];
+      for (const file of composeFiles) {
+        const parsed = parse(readFileSync(path.join(repoRoot, file), 'utf-8'), {
+          merge: true,
+        }) as ComposeConfig;
+        for (const [name, service] of Object.entries(parsed.services)) {
+          if (!service || !startsMongod(service)) continue;
+          const site = `${file} → ${name}`;
+          containerSites.push(site);
+          // The literals, not the shared constant: a test that imports the value it
+          // is checking agrees with the code by construction and would accept a
+          // wrong-but-consistent change. 0 is mongod's own default and exactly the
+          // value that breaks, so it must be 1.
+          const tunables = service.environment?.['GLIBC_TUNABLES'] ?? '';
+          if (
+            !tunables.includes('glibc.pthread.rseq=1') ||
+            tunables.includes('glibc.pthread.rseq=0')
+          ) {
+            misconfigured.push(`${site} — GLIBC_TUNABLES=${tunables || '<unset>'}`);
+          }
+        }
       }
+      expect(
+        misconfigured,
+        'these compose services start a mongod that will abort at startup on any ' +
+          'Linux 6.19+ kernel, and `restart: unless-stopped` turns that into a silent ' +
+          'crash loop',
+      ).toEqual([]);
+      expect(containerSites).toEqual(
+        expect.arrayContaining([
+          'docker-compose.yml → hvault-db',
+          'docker-compose.dev.yml → hvault-db',
+        ]),
+      );
+
+      // ── 2. Node launch sites ───────────────────────────────────────────────
+      // Every file in the repository that constructs an in-memory mongod. There are
+      // three, in three different tiers, reached by three different runners, and the
+      // point of discovering them is that a fourth cannot be added quietly.
+      const SKIP_DIRS = new Set([
+        '.git',
+        '.cache',
+        '.husky',
+        '.orchestrator',
+        '.stryker-tmp',
+        '.testfortress',
+        'coverage',
+        'dev-dist',
+        'dist',
+        'node_modules',
+        'playwright-report',
+        'test-results',
+      ]);
+      const SCANNED = /\.(?:tsx?|mjs|cjs|js)$/;
+      const walk = (dir: string, out: string[] = []): string[] => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            if (SKIP_DIRS.has(entry.name)) continue;
+            walk(path.join(dir, entry.name), out);
+          } else if (entry.isFile() && SCANNED.test(entry.name)) {
+            out.push(path.join(dir, entry.name));
+          }
+        }
+        return out;
+      };
+
+      const scanned = walk(repoRoot);
+      // The denominator: a walker that silently found nothing satisfies every
+      // per-file assertion below while proving nothing at all.
+      expect(scanned.length).toBeGreaterThan(400);
+
+      /**
+       * A file that can spawn a mongod, and the criterion is the IMPORT rather
+       * than the construction.
+       *
+       * Matching the class name beside its `create` call was the first draft, and
+       * it is one `as` away from useless: an aliased import followed by
+       * `Mem.create(…)` contains neither literal, so a fourth launch site could
+       * have been added with the tunable missing and this test would not even
+       * have listed it. A VALUE import of the package cannot be hidden that way —
+       * the specifier is a string and the module is the only way to reach the
+       * class. `import type` is excluded because a type has no runtime and spawns
+       * nothing, which is exactly what `tests/setup.ts` and
+       * `tests/recovery/restore-drill.test.ts` do (both reach mongod through
+       * `mongoHarness.ts` instead). The construction forms are kept beside it as
+       * a second net, so a file that re-exports or lazily requires the class is
+       * still caught.
+       *
+       * Known edge: an inline `{ type X }` import specifier is a value import
+       * syntactically and would be listed here. That is a false RED naming the
+       * file, which someone resolves in a minute — the opposite failure, a launch
+       * site that is silently never checked, is the one this test exists for.
+       *
+       * And a warning for whoever edits these comments: this file is inside the
+       * tree the walk below covers, so writing the package specifier or the class
+       * name beside its `create` call in PROSE makes this file discover ITSELF and
+       * go red. That is not hypothetical — it happened while this paragraph was
+       * being written. Describe the patterns; do not spell them out.
+       */
+      const CONSTRUCTS =
+        /^\s*import\s+(?!type\b)[^;]*from\s*['"]mongodb-memory-server['"]|(?:import|require)\s*\(\s*['"]mongodb-memory-server['"]\s*\)|MongoMemory(?:Server|ReplSet)\s*\.\s*create\s*\(|new\s+MongoMemory(?:Server|ReplSet)\s*\(/m;
+      /** The applier, called at MODULE SCOPE — unindented, so no branch can strand it. */
+      const APPLIED_AT_MODULE_SCOPE = /^appl(?:yMongoKernelCompat|yRseqTunable)\(\);$/m;
+      /** Reached from one of the two shared modules, never hand-copied again. */
+      const FROM_SHARED = /from '[^']*(?:mongoKernelCompat\.js|mongo-rseq\.mjs)';/;
+
+      const nodeSites: string[] = [];
+      const unprotected: string[] = [];
+      for (const file of scanned) {
+        const contents = readFileSync(file, 'utf-8');
+        if (!CONSTRUCTS.test(contents)) continue;
+        const rel = path.relative(repoRoot, file).split(path.sep).join('/');
+        nodeSites.push(rel);
+        if (!APPLIED_AT_MODULE_SCOPE.test(contents) || !FROM_SHARED.test(contents)) {
+          unprotected.push(rel);
+        }
+      }
+
+      expect(
+        unprotected,
+        'these files spawn a mongod without applying the rseq tunable from the shared ' +
+          'merge (scripts/ci/lib/mongo-rseq.mjs) at module scope — mongod will abort at ' +
+          'startup on any Linux 6.19+ kernel',
+      ).toEqual([]);
+
+      // The floor. `mongoHarness.ts` is the one that matters most: it constructs
+      // BOTH the standalone every test file gets and the replica set the
+      // transaction branches need, for every vitest config in the repository.
+      expect(nodeSites.sort()).toEqual(
+        expect.arrayContaining([
+          'e2e/start-server.ts',
+          'packages/server/tests/mongoHarness.ts',
+          'scripts/ci/smoke-gate.mjs',
+        ]),
+      );
     });
 
     it('keeps no-new-privileges and drops all but the capabilities gosu needs', () => {

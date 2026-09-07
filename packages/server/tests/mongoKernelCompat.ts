@@ -1,45 +1,44 @@
 /**
  * SERVER-121912 — make mongod start on Linux kernels >= 6.19 (Ubuntu 26.04 and newer).
  *
- * MongoDB 8.0 moved TCMalloc to per-CPU caches, and that TCMalloc drives them with
- * restartable sequences in a way that violates the rseq ABI as it changed in kernel
- * 6.19. mongod's startup self-check aborts, and it is still unpatched upstream.
+ * The typed façade the TypeScript harnesses use. The merge itself lives ONCE, in
+ * `scripts/ci/lib/mongo-rseq.mjs`, because a third launch site — `scripts/ci/smoke-gate.mjs`
+ * — is plain JavaScript with no build step in front of it and cannot import a `.ts`
+ * module. Read that file for the whole story: why the tunable is load-bearing on the
+ * 8.x line, why it has to be a merge rather than `??=`, and why an explicit
+ * `glibc.pthread.rseq=0` already in the environment is left alone.
  *
- * Every place this repository launches a mongod has to set the tunable, and there are
- * five: `docker-compose.yml` and `docker-compose.dev.yml` (which set it in the
- * container's environment), the two Node harnesses — `tests/setup.ts` and
- * `e2e/start-server.ts` — because `mongodb-memory-server` DOWNLOADS AND SPAWNS A REAL
- * mongod (defaulting to the 8.x line), and `scripts/ci/smoke-gate.mjs`, which spawns one
- * the same way to boot the built artifact against it. Miss the harnesses and `npm test` /
- * `npm run test:e2e`, both mandated by the project's pre-completion checklist, die at
- * mongod launch on a modern host for a reason that looks nothing like the change under
- * test. This module is the single implementation the two TypeScript harnesses share, so
- * they cannot drift; the smoke gate restates the merge in four lines because it is plain
- * JavaScript with no build step in front of it and cannot import this file — it points
- * back here for the explanation rather than repeating it.
+ * Reaching a pipeline helper from the suite is the established arrangement here, not
+ * a one-off: `packages/server/tsconfig.test.json` carries `allowJs` for exactly this,
+ * and a dozen suites already import `scripts/ci/lib/*.mjs` so TypeScript infers their
+ * types from the real sources instead of from a `.d.mts` sidecar free to drift.
  *
- * Why this is a MERGE and not `env.GLIBC_TUNABLES ??= 'glibc.pthread.rseq=1'`:
- * GLIBC_TUNABLES is a COLON-SEPARATED list. With `??=`, an operator or CI runner that
- * sets any unrelated tunable (`glibc.malloc.tcache_count=0`, say) silently loses the
- * rseq setting entirely — and gets back the crash, in an environment where the one
- * thing that changed was something apparently unrelated.
+ * There are five launch sites in total. Two are the compose files, which set
+ * `GLIBC_TUNABLES` in the container's environment. Three are Node programs that spawn
+ * a REAL mongod through `mongodb-memory-server` (it downloads the binary, defaulting
+ * to the 8.x line): `tests/mongoHarness.ts`, which constructs every standalone and
+ * replica set the server suite uses; `e2e/start-server.ts`; and the smoke gate. Miss
+ * one and `npm test` / `npm run test:e2e` / `npm run test:smoke`, all three mandated
+ * by the project's pre-completion checklist, die at mongod launch on a modern host for
+ * a reason that looks nothing like the change under test.
+ * `tests/docker-hardening.test.ts` ENUMERATES those sites rather than listing them,
+ * so a sixth cannot be added without the tunable.
  */
 
-const RSEQ_TUNABLE = 'glibc.pthread.rseq=1';
+import {
+  applyRseqTunable,
+  withRseqTunable as mergeRseqTunable,
+} from '../../../scripts/ci/lib/mongo-rseq.mjs';
 
 /**
  * Returns `current` with `glibc.pthread.rseq=1` guaranteed present, appending to any
- * tunables already set. An explicit `glibc.pthread.rseq=` choice already in `current`
- * is left ALONE — including `=0`. That is deliberate: `0` is the value that crashes,
- * so nobody sets it by accident, and someone who sets it on purpose (to reproduce the
- * abort, or because a future mongod fixes the ABI violation and they want the faster
- * allocator path back) should not be silently overridden by a test harness.
+ * tunables already set, and leaving an explicit `glibc.pthread.rseq=` choice alone.
+ * A typed re-export of the shared merge, kept so the harnesses and
+ * `mongo-kernel-compat.test.ts` name one function rather than reaching across the
+ * repository for it.
  */
 export function withRseqTunable(current: string | undefined): string {
-  const trimmed = current?.trim();
-  if (!trimmed) return RSEQ_TUNABLE;
-  if (/(?:^|:)glibc\.pthread\.rseq=/.test(trimmed)) return trimmed;
-  return `${trimmed}:${RSEQ_TUNABLE}`;
+  return mergeRseqTunable(current);
 }
 
 /**
@@ -47,5 +46,5 @@ export function withRseqTunable(current: string | undefined): string {
  * spawned — the child inherits `process.env`, which is the whole mechanism.
  */
 export function applyMongoKernelCompat(env: NodeJS.ProcessEnv = process.env): void {
-  env['GLIBC_TUNABLES'] = withRseqTunable(env['GLIBC_TUNABLES']);
+  applyRseqTunable(env);
 }

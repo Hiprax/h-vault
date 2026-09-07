@@ -63,6 +63,7 @@ import { repoRoot } from './lib/proc.mjs';
 import { color, formatDuration, note, symbol, warn } from './lib/ui.mjs';
 import { ensureReportDir, writeJsonReport } from './lib/reports.mjs';
 import { runVaultFlow, waitForHealth } from './lib/vault-flow.mjs';
+import { applyRseqTunable } from './lib/mongo-rseq.mjs';
 /**
  * The policy and the two asset headers `/sandbox.html` depends on, restated ON
  * PURPOSE — but in ONE gate-side place, shared with the deployment drill.
@@ -94,28 +95,6 @@ const BOOT_DEADLINE_MS = 45_000;
 const BUDGET_MS = 60_000;
 const SHUTDOWN_GRACE_MS = 5_000;
 
-/**
- * SERVER-121912 — mongod 8.x aborts at startup on Linux kernels >= 6.19 unless
- * restartable sequences are handed back to glibc.
- *
- * `mongodb-memory-server` downloads and spawns a REAL mongod, so this runner is
- * one of the launch sites that has to set it. The merge (rather than an
- * assignment) preserves any tunable an operator has already set, and an explicit
- * `glibc.pthread.rseq=` choice is left alone — including `=0`, which is the
- * value that crashes and which nobody sets by accident. The full explanation,
- * and the shared implementation the two TypeScript harnesses use, is
- * `packages/server/tests/mongoKernelCompat.ts`; it cannot be imported here
- * because this is plain JavaScript with no build step in front of it.
- */
-function applyRseqTunable(env = process.env) {
-  const current = env['GLIBC_TUNABLES']?.trim();
-  const tunable = 'glibc.pthread.rseq=1';
-  if (!current) env['GLIBC_TUNABLES'] = tunable;
-  else if (!/(?:^|:)glibc\.pthread\.rseq=/.test(current)) {
-    env['GLIBC_TUNABLES'] = `${current}:${tunable}`;
-  }
-}
-
 const secret = () => randomBytes(32).toString('hex');
 const started = Date.now();
 const steps = [];
@@ -144,6 +123,15 @@ function freePort() {
     });
   });
 }
+
+// SERVER-121912 — mongod 8.x aborts at startup on Linux kernels >= 6.19 unless
+// restartable sequences are handed back to glibc, and `mongodb-memory-server`
+// downloads and spawns a REAL mongod, so this runner is one of the repository's
+// mongod launch sites. Applied at MODULE SCOPE, like the two TypeScript harnesses:
+// the spawned child inherits `process.env` at spawn time and not a moment later,
+// and a call at load cannot be stranded behind a branch or a `try`. The merge, and
+// why it is a merge, is `scripts/ci/lib/mongo-rseq.mjs`.
+applyRseqTunable();
 
 ensureReportDir();
 console.log(color.bold('\n  smoke — the built artifact, in production mode\n'));
@@ -211,7 +199,6 @@ try {
   // -------------------------------------------------------------------------
   // 1. A real mongod (c)
   // -------------------------------------------------------------------------
-  applyRseqTunable();
   const { MongoMemoryServer } = await import('mongodb-memory-server');
   mongo = await MongoMemoryServer.create({ instance: { dbName: 'hvault' } });
   const mongoUri = mongo.getUri('hvault');

@@ -50,6 +50,36 @@ import { MongoMemoryReplSet, MongoMemoryServer } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 import { afterAll, beforeAll } from 'vitest';
 import { withEgressAllowed } from './egressGuard.js';
+import { applyMongoKernelCompat } from './mongoKernelCompat.js';
+
+/**
+ * SERVER-121912 — every mongod this file spawns has to have the rseq tunable in its
+ * inherited environment or it aborts at startup on a Linux 6.19+ kernel (Ubuntu 26.04
+ * and newer). See `scripts/ci/lib/mongo-rseq.mjs` for why, and why it is a merge.
+ *
+ * It is applied HERE, at module scope, as well as in `tests/setup.ts`, and this is not
+ * a live fix: every specialised vitest config in this package (`storage`, `resource`,
+ * `recovery`, `mutation`, `upgrade`, `fuzz`, …) spreads `...baseTest` from
+ * `vitest.config.ts` and so inherits its `setupFiles`, checked. Two reasons to put it
+ * at the spawn site anyway.
+ *
+ * The first is structural, and it is what this call buys: THIS module is where mongod
+ * is actually constructed — both {@link createStandaloneMongo} and `createReplicaSet`
+ * are below — so making it self-sufficient is what lets
+ * `tests/docker-hardening.test.ts` ENUMERATE the repository's mongod launch sites
+ * ("every file that constructs one applies the tunable at module scope") instead of
+ * listing two of them by name. An exception saying "this one is covered by another
+ * file" is exactly the kind of hole that let the smoke gate go unchecked.
+ *
+ * The second is that the inheritance above is a convention, not a guarantee. It is
+ * held by an object spread that any config is free to override, and several of them
+ * already override `coverage` exactly that way (the storage, resource, recovery,
+ * mutation, upgrade and fuzz configs do; the security and observability ones name no
+ * `coverage` key at all) — so a config that set its own `setupFiles`, or a script that
+ * imported this harness outside vitest, would silently spawn an aborting mongod. The
+ * merge is idempotent, so both calls cost nothing.
+ */
+applyMongoKernelCompat();
 
 /**
  * First port of the band pool.

@@ -12,6 +12,7 @@ import { AuditLog } from '../models/AuditLog.js';
 import { hashToken } from '../utils/token.js';
 import { createAuditLog } from '../services/auditService.js';
 import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
+import { supportsTransactions } from '../utils/transactionSupport.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
 import { getRequestContext, getUserId } from '../utils/controllerHelpers.js';
 import { readStringCookie } from '../utils/cookies.js';
@@ -224,11 +225,14 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
   // refresh tokens are already gone and they'll be forced to log in again
   // (mild inconvenience). The reverse ordering could leave stale refresh tokens
   // valid for a user whose password has been changed, which is a security issue.
-  const supportsTransactions =
-    mongoose.connection.readyState === mongoose.ConnectionStates.connected &&
-    Boolean(mongoose.connection.getClient().options.replicaSet);
+  //
+  // The topology check itself is `utils/transactionSupport.ts` and nothing else:
+  // it used to be inlined here, and an inlined copy is a second answer to a
+  // question every multi-collection writer has to answer the same way (see
+  // `tests/topology-predicate.test.ts`).
+  const useTransaction = supportsTransactions(mongoose.connection);
 
-  if (supportsTransactions) {
+  if (useTransaction) {
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {

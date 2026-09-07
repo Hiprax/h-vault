@@ -12,6 +12,7 @@ import { User } from '../models/User.js';
 import { RefreshToken } from '../models/RefreshToken.js';
 import { TrustedDevice } from '../models/TrustedDevice.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
+import { supportsTransactions } from '../utils/transactionSupport.js';
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -1241,9 +1242,12 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
 
   // Check if the topology supports transactions (replica set or sharded cluster)
   // before attempting one, rather than relying on error string matching.
-  const supportsTransactions =
-    mongoose.connection.readyState === mongoose.ConnectionStates.connected &&
-    Boolean(mongoose.connection.getClient().options.replicaSet);
+  //
+  // The check itself is `utils/transactionSupport.ts` and nothing else: it used to
+  // be inlined here, and an inlined copy is a second answer to a question every
+  // multi-collection writer has to answer the same way (see
+  // `tests/topology-predicate.test.ts`).
+  const useTransaction = supportsTransactions(mongoose.connection);
 
   const newRefreshTokenRaw = generateRefreshToken();
   const newRefreshTokenHash = hashToken(newRefreshTokenRaw);
@@ -1260,7 +1264,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
   }
   let claimed: ClaimedTokenMeta | null = null;
 
-  if (supportsTransactions) {
+  if (useTransaction) {
     // Transactional path: perform the claim (mark-used) AND create the new
     // token inside a single transaction so both commit or neither does. This
     // eliminates the race where the original token could be marked used but
