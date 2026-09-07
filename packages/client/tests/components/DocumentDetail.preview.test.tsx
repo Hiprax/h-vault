@@ -736,6 +736,24 @@ describe('DocumentDetail — full screen', () => {
     await waitFor(() => {
       expect(frame()).not.toBeNull();
     });
+    // The same flush the link describe's `beforeEach` performs, and for the same
+    // reason: the iframe ELEMENT is in the DOM as soon as React commits, but the
+    // effect that registers the host's window listener is a PASSIVE one, and the
+    // commit that mounts the frame happens when the plaintext read resolves —
+    // outside `act` — so its passive effects are still queued when `waitFor`
+    // first sees the element. Four tests below handshake against the host, and
+    // without this they were speaking to a window nothing was listening on.
+    //
+    // It presents as `handshake`'s "the host transferred no port": the listener
+    // has not been registered, so the ready message is dropped and no channel is
+    // posted, while the frame is plainly there. It only shows up when this file
+    // runs inside the whole suite, because the in-file shuffle order is drawn
+    // from a run-wide seeded sequence and so differs from the order this file
+    // takes on its own — which is what made it look like an anecdote rather than
+    // the race it is.
+    await act(async () => {
+      await Promise.resolve();
+    });
   }
 
   afterEach(() => {

@@ -1543,9 +1543,9 @@ git push --no-verify                    # skip the hook entirely
   the execute bit leaves the launcher unrunnable; `chmod +x .cache/codeql/codeql/codeql` fixes that
   one. The gate distinguishes the two and prints the applicable fix rather than a bare exit code.
 
-  CodeQL currently reports 24 accepted error-severity findings, every one of them reviewed:
+  CodeQL currently reports 27 accepted error-severity findings, every one of them reviewed:
 
-  - 20 `js/sql-injection` — request values reaching a Mongoose query, which it flags because it
+  - 23 `js/sql-injection` — request values reaching a Mongoose query, which it flags because it
     cannot see the Zod schema, the `$`-stripping middleware or the field allowlist standing in
     front of them.
   - 1 `js/type-confusion-through-parameter-tampering` on `Number(req.headers['content-length'])`
@@ -1560,10 +1560,16 @@ git push --no-verify                    # skip the hook entirely
     fixture writes `{ ['__proto__']: 'name' }`. The query does not distinguish the COMPUTED key
     from the literal one, and the distinction is the whole point of the fixture: a computed
     `['__proto__']` creates an ordinary own data property (`Reflect.ownKeys` returns
-    `['__proto__']`) and never reaches the prototype setter, which is exactly the shape a user's
-    CSV header can produce and the one `parseGenericCsv` has to survive. Nothing is used as a
-    prototype, so there is no defect to fix — rewriting correct, commented test code to satisfy a
-    query that mis-models the computed form would cost more than it buys.
+    `['__proto__']`) and never reaches the prototype setter. The app reaches that same own key by
+    a route worth knowing: the auto-map ASSIGNS (`mapping[header] = ...`), which hits the inherited
+    setter and creates nothing, but changing one column's dropdown rebuilds the mapping as
+    `{ ...prev, [header]: value }` — a computed key, which does create it. The row side never
+    produces it, because `rowsToRecords` assigns too, so the mapping is the one place an own
+    `__proto__` can arrive — and it is handled: the cell is read through the lower-keyed record,
+    where that name still resolves to `Object.prototype`, and a value that is not a string is
+    skipped. Nothing is used as a prototype, so there is no defect to fix — rewriting correct,
+    commented test code to satisfy a query that mis-models the computed form would cost more than
+    it buys.
 
   They are recorded in `scripts/ci/codeql-baseline.json`, keyed by content hash, so the gate fails
   only on **new** findings. Refresh it with `npm run ci:sast -- --update-baseline`, and review what
