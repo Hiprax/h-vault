@@ -87,7 +87,10 @@ vi.mock('../src/services/api/vaultApi', () => ({
 }));
 
 // Mock offlineCache used by vaultStore
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
     setUser: vi.fn().mockResolvedValue(undefined),
     cacheItems: vi.fn().mockResolvedValue(undefined),
@@ -139,7 +142,7 @@ describe('uiStore', () => {
     theme: 'system' as const,
     sidebarOpen: true,
     commandPaletteOpen: false,
-    offlineCacheAvailable: true,
+    offlineCacheError: null,
   };
 
   beforeEach(() => {
@@ -168,7 +171,7 @@ describe('uiStore', () => {
     expect(initial.sidebarOpen).toBe(true);
     expect(initial.sidebarCollapsed).toBe(false);
     expect(initial.commandPaletteOpen).toBe(false);
-    expect(initial.offlineCacheAvailable).toBe(true);
+    expect(initial.offlineCacheError).toBeNull();
   });
 
   // -----------------------------------------------------------------------
@@ -381,24 +384,32 @@ describe('uiStore', () => {
   });
 
   // -----------------------------------------------------------------------
-  // setOfflineCacheAvailable
+  // setOfflineCacheError
   // -----------------------------------------------------------------------
 
-  describe('setOfflineCacheAvailable', () => {
-    it('should set offlineCacheAvailable to false', () => {
-      expect(useUIStore.getState().offlineCacheAvailable).toBe(true);
+  describe('setOfflineCacheError', () => {
+    it('should record why the offline cache failed', () => {
+      expect(useUIStore.getState().offlineCacheError).toBeNull();
 
-      useUIStore.getState().setOfflineCacheAvailable(false);
+      useUIStore.getState().setOfflineCacheError('quota_exceeded');
 
-      expect(useUIStore.getState().offlineCacheAvailable).toBe(false);
+      expect(useUIStore.getState().offlineCacheError).toBe('quota_exceeded');
     });
 
-    it('should set offlineCacheAvailable back to true', () => {
-      useUIStore.setState({ offlineCacheAvailable: false });
+    it('should replace one cause with another rather than merging them', () => {
+      useUIStore.getState().setOfflineCacheError('quota_exceeded');
 
-      useUIStore.getState().setOfflineCacheAvailable(true);
+      useUIStore.getState().setOfflineCacheError('permission_denied');
 
-      expect(useUIStore.getState().offlineCacheAvailable).toBe(true);
+      expect(useUIStore.getState().offlineCacheError).toBe('permission_denied');
+    });
+
+    it('should clear the cause back to null when the cache recovers', () => {
+      useUIStore.setState({ offlineCacheError: 'unknown' });
+
+      useUIStore.getState().setOfflineCacheError(null);
+
+      expect(useUIStore.getState().offlineCacheError).toBeNull();
     });
   });
 });
@@ -1130,7 +1141,7 @@ describe('vaultStore', () => {
   // -----------------------------------------------------------------------
 
   describe('offline cache failure notification', () => {
-    it('should set offlineCacheAvailable to false when cacheItems fails', async () => {
+    it('should record the cause when cacheItems fails', async () => {
       // Set up auth state with a vault key
       useAuthStore.setState({ vaultKey: {} as CryptoKey });
 
@@ -1145,17 +1156,20 @@ describe('vaultStore', () => {
 
       // Mock cache write to fail
       const { offlineCache: mockCache } = await import('../src/services/offlineCache');
-      vi.mocked(mockCache.cacheItems).mockRejectedValue(new Error('QuotaExceededError'));
+      const { OfflineCacheError } = await import('../src/services/offlineCache');
+      vi.mocked(mockCache.cacheItems).mockRejectedValue(
+        new OfflineCacheError('IndexedDB storage quota exceeded', 'quota_exceeded'),
+      );
 
-      // Ensure offlineCacheAvailable starts as true
-      useUIStore.setState({ offlineCacheAvailable: true });
+      // Ensure the warning starts clear
+      useUIStore.setState({ offlineCacheError: null });
 
       await useVaultStore.getState().fetchItems();
 
       // Wait for the .catch() handler to execute (async)
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      expect(useUIStore.getState().offlineCacheAvailable).toBe(false);
+      expect(useUIStore.getState().offlineCacheError).toBe('quota_exceeded');
     });
   });
 

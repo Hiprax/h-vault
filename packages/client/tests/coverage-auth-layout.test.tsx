@@ -125,6 +125,7 @@ import { RegisterPage } from '../src/components/auth/RegisterPage';
 import { AppLayout, isNavItemActive, navItemsFor } from '../src/components/layout/AppLayout';
 import { FileDecryptPanel } from '../src/components/tools/FileDecryptPanel';
 import { useAuthStore } from '../src/stores/authStore';
+import { useUIStore } from '../src/stores/uiStore';
 import { useVaultStore } from '../src/stores/vaultStore';
 import { api, performTokenRefresh } from '../src/services/api/client';
 import { cryptoService } from '../src/services/crypto/cryptoService';
@@ -685,6 +686,179 @@ describe('AppLayout — decryption-failure banner and reconnect sync', () => {
 /* ========================================================================== */
 /*  AppLayout — the Documents navigation entry                                 */
 /* ========================================================================== */
+
+describe('AppLayout — the offline-cache warning', () => {
+  function setupLayout(): void {
+    authState = {
+      user: { userId: 'u1', email: 'test@example.com' },
+      logout: vi.fn(),
+      lock: vi.fn(),
+      isLocked: false,
+    };
+    vaultState = {
+      fetchItems: vi.fn().mockResolvedValue(undefined),
+      fetchFolders: vi.fn().mockResolvedValue(undefined),
+    };
+    installStores();
+    // The real UI store is used here (only auth and vault are mocked in this
+    // file), so the banner is driven exactly the way `vaultStore` drives it.
+    useUIStore.setState({ offlineCacheError: null });
+  }
+
+  function renderLayout() {
+    return render(
+      <MemoryRouter initialEntries={['/vault']}>
+        <Routes>
+          <Route element={<AppLayout />}>
+            <Route path="/vault" element={<div>Vault Content</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  function setCause(
+    cause: 'quota_exceeded' | 'permission_denied' | 'unavailable' | 'unknown' | null,
+  ): void {
+    act(() => {
+      useUIStore.setState({ offlineCacheError: cause });
+    });
+  }
+
+  afterEach(() => {
+    useUIStore.setState({ offlineCacheError: null });
+  });
+
+  it('shows nothing while the offline cache is healthy', () => {
+    setupLayout();
+    renderLayout();
+    expect(screen.queryByTestId('offline-cache-banner')).not.toBeInTheDocument();
+  });
+
+  it('names the remedy for a full storage quota', () => {
+    setupLayout();
+    renderLayout();
+    setCause('quota_exceeded');
+
+    const banner = screen.getByTestId('offline-cache-banner');
+    expect(banner).toHaveTextContent(
+      'Offline access is unavailable: offline storage is full. Free up browser storage, then reload.',
+    );
+    // The OTHER actionable remedy must not appear: telling a user to change a
+    // browser setting when the fix is to free space is worse than saying nothing,
+    // and keeping the two apart is the entire reason the cause is carried at all.
+    expect(banner).not.toHaveTextContent(/blocking offline storage/);
+  });
+
+  it('names the remedy for blocked site data', () => {
+    setupLayout();
+    renderLayout();
+    setCause('permission_denied');
+
+    const banner = screen.getByTestId('offline-cache-banner');
+    expect(banner).toHaveTextContent(
+      'Offline access is unavailable: your browser is blocking offline storage. Allow site data for this site, or leave private browsing, then reload.',
+    );
+    expect(banner).not.toHaveTextContent(/storage is full/);
+  });
+
+  it.each(['unavailable', 'unknown'] as const)(
+    'states the plain fact for `%s` and promises no remedy it cannot deliver',
+    (cause) => {
+      setupLayout();
+      renderLayout();
+      setCause(cause);
+
+      const banner = screen.getByTestId('offline-cache-banner');
+      expect(banner).toHaveTextContent(
+        'Offline access is unavailable: offline storage is not working in this browser.',
+      );
+      expect(banner).not.toHaveTextContent(/Free up browser storage|Allow site data/);
+    },
+  );
+
+  it('announces politely rather than interrupting, and offers a labelled dismiss', () => {
+    setupLayout();
+    renderLayout();
+    setCause('quota_exceeded');
+
+    const region = screen.getByTestId('offline-cache-region');
+    // `status`, not `alert`. A degraded-mode notice must not interrupt what the
+    // user is doing.
+    expect(region).toHaveAttribute('role', 'status');
+    expect(region).not.toHaveAttribute('role', 'alert');
+    expect(screen.getByLabelText('Dismiss offline storage warning')).toBeInTheDocument();
+  });
+
+  it('keeps the live region mounted and EMPTY before there is anything to announce', () => {
+    // The property, not the attribute. A live region that is inserted into the
+    // document already containing its message is frequently never announced —
+    // the handling that survives that shape is defined for `role="alert"`, and
+    // this is deliberately `role="status"`. So the region has to exist first and
+    // be filled second, which means it cannot be rendered behind the condition.
+    // A regression here is silent: the banner still looks right on screen and is
+    // never spoken.
+    setupLayout();
+    renderLayout();
+
+    const regionBefore = screen.getByTestId('offline-cache-region');
+    expect(regionBefore).toHaveAttribute('role', 'status');
+    expect(regionBefore).toBeEmptyDOMElement();
+    expect(screen.queryByTestId('offline-cache-banner')).not.toBeInTheDocument();
+
+    setCause('permission_denied');
+
+    // The SAME node now carries the message: the region was updated, not created.
+    const regionAfter = screen.getByTestId('offline-cache-region');
+    expect(regionAfter).toBe(regionBefore);
+    expect(regionAfter).toContainElement(screen.getByTestId('offline-cache-banner'));
+    expect(regionAfter).toHaveTextContent(/blocking offline storage/);
+  });
+
+  it('empties the live region again once the cache recovers, keeping the node', () => {
+    setupLayout();
+    renderLayout();
+    setCause('unknown');
+    const region = screen.getByTestId('offline-cache-region');
+    expect(region).not.toBeEmptyDOMElement();
+
+    setCause(null);
+
+    expect(screen.getByTestId('offline-cache-region')).toBe(region);
+    expect(region).toBeEmptyDOMElement();
+  });
+
+  it('stays dismissed for the same cause but returns when the cause changes', () => {
+    setupLayout();
+    renderLayout();
+    setCause('quota_exceeded');
+
+    fireEvent.click(screen.getByLabelText('Dismiss offline storage warning'));
+    expect(screen.queryByTestId('offline-cache-banner')).not.toBeInTheDocument();
+
+    // Re-asserting the SAME cause must not resurrect it — the user has read it.
+    setCause(null);
+    setCause('quota_exceeded');
+    expect(screen.queryByTestId('offline-cache-banner')).not.toBeInTheDocument();
+
+    // A DIFFERENT cause carries a different remedy, so it must be shown.
+    setCause('permission_denied');
+    expect(screen.getByTestId('offline-cache-banner')).toHaveTextContent(
+      /blocking offline storage/,
+    );
+  });
+
+  it('hides the banner once a later cache write succeeds', () => {
+    setupLayout();
+    renderLayout();
+    setCause('unknown');
+    expect(screen.getByTestId('offline-cache-banner')).toBeInTheDocument();
+
+    setCause(null);
+
+    expect(screen.queryByTestId('offline-cache-banner')).not.toBeInTheDocument();
+  });
+});
 
 describe('AppLayout — the Documents entry is gated on what the server advertises', () => {
   function renderNav(pathname = '/vault') {

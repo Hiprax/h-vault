@@ -9,7 +9,7 @@
 import { create } from 'zustand';
 import { cryptoService } from '../services/crypto/cryptoService.js';
 import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
-import { offlineCache } from '../services/offlineCache.js';
+import { offlineCache, offlineCacheErrorType } from '../services/offlineCache.js';
 import { clearScoreCache } from '../services/health/strengthCache.js';
 import { logger } from '../lib/logger.js';
 import { useAuthStore } from './authStore.js';
@@ -825,11 +825,21 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
             lastDecryptionError: errorMessage ?? state.lastDecryptionError,
           }));
 
-          // Cache raw encrypted items for offline access
-          offlineCache.cacheItems(allRawItems).catch((error: unknown) => {
-            logger.warn('Offline cache write failed (items):', error);
-            useUIStore.getState().setOfflineCacheAvailable(false);
-          });
+          // Cache raw encrypted items for offline access.
+          //
+          // BOTH outcomes are recorded, not just the failure: the status is a
+          // banner the user sees, and a warning that can only ever be turned ON
+          // states something false the moment the next write succeeds. One
+          // transient failure used to latch it for the rest of the session.
+          offlineCache.cacheItems(allRawItems).then(
+            () => {
+              useUIStore.getState().setOfflineCacheError(null);
+            },
+            (error: unknown) => {
+              logger.warn('Offline cache write failed (items):', error);
+              useUIStore.getState().setOfflineCacheError(offlineCacheErrorType(error));
+            },
+          );
         } catch (error) {
           // If offline, try loading from cache
           if (!navigator.onLine) {
@@ -1027,11 +1037,17 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
           lastDecryptionError: errorMessage ?? state.lastDecryptionError,
         }));
 
-        // Cache raw encrypted folders for offline access
-        offlineCache.cacheFolders(rawFolders).catch((error: unknown) => {
-          logger.warn('Offline cache write failed (folders):', error);
-          useUIStore.getState().setOfflineCacheAvailable(false);
-        });
+        // Cache raw encrypted folders for offline access. Both outcomes are
+        // recorded, for the reason spelled out in fetchItems.
+        offlineCache.cacheFolders(rawFolders).then(
+          () => {
+            useUIStore.getState().setOfflineCacheError(null);
+          },
+          (error: unknown) => {
+            logger.warn('Offline cache write failed (folders):', error);
+            useUIStore.getState().setOfflineCacheError(offlineCacheErrorType(error));
+          },
+        );
       } catch (error) {
         // If offline, try loading from cache
         if (!navigator.onLine) {

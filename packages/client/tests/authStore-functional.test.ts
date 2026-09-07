@@ -81,7 +81,10 @@ vi.mock('../src/services/api/vaultApi', () => ({
   listTrashApi: vi.fn(),
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
     setUser: vi.fn().mockResolvedValue(undefined),
     cacheItems: vi.fn().mockResolvedValue(undefined),
@@ -158,6 +161,8 @@ import {
   logoutApi,
 } from '../src/services/api/authApi.js';
 import { offlineCache } from '../src/services/offlineCache.js';
+import { clearCsrfToken } from '../src/services/api/client';
+import { clearSettingsCache } from '../src/hooks/useUserSettings';
 import {
   copySecretToClipboard,
   __resetClipboardGuardForTests,
@@ -1335,6 +1340,8 @@ describe('logout clears the encrypted Vault Health snapshot (lock does not)', ()
       mek: {} as CryptoKey,
     });
 
+    localStorage.removeItem('__hv_logout_event');
+
     await useAuthStore.getState().logout();
 
     expect(mockClearHealthResults).toHaveBeenCalledWith('user-123');
@@ -1343,6 +1350,14 @@ describe('logout clears the encrypted Vault Health snapshot (lock does not)', ()
       'Failed to clear health results during logout',
       expect.any(Error),
     );
+    // The whole point of the try/catch: logout AWAITS the clear, and three
+    // teardown steps run after that await. Asserting only that logout returned
+    // would pass even if all three were skipped, leaving the next session with a
+    // stale settings cache, a CSRF token bound to a dead session, and other tabs
+    // never told to wipe their state.
+    expect(clearSettingsCache).toHaveBeenCalled();
+    expect(clearCsrfToken).toHaveBeenCalled();
+    expect(localStorage.getItem('__hv_logout_event')).not.toBeNull();
   });
 });
 

@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-09-03",
-  "commit": "af609ee",
+  "recordedAt": "2026-09-07",
+  "commit": "999c611",
   "tests": {
-    "count": 9484
+    "count": 9821
   },
   "coverage": {
     "diff": 100
@@ -17,7 +17,7 @@
   "a11y": {
     "critical": 0,
     "serious": 0,
-    "viewsScanned": 20
+    "viewsScanned": 22
   },
   "suppressions": {
     "count": 20,
@@ -29,7 +29,7 @@
         "line": 100,
         "branch": 98.91,
         "function": 100,
-        "linesTotal": 652,
+        "linesTotal": 656,
         "branchesTotal": 367,
         "filesMeasured": [
           "src/constants/index.ts",
@@ -46,16 +46,16 @@
         ]
       },
       "tests": {
-        "count": 1284
+        "count": 1286
       }
     },
     "packages/server": {
       "coverage": {
-        "line": 98.84,
-        "branch": 92.93,
-        "function": 98.33,
-        "linesTotal": 4057,
-        "branchesTotal": 2064,
+        "line": 98.85,
+        "branch": 93.07,
+        "function": 98.35,
+        "linesTotal": 4102,
+        "branchesTotal": 2078,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/seedBreachesArgs.ts",
@@ -117,6 +117,7 @@
           "src/utils/breachSeed.ts",
           "src/utils/cascadeDelete.ts",
           "src/utils/controllerHelpers.ts",
+          "src/utils/cookies.ts",
           "src/utils/cryptoManager.ts",
           "src/utils/documentObjects.ts",
           "src/utils/documentSummary.ts",
@@ -131,6 +132,7 @@
           "src/utils/migrations.ts",
           "src/utils/partSemaphore.ts",
           "src/utils/sizeEstimator.ts",
+          "src/utils/storageBreaker.ts",
           "src/utils/storageHealth.ts",
           "src/utils/swaggerWarning.ts",
           "src/utils/token.ts",
@@ -139,16 +141,16 @@
         ]
       },
       "tests": {
-        "count": 3799
+        "count": 3915
       }
     },
     "packages/client": {
       "coverage": {
-        "line": 98.97,
-        "branch": 92.68,
-        "function": 98.32,
-        "linesTotal": 8816,
-        "branchesTotal": 6092,
+        "line": 99.1,
+        "branch": 93.1,
+        "function": 98.79,
+        "linesTotal": 9109,
+        "branchesTotal": 6362,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -158,14 +160,17 @@
           "src/components/documents/DocumentDetail.tsx",
           "src/components/documents/DocumentList.tsx",
           "src/components/documents/DocumentSandbox.tsx",
+          "src/components/documents/DocumentTransfers.tsx",
           "src/components/documents/DocumentTransformControls.tsx",
           "src/components/documents/DocumentUploadPanel.tsx",
           "src/components/documents/StorageUnavailable.tsx",
+          "src/components/folders/FolderRail.tsx",
           "src/components/layout/AppLayout.tsx",
           "src/components/layout/ErrorBoundary.tsx",
           "src/components/layout/OnboardingGuide.tsx",
           "src/components/layout/ProtectedRoute.tsx",
           "src/components/layout/PublicOnlyRoute.tsx",
+          "src/components/layout/RailLayout.tsx",
           "src/components/layout/ReloadPrompt.tsx",
           "src/components/tools/FileDecryptPanel.tsx",
           "src/components/tools/FileEncryptPanel.tsx",
@@ -178,6 +183,7 @@
           "src/components/ui/Input.tsx",
           "src/components/ui/Label.tsx",
           "src/components/ui/OtpInput.tsx",
+          "src/components/ui/Pagination.tsx",
           "src/components/ui/Spinner.tsx",
           "src/components/ui/Tabs.tsx",
           "src/components/ui/Toast.tsx",
@@ -199,12 +205,16 @@
           "src/hooks/useClipboardGuard.ts",
           "src/hooks/useConnectionStatus.ts",
           "src/hooks/useDocumentsConfig.ts",
+          "src/hooks/useDocumentsFilterView.ts",
           "src/hooks/useFavicon.ts",
           "src/hooks/useKeyboardShortcuts.ts",
           "src/hooks/useUploadUnloadGuard.ts",
           "src/hooks/useUserSettings.ts",
+          "src/hooks/useVaultFolderScope.ts",
+          "src/hooks/useVaultFolders.ts",
           "src/lib/accessToken.ts",
           "src/lib/address.ts",
+          "src/lib/documentSearch.ts",
           "src/lib/download.ts",
           "src/lib/lazySha256.ts",
           "src/lib/lazyZxcvbn.ts",
@@ -248,6 +258,7 @@
           "src/sandbox/sniff.ts",
           "src/sandbox/transform/formatEngine.ts",
           "src/services/api/authApi.ts",
+          "src/services/api/backupApi.ts",
           "src/services/api/client.ts",
           "src/services/api/configApi.ts",
           "src/services/api/documentsApi.ts",
@@ -303,12 +314,12 @@
         ]
       },
       "tests": {
-        "count": 4192
+        "count": 4410
       }
     },
     "e2e": {
       "tests": {
-        "count": 209
+        "count": 210
       }
     }
   },
@@ -486,9 +497,9 @@
     ]
   },
   "duplication": {
-    "percentage": 1.98,
-    "clones": 122,
-    "duplicatedLines": 1456,
+    "percentage": 1.91,
+    "clones": 120,
+    "duplicatedLines": 1450,
     "totalLines": 52849,
     "ceiling": 2.89,
     "sources": 190
@@ -522,7 +533,7 @@
       "spectral": 1
     }
   },
-  "reason": "secret-scan denominator fix: 16 new tests in local-pipeline.test.ts covering evaluateDenominator's four verdicts and the pre-commit hook end to end against a real index",
+  "reason": "Phase 19 (T2) final: the putStoredRecord abort test the judges asked for, net of two tests removed for failing the can-it-fail rule",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

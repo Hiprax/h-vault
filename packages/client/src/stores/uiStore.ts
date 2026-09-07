@@ -9,6 +9,7 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import type { OfflineCacheErrorType } from '../services/offlineCache';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -21,13 +22,19 @@ interface UIState {
   sidebarOpen: boolean;
   sidebarCollapsed: boolean;
   commandPaletteOpen: boolean;
-  offlineCacheAvailable: boolean;
+  /**
+   * `null` while the offline cache is healthy; otherwise WHY it is not, so the
+   * warning can say something the user can act on. A bare boolean was the
+   * previous shape and it threw away the only part of the failure that differs
+   * between "free some storage" and "your browser is blocking this".
+   */
+  offlineCacheError: OfflineCacheErrorType | null;
 
   setTheme: (theme: ThemeValue) => void;
   toggleSidebar: () => void;
   toggleSidebarCollapsed: () => void;
   toggleCommandPalette: () => void;
-  setOfflineCacheAvailable: (available: boolean) => void;
+  setOfflineCacheError: (error: OfflineCacheErrorType | null) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +91,7 @@ export const useUIStore = create<UIState>()(
       sidebarOpen: true,
       sidebarCollapsed: false,
       commandPaletteOpen: false,
-      offlineCacheAvailable: true,
+      offlineCacheError: null,
 
       setTheme: (theme: ThemeValue): void => {
         applyThemeToDocument(theme);
@@ -103,8 +110,8 @@ export const useUIStore = create<UIState>()(
         set((state) => ({ commandPaletteOpen: !state.commandPaletteOpen }));
       },
 
-      setOfflineCacheAvailable: (available: boolean): void => {
-        set({ offlineCacheAvailable: available });
+      setOfflineCacheError: (error: OfflineCacheErrorType | null): void => {
+        set({ offlineCacheError: error });
       },
     }),
     {

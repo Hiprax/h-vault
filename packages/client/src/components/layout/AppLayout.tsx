@@ -31,6 +31,7 @@ import { OnboardingGuide } from './OnboardingGuide';
 import { isStorageDegraded } from '../../stores/encryptedStorage';
 import { BrandLogo } from '../ui/BrandLogo';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
+import type { OfflineCacheErrorType } from '../../services/offlineCache';
 
 interface NavItem {
   label: string;
@@ -105,6 +106,33 @@ const DOCUMENTS_NAV_ITEM: NavItem = { label: 'Documents', to: '/documents', icon
  * carry for the sake of the sixth. Exported so the entry's presence and its
  * position can be pinned without rendering the whole layout.
  */
+/**
+ * What the user is told when the encrypted offline copy of their vault cannot be
+ * written. Offline read access is a shipped feature, so a silent write failure
+ * is discovered at the worst possible moment: an empty vault with no network to
+ * recover from. The notice is raised while the user is still ONLINE and able to
+ * act.
+ *
+ * The four classified causes collapse to three messages because only two of them
+ * have a remedy the user owns. `unavailable` (no IndexedDB at all) and `unknown`
+ * share one honest, non-prescriptive sentence rather than inviting the user to
+ * distinguish situations they cannot act on differently.
+ *
+ * Canned copy, keyed on the discriminant — never the underlying `message`, which
+ * is engine-specific text this project has not reviewed.
+ */
+const OFFLINE_CACHE_UNAVAILABLE =
+  'Offline access is unavailable: offline storage is not working in this browser.';
+
+const OFFLINE_CACHE_NOTICES: Record<OfflineCacheErrorType, string> = {
+  quota_exceeded:
+    'Offline access is unavailable: offline storage is full. Free up browser storage, then reload.',
+  permission_denied:
+    'Offline access is unavailable: your browser is blocking offline storage. Allow site data for this site, or leave private browsing, then reload.',
+  unavailable: OFFLINE_CACHE_UNAVAILABLE,
+  unknown: OFFLINE_CACHE_UNAVAILABLE,
+};
+
 export function navItemsFor(documentsEnabled: boolean): NavItem[] {
   if (!documentsEnabled) return [VAULT_NAV_ITEM, ...REMAINING_NAV_ITEMS];
   return [VAULT_NAV_ITEM, DOCUMENTS_NAV_ITEM, ...REMAINING_NAV_ITEMS];
@@ -115,12 +143,17 @@ export function AppLayout() {
   const [hovered, setHovered] = useState(false);
   const [storageDegraded, setStorageDegraded] = useState(isStorageDegraded());
   const [decryptionFailureCount, setDecryptionFailureCount] = useState(0);
+  // Dismissal is remembered per CAUSE, not as a bare boolean: a user who
+  // dismissed "storage is full" should still be told when the cause changes to
+  // "your browser is blocking this", which is a different remedy.
+  const [dismissedOfflineCacheError, setDismissedOfflineCacheError] =
+    useState<OfflineCacheErrorType | null>(null);
   const { user, logout, lock, isLocked } = useAuthStore();
   // `null` until the server has answered, and the entry is rendered only for an
   // explicit `true`: an entry that appeared and then vanished would be worse than
   // one that appeared a beat late.
   const documentsConfig = useDocumentsConfig();
-  const { sidebarCollapsed, toggleSidebarCollapsed } = useUIStore();
+  const { sidebarCollapsed, toggleSidebarCollapsed, offlineCacheError } = useUIStore();
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
   const navigate = useNavigate();
@@ -130,6 +163,14 @@ export function AppLayout() {
   // Reflects real server reachability (a lightweight /health poll), not just
   // navigator.onLine — so the indicator turns Offline when the server is down.
   const { isOnline } = useConnectionStatus();
+
+  // The cause to announce, or `null` when there is nothing to say. Derived rather
+  // than a bare boolean so the notice lookup and the dismiss handler both narrow
+  // to a real cause without a non-null assertion.
+  const offlineCacheNotice =
+    offlineCacheError !== null && offlineCacheError !== dismissedOfflineCacheError
+      ? offlineCacheError
+      : null;
 
   // Whether the sidebar should visually appear expanded
   const expanded = !sidebarCollapsed || hovered;
@@ -432,6 +473,46 @@ export function AppLayout() {
             </span>
           </div>
         )}
+
+        {/*
+          Offline cache warning.
+
+          The live region is MOUNTED UNCONDITIONALLY and only its CONTENT changes.
+          A region that is inserted into the document already holding its message
+          is frequently not announced at all: the special handling that survives
+          that is defined for `role="alert"`, not for `role="status"`. Rendering
+          the whole `<div role="status">…message…</div>` behind the condition
+          would therefore have left this notice silent for exactly the users who
+          cannot see it — the failure the notice exists to prevent, one layer
+          down. `alert` is the wrong politeness here (a degraded-mode notice must
+          not interrupt), so the region is empty until there is something to say.
+
+          When empty it is `sr-only`, so it occupies no layout; the visible box
+          and its spacing live on the child.
+        */}
+        <div
+          role="status"
+          data-testid="offline-cache-region"
+          className={offlineCacheNotice !== null ? 'mx-4 mt-2 lg:mx-6' : 'sr-only'}
+        >
+          {offlineCacheNotice !== null && (
+            <div
+              data-testid="offline-cache-banner"
+              className="flex items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-4 py-2 text-sm text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300"
+            >
+              <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+              <span className="flex-1">{OFFLINE_CACHE_NOTICES[offlineCacheNotice]}</span>
+              <button
+                type="button"
+                onClick={() => setDismissedOfflineCacheError(offlineCacheNotice)}
+                className="cursor-pointer rounded p-1 text-yellow-700 hover:bg-yellow-100 dark:text-yellow-400 dark:hover:bg-yellow-800/30"
+                aria-label="Dismiss offline storage warning"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+        </div>
 
         {/* Decryption failure warning */}
         {decryptionFailureCount > 0 && (
