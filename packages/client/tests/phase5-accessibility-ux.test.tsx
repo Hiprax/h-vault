@@ -298,9 +298,22 @@ function makeDecryptedItem(
 // Global store resets
 // ---------------------------------------------------------------------------
 
+/** The environment's own `fetch`, restored after every case. */
+const realFetch = globalThis.fetch;
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+
+  // `AppLayout` mounts `useConnectionStatus`, which probes `/api/v1/health` on
+  // mount. Under jsdom the real `fetch` cannot resolve a relative URL, so that
+  // probe rejects and lands `setIsOnline(false)` a microtask after a synchronous
+  // test body has finished — an update outside `act(...)`, which React reports and
+  // which means an assertion here can read a DOM one render behind. Nothing in this
+  // file is about connectivity, so the probe is left IN FLIGHT: the indicator reads
+  // from `navigator.onLine` until an answer arrives, exactly as it does in a browser
+  // between the mount and the first response.
+  globalThis.fetch = vi.fn(() => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
 
   useAuthStore.setState({
     accessToken: 'test-token',
@@ -334,7 +347,14 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // ORDER MATTERS, and it is the opposite of the obvious one. `restoreAllMocks`
+  // puts back whatever a `vi.spyOn` captured, and any spy on `fetch` here captured
+  // the PER-TEST stub installed above — so restoring after the reassignment would
+  // write that stub back over the environment's own `fetch`. Unwind the spies
+  // first, then put the real one back, and the file leaves `globalThis` as it
+  // found it whether a case spied on it or not.
   vi.restoreAllMocks();
+  globalThis.fetch = realFetch;
 });
 
 // ==========================================================================

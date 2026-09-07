@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { VaultItemForm } from '../../src/components/vault/VaultItemForm';
 
 // ---------------------------------------------------------------------------
@@ -259,22 +259,35 @@ describe('VaultItemForm', () => {
       });
     });
 
-    it('formats card number with 4-digit groups as user types', () => {
+    it('formats card number with 4-digit groups as user types', async () => {
       renderForm({ defaultType: 'card' });
 
       const cardInput = screen.getByPlaceholderText('1234 5678 9012 3456') as HTMLInputElement;
       fireEvent.change(cardInput, { target: { value: '4111111111111111' } });
 
       expect(cardInput.value).toBe('4111 1111 1111 1111');
+
+      // The lazily-loaded strength meter applies itself in a `.then` scheduled by
+      // the change above, which in a synchronous case lands once the body has
+      // finished and outside `act(...)`. Settled here rather than after the render,
+      // because it is the CHANGE that schedules it. Nothing above reads the meter.
+      await act(async () => {
+        await Promise.resolve();
+      });
     });
 
-    it('strips non-digit characters from card number input', () => {
+    it('strips non-digit characters from card number input', async () => {
       renderForm({ defaultType: 'card' });
 
       const cardInput = screen.getByPlaceholderText('1234 5678 9012 3456') as HTMLInputElement;
       fireEvent.change(cardInput, { target: { value: '4111-1111-1111-1111' } });
 
       expect(cardInput.value).toBe('4111 1111 1111 1111');
+
+      // See the case above: the strength meter's `.then` is scheduled by the change.
+      await act(async () => {
+        await Promise.resolve();
+      });
     });
 
     it('shows "+ Add billing address" button by default for new card', () => {

@@ -297,11 +297,13 @@ export const MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER = 3;
 // `MAX_DOCUMENTS_PER_USER`.
 //
 // The count is checked when a transfer is OPENED and never again
-// (`documentController`'s init: `documentCount >= MAX_DOCUMENTS_PER_USER`), so
-// three transfers opened against the same reading of 4,999 all pass and all
-// commit. The highest number of rows an account can actually hold is therefore
-// `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1`, and a
-// fourth transfer cannot be opened until it is back under the limit.
+// (`documentController`'s init: `documentCount >= MAX_DOCUMENTS_PER_USER`), and a
+// transfer already open commits whatever the count does afterwards. So an account
+// at `MAX_DOCUMENTS_PER_USER - 1` may open a transfer, then another, then a third
+// — each reading a count that still fits, because only a COMPLETION moves it —
+// and all three commit. The highest number of rows an account can actually hold is
+// therefore `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1`,
+// and a fourth transfer cannot be opened until it is back under the limit.
 //
 // That "and a fourth cannot be opened" is the whole derivation, and it is a
 // property of the SERVER rather than of arithmetic. TWO things in

@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-09-07",
-  "commit": "999c611",
+  "commit": "8d296a6",
   "tests": {
-    "count": 9821
+    "count": 9862
   },
   "coverage": {
     "diff": 100
@@ -54,7 +54,7 @@
         "line": 98.85,
         "branch": 93.07,
         "function": 98.35,
-        "linesTotal": 4102,
+        "linesTotal": 4103,
         "branchesTotal": 2078,
         "filesMeasured": [
           "src/app.ts",
@@ -141,13 +141,13 @@
         ]
       },
       "tests": {
-        "count": 3915
+        "count": 3953
       }
     },
     "packages/client": {
       "coverage": {
         "line": 99.1,
-        "branch": 93.1,
+        "branch": 93.12,
         "function": 98.79,
         "linesTotal": 9109,
         "branchesTotal": 6362,
@@ -314,7 +314,7 @@
         ]
       },
       "tests": {
-        "count": 4410
+        "count": 4413
       }
     },
     "e2e": {
@@ -497,7 +497,7 @@
     ]
   },
   "duplication": {
-    "percentage": 1.91,
+    "percentage": 1.9,
     "clones": 120,
     "duplicatedLines": 1450,
     "totalLines": 52849,
@@ -533,7 +533,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 19 (T2) final: the putStoredRecord abort test the judges asked for, net of two tests removed for failing the can-it-fail rule",
+  "reason": "validate-11-20: the a11y view-count guard (14 pinned sentences in docs-sync), the folder-row nested-interactive fix and its structural test, the offline-cache scoping/order test that covers authStore's login catch honestly, and 210 React act() warnings traced to root cause and removed across 16 client files",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

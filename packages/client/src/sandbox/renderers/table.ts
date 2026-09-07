@@ -227,9 +227,10 @@ export function parseDelimited(text: string, delimiter: string): DelimitedTable 
  * The row budget is spent at the width the caller DECLARED, before that width is
  * clamped. For a parsed table the two are the same number. For one assembled by
  * hand they are not, and taking the declared width is the conservative reading:
- * a table that claims to be a hundred thousand columns wide buys one row, rather
- * than buying `MAX_PREVIEW_TABLE_CELLS / MAX_PREVIEW_TABLE_COLUMNS` of them at a
- * width it never had.
+ * a table that claims to be a hundred thousand columns wide buys two rows, and one
+ * claiming a million buys none, rather than either of them buying
+ * `MAX_PREVIEW_TABLE_CELLS / MAX_PREVIEW_TABLE_COLUMNS` of them at a width it
+ * never had.
  */
 export function renderTable(doc: Document, table: DelimitedTable): HTMLTableElement {
   const node = el(doc, 'table', 'hv-table');

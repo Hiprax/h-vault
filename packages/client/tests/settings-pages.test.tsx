@@ -193,6 +193,16 @@ vi.mock('../src/services/offlineCache', async (importOriginal) => ({
   // classifier) stay real; only the IndexedDB-backed singleton is faked.
   ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
+    // `setUser` is not optional plumbing and the double must carry it. `authStore`
+    // awaits it as the FIRST statement of the try/catch that scopes the offline
+    // database to the account signing in — the control that stops one account
+    // reading another's cached ciphertext — so a double without it calls
+    // `undefined(...)`, throws synchronously, and takes the catch branch before
+    // `clear()` is reached either. Nothing here asserts that branch; what it cost
+    // was a `TypeError` in the run's output and a login path quietly exercising its
+    // failure arm. The real scoping behaviour is tested against the unmocked module
+    // in `offlineCache.test.ts`.
+    setUser: vi.fn().mockResolvedValue(undefined),
     cacheItems: vi.fn().mockResolvedValue(undefined),
     cacheFolders: vi.fn().mockResolvedValue(undefined),
     getCachedItems: vi.fn().mockResolvedValue([]),
@@ -429,6 +439,15 @@ describe('SettingsPage', () => {
         <SettingsPage />
       </MemoryRouter>,
     );
+
+    // The profile request above is held pending, and it is what keeps the spinner
+    // on screen. The page fires OTHER work on mount, though, and each of those
+    // applies itself in a `.then` that in a synchronous case lands after the body
+    // has finished and outside `act(...)`. Settled here: the held request means
+    // the spinner cannot go away, so the assertion below is unchanged.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     const spinner = container.querySelector('.animate-spin');
     expect(spinner).toBeTruthy();
@@ -2316,6 +2335,15 @@ describe('BackupSettingsPage', () => {
         <BackupSettingsPage />
       </MemoryRouter>,
     );
+
+    // The profile request above is held pending, and it is what keeps the spinner
+    // on screen. The page fires OTHER work on mount, though, and each of those
+    // applies itself in a `.then` that in a synchronous case lands after the body
+    // has finished and outside `act(...)`. Settled here: the held request means
+    // the spinner cannot go away, so the assertion below is unchanged.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     const spinner = container.querySelector('.animate-spin');
     expect(spinner).toBeTruthy();

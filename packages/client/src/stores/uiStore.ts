@@ -27,6 +27,15 @@ interface UIState {
    * warning can say something the user can act on. A bare boolean was the
    * previous shape and it threw away the only part of the failure that differs
    * between "free some storage" and "your browser is blocking this".
+   *
+   * ONE slot, written by BOTH of `vaultStore`'s cache writes (items and folders),
+   * last write wins. That is deliberate rather than unnoticed: every cause this
+   * discriminant carries is an ORIGIN-level condition — quota, blocked site data,
+   * no IndexedDB at all — and both writes go through one `openDatabase()` against
+   * one database whose stores are created together, so there is no steady state in
+   * which one succeeds and the other fails. The reachable cost is a banner that
+   * clears one fetch early during a transient failure and returns on the next
+   * write; the alternative is two banners for one condition.
    */
   offlineCacheError: OfflineCacheErrorType | null;
 

@@ -102,9 +102,11 @@ export const A11Y_VIEWS = [
   },
   { id: 'unlock-screen', description: 'the unlock screen, vault locked' },
   {
-    // THE FIFTH VIEW, and its reason is a property of axe rather than of this
-    // application, so it is written down here where somebody might otherwise
-    // delete it as redundant.
+    // THE ONE ENTRY THAT IS NOT A VIEW OF THIS APPLICATION, and its reason is a
+    // property of axe rather than of the code, so it is written down here where
+    // somebody might otherwise delete it as redundant. Deliberately not numbered:
+    // an ordinal here is a count of the document views above it, and it went stale
+    // the moment two more of those were added.
     //
     // The frame's CONTENTS are already scanned by `document-viewer`:
     // `@axe-core/playwright` reaches a child frame through Playwright's own

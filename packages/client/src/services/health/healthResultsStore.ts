@@ -26,13 +26,24 @@
  *   currently READS these rejection values — every caller swallows — so this is
  *   about the two services not drifting, and about not leaving the exact
  *   construct that was a shipped defect next door alive here.
- * - Every transaction listens for `abort` as well as `complete` and `error`. A
+ * - Every transaction WHOSE COMPLETION IS AWAITED listens for `abort` as well as
+ *   `complete` and `error` — which here means the two mutating ones,
+ *   {@link putStoredRecord} and the clear inside {@link clearHealthResults}. A
  *   transaction can end with neither of the latter two (a commit-time failure, or
  *   an abort raised while no request is outstanding), and a promise that is never
  *   settled in that case does not merely lose a snapshot: `enqueueWrite` chains
  *   every mutation through one promise, so a single pending op stops ALL later
  *   persistence for the tab's life, and `logout` — which awaits
  *   `clearHealthResults` — never returns.
+ *
+ *   {@link getStoredRecord} attaches nothing to its transaction, and that is not
+ *   an omission: it awaits the REQUEST, and the abort algorithm fires `error` at
+ *   every request still outstanding when a transaction aborts. A read transaction
+ *   has exactly one request, so there is no ordering in which the transaction ends
+ *   while that promise is unsettled — a commit-time failure can only arrive after
+ *   the single `get` has already resolved it, and `db.transaction(…)` throwing
+ *   synchronously rejects from inside the `new Promise` executor. The same shape,
+ *   for the same reason, is `offlineCache`'s three readers.
  */
 import { cryptoService } from '../crypto/cryptoService';
 import { deriveUserHash, transactionFailureError } from '../offlineCache';

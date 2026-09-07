@@ -216,8 +216,9 @@ function prettyJson(text: string, ext: string): string | null {
     // `.json5` and `.jsonc` are the expected failures here — comments and
     // trailing commas are not JSON — and a file that simply is not valid JSON
     // is the other. Both fall back to the source view, which is the honest
-    // rendering of a document that does not parse. Repairing it is Phase 20's
-    // job, on the UPLOAD path, with the user's confirmation.
+    // rendering of a document that does not parse. Repairing it belongs to the
+    // UPLOAD path (`DocumentUploadPanel`'s repair transform), with the user's
+    // confirmation — never to a viewer, which must show what is stored.
     return null;
   }
 }

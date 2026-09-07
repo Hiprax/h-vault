@@ -726,7 +726,16 @@ describe('AppLayout — the offline-cache warning', () => {
   }
 
   afterEach(() => {
-    useUIStore.setState({ offlineCacheError: null });
+    // Inside `act`, and that is not decoration. `vitest.config.ts` sets
+    // `sequence.hooks: 'stack'`, so this describe-scoped teardown runs BEFORE the
+    // root-level one Testing Library registers for its own cleanup — the layout is
+    // still mounted when this lands. `AppLayout` subscribes with `useUIStore()` and
+    // no selector, so zustand's fresh state object re-renders it on EVERY write,
+    // including one that sets the field to the value it already holds. Unwrapped,
+    // that is a React `act(...)` warning on every case in this block.
+    act(() => {
+      useUIStore.setState({ offlineCacheError: null });
+    });
   });
 
   it('shows nothing while the offline cache is healthy', () => {

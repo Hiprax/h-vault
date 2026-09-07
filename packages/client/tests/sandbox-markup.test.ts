@@ -364,9 +364,17 @@ describe('the markdown renderer, on a corpus of hostile documents', () => {
 
   it('says nothing for the references that reach no third party', async () => {
     // The negatives that keep the notice meaningful, and the ones the fix could
-    // most easily break. A `data:` image renders — `img-src` allows it — so
-    // announcing it as blocked would be a lie; a relative path is this
-    // document's own; and a scheme with no host is not a request at all.
+    // most easily break. A relative path is this document's own; a scheme with no
+    // host is not a request at all; and a `data:` src reaches nobody either.
+    //
+    // Say WHICH mechanism spares the `data:` one, because it is not the obvious
+    // one and the obvious one is what the first draft of this comment claimed.
+    // `hast-util-sanitize`'s default schema pins `protocols.src = ['http','https']`
+    // (measured against the installed library), so the ATTRIBUTE is stripped and
+    // that image never renders at all — `img-src data:` never comes into it. The
+    // case where a `data:` value really does survive and really does render is a
+    // `srcSet` candidate, which the schema applies no protocol filter to, and it
+    // is the case below.
     for (const src of [
       'local.png',
       './nested/local.png',
@@ -415,6 +423,30 @@ describe('the markdown renderer, on a corpus of hostile documents', () => {
     );
 
     expect(rendered.textContent).toContain(REMOTE_CONTENT_NOTICE);
+  });
+
+  it('says nothing about a srcset candidate that renders without reaching anyone', async () => {
+    // The `data:` case that DOES survive sanitization, unlike the `img src` one
+    // above: the default schema names no protocols for `srcSet`, so the candidate
+    // is kept, and `img-src` (`server/src/config/sandboxCsp.ts`) admits `data:`, so
+    // it renders. Announcing it as blocked would therefore be a lie — which is the
+    // one thing the sweep must not do — while the remote candidate beside it is
+    // still reported.
+    const localOnly = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="data:image/gif;base64,R0lGODlhAQABAAAAACw= 1x"><img src="local.png" alt="x"></picture>\n',
+      ),
+    );
+    expect(localOnly.textContent).not.toContain(REMOTE_CONTENT_NOTICE);
+
+    const mixed = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="data:image/gif;base64,R0lGODlhAQABAAAAACw= 1x, https://example.invalid/p.png 2x"><img src="local.png" alt="x"></picture>\n',
+      ),
+    );
+    expect(mixed.textContent).toContain(REMOTE_CONTENT_NOTICE);
   });
 
   it('says nothing about a <picture> whose candidates are all local', async () => {

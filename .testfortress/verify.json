@@ -356,7 +356,7 @@
     },
     {
       "area": "rendered-output and degraded-network testing",
-      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over twenty views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
+      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over twenty-two views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
       "ledger": ["SUP-0031", "SUP-0037"],
       "review": "2026-11-11"
     },
@@ -374,7 +374,7 @@
     },
     {
       "area": "accessibility below the blocking threshold",
-      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported and ratcheted but do not fail the gate, and 20 are currently open across the twenty scanned views (landmark-one-main, page-has-heading-one, region, landmark-unique, heading-order). The scan also runs in the light theme only.",
+      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported and ratcheted but do not fail the gate, and 20 are currently open across the twenty-two scanned views (landmark-one-main, page-has-heading-one, region, landmark-unique, heading-order). The scan also runs in the light theme only.",
       "ledger": [],
       "review": "2026-11-11"
     },

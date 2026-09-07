@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { AUDIT_ACTIONS, MAX_PREVIEW_BYTES, PREVIEW_MODES, formatBytes } from '@hvault/shared';
 import { TIER_BUDGET_SECONDS } from '../../../scripts/ci/lib/tiers.mjs';
+// The accessibility gate's membership, read from the ONE list that defines it —
+// the same import `gate-surface.test.ts` takes, for the same reason: a count
+// written down twice is a count that drifts.
+import { A11Y_VIEW_IDS } from '../../../e2e/a11yViews.js';
 
 // Documentation-lint: the README API reference, rate-limit table, env table,
 // and counts must stay in sync with the code. Resolve the monorepo-root
@@ -530,4 +534,219 @@ describe('README documentation sync', () => {
     expect(readme).toContain('Bitwarden CSV');
     expect(readme).toContain('Chrome/Edge CSV');
   });
+});
+
+/**
+ * The number of views the accessibility gate scans, in every document that
+ * states it.
+ *
+ * `e2e/a11yViews.ts` is the gate's MEMBERSHIP, and three things already read it
+ * so that a scan of nothing cannot pass as a scan that found nothing (the spec's
+ * own final assertion, `scripts/ci/a11y-gate.mjs`'s report check, and
+ * `gate-surface.test.ts`'s literal pin of the id list). What NOTHING read was
+ * the number spelled out in the prose beside them, and it drifted the moment the
+ * document store's viewer gained two more views: the list and the ratcheted
+ * `a11y.viewsScanned` said 22 while seven sentences across six files — the spec's
+ * own docblock, the README's gate table, CONTRIBUTING's prerequisite note, the
+ * gate script's header and the coverage manifest's two known-gap entries — still
+ * said twenty.
+ *
+ * **The production change that turns this red is adding or removing an entry in
+ * `A11Y_VIEWS` without moving the prose with it**, which is exactly what Phase 21
+ * of the current plan is about to do. That is the point of writing it now rather
+ * than after: a guard added afterwards records the drift, a guard added before
+ * prevents it.
+ *
+ * Spelled-out words rather than digits, because that is how these sentences are
+ * written and rewriting six documents to suit a regular expression is the wrong
+ * way round. The same technique, and the same reason, as the CONTRIBUTING
+ * gate-count case above.
+ *
+ * The document-store subset is derived rather than listed: every id that names a
+ * document begins with `document`, and `sandbox-rendered` — the isolated render
+ * document, scanned as a top-level page — deliberately does not, because it needs
+ * neither a session nor the storage engine. Two of the sentences below count that
+ * subset instead of the whole, and both had it wrong as well.
+ */
+describe('the accessibility gate’s scanned-view count', () => {
+  /** `n` spelled the way English spells it, for the range these counts live in. */
+  const NUMBER_WORDS = [
+    'zero',
+    'one',
+    'two',
+    'three',
+    'four',
+    'five',
+    'six',
+    'seven',
+    'eight',
+    'nine',
+    'ten',
+    'eleven',
+    'twelve',
+    'thirteen',
+    'fourteen',
+    'fifteen',
+    'sixteen',
+    'seventeen',
+    'eighteen',
+    'nineteen',
+    'twenty',
+    'twenty-one',
+    'twenty-two',
+    'twenty-three',
+    'twenty-four',
+    'twenty-five',
+    'twenty-six',
+    'twenty-seven',
+    'twenty-eight',
+    'twenty-nine',
+    'thirty',
+    'thirty-one',
+    'thirty-two',
+    'thirty-three',
+    'thirty-four',
+    'thirty-five',
+    'thirty-six',
+    'thirty-seven',
+    'thirty-eight',
+    'thirty-nine',
+    'forty',
+  ] as const;
+
+  const viewIds = A11Y_VIEW_IDS;
+  const total = viewIds.length;
+  const documentViews = viewIds.filter((id) => id.startsWith('document')).length;
+
+  /**
+   * One sentence that states one of the two counts.
+   *
+   * `expected` is a function of the two real numbers rather than a literal, so a
+   * sentence that legitimately says "the other N-1" moves with the list too — the
+   * spec has two of those, and a guard that only knew the total would have left
+   * them behind.
+   */
+  interface CountSite {
+    file: string;
+    pattern: RegExp;
+    expected: number;
+    what: string;
+  }
+
+  const SITES: CountSite[] = [
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /landing page would cover two of the ([a-z-]+) views below/,
+      expected: total,
+      what: 'the spec docblock’s own view total',
+    },
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /does not hide the state of the other\n \* ([a-z-]+) —/,
+      expected: total - 1,
+      what: 'the views a soft failure leaves reportable',
+    },
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /report somebody has to run ([a-z-]+) times/,
+      expected: total,
+      what: 'the runs a fail-fast report would cost',
+    },
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /for the sign-in, ([a-z-]+) axe runs over a/,
+      expected: total,
+      what: 'the timeout rationale’s run count',
+    },
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /the walk continues: ([a-z-]+) more views are worth more/,
+      expected: total - 1,
+      what: 'the soft-assertion rationale',
+    },
+    {
+      file: 'README.md',
+      pattern: /axe-core over ([a-z-]+) primary views and modals/,
+      expected: total,
+      what: 'the README gate table',
+    },
+    {
+      file: 'CONTRIBUTING.md',
+      pattern: /document journeys plus ([a-z-]+) of the [a-z-]+ scanned accessibility views/,
+      expected: documentViews,
+      what: 'CONTRIBUTING’s count of views that need the storage engine',
+    },
+    {
+      file: 'CONTRIBUTING.md',
+      pattern: /document journeys plus [a-z-]+ of the ([a-z-]+) scanned accessibility views/,
+      expected: total,
+      what: 'CONTRIBUTING’s view total',
+    },
+    {
+      file: 'scripts/ci/a11y-gate.mjs',
+      pattern: /runs axe over ([a-z-]+) views and modals/,
+      expected: total,
+      what: 'the gate script’s header',
+    },
+    {
+      file: 'scripts/ci/a11y-gate.mjs',
+      pattern: /([A-Za-z-]+) of those [a-z-]+ views are the document store's/,
+      expected: documentViews,
+      what: 'the gate script’s reason for declaring `docker`',
+    },
+    {
+      file: 'scripts/ci/a11y-gate.mjs',
+      pattern: /[A-Za-z-]+ of those ([a-z-]+) views are the document store's/,
+      expected: total,
+      what: 'the gate script’s view total',
+    },
+    {
+      file: '.testfortress/verify.json',
+      pattern: /covered by axe over ([a-z-]+) views/,
+      expected: total,
+      what: 'the visual-regression known gap',
+    },
+    {
+      file: '.testfortress/verify.json',
+      pattern: /currently open across the ([a-z-]+) scanned views/,
+      expected: total,
+      what: 'the below-threshold-a11y known gap',
+    },
+    {
+      file: 'packages/client/tests/theme-contrast.test.ts',
+      pattern: /`test:a11y`, axe over ([a-z-]+) views\)/,
+      expected: total,
+      what: 'the theme-contrast suite’s note on what the a11y gate cannot see',
+    },
+  ];
+
+  it('has a word for both counts, over a non-empty view list', () => {
+    // The denominator. A `viewIds` that came back empty would make every `%s`
+    // case below compare `undefined` against `undefined` and pass.
+    expect(total).toBeGreaterThan(10);
+    expect(documentViews).toBeGreaterThan(0);
+    expect(documentViews).toBeLessThan(total);
+    expect(NUMBER_WORDS[total], `no word for ${String(total)}`).toBeDefined();
+    expect(NUMBER_WORDS[total - 1]).toBeDefined();
+    expect(NUMBER_WORDS[documentViews]).toBeDefined();
+    // And the derivation of the subset is checked rather than trusted: the
+    // isolated render document must NOT be counted as a document-store view,
+    // because it needs neither a session nor the storage engine and the two
+    // sentences that use this number are about the engine.
+    expect(viewIds).toContain('sandbox-rendered');
+    expect(viewIds.filter((id) => id.startsWith('document'))).not.toContain('sandbox-rendered');
+  });
+
+  it.each(SITES.map((site) => [`${site.file} — ${site.what}`, site] as const))(
+    'states the right number in %s',
+    (_label, site) => {
+      const source = readFileSync(path.resolve(repoRoot, site.file), 'utf-8');
+      const match = site.pattern.exec(source);
+      expect(match, `${site.file} no longer contains the sentence this pins`).not.toBeNull();
+      // Lower-cased before comparing: one of these sentences opens a paragraph, so
+      // the same word is capitalised there. The NUMBER is what this pins; its case
+      // belongs to the sentence it sits in.
+      expect(match![1]?.toLowerCase()).toBe(NUMBER_WORDS[site.expected]);
+    },
+  );
 });

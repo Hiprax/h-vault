@@ -10,7 +10,7 @@
  */
 import type React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { Files } from 'lucide-react';
 import { FolderRail, type FolderScope } from '../../src/components/folders/FolderRail';
@@ -195,12 +195,16 @@ describe('FolderRail — the scope contract', () => {
     const dialog = screen.getByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
-    await vi.waitFor(() => {
+    // Testing Library's `waitFor`, never vitest's: RTL runs each poll inside its
+    // `asyncWrapper`, so the state update that lands when `deleteFolder`'s promise
+    // resolves is act-wrapped. `vi.waitFor` polls outside `act` and the same update
+    // is then a React warning.
+    await waitFor(() => {
       expect(deleteFolder).toHaveBeenCalledWith('folder-1', 'move');
     });
     // A view scoped to a folder that no longer exists shows nothing and explains
     // nothing.
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(onSelectAll).toHaveBeenCalledTimes(1);
     });
   });
@@ -250,6 +254,67 @@ describe('FolderRail — the scope contract', () => {
     expect(dialog).not.toHaveTextContent(/filed nowhere/);
   });
 
+  /**
+   * No control on a folder row contains another one.
+   *
+   * The production change that turns this red is putting the expand/collapse
+   * button back inside the folder button, which is where it lived and which is
+   * invalid HTML: `<button>` admits no interactive descendant. axe calls it
+   * `nested-interactive` and grades it SERIOUS against WCAG 4.1.2, because
+   * `button` carries `childrenPresentational: true` — the platform flattens the
+   * whole row into one control, so a keyboard user could tab to the chevron while
+   * assistive technology described nothing there.
+   *
+   * It is a UNIT test rather than an axe finding because axe never sees this
+   * markup: `e2e/a11y.spec.ts` creates no folder in any of its views, so no folder
+   * row has ever been scanned, nested or flat. That is a real gap in the gate's
+   * coverage and it is written down here rather than assumed away.
+   *
+   * Both halves are asserted, and the positive one is what stops this passing over
+   * a render that produced nothing: the row must actually HAVE two controls, and
+   * neither may contain the other.
+   */
+  it('nests no control inside another on a folder row, which no platform defines', () => {
+    useVaultStore.setState({
+      folders: [
+        { id: 'folder-1', name: 'Taxes', sortOrder: 0, createdAt: 'x', updatedAt: 'x' },
+        {
+          id: 'folder-2',
+          name: '2025',
+          parentId: 'folder-1',
+          sortOrder: 0,
+          createdAt: 'x',
+          updatedAt: 'x',
+        },
+      ] as never,
+    });
+    const { container } = renderRail(makeScope());
+
+    // The positive shape first. A row with children carries exactly two controls,
+    // and both have to be here for the negative below to mean anything.
+    const row = screen.getByText('Taxes').closest('[data-testid="folder-row"]');
+    expect(row, 'the folder row must exist').not.toBeNull();
+    const chevron = screen.getByLabelText('Collapse folder');
+    const folder = screen.getByRole('button', { name: /Taxes/ });
+    expect(row).toContainElement(chevron);
+    expect(row).toContainElement(folder);
+    expect(folder.contains(chevron), 'the chevron is inside the folder button again').toBe(false);
+    expect(chevron.contains(folder)).toBe(false);
+    // The drag handle is decorative and must not become a control of its own, nor
+    // end up outside the button it describes.
+    expect(folder.querySelector('button, a[href], input, select, textarea')).toBeNull();
+
+    // And then the whole rail, so a second row shape cannot reintroduce it
+    // somewhere this case did not look.
+    const INTERACTIVE = 'button, a[href], input, select, textarea, [role="button"]';
+    const nested = [...container.querySelectorAll(INTERACTIVE)]
+      .filter((element) => element.querySelector(INTERACTIVE) !== null)
+      .map((element) => element.outerHTML.slice(0, 120));
+    expect(nested, 'these controls contain another control').toEqual([]);
+    // The denominator: a sweep over an empty rail would satisfy the line above.
+    expect(container.querySelectorAll(INTERACTIVE).length).toBeGreaterThan(4);
+  });
+
   it('warns about sub-folders only when the folder has some', async () => {
     const openDialogFor = async (name: RegExp) => {
       fireEvent.contextMenu(screen.getByRole('button', { name }));
@@ -264,18 +329,24 @@ describe('FolderRail — the scope contract', () => {
     expect(flat).not.toHaveTextContent(/sub-folders move up a level/i);
     fireEvent.click(within(flat).getByRole('button', { name: 'Cancel' }));
 
-    useVaultStore.setState({
-      folders: [
-        { id: 'folder-1', name: 'Taxes', sortOrder: 0, createdAt: 'x', updatedAt: 'x' },
-        {
-          id: 'folder-2',
-          name: '2025',
-          parentId: 'folder-1',
-          sortOrder: 0,
-          createdAt: 'x',
-          updatedAt: 'x',
-        },
-      ] as never,
+    // Inside `act`: the rail is MOUNTED here, and the rail reads this store, so an
+    // unwrapped write is a React `act(...)` warning rather than a silent one. Every
+    // other `setState` in this file runs before its `renderRail`, which is why this
+    // is the only one that needs it.
+    act(() => {
+      useVaultStore.setState({
+        folders: [
+          { id: 'folder-1', name: 'Taxes', sortOrder: 0, createdAt: 'x', updatedAt: 'x' },
+          {
+            id: 'folder-2',
+            name: '2025',
+            parentId: 'folder-1',
+            sortOrder: 0,
+            createdAt: 'x',
+            updatedAt: 'x',
+          },
+        ] as never,
+      });
     });
     const nested = await openDialogFor(/^Taxes/);
     expect(nested).toHaveTextContent(/sub-folders move up a level/i);

@@ -778,7 +778,12 @@ describe('useAutoLock — hidden-tab locking is opt-in', () => {
   afterEach(() => {
     setHidden(false);
     vi.useRealTimers();
-    useAuthStore.setState({ ...authInitialState });
+    // Inside `act`: `sequence.hooks: 'stack'` runs a describe-scoped hook BEFORE
+    // the root-level cleanup, so the hook rendered by these cases is still mounted
+    // and subscribed when this store write lands.
+    act(() => {
+      useAuthStore.setState({ ...authInitialState });
+    });
   });
 
   /**
@@ -962,8 +967,11 @@ describe('useAutoLock — hidden-tab locking is opt-in', () => {
 
     hide();
 
-    // Another tab locked the vault while this one was hidden.
-    useAuthStore.setState({ isLocked: true });
+    // Another tab locked the vault while this one was hidden. Inside `act`,
+    // because the hook under test is mounted and subscribed to this store.
+    act(() => {
+      useAuthStore.setState({ isLocked: true });
+    });
 
     act(() => {
       vi.advanceTimersByTime(10 * MINUTE);
@@ -1008,9 +1016,14 @@ describe('useAutoLock — deadlines are wall-clock, not elapsed-timer', () => {
     // Restore the real `lock` action alongside the data: this block replaced it
     // with `mockLock`, and `authInitialState` carries no actions, so without this
     // the stub outlives the block.
-    useAuthStore.setState({
-      ...authInitialState,
-      lock: useAuthStore.getInitialState().lock,
+    // Inside `act`: `sequence.hooks: 'stack'` runs a describe-scoped hook BEFORE
+    // the root-level cleanup, so the hook rendered by these cases is still mounted
+    // and subscribed when this store write lands.
+    act(() => {
+      useAuthStore.setState({
+        ...authInitialState,
+        lock: useAuthStore.getInitialState().lock,
+      });
     });
   });
 

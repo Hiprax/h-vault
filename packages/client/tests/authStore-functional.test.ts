@@ -1068,6 +1068,68 @@ describe('L29 — swallowed catch blocks log warnings in dev mode', () => {
     // Lock should still succeed
     expect(useAuthStore.getState().isLocked).toBe(true);
   });
+
+  /**
+   * Scoping the offline database to the account signing in, and what happens when
+   * the browser refuses.
+   *
+   * The ORDER is the security property. `setUser(userId)` renames the database this
+   * session will read and write; `clear()` empties it. Reversed, the clear would
+   * empty the PREVIOUS account's database and leave this account's stale ciphertext
+   * in place — which is the cross-user leak the pair exists to prevent — and no
+   * assertion anywhere pinned it. It is pinned here by invocation order rather than
+   * by two separate `toHaveBeenCalled`s, which hold in either order.
+   *
+   * The failure arm is asserted for a reason of its own: this scoping is BEST
+   * EFFORT, so a browser that refuses IndexedDB entirely must not cost the user
+   * their sign-in. Three files used to reach this arm by accident, because their
+   * `offlineCache` double simply had no `setUser` and calling `undefined` threw;
+   * completing those doubles left the arm covered by nothing at all, which is what
+   * this case replaces.
+   */
+  it('scopes the offline cache to the new account before clearing it, and signs in anyway if that fails', async () => {
+    vi.mocked(loginApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          accessToken: buildMockJwt('user-123'),
+          encryptedVaultKey: 'enc-vk',
+          vaultKeyIv: 'vk-iv',
+          vaultKeyTag: 'vk-tag',
+          kdfIterations: 600_000,
+          kdfAlgorithm: 'PBKDF2-SHA256',
+        },
+      },
+    } as never);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    expect(offlineCache.setUser).toHaveBeenCalledWith('user-123');
+    expect(vi.mocked(offlineCache.setUser).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(offlineCache.clear).mock.invocationCallOrder[0]!,
+    );
+
+    // Now the browser refuses. The sign-in must still complete, and the failure
+    // must be reported rather than swallowed in silence.
+    useAuthStore.setState(authInitialState);
+    vi.clearAllMocks();
+    const scopeError = new Error('IndexedDB unavailable');
+    vi.mocked(offlineCache.setUser).mockRejectedValueOnce(scopeError);
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      'Failed to clear offline cache during login',
+      scopeError,
+    );
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(useAuthStore.getState().user?.userId).toBe('user-123');
+    expect(useAuthStore.getState().vaultKey).not.toBeNull();
+    // And the negative: a refusal to SCOPE must not go on to wipe whatever
+    // database the session was already pointing at.
+    expect(offlineCache.clear).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

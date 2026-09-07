@@ -246,7 +246,22 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  useVaultStore.setState({ items: [], loading: false, itemsLoading: false, trashLoading: false });
+  // Inside `act`, and this is the whole of the 111 React warnings this file used
+  // to print. `vitest.config.ts` sets `sequence.hooks: 'stack'`, so a hook declared
+  // here runs BEFORE the root-level one Testing Library registers for its cleanup:
+  // the page is still mounted, it subscribes to this store, and emptying `items`
+  // re-runs the weak-password effect. Unwrapped that is four updates per case
+  // landing outside `act(...)`, which is not cosmetic — it is the shape that lets
+  // an assertion read a DOM one render behind its own store, which is exactly the
+  // flake `documents-upload.test.tsx` was diagnosed with.
+  act(() => {
+    useVaultStore.setState({
+      items: [],
+      loading: false,
+      itemsLoading: false,
+      trashLoading: false,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

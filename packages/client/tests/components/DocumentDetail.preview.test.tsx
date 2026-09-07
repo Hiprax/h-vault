@@ -967,5 +967,14 @@ describe('DocumentDetail — full screen', () => {
     // The next file must not open filling the viewport without anyone asking —
     // over a spinner, at that, because its bytes have just been cleared.
     expect(screen.getByTestId('document-content')).not.toHaveAttribute('role');
+
+    // The rerender above starts a read of the SECOND document, which lands its
+    // plaintext in a `.then` after this body has finished and outside `act(...)`.
+    // Settled rather than left to fall outside, which React reports and which is
+    // the shape that lets an assertion read a DOM one render behind. The frame is
+    // waited for so the settle covers the whole read rather than one tick of it.
+    await waitFor(() => {
+      expect(frame()).not.toBeNull();
+    });
   });
 });

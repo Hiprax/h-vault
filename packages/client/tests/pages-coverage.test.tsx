@@ -723,8 +723,30 @@ describe('ResetPasswordPage', () => {
     mockResetPasswordApi.mockReset();
   });
 
-  it('shows invalid link message when no token is provided', () => {
-    renderWithRouter(<ResetPasswordPage />, { route: '/reset-password' });
+  /**
+   * Render, then let the mount settle INSIDE `act`.
+   *
+   * This page's only mount work is `getZxcvbn().then(setZxcvbnFn)` — one microtask
+   * against the loader mocked at the top of this file, which resolves immediately.
+   * In a test whose body is synchronous that setter therefore lands after the body
+   * has finished and outside any `act(...)`, which React reports as a warning and
+   * which no assertion here would ever notice. One checkpoint is exactly enough;
+   * a second would say nothing, and a `waitFor` would be polling for something
+   * that is already deterministic.
+   *
+   * The strength meter is not what any case below asserts — they read the static
+   * markup — so this changes no expectation.
+   */
+  async function renderResetPassword(route: string) {
+    const rendered = renderWithRouter(<ResetPasswordPage />, { route });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    return rendered;
+  }
+
+  it('shows invalid link message when no token is provided', async () => {
+    await renderResetPassword('/reset-password');
 
     expect(screen.getByText('Invalid Link')).toBeInTheDocument();
     expect(screen.getByText('Request new reset link').closest('a')).toHaveAttribute(
@@ -733,8 +755,8 @@ describe('ResetPasswordPage', () => {
     );
   });
 
-  it('renders the password reset form when token is present', () => {
-    renderWithRouter(<ResetPasswordPage />, { route: '/reset-password?token=test-token' });
+  it('renders the password reset form when token is present', async () => {
+    await renderResetPassword('/reset-password?token=test-token');
 
     expect(screen.getByRole('heading', { name: /reset password/i })).toBeInTheDocument();
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
@@ -743,8 +765,8 @@ describe('ResetPasswordPage', () => {
     expect(screen.getByRole('button', { name: /reset password/i })).toBeInTheDocument();
   });
 
-  it('shows data loss warning', () => {
-    renderWithRouter(<ResetPasswordPage />, { route: '/reset-password?token=test-token' });
+  it('shows data loss warning', async () => {
+    await renderResetPassword('/reset-password?token=test-token');
 
     expect(screen.getByText(/vault items will become unrecoverable/i)).toBeInTheDocument();
   });
@@ -768,8 +790,8 @@ describe('ResetPasswordPage', () => {
     });
   });
 
-  it('has back to sign in link', () => {
-    renderWithRouter(<ResetPasswordPage />, { route: '/reset-password?token=test-token' });
+  it('has back to sign in link', async () => {
+    await renderResetPassword('/reset-password?token=test-token');
 
     expect(screen.getByText('Back to sign in').closest('a')).toHaveAttribute('href', '/login');
   });
@@ -1548,14 +1570,28 @@ describe('SessionsPage', () => {
 
     const { default: SessionsPage } = await import('../src/pages/SessionsPage');
 
+    // The SESSIONS request is the one held pending above, and it is what keeps the
+    // spinner on screen. The page fires a SECOND request on mount —
+    // `listTrustedDevicesApi`, mocked to resolve — whose three setters would
+    // otherwise land outside `act(...)` and be reported as a warning about an
+    // update this case never meant to make. Settling it inside `act` here removes
+    // the warning without touching the assertion: the trusted-devices section stops
+    // spinning, the sessions section does not, and the spinner below is that one.
     const { container } = render(
       <MemoryRouter>
         <SessionsPage />
       </MemoryRouter>,
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     const spinner = container.querySelector('.animate-spin');
     expect(spinner).toBeTruthy();
+    // And it is the sessions one: pinned so a future change that resolves the
+    // sessions request cannot leave this passing on the trusted-devices spinner.
+    expect(screen.getByText('Active Sessions')).toBeInTheDocument();
+    expect(container.querySelectorAll('.animate-spin')).toHaveLength(1);
   });
 
   it('renders "Active Sessions" heading', async () => {

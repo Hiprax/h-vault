@@ -160,10 +160,20 @@ function hasHighlightableCode(node: Root | Element): boolean {
  * not control is a bad trade).
  *
  * Scoped to `http:`/`https:` and to a DIFFERENT origin, because the notice is
- * about a third party learning you opened your copy. `data:` and `blob:` are
- * named by `img-src` and DO render, so announcing them as blocked would be a
- * lie; the document's own origin is what `img-src 'self'` admits, and tells
- * nobody anything. A value `URL` refuses is not a request either.
+ * about a third party learning you opened your copy. The document's own origin
+ * is what `img-src 'self'` admits, and tells nobody anything; a value `URL`
+ * refuses is not a request either.
+ *
+ * `data:` and `blob:` are excluded for the same reason and NOT because they are
+ * blocked — but which mechanism spares them depends on the attribute, and only
+ * one of the two ever reaches this function. On `src`, `hast-util-sanitize`'s
+ * default schema pins `protocols.src = ['http','https']`, so a `data:` or `blob:`
+ * value is STRIPPED before any DOM exists (measured against the installed
+ * library) and there is nothing here to classify. On `srcSet` that schema names
+ * no protocols at all, so such a candidate survives whole — and `img-src`
+ * (`server/src/config/sandboxCsp.ts`) admits both, so it renders. Announcing THAT
+ * as blocked would be a lie, which is why the exclusion is stated over the value
+ * rather than over the attribute it came from.
  */
 function isRemoteUrl(value: string, base: URL): boolean {
   let resolved: URL;

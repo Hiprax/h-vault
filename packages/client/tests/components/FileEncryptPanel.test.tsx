@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { CryptoError, CryptoErrorType } from '@hiprax/crypto';
 
 const { mockToast, mockEncryptFile, mockGetMaxBytes } = vi.hoisted(() => ({
@@ -83,10 +83,18 @@ describe('FileEncryptPanel', () => {
     mockGetMaxBytes.mockResolvedValue(BIG_LIMIT);
   });
 
-  it('renders the irrecoverable-password warning', () => {
+  it('renders the irrecoverable-password warning', async () => {
     render(<FileEncryptPanel />);
     expect(screen.getByText(/no password recovery/i)).toBeInTheDocument();
     expect(screen.getByText(/never be opened again/i)).toBeInTheDocument();
+
+    // This panel has two mount loaders — the lazy zxcvbn chunk and the server's
+    // size cap — and each applies itself in a `.then`. In a synchronous case both
+    // land after the body has finished and outside `act(...)`. Neither is what this
+    // case reads; settling them here only removes the warning.
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it('keeps submit disabled until a file + strong, matching password are provided', async () => {
