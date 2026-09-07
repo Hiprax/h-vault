@@ -728,13 +728,13 @@ const GATES = [
     // It runs AFTER `e2e`, and that order is worth keeping: both drive the same
     // dev server, and Playwright reuses one that is already listening, so the
     // second run does not pay for Vite's cold transform of every route chunk.
-    title: 'Accessibility (axe over 20 views, plus the keyboard invariants)',
+    title: 'Accessibility (axe over thirty-two views, plus the keyboard invariants)',
     ci: 'new — no hosted job ever checked whether this application can be used without a mouse',
     dependsOn: ['build'],
     // `docker` for the same reason `e2e` carries it, and it is not optional here
     // either: `playwright.a11y.config.ts` spreads the base config's `webServer`
     // (`gate-surface.test.ts` asserts the two are equal), so this gate boots the
-    // very same `e2e/start-server.ts` and its four document views need the engine
+    // very same `e2e/start-server.ts` and its six document views need the engine
     // that harness starts.
     requires: ['build:shared', 'docker'],
     run: (options) => runExe(process.execPath, ['scripts/ci/a11y-gate.mjs'], options),

@@ -549,16 +549,18 @@ describe('README documentation sync', () => {
  * `a11y.viewsScanned` said 22 while seven sentences across six files — the spec's
  * own docblock, the README's gate table, CONTRIBUTING's prerequisite note, the
  * gate script's header and the coverage manifest's two known-gap entries — still
- * said twenty.
+ * said twenty. Four more turned up the next day, in the pipeline runner's own
+ * gate title and in the manifest's statement of what a green run means, which
+ * still said twenty and four after the sweep had grown twice.
  *
  * **The production change that turns this red is adding or removing an entry in
- * `A11Y_VIEWS` without moving the prose with it**, which is exactly what Phase 21
- * of the current plan is about to do. That is the point of writing it now rather
- * than after: a guard added afterwards records the drift, a guard added before
- * prevents it.
+ * `A11Y_VIEWS` without moving the prose with it.** It was written the day before
+ * ten views were added, on purpose: a guard added afterwards records the drift, a
+ * guard added before prevents it. It earned that immediately — the ten-view
+ * change had to move fourteen sentences, and this is what said which ones.
  *
  * Spelled-out words rather than digits, because that is how these sentences are
- * written and rewriting six documents to suit a regular expression is the wrong
+ * written and rewriting seven documents to suit a regular expression is the wrong
  * way round. The same technique, and the same reason, as the CONTRIBUTING
  * gate-count case above.
  *
@@ -635,8 +637,13 @@ describe('the accessibility gate’s scanned-view count', () => {
 
   const SITES: CountSite[] = [
     {
+      // The sentence this used to pin said "two of the twenty-two views below",
+      // and the "two" was a second stale count — it meant sign-in and
+      // registration, and there are now SEVEN pages a signed-out browser can
+      // reach. Rewritten to carry one number instead of two, so there is nothing
+      // left in it that can drift independently of the list.
       file: 'e2e/a11y.spec.ts',
-      pattern: /landing page would cover two of the ([a-z-]+) views below/,
+      pattern: /would miss most of the ([a-z-]+) views below/,
       expected: total,
       what: 'the spec docblock’s own view total',
     },
@@ -717,6 +724,54 @@ describe('the accessibility gate’s scanned-view count', () => {
       pattern: /`test:a11y`, axe over ([a-z-]+) views\)/,
       expected: total,
       what: 'the theme-contrast suite’s note on what the a11y gate cannot see',
+    },
+    // The last three unguarded copies, added when Phase 21 found them still
+    // saying "twenty" and "four" after the sweep had grown twice. The runner's
+    // title is what an operator reads while the gate is running, and the
+    // manifest's `gate` string is the sentence that says what a green run means
+    // — both are prose about this number, so both belong here.
+    {
+      file: 'scripts/ci/local-ci.mjs',
+      pattern: /Accessibility \(axe over ([a-z-]+) views/,
+      expected: total,
+      what: 'the pipeline runner’s gate title',
+    },
+    {
+      file: 'scripts/ci/local-ci.mjs',
+      pattern: /its ([a-z-]+) document views need the engine/,
+      expected: documentViews,
+      what: 'the runner’s reason for declaring `docker`',
+    },
+    // Two more found on a second sweep of the tree, both saying "twenty" and
+    // "four" long after the numbers were 32 and 6, and both the direct twin of a
+    // sentence already pinned above: the README's Docker-prerequisite paragraph
+    // is CONTRIBUTING's twin, and the suppression ledger's visual-regression
+    // entry is the manifest's known-gap twin. Finding a copy is not the same as
+    // finding them all, so the rule now is that every sentence stating either
+    // number gets an entry the moment it is noticed.
+    {
+      file: 'README.md',
+      pattern: /its journeys and ([a-z-]+) of its scanned views/,
+      expected: documentViews,
+      what: 'the README’s reason for declaring `docker` on `e2e` and `a11y`',
+    },
+    {
+      file: '.testfortress/suppressions.json',
+      pattern: /`test:a11y` runs axe over ([a-z-]+) views and asserts/,
+      expected: total,
+      what: 'the suppression ledger’s visual-regression deferral',
+    },
+    {
+      file: '.testfortress/verify.json',
+      pattern: /every primary view and modal \\u2014 ([a-z-]+) of them, in the real/,
+      expected: total,
+      what: 'the manifest’s statement of what a green a11y run means',
+    },
+    {
+      file: '.testfortress/verify.json',
+      pattern: /authenticated DOM, ([a-z-]+) of them the document store's/,
+      expected: documentViews,
+      what: 'the manifest’s count of views that need the storage engine',
     },
   ];
 

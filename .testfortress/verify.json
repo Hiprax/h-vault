@@ -174,7 +174,7 @@
     "test:a11y": {
       "cmd": "npm run test:a11y",
       "tier": 1,
-      "gate": "every primary view and modal \u2014 twenty of them, in the real authenticated DOM, four of them the document store's and one of them the isolated preview document itself \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
+      "gate": "every primary view and modal \u2014 thirty-two of them, in the real authenticated DOM, six of them the document store's and one of them the isolated preview document itself \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
       "report": ["a11y.json", "junit-a11y.xml"],
       "countsTests": false,
       "requires": ["build:shared", "docker"]
@@ -356,7 +356,7 @@
     },
     {
       "area": "rendered-output and degraded-network testing",
-      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over twenty-two views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
+      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over thirty-two views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
       "ledger": ["SUP-0031", "SUP-0037"],
       "review": "2026-11-11"
     },
@@ -374,7 +374,7 @@
     },
     {
       "area": "accessibility below the blocking threshold",
-      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported and ratcheted but do not fail the gate, and 20 are currently open across the twenty-two scanned views (landmark-one-main, page-has-heading-one, region, landmark-unique, heading-order). The scan also runs in the light theme only.",
+      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported but deliberately NOT ratcheted (`ratchet-check.mjs` records only `a11y.critical`, `a11y.serious` and `a11y.viewsScanned`), and the ones currently open across the thirty-two scanned views are `landmark-one-main`, `page-has-heading-one`, `region`, `landmark-unique` and `heading-order` (the count is in `a11y.json`, and is deliberately not repeated here: nothing would keep it true). The scan also runs in the light theme only.",
       "ledger": [],
       "review": "2026-11-11"
     },

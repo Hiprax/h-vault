@@ -1406,7 +1406,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                     | _new_                      |
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                              | _new_                      |
 | `e2e`              | T1   | Playwright (Chromium) against an auto-started stack: dev server, in-memory MongoDB and the pinned storage engine in a container                                                                                                                | `e2e` job                  |
-| `a11y`             | T1   | axe-core over twenty-two primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                              | _new_                      |
+| `a11y`             | T1   | axe-core over thirty-two primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                              | _new_                      |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                         | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                               | _new_                      |
 | `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline                                                                                       | _new_                      |
@@ -1817,7 +1817,7 @@ is the point of the paragraph.
 and Trivy-scans three of them — the database image is built and deliberately not scanned;
 `storage` (push tier) runs the storage port against the pinned engine in a container;
 `e2e` and `a11y` (push tier) drive a harness that starts that same engine, because the
-document store is switched off without it and its journeys and four of its scanned views
+document store is switched off without it and its journeys and six of its scanned views
 would fail for a reason that is not about them; `flake` (release tier) runs the Playwright
 suite three times over and so inherits the same need; and `deploy` (release tier) stands
 the whole Compose stack up from nothing. All six declare the daemon as a prerequisite and
@@ -2114,7 +2114,7 @@ in the run is seconds.
 | `type-check`       | 1m 24s   | none                                         |
 | `deploy`           | 1m 25s   | 120 s per health wait                        |
 | `resource`         | 1m 06s   | 15 min                                       |
-| `a11y`             | 57s      | none                                         |
+| `a11y`             | 1m 05s   | none                                         |
 | `lint`             | 48s      | none                                         |
 | `fuzz`             | 41s      | 5 min per leg                                |
 | `property`         | 31s      | none                                         |

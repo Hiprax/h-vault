@@ -34,15 +34,59 @@ export interface A11yView {
 /**
  * Every primary view and modal, in the order the spec visits them.
  *
- * The order is not arbitrary: the two unauthenticated pages come first because
- * they need no session, the item form's five type tabs are scanned inside ONE
- * open create dialog, the unlock screen comes near the end because reaching it
- * locks the vault and ends the authenticated walk, and the isolated document
- * comes after even that because it needs no session at all.
+ * The order is not arbitrary, and four constraints fix it:
+ *
+ *   - The SEVEN unauthenticated pages come first, and they have to. Three of them
+ *     — the sign-in page, the registration page and `/forgot-password` — sit
+ *     behind `PublicOnlyRoute` (`App.tsx`), which REDIRECTS a signed-in visitor
+ *     away, so before the sign-in is not merely the cheaper place to scan them,
+ *     it is the only point in the walk where they render at all. The remaining
+ *     four are top-level routes that a signed-in browser could reach, but only
+ *     through a full `page.goto()`, which reloads the SPA and drops the
+ *     in-memory vault key; scanning them here costs nothing and keeps the
+ *     authenticated walk on SPA navigation throughout.
+ *   - The item form's five type tabs are scanned inside ONE open create dialog.
+ *   - The unlock screen comes near the end, because reaching it locks the vault
+ *     and ends the authenticated walk.
+ *   - The isolated document comes after even that, because it needs no session.
  */
 export const A11Y_VIEWS = [
   { id: 'login', description: 'the sign-in page, signed out' },
   { id: 'register', description: 'the registration page, signed out' },
+  {
+    id: 'forgot-password',
+    description: 'the forgot-password form, signed out, before an address has been submitted',
+  },
+  {
+    // WITH a token in the query string, because that is the branch that has a
+    // form in it. `ResetPasswordPage` returns an "Invalid Link" card when the
+    // parameter is absent — the same shape the two views below already cover — so
+    // scanning the tokenless page would trade a three-field form, its data-loss
+    // `role="alert"` and its strength meter for a third look at a `<Card>`. The
+    // token is never submitted from here; the two views below are what present
+    // one and have it refused.
+    id: 'reset-password',
+    description:
+      'the reset-password form, reached with a token in the query string so the form renders rather than the invalid-link card, every field empty',
+  },
+  {
+    id: 'verify-email',
+    description:
+      'the email-verification page after the server rejected its token, settled on the failure card',
+  },
+  {
+    id: 'unlock-account',
+    description:
+      'the account-unlock page after the server rejected its token, settled on the failure card',
+  },
+  {
+    // Signed OUT, which decides what the page draws: its single link is
+    // "Back to Login" rather than "Back to Vault" (`NotFoundPage` branches on
+    // `isAuthenticated`), and there is no `AppLayout` around it either way —
+    // the catch-all route sits outside both guards.
+    id: 'not-found',
+    description: 'the 404 page, signed out, so its one link points at sign-in',
+  },
   { id: 'vault-list', description: 'the vault list with an item in it' },
   { id: 'item-detail', description: 'a login item opened from the list' },
   { id: 'item-form-login', description: 'the create dialog, Login tab' },
@@ -58,7 +102,45 @@ export const A11Y_VIEWS = [
     description: 'the create dialog, Card tab, saved-address picker panel open',
   },
   { id: 'item-form-identity', description: 'the create dialog, Identity tab' },
+  {
+    id: 'generator',
+    description:
+      'the password generator page in password mode, after its first password has been generated so the strength meter is rendered',
+  },
   { id: 'settings', description: 'the settings page' },
+  {
+    // The pager is the reason this view is worth its own scan, and it needs
+    // rows to exist: the walk seeds the account's history so the log runs to
+    // more than one page and page one carries every badge colour the page can
+    // draw. Both halves matter — a one-page log renders both pager buttons
+    // `aria-disabled`, and `ACTION_COLORS` pairs a `-100` surface with darker
+    // text in eleven distinct hues, which is eleven contrast measurements no
+    // other view in this list makes.
+    id: 'audit-log',
+    description:
+      'the audit log on page one of a multi-page history, carrying every action badge colour it can draw and a pager with Next live and Prev inert',
+  },
+  {
+    id: 'sessions',
+    description:
+      'the sessions page with this session listed as current and the trusted-device section in its empty state',
+  },
+  {
+    // The restore panel is opened before the scan, and that is a coverage
+    // decision rather than a flourish: it is part of THIS page, so opening it
+    // costs no extra view while adding a file input, a password field and a
+    // radio group that are otherwise scanned by nothing. The account has no
+    // backup encryption configured, which is what keeps the setup card on
+    // screen as well.
+    id: 'backup-settings',
+    description:
+      'the backup settings page on an account with no backup encryption configured, with the restore-from-file panel expanded',
+  },
+  {
+    id: 'export-data',
+    description:
+      'the plaintext-export page at rest: its danger banner, the format radio group and the re-authentication field, with no export prepared',
+  },
   { id: 'vault-health', description: 'the vault health page after its checks have run' },
   { id: 'file-encryption', description: 'the file-encryption tool' },
   { id: 'documents-list', description: 'the documents page with two documents stored' },

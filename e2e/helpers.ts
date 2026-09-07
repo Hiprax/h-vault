@@ -476,7 +476,46 @@ export interface A11yScan {
   violations: A11yViolation[];
   /** The subset that fails the gate: `serious` and `critical`. */
   blocking: A11yViolation[];
+  /**
+   * Checks axe COULD NOT DECIDE, recorded and not gated.
+   *
+   * These used to be thrown away, and that is the one place this gate could go
+   * quiet without going green-by-accident: axe answers `incomplete` when a rule
+   * ran and could not reach a verdict — most often `color-contrast` over a
+   * background it cannot resolve (a semi-transparent stack, an image, a gradient)
+   * — and a check that has silently become unmeasurable is then indistinguishable
+   * from one that passes, in every number this gate publishes. It is the same
+   * lesson as the completeness check itself, one level down: an axe run over
+   * nothing looks exactly like a clean one, and so does an axe rule that gave up.
+   *
+   * NOT blocking, deliberately. "Needs a human" is not a defect, gating on it
+   * would make the gate fail for the shape of a background rather than for a
+   * finding, and the one knob that would then be needed to get green again is a
+   * rule exclusion.
+   *
+   * It is not RATCHETED either, and that is a decision rather than an omission,
+   * so it is worth being plain about what this therefore does and does not buy.
+   * `a11y.json` publishes the count and the findings, and a person reading the
+   * gate's own output sees them — but nothing compares the number between runs,
+   * so 1 becoming 12 is visible only to a reader. Neither available direction is
+   * the answer: `lower` gates it, which is the paragraph above; and `info` is
+   * skipped by the compare loop AND never written by `--accept`
+   * (`ratchet-check.mjs`), so it would plant a figure nothing maintains — which
+   * is the exact rot this gate's prose counts were just cleaned of.
+   */
+  incomplete: A11yViolation[];
 }
+
+/**
+ * One row of axe output — a rule and the elements it matched.
+ *
+ * Derived from what `AxeBuilder.analyze()` actually returns rather than imported
+ * from `axe-core`, which is only a transitive dependency here: naming it
+ * directly is an undeclared import and `audit:deadcode` says so. Going through
+ * the builder also ties the type to the call this file makes, so a major bump of
+ * either package is a compile error rather than a silent shape change.
+ */
+type AxeResultRow = Awaited<ReturnType<AxeBuilder['analyze']>>['violations'][number];
 
 /** How many offending elements one violation lists. Beyond this the fix is the same fix. */
 const A11Y_MAX_NODES = 5;
@@ -559,21 +598,27 @@ export async function scanA11y(page: Page, view: string): Promise<A11yScan> {
   await settleToasts(page);
   await settleTransitions(page);
   const results = await new AxeBuilder({ page }).analyze();
-  const violations: A11yViolation[] = results.violations.map((violation) => ({
-    id: violation.id,
-    impact: violation.impact ?? 'unknown',
-    help: violation.help,
-    helpUrl: violation.helpUrl,
-    nodes: violation.nodes.slice(0, A11Y_MAX_NODES).map((node) => ({
-      target: Array.isArray(node.target) ? node.target.join(' ') : String(node.target),
-      summary: (node.failureSummary ?? '').replace(/\s+/g, ' ').trim(),
-    })),
-  }));
+  const flatten = (rows: AxeResultRow[]): A11yViolation[] =>
+    rows.map((row) => ({
+      id: row.id,
+      impact: row.impact ?? 'unknown',
+      help: row.help,
+      helpUrl: row.helpUrl,
+      nodes: row.nodes.slice(0, A11Y_MAX_NODES).map((node) => ({
+        target: Array.isArray(node.target) ? node.target.join(' ') : String(node.target),
+        summary: (node.failureSummary ?? '').replace(/\s+/g, ' ').trim(),
+      })),
+    }));
+  const violations = flatten(results.violations);
   return {
     view,
     url: page.url(),
     violations,
     blocking: violations.filter((violation) => A11Y_BLOCKING_IMPACTS.includes(violation.impact)),
+    // See `A11yScan.incomplete` for why these are recorded and why they are not
+    // gated. `failureSummary` is usually absent on an incomplete node, so the
+    // summary is often empty here — the rule id and the selector are the report.
+    incomplete: flatten(results.incomplete),
   };
 }
 

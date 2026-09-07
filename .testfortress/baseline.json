@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-09-07",
-  "commit": "8d296a6",
+  "commit": "a732108",
   "tests": {
-    "count": 9862
+    "count": 9872
   },
   "coverage": {
     "diff": 100
@@ -17,7 +17,7 @@
   "a11y": {
     "critical": 0,
     "serious": 0,
-    "viewsScanned": 22
+    "viewsScanned": 32
   },
   "suppressions": {
     "count": 20,
@@ -141,16 +141,16 @@
         ]
       },
       "tests": {
-        "count": 3953
+        "count": 3959
       }
     },
     "packages/client": {
       "coverage": {
-        "line": 99.1,
-        "branch": 93.12,
-        "function": 98.79,
+        "line": 99.11,
+        "branch": 93.16,
+        "function": 98.83,
         "linesTotal": 9109,
-        "branchesTotal": 6362,
+        "branchesTotal": 6364,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -314,7 +314,7 @@
         ]
       },
       "tests": {
-        "count": 4413
+        "count": 4417
       }
     },
     "e2e": {
@@ -533,7 +533,7 @@
       "spectral": 1
     }
   },
-  "reason": "validate-11-20: the a11y view-count guard (14 pinned sentences in docs-sync), the folder-row nested-interactive fix and its structural test, the offline-cache scoping/order test that covers authStore's login catch honestly, and 210 React act() warnings traced to root cause and removed across 16 client files",
+  "reason": "Phase 21 follow-up: two more sentences stating the accessibility view count (the README's Docker-prerequisite paragraph and the suppression ledger's visual-regression deferral) are now pinned by docs-sync, taking that guard to 20 sentences across 8 files.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

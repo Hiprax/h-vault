@@ -1040,8 +1040,16 @@ export default function BackupSettingsPage() {
           {/* Auto-backup toggle */}
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-[hsl(var(--foreground))]">Auto-backup</p>
-              <p className="text-xs text-[hsl(var(--muted-foreground))]">
+              <p
+                id="auto-backup-label"
+                className="text-sm font-medium text-[hsl(var(--foreground))]"
+              >
+                Auto-backup
+              </p>
+              <p
+                id="auto-backup-description"
+                className="text-xs text-[hsl(var(--muted-foreground))]"
+              >
                 Send encrypted backup daily via email
               </p>
               {!isConfigured && (
@@ -1050,12 +1058,22 @@ export default function BackupSettingsPage() {
                 </p>
               )}
             </div>
+            {/* `aria-labelledby`, not a duplicated `aria-label`: the switch's only
+                content is the sliding knob, so it reached a screen reader as an
+                unnamed control, and the words that name it are already on screen
+                two elements away. Pointing at them means the spoken name and the
+                visible one cannot drift (WCAG 2.5.3), which a hand-written label
+                does not guarantee. `disabled` alone does not excuse the omission:
+                the account that has not set up backup encryption yet is exactly
+                the one being told what this control is for. */}
             <button
               type="button"
               onClick={() => setBackupEnabled(!backupEnabled)}
               disabled={!isConfigured}
               role="switch"
               aria-checked={backupEnabled}
+              aria-labelledby="auto-backup-label"
+              aria-describedby="auto-backup-description"
               className={cn(
                 'relative h-6 w-11 rounded-full transition-colors disabled:opacity-50',
                 backupEnabled ? 'bg-[hsl(var(--primary))]' : 'bg-[hsl(var(--muted))]',
@@ -1070,13 +1088,23 @@ export default function BackupSettingsPage() {
             </button>
           </div>
 
-          {/* Schedule hour */}
+          {/* Schedule hour. A real `<label htmlFor>` rather than the `<span>` that
+              used to sit here: this is the one field on the page with neither a
+              label nor a placeholder, so it was the one field with no accessible
+              name at all — and a bare number spinner is precisely the control a
+              reader cannot guess from context. */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
-              <span className="text-sm text-[hsl(var(--foreground))]">Schedule (UTC hour)</span>
+              <label
+                htmlFor="backup-schedule-hour"
+                className="text-sm text-[hsl(var(--foreground))]"
+              >
+                Schedule (UTC hour)
+              </label>
             </div>
             <input
+              id="backup-schedule-hour"
               type="number"
               min={0}
               max={23}
@@ -1236,10 +1264,17 @@ export default function BackupSettingsPage() {
           {showRestore ? (
             <div className="space-y-4">
               <div>
-                <label className="mb-1 block text-sm font-medium text-[hsl(var(--foreground))]">
+                {/* `htmlFor`/`id`, because a `<label>` that is merely NEXT TO an
+                    input labels nothing: the file picker had no accessible name,
+                    and it is the control the whole panel exists for. */}
+                <label
+                  htmlFor="restore-backup-file"
+                  className="mb-1 block text-sm font-medium text-[hsl(var(--foreground))]"
+                >
                   Backup File
                 </label>
                 <input
+                  id="restore-backup-file"
                   type="file"
                   onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)}
                   className="block w-full text-sm text-[hsl(var(--foreground))] file:mr-4 file:rounded-md file:border-0 file:bg-[hsl(var(--primary))] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[hsl(var(--primary-foreground))]"

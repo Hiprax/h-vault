@@ -232,7 +232,20 @@ export default function ExportDataPage() {
         role="alert"
         className="space-y-2 rounded-lg border border-red-500/50 bg-red-500/5 p-4 text-sm text-[hsl(var(--foreground))]"
       >
-        <p className="flex items-center gap-2 font-semibold text-red-600 dark:text-red-400">
+        {/* `red-700`, not `red-600`. This line is 14px semibold on the tinted
+            `red-500/5` panel behind it, which is not large text, so WCAG 1.4.3
+            asks for 4.5:1 — and `red-600` on that surface (#e7000b on #fff4f5)
+            measures 4.43:1, both off Chrome's painted pixels and from axe-core
+            run over an isolated copy of this exact markup. `red-700` measures
+            5.97:1 on the same surface. It clears the threshold on plain WHITE,
+            which is why it reads as safe and is not: the 5%-tinted panel is the
+            only place this string is ever painted.
+
+            `test:a11y` does NOT report it — the `export-data` view flags the
+            amber button below (3.19:1) and nothing else — so this is a measured
+            fix rather than a gate finding, and the shade must not be walked back
+            on the grounds that the sweep is green. */}
+        <p className="flex items-center gap-2 font-semibold text-red-700 dark:text-red-400">
           <AlertTriangle className="h-5 w-5 shrink-0" /> This file is UNENCRYPTED plaintext
         </p>
         <ul className="list-disc space-y-1 pl-5">
@@ -313,11 +326,28 @@ export default function ExportDataPage() {
           </div>
 
           <div className="flex justify-end">
+            {/* One shade darker in both states, and it is a readability fix rather
+                than a taste one: white 14px medium on `amber-600` measures
+                3.20:1, well under the 4.5:1 floor for text this size — axe
+                reported it as 3.19 and it is the one serious finding the widened
+                sweep produced on this page. On `amber-700` the same text is
+                5.03:1 and the `amber-800` hover is 7.09:1 (all four figures read
+                off Chrome's painted pixels). The amber is deliberate — this
+                action is dangerous but not destructive, so it must not borrow the
+                destructive token — so the fix is the shade, never the hue.
+
+                The two `text-amber-*` lines further down (the skipped-item count
+                in the result card, and the same count in the confirmation
+                dialog) moved with it. Contrast is symmetric, so `amber-600` as
+                14px TEXT on the white card is the same 3.20:1 it was as a
+                background under white; those two states are ones this walk never
+                enters, so the sweep is green either way and the shade was fixed
+                on the measurement rather than on the gate. */}
             <button
               type="button"
               disabled={busy}
               onClick={() => void handlePrepare()}
-              className="inline-flex items-center gap-2 rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-md bg-amber-700 px-4 py-2 text-sm font-medium text-white hover:bg-amber-800 disabled:opacity-50"
             >
               {busy ? (
                 <>
@@ -349,7 +379,7 @@ export default function ExportDataPage() {
                 </li>
               )}
               {result.skipped.length > 0 && (
-                <li className="text-amber-600 dark:text-amber-500">
+                <li className="text-amber-700 dark:text-amber-500">
                   {result.skipped.length} item{result.skipped.length === 1 ? '' : 's'} skipped
                   because the data could not be decoded.
                 </li>
@@ -396,7 +426,7 @@ export default function ExportDataPage() {
           <ul className="list-disc space-y-1 pl-5 text-sm text-[hsl(var(--foreground))]">
             <li>{confirm?.lossNote}</li>
             {confirm && confirm.skippedCount > 0 && (
-              <li className="text-amber-600 dark:text-amber-500">
+              <li className="text-amber-700 dark:text-amber-500">
                 {confirm.skippedCount} item{confirm.skippedCount === 1 ? '' : 's'} could not be
                 decoded and will be listed as skipped, not exported.
               </li>

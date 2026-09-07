@@ -1379,6 +1379,11 @@ describe('machine-readable reports', () => {
     expect([...A11Y_VIEW_IDS]).toEqual([
       'login',
       'register',
+      'forgot-password',
+      'reset-password',
+      'verify-email',
+      'unlock-account',
+      'not-found',
       'vault-list',
       'item-detail',
       'item-form-login',
@@ -1388,7 +1393,12 @@ describe('machine-readable reports', () => {
       'item-form-card-billing',
       'item-form-address-picker',
       'item-form-identity',
+      'generator',
       'settings',
+      'audit-log',
+      'sessions',
+      'backup-settings',
+      'export-data',
       'vault-health',
       'file-encryption',
       'documents-list',
@@ -1420,6 +1430,38 @@ describe('machine-readable reports', () => {
         A11Y_VIEW_IDS.indexOf('unlock-screen'),
       );
     }
+    // The other end of the same constraint, and one of these five is not merely
+    // an optimisation. Every view from `vault-list` onwards needs an unlocked
+    // session, so the pages that need none are scanned FIRST — and
+    // `/forgot-password` sits behind `PublicOnlyRoute` (as `login` and `register`
+    // already did), which redirects a signed-in visitor away, so before the
+    // sign-in is the ONLY point in the walk where it renders at all. The other
+    // four are reachable only through a full `page.goto`, which reloads the SPA
+    // and drops the in-memory vault key; put any of them after the sign-in and
+    // the walk continues against a locked vault, scanning unlock screens under
+    // other views' names.
+    for (const view of [
+      'forgot-password',
+      'reset-password',
+      'verify-email',
+      'unlock-account',
+      'not-found',
+    ]) {
+      expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(A11Y_VIEW_IDS.indexOf('vault-list'));
+    }
+    // And the five views added on the authenticated side belong with the rest of
+    // it, for the same reason the document views do: each needs an unlocked
+    // vault, and the unlock step is what ends that. Listed rather than derived
+    // because "everything between `vault-list` and `unlock-screen`" is what the
+    // assertion would then be, which is true by construction and proves nothing.
+    for (const view of ['generator', 'audit-log', 'sessions', 'backup-settings', 'export-data']) {
+      expect(A11Y_VIEW_IDS.indexOf(view), view).toBeGreaterThan(
+        A11Y_VIEW_IDS.indexOf('vault-list'),
+      );
+      expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(
+        A11Y_VIEW_IDS.indexOf('unlock-screen'),
+      );
+    }
     // Every id is unique and every view says what state the page is in — the
     // description is what makes a report readable a year later.
     expect(new Set(A11Y_VIEW_IDS).size).toBe(A11Y_VIEW_IDS.length);
@@ -1441,6 +1483,22 @@ describe('machine-readable reports', () => {
     expect(a11yGate).toContain(
       `const BLOCKING_IMPACTS = [${A11Y_BLOCKING_IMPACTS.map((i) => `'${i}'`).join(', ')}];`,
     );
+    // And one more restatement in the same file, coupled to a DIFFERENT gate:
+    // the checks axe could not decide are published under `rule`, never `id`.
+    // `verify:selftest`'s defect case for `test:a11y` proves failability by
+    // finding a `blocking` entry, and `blocking` is the only place the report
+    // puts `"view"` immediately before `"id"` — a scan's own record has `"view"`
+    // then `"url"`, and an undecided entry has `"view"` then `"rule"`. Tidy the
+    // key back to `id` and that predicate starts matching an undecided finding
+    // too, which would attribute an unrelated red run to a defect nobody planted.
+    // Pinned here rather than left to two comments facing each other, because it
+    // is a one-word edit whose symptom appears in neither file.
+    expect(a11yGate).toContain('undecided.push({ view: scan.view, rule: id, ...rest });');
+    const selftestDefects = readFileSync(
+      path.join(repoRoot, 'scripts/ci/lib/selftest-defects.mjs'),
+      'utf8',
+    );
+    expect(selftestDefects).toContain('/"view":\\s*"item-form-note",\\s*"id":\\s*"select-name"/');
   });
 
   it('keeps every re-run subset out of the test headcount, because its files run twice elsewhere', () => {

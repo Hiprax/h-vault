@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AxiosHeaders, type AxiosResponse } from 'axios';
@@ -247,5 +247,49 @@ describe('ResetPasswordPage - zxcvbn strength enforcement', () => {
     await waitFor(() => {
       expect(resetPasswordApi).toHaveBeenCalled();
     });
+  });
+});
+
+describe('ResetPasswordPage - the reveal toggle has a name', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /**
+   * The toggle's content is a lucide icon, so `aria-label` is its ONLY
+   * accessible name — and this page shipped without one while the sign-in page,
+   * the registration page and the password generator all carried the same pair
+   * of strings. Deleting the attribute turns both assertions below red, and it
+   * is a `critical` `button-name` violation in `test:a11y`'s `reset-password`
+   * view; this file catches it in milliseconds instead.
+   *
+   * Both states are asserted because the label is derived from `showPassword`:
+   * a name that never changes would leave a screen-reader user told "Show
+   * password" about a field whose characters are already on screen (WCAG 4.1.2).
+   */
+  it('names the reveal control for both of its states', async () => {
+    // `await act` rather than a bare `render`: the page's mount effect resolves
+    // the lazily-imported strength library and calls `setState` when it lands,
+    // and this test is otherwise synchronous — so that update would arrive after
+    // the test body and React would log an "update was not wrapped in act"
+    // warning. The other cases in this file are covered by their own `waitFor`.
+    await act(async () => {
+      renderWithToken();
+    });
+
+    const reveal = screen.getByRole('button', { name: 'Show password' });
+    // Not merely present: it must be the control next to the password field
+    // rather than something else that happens to share the name.
+    expect(screen.queryByRole('button', { name: 'Hide password' })).toBeNull();
+    expect(screen.getByPlaceholderText('At least 12 characters')).toHaveAttribute(
+      'type',
+      'password',
+    );
+
+    fireEvent.click(reveal);
+
+    expect(screen.getByRole('button', { name: 'Hide password' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Show password' })).toBeNull();
+    expect(screen.getByPlaceholderText('At least 12 characters')).toHaveAttribute('type', 'text');
   });
 });
