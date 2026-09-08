@@ -1510,7 +1510,10 @@ only rise, warnings and suppressions may only fall — and an unlisted field is 
 than an unchecked one. A number can be moved only by
 `node scripts/ci/ratchet-check.mjs --accept --reason "..."`, which moves each field in its improving
 direction only and refuses while anything is failing or unmeasured; there is no flag that worsens a
-number. The baseline records absolute denominators (`linesTotal`) and the **measured file set**
+number. A family the baseline has **never** recorded is a separate act with its own flag —
+`--accept --seed <family> --reason "..."` — because that one writes a floor without comparing it to
+anything; it refuses a half-present family, refuses any path `meta.fields` still names, and reports
+what it wrote under `seeded` rather than as an improvement. The baseline records absolute denominators (`linesTotal`) and the **measured file set**
 beside every percentage, because a percentage whose denominator can shrink is not a gate: dropping a
 file from coverage raises the number while covering less code. A field that is absent from the
 baseline has no gate at all — which is the quieter half of the same mistake, so the baseline's own
@@ -2272,15 +2275,30 @@ Record it from the machine that measured it, once the rest of the run is clean:
 
 ```bash
 npm run audit:ratchet:full
-node scripts/ci/ratchet-check.mjs --accept --reason "first mutation baseline, measured on <host> at <sha>"
+node scripts/ci/ratchet-check.mjs --accept --seed mutation --reason "first mutation baseline, measured on <host> at <sha>"
 ```
 
-`--accept` moves every field in its improving direction only, refuses without a
-`--reason`, and refuses while anything is failing or unmeasured, so it can only ever be
-run from a tree that has just gone green. It also **refuses a `--tier` argument**:
-accepting demands the full comparison, because a partial one would write a floor from
-numbers it never looked at. Read the baseline back afterwards and confirm the block is
-there; if it is not, nothing was armed and the next run holds no floor either.
+**`--seed mutation` is the load-bearing half of that second command, and leaving it off
+records nothing.** The ratchet's comparison loop is driven by the baseline's own keys —
+that is what makes every direction check work — so a family the baseline has never
+carried is measured, and then never compared against anything, and `--accept` writes only
+the fields it compared. Naming the family is what tells it to record a floor that has no
+predecessor. It is deliberately explicit: seeding is the one operation here that writes a
+number without comparing it, so it refuses a family that is only half present, refuses any
+path `meta.fields` still names (deleting a floor and re-seeding it from a worse run would
+otherwise be a reduction with no `BASELINE-REDUCTION` entry and no sign-off), refuses a
+family this run measured nothing for, and blocks on a measured field with no declared
+direction. Seeded fields are reported under `seeded` rather than folded into
+`accepted`, because a floor compared against nothing and a floor that moved up are
+different claims.
+
+Everything else about `--accept` is unchanged: it moves every field in its improving
+direction only, refuses without a `--reason`, and refuses while anything is failing or
+unmeasured, so it can only ever be run from a tree that has just gone green. It also
+**refuses a `--tier` argument**: accepting demands the full comparison, because a partial
+one would write a floor from numbers it never looked at. Read the baseline back afterwards
+and confirm the block is there; if it is not, nothing was armed and the next run holds no
+floor either.
 
 Two things about that first run are easy to plan around badly, and both were measured
 the hard way.

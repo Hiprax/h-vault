@@ -343,11 +343,21 @@ if (!recorded) {
   // It is a FAILURE rather than a hard exit at the top of the file on purpose:
   // the legs still run and `mutation.json` is still written above, because that
   // report is exactly what an operator needs in order to record the first
-  // baseline (`--accept` reads it). A gate that refused to run could never be
-  // bootstrapped; a gate that passes with no floor is not a gate.
+  // baseline. A gate that refused to run could never be bootstrapped; a gate
+  // that passes with no floor is not a gate.
+  //
+  // `--seed mutation` is part of that command and not a decoration. `--accept`
+  // alone CANNOT create this block: the ratchet's comparison loop is driven by
+  // the baseline's own keys, so a family it has never carried is measured and
+  // then never compared, and only `improvements` are written. That was true for
+  // as long as this message has existed, and the message used to omit the flag —
+  // so the documented way out of this failure did not work, and the first
+  // campaign to reach this line would have been followed by an accept that
+  // silently recorded nothing.
   failures.push(
     'no mutation block in baseline.json — this run held no floor. ' +
-      'Record it with: npm run audit:ratchet:full && node scripts/ci/ratchet-check.mjs --accept --reason "..."',
+      'Record it with: npm run audit:ratchet:full && node scripts/ci/ratchet-check.mjs ' +
+      '--accept --seed mutation --reason "..."',
   );
 } else {
   const lost = (recorded.filesMutated ?? []).filter((file) => !filesMutated.includes(file));

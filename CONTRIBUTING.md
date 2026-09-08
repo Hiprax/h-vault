@@ -311,7 +311,10 @@ Three gates enforce it rather than trusting it:
   field has a direction: coverage, test counts and the measured file set may only rise;
   warnings and suppressions may only fall. Moving a number needs
   `node scripts/ci/ratchet-check.mjs --accept --reason "..."`, which moves each field only
-  in its improving direction and refuses while anything is failing or unmeasured.
+  in its improving direction and refuses while anything is failing or unmeasured. Recording a
+  family the baseline has never carried is a different act and needs
+  `--accept --seed <family> --reason "..."`, because it writes a floor with nothing to compare
+  it against; it refuses a half-present family and refuses any path `meta.fields` still names.
 - **`npm run verify:selftest`** plants one defect per registered gate in a throw-away copy
   of the tree and requires every gate to go red — for a reason its own report attributes to
   that defect, so a gate that fails for an unrelated reason is reported `unproven` rather

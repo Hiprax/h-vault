@@ -14,6 +14,8 @@
  *   node scripts/ci/ratchet-check.mjs --tier 0             the cheap fields only
  *   node scripts/ci/ratchet-check.mjs --json               report on stdout
  *   node scripts/ci/ratchet-check.mjs --accept --reason "" record improvements
+ *   node scripts/ci/ratchet-check.mjs --accept --seed mutation --reason ""
+ *                                                          record a NEW family
  *
  * Exit codes: 0 = no regression · 1 = regression or unmeasured field · 2 = could
  * not run.
@@ -69,6 +71,36 @@
  *     `BASELINE-REDUCTION` ledger entry plus judge sign-off, which the scanner
  *     exempts from the entry ceiling so the escape valve is not self-blocking.
  *
+ *  h. A FAMILY THE BASELINE HAS NEVER RECORDED IS SEEDED ONLY WHEN ASKED FOR BY
+ *     NAME. The comparison loop is driven by the BASELINE's own keys, which is
+ *     what makes (a)-(g) work at all; the cost is that a measurement with no
+ *     counterpart is invisible here, so `--accept` alone can never bring a new
+ *     field family into existence. That is not a theoretical gap: `test:mutation`
+ *     shipped at tier 2, its gate fails by design until `mutation.overall` is
+ *     recorded, and the procedure three documents prescribed for recording it
+ *     could not work. `--seed <prefix>` closes it, and every one of its four
+ *     refusals exists because seeding is the one operation here that writes a
+ *     floor without comparing it to anything:
+ *
+ *       - it is EXPLICIT and requires `--accept` and `--reason`. A blanket
+ *         "record whatever is measured but absent" would make the first run
+ *         after any extractor change write floors nobody asked for.
+ *       - it REFUSES A FAMILY THAT IS PARTIALLY PRESENT, so seeding cannot be
+ *         used to walk a field around MUTATION_REQUIRED_FIELDS one key at a time.
+ *       - it REFUSES A PATH `meta.fields` STILL NAMES. `meta.fields` is this
+ *         file's only memory that a field once existed; without this rule,
+ *         deleting a floor and re-seeding it from a WORSE run would be a silent
+ *         reduction with no `BASELINE-REDUCTION` entry and no sign-off, which is
+ *         precisely the manoeuvre (g) refuses to give a flag to.
+ *       - a MEASURED field with no declared direction is `undeclared` and
+ *         BLOCKING, exactly as a baselined one is under (b). Seeding may not be
+ *         the way an undeclared field gets in.
+ *
+ *     Seeded fields are reported under their own `seeded` key, never folded into
+ *     `improvements`: a floor compared against nothing and a floor that moved up
+ *     are different claims and a reader of the diff has to be able to tell them
+ *     apart.
+ *
  * ---------------------------------------------------------------------------
  * PORT NOTES — deliberate differences from the reference implementation.
  * ---------------------------------------------------------------------------
@@ -120,11 +152,11 @@ import {
   INITIAL_PAYLOAD_BUDGET_KB,
 } from './lib/bundle-budgets.mjs';
 import { RESOURCE_BUDGETS } from './lib/resource-budgets.mjs';
-// The one function shared with the mutation gate: a core module is a PATH, and
+// The two symbols shared with the mutation gate: a core module is a PATH, and
 // a baseline key may not contain a dot. Imported rather than restated so the
 // gate that writes `mutation.modules.*` and the gate that reads it cannot
-// disagree about what a module key is.
-import { moduleKey } from './lib/mutation-scope.mjs';
+// disagree about what a module key is, nor about WHICH modules are core.
+import { CORE_MODULES, moduleKey } from './lib/mutation-scope.mjs';
 // The one parser for an LCOV document, shared with `coverage-check.mjs` — see
 // `fromLcov` below. `pct` comes with it for the same reason.
 import { parseLcov, pct } from './lib/lcov.mjs';
@@ -499,6 +531,11 @@ function fromJunit(xml) {
  *    not to test, which is why `mutation.totalMutants` is ratcheted upward:
  *    turning `ignoreStatic` on would raise the percentage while shrinking this
  *    number, and the smaller denominator is what fails the run.
+ *  - `moduleIds` is `CORE_MODULES` UNION the baseline's own module keys (see
+ *    `mutationModuleIds`), never one or the other: the declaration is what lets
+ *    a newly-declared module be measured on its first run, and the baseline's
+ *    memory is what stops a module deleted from the declaration quietly ceasing
+ *    to be measured.
  *  - Module keys are matched with BOTH sides sanitised through `moduleKey`.
  *    A core module is a path, three of the six end in `.ts`, and an unsanitised
  *    key would flatten to a field whose wildcard is
@@ -506,7 +543,7 @@ function fromJunit(xml) {
  *    fail as having no direction. Sanitising both sides cannot change which
  *    files a module claims.
  */
-function fromMutationJson(json, baselineModules) {
+function fromMutationJson(json, moduleIds) {
   const out = {};
   if (!json.files || typeof json.files !== 'object') return out;
   const perFile = new Map();
@@ -528,7 +565,7 @@ function fromMutationJson(json, baselineModules) {
   out['mutation.filesMutated'] = [...perFile.keys()].sort();
   out['mutation.totalMutants'] = total;
   if (total) out['mutation.overall'] = pct(killed, total);
-  for (const mod of baselineModules) {
+  for (const mod of moduleIds) {
     let t = 0;
     let k = 0;
     for (const [f, v] of perFile) {
@@ -564,11 +601,48 @@ const fromFlakeJson = (json) => {
 if (!existsSync(BASELINE)) fail(`${BASELINE} not found; nothing to ratchet against`);
 const baselineRaw = JSON.parse(readFileSync(BASELINE, 'utf8'));
 const baselineModules = Object.keys(baselineRaw.mutation?.modules ?? {});
+/**
+ * Which modules get a per-module mutation score, and it is a UNION for two
+ * different reasons pulling in opposite directions.
+ *
+ * `CORE_MODULES` is the DECLARATION: a module newly added to it must be measured
+ * on the first run that has data for it, or it could never be seeded (decision
+ * (h)) and the plan's higher threshold would exist only on paper. Reading the
+ * declaration is also what makes the first run possible at all, since on a
+ * bootstrap `baselineModules` is empty and this loop produced nothing.
+ *
+ * `baselineModules` is the MEMORY, and dropping it would be the cheat: a module
+ * deleted from `CORE_MODULES` would stop being measured, and a baseline field
+ * with no measurement is UNMEASURED and blocking under (c) — which is the
+ * signal that wants to survive. Keeping both means the declaration can only ADD
+ * a module, never silently retire one.
+ *
+ * Deduplicated on the SANITISED key because that is what the two halves have in
+ * common: `CORE_MODULES` holds raw paths and a baseline key has already been
+ * through `moduleKey`, which is idempotent.
+ */
+const mutationModuleIds = [
+  ...new Map([...CORE_MODULES, ...baselineModules].map((mod) => [moduleKey(mod), mod])).values(),
+];
 const baselinePackages = Object.keys(baselineRaw.packages ?? {});
 const manifestRaw = existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, 'utf8')) : null;
 
 const tier = val('--tier');
 const tier0 = tier === '0';
+
+/**
+ * (h) The families this run has been asked to bring into existence. Comma
+ * separated, and only ever the families NAMED here — never "everything that was
+ * measured and is absent", which would let the first run after any extractor
+ * change write floors nobody asked for.
+ */
+const seedPrefixes = (val('--seed') ?? '')
+  .split(',')
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+if (seedPrefixes.length > 0 && !has('--accept')) {
+  fail('--seed only applies to --accept; on its own it would compare a family that is not there');
+}
 
 /**
  * The artifacts a COMPLETE run produces, read from the manifest rather than
@@ -730,7 +804,7 @@ function collect() {
       // passing it through as a number would fabricate a clean result.
       for (const [k, v] of Object.entries(j)) if (typeof v === 'number') got[`warnings.${k}`] = v;
     } else if (base.includes('mutation')) {
-      got = fromMutationJson(j, baselineModules);
+      got = fromMutationJson(j, mutationModuleIds);
     } else if (base.includes('flake')) {
       got = fromFlakeJson(j);
     }
@@ -983,6 +1057,52 @@ if (Array.isArray(baselineRaw.meta?.fields)) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// (h) seeding a family the baseline has never recorded
+// ---------------------------------------------------------------------------
+// Evaluated HERE, before `blocking`, and not inside the `--accept` branch: an
+// undeclared measured field has to reach `undeclared` while that count still
+// means something, or seeding would be the one way into the baseline that
+// decision (b) does not police.
+const seeded = [];
+if (seedPrefixes.length > 0) {
+  const remembered = new Set(
+    Array.isArray(baselineRaw.meta?.fields) ? baselineRaw.meta.fields : [],
+  );
+  for (const prefix of seedPrefixes) {
+    const under = (p) => p === prefix || p.startsWith(`${prefix}.`);
+    const present = Object.keys(base).filter(under);
+    if (present.length > 0) {
+      fail(
+        `--seed ${prefix}: the baseline already records ${String(present.length)} field(s) under ` +
+          `"${prefix}" (e.g. ${present[0]}). A family that exists moves through --accept's improving ` +
+          'direction; seeding it field by field would walk around the required-field check.',
+      );
+    }
+    const forgotten = Object.keys(cur).filter((p) => under(p) && remembered.has(p));
+    if (forgotten.length > 0) {
+      fail(
+        `--seed ${prefix}: meta.fields still names ${forgotten.slice(0, 3).join(', ')}, so this ` +
+          'family was recorded once and then removed. Re-recording it from a fresh run would be a ' +
+          'reduction with no comparison: that is a BASELINE-REDUCTION ledger entry and judge ' +
+          'sign-off, not a seed.',
+      );
+    }
+    const measured = Object.keys(cur).filter(under).sort();
+    if (measured.length === 0) {
+      fail(
+        `--seed ${prefix}: nothing under "${prefix}" was measured by this run, so there is no ` +
+          'evidence to record. Run the gate that produces it, then seed from the same tree.',
+      );
+    }
+    for (const path of measured) {
+      const dir = directionFor(path, undeclared);
+      if (!dir || dir === 'info') continue;
+      seeded.push({ path, value: cur[path], dir });
+    }
+  }
+}
+
 const blocking =
   regressions.length + missing.length + absent.length + undeclared.length + stale.length;
 
@@ -1015,6 +1135,10 @@ if (has('--accept')) {
     }
     for (const m of missing) console.error(`  UNMEASURED ${m.path}`);
     for (const a of absent) console.error(`  ABSENT     ${a.path}`);
+    // Printed because (h) made it reachable from an accept run: a seeded family
+    // carrying a field with no declared direction blocks here, and a refusal
+    // that names nothing is a refusal nobody can act on.
+    for (const u of undeclared) console.error(`  UNDECLARED ${u}`);
     for (const s of stale) console.error(`  STALE      ${s}`);
     console.error(
       'A justified reduction needs a BASELINE-REDUCTION ledger entry and judge sign-off, then re-run.',
@@ -1031,6 +1155,10 @@ if (has('--accept')) {
     n[keys.at(-1)] = v;
   };
   for (const i of improvements) setPath(next, i.path, cur[i.path]);
+  // (h) A seeded field is written from the same `cur` the comparison would have
+  // read; the difference is that nothing was compared, which is why it is
+  // reported separately below rather than counted as an improvement.
+  for (const s of seeded) setPath(next, s.path, s.value);
   next.recordedAt = new Date().toISOString().slice(0, 10);
   next.reason = reason;
   try {
@@ -1052,6 +1180,7 @@ if (has('--accept')) {
   // stderr so a machine consumer of an accept run is not handed a mixed stream.
   const accepted = {
     accepted: improvements.map((i) => ({ path: i.path, value: cur[i.path] })),
+    seeded: seeded.map((s) => ({ path: s.path, value: s.value, dir: s.dir })),
     reason,
     regressions: [],
     missing: [],
@@ -1063,7 +1192,14 @@ if (has('--accept')) {
   };
   if (has('--json')) console.log(JSON.stringify(accepted, null, 2));
   else
-    console.log(`ratchet-check: accepted ${improvements.length} improvement(s). Reason: ${reason}`);
+    console.log(
+      `ratchet-check: accepted ${String(improvements.length)} improvement(s)` +
+        (seeded.length > 0
+          ? ` and SEEDED ${String(seeded.length)} field(s) compared against nothing: ` +
+            `${seeded.map((s) => s.path).join(', ')}`
+          : '') +
+        `. Reason: ${reason}`,
+    );
   process.exit(0);
 }
 
