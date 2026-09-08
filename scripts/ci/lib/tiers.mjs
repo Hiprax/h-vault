@@ -51,10 +51,21 @@ export const TIER_SELECTOR = { 0: [0], 1: [0, 1], 2: [0, 1, 2], full: [0, 1, 2] 
  * Making `lint` cheaper has already been tried once and rejected on measurement —
  * see the rationale beside the constructor in `../lint-gate.mjs`.
  *
- * T1 is 12 minutes rather than a rounder 10 because the server suite alone is
- * ~150 s and Playwright is ~6 minutes: a budget nobody meets is a budget nobody
- * respects. T2 is unbounded on purpose — `mutation` re-runs the suite once per
- * mutant, and any number written here would be fiction.
+ * T1 is 12 minutes rather than a rounder 10 on the principle that a budget nobody
+ * meets is a budget nobody respects — but T1 no longer meets it, and the number is
+ * left alone rather than quietly raised, exactly as T0's is. MEASURED on the
+ * reference machine, 2026-09-08: `test-integration` 3 m 33 s, and `e2e` 10 m 34 s
+ * for 218 tests on a single worker (`junit-e2e.xml`, `time="633.83901"`; the gate
+ * itself is longer, since that figure excludes standing the stack up). So the two
+ * largest gates alone are 14 m 07 s before the other twenty are counted. The
+ * figures this budget was originally chosen against — ~150 s and ~6 minutes — are
+ * both stale; the E2E suite has grown by three quarters as specs were added to it.
+ * Raising `e2e`'s worker count would take it to 6 m 48 s, and that was measured
+ * too and REFUSED: see
+ * `.testfortress/suppressions.json`'s `SUP-0025`, which records why, and note that
+ * these budgets are not gates, so the saving would buy nothing a gate can see.
+ * T2 is unbounded on purpose — `mutation` re-runs the suite once per mutant, and
+ * any number written here would be fiction.
  */
 export const TIER_BUDGET_SECONDS = { 0: 90, 1: 720, 2: null };
 

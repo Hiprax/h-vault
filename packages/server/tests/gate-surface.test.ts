@@ -1447,6 +1447,49 @@ describe('machine-readable reports', () => {
     }
   });
 
+  it('resolves every Playwright config to one worker, and names the gates a raise would move', () => {
+    // `workers: 1` is a FLAKE-HIDE marker — `scripts/ci/integrity-scan.mjs` matches the
+    // literal `1` inside any runner config — so it is ledgered, dated and expiring
+    // rather than treated as settled. What this test pins is the thing that makes
+    // raising it a larger act than the one-character diff looks like:
+    // `playwright.a11y.config.ts` and `playwright.flake.config.ts` both spread the base
+    // config and override only `testMatch` / `projects` / `reporter` / `repeatEach`, so
+    // `workers` and `fullyParallel` reach them by INHERITANCE. One edit to the base
+    // therefore changes the concurrency model of THREE gates — `e2e`, `a11y` and
+    // `flake` — two of which nobody raising it would think to re-measure.
+    //
+    // The constraint is not costless and was measured rather than assumed. On the
+    // reference machine (four cores), `--workers=2` ran the whole suite 218 of 218
+    // green in 6.8 minutes against 10.6 at one worker. It stands anyway, and the
+    // reason is not the one people reach for: a second worker does NOT race on a port.
+    // Playwright's `webServer` is a per-RUN facility, so every worker shares the single
+    // dev server, the single mongod and the single storage container that
+    // `e2e/start-server.ts` stands up. It races on ACCOUNT MINTING. `e2e/helpers.ts`
+    // `testEmail()` draws from a module-level counter and a stream seeded from the
+    // run-wide `SEED` that the base config pins into the environment, so a second
+    // worker PROCESS restarts both at their initial values and the only entropy left
+    // between two workers is `Date.now()` in milliseconds — and a collision does not
+    // fail closed, because `createAuthenticatedUser` signs in with a CONSTANT auth
+    // hash, so the second worker signs into the FIRST one's account and the two drive
+    // one vault until something unrelated fails. The full enumeration, both
+    // measurements and the removal condition are in
+    // `.testfortress/phase-logs/e2e-worker-measurements.md`.
+    //
+    // Hence all three, labelled — and SOFT, for the reason `e2e/a11y.spec.ts` gives for
+    // the same choice: one failing arm must not hide the state of the others. A hard
+    // `expect` aborts on the first, so a raise would report the E2E gate and say nothing
+    // about the two that were converted along with it, which is precisely the silence
+    // this test exists to break.
+    for (const [gate, config] of [
+      ['the E2E gate', playwrightConfig],
+      ['the accessibility gate', a11yPlaywrightConfig],
+      ['the flake gate', flakePlaywrightConfig],
+    ] as const) {
+      expect.soft(config.workers, gate).toBe(1);
+      expect.soft(config.fullyParallel, gate).toBe(false);
+    }
+  });
+
   it('pins WHICH views the accessibility gate scans, and what fails it', () => {
     // The reason this list is pinned rather than merely counted: an axe run over
     // NOTHING reports zero violations, exactly like an axe run over a clean page.
