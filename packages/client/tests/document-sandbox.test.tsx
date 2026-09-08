@@ -821,7 +821,43 @@ describe('the frame’s program', () => {
     });
   }
 
+  /**
+   * Hand a throwaway port to any module instance still listening on the window.
+   *
+   * `sandbox.ts` is an ENTRY POINT: in a real document exactly one copy of it
+   * ever runs, and `startSandbox` removes its own window listener the moment a
+   * port arrives (`sandbox.ts:365`). This file imports it once per test
+   * (`vi.resetModules()`, then a fresh `import`), so a test that imports it and
+   * never completes the handshake leaves a program whose listener is STILL
+   * ARMED — and the next test's `window.dispatchEvent` is then accepted by BOTH
+   * programs, which each attach a `message` listener to the ONE port and each
+   * answer every request on it.
+   *
+   * The duplicate answer is not visibly wrong, which is what makes it expensive:
+   * it is the same reply, one turn late, so `nextReply` resolves the FOLLOWING
+   * request on it and the assertion that follows reads a page that has not been
+   * rendered yet. Measured, deterministically, at `--sequence.seed=1340`, where
+   * 'creates its render target when the document was served without one' is
+   * shuffled to run immediately before 'loads a renderer per mode': the `html`
+   * step resolved on the `markdown` step's duplicate and `#root h2` was still
+   * absent. It is a defect in THIS harness, not in the frame's program — nothing
+   * in a browser can produce two copies of an entry point in one document.
+   *
+   * Accepting a channel is what makes a program let go of the window, so handing
+   * it a dead one is the teardown. A program that already accepted has no
+   * listener left and never sees this.
+   */
+  function releaseStaleProgram(): void {
+    const spare = new MessageChannel();
+    const event = new MessageEvent('message', { data: null });
+    Object.defineProperty(event, 'ports', { configurable: true, get: () => [spare.port2] });
+    window.dispatchEvent(event);
+    spare.port1.close();
+    spare.port2.close();
+  }
+
   afterEach(() => {
+    releaseStaleProgram();
     document.body.innerHTML = '';
   });
 

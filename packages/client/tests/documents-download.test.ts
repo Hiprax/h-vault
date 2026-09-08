@@ -219,6 +219,13 @@ interface SavedFile {
 let savedFiles: SavedFile[] = [];
 let createdAnchors: HTMLAnchorElement[] = [];
 
+/**
+ * Runs once a blob download has been handed to the browser, so a test can act
+ * BETWEEN two documents of a bulk run. `onRequest` cannot reach that moment —
+ * every hook it offers is inside a document's read.
+ */
+let onSaved: ((file: SavedFile) => void) | null = null;
+
 /** The 32-byte plaintexts `crypto.subtle.decrypt` produced, i.e. the DEKs. */
 let unwrappedKeys: Uint8Array[] = [];
 
@@ -459,6 +466,7 @@ beforeEach(async () => {
   library.clear();
   onRequest = null;
   savedFiles = [];
+  onSaved = null;
   createdAnchors = [];
   unwrappedKeys = [];
 
@@ -493,7 +501,10 @@ beforeEach(async () => {
     this: HTMLAnchorElement,
   ) {
     const saved = savedFiles[savedFiles.length - 1];
-    if (saved) saved.filename = this.download;
+    if (saved) {
+      saved.filename = this.download;
+      onSaved?.(saved);
+    }
   });
 
   vaultKey = await cryptoService.importVaultKey(cryptoService.generateVaultKey());
@@ -1212,6 +1223,33 @@ describe('saveAllDocuments — taking a whole library out, one document at a tim
     expect(result.failures).toEqual([]);
     expect(savedFiles.map((file) => file.filename)).toEqual(['alpha.txt']);
     // And the third document was never touched.
+    expect(urls().some((url) => url.includes(ID_C))).toBe(false);
+  });
+
+  it('stops BETWEEN documents when the abort lands after one has been saved', async () => {
+    const built = await threeDocuments();
+    const controller = new AbortController();
+    // Aborted once `alpha.txt` has been handed to the browser, so the run is stopped
+    // tidily between two documents rather than inside one. That is the ONLY path to
+    // the guard at the top of the loop: an abort raised while a document is being
+    // read is answered by the read itself, several layers down, and never reaches
+    // the next iteration's check. It is also the shape a real Cancel click takes,
+    // because the click almost never lands inside the millisecond a read occupies.
+    onSaved = (file) => {
+      if (file.filename === 'alpha.txt') controller.abort();
+    };
+
+    const result = await saveAllDocuments(built.map(candidate), { signal: controller.signal });
+
+    expect(result).toMatchObject({ total: 3, savedCount: 1, stopped: 'cancelled' });
+    // A cancellation is never a failure, and the document that finished before it
+    // landed is still counted as saved rather than lost to the stop.
+    expect(result.failures).toEqual([]);
+    expect(savedFiles.map((file) => file.filename)).toEqual(['alpha.txt']);
+    // The negative the guard exists for: neither remaining document was ASKED FOR.
+    // Without it both are read under an already-aborted signal, which costs the
+    // server two requests and the reader two spurious rows in the summary.
+    expect(urls().some((url) => url.includes(ID_B))).toBe(false);
     expect(urls().some((url) => url.includes(ID_C))).toBe(false);
   });
 

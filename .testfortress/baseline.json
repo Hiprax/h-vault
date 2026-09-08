@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-09-07",
-  "commit": "a732108",
+  "recordedAt": "2026-09-08",
+  "commit": "728c8c7",
   "tests": {
-    "count": 9872
+    "count": 9941
   },
   "coverage": {
     "diff": 100
@@ -12,12 +12,12 @@
     "lint": 0,
     "typecheck": 0,
     "compiler": 0,
-    "audit:config": 59
+    "audit:config": 0
   },
   "a11y": {
     "critical": 0,
     "serious": 0,
-    "viewsScanned": 32
+    "viewsScanned": 33
   },
   "suppressions": {
     "count": 20,
@@ -51,11 +51,11 @@
     },
     "packages/server": {
       "coverage": {
-        "line": 98.85,
-        "branch": 93.07,
+        "line": 98.86,
+        "branch": 93.12,
         "function": 98.35,
-        "linesTotal": 4103,
-        "branchesTotal": 2078,
+        "linesTotal": 4118,
+        "branchesTotal": 2094,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/seedBreachesArgs.ts",
@@ -141,22 +141,23 @@
         ]
       },
       "tests": {
-        "count": 3959
+        "count": 3985
       }
     },
     "packages/client": {
       "coverage": {
-        "line": 99.11,
-        "branch": 93.16,
-        "function": 98.83,
-        "linesTotal": 9109,
-        "branchesTotal": 6364,
+        "line": 99.12,
+        "branch": 93.23,
+        "function": 98.84,
+        "linesTotal": 9182,
+        "branchesTotal": 6421,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
           "src/components/auth/LoginPage.tsx",
           "src/components/auth/RegisterPage.tsx",
           "src/components/auth/UnlockScreen.tsx",
+          "src/components/documents/DocumentBulkDownload.tsx",
           "src/components/documents/DocumentDetail.tsx",
           "src/components/documents/DocumentList.tsx",
           "src/components/documents/DocumentSandbox.tsx",
@@ -272,6 +273,7 @@
           "src/services/crypto/fileCryptoService.ts",
           "src/services/crypto/passwordHistory.ts",
           "src/services/documents/download.ts",
+          "src/services/documents/downloadAll.ts",
           "src/services/documents/transform.ts",
           "src/services/export/csvWriter.ts",
           "src/services/export/folderPath.ts",
@@ -314,12 +316,12 @@
         ]
       },
       "tests": {
-        "count": 4417
+        "count": 4452
       }
     },
     "e2e": {
       "tests": {
-        "count": 210
+        "count": 218
       }
     }
   },
@@ -497,7 +499,7 @@
     ]
   },
   "duplication": {
-    "percentage": 1.9,
+    "percentage": 1.88,
     "clones": 120,
     "duplicatedLines": 1450,
     "totalLines": 52849,
@@ -524,8 +526,8 @@
   "config": {
     "belowError": {
       "actionlint": 0,
-      "hadolint": 5,
-      "spectral": 54
+      "hadolint": 0,
+      "spectral": 0
     },
     "inputsExamined": {
       "actionlint": 1,
@@ -533,7 +535,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 21 follow-up: two more sentences stating the accessibility view count (the README's Docker-prerequisite paragraph and the suppression ledger's visual-regression deferral) are now pinned by docs-sync, taking that guard to 20 sentences across 8 files.",
+  "reason": "Phase 28 close-out: banks the plan's remaining measured gains after a full verify:full on an idle four-core host. Phase 24's below-error reductions (spectral 54 to 0, hadolint 5 to 0, warnings.audit:config 59 to 0) were measured during Phase 25 and deliberately left unaccepted so a dependency refresh could not claim them; Phase 26's document bulk export raised a11y.viewsScanned to 33 and the client and e2e test counts; this phase covered the loop-head abort guard in saveAllDocuments, bounded the HIBP L1 eviction scan, and fixed an in-file isolation leak in document-sandbox.test.tsx that made the flake gate red at order seed 1340, which is why flake.e2eExecutions is measured fresh at 654. mutation is NOT seeded: its server leg is a measured 120-130 hours on this hardware and did not complete.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -606,6 +608,6 @@
   "flake": {
     "runs": 10,
     "failures": 0,
-    "e2eExecutions": 609
+    "e2eExecutions": 654
   }
 }

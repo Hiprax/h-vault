@@ -1337,7 +1337,7 @@ npm run test:e2e                # Playwright
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Server** | 171   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
-| **Client** | 143   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
+| **Client** | 144   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
 | **Shared** | 13    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
 | **E2E**    | 21    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
 
@@ -1717,10 +1717,34 @@ doing nothing else, and treat any single number as the floor.
 
 `verify:full` is cumulative: it is `npm run ci` plus the eight release-tier gates, so
 those twenty-odd minutes are inside the number rather than beside it. Six of the
-release-tier gates are cheap and measured at ten and a half minutes between them
-(`dst` 6m52s, `deploy` 1m25s, `resource` 1m06s, `fuzz` 41s, `recovery` 20s,
-`upgrade` 13s); `flake` and then `mutation` are the rest. Budget a day, start it in the
-morning, and do not plan around a finish time.
+release-tier gates are cheap, and two separate measurements of them are quoted for the
+same reason the push tier is quoted as a range — neither is a constant:
+`dst` 6m52s / 4m56s, `deploy` 1m25s / 1m33s, `resource` 1m06s / 47s, `fuzz` 41s / 32s,
+`recovery` 20s / 14s, `upgrade` 13s / 10s. Eight to eleven minutes for the six.
+`flake` is the seventh and it is an hour and a quarter by itself: **78m46s** measured,
+being ten shuffled runs of all three package suites and then the E2E suite three times
+over, 654 executions in all.
+
+`mutation` is the eighth, and it is the one gate this page will not give you a day for.
+Measured on the four-core reference machine, idle, on 2026-09-08: the `shared` leg
+finishes in **13m30s** (2,469 mutants, 88.09 % killed). The `server` leg is a different
+animal — 12,174 mutants of which **4,977, 41 %, are static**. A static mutant executes
+while its module is being loaded, so it has no per-test coverage and is run against the
+_whole_ suite; on that package the whole suite is 3,224 tests, each file booting a real
+mongod, 5m58s end to end. `bail` does its job and keeps a mutant that dies cheap, and the
+leg still moves at roughly **one mutant per minute per runner** at its pinned concurrency
+of 2, which puts it at **120-130 hours**. Budget a week on four cores, or run it
+somewhere with more of them, and do not plan around a finish time.
+
+The tempting shortcut is `ignoreStatic: true`, and it is the one thing not to do. It does
+not make the gate faster so much as make the number smaller: it removes those mutants from
+the score's **denominator**. Measured on the first `shared` run, it discarded 684 of 2,008
+mutants, 249 of them in `schemas/vault.ts` and 212 in `schemas/user.ts` — and since every
+Zod bound in this project is built at module scope, a 90 % score over a tenth of the
+schemas is not a measurement of anything. Raising `concurrency` past its pinned value is
+the other one: a suite starved of CPU fails on a 30-second test timeout that has nothing to
+do with the mutation, and Stryker records a timeout as a **kill**, so the floor you bank
+would be inflated by exactly the contention you introduced.
 
 Two commands are **not registered gates**, so `verify:full` does not run them, and both are worth
 knowing about before you plan the day. `npm run verify:selftest` proves every gate can still fail,
@@ -1736,14 +1760,17 @@ pattern in the declared scope and expects the gate's cheap pre-flight to refuse 
 directory that left the scope. But that pre-flight compares the declared globs against the
 baseline's `mutation.filesMutated`, and with no `mutation` block there is nothing to compare
 against: the pre-flight passes, the case's failure comes from somewhere else, and the harness
-correctly refuses to credit it. Measured: **36 proven, 1 unproven, 33m 56s**, the one being
-`mutation`, reported as _"exit 1, but its report never mentions the planted defect, so the failure
-is not attributable to it"_. Record the first floor (see below) and the case becomes the
+correctly refuses to credit it. Measured twice, and the verdict is the same both times: **36 proven,
+1 unproven**, in **33m 56s** and again in **50m** on a busier machine, the one being `mutation`,
+reported as _"exit 1, but its report never mentions the planted defect, so the failure is not
+attributable to it"_. The second sweep is also the run that found the `.cache` sandbox-copy defect
+described under `mutation` above, which is what a selftest is for: it exercises every gate's real
+command, so it finds the faults that only show up when a gate actually runs. Record the first floor (see below) and the case becomes the
 millisecond pre-flight check it was designed to be. Until then, read a selftest sweep as
 36-of-37 rather than as broken.
 
-That is also the honest duration to plan against: the sweep is **34 minutes**, not the whole day
-`verify:full` needs, because each case runs its gate only until it fails. Two cases carry a time
+That is also the honest duration to plan against: the sweep is **34 to 50 minutes**, not the whole
+day `verify:full` needs, because each case runs its gate only until it fails. Two cases carry a time
 cap for the opposite reason, `flake` at five minutes and `mutation` at two, so that a defect which
 failed to land cannot leave the harness waiting on an hours-long gate.
 
@@ -2228,8 +2255,10 @@ only `sast` may emit and which means SKIPPED, and **124**, a wall-clock deadline
 which is always a failure.
 
 One more thing about a `1` on a first full run: read the failing gate names before
-reading the code as a verdict on your change. On the reference run these numbers come
-from, 34 of 37 gates passed and three did not. `mutation` was **stopped at a time limit**
+reading the code as a verdict on your change. On the **earlier** reference run these
+numbers come from — kept because its three failures are three different lessons, and
+superseded on the counts by the 36-of-37 / 151m 54s run quoted under `mutation` above —
+34 of 37 gates passed and three did not. `mutation` was **stopped at a time limit**
 after 114 seconds, so by the rule further down it is reported as **not run**, not as red,
 and the 2h 3m the run took therefore excludes a real mutation leg. `ratchet-full` failed
 because reports were invalidated by an edit made mid-run, which is the paragraph on a

@@ -110,6 +110,22 @@ describe('FileEncryptPanel', () => {
     await waitFor(() => {
       expect(screen.getByText(/Use at least 20 characters/)).toBeInTheDocument();
     });
+
+    // AND the strength meter has to be waited for SEPARATELY, which is not
+    // belt-and-braces. The refusal above comes from `isValidPassword` and does not
+    // depend on zxcvbn; the meter does, and zxcvbn is a LAZY chunk applied in a
+    // `.then`. So the refusal can be on screen a microtask before the meter is, and
+    // whether this case happened to observe the meter decided whether two of its
+    // branches ran at all. That is measurable, and it was measured: the client's
+    // BRANCH coverage moved between 93.19 % and 93.23 % from run to run, and an
+    // LCOV diff put the entire swing in this component — `FileEncryptPanel.tsx`
+    // 42/51 versus 44/51 — on exactly the two arms below, at the exactly the hit
+    // counts this password produces (three unfilled bars, one "Minimum" notice).
+    // Waiting for the meter's own text pins the ORDER and, more usefully, pins the
+    // BEHAVIOUR nothing else did: a weak password is scored, and the score is shown
+    // to the user with what it has to reach.
+    expect(await screen.findByText(/Minimum "Strong" required/)).toBeInTheDocument();
+    expect(screen.getByText(/Weak/)).toBeInTheDocument();
     expect(button).toBeDisabled();
 
     // Strong password but mismatched confirmation: still disabled.

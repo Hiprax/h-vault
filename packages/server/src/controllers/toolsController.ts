@@ -115,6 +115,36 @@ export const hibpCache = new Map<string, HibpCacheEntry>();
  */
 let hibpCacheBytes = 0;
 
+/**
+ * A LOWER BOUND on the `expires` of every entry currently held in {@link hibpCache}, or
+ * `0` meaning "unknown, a scan is required".
+ *
+ * It exists to keep the expired-victim search off the insert hot path. Without it,
+ * {@link evictHibpToWithinLimits} walks the whole Map looking for an expired entry on
+ * EVERY insert once the cache is full — and when nothing is expired that walk finds
+ * nothing, so a sustained run of inserts against a full cache costs
+ * `inserts × HIBP_CACHE_MAX_ENTRIES` iterations. The batch breach endpoint inserts up to
+ * `HIBP_BATCH_MAX_PREFIXES` ranges per request across `HIBP_FANOUT_CONCURRENCY` parallel
+ * fetches, so that is a real cost on a real path, and it is the same "never walk the whole
+ * Map on the hot path" principle {@link hibpCacheBytes} already applies to sizing.
+ *
+ * Maintained the only way a lower bound safely can be:
+ * - a full scan that finds NOTHING expired records the minimum it saw (the bound is then
+ *   exact); a scan that stops early on a victim records nothing and leaves it unknown;
+ * - {@link pruneHibpCache}'s sweep, which walks the whole Map anyway, records it too;
+ * - an insert through {@link setHibpCacheEntry} lowers it to the new entry's `expires`,
+ *   because a bound that ignored new entries would let an already-expired insert hide
+ *   behind a future bound;
+ * - evicting can only RAISE the true minimum, so it never invalidates the bound;
+ * - {@link resetCacheAccessCount} and an observed-empty Map reset it to unknown.
+ *
+ * A raw `hibpCache.set` that bypasses this module (a few tests do) can leave the bound
+ * stale-high, exactly as it already desyncs {@link hibpCacheBytes}. The consequence is
+ * bounded and is never a correctness fault: that entry loses its eviction PRIORITY for
+ * one round, `pruneHibpCache` still reaps it, and every read still treats it as a miss.
+ */
+let hibpEarliestExpiry = 0;
+
 /** Measured byte total of the L1 cache (test/introspection accessor). */
 export function getHibpCacheBytes(): number {
   return hibpCacheBytes;
@@ -126,17 +156,23 @@ let cacheAccessCount = 0;
 export function resetCacheAccessCount(): void {
   cacheAccessCount = 0;
   hibpCacheBytes = 0;
+  hibpEarliestExpiry = 0;
 }
 export function pruneHibpCache(): void {
   if (++cacheAccessCount % 100 !== 0) return;
   const now = Date.now();
+  let earliest = Number.POSITIVE_INFINITY;
   for (const [key, value] of hibpCache) {
     if (value.expires < now) {
       hibpCache.delete(key);
       hibpCacheBytes -= value.bytes ?? 0;
+    } else if (value.expires < earliest) {
+      earliest = value.expires;
     }
   }
   if (hibpCacheBytes < 0) hibpCacheBytes = 0;
+  // The sweep walked every entry, so what survived it establishes the bound exactly.
+  hibpEarliestExpiry = Number.isFinite(earliest) ? earliest : 0;
 }
 
 /**
@@ -153,10 +189,24 @@ function evictHibpToWithinLimits(): void {
   ) {
     const now = Date.now();
     let victimKey: string | undefined;
-    for (const [existingKey, existingEntry] of hibpCache) {
-      if (existingEntry.expires < now) {
-        victimKey = existingKey;
-        break;
+    // Skip the scan entirely while the recorded bound proves nothing can be expired yet;
+    // see {@link hibpEarliestExpiry} for why that bound is safe.
+    if (hibpEarliestExpiry === 0 || now >= hibpEarliestExpiry) {
+      let earliest = Number.POSITIVE_INFINITY;
+      for (const [existingKey, existingEntry] of hibpCache) {
+        if (existingEntry.expires < now) {
+          victimKey = existingKey;
+          break;
+        }
+        if (existingEntry.expires < earliest) earliest = existingEntry.expires;
+      }
+      // A scan that reached the end without a victim measured the bound exactly; one that
+      // stopped early saw only a prefix of the Map and must leave it unknown. `earliest` is
+      // always finite in the first case: the loop above only runs while `size > 1`, so it
+      // saw at least one entry and every entry sets it. No `isFinite` guard, therefore —
+      // it would be a branch no input can take, which is a mutant nothing can kill.
+      if (victimKey === undefined) {
+        hibpEarliestExpiry = earliest;
       }
     }
     // No expired entry to harvest — fall back to oldest-insertion eviction.
@@ -177,11 +227,19 @@ function evictHibpToWithinLimits(): void {
  */
 export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
   // Self-heal the running total after any external `hibpCache.clear()` that bypassed
-  // this module: an empty Map holds zero bytes.
-  if (hibpCache.size === 0) hibpCacheBytes = 0;
+  // this module: an empty Map holds zero bytes, and no bound describes it.
+  if (hibpCache.size === 0) {
+    hibpCacheBytes = 0;
+    hibpEarliestExpiry = 0;
+  }
 
   const bytes = Buffer.byteLength(entry.data, 'utf8');
   const stored: HibpCacheEntry = { data: entry.data, expires: entry.expires, bytes };
+  // Lower the bound to cover the newcomer. Without this an already-expired insert would
+  // hide behind a bound measured before it arrived and lose its eviction priority.
+  if (hibpEarliestExpiry !== 0 && entry.expires < hibpEarliestExpiry) {
+    hibpEarliestExpiry = entry.expires;
+  }
 
   const existing = hibpCache.get(key);
   if (existing) {

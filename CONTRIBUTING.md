@@ -85,8 +85,15 @@ computed in local time and every other gate runs where local time and UTC are th
 thing; `deploy`, the deployment clean room, which stands the whole Compose stack up from
 nothing and is far too heavy for a hook — its fast sibling `smoke` covers the built
 artifact on every push; `flake`, ten complete runs of every suite in ten different
-shuffled orders plus the Playwright suite three times over, measured at 84 minutes; and
-`mutation`, the oracle, which re-runs the suite once per mutant and is measured in hours.
+shuffled orders plus the Playwright suite three times over, measured at 84 and 79 minutes
+on two separate runs; and `mutation`, the oracle, which re-runs the suite once per mutant.
+`mutation` is measured in DAYS on a four-core machine, not in hours: its `shared` leg takes
+13m30s, but 41 % of the `server` leg's 12,174 mutants are static — a static mutant has no
+per-test coverage, so it is run against the whole suite, and that suite boots a real mongod
+per file. Measured at about one mutant per minute per runner, which is 120-130 hours for
+that leg alone. Plan for it, and never make it cheap by narrowing what it mutates or by
+raising its concurrency: the first shrinks the score's denominator and the second turns
+slow tests into timeouts, which Stryker counts as kills.
 All eight run in `npm run verify:full`.
 
 The gates are grouped into tiers by how long they take, so there is something worth
