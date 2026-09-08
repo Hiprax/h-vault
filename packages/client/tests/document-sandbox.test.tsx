@@ -33,6 +33,7 @@ import { render, screen, act, waitFor, cleanup } from '@testing-library/react';
 import { DocumentSandbox } from '../src/components/documents/DocumentSandbox';
 import { renderText } from '../src/sandbox/renderers/text';
 import { frameMessage, parseRenderRequest } from '../src/sandbox/protocol';
+import { PRETTIER_VERSION } from '../src/sandbox/transform/formatEngine';
 
 // ---------------------------------------------------------------------------
 // A stub frame
@@ -504,6 +505,183 @@ describe('one frame per document', () => {
     expect(screen.getByTitle('Document preview')).not.toBe(first);
     expect(handles.onUnavailable).not.toHaveBeenCalled();
   });
+
+  /**
+   * A rename, which is the case neither test above can reach.
+   *
+   * Every case below holds `bytes` at ONE reference on purpose. The two remount
+   * tests above call `bytesOf(...)` a second time, which allocates a second
+   * buffer and so takes the host's `seenBytes !== bytes` branch — they pass
+   * whatever the element key says, and would go on passing against a host that
+   * reused the frame for every prop except the payload. Renaming `notes.md` to
+   * `notes.markdown`, or `.txt` to `.log`, changes `mode` and/or `ext` with the
+   * same plaintext still in hand, and that is the shape the key has to survive.
+   *
+   * The two dimensions are exercised SEPARATELY as well as together, so that
+   * dropping either one from the key fails a case of its own. `mode` and `ext`
+   * are both derived from the document's name at the only call site today, so
+   * the mode-only case pins the component's own contract rather than a journey
+   * a user can take right now — which is the point: the rule is "every input the
+   * effect reads", and a key that lists only the props someone happened to think
+   * of is a key that will be wrong again.
+   */
+  describe('a rename, with the same bytes', () => {
+    /**
+     * Model the browser, because without this the cases below cannot fail for
+     * the right reason.
+     *
+     * An iframe loads `/sandbox.html` and announces itself with exactly one
+     * `ready` — per ELEMENT, at its load. An element that has ALREADY handshaked
+     * never speaks again, which is the whole fact the remount rule exists to
+     * respect. A helper that re-announced the same element would hand a reused
+     * frame a second handshake no browser could produce, and the defect these
+     * cases pin would present as a green suite.
+     */
+    let announced: WeakSet<HTMLIFrameElement>;
+    beforeEach(() => {
+      announced = new WeakSet<HTMLIFrameElement>();
+    });
+
+    function currentFrame(): HTMLIFrameElement {
+      return screen.getByTitle('Document preview') as HTMLIFrameElement;
+    }
+
+    /** Let the CURRENT element announce itself, once and only once, ever. */
+    function announceIfNew(): StubWindow | null {
+      const frame = currentFrame();
+      if (announced.has(frame)) return null;
+      announced.add(frame);
+      const stub = stubFrameWindow(frame);
+      postFromFrame(stub, { kind: 'ready' });
+      return stub;
+    }
+
+    /** What the frame was told to render, read off its own channel. */
+    async function renderRequestOn(stub: StubWindow): Promise<Record<string, unknown>> {
+      const port = transferredPort(stub);
+      expect(port).toBeInstanceOf(MessagePort);
+      const received: unknown[] = [];
+      port!.onmessage = (event) => received.push(event.data);
+      port!.start();
+      await waitFor(() => {
+        expect(received).toHaveLength(1);
+      });
+      return received[0] as Record<string, unknown>;
+    }
+
+    interface Naming {
+      mode: React.ComponentProps<typeof DocumentSandbox>['mode'];
+      ext: string;
+    }
+
+    it.each<[string, Naming, Naming]>([
+      ['the mode alone', { mode: 'text', ext: 'md' }, { mode: 'markdown', ext: 'md' }],
+      ['the extension alone', { mode: 'text', ext: 'txt' }, { mode: 'text', ext: 'log' }],
+      [
+        'both, which is what a rename does',
+        { mode: 'text', ext: 'txt' },
+        { mode: 'markdown', ext: 'md' },
+      ],
+    ])('replaces the frame when %s changes, and never times out', async (_label, before, after) => {
+      const bytes = bytesOf('# hello');
+      const handles = mountHost({ bytes, ...before });
+      const first = currentFrame();
+      announced.add(first);
+      postFromFrame(handles.stub, { kind: 'ready' });
+      expect(handles.onUnavailable).not.toHaveBeenCalled();
+
+      act(() => {
+        handles.rerender(
+          <DocumentSandbox
+            bytes={bytes}
+            mode={after.mode}
+            ext={after.ext}
+            theme="dark"
+            onLink={handles.onLink}
+            onUnavailable={handles.onUnavailable}
+          />,
+        );
+      });
+
+      // ELEMENT IDENTITY. A reused element means a listener registered for a
+      // handshake that has already happened and can never happen again.
+      const second = currentFrame();
+      expect(second).not.toBe(first);
+
+      // The new element is told what it is now rendering, over its own channel:
+      // the payload is the ONLY thing that carries the mode and the extension,
+      // and it crosses exactly once, so a frame cannot be corrected later.
+      const stub = announceIfNew();
+      expect(stub).not.toBeNull();
+      const payload = await renderRequestOn(stub!);
+      expect(payload['kind']).toBe('render');
+      expect(payload['mode']).toBe(after.mode);
+      expect(payload['ext']).toBe(after.ext);
+      expect((payload['bytes'] as ArrayBuffer).byteLength).toBe(bytes.byteLength);
+
+      // And the SYMPTOM, which is what the reader would have seen: a frame that
+      // has already handshaked never speaks again, so re-running the protocol
+      // against it can only end in the ten-second timeout, replacing a working
+      // preview with "The document preview did not load."
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(handles.onUnavailable).not.toHaveBeenCalled();
+      expect(screen.queryByTitle('Document preview')).not.toBeNull();
+    });
+
+    it('KEEPS the element when nothing the protocol reads changed', async () => {
+      // The converse, and the half that had nothing holding it. The key must
+      // contain everything the effect reads — and NOTHING ELSE, because a key
+      // that moves on an ordinary re-render tears down a healthy frame and
+      // re-handshakes mid-preview, which is the same ten-second death from the
+      // other direction.
+      //
+      // Two things are deliberately changed here and neither may move the key.
+      // `title` is one the caller really does change on a rename
+      // (`Preview of <name>` in `DocumentDetail`), and the effect does not read
+      // it. The callbacks are the other: they are passed as fresh inline arrows,
+      // which is what a caller writes by default, and they are held in refs
+      // precisely so they stay out of the dependency list. Delete that refs
+      // indirection, or give `giveUp`'s `useCallback` a dependency, and this
+      // goes red — which nothing in this suite could do before.
+      const bytes = bytesOf('plain text');
+      const handles = mountHost({ bytes, mode: 'text', ext: 'txt' });
+      const first = currentFrame();
+      announced.add(first);
+      postFromFrame(handles.stub, { kind: 'ready' });
+
+      act(() => {
+        handles.rerender(
+          <DocumentSandbox
+            bytes={bytes}
+            mode="text"
+            ext="txt"
+            theme="dark"
+            title="Preview of notes.md"
+            onLink={(href) => handles.onLink(href)}
+            onUnavailable={(reason) => handles.onUnavailable(reason)}
+          />,
+        );
+      });
+
+      // SAME element. The frame is mid-preview and must not be disturbed. Found
+      // by tag rather than by title, because the title is one of the two things
+      // this case changes.
+      const after = document.querySelector('iframe');
+      expect(after).toBe(first);
+      expect(screen.getByTitle('Preview of notes.md')).toBe(first);
+      // And no second handshake was even attempted, so nothing is left waiting
+      // on a frame that has already spoken. `announced` already holds this
+      // element, so the helper posts nothing — which is the whole point.
+      if (after !== null) announced.add(after);
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(handles.onUnavailable).not.toHaveBeenCalled();
+      expect(document.querySelector('iframe')).not.toBeNull();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -643,7 +821,43 @@ describe('the frame’s program', () => {
     });
   }
 
+  /**
+   * Hand a throwaway port to any module instance still listening on the window.
+   *
+   * `sandbox.ts` is an ENTRY POINT: in a real document exactly one copy of it
+   * ever runs, and `startSandbox` removes its own window listener the moment a
+   * port arrives (`sandbox.ts:365`). This file imports it once per test
+   * (`vi.resetModules()`, then a fresh `import`), so a test that imports it and
+   * never completes the handshake leaves a program whose listener is STILL
+   * ARMED — and the next test's `window.dispatchEvent` is then accepted by BOTH
+   * programs, which each attach a `message` listener to the ONE port and each
+   * answer every request on it.
+   *
+   * The duplicate answer is not visibly wrong, which is what makes it expensive:
+   * it is the same reply, one turn late, so `nextReply` resolves the FOLLOWING
+   * request on it and the assertion that follows reads a page that has not been
+   * rendered yet. Measured, deterministically, at `--sequence.seed=1340`, where
+   * 'creates its render target when the document was served without one' is
+   * shuffled to run immediately before 'loads a renderer per mode': the `html`
+   * step resolved on the `markdown` step's duplicate and `#root h2` was still
+   * absent. It is a defect in THIS harness, not in the frame's program — nothing
+   * in a browser can produce two copies of an entry point in one document.
+   *
+   * Accepting a channel is what makes a program let go of the window, so handing
+   * it a dead one is the teardown. A program that already accepted has no
+   * listener left and never sees this.
+   */
+  function releaseStaleProgram(): void {
+    const spare = new MessageChannel();
+    const event = new MessageEvent('message', { data: null });
+    Object.defineProperty(event, 'ports', { configurable: true, get: () => [spare.port2] });
+    window.dispatchEvent(event);
+    spare.port1.close();
+    spare.port2.close();
+  }
+
   afterEach(() => {
+    releaseStaleProgram();
     document.body.innerHTML = '';
   });
 
@@ -668,7 +882,13 @@ describe('the frame’s program', () => {
       formatted: true,
       repaired: false,
       tool: 'prettier',
-      toolVersion: '3.9.5',
+      // The CONSTANT, never a second copy of the literal. `PRETTIER_VERSION` is
+      // already pinned to the installed package by `document-format.test.ts`, so
+      // this is not a tautology — it is the same fact, asserted once. A literal
+      // here made a Prettier PATCH bump fail this suite with a diff about a
+      // version string, in a test whose subject is that the frame's reply
+      // reaches the host verbatim and that a transform frame draws nothing.
+      toolVersion: PRETTIER_VERSION,
     });
     // The transform frame is HIDDEN and renders nothing: it must touch neither
     // the render target nor the theme, both of which belong to the other job.
@@ -940,6 +1160,109 @@ describe('the frame’s program', () => {
 
     expect(click.defaultPrevented).toBe(true);
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(posted).toBe(false);
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it('still DECODES a valid percent escape, which the malformed-escape guard must not cost', async () => {
+    // The guard's failure mode in the other direction: returning the raw
+    // fragment unconditionally, or catching by not decoding at all, would leave
+    // `#a%20b` looking for an id spelled `a%20b` — and a heading anchor written
+    // by `remark-rehype` is spelled with the space.
+    const { host } = await bootFrame();
+    const rendered = nextReply(host);
+    host.postMessage({
+      kind: 'render',
+      mode: 'text',
+      ext: 'txt',
+      theme: 'dark',
+      bytes: bytesOf('x'),
+    });
+    await rendered;
+
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+
+    const root = document.getElementById('root')!;
+    const target = document.createElement('h2');
+    target.id = 'user-content-a b';
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#a%20b');
+    anchor.textContent = 'an escaped space';
+    root.append(target, anchor);
+
+    anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it('survives a fragment that is not a valid escape, and still resolves it literally', async () => {
+    // `<a href="#%">` is an ordinary href to write and a MALFORMED escape.
+    // `decodeURIComponent` throws `URIError` on it, and the throw left a
+    // DELEGATED click handler. The listener is reported against rather than
+    // removed, so the cost is that THIS click does nothing and the report lands
+    // in a document with no error surface — the frame's own program never learns
+    // it happened, and the reader is given no reason.
+    //
+    // The fallback is the RAW fragment rather than an early return, so an id
+    // that genuinely contains a stray `%` still resolves, which is what makes
+    // this assertable as a scroll rather than only as an absence of noise.
+    const { host } = await bootFrame();
+    const rendered = nextReply(host);
+    host.postMessage({
+      kind: 'render',
+      mode: 'text',
+      ext: 'txt',
+      theme: 'dark',
+      bytes: bytesOf('x'),
+    });
+    await rendered;
+
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+
+    const root = document.getElementById('root')!;
+    const target = document.createElement('h2');
+    target.id = '%';
+    const anchor = document.createElement('a');
+    anchor.setAttribute('href', '#%');
+    anchor.textContent = 'a malformed escape';
+    // A second anchor, clicked afterwards: the guard must leave the handler
+    // working for every later click, which is the property the raw-fallback
+    // return is there to keep rather than merely the absence of a throw.
+    const missing = document.createElement('a');
+    missing.setAttribute('href', '#%E0%A4%A');
+    missing.textContent = 'a malformed escape naming nothing';
+    root.append(target, anchor, missing);
+
+    let posted = false;
+    host.addEventListener('message', () => {
+      posted = true;
+    });
+
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    anchor.dispatchEvent(click);
+    const second = new MouseEvent('click', { bubbles: true, cancelable: true });
+    missing.dispatchEvent(second);
+    await Promise.resolve();
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(second.defaultPrevented).toBe(true);
+    // Once, for the anchor whose id exists. The one naming nothing scrolls
+    // nowhere, which is the same outcome every unresolvable fragment gets.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    // And a fragment is never handed to the host: `isSafeUrl` admits http, https
+    // and mailto only, so it would be dropped there with nothing to explain it.
     expect(posted).toBe(false);
     delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   });

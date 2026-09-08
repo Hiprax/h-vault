@@ -62,7 +62,7 @@ const {
   mockApiPost,
   mockClearSettingsCache,
   mockWriteText,
-  mockGetDocumentsConfig,
+  mockReadDocumentsConfigFresh,
   mockListDocuments,
   mockListDocumentTrash,
   mockDeriveWrapKey,
@@ -87,7 +87,7 @@ const {
   mockApiPost: vi.fn(),
   mockClearSettingsCache: vi.fn(),
   mockWriteText: vi.fn(),
-  mockGetDocumentsConfig: vi.fn(),
+  mockReadDocumentsConfigFresh: vi.fn(),
   mockListDocuments: vi.fn(),
   mockListDocumentTrash: vi.fn(),
   mockDeriveWrapKey: vi.fn(),
@@ -164,15 +164,27 @@ vi.mock('../src/services/api/documentsApi', async () => {
 });
 
 /**
- * Whether this server has a document store. Overridden per test, because
- * `getDocumentsConfig` memoises its answer for the tab's lifetime and a real one
- * resolved once would fix every later test in this file to the same server.
+ * Whether this server has a document store, as the rotation asks it.
+ *
+ * The rotation reads `readDocumentsConfigFresh`, NOT the memoised
+ * `getDocumentsConfig` beside it: the memo caches its own failure fallback for the
+ * life of the tab, and one transient `/config` blip must not be able to decide
+ * whether every document key gets re-wrapped. The distinction is the subject of one
+ * of the tests below, so the stub is on the fresh reader and the memoised one is
+ * deliberately left real and unused — a rotation that reached for it would go to
+ * the network here and fail loudly rather than quietly answering `{ enabled: false }`.
+ *
+ * Stubbed at all because a real resolver would still be uncached but would issue a
+ * request this suite has no server for; the value is the knob each test turns.
  */
 vi.mock('../src/services/api/configApi', async () => {
   const actual = await vi.importActual<typeof import('../src/services/api/configApi')>(
     '../src/services/api/configApi',
   );
-  return { ...actual, getDocumentsConfig: (...args: unknown[]) => mockGetDocumentsConfig(...args) };
+  return {
+    ...actual,
+    readDocumentsConfigFresh: (...args: unknown[]) => mockReadDocumentsConfigFresh(...args),
+  };
 });
 
 /**
@@ -216,8 +228,21 @@ vi.mock('../src/services/api/userApi', () => ({
   importVaultApi: (...args: unknown[]) => mockImportVaultApi(...args),
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
+    // `setUser` is not optional plumbing and the double must carry it. `authStore`
+    // awaits it as the FIRST statement of the try/catch that scopes the offline
+    // database to the account signing in — the control that stops one account
+    // reading another's cached ciphertext — so a double without it calls
+    // `undefined(...)`, throws synchronously, and takes the catch branch before
+    // `clear()` is reached either. Nothing here asserts that branch; what it cost
+    // was a `TypeError` in the run's output and a login path quietly exercising its
+    // failure arm. The real scoping behaviour is tested against the unmocked module
+    // in `offlineCache.test.ts`.
+    setUser: vi.fn().mockResolvedValue(undefined),
     cacheItems: vi.fn().mockResolvedValue(undefined),
     cacheFolders: vi.fn().mockResolvedValue(undefined),
     getCachedItems: vi.fn().mockResolvedValue([]),
@@ -467,7 +492,7 @@ const issuedDeks = new Map<string, Uint8Array>();
  */
 function installDocumentCryptoStubs() {
   issuedDeks.clear();
-  mockGetDocumentsConfig.mockResolvedValue({ enabled: false });
+  mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: false });
 
   mockDeriveWrapKey.mockImplementation((vaultKey: { key: string }, documentId: string) =>
     Promise.resolve({ wrapFor: documentId, under: vaultKey.key }),
@@ -567,6 +592,9 @@ describe('SettingsPage — error paths and branches', () => {
       vaultKey: OLD_VAULT_KEY,
       mek: MEK,
       encryptedVaultKeyData: null,
+      // Deliberately NOT zero: the generation this session records has to move
+      // WITH its key, and a base of 0 would let an off-by-one pass as a default.
+      vaultKeyVersion: 4,
     } as never);
     useUIStore.setState({ theme: 'dark', setTheme: mockSetTheme });
 
@@ -943,6 +971,11 @@ describe('SettingsPage — error paths and branches', () => {
       iv: 'newIv',
       tag: 'newTag',
     });
+    // …and says WHICH key it now holds. The number travels with the key or it is
+    // a lie: an upload from this session sends it so the server can tell a
+    // superseded key from the current one, and a session left claiming the
+    // generation it has just replaced would have every completion refused.
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(5);
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Vault key rotated successfully', type: 'success' }),
     );
@@ -1008,7 +1041,7 @@ describe('SettingsPage — error paths and branches', () => {
   // -------------------------------------------------------------------------
 
   it('rewraps every active AND trashed document key under the new vault key, in one request', async () => {
-    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
     mockListDocuments
       .mockResolvedValueOnce(documentPage([documentRow(docId(1))], 2))
       .mockResolvedValueOnce(documentPage([documentRow(docId(2))], 2));
@@ -1083,7 +1116,7 @@ describe('SettingsPage — error paths and branches', () => {
   });
 
   it('walks no more than the document page ceiling when the server inflates totalPages', async () => {
-    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
     // A server that keeps claiming there is another page. Without the clamp this
     // walk never ends and the rotation never reaches the request at all.
     mockListDocuments.mockResolvedValue(documentPage([documentRow(docId(1))], 99));
@@ -1109,7 +1142,7 @@ describe('SettingsPage — error paths and branches', () => {
   });
 
   it('reads every page an account that is really at its ceiling would report', async () => {
-    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
     // The ceiling this walk clamps to has to be derived from how many rows an
     // account can ACTUALLY hold, which is not the advertised per-user limit: the
     // server checks the document count only when a transfer is opened, so three
@@ -1136,7 +1169,7 @@ describe('SettingsPage — error paths and branches', () => {
   });
 
   it('advances the progress bar across the document leg rather than stalling on the folders', async () => {
-    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
     mockListDocuments.mockResolvedValue(
       documentPage([documentRow(docId(1)), documentRow(docId(2))]),
     );
@@ -1200,7 +1233,7 @@ describe('SettingsPage — error paths and branches', () => {
   });
 
   it('aborts the whole rotation without touching the server when one document key will not unwrap', async () => {
-    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
     mockListDocuments.mockResolvedValue(
       documentPage([documentRow(docId(1)), documentRow(docId(2))]),
     );
@@ -1237,7 +1270,7 @@ describe('SettingsPage — error paths and branches', () => {
   });
 
   it('aborts before sending anything when a document list cannot be read', async () => {
-    mockGetDocumentsConfig.mockResolvedValue({ enabled: true });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
     mockListDocumentTrash.mockRejectedValue(new Error('network'));
 
     await renderSettings();
@@ -1257,7 +1290,7 @@ describe('SettingsPage — error paths and branches', () => {
   it('sends an empty document leg, and asks the document store nothing, on a server without one', async () => {
     // The default from `installDocumentCryptoStubs`, restated here because it is
     // the subject: an older server, or one with no object storage configured.
-    mockGetDocumentsConfig.mockResolvedValue({ enabled: false });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: false });
 
     await renderSettings();
     await confirmRotation();
@@ -1276,6 +1309,43 @@ describe('SettingsPage — error paths and branches', () => {
     expect(mockListDocuments).not.toHaveBeenCalled();
     expect(mockListDocumentTrash).not.toHaveBeenCalled();
     expect(mockDeriveWrapKey).not.toHaveBeenCalled();
+  });
+
+  it('aborts, rather than sending an empty leg, when the server will not say whether it stores documents', async () => {
+    // `null` is the third answer, and the one an empty leg must never be built
+    // from. "This server holds no documents" and "I could not find out" look
+    // identical the moment they are collapsed, and the consequence of collapsing
+    // them is not a cosmetic one: the payload would name no documents, the server
+    // would refuse it with a completeness 409, and its diagnosis would blame a
+    // pending purge or absent storage — two causes that did not happen and that
+    // the account cannot act on. Every rotation for the rest of the tab's life
+    // used to behave this way after ONE transient `/config` failure, because the
+    // memoised reader cached the failure and nothing invalidated it.
+    mockReadDocumentsConfigFresh.mockResolvedValue(null);
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            'Rotation aborted: could not confirm whether this server stores documents. Check your connection and try again.',
+          type: 'error',
+        }),
+      );
+    });
+
+    // Nothing was sent, nothing was enumerated, and the account still holds the key
+    // it started with — so the reader can simply try again once the server answers.
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(mockListDocuments).not.toHaveBeenCalled();
+    expect(mockListDocumentTrash).not.toHaveBeenCalled();
+    expect(mockDeriveWrapKey).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    // The key that will now never be used is zeroed on the way out, exactly as it
+    // is on the other two abort paths.
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(NEW_VAULT_KEY);
   });
 
   it('refuses to rotate while the vault is locked', async () => {

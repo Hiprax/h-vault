@@ -51,6 +51,69 @@ vi.mock('../src/config/index.js', async (importOriginal) => {
   return { ...actual, storageConfigured: true };
 });
 
+/**
+ * The server's own log lines, captured.
+ *
+ * Only one case needs them, and it is the case that cannot be checked any other
+ * way: when the empty-trash walk gives up on a refusing engine, the response
+ * body deliberately does NOT say so — it is a published contract with a snapshot
+ * behind it, and the two counts already describe what was done. The `stoppedEarly`
+ * field on this log line is therefore the ONLY place the difference between "five
+ * keys are unreachable" and "the engine is down and the rest of this account's
+ * trash was never attempted" exists at all. A signal nothing asserts is a signal
+ * the next refactor deletes.
+ */
+const { loggerError, loggerInfo, loggerWarn, loggerDebug, loggerLog } = vi.hoisted(() => ({
+  loggerError: vi.fn(),
+  loggerInfo: vi.fn(),
+  loggerWarn: vi.fn(),
+  loggerDebug: vi.fn(),
+  loggerLog: vi.fn(),
+}));
+
+vi.mock('@hiprax/logger', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@hiprax/logger')>();
+  return {
+    ...original,
+    // `log` is not decoration and is not one of the four levels above. This mock
+    // replaces `createLogger` for the WHOLE process, and `app.ts` builds the
+    // request logger from the same factory (`createRequestLogger({ logger:
+    // createModuleLogger('http') })`); that logger's last act on every response
+    // is `logger.log({ level, message, http })`, a winston call the four
+    // level-shorthands do not provide. A double without it makes every request
+    // in this supertest file throw inside @hiprax/logger's own try/catch, which
+    // swallows the error and prints `request logger failed while logging <METHOD>
+    // <url>: r.log is not a function`. That costs nothing but a flooded
+    // transcript today — and it silently disables the application's request log
+    // in this file, so anything written here to assert on it would be asserting
+    // on a logger that never ran. Kept as its own spy rather than aliased to
+    // `loggerInfo`, so `emptiedLogPayload()` below still filters only the
+    // controller's own `info` lines.
+    createLogger: () => ({
+      error: loggerError,
+      info: loggerInfo,
+      warn: loggerWarn,
+      debug: loggerDebug,
+      log: loggerLog,
+    }),
+  };
+});
+
+/**
+ * The `Document trash emptied` line's structured payload for the request that
+ * just ran, or `undefined`.
+ *
+ * The LAST matching call, not the first. This file installs no `clearAllMocks`
+ * in its `beforeEach` — deliberately, because several cases set a
+ * `mockImplementationOnce` and the storage double is replaced wholesale each
+ * test instead — so the recorded calls accumulate across the whole file, and
+ * `find` would return some earlier case's line and assert nothing about this one.
+ */
+function emptiedLogPayload(): Record<string, unknown> | undefined {
+  const calls = loggerInfo.mock.calls.filter((entry) => entry[0] === 'Document trash emptied');
+  return calls.at(-1)?.[1] as Record<string, unknown> | undefined;
+}
+
 const { storageRef } = vi.hoisted(() => ({
   storageRef: { current: undefined as ReturnType<typeof createInMemoryStorage> | undefined },
 }));
@@ -129,6 +192,17 @@ const UNREACHABLE_COLUMNS = [
   'ciphertextBytes',
   'plaintextBytes',
 ] as const;
+
+/**
+ * How many storage refusals in a row abandon a bulk walk over object storage.
+ *
+ * Restated as a LITERAL rather than imported from `utils/storageBreaker.ts`,
+ * which deliberately keeps its own constant module-private: a test that read the
+ * number from the code would agree with it by construction, and could never
+ * notice the threshold being changed. If the breaker's number moves, this goes
+ * red and somebody has to decide whether it should have.
+ */
+const BREAKER_THRESHOLD = 5;
 
 interface SeedOptions {
   favorite?: boolean;
@@ -916,6 +990,129 @@ describe('the document mutation endpoints', () => {
       expect(res.body.data).toStrictEqual({ deletedCount: 0, failedCount: 0 });
       expect(deleteSpy).not.toHaveBeenCalled();
       expect(await rawRow(active.id)).not.toBeNull();
+    });
+
+    // ── The circuit breaker ────────────────────────────────────────────────
+    //
+    // Counting a failure and carrying on is the right answer for ONE unreachable
+    // key and the wrong answer for an engine that is not answering at all. The S3
+    // client is pinned to a 5-second connect timeout and three attempts, so a
+    // walk that pressed on through a full trash would hold this request open for
+    // hours against a client that gave up long ago, and bury the log in one
+    // message repeated a thousand times.
+    //
+    // Both cases below use the SAME always-failing double and differ only in the
+    // shape of the failures, because "consecutive" is the entire claim: a counter
+    // that only ever climbed would pass the first case and fail the second, and a
+    // counter that never climbed would pass the second and fail the first.
+
+    it('stops the walk once the engine has refused five deletes in a row, and reports what it did', async () => {
+      const seeded: Seeded[] = [];
+      for (let index = 0; index < 9; index += 1) {
+        seeded.push(await seedDocument(owner, { deletedAt: new Date(), body: OBJECT_BODY }));
+      }
+      // The walk visits rows in `_id` order, so the split between "attempted" and
+      // "never reached" has to be decided in that order rather than in the order
+      // they were seeded.
+      seeded.sort((left, right) => (left.id < right.id ? -1 : 1));
+      const attempted = seeded.slice(0, BREAKER_THRESHOLD);
+      const untouched = seeded.slice(BREAKER_THRESHOLD);
+
+      const deleteSpy = vi
+        .spyOn(storageRef.current!, 'deleteObject')
+        .mockRejectedValue(httpErrors.serviceUnavailable('Object storage is unavailable'));
+
+      const res = await send('delete', owner, '/api/v1/documents/trash/empty');
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      // Exactly the threshold, and no more. A count of 9 is the unbounded walk
+      // this case exists to refuse; a count below the threshold would mean the
+      // breaker tripped early and abandoned rows it should have tried.
+      expect(deleteSpy).toHaveBeenCalledTimes(BREAKER_THRESHOLD);
+      // The partial counts it ACTUALLY accumulated, never the set it set out to
+      // empty. A handler that reported `failedCount: 9` would be claiming five
+      // attempts it never made, and one that reported `deletedCount: 9` would be
+      // telling the user their trash is empty while every document is still in it.
+      expect(res.body.data).toStrictEqual({ deletedCount: 0, failedCount: BREAKER_THRESHOLD });
+
+      // The five it tried keep their marker, so the hourly collector finishes
+      // exactly those and no others.
+      for (const row of attempted) {
+        const survivor = (await rawRow(row.id))!;
+        expect(survivor, 'a row the walk attempted must not be deleted').not.toBeNull();
+        expect(survivor.purgePending, 'and it must keep its marker for the collector').toBe(true);
+      }
+      // THE NEGATIVE THAT MATTERS: the rows past the stopping point were not
+      // merely left undeleted, they were never claimed. A marker written without
+      // an attempt would be worse than useless — `restoreDocument` refuses a
+      // marked row, so the user could no longer pull one of these back out of the
+      // trash, and the collector would destroy a document nobody attempted.
+      for (const row of untouched) {
+        const survivor = (await rawRow(row.id))!;
+        expect(survivor, 'a row past the stopping point must survive').not.toBeNull();
+        expect(survivor.purgePending, 'and must carry no marker at all').toBeUndefined();
+        expect(survivor.deletedAt, 'and must still be in the trash').toBeInstanceOf(Date);
+      }
+      // Every object is still in the bucket: nothing was destroyed, the work was
+      // deferred, and the row beside each object still holds its wrapped key.
+      expect(storageRef.current!.storedKeys().sort()).toEqual(
+        seeded.map((row) => row.objectKey).sort(),
+      );
+
+      // The audit row reports the same partial counts the caller was given.
+      const audited = await AuditLog.findOne({ userId: owner.id, action: 'document_purge' }).lean();
+      expect(audited!.metadata).toMatchObject({
+        action: 'empty_trash',
+        deletedCount: 0,
+        failedCount: BREAKER_THRESHOLD,
+      });
+
+      // …and the one signal that is NOT in the response. Five failures and a
+      // stopped walk are the same two counts as five failures and a finished one,
+      // so without this an operator triaging the outage cannot tell whether four
+      // rows are outstanding or four thousand.
+      expect(emptiedLogPayload()).toMatchObject({
+        deletedCount: 0,
+        failedCount: BREAKER_THRESHOLD,
+        stoppedEarly: true,
+      });
+    });
+
+    it('finishes the whole trash through scattered failures, because the breaker counts consecutive ones', async () => {
+      const seeded: Seeded[] = [];
+      for (let index = 0; index < 12; index += 1) {
+        seeded.push(await seedDocument(owner, { deletedAt: new Date(), body: OBJECT_BODY }));
+      }
+      seeded.sort((left, right) => (left.id < right.id ? -1 : 1));
+      const doomed = new Set(
+        seeded.filter((_row, index) => index % 2 === 0).map((row) => row.objectKey),
+      );
+
+      const storage = storageRef.current!;
+      const realDelete = storage.deleteObject.bind(storage);
+      const deleteSpy = vi
+        .spyOn(storage, 'deleteObject')
+        .mockImplementation(async (key: string) => {
+          if (doomed.has(key)) throw httpErrors.serviceUnavailable('this one key is unreachable');
+          await realDelete(key);
+        });
+
+      const res = await send('delete', owner, '/api/v1/documents/trash/empty');
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      // Six failures in one request — more than the threshold — but never two in
+      // a row, so the engine is plainly up and the walk finishes. A breaker whose
+      // counter was never reset by a success would have abandoned this request
+      // after the ninth row and left three healthy documents in the trash.
+      expect(deleteSpy).toHaveBeenCalledTimes(12);
+      expect(res.body.data).toStrictEqual({ deletedCount: 6, failedCount: 6 });
+      expect(storage.storedKeys().sort()).toEqual([...doomed].sort());
+      expect(await Document.countDocuments({ userId: owner.id, purgePending: true })).toBe(6);
+      // The other half of the signal, and the half that makes it a signal at all:
+      // SIX failures here and FIVE in the case above, so a flag hardcoded to
+      // `true` — or one derived from `failedCount > 0` — passes that case and
+      // fails this one. It reports whether the walk STOPPED, not whether it hurt.
+      expect(emptiedLogPayload()).toMatchObject({ failedCount: 6, stoppedEarly: false });
     });
   });
 });

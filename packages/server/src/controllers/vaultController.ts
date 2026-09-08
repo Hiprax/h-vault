@@ -591,8 +591,14 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.unauthorized('Password verification failed');
   }
 
-  // If idempotencyKey is provided, check for duplicate request
-  if (idempotencyKey && user.lastRotationKey === idempotencyKey) {
+  /**
+   * The answer a retry of an already-completed rotation gets.
+   *
+   * Written once because it is sent from two places — the cheap pre-lock check
+   * and the authoritative one under the lock — and a client that retried cannot
+   * be allowed to tell which of them answered it.
+   */
+  const sendAlreadyRotated = (): void => {
     logger.info('Duplicate vault key rotation request detected, returning success', {
       userId,
       idempotencyKey,
@@ -602,6 +608,15 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       message: 'Vault key rotated successfully',
       data: { updatedCount: items.length + folders.length + documents.length },
     });
+  };
+
+  // The cheap pre-lock check: a retry that arrives after the original finished is
+  // answered without taking a lock at all. It is a FAST PATH and not the
+  // guarantee — `user` was read above, before the lock existed, so a retry that
+  // read it while the original was still running gets a stale answer here. The
+  // authoritative check is the re-read below, under the lock.
+  if (idempotencyKey && user.lastRotationKey === idempotencyKey) {
+    sendAlreadyRotated();
     return;
   }
 
@@ -614,6 +629,44 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
   const lockId = await acquireJobLock(rotationJobName, ROTATION_LOCK_TTL_MS);
   if (!lockId) {
     throw httpErrors.conflict('Vault key rotation is already in progress');
+  }
+
+  // The idempotency check, again and authoritatively, now that the lock is held.
+  //
+  // `acquireJobLock` is an atomic conditional upsert, so two live holders are
+  // impossible and a genuine double rotation is not what this closes. What it
+  // closes is the SEQUENTIAL one: a retry whose `User.findById` above landed
+  // while the original was still inside the lock reads a `lastRotationKey` the
+  // original has not written yet, spends a bcrypt compare — hundreds of
+  // milliseconds at the shipped cost — and reaches this lock AFTER the original
+  // released it. The pre-lock check saw a stale value; this one cannot, because
+  // `lastRotationKey` is only ever written under this lock, so a read taken under
+  // it is authoritative and needs no compare-and-set.
+  //
+  // What a second rotation costs, in order: `vaultKeyVersion` is `$inc`'d again,
+  // and that number is what a document upload's completion checks the client's
+  // wrapped key against, so a spurious bump refuses an upload holding a key that
+  // is genuinely current; and a second `vault_key_rotation` audit row is written
+  // for a rotation the user asked for once.
+  let alreadyRotated = false;
+  try {
+    if (idempotencyKey !== undefined) {
+      const committed = await User.findById(userId).select('lastRotationKey').lean();
+      alreadyRotated = committed?.lastRotationKey === idempotencyKey;
+    }
+  } catch (readError) {
+    // The lock is ours and nothing else will free it before its TTL, so a failure
+    // to answer this question must not leave it held for five minutes.
+    await releaseJobLock(rotationJobName, lockId);
+    throw readError;
+  }
+  if (alreadyRotated) {
+    // Released BEFORE the response, exactly as the `finally` below does it: a
+    // client that fires its next request the moment this one lands must not race
+    // the release round trip and be told a finished rotation is still running.
+    await releaseJobLock(rotationJobName, lockId);
+    sendAlreadyRotated();
+    return;
   }
 
   // Track errors from the non-transactional fallback path so that

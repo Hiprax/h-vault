@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { VaultItemForm, sanitizeBackupCodes } from '../src/components/vault/VaultItemForm';
 import {
   EncryptedFieldTooLargeError,
@@ -985,7 +985,7 @@ describe('VaultItemForm — card payload and validation', () => {
     expect(mockCreateItem).not.toHaveBeenCalled();
   });
 
-  it('shows no Luhn warning for a partial number or a valid one', () => {
+  it('shows no Luhn warning for a partial number or a valid one', async () => {
     renderForm({ defaultType: 'card' });
 
     // Fewer than 13 digits: too early to judge.
@@ -994,6 +994,13 @@ describe('VaultItemForm — card payload and validation', () => {
 
     typeIn('1234 5678 9012 3456', '4111111111111111');
     expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+
+    // The lazily-loaded strength meter applies itself in a `.then` scheduled by the
+    // typing above, which in a synchronous case lands once the body has finished and
+    // outside `act(...)`. Nothing above reads the meter; this only settles it.
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it('rejects a card number shorter than 13 digits', async () => {

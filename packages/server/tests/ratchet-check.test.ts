@@ -40,6 +40,9 @@ interface RatchetResult {
   staleReports: string[];
   deferred: { path: string; owner: string }[];
   improvements: { path: string; want: unknown; got: unknown }[];
+  /** Only an `--accept` run emits these two. */
+  accepted?: { path: string; value: unknown }[];
+  seeded?: { path: string; value: unknown; dir: string }[];
   stderr: string;
 }
 
@@ -876,6 +879,216 @@ describe('audit:ratchet', () => {
       expect(after.tests.count).toBe(560);
       expect(after.reason).toBe('added property tests');
       expect(after.meta.fields).toContain('tests.count');
+    });
+  });
+
+  /**
+   * Seeding, which is the ONE operation in this file that writes a floor without
+   * comparing it to anything.
+   *
+   * The gap it closes was real and shipped: the comparison loop is driven by the
+   * BASELINE's keys, so a family the baseline has never carried is measured into
+   * `cur` and then never looked at, and `--accept` — which writes only
+   * `improvements` — could not bring one into existence. `test:mutation` is
+   * exactly that case: its gate fails by design until `mutation.overall` exists,
+   * and the two-command procedure README and the gate's own failure message
+   * prescribed for recording it could not work. Every case below is about the
+   * price of closing that: seeding must not become a second, unpoliced way into
+   * the baseline.
+   */
+  describe('--seed, a family the baseline has never recorded', () => {
+    const read = (dir: string): Record<string, unknown> =>
+      JSON.parse(readFileSync(path.join(dir, '.testfortress', 'baseline.json'), 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+
+    /** HEALTHY_BASELINE with the whole mutation family gone, `meta.fields` included. */
+    function withoutMutation(metaFields?: string[]): Record<string, unknown> {
+      const { mutation: _dropped, ...rest } = HEALTHY_BASELINE;
+      return {
+        ...rest,
+        meta: {
+          fields:
+            metaFields ?? HEALTHY_BASELINE.meta.fields.filter((f) => !f.startsWith('mutation.')),
+        },
+      };
+    }
+
+    it('is not applied by a bare --accept, so a floor is never recorded unasked', () => {
+      // The other half of the contract. Seeding has to be deliberate: a blanket
+      // "record whatever is measured and absent" would make the first run after
+      // any extractor change write floors nobody asked for, and a floor nobody
+      // asked for is one nobody reviewed.
+      const result = ratchet({
+        baseline: withoutMutation(),
+        reports: HEALTHY_REPORTS,
+        args: ['--accept', '--reason', 'ordinary accept'],
+      });
+      expect(result.exitCode).toBe(0);
+      const after = read(result.dir);
+      expect(after['mutation']).toBeUndefined();
+      expect((after['meta'] as unknown as { fields: string[] }).fields).not.toContain(
+        'mutation.overall',
+      );
+      expect(result.seeded ?? []).toEqual([]);
+    });
+
+    it('records the whole family from the report when it is named', () => {
+      const result = ratchet({
+        baseline: withoutMutation(),
+        reports: HEALTHY_REPORTS,
+        args: ['--accept', '--seed', 'mutation', '--reason', 'first mutation baseline'],
+      });
+      expect(result.exitCode).toBe(0);
+      const after = read(result.dir) as unknown as {
+        mutation: { overall: number; totalMutants: number; filesMutated: string[] };
+        meta: { fields: string[] };
+        reason: string;
+      };
+      // 14 of 20 scored mutants, with the five Ignored ones out of both halves.
+      expect(after.mutation.overall).toBe(70);
+      expect(after.mutation.totalMutants).toBe(20);
+      expect(after.mutation.filesMutated).toEqual([
+        'packages/app/src/index.ts',
+        'packages/app/src/other.ts',
+      ]);
+      expect(after.reason).toBe('first mutation baseline');
+      // (d): the seeded fields join the pinned field list, so deleting one later
+      // is a regression in its own right.
+      expect(after.meta.fields).toContain('mutation.overall');
+      expect(after.meta.fields).toContain('mutation.totalMutants');
+      expect(after.meta.fields).toContain('mutation.filesMutated');
+    });
+
+    it('reports a seeded field as seeded and never as an improvement', () => {
+      // A floor compared against nothing and a floor that moved up are different
+      // claims. Folding the first into `improvements` would tell a reader of the
+      // accept output that a number went UP when nothing was there to go up from.
+      const result = ratchet({
+        baseline: withoutMutation(),
+        reports: HEALTHY_REPORTS,
+        args: ['--accept', '--seed', 'mutation', '--reason', 'first mutation baseline'],
+      });
+      expect((result.seeded ?? []).map((entry) => entry.path).sort()).toEqual([
+        'mutation.filesMutated',
+        'mutation.overall',
+        'mutation.totalMutants',
+      ]);
+      expect(result.improvements.filter((i) => i.path.startsWith('mutation.'))).toEqual([]);
+      expect((result.accepted ?? []).filter((a) => a.path.startsWith('mutation.'))).toEqual([]);
+    });
+
+    it('measures a core module the baseline has never carried, from the declaration', () => {
+      // The second chicken-and-egg, independent of the first: per-module scores
+      // used to be computed only for modules the BASELINE already listed, so a
+      // bootstrap measured none of them and a module newly added to CORE_MODULES
+      // could never be seeded either. The union with the declaration is what
+      // makes this row exist; `packages/shared/src/schemas/` is a real entry in
+      // `CORE_MODULES`, which is why this file and not `packages/app/**` proves it.
+      const result = ratchet({
+        baseline: withoutMutation(),
+        reports: {
+          ...HEALTHY_REPORTS,
+          '.testfortress/reports/mutation.json': mutationReport([
+            ...HEALTHY_MUTATION,
+            { name: 'packages/shared/src/schemas/vault.ts', killed: 9, survived: 1 },
+          ]),
+        },
+        args: ['--accept', '--seed', 'mutation', '--reason', 'first mutation baseline'],
+      });
+      expect(result.exitCode).toBe(0);
+      const after = read(result.dir) as unknown as {
+        mutation: { modules: Record<string, number>; overall: number };
+      };
+      expect(after.mutation.modules['packages/shared/src/schemas/']).toBe(90);
+      // and the overall is still computed over EVERY file, not just the module
+      expect(after.mutation.overall).toBe(76.67);
+    });
+
+    it('refuses without --accept, because there is nothing to compare on a read-only run', () => {
+      const result = ratchet({
+        baseline: withoutMutation(),
+        reports: HEALTHY_REPORTS,
+        args: ['--seed', 'mutation'],
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toMatch(/--seed only applies to --accept/);
+      expect(read(result.dir)['mutation']).toBeUndefined();
+    });
+
+    it('refuses to re-seed a field meta.fields still names, which is the laundering path', () => {
+      // The sharp one. `meta.fields` is this file's only memory that a field
+      // once existed. Delete `mutation.overall`'s VALUE but leave the memory,
+      // hand the run a worse report, and without this refusal the seed would
+      // write the worse number as a brand-new floor: a reduction with no
+      // comparison, no BASELINE-REDUCTION entry and no sign-off — the one
+      // manoeuvre decision (g) refuses to give a flag to.
+      const result = ratchet({
+        baseline: withoutMutation(HEALTHY_BASELINE.meta.fields),
+        reports: {
+          ...HEALTHY_REPORTS,
+          '.testfortress/reports/mutation.json': mutationReport([
+            { name: 'packages/app/src/index.ts', killed: 4, survived: 16 },
+          ]),
+        },
+        args: ['--accept', '--seed', 'mutation', '--reason', 'looks like a first baseline'],
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toMatch(/meta\.fields still names/);
+      expect(result.stderr).toMatch(/BASELINE-REDUCTION/);
+      expect(read(result.dir)['mutation']).toBeUndefined();
+    });
+
+    it('refuses a family that is only half there, so seeding cannot walk around a required field', () => {
+      // `mutation.filesMutated` is a REQUIRED field once the block exists. If a
+      // partially-present family could be seeded key by key, the missing half
+      // could be added without the required-field check ever seeing the family
+      // as incomplete.
+      const result = ratchet({
+        baseline: {
+          ...withoutMutation(),
+          mutation: { overall: 70 },
+        },
+        reports: HEALTHY_REPORTS,
+        args: ['--accept', '--seed', 'mutation', '--reason', 'topping the family up'],
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toMatch(/already records/);
+      expect(result.stderr).toMatch(/mutation\.overall/);
+    });
+
+    it('refuses a family nothing measured, rather than recording an empty one', () => {
+      const { '.testfortress/reports/mutation.json': _dropped, ...withoutReport } = HEALTHY_REPORTS;
+      const result = ratchet({
+        baseline: withoutMutation(),
+        reports: withoutReport,
+        args: ['--accept', '--seed', 'mutation', '--reason', 'no evidence at all'],
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toMatch(/nothing under "mutation" was measured/);
+      expect(read(result.dir)['mutation']).toBeUndefined();
+    });
+
+    it('blocks when a seeded family carries a field with no declared direction', () => {
+      // (b) applies to a seeded field exactly as it applies to a baselined one.
+      // `duplication.*` is deliberately NOT a wildcard in the direction map, and
+      // the deadcode extractor copies whatever keys the report carries, so an
+      // unrecognised one has to fail rather than be written with a direction
+      // this file guessed.
+      const result = ratchet({
+        baseline: withoutMutation(),
+        reports: {
+          ...HEALTHY_REPORTS,
+          '.testfortress/reports/deadcode.json': JSON.stringify({
+            duplication: { percentage: 1.5, unratcheted: 7 },
+          }),
+        },
+        args: ['--accept', '--seed', 'duplication', '--reason', 'recording duplication'],
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toMatch(/UNDECLARED duplication\.unratcheted/);
+      expect(read(result.dir)['duplication']).toBeUndefined();
     });
   });
 

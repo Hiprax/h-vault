@@ -458,6 +458,25 @@ const envSchema = z
     },
   );
 
+/**
+ * Every environment variable name the schema above declares.
+ *
+ * Read by `packages/server/tests/config.test.ts`, which asserts that each one is
+ * documented in the repository's `.env.example`. That file is the deployment's
+ * ONE configuration file and the only place an operator is told a variable
+ * exists, so a key added here and not there is configuration nobody can
+ * discover — the mirror image of the inert `RATE_LIMIT_WINDOW_MS` /
+ * `RATE_LIMIT_MAX` pair this schema deleted rather than leave documented and
+ * unread.
+ *
+ * Derived from the schema's own `shape` rather than written out, deliberately: a
+ * hand-maintained second list would go stale in exactly the way it exists to
+ * prevent, and would then agree with the drift. `.shape` survives the `.refine()`
+ * chain above (Zod 4 returns the same object schema from `.refine()`), so this is
+ * the schema's real key set and not a copy of it.
+ */
+export const ENV_SCHEMA_KEYS: readonly string[] = Object.freeze(Object.keys(envSchema.shape));
+
 type EnvConfig = z.infer<typeof envSchema>;
 
 function loadConfig(): EnvConfig {

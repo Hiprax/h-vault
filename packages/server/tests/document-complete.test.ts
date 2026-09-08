@@ -228,6 +228,47 @@ async function complete(
   return pending.set('Cookie', pair.cookie).set('x-csrf-token', pair.token).send(body);
 }
 
+/** One sign-in through the real route, with a real CSRF pair. */
+async function signIn(user: TestUser): Promise<request.Response> {
+  const agent = request.agent(app);
+  const { token, cookie } = await getCsrf(agent);
+  return agent
+    .post('/api/v1/auth/login')
+    .set('Cookie', cookie)
+    .set('x-csrf-token', token)
+    .send({ email: user.email, authHash: user.rawPassword });
+}
+
+/**
+ * A REAL vault-key rotation, not a `$set` on the counter.
+ *
+ * The counter and the new wrapped vault key move in one update, and it is that
+ * pairing the cases below depend on: a `$set` would advance the number while
+ * leaving the account's stored key the one the session still holds, which is the
+ * opposite of the situation being modelled. The account holds no items, folders
+ * or documents here, so three empty legs satisfy the completeness check — a
+ * staging row is not a `documents` row and is invisible to a rotation, which is
+ * the whole reason an in-flight transfer needs a version check at all.
+ */
+async function rotateVaultKey(user: TestUser): Promise<request.Response> {
+  const agent = request.agent(app);
+  const { token, cookie } = await getCsrf(agent);
+  return agent
+    .post('/api/v1/vault/items/bulk-reencrypt')
+    .set('Authorization', authHeader(user.accessToken))
+    .set('Cookie', cookie)
+    .set('x-csrf-token', token)
+    .send({
+      authHash: user.rawPassword,
+      items: [],
+      folders: [],
+      documents: [],
+      newEncryptedVaultKey: 'rotated-vault-key',
+      newVaultKeyIv: 'rotated-vault-key-iv',
+      newVaultKeyTag: 'rotated-vault-key-tag',
+    });
+}
+
 /** Everything a refusal must have left untouched, in one object. */
 async function stateOf(seeded: Seeded): Promise<{
   documents: number;
@@ -653,6 +694,10 @@ describe('POST /documents/uploads/:id/complete', () => {
       // Machine-readable, because the client rewraps against this number.
       expect(res.body.data).toEqual({ vaultKeyVersion: 3 });
       expect(String(res.body.message)).toMatch(/version 3/);
+      // Diagnosed as the rotation it is, and not as the bookkeeping fault the
+      // belt below answers — the two refusals share a remedy, not a cause.
+      expect(String(res.body.message)).toMatch(/rotated/i);
+      expect(String(res.body.message)).not.toMatch(/never had/i);
       // NOTHING released: the transfer is exactly as it was, which is what makes
       // the retry below cost one request instead of the whole file.
       expect(await stateOf(seeded)).toEqual(before);
@@ -724,6 +769,109 @@ describe('POST /documents/uploads/:id/complete', () => {
       expect(String(res.body.message)).toMatch(/rotation is in progress/i);
       expect(await stateOf(seeded)).toEqual(before);
       expect(before.documents).toBe(0);
+    });
+
+    // -----------------------------------------------------------------------
+    // The version has to describe the CLIENT's key, not the server's clock
+    // -----------------------------------------------------------------------
+
+    it('publishes, at sign-in, the vault key version the wrapped key it hands back belongs to', async () => {
+      // Every case above moves the SERVER's number after the transfer opened, so
+      // the number the client echoes back is the stale one and the comparison at
+      // completion catches it. None of them models the other order: a session that
+      // signed in, kept its key in memory, and only then had the account rotated
+      // from somewhere else. A rotation revokes no session and refreshes no key
+      // (`vaultController.ts` touches neither `RefreshToken` nor
+      // `passwordChangedAt`), so that session is still live and still holding the
+      // superseded key — and if it opens a transfer now, init reads the CURRENT
+      // number and echoes it, the numbers agree at completion, and the row commits
+      // wrapped under a key the account no longer stores.
+      //
+      // The only thing that can break that agreement is the client sending the
+      // version its OWN key belongs to, and the only place it can learn that is the
+      // response that handed it the key. Sign-in is that response: it is where the
+      // wrapped vault key is delivered, and it fetches no profile. Unlock re-derives
+      // from the very blob delivered here, so the two travel together for the life
+      // of the session.
+      const before = await signIn(user);
+      expect(before.status, JSON.stringify(before.body)).toBe(200);
+      expect(before.body.data.encryptedVaultKey).toBe('test-encrypted-vault-key');
+      expect(before.body.data.vaultKeyVersion).toBe(0);
+
+      const rotation = await rotateVaultKey(user);
+      expect(rotation.status, JSON.stringify(rotation.body)).toBe(200);
+
+      // It tracks the key, both parts of it: a session signing in AFTER the
+      // rotation is handed the new wrapped key and the number that names it, so it
+      // never takes the 409 below.
+      const after = await signIn(user);
+      expect(after.status, JSON.stringify(after.body)).toBe(200);
+      expect(after.body.data.encryptedVaultKey).toBe('rotated-vault-key');
+      expect(after.body.data.vaultKeyVersion).toBe(1);
+    });
+
+    it('refuses a session whose key predates a rotation the init echo already reflects, and commits nothing', async () => {
+      // The S1 arrangement, end to end: sign in, THEN rotate, THEN open the
+      // transfer. The staging row therefore carries the CURRENT version — this is
+      // what `initUpload` would have echoed — so the number that would once have
+      // come back in the completion body agrees with the server and nothing stops
+      // the row committing.
+      const session = await signIn(user);
+      expect(session.status, JSON.stringify(session.body)).toBe(200);
+      // Read from the response rather than written as a literal on purpose: a
+      // literal would pass whether or not the server ever told this session which
+      // key version it holds, which is precisely the thing being fixed.
+      const sessionVaultKeyVersion: unknown = session.body.data.vaultKeyVersion;
+      expect(sessionVaultKeyVersion).toBe(0);
+
+      expect((await rotateVaultKey(user)).status).toBe(200);
+      expect((await User.findById(user.id).lean())!.vaultKeyVersion).toBe(1);
+
+      const seeded = await seedTransfer(user, { vaultKeyVersion: 1 });
+      const state = await stateOf(seeded);
+
+      const res = await complete(user, seeded.id, completionBody(sessionVaultKeyVersion as number));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.data).toEqual({ vaultKeyVersion: 1 });
+      // THE NEGATIVE, and the reason this finding is data loss rather than an
+      // error code: a row committed here would list, charge the quota, never open,
+      // and — because the browser aborts a whole rotation on the first row it
+      // cannot unwrap — block every future rotation of this account until it was
+      // permanently deleted.
+      expect(await Document.countDocuments({})).toBe(0);
+      // And the transfer is untouched, so the recovery costs one rewrapped
+      // completion rather than the file.
+      expect(await stateOf(seeded)).toEqual(state);
+    });
+
+    it('refuses a version ABOVE the current one as unreachable, not as a rotation', async () => {
+      // The belt. The number now arrives from the client's own bookkeeping rather
+      // than from a server echo, and a version the account has never reached cannot
+      // name a key it ever stored. Answered with the recoverable refusal rather
+      // than a hard 400 — it still commits nothing, which is the property that
+      // matters, and it hands back the number a confused client needs instead of
+      // destroying a finished transfer.
+      //
+      // The DIAGNOSIS is what makes this its own case and not a restatement of the
+      // mismatch below it. A plain `!==` refuses this too, so the status, the
+      // payload and the negatives alone would say nothing about whether the
+      // separate branch exists at all; the message is what only that branch
+      // produces, and it is the difference between sending a reader to look for a
+      // rotation and telling them the client's own bookkeeping is wrong.
+      const seeded = await seedTransfer(user);
+      const state = await stateOf(seeded);
+
+      const res = await complete(user, seeded.id, completionBody(7));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(String(res.body.message)).toMatch(/never had/i);
+      expect(String(res.body.message)).not.toMatch(/rotated/i);
+      // Still the number to rewrap under, because the remedy is the same.
+      expect(String(res.body.message)).toMatch(/version 0/);
+      expect(res.body.data).toEqual({ vaultKeyVersion: 0 });
+      expect(await Document.countDocuments({})).toBe(0);
+      expect(await stateOf(seeded)).toEqual(state);
     });
   });
 

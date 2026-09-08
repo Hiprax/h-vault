@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../constants/index.js';
 
 /**
  * HIBP Pwned Passwords range-API helpers.
@@ -41,6 +42,23 @@ export function stripPaddingRows(body: string): string {
  * SSRF-hardened identically to the inline handler it replaces: `maxRedirects: 0`
  * and a bounded timeout. The caller is responsible for validating `prefix`
  * against the 5-hex-char format before calling.
+ *
+ * The response is also SIZE-bounded. This is the server's only outbound HTTP
+ * call, its whole body is buffered into a string before anything inspects it,
+ * and the batch endpoint runs `HIBP_FANOUT_CONCURRENCY` of them at once — so an
+ * anomalous or hostile upstream body is a memory-exhaustion vector against a
+ * container with a 1g limit. `axios` defaults both length limits to `-1` and
+ * only enforces a limit that is `> -1`, so the bound has to be given
+ * explicitly; once given, the Node adapter checks it incrementally on the
+ * response stream and destroys the socket on the chunk that crosses it, which
+ * is what makes it a real bound rather than an after-the-fact complaint.
+ *
+ * Exceeding it REJECTS (`ERR_BAD_RESPONSE`). That is deliberate and is the
+ * whole point: `getRange`'s caller turns the rejection into a 5xx (measured:
+ * 502, because a real `AxiosError` carrying no `.response` maps to "Error
+ * communicating with an external service") or an `errors[]` entry on the batch
+ * endpoint, so an unreadable upstream can never be mistaken for "this password
+ * appears in no breach".
  */
 export async function fetchRangeFromHibp(prefix: string): Promise<string> {
   const response = await axios.get<string>(`${HIBP_RANGE_URL}${prefix}`, {
@@ -51,6 +69,13 @@ export async function fetchRangeFromHibp(prefix: string): Promise<string> {
     timeout: 10_000,
     responseType: 'text',
     maxRedirects: 0,
+    maxContentLength: HIBP_MAX_RANGE_RESPONSE_BYTES,
+    // Bounds the REQUEST body, which this GET does not send — so it does no
+    // work today. Do not delete it on that basis: axios enforces it itself (a
+    // buffered body is checked before dispatch, a streamed one through its own
+    // byte-counting pipeline on native transports), so the bound is already in
+    // place for any future caller that gives this helper a body.
+    maxBodyLength: HIBP_MAX_RANGE_RESPONSE_BYTES,
   });
   return stripPaddingRows(response.data);
 }

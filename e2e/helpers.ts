@@ -1,4 +1,10 @@
-import { test, type Page, type APIRequestContext, expect } from '@playwright/test';
+import {
+  test,
+  type BrowserContext,
+  type Page,
+  type APIRequestContext,
+  expect,
+} from '@playwright/test';
 import { AxeBuilder } from '@axe-core/playwright';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -295,6 +301,129 @@ export function testEmail(): string {
 // ─── UI Helpers ──────────────────────────────────────────────────────────────
 
 /**
+ * Give the page permission to write to the clipboard, on the engines that have
+ * such a permission to give.
+ *
+ * This is a difference in the PLATFORM, not a difference in what any caller
+ * asserts: a spec that calls this runs every one of its lines on every engine it
+ * is scheduled on. Chromium gates `writeText()` on a Permissions API entry named
+ * `clipboard-write`, which is auto-granted to the active tab in a normal browser
+ * and has to be granted explicitly to an automated context. Gecko has no such
+ * permission at all — it gates the same call on TRANSIENT USER ACTIVATION
+ * instead — so the name does not exist there and Playwright rejects it outright
+ * with `browserContext.grantPermissions: Unknown permission: clipboard-write`
+ * (measured, Playwright 1.61.1 / Firefox 151).
+ *
+ * Hence the condition, which is on the engine's permission model rather than on
+ * a test that is expected to fail: a `try`/`catch` around the grant would have
+ * hidden a genuine permission error just as effectively, and skipping the spec
+ * on Firefox would have thrown away the only run that exercises the activation
+ * rule the clipboard guard was written for.
+ *
+ * IT LIVES HERE, not in the one spec that first needed it, and that is the
+ * point: while it was local to `clipboard-hygiene.spec.ts`,
+ * `login-backup-codes.spec.ts` went on calling `grantPermissions` outright. That
+ * is inert only while `FIREFOX_SUITE` in `playwright.config.ts` happens not to
+ * name that spec — the day a third file joins the second engine, an unconditional
+ * grant throws before its first assertion.
+ */
+export async function grantClipboardWrite(
+  context: BrowserContext,
+  browserName: 'chromium' | 'firefox' | 'webkit',
+): Promise<void> {
+  if (browserName === 'chromium') {
+    await context.grantPermissions(['clipboard-write']);
+  }
+}
+
+/**
+ * The accessible name of the sidebar control that locks the vault.
+ *
+ * A named constant because the string is HALF of a collision, and the other half
+ * is {@link UNLOCK_SUBMIT_LABEL}. See {@link unlockedLayoutMarker}.
+ *
+ * Exported so `auto-lock.spec.ts` can build the WRONG matcher out of the same
+ * label rather than copying a regex literal: an assertion about a collision has
+ * to be about these two strings, or a rename moves the code and leaves the
+ * assertion testing a string nothing renders.
+ */
+export const LOCK_VAULT_LABEL = 'Lock Vault';
+
+/** The accessible name of the unlock screen's submit control. */
+export const UNLOCK_SUBMIT_LABEL = 'Unlock Vault';
+
+/**
+ * THE control that exists only in the UNLOCKED layout, as one locator.
+ *
+ * ## Why this is a named factory rather than an inline locator
+ *
+ * It is the only thing that tells the vault apart from the unlock screen, and
+ * `ProtectedRoute` swaps one for the other at the SAME url, so a URL check
+ * cannot. Three places needed that discrimination — this file's
+ * {@link expectVaultVisible}, {@link lockViaUi}, and `zero-knowledge.spec.ts` —
+ * and each had written it out for itself.
+ *
+ * ## Why `exact`, which is the whole point
+ *
+ * The obvious spelling, `{ name: /lock vault/i }`, IS NOT A DISCRIMINATOR, and
+ * that is a fact about Playwright rather than about this application: a RegExp
+ * role-name is matched UNANCHORED (`matchesAttributePart`, operator `=`, which
+ * ends in `objValue.match(attrValue)`), and `exact` is ignored for a RegExp. The
+ * unlock screen's submit button is called `Unlock Vault`, and
+ * `/lock vault/i.test('Unlock Vault')` is TRUE — so the substring form matches
+ * the LOCKED screen just as happily as the unlocked one.
+ *
+ * That was not theoretical. `expectVaultVisible` shipped with the substring form
+ * and a docblock stating it distinguished the two states; it returned
+ * immediately on the unlock screen instead, so a four-cycle lock/unlock run
+ * moved on while a 600,000-iteration derivation was still in flight, the next
+ * `lockViaUi()` clicked the unlock screen's own submit button rather than
+ * locking, and `unlockVault` then pressed Enter on a button that the finished
+ * derivation had just unmounted — burning the test's whole 300 s budget with a
+ * screenshot of the vault, sidebar and all. It failed only under contention,
+ * which is why it survived several green runs.
+ *
+ * An exact STRING name is compared with `===` after white-space normalisation,
+ * so it refuses `Unlock Vault` and still matches `Lock Vault`. Do not soften it
+ * back to a RegExp for convenience, and note that the NON-exact string form is
+ * the same trap one step over: `'Lock Vault'` is a case-insensitive substring of
+ * `'Unlock Vault'`, so only `exact: true` discriminates. `auto-lock.spec.ts` pins
+ * both halves of this.
+ *
+ * ## The class, not just the instance
+ *
+ * Three more accessible names exist on BOTH screens, and none of them may ever
+ * be used to tell the two apart: `Logout` (the sidebar's, and the unlock
+ * screen's), `Show password`/`Hide password` (the unlock screen's reveal toggle,
+ * and every vault item form's), and the `Master Password` label (the unlock
+ * screen's, and the sign-in and registration pages'). Clicking one of them as an
+ * ACTION on a screen already established is fine, because only one exists at a
+ * time; reading one as EVIDENCE of which screen is up is the defect above.
+ */
+export function unlockedLayoutMarker(page: Page) {
+  return page.getByRole('button', { name: LOCK_VAULT_LABEL, exact: true });
+}
+
+/**
+ * Lock the vault through the sidebar control, the way a user does.
+ *
+ * Deliberately NOT the `Ctrl`+`L` keyboard shortcut: `useKeyboardShortcuts`
+ * suppresses every shortcut while focus is in an `INPUT`/`TEXTAREA`/`SELECT`,
+ * and the vault page holds a focusable search field — so the keypress silently
+ * did nothing and the caller failed waiting for a lock screen that was never
+ * going to appear. Clicking the real control has no such precondition and
+ * exercises the same `authStore.lock()` path.
+ *
+ * Built on {@link unlockedLayoutMarker}, which is not merely tidiness: the
+ * substring spelling this replaced also matches the unlock screen's `Unlock
+ * Vault` button, so a "lock" click landing while the vault was still locked
+ * submitted the unlock form a second time instead.
+ */
+export async function lockViaUi(page: Page): Promise<void> {
+  await unlockedLayoutMarker(page).click();
+}
+
+/**
  * Waits for the vault page to be visible (authenticated state).
  *
  * Derivation-bound: it is normally called straight after a sign-in submit, which
@@ -311,6 +440,21 @@ export function testEmail(): string {
 export async function expectVaultVisible(page: Page): Promise<void> {
   ensureTestTimeoutAtLeast(PBKDF2_STEP_TIMEOUT_MS + 30_000);
   await expect(page).toHaveURL(/\/vault/, { timeout: PBKDF2_STEP_TIMEOUT_MS });
+  // The URL alone is NOT enough, and the gap was load-bearing: locking the vault
+  // does not navigate — `ProtectedRoute` swaps the layout for the unlock screen at
+  // the SAME url — so a URL-only assertion passed for a LOCKED vault. Every caller
+  // that used this to mean "the unlock worked" was therefore asserting nothing, and
+  // the failure that produced surfaced two steps later and unrecognisably: the next
+  // `lockViaUi()` waited for a control the unlock screen does not have until the
+  // whole test timed out, five minutes away from the line that was actually wrong.
+  //
+  // Through {@link unlockedLayoutMarker}, never a locator written out here: the
+  // first version of this assertion used the substring form and therefore matched
+  // the unlock screen's own `Unlock Vault` button, so it discriminated nothing and
+  // the defect described above stayed live. That note is on the factory.
+  await expect(unlockedLayoutMarker(page)).toBeVisible({
+    timeout: PBKDF2_STEP_TIMEOUT_MS,
+  });
 }
 
 /**
@@ -397,10 +541,57 @@ export async function gotoFileEncryptionTool(page: Page): Promise<void> {
   });
 }
 
-/** Unlocks the vault via the unlock screen. */
+/**
+ * Unlocks the vault via the unlock screen.
+ *
+ * ## Why this activates the control from the keyboard rather than with `click()`
+ *
+ * MEASURED, once, on the run that first put `auto-lock.spec.ts` on a second
+ * engine: `several lock/unlock cycles in a row all succeed` burned its entire
+ * 300 s budget inside one `click()`, on a machine that was also running the rest
+ * of a fifteen-minute suite. The call log ends
+ *
+ *   - waiting for element to be visible, enabled and stable
+ *   - element is not stable
+ *   - retrying click action
+ *   - element was detached from the DOM, retrying
+ *
+ * and then goes silent, and the page snapshot taken at the timeout shows THE
+ * VAULT, sidebar and all. So the unlock had already succeeded: a click landed,
+ * the unlock screen unmounted, and `click()` — which cannot tell "the element
+ * vanished because my click worked" from "the element vanished before my click
+ * landed" — re-resolved a locator that now matches nothing and waited for it
+ * until the test died. The app did exactly the right thing and the helper
+ * reported a failure; that is a defect in the helper.
+ *
+ * The shape is general: every submit control whose success unmounts its own
+ * screen can do this, and a contended machine is what makes the first
+ * actionability pass fail and the second one race the unmount. It is not
+ * engine-specific — Firefox is simply where it came up first.
+ *
+ * So the control is ACTIVATED FROM THE KEYBOARD instead. `press('Enter')` focuses
+ * the button and dispatches the key events in a single step, with no stability
+ * poll and no hit-target retry to be caught in when the element leaves as a result
+ * of what it just did. Nothing is waved through to get there: the two assertions
+ * above it state, as assertions rather than as implicit preconditions, the part of
+ * actionability that matters here — the control is on screen and it is enabled.
+ * And Enter on a focused `type="submit"` button is a real user path this suite did
+ * not otherwise cover.
+ *
+ * A `hover()` + `page.mouse.down()/up()` pair was tried first, on the theory that
+ * it keeps every actionability check while making the click positional. MEASURED:
+ * it did not activate the button on Chromium at all, and — because
+ * {@link expectVaultVisible} then only compared the URL, which a lock does not
+ * change — it failed two steps later as another five-minute hang. Both halves of
+ * that are fixed; do not reintroduce the first half.
+ */
 export async function unlockVault(page: Page, password: string): Promise<void> {
   await page.getByLabel(/master password/i).fill(password);
-  await page.getByRole('button', { name: /unlock/i }).click();
+
+  const unlock = page.getByRole('button', { name: /unlock/i });
+  await expect(unlock).toBeVisible();
+  await expect(unlock).toBeEnabled();
+  await unlock.press('Enter');
 }
 
 // ─── Vault Item Helpers ──────────────────────────────────────────────────────
@@ -476,7 +667,46 @@ export interface A11yScan {
   violations: A11yViolation[];
   /** The subset that fails the gate: `serious` and `critical`. */
   blocking: A11yViolation[];
+  /**
+   * Checks axe COULD NOT DECIDE, recorded and not gated.
+   *
+   * These used to be thrown away, and that is the one place this gate could go
+   * quiet without going green-by-accident: axe answers `incomplete` when a rule
+   * ran and could not reach a verdict — most often `color-contrast` over a
+   * background it cannot resolve (a semi-transparent stack, an image, a gradient)
+   * — and a check that has silently become unmeasurable is then indistinguishable
+   * from one that passes, in every number this gate publishes. It is the same
+   * lesson as the completeness check itself, one level down: an axe run over
+   * nothing looks exactly like a clean one, and so does an axe rule that gave up.
+   *
+   * NOT blocking, deliberately. "Needs a human" is not a defect, gating on it
+   * would make the gate fail for the shape of a background rather than for a
+   * finding, and the one knob that would then be needed to get green again is a
+   * rule exclusion.
+   *
+   * It is not RATCHETED either, and that is a decision rather than an omission,
+   * so it is worth being plain about what this therefore does and does not buy.
+   * `a11y.json` publishes the count and the findings, and a person reading the
+   * gate's own output sees them — but nothing compares the number between runs,
+   * so 1 becoming 12 is visible only to a reader. Neither available direction is
+   * the answer: `lower` gates it, which is the paragraph above; and `info` is
+   * skipped by the compare loop AND never written by `--accept`
+   * (`ratchet-check.mjs`), so it would plant a figure nothing maintains — which
+   * is the exact rot this gate's prose counts were just cleaned of.
+   */
+  incomplete: A11yViolation[];
 }
+
+/**
+ * One row of axe output — a rule and the elements it matched.
+ *
+ * Derived from what `AxeBuilder.analyze()` actually returns rather than imported
+ * from `axe-core`, which is only a transitive dependency here: naming it
+ * directly is an undeclared import and `audit:deadcode` says so. Going through
+ * the builder also ties the type to the call this file makes, so a major bump of
+ * either package is a compile error rather than a silent shape change.
+ */
+type AxeResultRow = Awaited<ReturnType<AxeBuilder['analyze']>>['violations'][number];
 
 /** How many offending elements one violation lists. Beyond this the fix is the same fix. */
 const A11Y_MAX_NODES = 5;
@@ -559,21 +789,27 @@ export async function scanA11y(page: Page, view: string): Promise<A11yScan> {
   await settleToasts(page);
   await settleTransitions(page);
   const results = await new AxeBuilder({ page }).analyze();
-  const violations: A11yViolation[] = results.violations.map((violation) => ({
-    id: violation.id,
-    impact: violation.impact ?? 'unknown',
-    help: violation.help,
-    helpUrl: violation.helpUrl,
-    nodes: violation.nodes.slice(0, A11Y_MAX_NODES).map((node) => ({
-      target: Array.isArray(node.target) ? node.target.join(' ') : String(node.target),
-      summary: (node.failureSummary ?? '').replace(/\s+/g, ' ').trim(),
-    })),
-  }));
+  const flatten = (rows: AxeResultRow[]): A11yViolation[] =>
+    rows.map((row) => ({
+      id: row.id,
+      impact: row.impact ?? 'unknown',
+      help: row.help,
+      helpUrl: row.helpUrl,
+      nodes: row.nodes.slice(0, A11Y_MAX_NODES).map((node) => ({
+        target: Array.isArray(node.target) ? node.target.join(' ') : String(node.target),
+        summary: (node.failureSummary ?? '').replace(/\s+/g, ' ').trim(),
+      })),
+    }));
+  const violations = flatten(results.violations);
   return {
     view,
     url: page.url(),
     violations,
     blocking: violations.filter((violation) => A11Y_BLOCKING_IMPACTS.includes(violation.impact)),
+    // See `A11yScan.incomplete` for why these are recorded and why they are not
+    // gated. `failureSummary` is usually absent on an incomplete node, so the
+    // summary is often empty here — the rule id and the selector are the report.
+    incomplete: flatten(results.incomplete),
   };
 }
 

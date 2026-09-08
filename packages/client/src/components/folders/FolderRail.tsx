@@ -185,9 +185,46 @@ function FolderTreeItem({
 
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => onSelect(node.id)}
+      {/*
+        THE ROW IS A CONTAINER, AND THE TWO CONTROLS ARE SIBLINGS INSIDE IT.
+
+        The expand/collapse control used to sit INSIDE the row's own `<button>`,
+        which is invalid HTML — `button` admits no interactive descendant — and is
+        axe's `nested-interactive`, graded SERIOUS against WCAG 4.1.2. `button`
+        carries `childrenPresentational: true`, so assistive technology is told the
+        whole row is one flat control: a keyboard user could still tab to the
+        chevron, and nothing described what they had landed on. React reported the
+        nesting on every render of a folder that had children; the accessibility
+        gate did not, and never could, because `e2e/a11y.spec.ts` creates no folder
+        at all, so no folder row has ever been through axe in any state.
+
+        Only the chevron moved out. Everything else the row does — selection, the
+        context menu, drag and drop, the keyboard reorder, the grip, the icon, the
+        name and the count — stays on ONE button, which is what keeps the row a
+        single tab stop with the accessible name "<folder> <count>" it already had
+        (a nested control's `aria-label` is suppressed during name-from-content, so
+        that name is unchanged by this and every `getByRole` query still resolves
+        to the same element).
+
+        The wrapper takes the things that belong to the ROW rather than to either
+        control: the depth indent, the colour bar, the selected background and the
+        drop-target ring, so all four still span the chevron exactly as they did.
+        `group` is here for the same reason — the grip reveals on hovering the row,
+        not on hovering the button.
+      */}
+      <div
+        data-testid="folder-row"
+        data-folder-id={node.id}
+        // On the ROW, not on either button: a drop is aimed at the folder, and the
+        // pointer may well be over the chevron when it lands. `onDragStart` is the
+        // exception and stays on the button below, so the drag SOURCE is the
+        // interactive element the user grabbed rather than a plain container.
+        onDragOver={(e) => onDragOver(e, node.id)}
+        onDrop={(e) => onDrop(e, node.id)}
+        // Both of these reach the row from EITHER control by bubbling, which is
+        // what they did when the chevron was a descendant: right-clicking the
+        // chevron opens the folder's menu, and Ctrl+Arrow reorders while either
+        // button holds focus.
         onContextMenu={(e) => onContextMenu(e, node.id)}
         onKeyDown={(e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowUp') {
@@ -198,10 +235,6 @@ function FolderTreeItem({
             onKeyboardReorder(node.id, 'down');
           }
         }}
-        draggable
-        onDragStart={(e) => onDragStart(e, node.id)}
-        onDragOver={(e) => onDragOver(e, node.id)}
-        onDrop={(e) => onDrop(e, node.id)}
         className={cn(
           'group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors',
           isActive
@@ -213,17 +246,15 @@ function FolderTreeItem({
           paddingLeft: `${depth * 16 + 8}px`,
           ...(node.color ? { borderLeft: `3px solid ${node.color}` } : {}),
         }}
-        aria-current={isActive ? 'page' : undefined}
-        aria-description="Use Ctrl+Up or Ctrl+Down to reorder"
       >
-        {/* Drag handle */}
-        <GripVertical className="h-3 w-3 shrink-0 opacity-0 group-hover:opacity-40 transition-opacity cursor-grab" />
-
         {/* Expand/collapse */}
         {hasChildren ? (
           <button
             type="button"
             onClick={(e) => {
+              // Kept even though selection now lives on a SIBLING rather than an
+              // ancestor: the row above carries `onContextMenu` and `onKeyDown`,
+              // so it is a click handler away from re-coupling the two controls.
               e.stopPropagation();
               setExpanded((prev) => !prev);
             }}
@@ -236,17 +267,30 @@ function FolderTreeItem({
           <span className="w-4 shrink-0" />
         )}
 
-        <Folder
-          className="h-4 w-4 shrink-0"
-          style={node.color ? { color: node.color } : undefined}
-        />
-        <span className="flex-1 truncate text-left">{node.name}</span>
-        {count > 0 && (
-          <span className="shrink-0 rounded-full bg-[hsl(var(--muted))] px-1.5 py-0.5 text-xs text-[hsl(var(--muted-foreground))]">
-            {count}
-          </span>
-        )}
-      </button>
+        <button
+          type="button"
+          onClick={() => onSelect(node.id)}
+          draggable
+          onDragStart={(e) => onDragStart(e, node.id)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          aria-current={isActive ? 'page' : undefined}
+          aria-description="Use Ctrl+Up or Ctrl+Down to reorder"
+        >
+          {/* Drag handle */}
+          <GripVertical className="h-3 w-3 shrink-0 opacity-0 group-hover:opacity-40 transition-opacity cursor-grab" />
+
+          <Folder
+            className="h-4 w-4 shrink-0"
+            style={node.color ? { color: node.color } : undefined}
+          />
+          <span className="min-w-0 flex-1 truncate text-left">{node.name}</span>
+          {count > 0 && (
+            <span className="shrink-0 rounded-full bg-[hsl(var(--muted))] px-1.5 py-0.5 text-xs text-[hsl(var(--muted-foreground))]">
+              {count}
+            </span>
+          )}
+        </button>
+      </div>
 
       {hasChildren && expanded && (
         <div>

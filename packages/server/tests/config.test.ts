@@ -1,5 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { MAX_DOCUMENT_EXT_LENGTH, publicConfigResponseSchema } from '@hvault/shared';
+import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../src/constants/index.js';
+
+// The monorepo root, resolved from this file rather than from cwd: the server
+// suite is run both from the repository root and workspace-scoped, and the
+// `.env.example` assertions below have to find the same file either way.
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(testDir, '..', '..', '..');
 
 // Must mock dotenv to prevent .env file dependency during dynamic imports
 vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
@@ -1110,6 +1120,29 @@ describe('Server Config Validation', () => {
       );
     });
 
+    // `HIBP_MAX_RANGE_RESPONSE_BYTES` bounds a single fetched range, and its
+    // comment justifies the value partly by claiming it equals the SMALLEST L1
+    // budget an operator may configure. That matters: `evictHibpToWithinLimits`
+    // never evicts below one entry, so a range larger than the whole budget would
+    // sit in L1 permanently over it. Pinned by PARSING at bound and bound-1 —
+    // comparing the two constants to each other would stay green if both moved
+    // together and would prove nothing about the schema. Two tests, not one,
+    // because `loadConfigWithEnv` re-imports a module registry that is reset per
+    // test: a second call inside one test returns the first call's cached module.
+
+    it('accepts HIBP_MAX_RANGE_RESPONSE_BYTES as an L1 budget, so one range always fits', async () => {
+      const { config } = await loadConfigWithEnv({
+        HIBP_CACHE_MAX_BYTES: String(HIBP_MAX_RANGE_RESPONSE_BYTES),
+      });
+      expect(config.HIBP_CACHE_MAX_BYTES).toBe(HIBP_MAX_RANGE_RESPONSE_BYTES);
+    });
+
+    it('rejects an L1 budget one byte below HIBP_MAX_RANGE_RESPONSE_BYTES', async () => {
+      await expect(
+        loadConfigWithEnv({ HIBP_CACHE_MAX_BYTES: String(HIBP_MAX_RANGE_RESPONSE_BYTES - 1) }),
+      ).rejects.toThrow(/Invalid environment configuration/);
+    });
+
     it('invalid NODE_ENV value is rejected', async () => {
       await expect(loadConfigWithEnv({ NODE_ENV: 'staging' })).rejects.toThrow(
         /Invalid environment configuration/,
@@ -1609,5 +1642,187 @@ describe('Server Config Validation', () => {
         /Invalid environment configuration/,
       );
     });
+  });
+
+  /**
+   * `.env.example` against the schema, in both directions.
+   *
+   * `.env.example` is the template for the deployment's ONE configuration file
+   * and the only place an operator is ever told that a variable exists: there is
+   * no per-package `.env`, the Compose stack hands the whole of the `.env` copied
+   * from it to the app container, and outside Docker the server resolves that copy
+   * from the monorepo root. Nothing compared the template with the schema before
+   * this. `docs-sync.test.ts` pins a dozen README facts in both directions and
+   * `docker-hardening.test.ts` pins individual keys, but the schema's key set as a
+   * whole was unguarded.
+   *
+   * **The production change that turns the forward test red is adding a key to
+   * `envSchema` without documenting it in `.env.example`.** The operator-visible
+   * cost of that is a knob that exists, has a default, changes behaviour, and
+   * cannot be discovered — the mirror image of the `RATE_LIMIT_WINDOW_MS` /
+   * `RATE_LIMIT_MAX` pair, which was documented, settable and read by nothing,
+   * and which this schema deleted rather than leave inert.
+   *
+   * ### Why the reverse direction is asserted too, and why not as equality
+   *
+   * A plain reverse equality would be wrong and permanently red: `.env.example`
+   * configures the whole DEPLOYMENT, not just this process, so it legitimately
+   * documents variables the server schema never reads — the Compose topology
+   * (`HVAULT_*`, `TRUST_PROXY_HOPS`, the four MongoDB credentials), the storage
+   * engine's own cluster secret (`S3_RPC_SECRET`, which the app's `environment:`
+   * block deliberately blanks back out), and `LOG_DIRECTORY`, which
+   * `utils/logger.ts` reads straight from `process.env` because the logger is
+   * constructed before the config module. The only way to make a blanket
+   * equality green would be to declare those in the schema, which is exactly the
+   * inert configuration described above.
+   *
+   * Dropping the reverse check instead would leave the quieter rot unguarded: a
+   * key in `.env.example` that names nothing at all. An operator sets it, nothing
+   * happens, and no boot error says so — the same inert-configuration failure,
+   * arriving from the documentation side. It is also the one shape the forward
+   * direction structurally cannot see: RENAME a schema key, document the new
+   * name, and leave the old one behind, and the forward check stays green over a
+   * file that now advertises a variable nothing reads.
+   *
+   * So the reverse direction is asserted against an explicit allowlist that
+   * names, for each non-server variable, the file that actually reads it — and
+   * that claim is checked rather than taken on trust. Set equality both ways, so
+   * an allowlist entry whose variable has been deleted from `.env.example` fails
+   * as loudly as an undocumented one.
+   *
+   * `VITE_PORT` is deliberately NOT in the allowlist. It appears in
+   * `.env.example` only inside a prose note that says out loud that Vite does not
+   * read this file and that the port is set through the process environment
+   * instead, so it is not an assignment, live or commented-out, and the extractor
+   * below does not treat it as one.
+   */
+  describe('.env.example documents the configuration schema', () => {
+    const envExample = readFileSync(path.resolve(repoRoot, '.env.example'), 'utf-8');
+
+    /**
+     * Every variable `.env.example` ASSIGNS, whether the assignment is live or
+     * commented out. The commented arm is not a nicety: eight optional schema
+     * keys (`TWO_FACTOR_ENCRYPTION_KEY`, `TRUST_PROXY`, `SMTP_SECURE`,
+     * `GMAIL_USERNAME`, `GMAIL_PASSWORD`, `S3_FORCE_PATH_STYLE`,
+     * `ENABLE_SWAGGER`, `METRICS_TOKEN`) are documented that way on purpose,
+     * because a live empty assignment would mean something different for several
+     * of them, so an extractor that read only live assignments would report a
+     * sixth of the schema as undocumented.
+     *
+     * A commented assignment must be the whole line, give or take a trailing
+     * `#` comment — `# S3_FORCE_PATH_STYLE=true` and
+     * `# TRUST_PROXY=    # [docker: overridden]` both qualify. Prose that merely
+     * happens to wrap so that `NAME=value` lands at the start of a comment line
+     * does not, and the file contains two such lines today. Matching them would
+     * report a sentence as a variable.
+     *
+     * That strictness has a known cost, and it is the right way round: a
+     * commented-out value containing a SPACE (a cron expression, say) reads as
+     * prose and is therefore not counted, so documenting a new optional key that
+     * way reds the forward case. It fails LOUDLY and points at the line, whereas
+     * a regex loose enough to admit it would silently accept the two prose lines
+     * as variables and red the reverse case over a sentence. Document such a key
+     * with its value quoted, or with no prose after it on the line.
+     */
+    const documented = new Set<string>([
+      ...[...envExample.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]!),
+      ...[...envExample.matchAll(/^#\s*([A-Z][A-Z0-9_]*)=\S*[ \t]*(?:#.*)?$/gm)].map((m) => m[1]!),
+    ]);
+
+    /**
+     * The variables `.env.example` documents that this schema does not declare,
+     * each mapped to the repository file that DOES read it and to the exact text
+     * that constitutes the READ. Every entry is a component of the deployment
+     * other than the server process; nothing here is a server setting.
+     *
+     * The `reads` string, not just the file, because the case below is named
+     * "really does read it" and a bare name match would be satisfied by a
+     * COMMENT mentioning the variable — so an edit that deleted the read and left
+     * the prose behind would keep the exemption alive while the operator-facing
+     * documentation went on advertising a variable nothing consumes. Compose
+     * entries are pinned to their `${...}` substitution and the logger's to its
+     * `process.env` property access.
+     */
+    const NON_SCHEMA_KEYS: Record<string, { readBy: string; reads: string }> = {
+      // Compose reads these for its own `${...}` substitutions, before a
+      // container exists. The four credentials never reach the app as-is: the
+      // app authenticates as the least-privilege user through the `MONGODB_URI`
+      // Compose interpolates for it.
+      HVAULT_HTTP_PORT: { readBy: 'docker-compose.yml', reads: '${HVAULT_HTTP_PORT' },
+      HVAULT_STACK_NAME: { readBy: 'docker-compose.yml', reads: '${HVAULT_STACK_NAME' },
+      HVAULT_EDGE_SUBNET: { readBy: 'docker-compose.yml', reads: '${HVAULT_EDGE_SUBNET' },
+      HVAULT_DATA_SUBNET: { readBy: 'docker-compose.yml', reads: '${HVAULT_DATA_SUBNET' },
+      HVAULT_VERSION: { readBy: 'docker-compose.yml', reads: '${HVAULT_VERSION' },
+      TRUST_PROXY_HOPS: { readBy: 'docker-compose.yml', reads: '${TRUST_PROXY_HOPS' },
+      MONGO_ROOT_USERNAME: { readBy: 'docker-compose.yml', reads: '${MONGO_ROOT_USERNAME' },
+      MONGO_ROOT_PASSWORD: { readBy: 'docker-compose.yml', reads: '${MONGO_ROOT_PASSWORD' },
+      MONGO_APP_USERNAME: { readBy: 'docker-compose.yml', reads: '${MONGO_APP_USERNAME' },
+      MONGO_APP_PASSWORD: { readBy: 'docker-compose.yml', reads: '${MONGO_APP_PASSWORD' },
+      // The storage engine's cluster RPC secret. Only `hvault-s3` reads it, and
+      // the app's `environment:` block blanks it back out, which is why the
+      // schema declares no field for it.
+      S3_RPC_SECRET: { readBy: 'docker-compose.yml', reads: '${S3_RPC_SECRET' },
+      // Read from `process.env` by the logger, not from the config schema: the
+      // logger is constructed by the config module itself, so it cannot depend
+      // on the parsed config without a cycle.
+      LOG_DIRECTORY: {
+        readBy: 'packages/server/src/utils/logger.ts',
+        reads: 'env.LOG_DIRECTORY',
+      },
+    };
+
+    it('exposes the schema key set it is derived from, and not an empty list', async () => {
+      const { ENV_SCHEMA_KEYS } = await loadConfigWithEnv();
+      // `Object.keys(envSchema.shape)` answering `[]` — which is what a Zod
+      // upgrade that moved `.shape` off a refined object schema would produce —
+      // makes the forward assertion below vacuously green over no keys at all.
+      // The reverse assertion would then fail, so the pair is self-guarding, but
+      // this is the assertion that NAMES the cause instead of reporting sixty
+      // undocumented variables.
+      expect(ENV_SCHEMA_KEYS.length).toBeGreaterThan(40);
+      expect(ENV_SCHEMA_KEYS).toContain('SESSION_SECRET');
+      expect(ENV_SCHEMA_KEYS).toContain('METRICS_TOKEN');
+    });
+
+    it('documents every variable envSchema declares', async () => {
+      const { ENV_SCHEMA_KEYS } = await loadConfigWithEnv();
+      const undocumented = ENV_SCHEMA_KEYS.filter((key) => !documented.has(key));
+      expect(
+        undocumented,
+        'these envSchema keys are missing from .env.example, so no operator can discover them',
+      ).toEqual([]);
+    });
+
+    it('documents no variable that neither the schema nor a named component reads', async () => {
+      const { ENV_SCHEMA_KEYS } = await loadConfigWithEnv();
+      const schemaKeys = new Set(ENV_SCHEMA_KEYS);
+      const nonServer = [...documented].filter((key) => !schemaKeys.has(key)).sort();
+      // Not `[] === []`. Emptying the allowlist and every non-server variable in
+      // `.env.example` together would satisfy the equality below and leave the
+      // `it.each` case that follows generating no assertions at all, so the size
+      // is pinned first: the deployment has a Compose topology and it is
+      // documented in that file.
+      expect(Object.keys(NON_SCHEMA_KEYS).length).toBeGreaterThan(0);
+      // Set equality, not containment: an allowlist entry for a variable that
+      // has since been deleted from `.env.example` is a dead exemption, and a
+      // dead exemption is how the next real one gets waved through.
+      expect(nonServer).toEqual(Object.keys(NON_SCHEMA_KEYS).sort());
+    });
+
+    it.each(Object.entries(NON_SCHEMA_KEYS))(
+      'the file exempted for %s really does read it',
+      (key, { readBy, reads }) => {
+        // Without this the allowlist is a rubber stamp: any name at all could be
+        // added to it with any file beside it. Checking the claim makes an
+        // exemption cost the same as documenting the variable properly.
+        //
+        // The `reads` text has to NAME the variable, so the pin cannot drift into
+        // matching something else entirely, and it has to be the consuming
+        // syntax rather than the bare name, so a comment does not satisfy it.
+        expect(reads).toContain(key);
+        const source = readFileSync(path.resolve(repoRoot, readBy), 'utf-8');
+        expect(source, `${readBy} no longer reads ${key} as \`${reads}\``).toContain(reads);
+      },
+    );
   });
 });

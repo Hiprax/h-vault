@@ -240,6 +240,15 @@ function DiffView({ diff }: { diff: TextDiff }) {
 
 export interface TransformReviewPanelProps {
   readonly review: TransformReview;
+  /**
+   * Why the result cannot be uploaded, or `null` when it can.
+   *
+   * REQUIRED rather than optional, because the one thing it guards is the one
+   * thing this panel exists to offer: a caller that forgot it would offer a
+   * confirmation for bytes the server is going to refuse, which is the defect
+   * it was added for rather than a lesser version of it.
+   */
+  readonly refusal: string | null;
   readonly onConfirm: () => void;
   readonly onUploadOriginal: () => void;
   readonly onCancel: () => void;
@@ -248,6 +257,7 @@ export interface TransformReviewPanelProps {
 /** The confirmation: what changed, in numbers the application computed itself. */
 export function TransformReviewPanel({
   review,
+  refusal,
   onConfirm,
   onUploadOriginal,
   onCancel,
@@ -286,14 +296,33 @@ export function TransformReviewPanel({
           </div>
         </details>
       )}
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={onConfirm}
-          className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90"
+      {/*
+        A refused result keeps its comparison and loses its confirmation. The
+        diff is what tells the reader whether the transform was worth pursuing
+        by another route, so hiding it would leave them with a refusal and
+        nothing to act on; the confirm is simply not OFFERED, rather than
+        offered and then rejected, because a button that cannot work is a worse
+        answer than the sentence saying why.
+      */}
+      {refusal !== null && (
+        <p
+          role="alert"
+          data-testid="transform-refusal"
+          className="text-xs text-red-700 dark:text-red-300"
         >
-          Upload the formatted file
-        </button>
+          {refusal}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {refusal === null && (
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90"
+          >
+            Upload the formatted file
+          </button>
+        )}
         <button
           type="button"
           onClick={onUploadOriginal}

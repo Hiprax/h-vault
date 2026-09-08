@@ -4,6 +4,23 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "composite": true,
+    // `composite` implies `incremental`, and an incremental tsc — in build mode or
+    // out of it — does not check whether the outputs it already recorded still
+    // exist. With tsc's default location (`dist/../tsconfig.tsbuildinfo`, i.e.
+    // BESIDE this file) a deleted `dist/` left the state behind, and the next
+    // `npm run build` exited 0 having emitted nothing. Measured, and the reason
+    // this path is pinned INSIDE `outDir`: the state now dies with the outputs it
+    // describes, so removing `dist/` is always a correct cold rebuild. The boundary
+    // is worth knowing: deleting the WHOLE directory is safe, deleting one file out
+    // of it is still a no-op rebuild, and that residue is intrinsic to `composite`
+    // — it cannot be closed without dropping the project references.
+    //
+    // It also means `dist/tsconfig.tsbuildinfo` is copied into the app image by
+    // `docker/Dockerfile`'s `COPY --from=build-shared … /packages/shared/dist`. That
+    // is deliberate: ~48 KB, generated inside the build stage rather than carried in
+    // from a host, holding relative paths and hashes of files whose `.js.map`s ship
+    // beside it anyway.
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo",
     // TypeScript 6 defaults `types` to `[]` (no auto-loading of `@types/*`).
     // The shared utils use the Web Crypto `crypto` global (available in both
     // Node and the browser); `@types/node` provides its `Crypto` global type.

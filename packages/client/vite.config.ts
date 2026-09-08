@@ -9,7 +9,7 @@ import {
   manualChunks,
   resolveDevHost,
   resolveDevPort,
-} from './vite.config.helpers';
+} from './vite.config.helpers.ts';
 
 export default defineConfig({
   plugins: [

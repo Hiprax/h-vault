@@ -19,6 +19,7 @@ import {
 import { DOCUMENT_SEARCH_RESULTS_ID, SearchBar } from '../components/vault/SearchBar';
 import { FolderRail } from '../components/folders/FolderRail';
 import { RailLayout } from '../components/layout/RailLayout';
+import { DocumentBulkDownload } from '../components/documents/DocumentBulkDownload';
 import { DocumentList } from '../components/documents/DocumentList';
 import { DocumentTransfers } from '../components/documents/DocumentTransfers';
 import { DocumentUploadPanel } from '../components/documents/DocumentUploadPanel';
@@ -170,7 +171,16 @@ function DocumentsView({ config }: DocumentsViewProps) {
         toast({
           title:
             result.failedCount > 0
-              ? `${String(result.deletedCount)} deleted. ${String(result.failedCount)} could not be removed and will be cleaned up automatically.`
+              ? // Deliberately says nothing about what becomes of the residue.
+                // The server's walk stops once the storage engine has refused
+                // several deletes in a row, so `failedCount` counts only what it
+                // ATTEMPTED: on that path a whole trash can still be there behind
+                // five reported failures. The old wording promised those would
+                // "be cleaned up automatically", which is true of the rows the
+                // server marked and false of every row it never reached — the
+                // collector only ever looks at `purgePending`. So this points at
+                // the one thing that is authoritative and has just been re-read.
+                `${String(result.deletedCount)} deleted. ${String(result.failedCount)} could not be removed — the trash has been refreshed to show what is still there.`
               : `${String(result.deletedCount)} document(s) permanently deleted`,
           type: result.failedCount > 0 ? 'warning' : 'success',
         });
@@ -272,6 +282,13 @@ function DocumentsView({ config }: DocumentsViewProps) {
               </span>
             </p>
           )}
+
+          {/* Above the list and below everything that describes it, because what
+              it acts on is exactly the rows underneath: the same folder, the same
+              favorites or trash filter, the same search. A control placed in the
+              toolbar beside the search box would have read as an action on the
+              page rather than on that list. */}
+          <DocumentBulkDownload documents={view.rows} invalidCount={view.invalidCount} />
 
           <DocumentList
             id={DOCUMENT_SEARCH_RESULTS_ID}

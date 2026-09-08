@@ -5,6 +5,7 @@ import {
   getUserId,
   MAX_USER_AGENT_LENGTH,
   pickAllowedFields,
+  vaultKeyVersionOf,
 } from '../src/utils/controllerHelpers.js';
 
 describe('controllerHelpers', () => {
@@ -132,6 +133,35 @@ describe('controllerHelpers', () => {
 
     it('exposes MAX_USER_AGENT_LENGTH as 512 (matches AuditLog and RefreshToken model maxlength)', () => {
       expect(MAX_USER_AGENT_LENGTH).toBe(512);
+    });
+  });
+
+  describe('vaultKeyVersionOf', () => {
+    // The helper exists so that "the column was never written" is an ordinary
+    // boundary of a pure function rather than an unreachable arm inside a login
+    // handler and two document handlers. Every arm of `user?.vaultKeyVersion ?? 0`
+    // is exercised here; deleting either operator turns one of these red.
+    it('reports the generation an account has rotated to', () => {
+      expect(vaultKeyVersionOf({ vaultKeyVersion: 4 })).toBe(4);
+    });
+
+    it('reports 0 for an account that has never rotated', () => {
+      // The schema default, and the answer a hydrated read always gives.
+      expect(vaultKeyVersionOf({ vaultKeyVersion: 0 })).toBe(0);
+    });
+
+    it('reports 0 for an account created before the column existed', () => {
+      // What a `.lean()` read hands back for such an account — no default is
+      // applied on that path — and what MongoDB's `$inc` treats it as, so the
+      // first rotation of a legacy account lands on 1 exactly as a new one does.
+      expect(vaultKeyVersionOf({})).toBe(0);
+    });
+
+    it('reports 0 rather than throwing when the user was not found at all', () => {
+      // A deleted account racing a request in flight. Zero is safe: it can only
+      // make a completion look stale, which is refused and recoverable, never
+      // current, which would commit.
+      expect(vaultKeyVersionOf(null)).toBe(0);
     });
   });
 });

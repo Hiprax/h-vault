@@ -111,6 +111,18 @@ export function DocumentSandbox({
     setTorn(false);
   }
 
+  // `torn` is cleared HERE and nowhere else — on a new document, never on a
+  // rename or a theme change — and that asymmetry with the element key below is
+  // deliberate. A torn component renders no iframe at all, so the key cannot
+  // revive it; what revives it is the caller. `DocumentDetail` records the
+  // reason `giveUp` reported, which makes its own `previewRefusal` non-null and
+  // takes the refusal branch, so this component is not rendered at all while it
+  // is torn and never sees the changed prop. Clearing `torn` on `mode`/`ext`
+  // would therefore be dead code today — but if this component ever gains a
+  // second caller that keeps it mounted through a failure, that is the line to
+  // revisit, and it belongs to the caller's decision about when a failed preview
+  // is worth retrying rather than to this component's.
+
   // The callbacks are held in refs so the protocol effect depends only on the
   // frame's identity and the payload. A caller passing an inline arrow would
   // otherwise re-run the effect on every render, which would tear down a healthy
@@ -200,6 +212,17 @@ export function DocumentSandbox({
     return session.close;
     // `generation` is in the list because it is what identifies the ELEMENT: a
     // new document remounts the iframe, and this effect must bind to the new one.
+    //
+    // EVERY OTHER ENTRY HERE MUST BE ACCOUNTED FOR IN THE ELEMENT KEY BELOW,
+    // and exactly two are accounted for without appearing in it. `bytes` is
+    // represented by `generation`, which is bumped during render in the same
+    // commit the new buffer arrives, so it cannot move without the key moving;
+    // putting a buffer in a string key would say nothing anyway. `giveUp` is
+    // `useCallback(..., [])` and is stable for this component's life, so it
+    // never triggers a re-run at all — if it ever gains a dependency, it needs
+    // one of those two treatments and not a third. Everything else belongs in
+    // the key; see the key's own comment for why re-running this effect against
+    // a frame that has already handshaked can only ever end in the timeout.
   }, [bytes, mode, ext, theme, generation, giveUp]);
 
   if (torn) return null;
@@ -208,14 +231,32 @@ export function DocumentSandbox({
     <iframe
       // A NEW element per document, so one document can never observe the next.
       //
-      // The theme is part of the key for a reason that is easy to get wrong: the
-      // protocol effect re-runs when the theme changes, but a frame that has
-      // ALREADY handshaked never posts `ready` again, so a re-run against the
-      // same element would register a listener nothing ever speaks to and end in
-      // the ten-second timeout — a preview that vanishes when the user toggles
-      // dark mode. Remounting is the honest answer: a new element, a new
-      // handshake, and no stale channel to reason about.
-      key={`${String(generation)}:${theme}`}
+      // THE RULE, WHICH IS GENERAL AND NOT ABOUT ANY ONE PROP: every input the
+      // protocol effect above reads is part of this key. A frame that has
+      // ALREADY handshaked never posts `ready` again — that is the whole shape
+      // of the one-shot protocol — so re-running the effect against the same
+      // element registers a listener nothing will ever speak to, and the only
+      // possible outcome is the ten-second timeout. The reader watches a working
+      // preview be replaced by "The document preview did not load."
+      //
+      // Remounting is the honest answer: a new element, a new document, a new
+      // handshake, and no stale channel to reason about. It is also the ONLY
+      // answer available, because the payload — the mode and the extension
+      // among it — crosses exactly once, in `onOpen`, so a frame cannot be told
+      // it is now rendering something else.
+      //
+      // Both of the props that are not `bytes` have reached this the hard way.
+      // The theme is the obvious one: toggling dark mode killed the preview.
+      // `mode` and `ext` are the pair that reads like a rename and is not.
+      // Renaming `notes.md` to `notes.markdown`, or a `.txt` to a `.log`, moves
+      // `ext` (and often `mode` with it) while the plaintext stays the SAME
+      // BUFFER — `DocumentDetail`'s read effect depends on the document's id and
+      // not on its metadata, deliberately, so that a rename does not re-download
+      // the file. `generation` therefore does not move, and before this neither
+      // did anything else in the key. A key listing only the props someone
+      // happened to think of is a key that will be wrong again; list what the
+      // effect reads.
+      key={`${String(generation)}:${mode}:${ext}:${theme}`}
       ref={frameRef}
       src="/sandbox.html"
       title={title}

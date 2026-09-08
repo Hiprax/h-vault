@@ -481,7 +481,20 @@ describe('VaultHealthPage — encrypted result persistence', () => {
     await flush();
 
     // The superseded scan must NOT have written anything.
-    const persisted = await loadHealthResults(userId, vaultKey);
+    //
+    // Read INSIDE `act`, because the scan is still finishing while this awaits. Its
+    // last two setters (`setBreachResult`, and `setCheckingBreaches(false)` in the
+    // `finally`) are guarded on the abort signal and NOT on the health generation,
+    // deliberately: on a real lock the page unmounts, so they are a no-op, and what
+    // the generation guards is the PERSISTENCE at `VaultHealthPage.tsx:633`, which
+    // is what this case asserts. They land behind a `crypto.subtle.digest`, so they
+    // arrive after the microtask checkpoints above rather than inside them — and
+    // unwrapped, during this await, they are a React `act(...)` warning about an
+    // update this test is deliberately provoking.
+    let persisted: Awaited<ReturnType<typeof loadHealthResults>> = null;
+    await act(async () => {
+      persisted = await loadHealthResults(userId, vaultKey);
+    });
     expect(persisted).toBeNull();
   });
 });

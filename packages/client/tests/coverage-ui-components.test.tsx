@@ -75,7 +75,12 @@ describe('DropdownMenu', () => {
     it('wraps focus from the last item back to the first on ArrowDown', () => {
       const { items } = renderThreeItems();
       const last = items[2]!;
-      last.focus();
+      // Inside `act`: the menu tracks its active descendant in state and updates it
+      // from a `focus` handler, so moving focus imperatively is a React update.
+      // `fireEvent` wraps its own dispatch; a direct `.focus()` call does not.
+      act(() => {
+        last.focus();
+      });
 
       fireEvent.keyDown(last, { key: 'ArrowDown' });
 
@@ -96,7 +101,12 @@ describe('DropdownMenu', () => {
 
     it('Home focuses the first item and End focuses the last', () => {
       const { items } = renderThreeItems();
-      items[1]!.focus();
+      // Inside `act`: the menu tracks its active descendant in state and updates it
+      // from a `focus` handler, so moving focus imperatively is a React update.
+      // `fireEvent` wraps its own dispatch; a direct `.focus()` call does not.
+      act(() => {
+        items[1]!.focus();
+      });
 
       fireEvent.keyDown(items[1]!, { key: 'End' });
       expect(document.activeElement).toBe(items[2]);
@@ -109,7 +119,12 @@ describe('DropdownMenu', () => {
 
     it('leaves focus untouched for a key it does not handle', () => {
       const { items } = renderThreeItems();
-      items[1]!.focus();
+      // Inside `act`: the menu tracks its active descendant in state and updates it
+      // from a `focus` handler, so moving focus imperatively is a React update.
+      // `fireEvent` wraps its own dispatch; a direct `.focus()` call does not.
+      act(() => {
+        items[1]!.focus();
+      });
 
       fireEvent.keyDown(items[1]!, { key: 'a' });
 

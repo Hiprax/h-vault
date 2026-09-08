@@ -86,7 +86,10 @@ vi.mock('../src/services/api/vaultApi', () => ({
   listTrashApi: vi.fn(),
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
     cacheItems: vi.fn().mockResolvedValue(undefined),
     cacheFolders: vi.fn().mockResolvedValue(undefined),
@@ -120,7 +123,7 @@ import { useAuthStore } from '../src/stores/authStore';
 import { useVaultStore } from '../src/stores/vaultStore';
 import { useUIStore } from '../src/stores/uiStore';
 import { cryptoService } from '../src/services/crypto/cryptoService';
-import { offlineCache } from '../src/services/offlineCache';
+import { offlineCache, OfflineCacheError } from '../src/services/offlineCache';
 import {
   listItemsApi,
   listTrashApi,
@@ -712,7 +715,7 @@ describe('vaultStore — additional edge cases', () => {
       consoleSpy.mockRestore();
     });
 
-    it('should set offlineCacheAvailable to false when cacheFolders fails', async () => {
+    it('should record the cause when cacheFolders fails', async () => {
       setupUnlockedVault();
 
       vi.mocked(listFoldersApi).mockResolvedValue({
@@ -722,15 +725,17 @@ describe('vaultStore — additional edge cases', () => {
         },
       } as never);
 
-      vi.mocked(offlineCache.cacheFolders).mockRejectedValue(new Error('Cache write error'));
-      useUIStore.setState({ offlineCacheAvailable: true });
+      vi.mocked(offlineCache.cacheFolders).mockRejectedValue(
+        new OfflineCacheError('IndexedDB access denied', 'permission_denied'),
+      );
+      useUIStore.setState({ offlineCacheError: null });
 
       await useVaultStore.getState().fetchFolders();
 
       // Wait for async .catch() handler
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      expect(useUIStore.getState().offlineCacheAvailable).toBe(false);
+      expect(useUIStore.getState().offlineCacheError).toBe('permission_denied');
     });
   });
 
@@ -982,7 +987,7 @@ describe('uiStore — additional coverage', () => {
       theme: 'system',
       sidebarOpen: true,
       commandPaletteOpen: false,
-      offlineCacheAvailable: true,
+      offlineCacheError: null,
     });
     document.documentElement.classList.remove('dark');
     document.documentElement.removeAttribute('data-theme');
@@ -995,7 +1000,7 @@ describe('uiStore — additional coverage', () => {
       useUIStore.getState().toggleSidebarCollapsed();
       useUIStore.getState().toggleSidebar(); // sidebarOpen — must NOT persist
       useUIStore.getState().toggleCommandPalette(); // commandPaletteOpen — must NOT persist
-      useUIStore.getState().setOfflineCacheAvailable(false); // must NOT persist
+      useUIStore.getState().setOfflineCacheError('quota_exceeded'); // must NOT persist
 
       // Read what the persist middleware actually wrote to storage.
       const raw = localStorage.getItem('hvault-ui');
@@ -1003,12 +1008,12 @@ describe('uiStore — additional coverage', () => {
       const persisted = JSON.parse(raw!) as { state: Record<string, unknown> };
 
       // The partialize allowlist is exactly these two keys — leaking sidebarOpen /
-      // commandPaletteOpen / offlineCacheAvailable across sessions would fail here.
+      // commandPaletteOpen / offlineCacheError across sessions would fail here.
       expect(Object.keys(persisted.state).sort()).toEqual(['sidebarCollapsed', 'theme']);
       expect(persisted.state.theme).toBe('dark');
       expect(persisted.state).not.toHaveProperty('sidebarOpen');
       expect(persisted.state).not.toHaveProperty('commandPaletteOpen');
-      expect(persisted.state).not.toHaveProperty('offlineCacheAvailable');
+      expect(persisted.state).not.toHaveProperty('offlineCacheError');
     });
   });
 
@@ -1065,15 +1070,15 @@ describe('uiStore — additional coverage', () => {
     });
   });
 
-  describe('setOfflineCacheAvailable toggling', () => {
-    it('should toggle offlineCacheAvailable from true to false and back', () => {
-      expect(useUIStore.getState().offlineCacheAvailable).toBe(true);
+  describe('setOfflineCacheError toggling', () => {
+    it('should record a cause and then clear it again', () => {
+      expect(useUIStore.getState().offlineCacheError).toBeNull();
 
-      useUIStore.getState().setOfflineCacheAvailable(false);
-      expect(useUIStore.getState().offlineCacheAvailable).toBe(false);
+      useUIStore.getState().setOfflineCacheError('unavailable');
+      expect(useUIStore.getState().offlineCacheError).toBe('unavailable');
 
-      useUIStore.getState().setOfflineCacheAvailable(true);
-      expect(useUIStore.getState().offlineCacheAvailable).toBe(true);
+      useUIStore.getState().setOfflineCacheError(null);
+      expect(useUIStore.getState().offlineCacheError).toBeNull();
     });
   });
 });

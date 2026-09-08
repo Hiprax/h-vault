@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { AUDIT_ACTIONS, MAX_PREVIEW_BYTES, PREVIEW_MODES, formatBytes } from '@hvault/shared';
 import { TIER_BUDGET_SECONDS } from '../../../scripts/ci/lib/tiers.mjs';
+// The accessibility gate's membership, read from the ONE list that defines it —
+// the same import `gate-surface.test.ts` takes, for the same reason: a count
+// written down twice is a count that drifts.
+import { A11Y_VIEW_IDS } from '../../../e2e/a11yViews.js';
+import { NUMBER_WORDS } from './support/numberWords';
 
 // Documentation-lint: the README API reference, rate-limit table, env table,
 // and counts must stay in sync with the code. Resolve the monorepo-root
@@ -185,6 +190,103 @@ describe('README documentation sync', () => {
   });
 
   /**
+   * The MEASURED cost of the fast tier, as opposed to its budget.
+   *
+   * The test above pins the budget, which `tiers.mjs` exports and a reader can
+   * therefore never disagree with silently. The measured span is the opposite
+   * shape of problem: it is prose, it lives in three files at once, and nothing
+   * exports it. It has already drifted once — `tiers.mjs` spent twenty-five
+   * phases claiming "the measured value is ~82 s" with "eight seconds of
+   * headroom" while the README published 1m 19s to 2m 44s and CONTRIBUTING
+   * agreed with the README, so the file the RUNNER lives in was the one telling
+   * contributors the tier still fit. Two documents agreeing is not a check when
+   * the third is the one that matters.
+   *
+   * The production change that turns this red is the one that caused the drift:
+   * re-measuring the tier and updating one copy of the number without the
+   * others. Every `Xm YYs to Xm YYs` span in these three files is a statement
+   * about T0 — verified by inspection, and enforced here by requiring them all
+   * to be the same span — so a stale copy has nowhere to hide.
+   */
+  it('quotes ONE measured fast-tier cost, in tiers.mjs, the README and CONTRIBUTING alike', () => {
+    const tiersSource = readFileSync(
+      path.resolve(repoRoot, 'scripts', 'ci', 'lib', 'tiers.mjs'),
+      'utf-8',
+    );
+    const contributing = readFileSync(path.resolve(repoRoot, 'CONTRIBUTING.md'), 'utf-8');
+
+    const toSeconds = (value: string): number => {
+      const parts = /^(\d+)m (\d+)s$/.exec(value)!;
+      return Number(parts[1]) * 60 + Number(parts[2]);
+    };
+
+    /**
+     * A duration range that STRADDLES the budget is a claim about what the whole
+     * tier costs — nothing else in these documents can straddle it, because the
+     * per-gate figures quoted beside it sit wholly on one side or the other
+     * (`lint` + `format` busy is 1m 42s to 2m 00s, both above; `lint` alone is
+     * 1m 05s to 1m 16s, both below). That is what makes this checkable without
+     * pinning anyone's prose: find every range of that shape and require them to
+     * agree. `1m 19s to 2m 44s` and `1m 19s-2m 44s` are the same claim.
+     */
+    const tierSpans = (text: string): string[] =>
+      [...text.matchAll(/(\d+m \d+s) ?(?:to|-|–) ?(\d+m \d+s)/g)]
+        .filter(
+          (m) =>
+            toSeconds(m[1]!) < TIER_BUDGET_SECONDS[0] && toSeconds(m[2]!) > TIER_BUDGET_SECONDS[0],
+        )
+        .map((m) => `${m[1]!} to ${m[2]!}`);
+
+    // `tiers.mjs` is the source of truth: it sits beside the runner that does the
+    // measuring, and it is the copy that went stale last time while the two
+    // Markdown files agreed with each other.
+    const declared = new Set(tierSpans(tiersSource));
+    expect(
+      [...declared],
+      'scripts/ci/lib/tiers.mjs must state the measured busy-machine T0 span exactly once',
+    ).toHaveLength(1);
+    const span = [...declared][0]!;
+
+    for (const [name, text] of [
+      ['README.md', readme],
+      ['CONTRIBUTING.md', contributing],
+    ] as const) {
+      const found = tierSpans(text);
+      expect(found.length, `${name} must quote the measured T0 span`).toBeGreaterThan(0);
+      for (const quoted of found) {
+        expect(quoted, `${name} quotes a fast-tier span that tiers.mjs does not`).toBe(span);
+      }
+    }
+
+    /**
+     * The idle figure is the other half of the measurement and the half a reader
+     * acts on, because it is the one that says whether the budget is met at all.
+     * It is a point value, so the straddle rule above cannot see it, and it would
+     * drift on its own.
+     */
+    const idle = /idle machine: \*\*(\d+m \d+s)\*\*/.exec(tiersSource)?.[1];
+    expect(idle, 'scripts/ci/lib/tiers.mjs must state the idle T0 figure').toBeDefined();
+    for (const [name, text] of [
+      ['README.md', readme],
+      ['CONTRIBUTING.md', contributing],
+    ] as const) {
+      expect(text, `${name} must quote the idle T0 figure ${idle!}`).toContain(idle!);
+    }
+
+    // The point of splitting the measurement in two is that the halves fall on
+    // opposite sides of the budget. If they ever stop doing so, every sentence
+    // built on that split is wrong wherever it appears.
+    expect(
+      toSeconds(idle!),
+      'the idle measurement no longer fits the budget — the prose saying it does is now wrong',
+    ).toBeLessThanOrEqual(TIER_BUDGET_SECONDS[0]);
+    expect(
+      toSeconds(span.split(' to ')[1]!),
+      'the slowest measured T0 run now fits the budget — re-word the prose that says it does not',
+    ).toBeGreaterThan(TIER_BUDGET_SECONDS[0]);
+  });
+
+  /**
    * The README's Documents section tells a reader which file types the app will
    * display and which it will only hand back as a download, and every
    * download-only case is given a REASON so it reads as a decision. That table
@@ -257,6 +359,98 @@ describe('README documentation sync', () => {
       // README has to quote the same string or a reader is told one number and
       // shown another.
       expect(viewer).toContain(`over ${formatBytes(MAX_PREVIEW_BYTES)}`);
+    });
+  });
+
+  /**
+   * The README's CodeQL section publishes the accepted-findings total and a
+   * per-rule breakdown, each rule given the reason it was accepted rather than
+   * fixed. That list is the repository's answer to "why does a security gate pass
+   * with error-severity findings in it", so a reader who wants to check the
+   * reasoning is reading these numbers, and they are the numbers nothing moved:
+   * the section said 24 accepted and 20 `js/sql-injection` over a baseline
+   * holding 27 and 23, and had been wrong across several refreshes of the
+   * baseline.
+   *
+   * The drift is structural, not careless: the baseline is REGENERATED by a
+   * command (`npm run ci:sast -- --update-baseline`) that accepts everything
+   * currently reported, so the file moves whenever the code does, while the prose
+   * moves only when somebody remembers it. Both directions are checked, and the
+   * second matters more: a rule in the baseline with no bullet is an accepted
+   * finding with no stated reason, which is precisely the thing this section
+   * exists to rule out.
+   */
+  describe('the accepted CodeQL findings', () => {
+    interface CodeqlBaseline {
+      findings: { rule: string; file: string; fingerprint: string }[];
+    }
+
+    const baseline = JSON.parse(
+      readFileSync(path.resolve(repoRoot, 'scripts', 'ci', 'codeql-baseline.json'), 'utf-8'),
+    ) as CodeqlBaseline;
+
+    /**
+     * The prose block, bounded so no bullet outside it can be counted.
+     *
+     * BOTH anchors are asserted present, because the two failures are not
+     * symmetrical: losing the opening one makes `slice(-1, n)` empty, which reds
+     * the rule-set case for the right reason, while losing the CLOSING one makes
+     * `slice(i, -1)` run to the end of the README and start counting bullets from
+     * unrelated sections. That one would fail confusingly or, worse, not at all.
+     */
+    const sectionStart = readme.indexOf('CodeQL currently reports');
+    const sectionEnd = readme.indexOf('They are recorded in `scripts/ci/codeql-baseline.json`');
+    const section = readme.slice(sectionStart, sectionEnd);
+
+    /** `rule -> the count the README claims for it`, in the order it lists them. */
+    const claimedBullets = [...section.matchAll(/^\s*- (\d+) `(js\/[a-z0-9-]+)`/gm)].map(
+      (m) => [m[2]!, Number(m[1])] as const,
+    );
+    const claimed = new Map<string, number>(claimedBullets);
+
+    /** `rule -> the number of entries the baseline actually holds`. */
+    const actual = new Map<string, number>();
+    for (const finding of baseline.findings) {
+      actual.set(finding.rule, (actual.get(finding.rule) ?? 0) + 1);
+    }
+
+    it('keeps the section this reads bounded at both ends', () => {
+      expect(sectionStart, 'the README must open the CodeQL findings section').toBeGreaterThan(-1);
+      expect(sectionEnd, 'the README must close the CodeQL findings section').toBeGreaterThan(
+        sectionStart,
+      );
+    });
+
+    it('states the accepted total the baseline file actually holds', () => {
+      const total = /CodeQL currently reports (\d+) accepted error-severity findings/.exec(readme);
+      expect(total, 'the README must state the accepted-findings total').not.toBeNull();
+      expect(Number(total![1])).toBe(baseline.findings.length);
+    });
+
+    it('gives a reason for every rule in the baseline, and for no rule that is not', () => {
+      // A rule listed here but absent from the baseline advertises a review of
+      // something the gate is not accepting; a rule in the baseline with no
+      // bullet is an unexplained exemption. Neither is visible from the other
+      // direction, so both are asserted.
+      expect([...claimed.keys()].sort()).toEqual([...actual.keys()].sort());
+      expect(actual.size).toBeGreaterThan(0);
+      // One bullet per rule. Two bullets for the same rule would collapse into
+      // the map above, silently discarding the first — and the sum below would
+      // then be the only thing that noticed, which it would report as a wrong
+      // total rather than as a duplicated rule.
+      expect(claimedBullets.map(([rule]) => rule)).toEqual([...claimed.keys()]);
+    });
+
+    it.each([...actual.keys()].sort())('counts the accepted `%s` findings correctly', (rule) => {
+      expect(claimed.get(rule)).toBe(actual.get(rule));
+    });
+
+    it('breaks the total down without losing or inventing a finding', () => {
+      // The total and the bullets are two independent statements in the prose,
+      // and a phase that corrects one and not the other leaves the section
+      // self-contradicting while both of the checks above still pass.
+      const summed = [...claimed.values()].reduce((sum, count) => sum + count, 0);
+      expect(summed).toBe(baseline.findings.length);
     });
   });
 
@@ -341,4 +535,255 @@ describe('README documentation sync', () => {
     expect(readme).toContain('Bitwarden CSV');
     expect(readme).toContain('Chrome/Edge CSV');
   });
+});
+
+/**
+ * The number of views the accessibility gate scans, in every document that
+ * states it.
+ *
+ * `e2e/a11yViews.ts` is the gate's MEMBERSHIP, and three things already read it
+ * so that a scan of nothing cannot pass as a scan that found nothing (the spec's
+ * own final assertion, `scripts/ci/a11y-gate.mjs`'s report check, and
+ * `gate-surface.test.ts`'s literal pin of the id list). What NOTHING read was
+ * the number spelled out in the prose beside them, and it drifted the moment the
+ * document store's viewer gained two more views: the list and the ratcheted
+ * `a11y.viewsScanned` said 22 while seven sentences across six files — the spec's
+ * own docblock, the README's gate table, CONTRIBUTING's prerequisite note, the
+ * gate script's header and the coverage manifest's two known-gap entries — still
+ * said twenty. Four more turned up the next day, in the pipeline runner's own
+ * gate title and in the manifest's statement of what a green run means, which
+ * still said twenty and four after the sweep had grown twice.
+ *
+ * **The production change that turns this red is adding or removing an entry in
+ * `A11Y_VIEWS` without moving the prose with it.** It was written the day before
+ * ten views were added, on purpose: a guard added afterwards records the drift, a
+ * guard added before prevents it. It earned that immediately — the ten-view
+ * change had to move fourteen sentences, and this is what said which ones.
+ *
+ * Spelled-out words rather than digits, because that is how these sentences are
+ * written and rewriting seven documents to suit a regular expression is the wrong
+ * way round. The same technique, and the same reason, as the CONTRIBUTING
+ * gate-count case above. The word table itself is `support/numberWords.ts`, one
+ * definition shared with `gate-surface.test.ts`'s core-module count: two copies
+ * of it would be the same defect these tests are about, one level down.
+ *
+ * The document-store subset is derived rather than listed: every id that names a
+ * document begins with `document`, and `sandbox-rendered` — the isolated render
+ * document, scanned as a top-level page — deliberately does not, because it needs
+ * neither a session nor the storage engine. Two of the sentences below count that
+ * subset instead of the whole, and both had it wrong as well.
+ *
+ * **`CHANGELOG.md` is deliberately NOT a site, and that is the one exception to
+ * the rule above.** It states this number too, and it stated it wrongly for a
+ * while — so the exclusion is a decision rather than an oversight. A site here
+ * FAILS when its sentence cannot be found (`not.toBeNull()` below), and a
+ * changelog entry is not a standing description of the system: `## [Unreleased]`
+ * becomes `## [X.Y.Z]` at the next release and is then frozen release history,
+ * which `scripts/ci/changelog-extract.mjs` publishes verbatim as the Release
+ * body. Pinning a sentence inside it would demand rewriting a published release
+ * every time a view is added, and would turn this suite red the first time a
+ * release left the section empty. The entry is checked by review, like every
+ * other claim in that file.
+ */
+describe('the accessibility gate’s scanned-view count', () => {
+  const viewIds = A11Y_VIEW_IDS;
+  const total = viewIds.length;
+  const documentViews = viewIds.filter((id) => id.startsWith('document')).length;
+
+  /**
+   * One sentence that states one of the two counts.
+   *
+   * `expected` is a function of the two real numbers rather than a literal, so a
+   * sentence that legitimately says "the other N-1" moves with the list too — the
+   * spec has two of those, and a guard that only knew the total would have left
+   * them behind.
+   */
+  interface CountSite {
+    file: string;
+    pattern: RegExp;
+    expected: number;
+    what: string;
+  }
+
+  const SITES: CountSite[] = [
+    {
+      // The sentence this used to pin said "two of the twenty-two views below",
+      // and the "two" was a second stale count — it meant sign-in and
+      // registration, and there are now SEVEN pages a signed-out browser can
+      // reach. Rewritten to carry one number instead of two, so there is nothing
+      // left in it that can drift independently of the list.
+      file: 'e2e/a11y.spec.ts',
+      pattern: /would miss most of the ([a-z-]+) views below/,
+      expected: total,
+      what: 'the spec docblock’s own view total',
+    },
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /does not hide the state of the other\n \* ([a-z-]+) —/,
+      expected: total - 1,
+      what: 'the views a soft failure leaves reportable',
+    },
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /report somebody has to run ([a-z-]+) times/,
+      expected: total,
+      what: 'the runs a fail-fast report would cost',
+    },
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /for the sign-in, ([a-z-]+) axe runs over a/,
+      expected: total,
+      what: 'the timeout rationale’s run count',
+    },
+    {
+      file: 'e2e/a11y.spec.ts',
+      pattern: /the walk continues: ([a-z-]+) more views are worth more/,
+      expected: total - 1,
+      what: 'the soft-assertion rationale',
+    },
+    {
+      file: 'README.md',
+      pattern: /axe-core over ([a-z-]+) primary views and modals/,
+      expected: total,
+      what: 'the README gate table',
+    },
+    {
+      file: 'CONTRIBUTING.md',
+      pattern: /document journeys plus ([a-z-]+) of the [a-z-]+ scanned accessibility views/,
+      expected: documentViews,
+      what: 'CONTRIBUTING’s count of views that need the storage engine',
+    },
+    {
+      file: 'CONTRIBUTING.md',
+      pattern: /document journeys plus [a-z-]+ of the ([a-z-]+) scanned accessibility views/,
+      expected: total,
+      what: 'CONTRIBUTING’s view total',
+    },
+    {
+      file: 'scripts/ci/a11y-gate.mjs',
+      pattern: /runs axe over ([a-z-]+) views and modals/,
+      expected: total,
+      what: 'the gate script’s header',
+    },
+    {
+      file: 'scripts/ci/a11y-gate.mjs',
+      pattern: /([A-Za-z-]+) of those [a-z-]+ views are the document store's/,
+      expected: documentViews,
+      what: 'the gate script’s reason for declaring `docker`',
+    },
+    {
+      file: 'scripts/ci/a11y-gate.mjs',
+      pattern: /[A-Za-z-]+ of those ([a-z-]+) views are the document store's/,
+      expected: total,
+      what: 'the gate script’s view total',
+    },
+    {
+      file: '.testfortress/verify.json',
+      pattern: /covered by axe over ([a-z-]+) views/,
+      expected: total,
+      what: 'the visual-regression known gap',
+    },
+    {
+      file: '.testfortress/verify.json',
+      pattern: /currently open across the ([a-z-]+) scanned views/,
+      expected: total,
+      what: 'the below-threshold-a11y known gap',
+    },
+    {
+      file: 'packages/client/tests/theme-contrast.test.ts',
+      pattern: /`test:a11y`, axe over ([a-z-]+) views\)/,
+      expected: total,
+      what: 'the theme-contrast suite’s note on what the a11y gate cannot see',
+    },
+    // The last three unguarded copies, added when Phase 21 found them still
+    // saying "twenty" and "four" after the sweep had grown twice. The runner's
+    // title is what an operator reads while the gate is running, and the
+    // manifest's `gate` string is the sentence that says what a green run means
+    // — both are prose about this number, so both belong here.
+    {
+      file: 'scripts/ci/local-ci.mjs',
+      pattern: /Accessibility \(axe over ([a-z-]+) views/,
+      expected: total,
+      what: 'the pipeline runner’s gate title',
+    },
+    {
+      file: 'scripts/ci/local-ci.mjs',
+      pattern: /its ([a-z-]+) document views need the engine/,
+      expected: documentViews,
+      what: 'the runner’s reason for declaring `docker`',
+    },
+    // A THIRD sentence in the same file, three lines above the `e2e` gate's title,
+    // found only when the cross-browser leg was added and the gate around it was
+    // read line by line. It still said "four" — the number two sweeps ago — while
+    // its exact twin in `CONTRIBUTING.md` was pinned and correct at six. That is
+    // the rule at the top of this block earning itself for the third time: a
+    // sentence in a file that already has entries is not covered by them.
+    {
+      file: 'scripts/ci/local-ci.mjs',
+      pattern: /the document specs plus ([a-z-]+) of the\n    \/\/ accessibility views fail/,
+      expected: documentViews,
+      what: 'the runner’s reason for declaring `docker` on `e2e`',
+    },
+    // Two more found on a second sweep of the tree, both saying "twenty" and
+    // "four" long after the numbers were 32 and 6, and both the direct twin of a
+    // sentence already pinned above: the README's Docker-prerequisite paragraph
+    // is CONTRIBUTING's twin, and the suppression ledger's visual-regression
+    // entry is the manifest's known-gap twin. Finding a copy is not the same as
+    // finding them all, so the rule now is that every sentence stating either
+    // number gets an entry the moment it is noticed.
+    {
+      file: 'README.md',
+      pattern: /its journeys and ([a-z-]+) of its scanned views/,
+      expected: documentViews,
+      what: 'the README’s reason for declaring `docker` on `e2e` and `a11y`',
+    },
+    {
+      file: '.testfortress/suppressions.json',
+      pattern: /`test:a11y` runs axe over ([a-z-]+) views and asserts/,
+      expected: total,
+      what: 'the suppression ledger’s visual-regression deferral',
+    },
+    {
+      file: '.testfortress/verify.json',
+      pattern: /every primary view and modal \\u2014 ([a-z-]+) of them, in the real/,
+      expected: total,
+      what: 'the manifest’s statement of what a green a11y run means',
+    },
+    {
+      file: '.testfortress/verify.json',
+      pattern: /authenticated DOM, ([a-z-]+) of them the document store's/,
+      expected: documentViews,
+      what: 'the manifest’s count of views that need the storage engine',
+    },
+  ];
+
+  it('has a word for both counts, over a non-empty view list', () => {
+    // The denominator. A `viewIds` that came back empty would make every `%s`
+    // case below compare `undefined` against `undefined` and pass.
+    expect(total).toBeGreaterThan(10);
+    expect(documentViews).toBeGreaterThan(0);
+    expect(documentViews).toBeLessThan(total);
+    expect(NUMBER_WORDS[total], `no word for ${String(total)}`).toBeDefined();
+    expect(NUMBER_WORDS[total - 1]).toBeDefined();
+    expect(NUMBER_WORDS[documentViews]).toBeDefined();
+    // And the derivation of the subset is checked rather than trusted: the
+    // isolated render document must NOT be counted as a document-store view,
+    // because it needs neither a session nor the storage engine and the two
+    // sentences that use this number are about the engine.
+    expect(viewIds).toContain('sandbox-rendered');
+    expect(viewIds.filter((id) => id.startsWith('document'))).not.toContain('sandbox-rendered');
+  });
+
+  it.each(SITES.map((site) => [`${site.file} — ${site.what}`, site] as const))(
+    'states the right number in %s',
+    (_label, site) => {
+      const source = readFileSync(path.resolve(repoRoot, site.file), 'utf-8');
+      const match = site.pattern.exec(source);
+      expect(match, `${site.file} no longer contains the sentence this pins`).not.toBeNull();
+      // Lower-cased before comparing: one of these sentences opens a paragraph, so
+      // the same word is capitalised there. The NUMBER is what this pins; its case
+      // belongs to the sentence it sits in.
+      expect(match![1]?.toLowerCase()).toBe(NUMBER_WORDS[site.expected]);
+    },
+  );
 });

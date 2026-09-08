@@ -188,8 +188,21 @@ vi.mock('../src/services/api/userApi', () => ({
   importVaultApi: (...args: unknown[]) => mockImportVaultApi(...args),
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
+    // `setUser` is not optional plumbing and the double must carry it. `authStore`
+    // awaits it as the FIRST statement of the try/catch that scopes the offline
+    // database to the account signing in — the control that stops one account
+    // reading another's cached ciphertext — so a double without it calls
+    // `undefined(...)`, throws synchronously, and takes the catch branch before
+    // `clear()` is reached either. Nothing here asserts that branch; what it cost
+    // was a `TypeError` in the run's output and a login path quietly exercising its
+    // failure arm. The real scoping behaviour is tested against the unmocked module
+    // in `offlineCache.test.ts`.
+    setUser: vi.fn().mockResolvedValue(undefined),
     cacheItems: vi.fn().mockResolvedValue(undefined),
     cacheFolders: vi.fn().mockResolvedValue(undefined),
     getCachedItems: vi.fn().mockResolvedValue([]),
@@ -343,6 +356,33 @@ const EMPTY_ITEMS_PAGE = {
   },
 };
 
+/**
+ * Answer `GET /config` for a server that stores no documents.
+ *
+ * The rotation asks `readDocumentsConfigFresh` whether this server has a document
+ * store, and refuses to go on when the answer cannot be determined: an empty
+ * documents leg is a CLAIM that the account holds none, and only a server that
+ * actually said so licenses it. Without an answer here the rotation aborts before
+ * the backup-key step these tests are about — correctly, which is why the fix is to
+ * answer rather than to loosen anything.
+ *
+ * `{ enabled: false }` because these tests hold no documents. The document leg
+ * itself is covered in `coverage-settings-page.test.tsx`, which stubs the reader
+ * per test.
+ */
+function answerConfigWithoutDocuments(): void {
+  mockApiGet.mockImplementation((url: string) =>
+    url === '/config'
+      ? Promise.resolve({
+          data: {
+            success: true,
+            data: { fileEncryption: { maxSizeMB: 100 }, documents: { enabled: false } },
+          },
+        })
+      : Promise.resolve({ data: {} }),
+  );
+}
+
 describe('SettingsPage', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -399,6 +439,15 @@ describe('SettingsPage', () => {
         <SettingsPage />
       </MemoryRouter>,
     );
+
+    // The profile request above is held pending, and it is what keeps the spinner
+    // on screen. The page fires OTHER work on mount, though, and each of those
+    // applies itself in a `.then` that in a synchronous case lands after the body
+    // has finished and outside `act(...)`. Settled here: the held request means
+    // the spinner cannot go away, so the assertion below is unchanged.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     const spinner = container.querySelector('.animate-spin');
     expect(spinner).toBeTruthy();
@@ -975,6 +1024,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce({ data: { success: true, data: defaultProfile } })
       .mockResolvedValueOnce({ data: backupProfile });
 
+    answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
 
     await renderSettings();
@@ -1038,6 +1088,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce({ data: backupProfile })
       .mockResolvedValueOnce({ data: backupProfile });
 
+    answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
 
     await renderSettings();
@@ -1111,6 +1162,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce({ data: backupProfile })
       .mockResolvedValueOnce({ data: backupProfile });
 
+    answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
 
     await renderSettings();
@@ -2283,6 +2335,15 @@ describe('BackupSettingsPage', () => {
         <BackupSettingsPage />
       </MemoryRouter>,
     );
+
+    // The profile request above is held pending, and it is what keeps the spinner
+    // on screen. The page fires OTHER work on mount, though, and each of those
+    // applies itself in a `.then` that in a synchronous case lands after the body
+    // has finished and outside `act(...)`. Settled here: the held request means
+    // the spinner cannot go away, so the assertion below is unchanged.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     const spinner = container.querySelector('.animate-spin');
     expect(spinner).toBeTruthy();

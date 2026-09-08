@@ -114,7 +114,10 @@ vi.mock('../src/services/api/configApi', () => ({
   getDocumentsConfig: vi.fn(() => new Promise(() => undefined)),
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
     cacheItems: vi.fn().mockResolvedValue(undefined),
     cacheFolders: vi.fn().mockResolvedValue(undefined),
@@ -317,6 +320,9 @@ function makeFolder(
 // Global store resets
 // ---------------------------------------------------------------------------
 
+/** The environment's own `fetch`, restored after every case. */
+const realFetch = globalThis.fetch;
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
@@ -350,10 +356,38 @@ beforeEach(() => {
   });
 
   vi.mocked(isStorageDegraded).mockReturnValue(false);
+
+  // `AppLayout` mounts `useConnectionStatus`, which probes `/api/v1/health` on
+  // mount. Left to the real `fetch` that probe FAILS — jsdom cannot resolve a
+  // relative URL — and lands `setIsOnline(false)` a microtask after a synchronous
+  // test body has finished, which React reports as an update outside `act(...)`.
+  // Twenty-six of this file's cases printed one.
+  //
+  // The default leaves the probe IN FLIGHT, which is the honest answer for a case
+  // that says nothing about connectivity: `isOnline` starts from `navigator.onLine`
+  // and the indicator reads Online, exactly as it does in a browser between the
+  // mount and the first response. Resolving it instead was tried and is not enough:
+  // `setIsOnline(true)` is a no-op React eagerly bails out of ONLY while the fiber
+  // has no other pending work, so the cases that also click something still
+  // scheduled a render for it.
+  //
+  // Deliberately NOT a mock of the hook. Three cases below assert the indicator's
+  // real behaviour — offline is immediate, online waits for the probe to answer —
+  // and a stubbed hook would turn those into tests of the stub. The one that needs
+  // a controlled probe spies on `fetch` itself and restores it, which puts this
+  // default back.
+  globalThis.fetch = vi.fn(() => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
 });
 
 afterEach(() => {
+  // ORDER MATTERS, and it is the opposite of the obvious one. `restoreAllMocks`
+  // puts back whatever a `vi.spyOn` captured, and any spy on `fetch` here captured
+  // the PER-TEST stub installed above — so restoring after the reassignment would
+  // write that stub back over the environment's own `fetch`. Unwind the spies
+  // first, then put the real one back, and the file leaves `globalThis` as it
+  // found it whether a case spied on it or not.
   vi.restoreAllMocks();
+  globalThis.fetch = realFetch;
 });
 
 // ==========================================================================
@@ -1087,9 +1121,20 @@ describe('FolderRail - folder color change', () => {
 
     renderWithRouter(<VaultRail />);
 
-    const folderBtn = screen.getByText('Colored').closest('button')!;
+    // Read from the ROW, not from the button inside it, and keyed to the folder
+    // whose colour this is. The colour bar, the depth indent, the selected
+    // background and the drop ring all belong to the row rather than to either
+    // control on it, and they moved to the row's own element when the
+    // expand/collapse button was lifted out of the folder button — which it had
+    // to be, because a `<button>` inside a `<button>` is invalid HTML and is axe's
+    // `nested-interactive` (serious, WCAG 4.1.2). Nothing about what this pins
+    // changed: remove the `borderLeft` clause in `FolderRail` and it is still red.
+    // Keying it to `f1` makes it STRICTER than the old `.closest('button')`, which
+    // would have accepted a bar drawn on the wrong row.
+    const row = screen.getByText('Colored').closest('[data-testid="folder-row"]')!;
+    expect(row).toHaveAttribute('data-folder-id', 'f1');
     // Browser normalizes hex to rgb format
-    expect(folderBtn.style.borderLeft).toContain('3px solid');
+    expect((row as HTMLElement).style.borderLeft).toContain('3px solid');
   });
 });
 
@@ -1138,6 +1183,17 @@ describe('FolderRail - drag-and-drop reordering', () => {
 
     const firstBtn = screen.getByText('First').closest('button')!;
     const secondBtn = screen.getByText('Second').closest('button')!;
+    // The ring is drawn on the ROW, which is where it has to be: a drop is aimed
+    // at the folder and the pointer may be over the expand/collapse control when
+    // it lands. That control is a SIBLING of the folder button rather than a child
+    // of it — a `<button>` inside a `<button>` is invalid HTML and is axe's
+    // `nested-interactive` (serious, WCAG 4.1.2) — so the element carrying the
+    // highlight is the row, and it is read here by the folder it belongs to.
+    // Both directions below are unchanged, and both still fail for their original
+    // reasons: drop the `isDragOver` class clause and the ring never appears; drop
+    // `onDragEnd` and it never goes away.
+    const secondRow = secondBtn.closest('[data-testid="folder-row"]')!;
+    expect(secondRow).toHaveAttribute('data-folder-id', 'f2');
     const dataTransfer = {
       effectAllowed: '',
       dropEffect: '',
@@ -1149,7 +1205,7 @@ describe('FolderRail - drag-and-drop reordering', () => {
     // gains the highlight ring (dragOverId === 'f2').
     fireEvent.dragStart(firstBtn, { dataTransfer });
     fireEvent.dragOver(secondBtn, { dataTransfer });
-    expect(secondBtn.className).toContain('ring-2');
+    expect(secondRow.className).toContain('ring-2');
 
     // dragEnd (no drop) must clear dragOverId, removing the highlight. Without the
     // onDragEnd handler the ring would stick forever.
@@ -1157,7 +1213,7 @@ describe('FolderRail - drag-and-drop reordering', () => {
     expect(foldersSection).toBeInTheDocument();
     fireEvent.dragEnd(foldersSection!);
 
-    expect(secondBtn.className).not.toContain('ring-2');
+    expect(secondRow.className).not.toContain('ring-2');
   });
 });
 

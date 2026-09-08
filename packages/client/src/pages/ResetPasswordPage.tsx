@@ -279,9 +279,15 @@ export default function ResetPasswordPage() {
                   error={!!form.formState.errors.newPassword}
                   {...form.register('newPassword')}
                 />
+                {/* The label is the whole accessible name: the content is a lucide
+                    icon, so without it this control reaches a screen reader as an
+                    unnamed button. The sign-in page, the registration page and the
+                    generator all carry the same pair of strings; this one was
+                    written without them. */}
                 <button
                   type="button"
                   tabIndex={-1}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]"
                   onClick={() => setShowPassword(!showPassword)}
                 >

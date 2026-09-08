@@ -86,8 +86,11 @@ const E2E_ENV: Record<string, string> = {
  * under test. The production stack pins mongo:8.0 and needs the same tunable, which
  * it sets in docker-compose.yml.
  *
- * Shared with the unit-test harness so the two cannot drift, and a MERGE rather than
- * an overwrite — see mongoKernelCompat.ts. The spawned mongod inherits process.env.
+ * One implementation, shared by all three Node launch sites so they cannot drift —
+ * this harness, packages/server/tests/mongoHarness.ts and scripts/ci/smoke-gate.mjs —
+ * and a MERGE rather than an overwrite. The merge lives in scripts/ci/lib/mongo-rseq.mjs
+ * (plain JS, because the smoke gate cannot import a .ts) and mongoKernelCompat.ts is the
+ * typed facade over it. The spawned mongod inherits process.env.
  */
 applyMongoKernelCompat();
 

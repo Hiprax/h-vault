@@ -82,7 +82,7 @@ import {
  * is sealed into the document and is the only record of what rewrote the bytes.
  */
 export const JSONREPAIR_VERSION = '3.15.0';
-export const PRETTIER_VERSION = '3.9.5';
+export const PRETTIER_VERSION = '3.9.6';
 
 /**
  * The Prettier parser for each extension in the JSON family.

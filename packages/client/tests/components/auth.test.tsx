@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
@@ -577,8 +577,15 @@ describe('RegisterPage', () => {
     });
   });
 
-  it('renders the registration form with title and all fields', () => {
+  it('renders the registration form with title and all fields', async () => {
     renderWithRouter(<RegisterPage />);
+    // Settled inside `act`: `RegisterPage` loads zxcvbn lazily on mount and sets it
+    // in a `.then`, which in a synchronous case lands after the body has finished
+    // and outside `act(...)`. The strength meter is not what these four cases read
+    // — they read the static markup — so nothing here changes but the warning.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(screen.getByRole('heading', { name: /create account/i })).toBeInTheDocument();
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
@@ -587,20 +594,41 @@ describe('RegisterPage', () => {
     expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
   });
 
-  it('renders the "Sign in" link', () => {
+  it('renders the "Sign in" link', async () => {
     renderWithRouter(<RegisterPage />);
+    // Settled inside `act`: `RegisterPage` loads zxcvbn lazily on mount and sets it
+    // in a `.then`, which in a synchronous case lands after the body has finished
+    // and outside `act(...)`. The strength meter is not what these four cases read
+    // — they read the static markup — so nothing here changes but the warning.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(screen.getByText('Sign in')).toBeInTheDocument();
   });
 
-  it('renders the password recovery warning', () => {
+  it('renders the password recovery warning', async () => {
     renderWithRouter(<RegisterPage />);
+    // Settled inside `act`: `RegisterPage` loads zxcvbn lazily on mount and sets it
+    // in a `.then`, which in a synchronous case lands after the body has finished
+    // and outside `act(...)`. The strength meter is not what these four cases read
+    // — they read the static markup — so nothing here changes but the warning.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(screen.getByText(/your master password cannot be recovered/i)).toBeInTheDocument();
   });
 
-  it('renders the terms checkbox text', () => {
+  it('renders the terms checkbox text', async () => {
     renderWithRouter(<RegisterPage />);
+    // Settled inside `act`: `RegisterPage` loads zxcvbn lazily on mount and sets it
+    // in a `.then`, which in a synchronous case lands after the body has finished
+    // and outside `act(...)`. The strength meter is not what these four cases read
+    // — they read the static markup — so nothing here changes but the warning.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(
       screen.getByText(/I understand that H-Vault cannot recover my master password/),

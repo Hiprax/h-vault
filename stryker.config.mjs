@@ -93,9 +93,25 @@ export default {
   // Copying `.git`, the built output and the coverage directories into the
   // sandbox costs minutes per leg and changes nothing: no test reads them.
   // (`node_modules` is symlinked by Stryker itself and is not listed here.)
+  //
+  // `.cache` is the biggest of them by two orders of magnitude and was the one
+  // missing: it is the local pipeline's scratch space, and on a machine that has
+  // run `sast` even once it holds the CodeQL bundle and its database — MEASURED
+  // at 3.1 GB (2.5 GB bundle + 604 MB database) on the reference host. Stryker
+  // copies the sandbox once per RUNNER, so that is ~9 GB per leg of pure
+  // overhead. Worse than slow: `verify:selftest` caught it CRASHING the gate
+  // outright with `EISDIR: copyfile … .cache/codeql`, which is how it was found.
+  // `.dockerignore` excludes `**/.cache` for exactly this reason and says so.
+  //
+  // This changes what is COPIED, never what is MUTATED: the denominator comes
+  // from the `mutate` globs above, which only ever name `packages/*/src/**`, and
+  // `mutation.filesMutated` is ratcheted as a SUPERSET so a narrowed denominator
+  // would fail the ratchet rather than pass quietly. Verified by re-running the
+  // `shared` leg and confirming it still reports 2,469 mutants at 88.09 %.
   ignorePatterns: [
     '.git',
     '.stryker-tmp',
+    '.cache',
     'packages/*/dist',
     'packages/*/coverage',
     'playwright-report',

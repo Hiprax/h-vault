@@ -35,10 +35,72 @@ function classifyError(error: unknown): OfflineCacheError {
     if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
       return new OfflineCacheError('IndexedDB access denied', 'permission_denied', error);
     }
+    // Any other DOMException keeps the engine's own wording. This arm exists
+    // because `DOMException instanceof Error` is NOT portable: it is true in
+    // every browser and in Node, and false under jsdom, whose DOMException
+    // inherits from a different realm's `Error.prototype`. Falling through to
+    // the generic branch below therefore kept the message in production and
+    // replaced it with a stand-in under test — a divergence that makes the
+    // shipped behaviour of this function unobservable from the suite.
+    return new OfflineCacheError(error.message, 'unknown', error);
   }
 
   const message = error instanceof Error ? error.message : 'Unknown IndexedDB error';
   return new OfflineCacheError(message, 'unknown', error);
+}
+
+/**
+ * The cause behind a rejected `offlineCache` operation, as a plain discriminant.
+ *
+ * Every method here rejects with an `OfflineCacheError`; anything else arriving
+ * is a programming fault rather than a storage condition, so it degrades to
+ * `'unknown'` instead of throwing a second time from inside a `.catch`.
+ */
+export function offlineCacheErrorType(error: unknown): OfflineCacheErrorType {
+  return error instanceof OfflineCacheError ? error.type : 'unknown';
+}
+
+// ---------------------------------------------------------------------------
+// Reading the error off a failed request or transaction
+// ---------------------------------------------------------------------------
+
+/**
+ * The error behind a failed IndexedDB transaction, read off the event that
+ * reported it. Shared with `healthResultsStore`, the other IndexedDB-backed
+ * service, so the two cannot drift.
+ *
+ * `IDBTransaction.error` is still `null` while the failing request's `error`
+ * event is bubbling: the specification only populates it during the abort that
+ * follows, and the `error` listener on the transaction runs before that. So a
+ * handler that read `tx.error` saw nothing every single time, rejected with the
+ * bare fallback below, and `classifyError` — handed a plain `Error` — answered
+ * `'unknown'`. That made `'quota_exceeded'` unreachable on the write path, which
+ * is the only path a quota failure can arrive on.
+ *
+ * On an `error` event the target is the failing request and carries the real
+ * `DOMException`; on an `abort` event the target is the transaction, whose
+ * `error` is set for an implicit abort and `null` for an explicit one. Reading
+ * `event.target.error` covers both, and falls back for the explicit case.
+ *
+ * The presence test is deliberately a null check rather than an `instanceof
+ * Error` check: `DOMException instanceof Error` is true in every browser and
+ * false under jsdom (different realm's `Error.prototype`), so the stricter guard
+ * would keep the engine's error in production and discard it under test.
+ */
+export function transactionFailureError(event: Event, fallbackMessage: string): Error {
+  const target: unknown = event.target;
+  if (typeof target === 'object' && target !== null && 'error' in target) {
+    const { error } = target;
+    if (error !== null && error !== undefined) {
+      // A `DOMException`, which `lib.dom` declares as an `Error` subtype and
+      // every browser implements as one. Asserting rather than testing with
+      // `instanceof Error` is the point: that test is the one jsdom answers
+      // differently, and this value is only ever handed to `classifyError`,
+      // which re-examines it properly.
+      return error as Error;
+    }
+  }
+  return new Error(fallbackMessage);
 }
 
 // ---------------------------------------------------------------------------
@@ -121,8 +183,7 @@ function openDatabase(): Promise<IDBDatabase> {
       }
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () =>
-      reject(request.error instanceof Error ? request.error : new Error('IndexedDB open failed'));
+    request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
   });
 }
 
@@ -154,20 +215,26 @@ export const offlineCache = {
       }
       await new Promise<void>((resolve, reject) => {
         tx.oncomplete = () => resolve();
-        tx.onerror = () =>
-          reject(tx.error instanceof Error ? tx.error : new Error('IndexedDB transaction failed'));
+        tx.onerror = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction failed'));
+        // A transaction can end WITHOUT any request having reported an error —
+        // a commit-time failure, or an abort raised while no request is still
+        // outstanding. Only `abort` fires then, so a handler listening for
+        // `complete` and `error` alone leaves this promise pending for ever, the
+        // caller awaiting it never returns, and the `finally` that closes the
+        // connection never runs.
+        tx.onabort = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction aborted'));
       });
       // Update last sync timestamp
       const metaTx = db.transaction(META_STORE, 'readwrite');
       metaTx.objectStore(META_STORE).put({ key: 'lastItemsSync', value: Date.now() });
       await new Promise<void>((resolve, reject) => {
         metaTx.oncomplete = () => resolve();
-        metaTx.onerror = () =>
-          reject(
-            metaTx.error instanceof Error
-              ? metaTx.error
-              : new Error('IndexedDB transaction failed'),
-          );
+        metaTx.onerror = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction failed'));
+        metaTx.onabort = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction aborted'));
       });
     } catch (error) {
       throw classifyError(error);
@@ -189,19 +256,25 @@ export const offlineCache = {
       }
       await new Promise<void>((resolve, reject) => {
         tx.oncomplete = () => resolve();
-        tx.onerror = () =>
-          reject(tx.error instanceof Error ? tx.error : new Error('IndexedDB transaction failed'));
+        tx.onerror = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction failed'));
+        // A transaction can end WITHOUT any request having reported an error —
+        // a commit-time failure, or an abort raised while no request is still
+        // outstanding. Only `abort` fires then, so a handler listening for
+        // `complete` and `error` alone leaves this promise pending for ever, the
+        // caller awaiting it never returns, and the `finally` that closes the
+        // connection never runs.
+        tx.onabort = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction aborted'));
       });
       const metaTx = db.transaction(META_STORE, 'readwrite');
       metaTx.objectStore(META_STORE).put({ key: 'lastFoldersSync', value: Date.now() });
       await new Promise<void>((resolve, reject) => {
         metaTx.oncomplete = () => resolve();
-        metaTx.onerror = () =>
-          reject(
-            metaTx.error instanceof Error
-              ? metaTx.error
-              : new Error('IndexedDB transaction failed'),
-          );
+        metaTx.onerror = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction failed'));
+        metaTx.onabort = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction aborted'));
       });
     } catch (error) {
       throw classifyError(error);
@@ -219,10 +292,7 @@ export const offlineCache = {
       return await new Promise((resolve, reject) => {
         const request = store.getAll();
         request.onsuccess = () => resolve(request.result as T[]);
-        request.onerror = () =>
-          reject(
-            request.error instanceof Error ? request.error : new Error('IndexedDB read failed'),
-          );
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB read failed'));
       });
     } catch (error) {
       throw classifyError(error);
@@ -240,10 +310,7 @@ export const offlineCache = {
       return await new Promise((resolve, reject) => {
         const request = store.getAll();
         request.onsuccess = () => resolve(request.result as T[]);
-        request.onerror = () =>
-          reject(
-            request.error instanceof Error ? request.error : new Error('IndexedDB read failed'),
-          );
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB read failed'));
       });
     } catch (error) {
       throw classifyError(error);
@@ -265,10 +332,7 @@ export const offlineCache = {
           const result = request.result as { key: string; value: number } | undefined;
           resolve(result?.value ?? null);
         };
-        request.onerror = () =>
-          reject(
-            request.error instanceof Error ? request.error : new Error('IndexedDB read failed'),
-          );
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB read failed'));
       });
     } catch (error) {
       throw classifyError(error);
@@ -288,8 +352,16 @@ export const offlineCache = {
       tx.objectStore(META_STORE).clear();
       await new Promise<void>((resolve, reject) => {
         tx.oncomplete = () => resolve();
-        tx.onerror = () =>
-          reject(tx.error instanceof Error ? tx.error : new Error('IndexedDB transaction failed'));
+        tx.onerror = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction failed'));
+        // A transaction can end WITHOUT any request having reported an error —
+        // a commit-time failure, or an abort raised while no request is still
+        // outstanding. Only `abort` fires then, so a handler listening for
+        // `complete` and `error` alone leaves this promise pending for ever, the
+        // caller awaiting it never returns, and the `finally` that closes the
+        // connection never runs.
+        tx.onabort = (event) =>
+          reject(transactionFailureError(event, 'IndexedDB transaction aborted'));
       });
     } catch (error) {
       throw classifyError(error);

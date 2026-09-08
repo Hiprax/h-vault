@@ -1,5 +1,13 @@
 import { test, expect, type Page } from '@playwright/test';
-import { registerAndSignInViaUI, unlockVault, expectVaultVisible } from './helpers';
+import {
+  LOCK_VAULT_LABEL,
+  UNLOCK_SUBMIT_LABEL,
+  expectVaultVisible,
+  lockViaUi,
+  registerAndSignInViaUI,
+  unlockVault,
+  unlockedLayoutMarker,
+} from './helpers';
 
 /**
  * Budget for a spec that performs SEVERAL master-password derivations.
@@ -33,21 +41,12 @@ const LOCK_CYCLE_TEST_TIMEOUT_MS = 300_000;
  * `NODE_ENV=development`, where every limiter is a pass-through no-op. The
  * budget-isolation guarantee is asserted against the real, production-configured
  * limiters in `packages/server/tests/auth-limiter-isolation.test.ts`.
- */
-
-/**
- * Lock the vault through the sidebar control, the way a user does.
  *
- * Deliberately NOT the `Ctrl`+`L` keyboard shortcut:
- * `useKeyboardShortcuts` suppresses every shortcut while focus is in an
- * `INPUT`/`TEXTAREA`/`SELECT`, and the vault page holds a focusable search field —
- * so the keypress silently did nothing here and the test failed waiting for a lock
- * screen that was never going to appear. Clicking the real control has no such
- * precondition, and exercises the same `authStore.lock()` path.
+ * `lockViaUi` used to live here. It is in `helpers.ts` now, with the locator it
+ * is built on, because `zero-knowledge.spec.ts` had written its own copy and
+ * both copies used a name matcher that also matches the UNLOCK screen — see
+ * `unlockedLayoutMarker` there, and the two assertions in the third test below.
  */
-async function lockViaUi(page: Page): Promise<void> {
-  await page.getByRole('button', { name: /lock vault/i }).click();
-}
 
 /**
  * Report `visibilityState` as `state` and fire a real `visibilitychange`.
@@ -143,6 +142,31 @@ test.describe('auto-lock', () => {
 
     await lockViaUi(page);
     await expect(page.getByText('Vault Locked')).toBeVisible({ timeout: 30_000 });
+
+    // The vault is LOCKED here, so the marker every "are we in the vault" check
+    // in this suite is built on must be ABSENT. Asserted rather than assumed,
+    // because the obvious way to write that marker is not a discriminator at
+    // all: Playwright matches a RegExp role-name UNANCHORED, and the unlock
+    // screen's submit button is called "Unlock Vault", which `/lock vault/i`
+    // matches. `expectVaultVisible` shipped that way — returning immediately on
+    // the unlock screen while claiming to prove the opposite — and the
+    // four-cycle test below is what paid for it, burning its whole 300 s budget
+    // under contention. This line is red against that spelling and green
+    // against the exact one.
+    await expect(unlockedLayoutMarker(page)).toHaveCount(0);
+    // And the collision itself, as a DOM fact rather than a comment, so that a
+    // future rename which removes it makes somebody re-read the note instead of
+    // quietly making the exactness above look like fussiness. The matcher is
+    // BUILT from the same label rather than copied as a regex literal, so it
+    // cannot end up asserting about a string nothing renders; and the line under
+    // it names which button the loose matcher actually found. Both engines run
+    // this file, so both are checked against two accessible-name implementations.
+    await expect(page.getByRole('button', { name: new RegExp(LOCK_VAULT_LABEL, 'i') })).toHaveCount(
+      1,
+    );
+    await expect(page.getByRole('button', { name: UNLOCK_SUBMIT_LABEL, exact: true })).toHaveCount(
+      1,
+    );
 
     await unlockVault(page, password);
 

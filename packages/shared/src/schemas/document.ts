@@ -338,9 +338,12 @@ export const documentKeyRewrapSchema = z.object({
  *
  * Three things are deliberately absent. `chunkPlaintextBytes` is set by the SERVER
  * from its own constant and returned in the response, so a client cannot choose
- * its own framing. `vaultKeyVersion` is READ by the server from the user, not
- * declared here, and returned so the completion can be checked against it.
- * `objectKey` is server-assigned and never client-supplied.
+ * its own framing. `vaultKeyVersion` is READ by the server from its own counter,
+ * not declared here, and returned as an OBSERVATION of the account's generation
+ * when the transfer opened — the completion is emphatically NOT checked against
+ * that echo, but against the number the CLIENT sends, which is the only one that
+ * says which vault key the client actually wrapped with. `objectKey` is
+ * server-assigned and never client-supplied.
  */
 export const initDocumentUploadSchema = z
   .object({

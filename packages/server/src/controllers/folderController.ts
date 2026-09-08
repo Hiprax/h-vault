@@ -13,6 +13,7 @@ import {
   pickAllowedFields,
 } from '../utils/controllerHelpers.js';
 import { getAncestorChain, hasCycle } from '../utils/folderGraph.js';
+import { supportsTransactions } from '../utils/transactionSupport.js';
 import {
   deleteFolderQuerySchema,
   MAX_FOLDERS_PER_USER,
@@ -330,10 +331,12 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
   // WARNING: On standalone MongoDB (no replica set), folder deletion is non-atomic.
   // A crash mid-operation could leave orphaned items pointing to a deleted folder.
   // A post-delete cleanup step below clears any stale folderId references to mitigate this.
-  const useTransaction =
-    mongoose.connection.readyState === mongoose.ConnectionStates.connected &&
-    // Check if the topology supports sessions (replica set or sharded cluster)
-    Boolean(mongoose.connection.getClient().options.replicaSet);
+  //
+  // The topology check is `utils/transactionSupport.ts` and nothing else: it used
+  // to be inlined here, and an inlined copy is a second answer to a question every
+  // multi-collection writer has to answer the same way (see
+  // `tests/topology-predicate.test.ts`).
+  const useTransaction = supportsTransactions(mongoose.connection);
 
   const session = useTransaction ? await mongoose.startSession() : null;
   const sessionOpt = session ? { session } : {};

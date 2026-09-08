@@ -70,6 +70,14 @@ which the reader is told about:
 
 ![a tracking pixel](https://example.invalid/pixel.png)
 
+A `<picture>` whose ONLY remote reference is a `srcset` candidate, and not the
+first one. The default schema allows `picture` and `source`, allows
+`source: ['srcSet']`, and lists no protocol filter for `srcSet` at all, so the
+URL survives exactly as written and the request is refused by `img-src`. A sweep
+that looked at `img[src]` alone saw nothing here.
+
+<picture><source srcset="local-narrow.png 1x, https://example.invalid/wide.png 2x"><img src="local-narrow.png" alt="a responsive image"></picture>
+
 ## Things that must SURVIVE, because a README is supposed to look like one
 
 | column | meaning |

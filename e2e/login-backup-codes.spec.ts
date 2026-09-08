@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { registerAndSignInViaUI, unlockVault } from './helpers';
+import { grantClipboardWrite, registerAndSignInViaUI, unlockVault } from './helpers';
 
 /**
  * A login's 2FA backup codes, end to end in a real browser.
@@ -64,12 +64,17 @@ async function openItem(page: Page, name: string): Promise<void> {
 
 test.describe('login backup codes', () => {
   test('pasted codes are stored, copied individually, deleted, and survive a reload', async ({
+    browserName,
     context,
     page,
   }, testInfo) => {
     // Three PBKDF2 derivations at 600k iterations: register, sign in, unlock.
     testInfo.setTimeout(120_000);
-    await context.grantPermissions(['clipboard-write']);
+    // Through the shared helper, never `grantPermissions` outright: Gecko has no
+    // `clipboard-write` permission and Playwright REJECTS the name, so an
+    // unconditional grant here throws the moment this spec is scheduled on a
+    // second engine. See `grantClipboardWrite` in `helpers.ts`.
+    await grantClipboardWrite(context, browserName);
     await installClipboardSpy(page);
     const { password } = await registerAndSignInViaUI(page);
 

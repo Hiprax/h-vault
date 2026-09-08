@@ -635,7 +635,17 @@ beforeEach(async () => {
 
   vaultKey = await cryptoService.importVaultKey(cryptoService.generateVaultKey());
   mek = await cryptoService.importVaultKey(cryptoService.generateVaultKey());
-  useAuthStore.setState({ accessToken: 'access-token', vaultKey, mek, isAuthenticated: true });
+  // `vaultKeyVersion` is set EXPLICITLY, beside the key it names: the completion
+  // sends this session's number, so leaving it to a default would make every
+  // assertion about that number incidental — and would let a rotated version leak
+  // from a neighbouring test under the suite's shuffled order.
+  useAuthStore.setState({
+    accessToken: 'access-token',
+    vaultKey,
+    mek,
+    vaultKeyVersion: 0,
+    isAuthenticated: true,
+  });
   useDocumentsStore.setState({
     documents: [],
     trashDocuments: [],
@@ -1786,6 +1796,73 @@ describe('documentsStore — a vault key rotated mid-upload', () => {
     expect(dek).toHaveLength(32);
   });
 
+  it('sends the version its OWN key is, not the one init echoed, and self-heals from the 409', async () => {
+    // The S1 arrangement, which the case above does not reach: the rotation
+    // happened BEFORE this transfer opened, from another session. A rotation
+    // revokes nothing and refreshes no key already held here, so this session is
+    // still holding the superseded vault key — and init, reading the server's own
+    // counter, echoes the NEW generation back.
+    //
+    // Echoing that number onward is what committed a row wrapped under a key the
+    // account no longer stores: the server would be comparing its own number with
+    // itself and agreeing. The document then lists, charges the quota, never
+    // opens, and — because the rotation screen aborts on the first row it cannot
+    // unwrap — blocks every future rotation of the account.
+    advertisedVaultKeyVersion = 1;
+    useAuthStore.setState({ vaultKeyVersion: 0 });
+    const content = bytes(9, 8, 7);
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: content.length });
+    completeOutcomes = [
+      { status: 409, data: { success: false, data: { vaultKeyVersion: 1 } } },
+      'ok',
+    ];
+    const rotatedRaw = cryptoService.generateVaultKey();
+    const rotatedKey = await cryptoService.importVaultKey(rotatedRaw);
+    const wrapped = await cryptoService.encryptVaultKey(rotatedKey, mek);
+    profileBody = {
+      encryptedVaultKey: wrapped.encrypted,
+      vaultKeyIv: wrapped.iv,
+      vaultKeyTag: wrapped.tag,
+    };
+
+    await useDocumentsStore.getState().startUpload({
+      source: new Blob([content]),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+
+    // THE ASSERTION THIS TEST EXISTS FOR: the first completion carried 0 — what
+    // this session's key IS — and not the 1 the init response advertised.
+    expect(completeBodies[0]?.vaultKeyVersion).toBe(0);
+    expect(advertisedVaultKeyVersion).toBe(1);
+    // …so the server could refuse, and the existing recovery ran: one retry,
+    // carrying the number the refusal handed back.
+    expect(completeBodies).toHaveLength(2);
+    expect(completeBodies[1]?.vaultKeyVersion).toBe(1);
+    // One part for two completions — the recovery costs a request, not the file.
+    expect(partRequests()).toHaveLength(1);
+    // And the committed key really is the DEK under the account's CURRENT vault
+    // key, which is the whole point of refusing the first attempt.
+    const dek = await unwrapDek(
+      {
+        encryptedDek: completeBodies[1]?.encryptedDek as string,
+        dekIv: completeBodies[1]?.dekIv as string,
+        dekTag: completeBodies[1]?.dekTag as string,
+      },
+      await deriveWrapKey(rotatedKey, ID_A),
+    );
+    expect(dek).toHaveLength(32);
+
+    // THE NEGATIVES, and the second is easy to get wrong. The session did not
+    // adopt the rotated key — every item already decrypted in memory belongs to
+    // the old one — and it must not adopt the rotated NUMBER either. A version
+    // moved forward while the key stayed behind is the original defect rebuilt
+    // from the client side: the next upload would send 1, the server would agree,
+    // and the row would commit under a key nothing can unwrap.
+    expect(useAuthStore.getState().vaultKey).toBe(vaultKey);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(0);
+  });
+
   it('does not adopt the rotated key into the auth store', async () => {
     const content = bytes(1);
     committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 1 });
@@ -2071,6 +2148,169 @@ describe('documentsStore — cancel and teardown', () => {
     releasePart();
     await expect(pending).rejects.toBeInstanceOf(UploadCancelledError);
   });
+
+  /**
+   * Two Retries taken inside the ledger round trip, and the wrap that must never
+   * be sent.
+   *
+   * The status flip to `'uploading'` happens AFTER `GET /uploads/:id` returns, so
+   * `status !== 'failed'` cannot refuse a second call taken while that request is
+   * still on the wire. Both calls then reach `session.controller = new
+   * AbortController()`, and the SECOND one overwrites the first's — which leaves
+   * the first loop running with a controller nothing in this module can reach any
+   * more.
+   *
+   * What that costs is not a duplicated request. `cancelUpload` aborts
+   * `session.controller` — the surviving one — and zeroes the DEK, and the
+   * orphaned loop, whose signal was never aborted, walks on to `wrapDek` and
+   * commits a key made of 32 zero bytes. `completeTransfer`'s own abort check
+   * cannot help: it reads the orphan's own signal. The metadata key is derived
+   * from the same zeroes, so the row LISTS with its real name and its segments —
+   * sealed under the stream key derived from the REAL DEK — can never be opened
+   * again by anyone, including the account that stored them.
+   *
+   * The barrier below is deterministic rather than timed. Both calls await the
+   * SAME gate promise, so their continuations run in registration order, and the
+   * first thing each does on resuming is set its controller and enter
+   * `runTransfer` synchronously up to `deriveStreamKey`. A part request costs
+   * several more real awaits, so by the time ONE part has reached the transport,
+   * a second call — if it was admitted at all — has already installed its
+   * controller. Waiting on the part is therefore waiting on the exact state the
+   * defect needs.
+   */
+  it('refuses a second resume taken inside the ledger read, and commits no key made of zeroes', async () => {
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    // 400 is the `fail` verdict: no backoff, and the session is KEPT, which is
+    // the only state a Retry is offered from.
+    partOutcomes = [400];
+
+    let ledgerReads = 0;
+    let resumedParts = 0;
+    let gatesArmed = false;
+    let openLedger = (): void => {};
+    let openPart = (): void => {};
+    const ledgerGate = new Promise<void>((resolve) => {
+      openLedger = resolve;
+    });
+    const partGate = new Promise<void>((resolve) => {
+      openPart = resolve;
+    });
+
+    api.defaults.adapter = async (config) => {
+      const url = config.url ?? '';
+      const method = (config.method ?? 'get').toUpperCase();
+      if (gatesArmed) {
+        if (method === 'GET' && /^\/documents\/uploads\/[a-f0-9]{24}$/.test(url)) {
+          ledgerReads += 1;
+          await ledgerGate;
+        } else if (method === 'PUT' && url.includes('/parts/')) {
+          resumedParts += 1;
+          await partGate;
+        }
+      }
+      return adapter(config);
+    };
+
+    // The refusal is named, not merely counted: "something was raised" would pass
+    // on a typo in the fixture and leave the row in a state this test then reads.
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow(/status code 400/);
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+
+    gatesArmed = true;
+    const first = useDocumentsStore.getState().retryUpload(ID_A);
+    const firstOutcome = first.then(
+      () => 'resolved' as unknown,
+      (error: unknown) => error,
+    );
+    await until(() => ledgerReads === 1, 'the ledger read to reach the transport');
+
+    // The second click, inside the window the status flip does not cover. It is
+    // NOT awaited here: an unguarded second call parks on the same gate, so
+    // awaiting it before the gate opens would hang instead of failing.
+    const second = useDocumentsStore.getState().retryUpload(ID_A);
+    const secondOutcome = second.then(
+      () => 'resolved' as unknown,
+      (error: unknown) => error,
+    );
+
+    openLedger();
+    await until(() => resumedParts >= 1, 'the resumed part to reach the transport');
+
+    useDocumentsStore.getState().cancelUpload(ID_A);
+    openPart();
+
+    const [firstResult, secondResult] = await Promise.all([firstOutcome, secondOutcome]);
+    await until(
+      () => Object.keys(useDocumentsStore.getState().uploads).length === 0,
+      'the teardown',
+    );
+
+    // THE NEGATIVE THAT MATTERS, asserted FIRST because it is the one that costs a
+    // user their file: no completion the server was ever given carries a DEK that
+    // opens to zeroes. Stated as the shape rather than as a count, because the
+    // count alone would not say WHICH body was wrong. With a second loop running,
+    // this is the body that commits a permanently unopenable document and blocks
+    // every future vault key rotation of the account.
+    const wrapKey = await deriveWrapKey(vaultKey, ID_A);
+    const zeroedWraps: number[] = [];
+    for (const [index, body] of completeBodies.entries()) {
+      const opened = await unwrapDek(
+        {
+          encryptedDek: String(body.encryptedDek),
+          dekIv: String(body.dekIv),
+          dekTag: String(body.dekTag),
+        },
+        wrapKey,
+      ).catch(() => null);
+      if (opened !== null && isAllZero(opened)) zeroedWraps.push(index);
+    }
+    expect(zeroedWraps).toEqual([]);
+    // And nothing was committed at all: the transfer the user cancelled did not
+    // quietly finish behind the cancellation.
+    expect(completeBodies).toHaveLength(0);
+
+    // The refusal is the second caller's answer, and it is not the cancellation
+    // that came later: a caller that cannot tell them apart shows the user an
+    // error about a vault they locked on purpose.
+    expect(secondResult).toBeInstanceOf(Error);
+    expect((secondResult as Error).message).toMatch(/already being retried/i);
+    expect(secondResult).not.toBeInstanceOf(UploadCancelledError);
+    // Only ONE transfer was ever prepared: the refused call never read the ledger.
+    expect(ledgerReads).toBe(1);
+    // The one that was admitted is the one the cancel reached.
+    expect(firstResult).toBeInstanceOf(UploadCancelledError);
+  });
+
+  it('lets a resume that failed again be resumed once more', async () => {
+    // The claim taken by a retry is RELEASED once the transfer is running, and
+    // this is what says so: without the release the row goes back to `failed`,
+    // offers its Retry button, and the button refuses for the rest of the
+    // session. Two failures in a row, two accepted retries.
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [400, 400, null];
+
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow(/status code 400/);
+
+    // The FIRST retry is admitted — it is the part that fails again, not the
+    // claim, which is what makes the second retry below a test of the release
+    // rather than of a refusal that never happened.
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(/status code 400/);
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+
+    // The second retry is admitted and this time the part lands, so the document
+    // commits and leaves the registry.
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).resolves.toBe(ID_A);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+  });
 });
 
 // ===========================================================================
@@ -2105,6 +2345,15 @@ describe('documentsStore — writes on a committed document', () => {
     // Nothing that frames the file crossed the wire: content is immutable, so a
     // rename cannot reach a framing field, the wrapped key or the object key.
     expect(Object.keys(body).sort()).toEqual(['encryptedMeta', 'metaIv', 'metaTag']);
+
+    // And the row the server answered with IS adopted, because it names this
+    // document. Without this the whole write could be dropped — by an over-eager
+    // identity guard, or by losing the apply altogether — and every assertion
+    // above would still pass, since they only describe the request.
+    const after = useDocumentsStore.getState().documents[0];
+    expect(after?.updatedAt).toBe('2026-02-02T00:00:00.000Z');
+    expect(after?._raw).not.toBe(before?._raw);
+    expect(after?.id).toBe(ID_A);
   });
 
   it('refuses to rename a document whose metadata will not open', async () => {
@@ -2223,6 +2472,45 @@ describe('documentsStore — writes on a committed document', () => {
     // was never sealed with. Nothing local changed.
     expect(useDocumentsStore.getState().documents[0]?.favorite).toBe(false);
     expect(useDocumentsStore.getState().documents[0]?._raw).toBe(before?._raw);
+  });
+
+  it('ignores a rename response that describes a different document', async () => {
+    // The sibling check `patchDocument` has carried all along, and it is needed
+    // here for a second reason on top of the shared one. The shared one: `_raw` is
+    // what the NEXT rename derives this document's metadata key from, so adopting a
+    // foreign row would seal that rename under keys the row was never sealed with.
+    // The one that is particular to this path: the write lands by id, so a foreign
+    // response does not even mis-apply the rename that was asked for — it rewrites
+    // an entry nobody touched, with a row whose keys are derived from ITS id, which
+    // this vault key may well fail to open. A healthy document then goes degraded,
+    // and a degraded document is one this client refuses to rename at all.
+    listPages = [[await makeRow(ID_A, 'notes.txt'), await makeRow(ID_B, 'contract.pdf')]];
+    await useDocumentsStore.getState().fetchDocuments();
+    requests = [];
+    const [beforeA, beforeB] = useDocumentsStore.getState().documents;
+    expect(beforeB?.meta?.name).toBe('contract.pdf');
+
+    // A row about ID_B, and one this vault key cannot open: its DEK is wrapped
+    // under a third document's key.
+    committedRow = await makeRow(ID_B, 'someone-elses.txt', { wrapUnder: ID_C });
+
+    await useDocumentsStore.getState().updateDocumentMeta(ID_A, { name: 'renamed.txt' });
+
+    // The request was legitimate and was made; only the answer is refused.
+    expect(requestsFor('PUT', `/documents/${ID_A}`)).toHaveLength(1);
+
+    const [afterA, afterB] = useDocumentsStore.getState().documents;
+    // The symptom first: the untouched document is neither degraded nor renamed.
+    // Adopting the foreign row put a `meta: null` entry here — a document this
+    // client then refuses to rename at all — for a file nobody asked about.
+    expect(afterB?.meta).not.toBeNull();
+    expect(afterB?.meta?.name).toBe('contract.pdf');
+    expect(afterB?._raw).toBe(beforeB?._raw);
+    // And the document that WAS renamed keeps the row it had. The server-side
+    // rename may well have happened — this client simply will not adopt a row that
+    // does not name it, and the next fetch reads the truth.
+    expect(afterA?._raw).toBe(beforeA?._raw);
+    expect(afterA?.meta?.name).toBe('notes.txt');
   });
 
   it('moves a document to the trash and back', async () => {
@@ -2574,6 +2862,170 @@ describe('documentsStore — filters, trash coherence and folder sweeps', () => 
     expect(result.failedCount).toBe(1);
     expect(requestsFor('GET', '/documents/trash')).toHaveLength(1);
     expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_B]);
+  });
+
+  it('puts back the rows the server never reached when its walk stopped on a refusing engine', async () => {
+    // The server's empty-trash walk shares the collector's circuit breaker: after
+    // enough storage refusals in a row it STOPS, having attempted only some of the
+    // set, and answers with the counts it actually accumulated. So the response can
+    // report a handful of failures while the trash still holds rows nothing tried
+    // to purge — rows that carry no `purgePending` marker at all and are simply
+    // still there.
+    //
+    // This is the case that decides whether the server change needs a client
+    // change, and it does NOT: the store already refetches whenever `failedCount`
+    // is non-zero, and tripping the breaker costs several recorded failures, so
+    // `failedCount` can never be zero on the path that stops early. The read is
+    // what makes the list true again, and it returns MORE rows than the response
+    // accounted for — which is exactly the state a client that trusted the counts
+    // instead of re-reading would get wrong.
+    const attempted = await makeRow(ID_A, 'attempted.txt');
+    const neverReached = await makeRow(ID_B, 'never-reached.txt');
+    const alsoNeverReached = await makeRow(ID_C, 'also-never-reached.txt');
+    trashRows = [attempted, neverReached, alsoNeverReached];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+    // Nothing was destroyed and the walk gave up part-way through.
+    emptyTrashResult = { deletedCount: 0, failedCount: 5 };
+
+    const result = await useDocumentsStore.getState().emptyTrash();
+
+    expect(result).toEqual({ deletedCount: 0, failedCount: 5 });
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(1);
+    // Every row is back, including the two the server never attempted. The
+    // suppression set must stay EMPTY on this path — populating it would subtract
+    // exactly these ids from the read that is meant to restore them.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([
+      ID_A,
+      ID_B,
+      ID_C,
+    ]);
+    expect(useDocumentsStore.getState().trashLoading).toBe(false);
+  });
+
+  it('reads the trash back for real when a listing was already in flight', async () => {
+    // The window that made the partial path lie. A reader opens Trash — the
+    // listing starts, empties the local list and then spends seconds unwrapping a
+    // key per row — and confirms Empty trash before it finishes. `emptyTrash`
+    // invalidates that listing, which is correct, and then asks for the list
+    // again; if that request is answered by the very run it just invalidated, the
+    // run's terminal write is suppressed and NOTHING is written. The trash then
+    // renders empty while the row the engine refused is still on the server, still
+    // listed, still charged to the quota — and the toast beside it points at this
+    // list as the authoritative answer.
+    const stuck = await makeRow(ID_A, 'stuck.txt');
+    const destroyed = await makeRow(ID_B, 'destroyed.txt');
+    trashRows = [stuck, destroyed];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+    emptyTrashResult = { deletedCount: 1, failedCount: 1 };
+
+    let releaseTrash: (() => void) | undefined;
+    trashGate = new Promise<void>((resolve) => {
+      releaseTrash = resolve;
+    });
+    // Parked in the adapter, so it cannot resolve until this test says so — and
+    // waited for explicitly, because the premise of the whole test is that this
+    // listing's body, BOTH rows, was fixed before the trash changed underneath it.
+    // The adapter builds a response at request time, so gating on the request
+    // itself makes that premise self-checking rather than a hope about turns.
+    const listing = useDocumentsStore.getState().fetchTrash();
+    await until(
+      () => requestsFor('GET', '/documents/trash').length === 1,
+      'the listing to reach the server',
+    );
+
+    // What the server still has once its walk is over: the row it could not delete,
+    // marked and still listed. The listing parked above predates all of this and
+    // would answer with both rows, so a store that let it win would put back a
+    // document that really is gone.
+    trashRows = [{ ...stuck, deletedAt: '2026-02-01T00:00:00.000Z', purgePending: true }];
+
+    const emptied = useDocumentsStore.getState().emptyTrash();
+    // One turn of the event loop, which drains the whole microtask queue: every
+    // step between the DELETE going out and `emptyTrash` asking for the list again
+    // is a promise continuation, so after this the re-read has been requested
+    // whichever way the store chose to answer it. Nothing is being waited ON — the
+    // listing is held by the gate, not by time — and turning too FEW times cannot
+    // produce a false pass either: under the unfixed store the re-read is answered
+    // by the suppressed run, so the assertions below fail however long this waits.
+    await realTurn();
+    releaseTrash?.();
+
+    const result = await emptied;
+    await listing;
+
+    expect(result).toEqual({ deletedCount: 1, failedCount: 1 });
+    // The row the engine refused is on screen — the symptom, stated first, because
+    // an empty list here is what the reader was shown.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_A]);
+    // And it is there because a genuinely fresh read fetched it, not because a
+    // suppressed one happened to leave it behind.
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(2);
+    expect(useDocumentsStore.getState().trashDocuments[0]?.purgePending).toBe(true);
+    // The negatives: the destroyed row was not resurrected by the stale listing,
+    // and no spinner was stranded by the run that lost.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).not.toContain(ID_B);
+    expect(useDocumentsStore.getState().trashLoading).toBe(false);
+  });
+
+  it('brings back every row a stopped-early walk never reached, even mid-listing', async () => {
+    // Phase 10's breaker turned the partial path from the rare one into the
+    // ORDINARY shape of a storage outage: after enough refusals in a row the
+    // server's walk stops, so `failedCount` is non-zero on a run that attempted
+    // only the first few rows and never touched the rest. Those untouched rows
+    // carry no `purgePending` marker at all — the collector will never look at
+    // them — so the re-read is the only thing that can tell the reader they are
+    // still there. Combined with a listing in flight, this is the state that used
+    // to render as an empty trash beside a warning saying the list had just been
+    // refreshed to show what remained.
+    const attempted = await makeRow(ID_A, 'attempted.txt');
+    const neverReached = await makeRow(ID_B, 'never-reached.txt');
+    const alsoNeverReached = await makeRow(ID_C, 'also-never-reached.txt');
+    trashRows = [attempted, neverReached, alsoNeverReached];
+    await useDocumentsStore.getState().fetchTrash();
+    requests = [];
+    // Nothing was destroyed and the walk gave up part-way through.
+    emptyTrashResult = { deletedCount: 0, failedCount: 5 };
+
+    let releaseTrash: (() => void) | undefined;
+    trashGate = new Promise<void>((resolve) => {
+      releaseTrash = resolve;
+    });
+    const listing = useDocumentsStore.getState().fetchTrash();
+    await until(
+      () => requestsFor('GET', '/documents/trash').length === 1,
+      'the listing to reach the server',
+    );
+
+    // The marker lands only on the row the walk actually attempted; the two it
+    // never reached are simply still there, exactly as they were.
+    trashRows = [
+      { ...attempted, deletedAt: '2026-02-01T00:00:00.000Z', purgePending: true },
+      neverReached,
+      alsoNeverReached,
+    ];
+
+    const emptied = useDocumentsStore.getState().emptyTrash();
+    await realTurn();
+    releaseTrash?.();
+
+    const result = await emptied;
+    await listing;
+
+    expect(result).toEqual({ deletedCount: 0, failedCount: 5 });
+    // Every row is back, including the two the server never attempted, and only
+    // the one it did attempt carries the marker.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([
+      ID_A,
+      ID_B,
+      ID_C,
+    ]);
+    expect(requestsFor('GET', '/documents/trash')).toHaveLength(2);
+    expect(
+      useDocumentsStore.getState().trashDocuments.map((doc) => doc.purgePending ?? false),
+    ).toEqual([true, false, false]);
+    expect(useDocumentsStore.getState().trashLoading).toBe(false);
   });
 
   it('counts a trashed row whose key will not unwrap instead of dropping it silently', async () => {

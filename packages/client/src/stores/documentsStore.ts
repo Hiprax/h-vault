@@ -225,6 +225,22 @@ export function isLiveTransfer(transfer: DocumentUploadProgress): boolean {
 /** The handles, key material and inputs one transfer needs, kept out of the state tree. */
 interface UploadSession {
   controller: AbortController;
+  /**
+   * Whether a resume is being PREPARED for this transfer right now.
+   *
+   * The claim {@link DocumentsState.retryUpload} takes before its first `await`,
+   * and the reason it is a field on the session rather than a second module-level
+   * registry: `endSession` removes the session, so the claim cannot outlive the
+   * thing it describes, and a retry that finds no session is already refused for
+   * a different and more accurate reason.
+   *
+   * It covers exactly the window `status` cannot. The flip to `'uploading'`
+   * happens only once the staging ledger has answered, and a second Retry taken
+   * inside that round trip would pass the `status !== 'failed'` guard, install its
+   * own `controller` over the first one's, and leave the first loop running with a
+   * controller nothing in this module can reach any more.
+   */
+  retrying: boolean;
   dek: DocumentBytes;
   source: Blob;
   /**
@@ -250,7 +266,6 @@ interface UploadSession {
   noncePrefix: DocumentBytes;
   chunkCount: number;
   chunkPlaintextBytes: number;
-  vaultKeyVersion: number;
 }
 
 /** What {@link DocumentsState.startUpload} needs to seal and store a file. */
@@ -447,6 +462,24 @@ const inFlightDeletedTrashIds = new Set<string>();
 let trashInvalidatedAt = 0;
 
 /**
+ * The `trashInvalidatedAt` the run currently holding `fetchTrashInFlight` captured.
+ *
+ * The dedup handle alone is not enough to answer "is this run still worth waiting
+ * for". A run that started before an `emptyTrash` has already been superseded: its
+ * terminal write is suppressed, so handing it back to a new caller resolves that
+ * caller on a read which writes NOTHING. `emptyTrash`'s partial path is exactly
+ * that caller — it bumps the counter and then asks for the list again — and the
+ * result was a trash rendered EMPTY while `purgePending` rows were still listed,
+ * still charged to the quota, and named by a toast pointing at this very list as
+ * the authoritative answer.
+ *
+ * So a run is shared only while the invalidation it captured is still current.
+ * Recorded beside the handle rather than derived from it, because the value lives
+ * in the run's closure and nothing outside can read it there.
+ */
+let inFlightTrashInvalidation = 0;
+
+/**
  * The live transfers' handles and keys.
  *
  * The AUTHORITY on which transfers exist: `clearStore()` iterates this rather than
@@ -460,19 +493,30 @@ const sessions = new Map<string, UploadSession>();
 // ---------------------------------------------------------------------------
 
 /**
- * The unlocked vault key, or a throw.
+ * The unlocked vault key AND the generation it belongs to, or a throw.
  *
  * Read from `authStore` at CALL time, never at module evaluation. The two stores
  * import each other — `authStore` needs this one for its lock and logout teardown,
  * this one needs the vault key — and a module-scope read would resolve to whatever
  * the bundler happened to evaluate first.
+ *
+ * The two come out of ONE snapshot, never two reads. The number is only
+ * meaningful as a statement about the key beside it, and a lock or a rotation
+ * landing between two separate `getState()` calls would pair a key with a version
+ * that names a different one — precisely the confusion the version exists to
+ * prevent.
  */
-function getVaultKey(): CryptoKey {
-  const { vaultKey } = useAuthStore.getState();
+function requireVaultKey(): { vaultKey: CryptoKey; vaultKeyVersion: number } {
+  const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
   if (!vaultKey) {
     throw new Error('Vault is locked. Unlock it before performing document operations.');
   }
-  return vaultKey;
+  return { vaultKey, vaultKeyVersion };
+}
+
+/** The unlocked vault key alone, for the callers that bind nothing to its generation. */
+function getVaultKey(): CryptoKey {
+  return requireVaultKey().vaultKey;
 }
 
 /** `length` cryptographically random bytes. */
@@ -775,13 +819,23 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
   },
 
   fetchTrash: async (): Promise<void> => {
-    if (fetchTrashInFlight) return fetchTrashInFlight;
+    // Shared only while it can still answer. A run that captured an older
+    // `trashInvalidatedAt` was superseded by an `emptyTrash` after it started, so
+    // its terminal write is already suppressed below and handing it back would
+    // resolve this caller on a read that writes nothing — leaving the list exactly
+    // as `emptyTrash` emptied it. Starting a second run instead is safe by the same
+    // guards: the older run's generation no longer matches, so neither its write nor
+    // its `finally` can touch the state or the handle this one owns.
+    if (fetchTrashInFlight && inFlightTrashInvalidation === trashInvalidatedAt) {
+      return fetchTrashInFlight;
+    }
     fetchTrashGeneration += 1;
     const myGeneration = fetchTrashGeneration;
 
     // Captured with the generation, and checked beside it: this run is stale if
     // the trash was emptied while it was reading.
     const myInvalidation = trashInvalidatedAt;
+    inFlightTrashInvalidation = myInvalidation;
 
     const run = async (): Promise<void> => {
       try {
@@ -908,7 +962,10 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       throw error;
     }
 
-    const { uploadId, vaultKeyVersion, chunkPlaintextBytes } = init;
+    // `init.vaultKeyVersion` is deliberately NOT kept: it is the SERVER's current
+    // generation, which says nothing about the key this session holds, and the
+    // completion needs the one thing it cannot answer. See `completeTransfer`.
+    const { uploadId, chunkPlaintextBytes } = init;
 
     // A lock, a logout or a teardown landed while this transfer was being opened.
     // Registering it now would put a live key and a progress row into a store that
@@ -934,6 +991,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
 
     sessions.set(uploadId, {
       controller: new AbortController(),
+      retrying: false,
       dek,
       source: input.source,
       sourceSize: totalBytes,
@@ -948,7 +1006,6 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       noncePrefix,
       chunkCount,
       chunkPlaintextBytes,
-      vaultKeyVersion,
     });
     set((state) => ({
       uploads: {
@@ -973,46 +1030,75 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     if (progress.status !== 'failed') {
       throw new Error('Only a failed upload can be retried.');
     }
-
-    // Two different plaintexts under one (key, nonce) pair is the catastrophic
-    // failure this whole design is arranged to prevent, and a resume is the one
-    // moment a slice is read a second time. If the file on disk moved underneath
-    // us, the safe answer is to refuse rather than to re-seal segment `i` over
-    // different bytes.
-    if (
-      session.source.size !== session.sourceSize ||
-      sourceLastModifiedOf(session.source) !== session.sourceLastModified
-    ) {
-      endSession(set, uploadId, { zero: true });
-      throw new Error('The file changed since the upload started; start it again.');
+    // THE CLAIM, and it is taken here — synchronously, before the first `await` —
+    // rather than left to the status flip at the bottom, which cannot happen until
+    // the ledger has answered. A second Retry taken inside that round trip would
+    // pass every guard above it, and the cost is not a duplicated request: both
+    // calls reach `session.controller = new AbortController()` and the second
+    // OVERWRITES the first's, so the first loop keeps running against a controller
+    // nothing in this module holds. `cancelUpload` then aborts the surviving
+    // controller and zeroes the DEK, while the orphan — whose own signal was never
+    // aborted, so `completeTransfer`'s abort check cannot help it — walks on to
+    // `wrapDek` and commits a key made of 32 zero bytes. The metadata key derives
+    // from the same zeroes, so the row LISTS with its real name while its segments,
+    // sealed under the stream key derived from the REAL DEK, can never be opened
+    // by anyone again; and the account cannot rotate its vault key at all until
+    // that row is destroyed, because the rotation aborts on the first row it
+    // cannot unwrap.
+    if (session.retrying) {
+      throw new Error('That upload is already being retried.');
     }
+    session.retrying = true;
 
     // The ledger, not a local guess, decides what still has to be sent. A part the
     // server already holds is skipped, but its slice is still read and hashed
     // below: the whole-file digest has to cover bytes that are not being re-sent.
     const held = new Set<number>();
     try {
-      // Validated, like every committed row this client reads: the part numbers
-      // below decide which segments are re-sent, so a malformed ledger would
-      // silently re-send everything or throw somewhere less obvious than here.
-      const staging = documentUploadResponseSchema.parse(
-        payloadOf(await getDocumentUploadApi(uploadId), 'read the upload'),
-      );
-      for (const part of staging.parts) held.add(part.partNumber);
-    } catch (error) {
-      // The staging row is gone — its TTL fired, or it was cancelled elsewhere — so
-      // there is nothing to resume onto and the DEK must not outlive the attempt.
-      endSession(set, uploadId, { zero: true });
-      throw error;
-    }
+      // Two different plaintexts under one (key, nonce) pair is the catastrophic
+      // failure this whole design is arranged to prevent, and a resume is the one
+      // moment a slice is read a second time. If the file on disk moved underneath
+      // us, the safe answer is to refuse rather than to re-seal segment `i` over
+      // different bytes.
+      if (
+        session.source.size !== session.sourceSize ||
+        sourceLastModifiedOf(session.source) !== session.sourceLastModified
+      ) {
+        endSession(set, uploadId, { zero: true });
+        throw new Error('The file changed since the upload started; start it again.');
+      }
 
-    session.controller = new AbortController();
-    updateProgress(set, uploadId, (current) => ({
-      ...current,
-      status: 'uploading',
-      error: undefined,
-      sentBytes: 0,
-    }));
+      try {
+        // Validated, like every committed row this client reads: the part numbers
+        // below decide which segments are re-sent, so a malformed ledger would
+        // silently re-send everything or throw somewhere less obvious than here.
+        const staging = documentUploadResponseSchema.parse(
+          payloadOf(await getDocumentUploadApi(uploadId), 'read the upload'),
+        );
+        for (const part of staging.parts) held.add(part.partNumber);
+      } catch (error) {
+        // The staging row is gone — its TTL fired, or it was cancelled elsewhere — so
+        // there is nothing to resume onto and the DEK must not outlive the attempt.
+        endSession(set, uploadId, { zero: true });
+        throw error;
+      }
+
+      session.controller = new AbortController();
+      updateProgress(set, uploadId, (current) => ({
+        ...current,
+        status: 'uploading',
+        error: undefined,
+        sentBytes: 0,
+      }));
+    } finally {
+      // Released on EVERY exit, including both of the throwing ones above. On the
+      // way out through the bottom the status is already `'uploading'`, so the
+      // guard above takes over from here — which is what lets a resume that fails
+      // again be resumed once more, instead of leaving a Retry button that refuses
+      // for the rest of the session. `runTransfer` is deliberately started OUTSIDE
+      // this block: the claim covers the preparation, never the transfer.
+      session.retrying = false;
+    }
 
     return runTransfer(set, uploadId, held);
   },
@@ -1067,7 +1153,22 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
 
     const row = payloadOf(await updateDocumentApi(id, sealed), 'update the document');
     const opened = await openDocumentRow(row, vaultKey);
-    if (myGeneration !== mutationGeneration || !opened) return;
+    // The id check is `patchDocument`'s, for the same reason and with a second one
+    // of its own. `_raw` is what a later re-seal derives this document's metadata
+    // key from, so writing another document's row into an entry would produce a
+    // rename sealed under keys that row was never sealed with. And here the write
+    // lands by id, so a response about a different document would not even correct
+    // the entry that was renamed: it would overwrite an UNTOUCHED document — with a
+    // row this vault key may well fail to open, since the metadata key is derived
+    // from the id, replacing a healthy entry with a degraded one the reader never
+    // asked about. Dropped; the next fetch reads the truth.
+    //
+    // `opened?.id !== id` covers the SCHEMA-INVALID row as well, because `id` is a
+    // string: `openDocumentRow` answers `null` for a row it cannot vouch for, and
+    // `undefined` never equals a string. (A row that is well-formed but will not
+    // OPEN is a different outcome — it comes back non-null with `meta: null` — and
+    // is deliberately still applied, exactly as a listing lists it.)
+    if (myGeneration !== mutationGeneration || opened?.id !== id) return;
     applyUpdatedDocument(set, opened);
   },
 
@@ -1164,6 +1265,12 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       return result;
     }
 
+    // The re-read is guaranteed to be a FRESH one. `fetchTrash` shares a run only
+    // while the `trashInvalidatedAt` it captured is still current, and the bump
+    // above has just made any run started before this point stale — so this cannot
+    // be answered by the listing that was already in flight, whose own terminal
+    // write is suppressed. It used to be, and the trash then rendered empty with
+    // every `purgePending` row still on the server and still charged to the quota.
     set({ trashDocuments: [] });
     await get().fetchTrash();
     return result;
@@ -1294,6 +1401,12 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     inFlightDeletedDocumentIds.clear();
     inFlightDeletedTrashIds.clear();
     trashInvalidatedAt += 1;
+    // Reset with the counter it is compared against, not because a stale value
+    // could be read — the share guard is conjunctive with `fetchTrashInFlight`,
+    // which is nulled three lines up — but because a teardown list that does not
+    // name every module-level variable is exactly the drift `EMPTY_DOCUMENTS_STATE`
+    // exists to prevent, and the omission would be silent.
+    inFlightTrashInvalidation = trashInvalidatedAt;
 
     for (const [uploadId, session] of sessions) {
       session.controller.abort();
@@ -1602,7 +1715,10 @@ async function runTransfer(
   const { signal } = session.controller;
 
   try {
-    const vaultKey = getVaultKey();
+    // The key and the generation it belongs to, read together — the completion
+    // has to say WHICH vault key it wrapped with, and only a pair read from one
+    // snapshot can say that truthfully.
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const streamKey = await deriveStreamKey(session.dek, session.streamSalt, uploadId);
     const createSHA256 = await getSha256Factory();
     const hasher = await createSHA256();
@@ -1661,7 +1777,14 @@ async function runTransfer(
       meta,
     );
 
-    const row = await completeTransfer(session, uploadId, sealedMeta, vaultKey, signal);
+    const row = await completeTransfer(
+      session,
+      uploadId,
+      sealedMeta,
+      vaultKey,
+      vaultKeyVersion,
+      signal,
+    );
     endSession(set, uploadId, { zero: true });
     // The document IS committed, so this is not a failure and nothing is thrown —
     // but opening it for the list is a LOCAL write, and a lock or a logout that
@@ -1730,6 +1853,17 @@ async function runTransfer(
  * rewraps the DEK it still holds, and retries THIS request alone — no part is
  * re-sent, and the negative that proves it is that no part request is issued.
  *
+ * `vaultKeyVersion` is THIS SESSION'S — the generation `authStore` recorded
+ * alongside the wrapped vault key it signed in with — and never the number init
+ * echoed back. The echo is the SERVER's own current version, so sending it back
+ * asks the server to compare a number with itself: it agrees no matter which key
+ * this session is actually holding. A rotation performed from another session
+ * revokes nothing and refreshes no key here, so "still holding the superseded
+ * key" is an ordinary state, not an exotic one — and the row that would commit is
+ * one that lists, charges the quota, never opens, and blocks every future
+ * rotation of the account. Sending the session's own number turns that silent
+ * loss into the 409 below, which costs one request.
+ *
  * Exactly one retry. A second 409 means a second rotation landed inside the
  * recovery, which is a race for the user to resolve by retrying, not one to spin
  * on.
@@ -1739,6 +1873,7 @@ async function completeTransfer(
   uploadId: string,
   sealedMeta: { encryptedMeta: string; metaIv: string; metaTag: string },
   vaultKey: CryptoKey,
+  vaultKeyVersion: number,
   signal: AbortSignal,
 ): Promise<unknown> {
   const send = async (key: CryptoKey, version: number): Promise<unknown> => {
@@ -1762,7 +1897,7 @@ async function completeTransfer(
   };
 
   try {
-    return await send(vaultKey, session.vaultKeyVersion);
+    return await send(vaultKey, vaultKeyVersion);
   } catch (error) {
     // Discriminated on the PRESENCE of an integer `data.vaultKeyVersion`, never on
     // the message: this is the one refusal in the surface that carries a number,

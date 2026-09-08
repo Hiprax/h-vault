@@ -4,7 +4,14 @@ import { open, readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import * as OTPAuth from 'otpauth';
 import { seededRandom } from '../tests/harness/determinism.js';
-import { registerAndSignInViaUI, testDb, testEmail, unlockVault } from './helpers';
+import {
+  expectVaultVisible,
+  lockViaUi,
+  registerAndSignInViaUI,
+  testDb,
+  testEmail,
+  unlockVault,
+} from './helpers';
 
 /**
  * The zero-knowledge boundary, asserted NEGATIVELY across one whole session.
@@ -670,10 +677,17 @@ test.describe('zero-knowledge boundary', () => {
 
     // ── Lock and unlock ─────────────────────────────────────────────────────
     await test.step('lock and unlock', async () => {
-      await page.getByRole('button', { name: /lock vault/i }).click();
+      // `lockViaUi`, not a locator written out here: the substring spelling this
+      // replaced ALSO matches the unlock screen's own `Unlock Vault` button, so a
+      // lock click could land on the wrong screen entirely (see
+      // `unlockedLayoutMarker` in `helpers.ts`).
+      await lockViaUi(page);
       await expect(page.getByText('Vault Locked')).toBeVisible({ timeout: 30_000 });
       await unlockVault(page, MASTER_PASSWORD);
-      await expect(page).toHaveURL(/\/vault/, { timeout: 120_000 });
+      // `expectVaultVisible`, not a bare URL check: locking does not navigate, so
+      // `toHaveURL(/\/vault/)` passes for a vault that is still LOCKED and would
+      // have let this step run its remaining assertions against the unlock screen.
+      await expectVaultVisible(page);
       await expect(page).not.toHaveURL(/\/login/);
     });
 

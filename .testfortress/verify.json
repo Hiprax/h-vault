@@ -76,7 +76,7 @@
     "typecheck": {
       "cmd": "npm run type-check",
       "tier": 0,
-      "gate": "0 type errors across all 4 tsc projects",
+      "gate": "0 type errors across all 7 tsc projects",
       "report": "tsc.log",
       "requires": ["build:shared"]
     },
@@ -174,7 +174,7 @@
     "test:a11y": {
       "cmd": "npm run test:a11y",
       "tier": 1,
-      "gate": "every primary view and modal \u2014 twenty of them, in the real authenticated DOM, four of them the document store's and one of them the isolated preview document itself \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
+      "gate": "every primary view and modal \u2014 thirty-three of them, in the real authenticated DOM, seven of them the document store's and one of them the isolated preview document itself \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
       "report": ["a11y.json", "junit-a11y.xml"],
       "countsTests": false,
       "requires": ["build:shared", "docker"]
@@ -230,7 +230,7 @@
     "test:mutation": {
       "cmd": "npm run test:mutation",
       "tier": 2,
-      "gate": "the oracle: Stryker mutates every production file in the declared scope \u2014 packages/*/src/** minus the coverage-excluded entry points and the presentational UI primitives \u2014 and the suite kills at least the recorded share of them, with the six core modules held to their own recorded scores, no file dropping out of the measured set, and no mutant left untested that was tested before",
+      "gate": "the oracle: Stryker mutates every production file in the declared scope \u2014 packages/*/src/** minus the coverage-excluded entry points and the presentational UI primitives \u2014 and the suite kills at least the recorded share of them, with the seven core modules held to their own recorded scores, no file dropping out of the measured set, and no mutant left untested that was tested before",
       "report": "mutation.json",
       "requires": ["build:shared"]
     },
@@ -304,7 +304,7 @@
     "test:e2e": {
       "cmd": "npm run test:e2e",
       "tier": 1,
-      "gate": "every Playwright spec passes, against a harness that starts an in-memory MongoDB AND the pinned object-storage engine in a container, so the document journeys run against the engine the stack ships rather than against a double",
+      "gate": "every Playwright spec passes, against a harness that starts an in-memory MongoDB AND the pinned object-storage engine in a container, so the document journeys run against the engine the stack ships rather than against a double \u2014 Chromium over every spec, and a second Firefox project over the clipboard-hygiene and auto-lock specs, whose answers depend on the browser's clipboard-activation and visibility rules rather than on this application",
       "report": "junit-e2e.xml",
       "requires": ["build:shared", "docker"]
     },
@@ -331,14 +331,14 @@
       "review": "2026-11-11"
     },
     {
-      "area": "cross-browser end-to-end",
-      "detail": "playwright.config.ts declares a single `chromium` project, so every browser assertion in this repository is an assertion about one engine. The subsystem this understates most is the clipboard guard, whose refusal-retry state machine exists for the Firefox/Safari transient-activation rule and is verified only by unit tests with simulated refusals.",
+      "area": "cross-browser end-to-end: WebKit",
+      "detail": "playwright.config.ts now declares two engine projects: Chromium over every spec, and Firefox over the two whose answers depend on the engine (clipboard-hygiene, auto-lock), attributed in the JUnit report by project name. That leg drives a GENUINE transient-activation refusal on Gecko and the gesture-scoped retry that follows it, so the clipboard guard is no longer verified only by unit tests with simulated refusals. What is still asserted about one engine only: WebKit, and the other nineteen specs \u2014 the latter deliberately, because they assert application behaviour that does not vary by engine.",
       "ledger": ["SUP-0042"],
-      "review": "2026-10-13"
+      "review": "2026-11-11"
     },
     {
       "area": "non-functional load and performance",
-      "detail": "No benchmark, load, stress, spike or soak testing. `test:resource` holds six measured scenarios to committed time and memory ceilings \u2014 four over a 10,000-item vault, plus a document at the configured maximum size delivered part by part and a document list walked at MAX_DOCUMENTS_PER_USER \u2014 but its noise band is 2.4-50 percent (SUP-0027), so it sees a step change and nothing smaller. There is no concurrent-user SLO for a single-tenant self-hosted deployment to test against.",
+      "detail": "No benchmark, load, stress, spike or soak testing. `test:resource` holds nine measured scenarios to committed time and memory ceilings \u2014 seven over a 10,000-item vault (`RESOURCE_SCENARIOS` in `scripts/ci/lib/resource-budgets.mjs` is the list), plus a document at the configured maximum size delivered part by part and a document list walked at MAX_DOCUMENTS_PER_USER \u2014 but its noise band is 2.4-50 percent (SUP-0027), so it sees a step change and nothing smaller. There is no concurrent-user SLO for a single-tenant self-hosted deployment to test against.",
       "ledger": ["SUP-0032", "SUP-0033", "SUP-0034", "SUP-0035", "SUP-0036", "SUP-0039"],
       "review": "2026-11-11"
     },
@@ -356,7 +356,7 @@
     },
     {
       "area": "rendered-output and degraded-network testing",
-      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over twenty views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
+      "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over thirty-three views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
       "ledger": ["SUP-0031", "SUP-0037"],
       "review": "2026-11-11"
     },
@@ -374,7 +374,7 @@
     },
     {
       "area": "accessibility below the blocking threshold",
-      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported and ratcheted but do not fail the gate, and 20 are currently open across the twenty scanned views (landmark-one-main, page-has-heading-one, region, landmark-unique, heading-order). The scan also runs in the light theme only.",
+      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported but deliberately NOT ratcheted (`ratchet-check.mjs` records only `a11y.critical`, `a11y.serious` and `a11y.viewsScanned`), and the ones currently open across the thirty-three scanned views are `landmark-one-main`, `page-has-heading-one`, `region`, `landmark-unique` and `heading-order` (the count is in `a11y.json`, and is deliberately not repeated here: nothing would keep it true). The scan also runs in the light theme only.",
       "ledger": [],
       "review": "2026-11-11"
     },

@@ -26,13 +26,46 @@ export const TIER_SELECTOR = { 0: [0], 1: [0, 1], 2: [0, 1, 2], full: [0, 1, 2] 
  * constantly" is a measurement anyone can check rather than a claim from the day
  * it was written.
  *
- * T0 is 90 s because it is meant to be run without thinking about it; the
- * measured value is ~82 s, and the eight seconds of headroom are the reason a
- * gate is not added to T0 without re-measuring. T1 is 12 minutes rather than a
- * rounder 10 because the server suite alone is ~150 s and Playwright is ~6
- * minutes: a budget nobody meets is a budget nobody respects. T2 is unbounded on
- * purpose — `mutation` re-runs the suite once per mutant, and any number written
- * here would be fiction.
+ * T0 is 90 s because it is meant to be run without thinking about it. Measured
+ * to 2026-09-06 it still just fits, but only on a machine doing nothing else,
+ * and that is the finding: a single number hid it for twenty-five phases.
+ *
+ *   idle machine: **1m 18s** — five runs spanning one second (lint 39.4-39.7 s,
+ *   format 21.7-21.8 s, type-check 12.9-13.3 s, the rest 3.8 s), so twelve
+ *   seconds of headroom rather than the eight this comment used to claim.
+ *
+ *   busy machine: 1m 19s to 2m 44s — ten runs, the same tree and the same gates,
+ *   taken while the same four cores ran unrelated work.
+ *
+ * Contention decides it, not the tree.
+ *
+ * `lint` and `format` are where the time is either way: 61 s of the idle 78 s,
+ * and 1m 42s to 2m 00s between them when the machine is busy, which is more than
+ * this whole budget. `type-check` is 13 to 32 s only because every tsc invocation
+ * keeps incremental build information; a cold one adds about a minute.
+ *
+ * The number stays at 90 and does not move: a budget raised to whatever was last
+ * measured stops being a budget. Read the twelve seconds as what is left to spend
+ * before a gate may be added here, and read the busy-machine figures as the
+ * reason to spend it on making an existing gate cheaper rather than on a new one.
+ * Making `lint` cheaper has already been tried once and rejected on measurement —
+ * see the rationale beside the constructor in `../lint-gate.mjs`.
+ *
+ * T1 is 12 minutes rather than a rounder 10 on the principle that a budget nobody
+ * meets is a budget nobody respects — but T1 no longer meets it, and the number is
+ * left alone rather than quietly raised, exactly as T0's is. MEASURED on the
+ * reference machine, 2026-09-08: `test-integration` 3 m 33 s, and `e2e` 10 m 34 s
+ * for 218 tests on a single worker (`junit-e2e.xml`, `time="633.83901"`; the gate
+ * itself is longer, since that figure excludes standing the stack up). So the two
+ * largest gates alone are 14 m 07 s before the other twenty are counted. The
+ * figures this budget was originally chosen against — ~150 s and ~6 minutes — are
+ * both stale; the E2E suite has grown by three quarters as specs were added to it.
+ * Raising `e2e`'s worker count would take it to 6 m 48 s, and that was measured
+ * too and REFUSED: see
+ * `.testfortress/suppressions.json`'s `SUP-0025`, which records why, and note that
+ * these budgets are not gates, so the saving would buy nothing a gate can see.
+ * T2 is unbounded on purpose — `mutation` re-runs the suite once per mutant, and
+ * any number written here would be fiction.
  */
 export const TIER_BUDGET_SECONDS = { 0: 90, 1: 720, 2: null };
 

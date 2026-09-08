@@ -21,6 +21,14 @@ import { getDocumentsConfig, type DocumentsConfig } from '../services/api/config
  * older server, for an unconfigured one and for a failed request alike, and
  * caches that answer too, so a transient outage cannot re-hit the endpoint on
  * every render.
+ *
+ * That collapse is safe HERE and nowhere else: these three consumers decide only
+ * what to show, and every number in the answer is advisory — the server enforces
+ * its own size cap and extension list on ciphertext it cannot inspect. Anything
+ * that ACTS on the answer reads `readDocumentsConfigFresh` instead, which is
+ * uncached and reports "the server did not say" as its own third answer. A
+ * successful call to it replaces the memo, so a mount after one gets the corrected
+ * value; an already-mounted consumer keeps what it was given.
  */
 export function useDocumentsConfig(): DocumentsConfig | null {
   const [config, setConfig] = useState<DocumentsConfig | null>(null);

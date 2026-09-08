@@ -102,11 +102,12 @@ function compilerWarnings() {
  * actionlint, hadolint and spectral findings below error level, as one number.
  *
  * The `audit:config` gate FAILS on error-level findings only; everything below
- * that is real debt (53 operations with no `operationId`, a Dockerfile
- * `HEALTHCHECK` in shell form) that no one is going to clear in the change that
- * wires the linters up. Counting it here puts it under the ratchet, where
- * lower-is-better: the debt can be paid down and cannot grow, which is the
- * difference between a recorded warning and an ignored one.
+ * that was real debt — 53 operations with no `operationId`, a Dockerfile
+ * `HEALTHCHECK` in shell form — that no one was going to clear in the change
+ * that wired the linters up. Counting it here put it under the ratchet, where
+ * lower-is-better, which is the difference between a recorded warning and an
+ * ignored one: it has since been paid down to zero, and the ratchet is now what
+ * keeps it there.
  */
 function configWarnings() {
   if (!ran('audit:config')) return null;

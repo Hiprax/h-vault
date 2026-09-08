@@ -5,6 +5,39 @@ import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 import app from '../src/app.js';
 
+/**
+ * Split a `Content-Security-Policy` header into `directive -> source list`.
+ *
+ * helmet joins directives with `;` and no surrounding space (`helmet/index.cjs`,
+ * `getHeaderValue`), and a valueless directive such as
+ * `upgrade-insecure-requests` is emitted as a bare name — which parses here to
+ * an empty source array, deliberately distinct from an absent directive
+ * (`undefined`). Order is not preserved because CSP attaches no meaning to it.
+ */
+function parseCspHeader(header: string): Record<string, string[]> {
+  const directives: Record<string, string[]> = {};
+  for (const part of header.split(';')) {
+    const [name, ...sources] = part.trim().split(/\s+/).filter(Boolean);
+    if (name !== undefined) directives[name.toLowerCase()] = sources;
+  }
+  return directives;
+}
+
+/**
+ * Fetch a real app response and hand back both the raw policy and its parse.
+ *
+ * The status and header assertions live here so that a broken `/health` or a
+ * missing CSP surfaces as its own loud failure in every caller rather than as a
+ * directive quietly reading `undefined`.
+ */
+async function appCsp(): Promise<{ header: string; directives: Record<string, string[]> }> {
+  const res = await request(app).get('/api/v1/health');
+  expect(res.status).toBe(200);
+  const header = res.headers['content-security-policy'] as string | undefined;
+  expect(header).toBeDefined();
+  return { header: header!, directives: parseCspHeader(header!) };
+}
+
 describe('Security Headers & Middleware', () => {
   // ── Helmet Security Headers ────────────────────────────────────────
 
@@ -84,6 +117,137 @@ describe('Security Headers & Middleware', () => {
       // The worker is a same-origin bundled file — a blob: worker would be an
       // XSS-amplification vector and is deliberately NOT permitted.
       expect(workerSrc).not.toContain('blob:');
+    });
+
+    // ── The five directives that come from helmet's defaults, not from app.ts ──
+    //
+    // `app.ts` passes `contentSecurityPolicy: { directives }` and never sets
+    // `useDefaults`, which helmet defaults to `true`. Everything the app names
+    // explicitly is pinned by the tests above; the five below are supplied
+    // ENTIRELY by `helmet.contentSecurityPolicy.getDefaultDirectives()` and were
+    // asserted by nothing on this response, so `useDefaults: false` — one word —
+    // removed all five while the twenty-six tests that existed before these did
+    // stayed green. These tests are the pin, and `app.ts` carries a comment
+    // pointing back at them.
+    //
+    // Each asserts the whole parsed source list rather than a substring, so it
+    // fails on removal (`undefined`), on a widening and on a swap; the second
+    // assertion in each re-reads the RAW header, so a bug in `parseCspHeader`
+    // cannot make the TEST pass vacuously. Those raw assertions are coupled to
+    // helmet joining directives with `;` and no space: a helmet that emitted
+    // `; ` would redden all five, which is the correct direction to fail.
+    //
+    // They run against `/api/v1/health` because that is the cheapest response
+    // that carries this policy, and the SPA shell carries the same one — no
+    // route sets a CSP of its own except `/sandbox.html`, and
+    // `app-production-client.test.ts` asserts the shell's policy and the
+    // sandbox's are different objects.
+
+    it("pins base-uri to 'self', which comes from helmet's implicit useDefaults and not from app.ts", async () => {
+      const { header, directives } = await appCsp();
+
+      // `base-uri` has NO fallback to `default-src`, so if `useDefaults` ever
+      // goes false this directive is simply gone and an injected
+      // `<base href="https://attacker.example">` re-points every relative URL on
+      // the page — including the ones that carry the CSRF token.
+      expect(directives['base-uri']).toEqual(["'self'"]);
+      expect(header).toMatch(/(^|;)base-uri 'self'(;|$)/);
+    });
+
+    it("pins form-action to 'self', which comes from helmet's implicit useDefaults and not from app.ts", async () => {
+      const { header, directives } = await appCsp();
+
+      // Also without a `default-src` fallback. Losing it lets an injected or
+      // DOM-clobbered <form> POST the master-password form's fields to a
+      // third-party origin, which is precisely the class of exfiltration a
+      // nonce-based `script-src` does not cover — no script is involved.
+      expect(directives['form-action']).toEqual(["'self'"]);
+      expect(header).toMatch(/(^|;)form-action 'self'(;|$)/);
+    });
+
+    it("pins frame-ancestors to 'self', which comes from helmet's implicit useDefaults and not from app.ts", async () => {
+      const { header, directives } = await appCsp();
+
+      // The clickjacking bound, and the modern half of it: `X-Frame-Options`
+      // (asserted below) is the legacy header, `frame-ancestors` is what current
+      // browsers enforce, and it too has no `default-src` fallback.
+      //
+      // It governs who may EMBED this response. It is NOT what lets the
+      // application frame its own `/sandbox.html` — that is `frame-src 'self'`
+      // (asserted above) on this side, plus the sandbox response's own
+      // `frame-ancestors 'self'` in `config/sandboxCsp.ts` on the other. Reading
+      // the two as one directive is the mistake this note exists to prevent.
+      // 'self' is helmet's untouched default and agrees with the
+      // `X-Frame-Options: SAMEORIGIN` this same response carries; nothing here
+      // is meant to be framed by anyone, so this value is a floor to hold.
+      expect(directives['frame-ancestors']).toEqual(["'self'"]);
+      expect(header).toMatch(/(^|;)frame-ancestors 'self'(;|$)/);
+    });
+
+    it("pins script-src-attr to 'none', which comes from helmet's implicit useDefaults and not from app.ts", async () => {
+      const { header, directives } = await appCsp();
+
+      // Inline event handlers (`onclick="..."`) are governed by
+      // `script-src-attr`, which DOES fall back to `script-src`. Today that
+      // fallback would still block them: `script-src` carries a nonce, and a
+      // source list holding any nonce refuses inline behaviour of every kind
+      // regardless of 'unsafe-inline'. Stating 'none' unconditionally is what
+      // makes the block independent of `script-src` — the day someone drops the
+      // nonce in favour of 'unsafe-inline' for a legacy widget, or adds
+      // 'unsafe-hashes' with a handler hash, attribute handlers must stay dead.
+      expect(directives['script-src-attr']).toEqual(["'none'"]);
+      expect(header).toMatch(/(^|;)script-src-attr 'none'(;|$)/);
+    });
+
+    it("pins upgrade-insecure-requests, which comes from helmet's implicit useDefaults and not from app.ts", async () => {
+      const { header, directives } = await appCsp();
+
+      // A valueless directive: present with an EMPTY source list, which is what
+      // distinguishes it from an absent one (`undefined`). It rewrites the
+      // http:// sub-resources and same-origin navigations a mixed-content asset
+      // or an in-page link would otherwise fetch in the clear. It is NOT a
+      // substitute for HSTS: the upgrade set is scoped to a browsing context and
+      // is not persisted across browser sessions, so a top-level navigation
+      // arriving from outside — the first of a fresh session above all — is
+      // what it does not cover.
+      expect(directives['upgrade-insecure-requests']).toEqual([]);
+      // And it must stay valueless: a source list here is a malformed directive
+      // that browsers discard, which a presence check alone would not notice.
+      expect(header).toMatch(/(^|;)upgrade-insecure-requests(;|$)/);
+    });
+
+    it('pins the policy as one whole set, so no directive can appear, vanish, or revert to a looser helmet default unnoticed', async () => {
+      const { header } = await appCsp();
+      // The one value that legitimately differs per request.
+      const normalised = header.replace(/'nonce-[A-Za-z0-9+/=]+'/, "'nonce-<per-request>'");
+
+      // Compared WHOLE, and in both directions, for the same reason
+      // `sandbox-document.test.ts` compares the sandbox policy whole. Every
+      // assertion above names one directive, so between them they catch a
+      // directive that disappears and a named source list that is widened — but
+      // none of them catches a directive that is ADDED, nor one the app names
+      // today being DELETED and silently replaced by helmet's looser default.
+      // Removing `fontSrc: ["'self'"]` from app.ts is exactly that shape:
+      // `font-src` reverts to helmet's `'self' https: data:`, admitting every
+      // https origin as a font source, and nothing else in this repository
+      // notices. A deliberate policy change updates this literal and says why.
+      expect(parseCspHeader(normalised)).toEqual({
+        'default-src': ["'self'"],
+        'base-uri': ["'self'"],
+        'font-src': ["'self'"],
+        'form-action': ["'self'"],
+        'frame-ancestors': ["'self'"],
+        'img-src': ["'self'", 'data:', 'blob:'],
+        'object-src': ["'none'"],
+        'script-src': ["'self'", "'nonce-<per-request>'", "'wasm-unsafe-eval'"],
+        'script-src-attr': ["'none'"],
+        'style-src': ["'self'", "'unsafe-inline'"],
+        'upgrade-insecure-requests': [],
+        'connect-src': ["'self'"],
+        'worker-src': ["'self'"],
+        'media-src': ["'none'"],
+        'frame-src': ["'self'"],
+      });
     });
 
     it('should generate unique CSP nonce per request', async () => {

@@ -19,6 +19,8 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
+  MAX_PREVIEW_TABLE_CELLS,
+  MAX_PREVIEW_TABLE_COLUMNS,
   MAX_PREVIEW_TEXT_LINES,
   PREVIEW_MAGIC_BYTES,
   PREVIEW_MODES,
@@ -26,7 +28,12 @@ import {
 } from '@hvault/shared';
 import { decodeDocumentText } from '../src/sandbox/decode';
 import { previewRefusal } from '../src/sandbox/sniff';
-import { delimiterFor, parseDelimited } from '../src/sandbox/renderers/table';
+import {
+  delimiterFor,
+  describeTableTruncation,
+  parseDelimited,
+  renderTable,
+} from '../src/sandbox/renderers/table';
 import { HIGHLIGHT_LANGUAGES, renderText } from '../src/sandbox/renderers/text';
 import {
   IMAGE_MEDIA_TYPES,
@@ -329,6 +336,133 @@ describe('parsing delimited data', () => {
   it('reports an empty document as no rows at all', () => {
     expect(parseDelimited('', ',')).toMatchObject({ rows: [], truncated: false, totalRows: 0 });
   });
+
+  it('counts the columns past the ceiling even though it keeps none of them', () => {
+    // The row cap is not a node budget: a table's node count is rows TIMES
+    // columns, and the width comes from the file. `MAX_PREVIEW_BYTES` is 25 MiB,
+    // so a single line of nothing but commas asks for twenty-six million cells
+    // in one row — and the array of empty strings is a quarter of a gigabyte
+    // before one element exists, which is why the cap is applied HERE and not
+    // only at render time.
+    const fields = MAX_PREVIEW_TABLE_COLUMNS + 6;
+    const parsed = parseDelimited(`${'x,'.repeat(fields - 1)}x\n`, ',');
+
+    expect(parsed.rows[0]).toHaveLength(MAX_PREVIEW_TABLE_COLUMNS);
+    expect(parsed.columns).toBe(MAX_PREVIEW_TABLE_COLUMNS);
+    expect(parsed.columnsTruncated).toBe(true);
+    // The real width, so the notice can name it rather than saying "some".
+    expect(parsed.totalColumns).toBe(fields);
+    // And the negative that keeps the two dimensions apart: nothing was cut
+    // vertically, so nothing may claim it was.
+    expect(parsed.truncated).toBe(false);
+    expect(parsed.totalRows).toBe(1);
+  });
+
+  it('leaves a row EXACTLY at the column ceiling alone', () => {
+    // The other side of the bound. `n + 6` above proves the cap fires; this
+    // proves it does not fire one column early, which is the edit that would
+    // quietly cut a real file's last column and report it as truncated.
+    const atBound = parseDelimited(`${'x,'.repeat(MAX_PREVIEW_TABLE_COLUMNS - 1)}x\n`, ',');
+    expect(atBound.rows[0]).toHaveLength(MAX_PREVIEW_TABLE_COLUMNS);
+    expect(atBound.columns).toBe(MAX_PREVIEW_TABLE_COLUMNS);
+    expect(atBound.totalColumns).toBe(MAX_PREVIEW_TABLE_COLUMNS);
+    expect(atBound.columnsTruncated).toBe(false);
+
+    // And one past it, which is the same file with a single extra comma.
+    const overBound = parseDelimited(`${'x,'.repeat(MAX_PREVIEW_TABLE_COLUMNS)}x\n`, ',');
+    expect(overBound.rows[0]).toHaveLength(MAX_PREVIEW_TABLE_COLUMNS);
+    expect(overBound.totalColumns).toBe(MAX_PREVIEW_TABLE_COLUMNS + 1);
+    expect(overBound.columnsTruncated).toBe(true);
+  });
+
+  it('drops rows once the CELL budget is spent, at a height the row cap never reaches', () => {
+    // The column ceiling alone still permits 50,000 x 1,000, which is fifty
+    // million cells. The budget that bites here is the PRODUCT, and it bites
+    // 400 rows into a file the row cap would have waved through whole.
+    const columns = 700;
+    const row = Array.from({ length: columns }, () => 'x').join(',');
+    const rowCount = 400;
+    const parsed = parseDelimited(
+      `${Array.from({ length: rowCount }, () => row).join('\n')}\n`,
+      ',',
+    );
+
+    // floor(250,000 / 700). Written as the number rather than as the division,
+    // so this cannot pass by re-implementing the code it is checking.
+    expect(parsed.rows).toHaveLength(357);
+    expect(parsed.columns).toBe(columns);
+    expect(parsed.rows.length * parsed.columns).toBeLessThanOrEqual(MAX_PREVIEW_TABLE_CELLS);
+    expect(rowCount).toBeLessThan(MAX_PREVIEW_TEXT_LINES);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.totalRows).toBe(rowCount);
+    // Nothing was cut horizontally: 700 is under the ceiling.
+    expect(parsed.columnsTruncated).toBe(false);
+  });
+
+  it('counts a late wide row rather than throwing away the rows already kept', () => {
+    // ONE pathological row is enough to blow the budget, because every other row
+    // is PADDED out to the widest one. The choice made here is to keep the rows
+    // a reader is already looking at — a file reads in order — and to count the
+    // row that would have widened them.
+    const wide = Array.from({ length: 1_200 }, (_, index) => `w${String(index)}`).join(',');
+    const narrow = Array.from({ length: 300 }, (_, index) => `a${String(index)},b,c`).join('\n');
+    const parsed = parseDelimited(`${narrow}\n${wide}\n`, ',');
+
+    expect(parsed.rows).toHaveLength(300);
+    expect(parsed.columns).toBe(3);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.totalRows).toBe(301);
+    expect(parsed.columnsTruncated).toBe(true);
+    expect(parsed.totalColumns).toBe(1_200);
+    // Had the wide row been kept, the table would be 301 x 1,200 = 361,200 cells.
+    expect(parsed.rows.length * parsed.columns).toBeLessThanOrEqual(MAX_PREVIEW_TABLE_CELLS);
+  });
+});
+
+describe('describing what a table preview cut', () => {
+  /** A table of the given shape, with no cells: only the counts are read. */
+  const shaped = (
+    rows: number,
+    totalRows: number,
+    columns: number,
+    totalColumns: number,
+  ): Parameters<typeof describeTableTruncation>[0] => ({
+    rows: Array.from({ length: rows }, () => []),
+    truncated: totalRows > rows,
+    totalRows,
+    columns,
+    columnsTruncated: totalColumns > columns,
+    totalColumns,
+  });
+
+  it('says nothing at all about a table that fitted', () => {
+    // The negative that keeps the notice meaningful: a banner on every CSV is a
+    // banner nobody reads.
+    expect(describeTableTruncation(shaped(3, 3, 4, 4))).toBeNull();
+  });
+
+  it('names the ROW count kept, not the row cap, because the cell budget cuts rows too', () => {
+    // The bug this replaces: the sentence quoted `MAX_PREVIEW_TEXT_LINES`
+    // verbatim, so a file cut by the cell budget was told "the first 50000"
+    // while 357 rows were on screen.
+    expect(describeTableTruncation(shaped(357, 400, 700, 700))).toBe(
+      'Showing the first 357 of 400 rows',
+    );
+  });
+
+  it('names the columns when only the width was cut', () => {
+    expect(describeTableTruncation(shaped(1, 1, 1_000, 26_001))).toBe(
+      'Showing the first 1000 of 26001 columns',
+    );
+  });
+
+  it('names BOTH dimensions when both were cut, because either alone is a lie', () => {
+    // A reader told only about the rows has no way to know the columns they can
+    // see are not all of them, and vice versa.
+    expect(describeTableTruncation(shaped(300, 301, 3, 1_200))).toBe(
+      'Showing the first 300 of 301 rows and the first 3 of 1200 columns',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -458,6 +592,104 @@ describe('rendering text and code', () => {
     expect(rendered.querySelectorAll('tbody td')).toHaveLength(3);
   });
 
+  it('puts no notice at all above a CSV that fitted, and none above an empty one', async () => {
+    // The negative that keeps the notice meaningful. Without it, a notice built
+    // unconditionally reads `null (12 bytes). Download the file to see all of
+    // it.` above every spreadsheet in the vault, and every assertion that only
+    // looks for text INSIDE a notice still passes.
+    const fitted = await renderText(document, bytesOf('a,b\n1,2\n'), 'csv');
+    expect(fitted.querySelector('.hv-notice')).toBeNull();
+    expect(fitted.querySelectorAll('th')).toHaveLength(2);
+
+    // And a `.csv` with no bytes at all, which reaches `renderTable` with no
+    // header row and must render an empty table rather than throw.
+    const empty = await renderText(document, new ArrayBuffer(0), 'csv');
+    expect(empty.querySelector('.hv-notice')).toBeNull();
+    expect(empty.querySelector('table')).not.toBeNull();
+    expect(empty.querySelectorAll('th')).toHaveLength(0);
+    expect(empty.querySelectorAll('tr')).toHaveLength(0);
+  });
+
+  it('clamps a single unbounded row to the column ceiling and says so', async () => {
+    // The shape of the defect: 26,001 empty fields on ONE line is well under
+    // MAX_PREVIEW_BYTES, and the table was built EAGERLY — not behind the view
+    // toggle — so the tab died on opening the document, with no notice, because
+    // no ROW had been dropped and the notice only ever counted rows.
+    const rendered = await renderText(document, bytesOf(`${','.repeat(26_000)}\n`), 'csv');
+
+    expect(rendered.querySelectorAll('th')).toHaveLength(MAX_PREVIEW_TABLE_COLUMNS);
+    expect(rendered.querySelectorAll('td')).toHaveLength(0);
+
+    const said = rendered.querySelector('.hv-notice')?.textContent ?? '';
+    expect(said).toContain(`the first ${String(MAX_PREVIEW_TABLE_COLUMNS)} of 26001 columns`);
+    expect(said).toContain('Download the file to see all of it.');
+    // The file is one row and all of it is on screen, so the notice must not
+    // claim rows are missing.
+    expect(said).not.toContain('rows');
+  });
+
+  it('bounds the CELL count of a file one wide row would blow up, and names both cuts', async () => {
+    // 300 ordinary three-column rows and one 1,200-field row. Every row is
+    // padded out to the widest, so this asked for 361,200 cells and reported
+    // nothing missing — the row count and the total row count agreed, because
+    // the row that broke it was a WIDTH.
+    const wide = Array.from({ length: 1_200 }, (_, index) => `w${String(index)}`).join(',');
+    const narrow = Array.from({ length: 300 }, (_, index) => `a${String(index)},b,c`).join('\n');
+    const rendered = await renderText(document, bytesOf(`${narrow}\n${wide}\n`), 'csv');
+
+    const cells = rendered.querySelectorAll('th').length + rendered.querySelectorAll('td').length;
+    expect(cells).toBeLessThanOrEqual(MAX_PREVIEW_TABLE_CELLS);
+    // Exactly, not merely under: the first row is the header, the other 299 are
+    // body rows, and every one is three cells wide.
+    expect(rendered.querySelectorAll('th')).toHaveLength(3);
+    expect(rendered.querySelectorAll('td')).toHaveLength(299 * 3);
+
+    const said = rendered.querySelector('.hv-notice')?.textContent ?? '';
+    expect(said).toContain('the first 300 of 301 rows');
+    expect(said).toContain('the first 3 of 1200 columns');
+  });
+
+  it('re-applies the budget in renderTable, which is where the elements are made', async () => {
+    // `renderText` builds the table on FIRST render rather than behind the view
+    // toggle, so this function is the last place before the elements exist. A
+    // caller assembling a DelimitedTable itself would otherwise decide how many
+    // this document creates — and the row budget is spent at the width the
+    // caller DECLARED, so a table claiming a hundred thousand columns buys one
+    // row rather than 250 of them at a width it never had.
+    const table = renderTable(document, {
+      rows: Array.from({ length: 3 }, () => ['a', 'b', 'c', 'd']),
+      truncated: false,
+      totalRows: 3,
+      columns: MAX_PREVIEW_TABLE_CELLS,
+      columnsTruncated: false,
+      totalColumns: MAX_PREVIEW_TABLE_CELLS,
+    });
+
+    expect(table.querySelectorAll('th')).toHaveLength(MAX_PREVIEW_TABLE_COLUMNS);
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(0);
+    expect(table.querySelectorAll('td')).toHaveLength(0);
+  });
+
+  it('builds no rows for a table that declares no columns', async () => {
+    // A width of zero prices a row at nothing, so the cell budget buys every
+    // row in the array and each renders as an empty `<tr>`. The parser never
+    // produces that shape — a kept row always has at least one field — but this
+    // function is the defensive boundary, and a boundary that answers "250,000
+    // empty rows" to a degenerate input is not defending anything.
+    const table = renderTable(document, {
+      rows: Array.from({ length: 5 }, () => ['a']),
+      truncated: false,
+      totalRows: 5,
+      columns: 0,
+      columnsTruncated: false,
+      totalColumns: 0,
+    });
+
+    expect(table.querySelectorAll('tr')).toHaveLength(0);
+    expect(table.querySelectorAll('th')).toHaveLength(0);
+    expect(table.querySelectorAll('td')).toHaveLength(0);
+  });
+
   it('offers the raw text behind a CSV, and builds it only when asked', async () => {
     const rendered = await renderText(document, bytesOf('a,b\n1,2\n'), 'csv');
     document.body.append(rendered);
@@ -564,11 +796,37 @@ describe('rendering text and code', () => {
     const notices = [...rendered.querySelectorAll('.hv-notice')].map((n) => n.textContent ?? '');
     expect(notices.some((text) => text.includes('Download the file'))).toBe(true);
     expect(rendered.querySelector('.hv-plain .hv-notice')).not.toBeNull();
+    // Two columns at the row cap is 100,000 cells, comfortably inside the cell
+    // budget, so ROWS are the only thing cut and the notice says only that.
+    expect(
+      notices.some(
+        (text) =>
+          text.includes(`the first ${String(MAX_PREVIEW_TEXT_LINES)} of 50004 rows`) &&
+          !text.includes('columns'),
+      ),
+    ).toBe(true);
   });
 
   it('renders an empty file as an empty preview rather than a failure', async () => {
     const rendered = await renderText(document, new ArrayBuffer(0), 'txt');
     expect(rendered.querySelector('.hv-lines code')?.textContent).toBe('');
+  });
+
+  it('renders an empty file whose extension DOES have a grammar, highlighter and all', async () => {
+    // `.txt` above never reaches the highlighter, so it cannot cover this. An
+    // empty `.js` does, and it is the one input for which lowlight returns a
+    // root with NO CHILDREN (measured: `''` -> 0 children, `' '` -> 1). An empty
+    // hast root is exactly the tree for which `hast-util-to-dom` builds a
+    // `Document` instead of a fragment regardless of `fragment: true`, and
+    // `replaceChildren` on a `Document` throws `HierarchyRequestError` — which
+    // `sourceView`'s best-effort catch swallowed, silently downgrading the file
+    // to the unhighlighted presentation.
+    const rendered = await renderText(document, new ArrayBuffer(0), 'js');
+    const code = rendered.querySelector('.hv-lines code');
+    expect(code?.textContent).toBe('');
+    // The SAME presentation an empty file gets in every other highlightable
+    // language, rather than one that silently lost its code styling.
+    expect(code?.className).toBe('hljs');
   });
 });
 

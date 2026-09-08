@@ -258,7 +258,14 @@ describe('Concurrent Operations', () => {
       //     per-user rotation lock, and is refused with 409; or
       //   * it arrives after the first has committed, its `lastRotationKey` read
       //     matches, and the idempotency short-circuit answers 200 having written
-      //     NOTHING — the documented behaviour a retrying client depends on.
+      //     NOTHING — the documented behaviour a retrying client depends on; or
+      //   * its PRE-LOCK read is stale — taken while the first was still inside
+      //     the lock — and it reaches the lock only after the first releases. That
+      //     third ordering is the one this case's original comment missed, and it
+      //     is why this file once failed with two audit rows: the handler now
+      //     re-reads `lastRotationKey` UNDER the lock, so it too answers 200
+      //     having written nothing. `rotation-idempotency-lock.test.ts` constructs
+      //     it deterministically rather than waiting for it to happen.
       //
       // Which one happens is decided by scheduling, so the old `toEqual([200, 409])`
       // was a coin toss dressed as an assertion; it lost the toss the first time the

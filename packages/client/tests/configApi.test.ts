@@ -1,8 +1,17 @@
 /**
  * Tests for the public-config API service (`services/api/configApi.ts`).
  *
- * Covers `getPublicConfigApi` (thin `GET /config` wrapper) and the two cached
- * resolvers over it, `getFileEncryptionMaxBytes` and `getDocumentsConfig`.
+ * Covers `getPublicConfigApi` (thin `GET /config` wrapper), the two cached
+ * resolvers over it, `getFileEncryptionMaxBytes` and `getDocumentsConfig`, and the
+ * UNCACHED document-store reader beside them, `readDocumentsConfigFresh`.
+ *
+ * That third reader exists because caching is right for one kind of caller and
+ * wrong for another. A memo that resolves to "the feature is off" when the request
+ * failed costs a display consumer a missing navigation entry; it costs the
+ * vault-key rotation every document key the account holds. So the two are separate
+ * functions with separate contracts, and the tests below pin BOTH: the memo still
+ * caches its fallback, and the fresh reader never does and answers `null` for "the
+ * server did not tell me".
  *
  * The pair matters as a pair. One envelope carries two features that have nothing
  * to do with each other, and each resolver validates only the block it acts on
@@ -40,6 +49,19 @@ const FALLBACK_BYTES = MAX_FILE_ENCRYPTION_SIZE_MB * BYTES_PER_MB;
 /** Build a well-formed `{ success, data }` config envelope wire response. */
 function makeWire(maxSizeMB: number): { data: unknown } {
   return { data: { success: true, data: { fileEncryption: { maxSizeMB } } } };
+}
+
+/**
+ * The same envelope carrying both blocks.
+ *
+ * One helper rather than one per `describe`, because both document-store readers
+ * narrow the same envelope and a second copy could drift into describing a
+ * different wire to each of them.
+ */
+function makeFullWire(documents: unknown): { data: unknown } {
+  return {
+    data: { success: true, data: { fileEncryption: { maxSizeMB: 100 }, documents } },
+  };
 }
 
 // Import fresh after `vi.resetModules()` so each test gets an empty cache.
@@ -177,13 +199,6 @@ describe('configApi', () => {
   });
 
   describe('getDocumentsConfig', () => {
-    /** A well-formed envelope carrying both blocks. */
-    function makeFullWire(documents: unknown): { data: unknown } {
-      return {
-        data: { success: true, data: { fileEncryption: { maxSizeMB: 100 }, documents } },
-      };
-    }
-
     it('returns the advertised block, numbers and all, when the feature is on', async () => {
       const block = {
         enabled: true,
@@ -296,6 +311,113 @@ describe('configApi', () => {
       // own 50 MB cap must not become the File Encryption tool's, which is 100 here.
       expect(documents.maxSizeMB).toBe(50);
       expect(bytes).toBe(100 * BYTES_PER_MB);
+    });
+  });
+
+  describe('readDocumentsConfigFresh', () => {
+    it('returns the advertised block when the server answers', async () => {
+      mockGet.mockResolvedValue(makeFullWire({ enabled: true, maxSizeMB: 100 }));
+      const { readDocumentsConfigFresh } = await importConfigApi();
+
+      await expect(readDocumentsConfigFresh()).resolves.toEqual({ enabled: true, maxSizeMB: 100 });
+    });
+
+    it('reports the feature off for both wire states that DETERMINE it is off', async () => {
+      // These two are answers, not failures: a server older than the feature omits
+      // the block, and this server with no object storage configured sends it with
+      // `enabled: false`. In both the account provably holds no documents, so a
+      // caller may act on them — which is precisely what it may not do with `null`.
+      mockGet.mockResolvedValue(makeWire(100));
+      const { readDocumentsConfigFresh } = await importConfigApi();
+      await expect(readDocumentsConfigFresh()).resolves.toEqual({ enabled: false });
+
+      mockGet.mockResolvedValue(makeFullWire({ enabled: false }));
+      await expect(readDocumentsConfigFresh()).resolves.toEqual({ enabled: false });
+    });
+
+    it('answers null — never "the feature is off" — when the request fails', async () => {
+      mockGet.mockRejectedValue(new Error('network down'));
+      const { readDocumentsConfigFresh } = await importConfigApi();
+
+      const answer = await readDocumentsConfigFresh();
+
+      // The whole reason this function exists. `{ enabled: false }` is a claim about
+      // the account — it holds no documents — and a failed request supports no such
+      // claim. The rotation acts on this value, so the two must not collapse.
+      expect(answer).toBeNull();
+      expect(answer).not.toEqual({ enabled: false });
+    });
+
+    it('answers null when the documents block itself is malformed', async () => {
+      // A deliberate divergence from the memoised reader, which treats an
+      // unparseable block as "off". This reader's caller compares nothing and
+      // displays nothing: it decides whether to re-key every document the account
+      // holds, and a block it cannot vouch for tells it nothing about that.
+      mockGet.mockResolvedValue(makeFullWire({ enabled: true, maxSizeMB: -1 }));
+      const { readDocumentsConfigFresh } = await importConfigApi();
+
+      await expect(readDocumentsConfigFresh()).resolves.toBeNull();
+    });
+
+    it('reads its own block out of an envelope whose fileEncryption block is malformed', async () => {
+      // The same narrowing the memoised reader uses, pinned on this one too: a
+      // negative File Encryption cap is a different feature's problem and must not
+      // stop a rotation from learning that this server does store documents.
+      mockGet.mockResolvedValue({
+        data: {
+          success: true,
+          data: { fileEncryption: { maxSizeMB: -5 }, documents: { enabled: true, maxSizeMB: 50 } },
+        },
+      });
+      const { readDocumentsConfigFresh } = await importConfigApi();
+
+      await expect(readDocumentsConfigFresh()).resolves.toEqual({ enabled: true, maxSizeMB: 50 });
+    });
+
+    it('re-reads the server on every call, so one transient failure is not permanent', async () => {
+      // The defect this reader was added for. The memoised reader caches whatever
+      // it resolved FIRST, including the fallback it answers with when the request
+      // failed, and nothing invalidates that for the life of the tab — so a single
+      // `/config` blip on some unrelated page used to make every later rotation
+      // send an empty documents leg and take the server's completeness 409.
+      mockGet.mockRejectedValueOnce(new Error('network down'));
+      mockGet.mockResolvedValue(makeFullWire({ enabled: true, maxSizeMB: 100 }));
+      const { readDocumentsConfigFresh } = await importConfigApi();
+
+      await expect(readDocumentsConfigFresh()).resolves.toBeNull();
+      await expect(readDocumentsConfigFresh()).resolves.toEqual({ enabled: true, maxSizeMB: 100 });
+      expect(mockGet).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not write its own failure into the memo the display consumers share', async () => {
+      mockGet.mockRejectedValueOnce(new Error('network down'));
+      mockGet.mockResolvedValue(makeFullWire({ enabled: true, maxSizeMB: 100 }));
+      const { readDocumentsConfigFresh, getDocumentsConfig } = await importConfigApi();
+
+      await expect(readDocumentsConfigFresh()).resolves.toBeNull();
+
+      // The failure belonged to the caller that asked for it. Poisoning the memo
+      // would have made one rotation's outage hide the navigation entry, the page
+      // and the upload panel for the rest of the tab's life.
+      await expect(getDocumentsConfig()).resolves.toEqual({ enabled: true, maxSizeMB: 100 });
+      expect(mockGet).toHaveBeenCalledTimes(2);
+    });
+
+    it('heals a memo that cached the fallback during an outage', async () => {
+      mockGet.mockRejectedValueOnce(new Error('network down'));
+      mockGet.mockResolvedValue(makeFullWire({ enabled: true, maxSizeMB: 100 }));
+      const { readDocumentsConfigFresh, getDocumentsConfig } = await importConfigApi();
+
+      // The display reader goes first and caches the fallback — the state that used
+      // to survive until the tab was reloaded.
+      await expect(getDocumentsConfig()).resolves.toEqual({ enabled: false });
+
+      await expect(readDocumentsConfigFresh()).resolves.toEqual({ enabled: true, maxSizeMB: 100 });
+
+      // The memo now holds the truth, and serves it without a third round trip: the
+      // caching property the display consumers depend on is intact.
+      await expect(getDocumentsConfig()).resolves.toEqual({ enabled: true, maxSizeMB: 100 });
+      expect(mockGet).toHaveBeenCalledTimes(2);
     });
   });
 });

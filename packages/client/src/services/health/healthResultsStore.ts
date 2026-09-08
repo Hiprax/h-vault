@@ -13,10 +13,40 @@
  *   relying on module state would read the wrong DB after a refresh.
  * - Every function SWALLOWS errors and degrades gracefully (load → null, writes →
  *   no-op). A locked vault, a rotated key, IndexedDB being unavailable, or a quota
- *   error must never break the page or block logout.
+ *   error must never break the page or block logout. `authStore.logout` AWAITS
+ *   `clearHealthResults` and runs three teardown steps after that await, so a
+ *   clear that rejected would leave the session half torn down.
+ * - The handlers below read their error the same way the sibling `offlineCache`
+ *   does, through the shared `transactionFailureError`, rather than with an
+ *   `x.error instanceof Error` test. Two measured reasons: `IDBTransaction.error`
+ *   is still `null` while the failing request's `error` event bubbles (the
+ *   specification populates it during the abort that follows), and `DOMException
+ *   instanceof Error` is true in every browser but false under jsdom, whose
+ *   DOMException inherits from a different realm's `Error.prototype`. Nothing
+ *   currently READS these rejection values — every caller swallows — so this is
+ *   about the two services not drifting, and about not leaving the exact
+ *   construct that was a shipped defect next door alive here.
+ * - Every transaction WHOSE COMPLETION IS AWAITED listens for `abort` as well as
+ *   `complete` and `error` — which here means the two mutating ones,
+ *   {@link putStoredRecord} and the clear inside {@link clearHealthResults}. A
+ *   transaction can end with neither of the latter two (a commit-time failure, or
+ *   an abort raised while no request is outstanding), and a promise that is never
+ *   settled in that case does not merely lose a snapshot: `enqueueWrite` chains
+ *   every mutation through one promise, so a single pending op stops ALL later
+ *   persistence for the tab's life, and `logout` — which awaits
+ *   `clearHealthResults` — never returns.
+ *
+ *   {@link getStoredRecord} attaches nothing to its transaction, and that is not
+ *   an omission: it awaits the REQUEST, and the abort algorithm fires `error` at
+ *   every request still outstanding when a transaction aborts. A read transaction
+ *   has exactly one request, so there is no ordering in which the transaction ends
+ *   while that promise is unsettled — a commit-time failure can only arrive after
+ *   the single `get` has already resolved it, and `db.transaction(…)` throwing
+ *   synchronously rejects from inside the `new Promise` executor. The same shape,
+ *   for the same reason, is `offlineCache`'s three readers.
  */
 import { cryptoService } from '../crypto/cryptoService';
-import { deriveUserHash } from '../offlineCache';
+import { deriveUserHash, transactionFailureError } from '../offlineCache';
 
 const DB_NAME_PREFIX = 'hvault-health';
 const DB_VERSION = 1;
@@ -113,8 +143,7 @@ async function openDb(userId: string): Promise<IDBDatabase> {
       }
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () =>
-      reject(request.error instanceof Error ? request.error : new Error('IndexedDB open failed'));
+    request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
   });
 }
 
@@ -122,8 +151,7 @@ function getStoredRecord(db: IDBDatabase): Promise<StoredRecord | undefined> {
   return new Promise((resolve, reject) => {
     const request = db.transaction(RESULTS_STORE).objectStore(RESULTS_STORE).get(RECORD_KEY);
     request.onsuccess = () => resolve(request.result as StoredRecord | undefined);
-    request.onerror = () =>
-      reject(request.error instanceof Error ? request.error : new Error('IndexedDB read failed'));
+    request.onerror = () => reject(request.error ?? new Error('IndexedDB read failed'));
   });
 }
 
@@ -132,8 +160,8 @@ function putStoredRecord(db: IDBDatabase, record: StoredRecord): Promise<void> {
     const tx = db.transaction(RESULTS_STORE, 'readwrite');
     tx.objectStore(RESULTS_STORE).put(record);
     tx.oncomplete = () => resolve();
-    tx.onerror = () =>
-      reject(tx.error instanceof Error ? tx.error : new Error('IndexedDB write failed'));
+    tx.onerror = (event) => reject(transactionFailureError(event, 'IndexedDB write failed'));
+    tx.onabort = (event) => reject(transactionFailureError(event, 'IndexedDB write aborted'));
   });
 }
 
@@ -267,8 +295,8 @@ export function clearHealthResults(userId: string): Promise<void> {
         const tx = database.transaction(RESULTS_STORE, 'readwrite');
         tx.objectStore(RESULTS_STORE).clear();
         tx.oncomplete = () => resolve();
-        tx.onerror = () =>
-          reject(tx.error instanceof Error ? tx.error : new Error('IndexedDB clear failed'));
+        tx.onerror = (event) => reject(transactionFailureError(event, 'IndexedDB clear failed'));
+        tx.onabort = (event) => reject(transactionFailureError(event, 'IndexedDB clear aborted'));
       });
     } catch {
       // Best-effort — a failed clear must never block logout.

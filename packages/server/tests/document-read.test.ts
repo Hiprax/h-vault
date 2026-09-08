@@ -65,6 +65,15 @@ const { storageRef } = vi.hoisted(() => ({
  * deliverable, and asserting it is the only way to pin "log it, do not re-throw"
  * against a change that would ask the error middleware to serialise JSON onto a
  * socket that is gone. Same shape `s3-provider.test.ts` uses.
+ *
+ * `log` belongs on this list even though nothing here asserts it, and it is the
+ * one entry that is not a level shorthand. `createModuleLogger` is what `app.ts`
+ * hands to `createRequestLogger`, and that logger's last act on every response is
+ * `logger.log({ level, message, http })`. Without it every supertest request in
+ * this file threw inside @hiprax/logger's own try/catch, which swallowed the
+ * error and printed `request logger failed while logging <METHOD> <url>: r.log is
+ * not a function` — a flooded transcript, and an application request log that was
+ * silently dead for the whole file.
  */
 const logs = vi.hoisted(() => ({
   error: vi.fn(),
@@ -74,6 +83,7 @@ const logs = vi.hoisted(() => ({
   verbose: vi.fn(),
   http: vi.fn(),
   silly: vi.fn(),
+  log: vi.fn(),
 }));
 
 vi.mock('../src/utils/logger.js', async (importOriginal) => {

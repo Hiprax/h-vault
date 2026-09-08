@@ -173,6 +173,23 @@ export interface SuccessfulLoginResponse {
   vaultKeyTag: string;
   kdfIterations: number;
   kdfAlgorithm: 'PBKDF2-SHA256';
+  /**
+   * Which vault key the wrapped key above IS — the account's `vaultKeyVersion`
+   * at the moment this response was built.
+   *
+   * A rotation revokes no session and refreshes no key in a session already
+   * running, so a client has no way to notice that the key it decrypted at
+   * sign-in has been superseded. This number travels with the key it names so
+   * that anything binding data to the vault key can say WHICH vault key it
+   * bound to, rather than asking the server what the current one is and
+   * receiving an answer about a key it does not hold.
+   *
+   * OPTIONAL because a server that predates the field sends nothing, and
+   * because reading a missing value as `0` is what the server itself does for
+   * an account created before the column existed. Read it as `?? 0`; never
+   * forward it undefined.
+   */
+  vaultKeyVersion?: number;
 }
 
 export type LoginResponse = TwoFactorRequiredLoginResponse | SuccessfulLoginResponse;
@@ -266,6 +283,17 @@ export interface IUserProfile {
   kdfIterations: number;
   kdfAlgorithm: 'PBKDF2-SHA256';
   encryptionVersion: number;
+  /**
+   * The account's current vault-key generation. See
+   * {@link SuccessfulLoginResponse.vaultKeyVersion} — this is the same number,
+   * naming the same wrapped key, for the cold-start resume that recovers the
+   * key material from the profile instead of from a sign-in.
+   *
+   * Optional for one more reason here than there: this endpoint reads the user
+   * with `.lean()`, so an account created before the column existed genuinely
+   * yields nothing at all rather than the schema default.
+   */
+  vaultKeyVersion?: number;
   settings: IUserSettings;
   createdAt: string;
   updatedAt: string;

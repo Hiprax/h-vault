@@ -12,6 +12,7 @@ import { User } from '../models/User.js';
 import { RefreshToken } from '../models/RefreshToken.js';
 import { TrustedDevice } from '../models/TrustedDevice.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
+import { supportsTransactions } from '../utils/transactionSupport.js';
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -32,7 +33,9 @@ import {
   isVaultRotationLockHeld,
   MAX_USER_AGENT_LENGTH,
   pickAllowedFields,
+  vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
+import { readStringCookie } from '../utils/cookies.js';
 import { clearCsrfCookie } from '../middleware/csrf.js';
 import {
   ERROR_CODES,
@@ -595,16 +598,59 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     throw httpErrors.unauthorized('Invalid email or password');
   }
 
-  // Reset failed attempts on successful credential check. The throttle reset is
-  // UNCONDITIONAL: attempts recorded while the account was locked never touched
-  // `failedLoginAttempts`, so gating it on the database counter would let a
-  // stale in-memory count survive a successful login and delay the next typo.
+  // The process-local throttle drives ONLY the progressive sleep on THIS step —
+  // `login2fa` never reads it, taking its own delay from the durable counter
+  // instead — so a verified password clears it here even when a second factor is
+  // still owed: a correct password is proof that the password guessing this
+  // counter exists to slow has ended, and clearing it hands a password-holding
+  // attacker nothing at the second step. It is emphatically NOT the durable
+  // lockout counter, which is handled separately below and in `finishLogin`.
+  // The reset is also UNCONDITIONAL: attempts recorded while the account was
+  // locked never touched `failedLoginAttempts`, so gating it on the database
+  // counter would let a stale in-memory count survive a successful login and
+  // delay the next typo.
   resetLoginAttempts(email);
 
-  if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
+  // A lockout that was actually SERVED is discharged here, before the
+  // `twoFactorEnabled` branch — the one and only case in which a password alone
+  // clears the durable counter.
+  //
+  // It is reachable only after a real 30-minute wait: `lockoutUntil` is written
+  // solely by the two threshold crossings below and in `login2fa`, and while it
+  // is in the FUTURE both doors refuse — this handler 403s above with the
+  // correct password, and `login2fa` 403s before it reads the code. So the
+  // budget it restores is ten guesses per half hour, which is the designed
+  // lockout rate, not a bypass of it.
+  //
+  // Without this, a 2FA account would be discharged only by a completed second
+  // factor, and the first fumbled TOTP code after any lockout would `$inc` 10 to
+  // 11 and re-lock for another half hour — silently, because the unlock mail
+  // fires on `=== MAX_FAILED_ATTEMPTS` and 11 is not equal. Worse, that re-lock
+  // REWRITES `lockoutUntil`, and the emailed unlock token's `stateHash` is bound
+  // to that exact value, so the one recovery link the user was ever sent dies
+  // with it and no replacement is issued. TOTP fails systematically rather than
+  // randomly — a phone clock drifted past the ±1 step window fails every code,
+  // and a code entered twice is refused as a replay and counted as a failure —
+  // and this product's password reset MINTS A NEW VAULT KEY, so "just reset your
+  // password" is total data loss, not a recovery path. The remaining exit would
+  // be a backup code, if one is left. Discharging a served lockout keeps
+  // `README.md`'s "30 minutes after 10 failed attempts" true for accounts with a
+  // second factor as well as without, matches what a non-2FA account has always
+  // done, and re-arms the alert: each cycle crosses the threshold exactly once,
+  // so a victim under a grinding attack keeps being mailed instead of being
+  // told once and then left in silence.
+  //
+  // Atomic update rather than `user.save()` on the document loaded before the
+  // bcrypt compare, mirroring `login2fa`: a concurrent `$inc` must not be
+  // clobbered by a stale in-memory zero. The in-memory copy is corrected too, so
+  // `finishLogin`'s own guarded reset below does not repeat the write.
+  if (user.lockoutUntil && user.lockoutUntil <= new Date()) {
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { failedLoginAttempts: 0 }, $unset: { lockoutUntil: 1 } },
+    );
     user.failedLoginAttempts = 0;
     user.lockoutUntil = undefined;
-    await user.save();
   }
 
   // Detect and recover from interrupted vault key rotation. If rotationInProgress
@@ -661,6 +707,57 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // it with the SAME `rememberMe` from the request, so an unchecked box never
   // silently produces a 30-day session on either path.
   const finishLogin = async (auditMetadata?: Record<string, unknown>): Promise<void> => {
+    // Discharge the durable counter, FIRST — before any token is minted, so a
+    // failure here cannot 500 a request that has already written a session row
+    // and shipped a refresh cookie.
+    //
+    // `failedLoginAttempts` / `lockoutUntil` are ONE brake shared by both
+    // authentication steps, and they are the ONLY per-account brake on the
+    // second one: `routes/auth.ts` gives `/login/2fa` `authLimiter` and
+    // `tokenVerifyLimiter`, both keyed by IP, never by account. So the reset
+    // belongs to a COMPLETED authentication and not merely to a verified
+    // password. Clearing it before the `twoFactorEnabled` branch below — which
+    // is what this handler used to do — let an attacker who already held the
+    // master password replay this step between batches of wrong codes and reset
+    // the second factor's only brake for ever: nine guesses, one `/auth/login`,
+    // nine more, never reaching the threshold. The residual bound was
+    // `accountLimiter` at 20 per email per 15 minutes, i.e. roughly 180 TOTP
+    // guesses a quarter hour instead of ten a half hour, and worse still on a
+    // self-hosted instance not running `NODE_ENV=production`, where every
+    // limiter is a no-op and this counter is the only brake there is.
+    //
+    // `finishLogin` is the right home because BOTH paths that complete a login
+    // without a submitted TOTP code run through it: the ordinary non-2FA
+    // completion, and the trusted-device 2FA skip. The skip resets deliberately.
+    // It is a completed authentication, not a replayable oracle: it presents two
+    // factors — the password, and a device-bound trust token minted at exactly
+    // one site, inside `login2fa` AFTER a code verified — and `findOneAndDelete`
+    // burns that token as it is spent, scoped to this user and an unexpired
+    // grant. Anyone who reaches it has already been handed an access token, a
+    // refresh cookie and the wrapped vault key, so there is nothing left to
+    // brute-force. A cookie that does NOT match resets nothing: it falls through
+    // to the 2FA challenge below. Refusing to reset here would be its own bug,
+    // in the other direction — a user sitting at nine from earlier typos who
+    // then signs in on a trusted device would carry that nine indefinitely, and
+    // their next single mistake would lock them out.
+    //
+    // The counterpart for a real second factor lives at the end of `login2fa`,
+    // once the code verifies. A challenge that is issued and abandoned resets
+    // nothing, so a lockout survives until an authentication completes, a served
+    // lockout is discharged above, the emailed unlock link is used, or the
+    // password is reset.
+    //
+    // Atomic update rather than `user.save()` on the document loaded before the
+    // bcrypt compare, mirroring `login2fa`: a concurrent `$inc` must not be
+    // clobbered by a stale in-memory zero, and a login is not the place to run
+    // whole-document validators.
+    if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
+      await User.updateOne(
+        { _id: user._id },
+        { $set: { failedLoginAttempts: 0 }, $unset: { lockoutUntil: 1 } },
+      );
+    }
+
     const accessToken = generateAccessToken(user._id.toString());
     const refreshTokenRaw = generateRefreshToken();
     const refreshTokenHash = hashToken(refreshTokenRaw);
@@ -693,6 +790,12 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
         vaultKeyTag: user.vaultKeyTag,
         kdfIterations: user.kdfIterations,
         kdfAlgorithm: user.kdfAlgorithm,
+        // Which vault key the wrapped key above IS. A rotation revokes nothing
+        // and refreshes no key already resident in a running session, so this is
+        // the only moment the client can learn which generation the key it is
+        // about to decrypt belongs to — and without that it cannot tell a server
+        // asking "is this the current key?" from one asking "is this YOUR key?".
+        vaultKeyVersion: vaultKeyVersionOf(user),
       },
     });
   };
@@ -706,7 +809,7 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     // pointless `Set-Cookie` — on every ordinary 2FA login. The check sits here,
     // strictly AFTER the bcrypt compare and lockout evaluation above, so a cookie
     // can never become an authentication bypass or an account-enumeration oracle.
-    const trustedCookie = req.cookies[TRUSTED_DEVICE_COOKIE_NAME] as string | undefined;
+    const trustedCookie = readStringCookie(req, TRUSTED_DEVICE_COOKIE_NAME);
     if (trustedCookie) {
       // Consume the record atomically: `findOneAndDelete` recognises and burns
       // the token in one step, so a replayed (already-consumed) cookie simply
@@ -889,16 +992,37 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
       // backupCodes array contains matchedCode". The Mongoose types expect
       // `backupCodes` to be the full array type, not a single element value.
       // This is a known Mongoose typing limitation (not a runtime concern).
+      //
+      // `backupCodes` is `select: false` on the model, so the post-update
+      // document only carries the surviving codes if they are asked for. The
+      // count is what the audit row below reports, and it must come from the
+      // document the atomic pull actually produced rather than from
+      // `user.backupCodes.length - 1`: that in-memory array was read before the
+      // update and a concurrent code redemption would make the arithmetic lie.
       const result = await User.findOneAndUpdate(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument
         { _id: user._id, backupCodes: matchedCode } as any,
         { $pull: { backupCodes: matchedCode } },
         { returnDocument: 'after' },
-      );
+      ).select('+backupCodes');
       if (result) {
         isValid = true;
         usedBackupCode = true;
         logger.info('Backup code used for 2FA', { userId: user._id.toString() });
+        // Audited HERE, at the point of consumption, rather than beside the
+        // `login` row below: the code is spent whatever happens next, and a
+        // failure between here and the response would otherwise burn a recovery
+        // credential leaving no record the owner can see. The server log line
+        // above is not that record — it is not theirs to read. `remaining` is
+        // the actionable half: the row that says `0` is the one telling a user
+        // to regenerate before they are locked out of their own account.
+        await createAuditLog(
+          user._id.toString(),
+          '2fa_backup_code_used',
+          { remaining: countBackupCodes(result) },
+          ip,
+          userAgent,
+        );
       }
       // If result is null, the code was already consumed by a concurrent request
     }
@@ -1046,14 +1170,46 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   clearCsrfCookie(res);
 
   // Grant a trusted device so this device may skip the 2FA step until the grant
-  // expires. Minted only on a remembered login; the raw token lives solely in the
-  // Set-Cookie header. Done before the response is written so the cookie ships.
-  if (remember) {
+  // expires. Minted only on a remembered login completed with a REAL second
+  // factor; the raw token lives solely in the Set-Cookie header. Done before the
+  // response is written so the cookie ships.
+  //
+  // `!usedBackupCode` is the load-bearing half. A TOTP code proves the second
+  // factor is present on this device right now, which is the thing trust is
+  // being extended to. A backup code proves the opposite: it is the recovery
+  // credential, issued eight at a time and kept precisely where the
+  // authenticator is not — on paper, in another password manager, in an email to
+  // oneself. Minting a grant from it turned one line off that sheet into a
+  // `TRUSTED_DEVICE_DAYS` (30) standing skip of the second factor, and because a
+  // trusted-device login mints a fresh remembered session while the record keeps
+  // its own expiry, up to `REFRESH_TOKEN_REMEMBER_DAYS + TRUSTED_DEVICE_DAYS`
+  // (60) days without a TOTP code ever being presented again. Whoever loses the
+  // sheet also needs the master password, which is why this is a hardening fix
+  // and not an open door — but a recovery credential must buy exactly one
+  // recovery, not a month of them, and the account owner had no way to see it
+  // had bought more.
+  //
+  // The remembered SESSION is deliberately still honoured above: `remember`
+  // drives `resolveRefreshLifetime`, and this condition does not. "Remember me"
+  // and "skip the second factor on this device" are two promises, and only the
+  // second one depends on which credential was presented.
+  if (remember && !usedBackupCode) {
     await grantTrustedDevice(res, user._id, sanitizedDeviceInfo);
     await createAuditLog(user._id.toString(), 'trusted_device_grant', undefined, ip, userAgent);
   }
 
-  await createAuditLog(user._id.toString(), 'login', { twoFactor: true }, ip, userAgent);
+  // `backupCode` discriminates the two credentials on the row itself. The
+  // audit-log UI renders the action and not the metadata, so the user-visible
+  // record of a spent code is the `2fa_backup_code_used` row written at the
+  // point of consumption; this field is for anything reading the API, where
+  // `{ twoFactor: true }` alone could not tell the two logins apart.
+  await createAuditLog(
+    user._id.toString(),
+    'login',
+    { twoFactor: true, backupCode: usedBackupCode },
+    ip,
+    userAgent,
+  );
 
   logger.info('User logged in via 2FA', { userId: user._id.toString() });
 
@@ -1066,6 +1222,9 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
       vaultKeyTag: user.vaultKeyTag,
       kdfIterations: user.kdfIterations,
       kdfAlgorithm: user.kdfAlgorithm,
+      // The 2FA leg completes a sign-in exactly as the direct one does, so it
+      // publishes the same pairing. See the note on the other response.
+      vaultKeyVersion: vaultKeyVersionOf(user),
     },
   });
 });
@@ -1073,7 +1232,7 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
 // ─── Refresh ─────────────────────────────────────────────────────────────────
 
 export const refresh = catchAsync(async (req: Request, res: Response): Promise<void> => {
-  const token: string | undefined = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
+  const token = readStringCookie(req, REFRESH_COOKIE_NAME);
 
   if (!token) {
     throw httpErrors.unauthorized('Refresh token not provided');
@@ -1083,9 +1242,12 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
 
   // Check if the topology supports transactions (replica set or sharded cluster)
   // before attempting one, rather than relying on error string matching.
-  const supportsTransactions =
-    mongoose.connection.readyState === mongoose.ConnectionStates.connected &&
-    Boolean(mongoose.connection.getClient().options.replicaSet);
+  //
+  // The check itself is `utils/transactionSupport.ts` and nothing else: it used to
+  // be inlined here, and an inlined copy is a second answer to a question every
+  // multi-collection writer has to answer the same way (see
+  // `tests/topology-predicate.test.ts`).
+  const useTransaction = supportsTransactions(mongoose.connection);
 
   const newRefreshTokenRaw = generateRefreshToken();
   const newRefreshTokenHash = hashToken(newRefreshTokenRaw);
@@ -1102,7 +1264,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
   }
   let claimed: ClaimedTokenMeta | null = null;
 
-  if (supportsTransactions) {
+  if (useTransaction) {
     // Transactional path: perform the claim (mark-used) AND create the new
     // token inside a single transaction so both commit or neither does. This
     // eliminates the race where the original token could be marked used but
@@ -1263,7 +1425,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
 
 export const logout = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = (req as AuthenticatedRequest).user._id;
-  const token: string | undefined = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
+  const token = readStringCookie(req, REFRESH_COOKIE_NAME);
 
   if (token) {
     const tokenHash = hashToken(token);
@@ -1312,7 +1474,7 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
   const userId = (req as AuthenticatedRequest).user._id;
 
   // Exclude the current session's refresh token so the caller stays logged in
-  const currentToken: string | undefined = req.cookies[REFRESH_COOKIE_NAME] as string | undefined;
+  const currentToken = readStringCookie(req, REFRESH_COOKIE_NAME);
   const filter: Record<string, unknown> = { userId };
 
   if (currentToken) {
@@ -1742,6 +1904,25 @@ function sanitizeDeviceInfo(
     ip: ip.slice(0, DEVICE_INFO_LIMITS.ip),
     fingerprint: rawFingerprint.slice(0, DEVICE_INFO_LIMITS.fingerprint),
   };
+}
+
+/**
+ * How many 2FA backup codes a loaded user document still holds.
+ *
+ * `backupCodes` is `select: false` on the model, so it is absent unless a query
+ * explicitly asks for it — which makes its type `string[] | undefined` at every
+ * call site, and makes "the field was not projected" a case this has to answer
+ * for. Zero is the safe answer: it is what an account with no codes left would
+ * report, so a caller that forgets the projection under-reports rather than
+ * throwing inside a login.
+ *
+ * It is a named, exported function rather than an inline `?.length ?? 0` for one
+ * reason: inline, the not-projected arm is unreachable from any route and would
+ * sit forever as an uncovered branch that nobody could honestly exercise. Here
+ * it is an ordinary boundary case of a pure function, and is tested as one.
+ */
+export function countBackupCodes(user: { backupCodes?: string[] | undefined }): number {
+  return user.backupCodes?.length ?? 0;
 }
 
 export async function findMatchingBackupCodeIndex(

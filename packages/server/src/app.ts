@@ -56,6 +56,24 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 // Security middleware — configured once; nonce is injected dynamically per request
 app.use(
   helmet({
+    // `useDefaults` is deliberately left unset, and helmet reads that as `true`:
+    // the directives below are MERGED over
+    // `helmet.contentSecurityPolicy.getDefaultDirectives()`. Five directives
+    // this object never names therefore reach every response but
+    // `/sandbox.html` from helmet alone — that one route replaces the header
+    // outright with its own far stricter policy (`config/sandboxCsp.ts`) —
+    // namely `base-uri 'self'`, `form-action 'self'`, `frame-ancestors 'self'`,
+    // `script-src-attr 'none'` and `upgrade-insecure-requests` — and the first
+    // three have no `default-src` fallback, so losing them is a real hole
+    // rather than a downgrade. Writing `useDefaults: false` here is a one-word
+    // change that removes all five while every directive named below still
+    // ships unchanged, which is why the policy is pinned from the OUTSIDE
+    // instead: `tests/security-headers.test.ts` asserts each of the five on a
+    // real app response, and compares the whole parsed policy against a
+    // literal so that DELETING a key below is caught too — dropping `fontSrc`,
+    // for instance, silently reverts `font-src` to helmet's looser
+    // `'self' https: data:`. Naming a directive below overrides the default of
+    // that same name; it does not disable the others.
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
@@ -179,6 +197,12 @@ app.use((_req: Request, _res: Response, next: NextFunction) => {
   //   so operator injection via query strings is not possible.
   // - Zod validation on all endpoints catches any unexpected shapes downstream
   //   as a defense-in-depth measure.
+  // - COOKIES are the one other source, and they are handled elsewhere rather
+  //   than here: `cookieParser()` below JSON-decodes any `j:`-prefixed value, so
+  //   `req.cookies[x]` really can be an object or a number. Nothing reads one
+  //   except through `utils/cookies.ts` `readStringCookie`, which yields a value
+  //   only when it is a non-empty string, so no cookie ever reaches a query as an
+  //   operand. Narrow there, not here — see that file for why.
   //
   // Additionally, req.query and req.params are read-only getters in Express 5.
   next();

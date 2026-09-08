@@ -206,6 +206,13 @@ export const swaggerSpec: JsonObject = {
       name: 'MIT',
       url: 'https://opensource.org/licenses/MIT',
     },
+    // The issues page, not an address: a vulnerability must never arrive in a
+    // public issue, and `.github/ISSUE_TEMPLATE/config.yml` is what routes one
+    // to the private Security Advisory instead. See SECURITY.md.
+    contact: {
+      name: 'H-Vault',
+      url: 'https://github.com/Hiprax/h-vault/issues',
+    },
   },
   servers: [
     {
@@ -348,6 +355,12 @@ export const swaggerSpec: JsonObject = {
               vaultKeyTag: { type: 'string' },
               kdfIterations: { type: 'integer' },
               kdfAlgorithm: { type: 'string' },
+              vaultKeyVersion: {
+                type: 'integer',
+                minimum: 0,
+                description:
+                  "Which vault key the wrapped key above IS — the account's vault-key generation when this response was built. A rotation revokes no session and refreshes no key already held in a running one, so this is where a client learns which generation the key it is about to decrypt belongs to. Anything binding data to the vault key sends this number back, rather than a number the server told it later, so the server can tell a stale key from a current one.",
+              },
             },
           },
         },
@@ -661,6 +674,7 @@ export const swaggerSpec: JsonObject = {
           kdfIterations: { type: 'integer' },
           kdfAlgorithm: { type: 'string' },
           encryptionVersion: { type: 'integer' },
+          vaultKeyVersion: { type: 'integer', minimum: 0 },
           settings: { $ref: '#/components/schemas/UserSettings' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
@@ -1090,7 +1104,7 @@ export const swaggerSpec: JsonObject = {
             type: 'integer',
             minimum: 0,
             description:
-              "The caller's vault-key version at init. Completion is refused with 409 when it no longer matches, which is what stops a rotation mid-transfer from committing a key nothing can unwrap.",
+              "The account's vault-key generation as it stood when this transfer opened. Informational: the completion checks the number the CLIENT sends against the account's current one, not this echo, because only the client knows which key it actually wrapped with.",
             example: 0,
           },
           chunkPlaintextBytes: {
@@ -1187,7 +1201,7 @@ export const swaggerSpec: JsonObject = {
             type: 'integer',
             minimum: 0,
             description:
-              "The vault-key version the wrapped key above was produced under. Refused with 409 when it is no longer the account's current version.",
+              "The vault-key version the wrapped key above was produced under — the number this session received alongside the wrapped vault key it signed in with, NOT the one echoed by init. Refused with 409, carrying the current version, when it is not the account's current one; the client then rewraps and retries this request alone.",
             example: 0,
           },
         },
@@ -1497,7 +1511,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Open a transfer',
         description:
-          'Reserves an upload id, records the wrapped document key and the framing, and opens an engine-side multipart upload when more than one segment is declared. The id it returns is the future document id: the browser binds its key derivation to it before sealing the first byte, so it can never be reassigned without re-encrypting the file. Refused with 400 when the declared size exceeds the operator cap, the document count or concurrent-transfer cap is reached, or the storage quota would be exceeded, and with 409 while a vault-key rotation is running.',
+          'Reserves an upload id, records the wrapped document key and the framing, and opens an engine-side multipart upload when more than one segment is declared. The id it returns is the future document id: the browser binds its key derivation to it before sealing the first byte, so it can never be reassigned without re-encrypting the file. Refused with 400 when the declared size exceeds the operator cap, the document count or concurrent-transfer cap is reached, or the storage quota would be exceeded, and with 409 while a vault-key rotation is running or while another transfer is already being opened for the same account. Those per-account budgets are decided under a per-user lock, so an account can never hold more than the concurrent-transfer cap allows however many opens arrive at once.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -1513,7 +1527,8 @@ export const swaggerSpec: JsonObject = {
           }),
           ...DOCUMENT_ITEM_WRITE_ERRORS,
           409: {
-            description: 'A vault-key rotation is in progress; retry when it finishes',
+            description:
+              'A vault-key rotation is in progress, or another transfer is already being opened for this account; retry when it finishes',
             content: {
               'application/json': {
                 schema: { $ref: '#/components/schemas/ErrorResponse' },
@@ -1656,7 +1671,7 @@ export const swaggerSpec: JsonObject = {
           ...DOCUMENT_ITEM_WRITE_ERRORS,
           409: {
             description:
-              'The completion cannot proceed yet. A stale vaultKeyVersion carries the current one in `data`, so the client rewraps the document key it still holds and retries this request alone rather than re-sending the file; a rotation in progress or a completion already in flight carry no data and are retried unchanged.',
+              "The completion cannot proceed yet. A vaultKeyVersion that is not the account's current one carries the current one in `data`, so the client rewraps the document key it still holds and retries this request alone rather than re-sending the file; the message distinguishes a key superseded by a rotation from a version the account has never had, which no rotation can explain. A rotation in progress or a completion already in flight carry no data and are retried unchanged.",
             content: {
               'application/json': {
                 schema: {
@@ -1770,7 +1785,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Permanently delete every trashed document',
         description:
-          'Runs the same three ordered steps as a per-document purge over every document that was in the trash when the request arrived — a document trashed by another tab while it runs is outside that set and survives. It is not a bulk row delete: every document owns an object, so deleting the rows alone would leave the objects behind with nothing naming them. A document whose object cannot be deleted is counted rather than thrown, because it is already marked purgePending and the hourly collector will finish it, so the response reports both counts and the request succeeds either way.',
+          'Runs the same three ordered steps as a per-document purge over every document that was in the trash when the request arrived — a document trashed by another tab while it runs is outside that set and survives. It is not a bulk row delete: every document owns an object, so deleting the rows alone would leave the objects behind with nothing naming them. A document whose object cannot be deleted is counted rather than thrown, because it is already marked purgePending and the hourly collector will finish it, so the response reports both counts and the request succeeds either way. If the storage engine refuses several deletes in a row the walk stops there rather than spending hours on a service that is plainly down; the two counts then describe only what was attempted, and the documents past that point are left untouched, unmarked and still in the trash, so re-reading the trash listing is what tells a client the true remaining set.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           200: jsonEnvelope(
@@ -1838,6 +1853,7 @@ export const swaggerSpec: JsonObject = {
     // -- Health --
     '/health': {
       get: {
+        operationId: 'healthCheck',
         tags: ['Health'],
         summary: 'Health check',
         description:
@@ -1851,6 +1867,7 @@ export const swaggerSpec: JsonObject = {
     // -- CSRF --
     '/csrf-token': {
       get: {
+        operationId: 'getCsrfToken',
         tags: ['Auth'],
         summary: 'Get CSRF token',
         description:
@@ -1883,6 +1900,7 @@ export const swaggerSpec: JsonObject = {
     // -- Auth --
     '/auth/register': {
       post: {
+        operationId: 'register',
         tags: ['Auth'],
         summary: 'Register a new account',
         description:
@@ -1911,6 +1929,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/login': {
       post: {
+        operationId: 'login',
         tags: ['Auth'],
         summary: 'Login with credentials',
         description:
@@ -1952,10 +1971,11 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/login/2fa': {
       post: {
+        operationId: 'loginWithTwoFactor',
         tags: ['Auth'],
         summary: 'Complete 2FA verification',
         description:
-          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body), a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires.',
+          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body) AND the code submitted was a TOTP code, a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires. A **backup code** never sets that cookie, whatever the remember-me setting: it is a single-use recovery credential, so it completes this login (and still opens the longer remembered session) without registering the device as trusted.',
         requestBody: {
           required: true,
           content: {
@@ -1967,11 +1987,11 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: {
             description:
-              '2FA verification successful. Sets a httpOnly refresh-token cookie, and — only when the login opted into "remember me" — a httpOnly `trustedDevice` cookie (scoped to `/api/v1/auth`) whose raw value is never returned in the response body.',
+              '2FA verification successful. Sets a httpOnly refresh-token cookie, and — only when the login opted into "remember me" and the code was a TOTP code rather than a backup code — a httpOnly `trustedDevice` cookie (scoped to `/api/v1/auth`) whose raw value is never returned in the response body.',
             headers: {
               'Set-Cookie': {
                 description:
-                  'Sets `refreshToken` (httpOnly, path `/api/v1`) and, for a remembered login, `trustedDevice` (httpOnly, path `/api/v1/auth`). Only the SHA-256 of the trusted-device token is stored server-side.',
+                  'Sets `refreshToken` (httpOnly, path `/api/v1`) and, for a remembered login completed with a TOTP code, `trustedDevice` (httpOnly, path `/api/v1/auth`). Only the SHA-256 of the trusted-device token is stored server-side.',
                 schema: { type: 'string' },
               },
             },
@@ -1988,6 +2008,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/refresh': {
       post: {
+        operationId: 'refreshSession',
         tags: ['Auth'],
         summary: 'Refresh access token',
         description:
@@ -2007,6 +2028,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/logout': {
       post: {
+        operationId: 'logout',
         tags: ['Auth'],
         summary: 'Logout current session',
         description: 'Revokes the current refresh token and clears the cookie.',
@@ -2026,6 +2048,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/logout-all': {
       post: {
+        operationId: 'logoutAll',
         tags: ['Auth'],
         summary: 'Logout all other sessions',
         description: 'Revokes all refresh tokens except the current session.',
@@ -2045,6 +2068,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/verify-email': {
       post: {
+        operationId: 'verifyEmail',
         tags: ['Auth'],
         summary: 'Verify email address',
         description:
@@ -2073,6 +2097,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/resend-verification': {
       post: {
+        operationId: 'resendVerification',
         tags: ['Auth'],
         summary: 'Resend email verification',
         description: 'Resends the email verification link. Rate limited: 5 req/IP per 15 min.',
@@ -2099,6 +2124,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/forgot-password': {
       post: {
+        operationId: 'forgotPassword',
         tags: ['Auth'],
         summary: 'Request password reset',
         description: 'Sends a password reset email. Rate limited: 5 req/IP per 15 min.',
@@ -2125,6 +2151,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/reset-password': {
       post: {
+        operationId: 'resetPassword',
         tags: ['Auth'],
         summary: 'Reset password with token',
         description:
@@ -2153,6 +2180,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/auth/unlock-account': {
       post: {
+        operationId: 'unlockAccount',
         tags: ['Auth'],
         summary: 'Unlock locked account',
         description:
@@ -2183,6 +2211,7 @@ export const swaggerSpec: JsonObject = {
     // -- Vault items --
     '/vault/items': {
       get: {
+        operationId: 'listVaultItems',
         tags: ['Vault'],
         summary: 'List vault items',
         description:
@@ -2218,6 +2247,7 @@ export const swaggerSpec: JsonObject = {
         },
       },
       post: {
+        operationId: 'createVaultItem',
         tags: ['Vault'],
         summary: 'Create vault item',
         description: 'Creates a new encrypted vault item.',
@@ -2239,6 +2269,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/vault/items/trash': {
       get: {
+        operationId: 'listVaultItemTrash',
         tags: ['Vault'],
         summary: 'List trashed items',
         description: 'Returns paginated list of soft-deleted vault items.',
@@ -2252,6 +2283,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/vault/items/trash/empty': {
       delete: {
+        operationId: 'emptyVaultItemTrash',
         tags: ['Vault'],
         summary: 'Empty trash',
         description: 'Permanently deletes all items in the trash.',
@@ -2280,6 +2312,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/vault/items/bulk-delete': {
       post: {
+        operationId: 'bulkDeleteVaultItems',
         tags: ['Vault'],
         summary: 'Bulk soft-delete items',
         description: 'Soft-deletes up to 100 vault items at once.',
@@ -2317,6 +2350,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/vault/items/bulk-move': {
       post: {
+        operationId: 'bulkMoveVaultItems',
         tags: ['Vault'],
         summary: 'Bulk move items to folder',
         description: 'Moves up to 100 vault items to a folder (or root if folderId is null).',
@@ -2355,6 +2389,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/vault/items/bulk-reencrypt': {
       post: {
+        operationId: 'bulkReEncryptVault',
         tags: ['Vault'],
         summary: 'Bulk re-encrypt vault items',
         description:
@@ -2399,6 +2434,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/vault/items/{id}': {
       get: {
+        operationId: 'getVaultItem',
         tags: ['Vault'],
         summary: 'Get vault item',
         description: 'Returns a single vault item by ID.',
@@ -2411,6 +2447,7 @@ export const swaggerSpec: JsonObject = {
         },
       },
       put: {
+        operationId: 'updateVaultItem',
         tags: ['Vault'],
         summary: 'Update vault item',
         description: 'Updates an existing vault item.',
@@ -2432,6 +2469,7 @@ export const swaggerSpec: JsonObject = {
         },
       },
       delete: {
+        operationId: 'deleteVaultItem',
         tags: ['Vault'],
         summary: 'Soft-delete vault item',
         description: 'Moves a vault item to the trash (soft delete).',
@@ -2453,6 +2491,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/vault/items/{id}/permanent': {
       delete: {
+        operationId: 'purgeVaultItem',
         tags: ['Vault'],
         summary: 'Permanently delete vault item',
         description: 'Permanently deletes a trashed vault item. Cannot be undone.',
@@ -2474,6 +2513,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/vault/items/restore/{id}': {
       post: {
+        operationId: 'restoreVaultItem',
         tags: ['Vault'],
         summary: 'Restore trashed item',
         description: 'Restores a soft-deleted vault item from the trash.',
@@ -2490,6 +2530,7 @@ export const swaggerSpec: JsonObject = {
     // -- Folders --
     '/folders': {
       get: {
+        operationId: 'listFolders',
         tags: ['Folders'],
         summary: 'List folders',
         description: 'Returns all folders for the authenticated user.',
@@ -2516,6 +2557,7 @@ export const swaggerSpec: JsonObject = {
         },
       },
       post: {
+        operationId: 'createFolder',
         tags: ['Folders'],
         summary: 'Create folder',
         description: 'Creates a new folder for organizing vault items.',
@@ -2537,6 +2579,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/folders/{id}': {
       put: {
+        operationId: 'updateFolder',
         tags: ['Folders'],
         summary: 'Update folder',
         description: 'Updates folder properties. Validates against circular parent references.',
@@ -2565,6 +2608,7 @@ export const swaggerSpec: JsonObject = {
         },
       },
       delete: {
+        operationId: 'deleteFolder',
         tags: ['Folders'],
         summary: 'Delete folder',
         description:
@@ -2594,6 +2638,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/folders/{id}/sort': {
       put: {
+        operationId: 'reorderFolder',
         tags: ['Folders'],
         summary: 'Reorder folder',
         description: 'Updates the sort order of a folder.',
@@ -2618,6 +2663,7 @@ export const swaggerSpec: JsonObject = {
     // -- User --
     '/user/profile': {
       get: {
+        operationId: 'getProfile',
         tags: ['User'],
         summary: 'Get user profile',
         description: 'Returns the authenticated user profile and settings.',
@@ -2630,6 +2676,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/settings': {
       put: {
+        operationId: 'updateSettings',
         tags: ['User'],
         summary: 'Update user settings',
         description:
@@ -2652,6 +2699,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/change-password': {
       put: {
+        operationId: 'changePassword',
         tags: ['User'],
         summary: 'Change master password',
         description:
@@ -2682,6 +2730,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/2fa/setup': {
       post: {
+        operationId: 'setupTwoFactor',
         tags: ['User'],
         summary: 'Start 2FA setup',
         description:
@@ -2724,6 +2773,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/2fa/verify': {
       post: {
+        operationId: 'verifyTwoFactor',
         tags: ['User'],
         summary: 'Complete 2FA setup',
         description:
@@ -2767,6 +2817,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/2fa': {
       delete: {
+        operationId: 'disableTwoFactor',
         tags: ['User'],
         summary: 'Disable 2FA',
         description:
@@ -2796,6 +2847,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/sessions': {
       get: {
+        operationId: 'listSessions',
         tags: ['User'],
         summary: 'List active sessions',
         description: 'Returns all active sessions for the authenticated user.',
@@ -2824,6 +2876,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/sessions/{id}': {
       delete: {
+        operationId: 'revokeSession',
         tags: ['User'],
         summary: 'Revoke session',
         description: 'Revokes a specific active session by its refresh token ID.',
@@ -2845,6 +2898,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/trusted-devices': {
       get: {
+        operationId: 'listTrustedDevices',
         tags: ['User'],
         summary: 'List trusted devices',
         description:
@@ -2872,6 +2926,7 @@ export const swaggerSpec: JsonObject = {
         },
       },
       delete: {
+        operationId: 'revokeAllTrustedDevices',
         tags: ['User'],
         summary: 'Revoke all trusted devices',
         description:
@@ -2892,6 +2947,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/trusted-devices/{id}': {
       delete: {
+        operationId: 'revokeTrustedDevice',
         tags: ['User'],
         summary: 'Revoke trusted device',
         description:
@@ -2914,6 +2970,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/user/audit-log': {
       get: {
+        operationId: 'getAuditLog',
         tags: ['User'],
         summary: 'Get audit log',
         description: 'Returns paginated audit log entries for the authenticated user.',
@@ -2936,6 +2993,7 @@ export const swaggerSpec: JsonObject = {
     // -- Tools --
     '/tools/check-password-breach': {
       post: {
+        operationId: 'checkPasswordBreach',
         tags: ['Tools'],
         summary: 'Check password breach (HIBP)',
         description:
@@ -2977,6 +3035,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/tools/check-password-breach/batch': {
       post: {
+        operationId: 'checkPasswordBreachBatch',
         tags: ['Tools'],
         summary: 'Check password breaches in bulk (HIBP)',
         description:
@@ -3022,6 +3081,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/tools/export': {
       post: {
+        operationId: 'exportVault',
         tags: ['Tools'],
         summary: 'Export vault',
         description: 'Exports all vault items as JSON. Rate limited: 3 req/IP per 15 min.',
@@ -3078,6 +3138,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/tools/import': {
       post: {
+        operationId: 'importVault',
         tags: ['Tools'],
         summary: 'Import vault items',
         description:
@@ -3130,6 +3191,7 @@ export const swaggerSpec: JsonObject = {
     // -- Backup --
     '/backup/setup': {
       post: {
+        operationId: 'setupBackup',
         tags: ['Backup'],
         summary: 'Setup backup encryption',
         description:
@@ -3159,6 +3221,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/backup/settings': {
       put: {
+        operationId: 'updateBackupSettings',
         tags: ['Backup'],
         summary: 'Update backup settings',
         description: 'Updates backup schedule and email settings.',
@@ -3193,6 +3256,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/backup/trigger': {
       post: {
+        operationId: 'triggerBackup',
         tags: ['Backup'],
         summary: 'Trigger backup now',
         description:
@@ -3214,6 +3278,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/backup/download': {
       get: {
+        operationId: 'downloadBackup',
         tags: ['Backup'],
         summary: 'Download backup',
         description:
@@ -3235,6 +3300,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/backup/history': {
       get: {
+        operationId: 'getBackupHistory',
         tags: ['Backup'],
         summary: 'Backup history',
         description: 'Returns paginated backup history log.',
@@ -3248,6 +3314,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/backup/change-password': {
       put: {
+        operationId: 'changeBackupPassword',
         tags: ['Backup'],
         summary: 'Change backup password',
         description:
@@ -3277,6 +3344,7 @@ export const swaggerSpec: JsonObject = {
     },
     '/backup/restore': {
       post: {
+        operationId: 'restoreBackup',
         tags: ['Backup'],
         summary: 'Restore from backup',
         description:

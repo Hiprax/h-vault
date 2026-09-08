@@ -151,8 +151,15 @@ test.describe('Remember-me cold boot (2FA)', () => {
     const { backupCodes } = await enable2fa(request, apiUser);
 
     // 3. Fresh browser session: log in with "Remember me" checked and clear the
-    //    2FA challenge (a backup code — a plain input, sturdier than the OTP
-    //    boxes, and it grants the trusted device just the same).
+    //    2FA challenge (a backup code — a plain input, sturdier in a browser
+    //    than the OTP boxes). A backup code deliberately grants NO trusted
+    //    device, which is fine here and is the point worth writing down: what
+    //    this test proves is that the REMEMBERED SESSION survives a restart, and
+    //    that is `rememberMe` alone. Nothing below reads the trusted-device
+    //    cookie — the restart resumes from the refresh cookie, it does not log
+    //    in again — so this stays a clean test of the session promise, with the
+    //    2FA-skip promise pinned separately in
+    //    `packages/server/tests/backup-code-trusted-device.test.ts`.
     const liveContext = await browser.newContext();
     const livePage = await liveContext.newPage();
     await suppressOnboarding(livePage);

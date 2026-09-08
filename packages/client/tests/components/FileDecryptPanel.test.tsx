@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { CryptoError, CryptoErrorType } from '@hiprax/crypto';
 
 const { mockToast, mockDecryptFile, mockGetMaxBytes } = vi.hoisted(() => ({
@@ -70,7 +70,7 @@ describe('FileDecryptPanel', () => {
     mockGetMaxBytes.mockResolvedValue(BIG_LIMIT);
   });
 
-  it('keeps submit disabled until a file and a password are provided', () => {
+  it('keeps submit disabled until a file and a password are provided', async () => {
     render(<FileDecryptPanel />);
     const button = screen.getByRole('button', { name: /decrypt & download/i });
     expect(button).toBeDisabled();
@@ -80,6 +80,13 @@ describe('FileDecryptPanel', () => {
 
     typePassword('anything');
     expect(button).not.toBeDisabled();
+
+    // The panel reads the server's size cap on mount and applies it in a `.then`,
+    // which in a synchronous case lands after the body has finished and outside
+    // `act(...)`. Nothing above reads the cap; this only settles it.
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it('decrypts on the happy path and downloads the restored file', async () => {

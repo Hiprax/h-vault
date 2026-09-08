@@ -9,8 +9,15 @@ pipeline and about tests are not optional.
 
 ## Getting set up
 
-You need **Node 24+** (pinned in `.nvmrc`) and **Docker** (for MongoDB and the object
-storage the document store uses, and for the `docker` pipeline gate).
+You need **Node 24+** (pinned in `.nvmrc`), **Docker** (for MongoDB and the object
+storage the document store uses, and for the `docker` pipeline gate), and **two Playwright
+browsers** — the end-to-end gate declares a Chromium project over every spec and a Firefox
+project over the clipboard and auto-lock specs, and a browser that is not installed fails
+those specs outright rather than reporting "could not run":
+
+```bash
+npx playwright install --with-deps chromium firefox
+```
 
 ```bash
 git clone https://github.com/Hiprax/h-vault.git
@@ -78,8 +85,15 @@ computed in local time and every other gate runs where local time and UTC are th
 thing; `deploy`, the deployment clean room, which stands the whole Compose stack up from
 nothing and is far too heavy for a hook — its fast sibling `smoke` covers the built
 artifact on every push; `flake`, ten complete runs of every suite in ten different
-shuffled orders plus the Playwright suite three times over, measured at 84 minutes; and
-`mutation`, the oracle, which re-runs the suite once per mutant and is measured in hours.
+shuffled orders plus the Playwright suite three times over, measured at 84 and 79 minutes
+on two separate runs; and `mutation`, the oracle, which re-runs the suite once per mutant.
+`mutation` is measured in DAYS on a four-core machine, not in hours: its `shared` leg takes
+13m30s, but 41 % of the `server` leg's 12,174 mutants are static — a static mutant has no
+per-test coverage, so it is run against the whole suite, and that suite boots a real mongod
+per file. Measured at about one mutant per minute per runner, which is 120-130 hours for
+that leg alone. Plan for it, and never make it cheap by narrowing what it mutates or by
+raising its concurrency: the first shrinks the score's denominator and the second turns
+slow tests into timeouts, which Stryker counts as kills.
 All eight run in `npm run verify:full`.
 
 The gates are grouped into tiers by how long they take, so there is something worth
@@ -103,10 +117,26 @@ rather than gates, because the wall clock of your laptop is not a property of th
 failing a push over it would only teach people to reach for `--no-verify`. They are still measured:
 every run records `budgetSeconds` beside its own `durationMs` in `summary.json` and prints the
 comparison. The numbers live in `scripts/ci/lib/tiers.mjs`. If you add a gate to T0, re-measure, and
-know before you start that there is nothing left to spend: the measured value is now
-**1m 49s to 2m 23s** over three runs against that 90 s budget, so even the quietest is
-over it and the runner says so on every run. `lint` and `type-check` are about 85 s of
-the total between them.
+know before you start that there is very little left to spend. The measurement splits
+by what else the machine was doing: on an idle four-core box it is
+**1m 18s**, five runs spanning a single second, which is twelve seconds inside
+the 90 s budget; on the same four cores running unrelated work it is
+**1m 19s to 2m 44s**. The runner says which on every run. `lint` and `format` are 61 s of
+the idle 78 s and 1m 42s to 2m 00s of a busy run — more than the whole budget between
+them — so that is where any new gate's time would have to come from. `type-check` is 13
+to 32 s only because every tsc invocation keeps incremental build information in
+`.cache/tsbuildinfo/`; a cold run — a fresh clone, or the clean room — measures about
+1m 24s instead.
+
+The obvious way to buy that back has already been tried and rejected: ESLint's
+`concurrency: 'auto'` measured 4-4 on wall clock over eight interleaved pairs of runs
+while costing +37.5 % CPU and +0.95 GB of peak memory in every one of them, because
+`projectService: true` makes each worker thread build its own TypeScript program. It is
+backwards for this tier twice over — the extra CPU only turns into wall clock when cores
+are idle, which is when the tier already fits, and it costs most when the machine is
+busy, which is the only time the tier needs help. The measurement is recorded beside the
+constructor in `scripts/ci/lint-gate.mjs`, so please read it before spending an afternoon
+reproducing it.
 
 The runner **aggregates by default**: it runs every selected gate and reports all the
 failures, rather than costing you a round trip per failure. A gate whose dependency
@@ -192,7 +222,7 @@ because the obvious way past each of them is the wrong one.
   pinned object-storage engine, in a container. **Both declare the `docker` CLI**, and
   the reason is worth stating because it is not obvious from the gate names: with no
   engine the server reports `documents: { enabled: false }`, the client hides the whole
-  section, and the document journeys plus four of the twenty scanned accessibility views
+  section, and the document journeys plus seven of the thirty-three scanned accessibility views
   fail with symptoms that say nothing about the code. Without a daemon both report **could
   not run** rather than passing quietly. `flake` inherits the same requirement, because
   the Playwright suite is three of the runs it makes.
@@ -288,7 +318,10 @@ Three gates enforce it rather than trusting it:
   field has a direction: coverage, test counts and the measured file set may only rise;
   warnings and suppressions may only fall. Moving a number needs
   `node scripts/ci/ratchet-check.mjs --accept --reason "..."`, which moves each field only
-  in its improving direction and refuses while anything is failing or unmeasured.
+  in its improving direction and refuses while anything is failing or unmeasured. Recording a
+  family the baseline has never carried is a different act and needs
+  `--accept --seed <family> --reason "..."`, because it writes a floor with nothing to compare
+  it against; it refuses a half-present family and refuses any path `meta.fields` still names.
 - **`npm run verify:selftest`** plants one defect per registered gate in a throw-away copy
   of the tree and requires every gate to go red — for a reason its own report attributes to
   that defect, so a gate that fails for an unrelated reason is reported `unproven` rather

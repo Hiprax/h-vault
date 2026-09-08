@@ -297,11 +297,32 @@ export const MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER = 3;
 // `MAX_DOCUMENTS_PER_USER`.
 //
 // The count is checked when a transfer is OPENED and never again
-// (`documentController`'s init: `documentCount >= MAX_DOCUMENTS_PER_USER`), so
-// three transfers opened against the same reading of 4,999 all pass and all
-// commit. The highest number of rows an account can actually hold is therefore
-// `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1`, and a
-// fourth transfer cannot be opened until it is back under the limit.
+// (`documentController`'s init: `documentCount >= MAX_DOCUMENTS_PER_USER`), and a
+// transfer already open commits whatever the count does afterwards. So an account
+// at `MAX_DOCUMENTS_PER_USER - 1` may open a transfer, then another, then a third
+// — each reading a count that still fits, because only a COMPLETION moves it —
+// and all three commit. The highest number of rows an account can actually hold is
+// therefore `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1`,
+// and a fourth transfer cannot be opened until it is back under the limit.
+//
+// That "and a fourth cannot be opened" is the whole derivation, and it is a
+// property of the SERVER rather than of arithmetic. TWO things in
+// `documentController`'s init establish it, and either one alone is not enough:
+//
+//   1. The per-user `document-init:<userId>` JobLock. The concurrency check is
+//      itself a read followed by a write, so unserialized, N simultaneous opens
+//      all read zero live transfers and all commit — the overshoot has no bound
+//      at all, and an account carried past this constant can never rotate its
+//      vault key again.
+//   2. The ORDER of the two counts: live transfers first, committed documents
+//      second. A completion holds a DIFFERENT lock (per upload) and can land
+//      between them, so reading documents first pairs a count taken before three
+//      completions with a live-transfer count of zero taken after them — both
+//      pass, and the account finishes on exactly this constant, leaving the
+//      slack described below at zero.
+//
+// Anything that removes that lock, or swaps those two reads, invalidates the
+// number below rather than merely the comment above it.
 //
 // A rotation must name EVERY row the account holds — the handler compares
 // distinct ids against an UNFILTERED `countDocuments`, because a trashed document
@@ -564,6 +585,27 @@ export const MAX_PREVIEW_BYTES = 26_214_400;
 // fine; 50,000 SEPARATE lines is 50,000 nodes, and it is the node count rather
 // than the byte count that stops a tab responding.
 export const MAX_PREVIEW_TEXT_LINES = 50_000;
+
+// The widest a previewed delimited file is rendered, in columns.
+//
+// The row cap above is not a node budget on its own: a table's node count is
+// rows TIMES columns, and the width of a CSV is decided by the file rather than
+// by the reader. A 25 MiB line of nothing but commas is comfortably under
+// MAX_PREVIEW_BYTES and asks for twenty-six million cells in one row, which
+// stops the tab before it can show anything at all. Real delimited data is a
+// few dozen columns wide, so this is a bound on the pathological case and not a
+// limit anybody's spreadsheet meets. Fields past it are COUNTED and not kept,
+// exactly as rows past the row cap are, so the notice can name the real width.
+export const MAX_PREVIEW_TABLE_COLUMNS = 1_000;
+// The total number of cells a previewed delimited file may render.
+//
+// The column cap alone still permits 50,000 x 1,000, so the product needs its
+// own ceiling. This one is what today's ordinary worst case already costs: a
+// five-column file at the row cap. Past it, ROWS are dropped rather than
+// columns, because a table missing its right-hand columns is unreadable while
+// one missing its later rows is simply shorter — and the reader is told which
+// of the two happened.
+export const MAX_PREVIEW_TABLE_CELLS = 250_000;
 
 // Extension to render mode. The lookup key is what `documentExtension` returns:
 // the LOWERCASED segment after the LAST dot of the decrypted name. A name with
@@ -898,6 +940,14 @@ export const AUDIT_ACTIONS = [
   'backup_download',
   'trash_auto_purge',
   '2fa_backup_codes_regenerated',
+  // Spending one of those codes. A backup code is a RECOVERY credential — issued
+  // in a batch, kept where the authenticator app is not — so its use is a thing
+  // the account owner needs to see, and it used to produce a server log line and
+  // nothing else. It is its own action rather than a field on the `login` row
+  // because the audit log's UI renders the action and never the metadata, so a
+  // marker alone would be invisible to the only person it is written for; the
+  // `login` row carries `backupCode` as well, for anything reading the API.
+  '2fa_backup_code_used',
   'rotation_recovery',
   'deletion_cleanup',
   'settings_update',

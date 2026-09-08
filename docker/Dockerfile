@@ -103,9 +103,9 @@ CMD ["npm", "run", "dev"]
 # `COPY` PRESERVES the source file's mode. On a checkout created with a
 # restrictive umask — which this one is, at 0600 — every file copied from the
 # build context lands root-owned and unreadable by anyone else, and both runtime
-# images drop to `USER node` (uid 1000). Measured on the images this repository
-# builds today: `/app/package.json` arrived `-rw-------`, so `hvault-app` died at
-# launch with "Cannot find package '/app/node_modules/@hvault/shared/index.js'"
+# images drop to `USER 1000:1000` — the `node` account. Measured on the images
+# this repository builds today: `/app/package.json` arrived `-rw-------`, so
+# `hvault-app` died at launch with "Cannot find package '/app/node_modules/@hvault/shared/index.js'"
 # (Node cannot read a workspace's package.json to resolve it) and
 # `hvault-bootstrap` died with `npm error EACCES ... open '/app/package.json'`.
 # The app gates on the bootstrap completing, so the whole stack stays down — and
@@ -239,7 +239,17 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 # write permission. A fresh clone has no such directory, and the stack dies.
 RUN mkdir -p /app/packages/server/logs && chown -R node:node /app/packages/server/logs
 
-USER node
+# `1000:1000`, not `node`. It is the SAME account — the base image's
+# /etc/passwd carries `node:x:1000:1000`, and a numeric USER is still resolved
+# through it, so $HOME is /home/node either way (measured on
+# node:24-alpine3.23). Written numerically because that is the form the OTHER
+# half of this contract is written in: docker-compose.yml pins every tmpfs this
+# container mounts to `uid=1000,gid=1000`, and a tmpfs whose owner disagrees with
+# the process is the failure CLAUDE.md records as an app that exits 0 silently
+# and never restarts. Two spellings of one uid is how those two drift apart.
+# hadolint DL3066 asks for the same thing for its own reason: a name has to be
+# resolvable, a number always is.
+USER 1000:1000
 # The cwd every line of the comment above depends on. Set as its own directive
 # rather than assumed, so a reader does not have to trace it back to `base`.
 WORKDIR /app/packages/server
@@ -284,10 +294,18 @@ EXPOSE 5000
 # linger for as long as the keep-alive timer says, and a probe that overruns
 # --timeout is recorded as a FAILURE. (Compose overrides this healthcheck with its
 # own; this one is what `docker run` of the image alone gets, so it must agree.)
+#
+# Exec form (a JSON array), never the shell form: the shell form wraps the probe
+# in `/bin/sh -c`, which adds a process to every 30-second check and makes the
+# shell — not node — the process whose exit status Docker records. It also
+# matches the CMD below, so both entry points into this image are read the same
+# way. hadolint DL3025 asks for it; the reason to want it is the extra process.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:5000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD ["node", "-e", "fetch('http://127.0.0.1:5000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-USER node
+# The `node` account, numerically — see the bootstrap stage above for why the
+# number rather than the name.
+USER 1000:1000
 
 CMD ["node", "packages/server/dist/server.js"]
 
@@ -329,19 +347,29 @@ FROM nginxinc/nginx-unprivileged:1.29-alpine AS web
 # unprivileged uid 101, so switch to root ONLY for the apk transaction and drop
 # straight back; the final runtime user is unchanged, and --no-cache leaves no apk
 # index behind in the layer.
-USER root
-RUN apk upgrade --no-cache
-# Bound the worker count to this container's CPU budget, not the host's core
-# count. nginx ships `worker_processes auto`, which resolves through
-# sysconf(_SC_NPROCESSORS_ONLN) — that reports the HOST's cores and is blind to
-# the CFS quota, so on a 32-core machine nginx forks 32 workers inside a service
-# capped at `cpus: '0.5'` / `mem_limit: 256m`, and past ~99 cores it cannot fork
-# them all under `pids_limit: 100`. Two workers comfortably saturate half a core
-# for a reverse proxy while leaving a spare if one blocks on a static-file read.
-# This is baked at build time on purpose: the runtime alternative
-# (NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE) rewrites nginx.conf on boot, which
-# cannot work against this service's `read_only: true` root filesystem.
-RUN sed -i 's/^worker_processes .*/worker_processes 2;/' /etc/nginx/nginx.conf
+# `0`, not `root`: the same uid, written the way the `USER 101` below it is
+# written, so the pair reads as one decision rather than two conventions.
+USER 0
+# ONE RUN, and the order inside it is load-bearing rather than cosmetic. The
+# upgrade must precede the edit, because an nginx package upgrade would overwrite
+# /etc/nginx/nginx.conf and take the worker count with it; `&&` fixes that order
+# in a way two instructions never did. It also collapses two layers into one and
+# clears hadolint DL3059, which is what `development` above already does for the
+# same reason.
+#
+# The second command bounds the worker count to this container's CPU budget, not
+# the host's core count. nginx ships `worker_processes auto`, which resolves
+# through sysconf(_SC_NPROCESSORS_ONLN) — that reports the HOST's cores and is
+# blind to the CFS quota, so on a 32-core machine nginx forks 32 workers inside a
+# service capped at `cpus: '0.5'` / `mem_limit: 256m`, and past ~99 cores it
+# cannot fork them all under `pids_limit: 100`. Two workers comfortably saturate
+# half a core for a reverse proxy while leaving a spare if one blocks on a
+# static-file read. This is baked at build time on purpose: the runtime
+# alternative (NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE) rewrites nginx.conf on
+# boot, which cannot work against this service's `read_only: true` root
+# filesystem.
+RUN apk upgrade --no-cache \
+ && sed -i 's/^worker_processes .*/worker_processes 2;/' /etc/nginx/nginx.conf
 USER 101
 
 # The bundle is served from /srv/hvault, NOT from the base image's

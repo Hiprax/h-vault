@@ -81,7 +81,10 @@ vi.mock('../src/services/api/vaultApi', () => ({
   listTrashApi: vi.fn(),
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
     setUser: vi.fn().mockResolvedValue(undefined),
     cacheItems: vi.fn().mockResolvedValue(undefined),
@@ -158,6 +161,8 @@ import {
   logoutApi,
 } from '../src/services/api/authApi.js';
 import { offlineCache } from '../src/services/offlineCache.js';
+import { clearCsrfToken } from '../src/services/api/client';
+import { clearSettingsCache } from '../src/hooks/useUserSettings';
 import {
   copySecretToClipboard,
   __resetClipboardGuardForTests,
@@ -412,6 +417,45 @@ describe('authStore.login', () => {
     expect(state.isLoading).toBe(false);
   });
 
+  it('records the vault key generation the response delivered, beside the key itself', async () => {
+    // The join the whole rotation guard rests on. `authStore` is the only place
+    // that knows WHICH vault key this session holds; an upload sends that number
+    // so the server can tell a superseded key from the current one. A rotated
+    // account is served here (generation 2, not 0) precisely so that dropping
+    // this line cannot pass as a default.
+    vi.mocked(loginApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: { ...mockLoginResponse.data.data, vaultKeyVersion: 2 },
+      },
+    } as never);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    const state = useAuthStore.getState();
+    expect(state.vaultKeyVersion).toBe(2);
+    // It names the key that arrived with it, so the two must be set together.
+    expect(state.encryptedVaultKeyData).toEqual({
+      encrypted: 'enc-vk',
+      iv: 'vk-iv',
+      tag: 'vk-tag',
+    });
+  });
+
+  it('records generation 0 when the server does not publish one at all', async () => {
+    // A server older than the field. Zero is the safe reading: it can only make a
+    // later upload look BEHIND, which is refused and recovered from, never
+    // current, which would commit under a key nothing could unwrap.
+    vi.mocked(loginApi).mockResolvedValue(mockLoginResponse as never);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+    useAuthStore.setState({ vaultKeyVersion: 9 });
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(0);
+  });
+
   it('should handle 2FA required flow', async () => {
     const mock2faResponse = {
       data: {
@@ -617,6 +661,29 @@ describe('authStore.verify2fa', () => {
     expect(state.twoFactorRequired).toBe(false);
     expect(state.tempToken).toBeNull();
     expect(state.isLoading).toBe(false);
+  });
+
+  it('records the vault key generation on this leg too', async () => {
+    // A separate response builder on the server and a separate `set` here, so the
+    // pairing has to be asserted twice or half the sign-ins in the product record
+    // nothing and every upload from them pays the recovery round trip.
+    vi.mocked(login2faApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: { ...mock2faSuccessResponse.data.data, vaultKeyVersion: 3 },
+      },
+    } as never);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+
+    await useAuthStore.getState().verify2fa('123456');
+
+    const state = useAuthStore.getState();
+    expect(state.vaultKeyVersion).toBe(3);
+    expect(state.encryptedVaultKeyData).toEqual({
+      encrypted: 'enc-vk-2fa',
+      iv: 'vk-iv-2fa',
+      tag: 'vk-tag-2fa',
+    });
   });
 
   it('should throw if no tempToken is available', async () => {
@@ -1001,6 +1068,68 @@ describe('L29 — swallowed catch blocks log warnings in dev mode', () => {
     // Lock should still succeed
     expect(useAuthStore.getState().isLocked).toBe(true);
   });
+
+  /**
+   * Scoping the offline database to the account signing in, and what happens when
+   * the browser refuses.
+   *
+   * The ORDER is the security property. `setUser(userId)` renames the database this
+   * session will read and write; `clear()` empties it. Reversed, the clear would
+   * empty the PREVIOUS account's database and leave this account's stale ciphertext
+   * in place — which is the cross-user leak the pair exists to prevent — and no
+   * assertion anywhere pinned it. It is pinned here by invocation order rather than
+   * by two separate `toHaveBeenCalled`s, which hold in either order.
+   *
+   * The failure arm is asserted for a reason of its own: this scoping is BEST
+   * EFFORT, so a browser that refuses IndexedDB entirely must not cost the user
+   * their sign-in. Three files used to reach this arm by accident, because their
+   * `offlineCache` double simply had no `setUser` and calling `undefined` threw;
+   * completing those doubles left the arm covered by nothing at all, which is what
+   * this case replaces.
+   */
+  it('scopes the offline cache to the new account before clearing it, and signs in anyway if that fails', async () => {
+    vi.mocked(loginApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          accessToken: buildMockJwt('user-123'),
+          encryptedVaultKey: 'enc-vk',
+          vaultKeyIv: 'vk-iv',
+          vaultKeyTag: 'vk-tag',
+          kdfIterations: 600_000,
+          kdfAlgorithm: 'PBKDF2-SHA256',
+        },
+      },
+    } as never);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    expect(offlineCache.setUser).toHaveBeenCalledWith('user-123');
+    expect(vi.mocked(offlineCache.setUser).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(offlineCache.clear).mock.invocationCallOrder[0]!,
+    );
+
+    // Now the browser refuses. The sign-in must still complete, and the failure
+    // must be reported rather than swallowed in silence.
+    useAuthStore.setState(authInitialState);
+    vi.clearAllMocks();
+    const scopeError = new Error('IndexedDB unavailable');
+    vi.mocked(offlineCache.setUser).mockRejectedValueOnce(scopeError);
+
+    await useAuthStore.getState().login('user@example.com', 'Master123!');
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      'Failed to clear offline cache during login',
+      scopeError,
+    );
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(useAuthStore.getState().user?.userId).toBe('user-123');
+    expect(useAuthStore.getState().vaultKey).not.toBeNull();
+    // And the negative: a refusal to SCOPE must not go on to wipe whatever
+    // database the session was already pointing at.
+    expect(offlineCache.clear).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1273,6 +1402,8 @@ describe('logout clears the encrypted Vault Health snapshot (lock does not)', ()
       mek: {} as CryptoKey,
     });
 
+    localStorage.removeItem('__hv_logout_event');
+
     await useAuthStore.getState().logout();
 
     expect(mockClearHealthResults).toHaveBeenCalledWith('user-123');
@@ -1281,6 +1412,14 @@ describe('logout clears the encrypted Vault Health snapshot (lock does not)', ()
       'Failed to clear health results during logout',
       expect.any(Error),
     );
+    // The whole point of the try/catch: logout AWAITS the clear, and three
+    // teardown steps run after that await. Asserting only that logout returned
+    // would pass even if all three were skipped, leaving the next session with a
+    // stale settings cache, a CSRF token bound to a dead session, and other tabs
+    // never told to wipe their state.
+    expect(clearSettingsCache).toHaveBeenCalled();
+    expect(clearCsrfToken).toHaveBeenCalled();
+    expect(localStorage.getItem('__hv_logout_event')).not.toBeNull();
   });
 });
 

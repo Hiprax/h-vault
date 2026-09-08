@@ -8,7 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * This package's leg of the `test:property` suite: the vault's crypto round-trip,
- * the document container's, and the three pure-logic properties.
+ * the document container's, and the four pure-logic properties.
  *
  * Every file here also runs under `test:unit`, which is the whole client suite —
  * so this narrows NOTHING. It exists for the same two reasons `test:security`
@@ -34,6 +34,7 @@ export const CLIENT_PROPERTY_SUITE = [
   'tests/property/expiry.property.test.ts',
   'tests/property/entropy.property.test.ts',
   'tests/property/address.property.test.ts',
+  'tests/property/text-diff.property.test.ts',
 ];
 
 /**

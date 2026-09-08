@@ -89,11 +89,25 @@ export interface IDocumentUpload extends IWrappedDekFields, IStreamFramingFields
   /** Set by the SERVER at init from its own constant, and echoed to the client. */
   chunkPlaintextBytes: number;
   /**
-   * The user's `vaultKeyVersion` at the moment the DEK above was wrapped.
+   * The account's vault-key generation at the moment this transfer OPENED.
    *
-   * Completion refuses with 409 when it no longer matches, which is what stops a
-   * rotation that ran mid-transfer from committing a DEK wrapped under the
-   * superseded vault key — a row nothing could ever unwrap again.
+   * Written by the server, never read by the completion, and deliberately kept.
+   * It is the only record of which vault key an in-flight transfer began under —
+   * what a support question or a read of a stranded row needs, and what nothing
+   * else retains once the staging row is deleted.
+   *
+   * "Never read by the completion" is not the same as unused, and the difference
+   * matters before anyone deletes it: it is NOT stripped by `UPLOAD_PROJECTION`,
+   * so it goes out on `GET /documents/uploads[/:id]`, and
+   * `documentUploadResponseSchema` REQUIRES it — so a resume, which validates
+   * that row before deciding which parts to re-send, throws without it.
+   *
+   * It is emphatically NOT the rotation check. That compares the number the
+   * CLIENT sends at completion — its own record of the key it wrapped with — and
+   * this column could not stand in for it in either direction: it says what the
+   * SERVER's counter read at init, which is silent about the client's key, and
+   * the legitimate rewrap-after-409 retry deliberately carries a body version
+   * this column does not match.
    */
   vaultKeyVersion: number;
   parts: IDocumentUploadPart[];

@@ -85,7 +85,10 @@ vi.mock('../src/services/api/vaultApi', () => ({
   listTrashApi: vi.fn(),
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
     setUser: vi.fn().mockResolvedValue(undefined),
     cacheItems: vi.fn().mockResolvedValue(undefined),

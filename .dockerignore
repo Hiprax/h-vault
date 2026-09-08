@@ -24,6 +24,16 @@
 **/build
 **/coverage
 **/*.tsbuildinfo
+# `**/.cache`, and depth-agnostic for the same reason as `**/logs`. The root
+# `.cache/` is the local pipeline's scratch space: the CodeQL bundle and database
+# (hundreds of MB, which would otherwise ride into the `development` stage's
+# `COPY . .`) and, since type-checking became incremental, `tsbuildinfo/`. That
+# last one matters for correctness, not size: it records the state of ONE machine's
+# tree, and an incremental tsc that trusts it does not check whether the outputs it
+# describes exist — so a host copy sneaking in could leave a stage's build a silent
+# no-op. The rule above already excludes those files by name; this one keeps the
+# directory itself out of the context.
+**/.cache
 # `**/logs`, NOT `logs`. Docker matches these patterns against the whole
 # context-relative path, so a bare `logs` excludes ONLY the root logs/ — and
 # `packages/server/logs/` (the rotating request/audit logs a developer's local

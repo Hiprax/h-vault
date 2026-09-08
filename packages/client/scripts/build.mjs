@@ -4,13 +4,20 @@
  * application, then a SECOND `vite build` for the document sandbox.
  *
  * `vite build` is powered by Rolldown's native (Rust/napi) bundler. On Windows,
- * the Rolldown that vite 8.1.5 pins (`rolldown@~1.1.5`) intermittently segfaults
- * in its native worker threads AT PROCESS TEARDOWN — after the bundle AND the PWA
- * service worker have already been written to disk — surfacing as exit code
- * 0xC0000005 (`3221225477`, STATUS_ACCESS_VIOLATION). It is an upstream native
- * crash (vitejs/rolldown-vite#192), unrelated to our sources: the identical
- * commit builds cleanly on the very next run, and rolldown-vite is now archived
- * with no patched release inside vite 8's supported range.
+ * Rolldown intermittently segfaults in its native worker threads AT PROCESS
+ * TEARDOWN — after the bundle AND the PWA service worker have already been
+ * written to disk — surfacing as exit code 0xC0000005 (`3221225477`,
+ * STATUS_ACCESS_VIOLATION). It is an upstream native crash
+ * (vitejs/rolldown-vite#192), unrelated to our sources: the identical commit
+ * builds cleanly on the very next run, and rolldown-vite is archived with no
+ * patched release inside vite 8's supported range.
+ *
+ * MEASURED against `rolldown@~1.1.5`, the version vite 8.1.5 pinned. Vite now
+ * pins `rolldown@~1.2.4` and the crash has NOT been re-measured against it,
+ * because it reproduces only on Windows and only intermittently — so the retry
+ * stays. Do not delete it on the strength of a version number: the branch below
+ * is inert on Linux and macOS, it costs a passing build nothing, and the way to
+ * retire it is a Windows run that stops crashing, not a bump.
  *
  * This wrapper does NOT relax the build gate:
  *   - a normal success (exit 0) passes with no retry;

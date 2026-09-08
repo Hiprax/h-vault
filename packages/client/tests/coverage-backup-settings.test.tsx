@@ -1290,3 +1290,86 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     expect(mockApiPut).not.toHaveBeenCalledWith('/backup/change-password', expect.anything());
   });
 });
+
+/**
+ * The three controls on this page that reached a screen reader unnamed.
+ *
+ * All three are `test:a11y`'s `backup-settings` view now, which is what found
+ * them — but that gate needs a container, a dev server and two 600k-iteration
+ * key derivations, so the accessible names are pinned here as well, where they
+ * cost milliseconds. The queries below are by ROLE AND NAME, which is the point:
+ * `getByRole('switch', { name: 'Auto-backup' })` cannot pass unless the browser's
+ * accessible-name computation produces that string, so deleting the
+ * `aria-labelledby`, dropping the `id` it points at, or replacing the `<label
+ * htmlFor>` with the `<span>` that used to sit there each turns one of them red.
+ */
+describe('BackupSettingsPage — every control has an accessible name', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    useAuthStore.setState({
+      accessToken: 'test-token',
+      user: { userId: 'u1', email: 'test@example.com' },
+      isAuthenticated: true,
+      isLocked: false,
+      vaultKey: new Uint8Array(32) as unknown as CryptoKey,
+      mek: new Uint8Array(32) as unknown as CryptoKey,
+      encryptedVaultKeyData: null,
+      twoFactorRequired: false,
+      tempToken: null,
+    });
+
+    mockGetProfileApi.mockResolvedValue(profileWith(CONFIGURED_BACKUP));
+    mockApiGet.mockImplementation((url: string) => {
+      if (url === '/backup/history')
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [],
+            pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+          },
+        });
+      return Promise.resolve({ data: {} });
+    });
+  });
+
+  it('names the auto-backup switch from the words already on screen', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByText('Auto-backup'));
+
+    const toggle = screen.getByRole('switch', { name: 'Auto-backup' });
+    // Its content is a sliding knob, so there is nothing else the name could
+    // come from — and the description must reach the reader too, because the
+    // words "daily via email" are the only place the schedule is explained.
+    expect(toggle).toHaveAccessibleDescription('Send encrypted backup daily via email');
+    // The state, which is the other half of a switch's contract: a control that
+    // is named but never reports on/off is no more usable than an unnamed one.
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('names the schedule-hour field, which has no placeholder to fall back on', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByText('Backup Configuration'));
+
+    // `getByLabelText`, not a `container.querySelector`: this is the one field
+    // on the page with neither a label nor a placeholder, so before the fix
+    // there was no accessible name for any query to match.
+    const hour = screen.getByLabelText('Schedule (UTC hour)');
+    expect(hour).toHaveAttribute('type', 'number');
+    // The profile's `scheduleHour`, so the label is proved to be attached to the
+    // field that actually carries the setting rather than to some other spinner.
+    // `CONFIGURED_BACKUP` is a `Record<string, unknown>` by design, so the value
+    // is narrowed here rather than the fixture being retyped for one assertion.
+    expect(hour).toHaveValue(Number(CONFIGURED_BACKUP['scheduleHour']));
+  });
+
+  it('names the restore file picker, whose label used to be a mere sibling', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByText('Restore from File'));
+    fireEvent.click(screen.getByText('Restore from File'));
+
+    const picker = screen.getByLabelText('Backup File');
+    expect(picker).toHaveAttribute('type', 'file');
+    expect(picker).toHaveAttribute('accept', '.enc');
+  });
+});

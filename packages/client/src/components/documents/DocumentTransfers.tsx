@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { Loader2, RefreshCw, X } from 'lucide-react';
 import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, documentChunkCountFor, formatBytes } from '@hvault/shared';
 import { cn, getApiErrorMessage } from '../../lib/utils';
@@ -25,13 +25,16 @@ function describeTransfer(upload: DocumentUploadProgress): string {
   // from the byte counts the store already keeps rather than reported beside
   // them: a second field carrying the same fact is a second field that can
   // disagree with the first.
-  // `Math.max(1, …)` for the same reason `UploadRow` special-cases a zero-byte
-  // document below: `documentChunkCountFor(0, …)` is 0, and "Part 0 of 0" is not
-  // a sentence about anything. A file with no bytes is still one transfer.
-  const totalParts = Math.max(
-    1,
-    documentChunkCountFor(upload.totalBytes, DOCUMENT_PLAINTEXT_CHUNK_BYTES),
-  );
+  //
+  // Nothing is clamped here. `documentChunkCountFor` is already
+  // `max(1, ceil(bytes / chunk))`, and that floor is part of the FRAMING rather
+  // than presentation: a zero-byte document is one segment holding a tag and no
+  // plaintext, which is what the container format stores and what every other
+  // caller of that helper derives. Re-flooring it here would be a second copy of
+  // a rule the shared helper documents as having exactly one — and a copy that
+  // would go on quietly reporting "Part 1 of 1" if the real one were ever
+  // removed, hiding a framing change behind a sentence that still read correctly.
+  const totalParts = documentChunkCountFor(upload.totalBytes, DOCUMENT_PLAINTEXT_CHUNK_BYTES);
   const currentPart = Math.min(
     totalParts,
     Math.floor(upload.sentBytes / DOCUMENT_PLAINTEXT_CHUNK_BYTES) + 1,
@@ -42,7 +45,8 @@ function describeTransfer(upload: DocumentUploadProgress): string {
 interface UploadRowProps {
   upload: DocumentUploadProgress;
   onCancel: (id: string) => void;
-  onRetry: (id: string) => void;
+  /** Resolves when the resume has been prepared or refused; never rejects. */
+  onRetry: (id: string) => Promise<void>;
 }
 
 function UploadRow({ upload, onCancel, onRetry }: UploadRowProps) {
@@ -51,6 +55,35 @@ function UploadRow({ upload, onCancel, onRetry }: UploadRowProps) {
   const percent =
     upload.totalBytes === 0 ? 100 : Math.round((upload.sentBytes / upload.totalBytes) * 100);
   const failed = upload.status === 'failed';
+
+  /**
+   * Whether this row's resume is being prepared.
+   *
+   * `status` cannot answer this. The store's flip to `'uploading'` happens only
+   * once the staging ledger has answered, which is a full round trip, and a
+   * second click inside it used to start a SECOND transfer over the same parts —
+   * the defect the store now refuses outright. The refusal is the guarantee; this
+   * is the affordance, so the reader is told what is happening rather than left
+   * clicking a button that answers with an error toast.
+   *
+   * Local to the row rather than lifted into the store, because it describes this
+   * button between a click and its answer and nothing else reads it.
+   *
+   * `retryUpload` settles only when the whole transfer does, so this outlives the
+   * preparation it names — harmlessly, because every other status unmounts the
+   * button. The one case where the row is `'failed'` again by the time it settles
+   * is a resume that ran and then failed, and there it clears a microtask after
+   * the status write rather than a render later: a zustand `set` schedules React's
+   * render as a task, while the rejection travelling out of `runTransfer` to the
+   * `finally` below is microtasks, so the commit already sees `false`. No
+   * mounted-ref guard: a state update on an unmounted component is a no-op in
+   * React 19, and one added to avoid it would be ceremony around a non-event.
+   */
+  const [retrying, setRetrying] = useState(false);
+
+  const retryName = retrying
+    ? `Retrying upload of ${upload.fileName}`
+    : `Retry upload of ${upload.fileName}`;
 
   return (
     <li
@@ -62,13 +95,29 @@ function UploadRow({ upload, onCancel, onRetry }: UploadRowProps) {
           {upload.fileName}
         </span>
         {failed && (
+          /* The accessible name carries the file name, like the Cancel button
+             beside it: two failed transfers otherwise offer two controls called
+             "Retry" and nothing distinguishes them. The visible label stays a
+             prefix of it in BOTH states, so speech input still reaches the
+             control by what is written on it (WCAG 2.5.3). */
           <button
             type="button"
-            onClick={() => onRetry(upload.id)}
-            className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium text-[hsl(var(--primary))] hover:bg-[hsl(var(--accent))]"
+            disabled={retrying}
+            aria-label={retryName}
+            onClick={() => {
+              setRetrying(true);
+              void onRetry(upload.id).finally(() => {
+                setRetrying(false);
+              });
+            }}
+            className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium text-[hsl(var(--primary))] hover:bg-[hsl(var(--accent))] disabled:opacity-60 disabled:hover:bg-transparent"
           >
-            <RefreshCw className="h-3 w-3" />
-            Retry
+            {retrying ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+            {retrying ? 'Retrying' : 'Retry'}
           </button>
         )}
         <button
@@ -128,19 +177,24 @@ export function DocumentTransfers() {
   const transfers = Object.values(uploads);
   const anyLive = transfers.some(isLiveTransfer);
 
+  // Returns a promise that always RESOLVES, so the row's pending state settles on
+  // a refusal exactly as it does on a success. Reporting stays here, because the
+  // row has no toast and no business deciding which failures are worth saying.
   const handleRetry = useCallback(
-    (uploadId: string) => {
-      void retryUpload(uploadId).catch((error: unknown) => {
-        // A cancellation is never reported: `clearStore()` aborts every transfer
-        // on a lock and on a logout, and a user who has just locked their vault
-        // on purpose does not need an error about it.
-        if (error instanceof UploadCancelledError) return;
-        toast({
-          title: getApiErrorMessage(error, 'The upload could not be resumed.'),
-          type: 'error',
-        });
-      });
-    },
+    (uploadId: string): Promise<void> =>
+      retryUpload(uploadId).then(
+        () => undefined,
+        (error: unknown) => {
+          // A cancellation is never reported: `clearStore()` aborts every transfer
+          // on a lock and on a logout, and a user who has just locked their vault
+          // on purpose does not need an error about it.
+          if (error instanceof UploadCancelledError) return;
+          toast({
+            title: getApiErrorMessage(error, 'The upload could not be resumed.'),
+            type: 'error',
+          });
+        },
+      ),
     [retryUpload, toast],
   );
 

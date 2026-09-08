@@ -48,7 +48,10 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
   },
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
     setUser: vi.fn().mockResolvedValue(undefined),
     clear: vi.fn().mockResolvedValue(undefined),
@@ -156,6 +159,7 @@ function resetStore(): void {
     vaultKey: null,
     mek: null,
     encryptedVaultKeyData: null,
+    vaultKeyVersion: 0,
     kdfIterations: KDF_ITERATIONS,
   });
 }
@@ -207,6 +211,44 @@ describe('resumeSession', () => {
     expect(state.mek).toBeNull();
     // A successful resume keeps the hint for future boots.
     expect(getHint()).toBe('1');
+  });
+
+  it('records the vault key generation the profile named, beside the wrapped key', async () => {
+    // The third and last place a session learns which vault key it is about to
+    // hold. The Unlock screen re-derives from the blob recorded here and re-reads
+    // nothing, so a resume that dropped the number would leave a rotated account
+    // claiming generation 0 for the rest of the session — and every upload from it
+    // paying a refusal and a profile round trip before it could commit. A non-zero
+    // generation is served so a dropped line cannot pass as the default.
+    setHint();
+    mockRefreshTokenApi.mockImplementation(() => refreshOk());
+    mockGetProfileApi.mockResolvedValue(profileOk({ ...PROFILE, vaultKeyVersion: 5 }));
+
+    expect(await resumeSession()).toBe(true);
+
+    const state = useAuthStore.getState();
+    expect(state.vaultKeyVersion).toBe(5);
+    expect(state.encryptedVaultKeyData).toEqual({
+      encrypted: 'enc-vk',
+      iv: 'vk-iv',
+      tag: 'vk-tag',
+    });
+    // Still no key material: this path never sets one, whatever it records about it.
+    expect(state.vaultKey).toBeNull();
+  });
+
+  it('records generation 0 for an account created before the column existed', async () => {
+    // A `.lean()` read applies no schema default, so such an account genuinely
+    // carries nothing. Zero is what the server itself reads it as, and it is the
+    // safe direction: it can only make a later upload look behind, never current.
+    setHint();
+    mockRefreshTokenApi.mockImplementation(() => refreshOk());
+    mockGetProfileApi.mockResolvedValue(profileOk());
+    useAuthStore.setState({ vaultKeyVersion: 7 });
+
+    expect(await resumeSession()).toBe(true);
+
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(0);
   });
 
   it('returns false and makes no network call when the hint is absent', async () => {

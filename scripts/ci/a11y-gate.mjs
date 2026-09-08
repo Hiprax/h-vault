@@ -3,11 +3,11 @@
  * `test:a11y` — the accessibility suite, run as its own gate.
  *
  * Two specs, driven by `playwright.a11y.config.ts` against the real application:
- * `e2e/a11y.spec.ts` runs axe over twenty views and modals in the authenticated
+ * `e2e/a11y.spec.ts` runs axe over thirty-three views and modals in the authenticated
  * DOM, and `e2e/a11y-keyboard.spec.ts` pins the focus and keyboard behaviours a
  * scanner cannot infer.
  *
- * Four of those twenty views are the document store's, so this gate DECLARES
+ * Seven of those thirty-three views are the document store's, so this gate DECLARES
  * `docker` beside `build:shared` in `.testfortress/verify.json` and in
  * `scripts/ci/local-ci.mjs`: `playwright.a11y.config.ts` spreads the base
  * config's `webServer`, which runs `e2e/start-server.ts`, which stands the real
@@ -48,6 +48,16 @@
  *     in `A11Y_SUITE`, because a `testMatch` that has gone stale in part matches
  *     the remaining file and passes — Playwright only errors when NOTHING
  *     matches, the same trap `vitest.security.config.ts` records.
+ *
+ *  e. A CHECK AXE COULD NOT DECIDE IS RECORDED, AND IS NOT A FAILURE. axe answers
+ *     `incomplete` when a rule ran and reached no verdict — most often
+ *     `color-contrast` over a background it cannot resolve. Those used to be
+ *     discarded, which meant a check that had silently stopped being measurable
+ *     was indistinguishable from one that passed in every number published here:
+ *     the same trap as (a), one level down. They are counted as `undecided` and
+ *     listed, and they are deliberately NOT gated — "needs a human" is not a
+ *     defect, and gating on it would make the only route back to green a rule
+ *     exclusion.
  */
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { runNpm } from './lib/proc.mjs';
@@ -134,12 +144,25 @@ if (junit && missingSuites.length > 0) {
 // (b) The findings themselves.
 const byImpact = {};
 const blocking = [];
+// (e) And the checks axe could not decide. Counted per RULE, per view, the same
+// way the violations above are.
+const undecided = [];
 for (const scan of scans) {
   for (const violation of scan.violations ?? []) {
     byImpact[violation.impact] = (byImpact[violation.impact] ?? 0) + 1;
     if (BLOCKING_IMPACTS.includes(violation.impact)) {
       blocking.push({ view: scan.view, ...violation });
     }
+  }
+  for (const item of scan.incomplete ?? []) {
+    // `rule`, NOT `id`, and the rename is load-bearing. `blocking` entries are
+    // `{ view, id, ... }`, and `verify:selftest`'s defect case for this gate
+    // proves failability by finding one — so an undecided entry with the same two
+    // adjacent keys would let a GREEN report satisfy that predicate. `select-name`
+    // is not a hypothetical here either: its `no-implicit-explicit-label` check
+    // can return undecided, which is exactly the rule that case plants.
+    const { id, ...rest } = item;
+    undecided.push({ view: scan.view, rule: id, ...rest });
   }
 }
 
@@ -166,6 +189,10 @@ const payload = {
     // finding of unknown severity appeared in no number this gate reports.
     unknown: byImpact['unknown'] ?? 0,
   },
+  // (e) Recorded, never gated. See the note beside `A11yScan.incomplete` in
+  // `e2e/helpers.ts` for why both halves of that matter.
+  undecided: undecided.length,
+  undecidedFindings: undecided,
   problems,
   blocking,
   scans,
@@ -189,6 +216,7 @@ if (code !== 0 || problems.length > 0 || blocking.length > 0) {
 
 note(
   `a11y.json — ${String(scanned.size)} views, 0 serious/critical, ` +
-    `${String(payload.violations.moderate)} moderate, ${String(payload.violations.minor)} minor ` +
+    `${String(payload.violations.moderate)} moderate, ${String(payload.violations.minor)} minor, ` +
+    `${String(undecided.length)} undecided ` +
     `(automated scanning finds roughly a third of real accessibility defects: this is a floor)`,
 );

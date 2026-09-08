@@ -33,14 +33,17 @@ import { getStorage, isStorageNotFound } from '../services/storage/index.js';
 import type { StoragePart, StorageRangeRead } from '../services/storage/types.js';
 import { buildObjectKey, expectedPartSize, segmentRange } from '../utils/documentObjects.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
+import { createStorageBreaker } from '../utils/storageBreaker.js';
 import {
   assertFolderOwned,
   assertVaultNotRotating,
   buildFolderAwareUpdate,
   documentCompleteLockName,
+  documentInitLockName,
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 
 const logger = createModuleLogger('document-controller');
@@ -56,10 +59,15 @@ const BYTES_PER_MB = 1024 * 1024;
  * What it keeps OUT is the point. `objectKey`, `chunkPlaintextBytes`,
  * `vaultKeyVersion`, `_id`, `parts`, `receivedBytes` and `expiresAt` are all
  * SERVER-assigned — a client that could set `objectKey` could address another
- * user's object, one that could set `chunkPlaintextBytes` could choose its own
- * framing, and one that could set `vaultKeyVersion` could defeat the rotation
- * check at completion. `z.object()` already strips an unknown key, so this is the
- * second of two independent filters rather than the only one.
+ * user's object, and one that could set `chunkPlaintextBytes` could choose its
+ * own framing. `vaultKeyVersion` is here because the staging row's copy is a
+ * SERVER observation — what this account's vault-key generation was when the
+ * transfer opened — and a column recording an observation must not be writable
+ * by the thing being observed. It is NOT what the completion checks: that reads
+ * the number from the completion body, because the body's number says which key
+ * the client wrapped with and the staging row's says nothing about the client at
+ * all. `z.object()` already strips an unknown key, so this is the second of two
+ * independent filters rather than the only one.
  */
 const ALLOWED_INIT_FIELDS = new Set([
   'encryptedDek',
@@ -147,6 +155,30 @@ const PART_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
  * untouched.
  */
 const COMPLETE_LOCK_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * How long one transfer OPEN may hold its per-user lock.
+ *
+ * The same two minutes an import and a completion take. The work under it is a
+ * handful of counted index scans and, for a multi-segment transfer, one
+ * `CreateMultipartUpload` — a metadata call, but a network one. What it really
+ * bounds is how long a process that died mid-open blocks the SAME account from
+ * opening another transfer, and two minutes is short enough that a user waits
+ * rather than gives up. It blocks nothing else: the lock is keyed by user, so
+ * parts and completions of transfers already open are untouched.
+ *
+ * It does NOT dominate the worst case of the call it spans, and that is a
+ * conscious trade rather than an oversight. `s3Provider` pins
+ * `connectionTimeout` 5 s but `socketTimeout` 60 s over 3 attempts, so an engine
+ * that CONNECTS and then hangs can hold this for ~180 s and the TTL lapses first.
+ * Raising the TTL past that would mean a crashed worker locking an account out of
+ * its own uploads for three minutes, to buy mutual exclusion in the one case
+ * where the engine is already refusing to complete a transfer. What the lapse
+ * degrades to is the unserialized race this lock closes, never a cross-account
+ * one and never a released lock stolen from a live holder: `releaseJobLock`
+ * deletes by `lockedBy`, so the stale holder cannot free its successor's.
+ */
+const INIT_LOCK_TTL_MS = 2 * 60 * 1000;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -470,7 +502,19 @@ async function releaseTransfer(
  */
 type CompletionOutcome =
   | { readonly kind: 'document'; readonly document: HydratedDocument<IDocument> }
-  | { readonly kind: 'staleVaultKey'; readonly vaultKeyVersion: number };
+  | {
+      readonly kind: 'staleVaultKey';
+      readonly vaultKeyVersion: number;
+      /**
+       * WHY the version did not match, which the two cases do not share.
+       * `rotated` is the ordinary one the recovery path exists for. `unreached`
+       * is a version above anything this account has ever held, which no
+       * rotation can explain — the same refusal, because refusing costs the
+       * client one retry and a 400 would cost it the whole transfer, but a
+       * different thing to be told.
+       */
+      readonly reason: 'rotated' | 'unreached';
+    };
 
 /**
  * One page of documents and the pagination envelope that describes it, for the
@@ -554,10 +598,15 @@ export const initUpload = catchAsync(async (req: Request, res: Response): Promis
 
   // A wrapped DEK is ciphertext under the caller's vault key, so this is a
   // ciphertext-creating write and carries the same fence every other one does.
-  // Both ends of an upload are fenced, and the two are not redundant: the
-  // per-upload lock and the per-user rotation lock are disjoint, so a completion
+  // Both ends of an upload are fenced, and the fence is not made redundant by any
+  // of the locks around it: this handler's `document-init` lock, the completion's
+  // per-upload lock and the rotation's own lock are all disjoint, so a transfer
   // that started before a rotation could otherwise commit a key nothing can
   // unwrap. See `assertVaultNotRotating`.
+  //
+  // Outside the lock below, with the size check: both are refusals that read no
+  // budget and write nothing, so serializing them would buy nothing and would
+  // make a rotating account's 409 wait behind another open.
   await assertVaultNotRotating(userId);
 
   if (body.declaredPlaintextBytes > maxDocumentBytes()) {
@@ -566,27 +615,122 @@ export const initUpload = catchAsync(async (req: Request, res: Response): Promis
     );
   }
 
-  // Checked HERE and not again at completion, deliberately. Init is where a
-  // refusal is free — nothing has been uploaded yet — while a completion refused
-  // for the count would throw away a transfer that has already crossed the network
-  // in full, and the caps this project re-measures late are the ones a client can
-  // move after the check (the quota, because the bytes that arrive may exceed the
-  // bytes declared). The count cannot be moved that way: a transfer commits exactly
-  // one document. The residual is bounded by the concurrency cap, so an account can
-  // finish at most `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1` documents past
-  // the limit and cannot open another transfer until it is back under it.
-  const documentCount = await Document.countDocuments({ userId });
-  if (documentCount >= MAX_DOCUMENTS_PER_USER) {
-    throw httpErrors.badRequest(
-      `Document limit reached. You can have a maximum of ${String(MAX_DOCUMENTS_PER_USER)} documents.`,
+  const lockName = documentInitLockName(userId);
+  const lockId = await acquireJobLock(lockName, INIT_LOCK_TTL_MS);
+  if (lockId === null) {
+    // A conflict rather than a queue, and rather than a 500. Every budget below
+    // is per-user, so the honest answer to "another open is deciding them right
+    // now" is that this one cannot be decided yet.
+    //
+    // Reachable by a real user, but only just: the upload panel sends one file at
+    // a time and the window is the open itself, so producing this means picking a
+    // second file and confirming it within the milliseconds the first open takes.
+    // The panel reports the message verbatim (`DocumentUploadPanel`'s
+    // `reportFailure`, whose own docblock describes exactly this pair of
+    // overlapping transfers), so the answer a user gets is "retry", not silence.
+    // A scripted client can produce it at will, which is the point.
+    throw httpErrors.conflict(
+      'Another transfer is already being opened for this account. Please wait a moment and retry.',
     );
   }
 
+  // The lock is released BEFORE the response is written, on EVERY path including
+  // a refusal — the same ordering `toolsController.importVault` and
+  // `completeUpload` take, and for the same reason. A client that retried the
+  // moment its 400 landed would otherwise race the release round trip and be told
+  // its own finished attempt was still in progress, which is a conflict it can do
+  // nothing about. Hence the transfer is opened under the lock and rendered after
+  // it.
+  let opened: OpenedTransfer;
+  try {
+    opened = await openTransferUnderLock(userId, body);
+  } finally {
+    await releaseJobLock(lockName, lockId);
+  }
+
+  logger.info('Document upload initiated', {
+    userId,
+    uploadId: opened.uploadId,
+    declaredChunkCount: body.declaredChunkCount,
+  });
+
+  res.status(201).json({
+    success: true,
+    data: {
+      uploadId: opened.uploadId,
+      vaultKeyVersion: opened.vaultKeyVersion,
+      chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+    },
+  });
+});
+
+/** What {@link openTransferUnderLock} hands back for the response to render. */
+interface OpenedTransfer {
+  uploadId: string;
+  vaultKeyVersion: number;
+}
+
+/**
+ * Every per-user budget, and the staging row that spends them, under one lock.
+ *
+ * Each of these three caps is a read followed by a write, which is the shape that
+ * cannot hold on its own: two opens both read a count that fits and then both
+ * commit. `document-init:<userId>` is what makes them hold — see
+ * {@link documentInitLockName} for why the lock is per-user and why a transaction
+ * would not do instead.
+ *
+ * The folder lookup and the `vaultKeyVersion` read are inside it too, at no cost:
+ * neither is a budget, but splitting the span would buy nothing and would make
+ * the compensating abort below span a lock boundary.
+ */
+async function openTransferUnderLock(
+  userId: string,
+  body: InitDocumentUploadInput,
+): Promise<OpenedTransfer> {
+  // ── The two counts, and why they are read IN THIS ORDER ──────────────
+  //
+  // Both are checked HERE and not again at completion, deliberately. Init is
+  // where a refusal is free — nothing has been uploaded yet — while a completion
+  // refused for a count would throw away a transfer that has already crossed the
+  // network in full, and the caps this project re-measures late are the ones a
+  // client can move after the check (the quota, because the bytes that arrive may
+  // exceed the bytes declared). Neither count can be moved that way: a transfer
+  // commits exactly one document.
+  //
+  // Write `D` for the account's committed documents and `L` for its live staging
+  // rows. Every document this account will ever hold is `D + L`: a completion
+  // moves one row from `L` to `D` and preserves the sum, an expiry or a cancel
+  // lowers it, and ONLY an open raises it — which is why serializing opens is
+  // what bounds it at all. The lock makes `L` unable to RISE while this request
+  // holds it, so the two refusals below give
+  // `D + L <= (MAX_DOCUMENTS_PER_USER - 1) + (MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1) + 1`,
+  // one row past the advertised limit for each transfer this account may run at
+  // once. That is exactly the slack `MAX_DOCUMENTS_PER_ROTATION` is derived from,
+  // so an account which overshot can still name every row it holds in one
+  // rotation payload.
+  //
+  // The order is load-bearing and NOT interchangeable, because a completion holds
+  // a DIFFERENT lock (`documentCompleteLockName`, keyed by upload) and can
+  // therefore land BETWEEN these two reads. Reading `L` first is what makes the
+  // bound above hold: `L` can only fall between the reads, so the value used is an
+  // upper bound on the rows still outstanding when `D` is read, and the two
+  // together bound the sum. Read the other way round, a `D` of
+  // `MAX_DOCUMENTS_PER_USER - 1` taken before three completions land is paired
+  // with an `L` of zero taken after them — both pass, and the account finishes on
+  // `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER`, which is
+  // `MAX_DOCUMENTS_PER_ROTATION` exactly and leaves that constant no slack at all.
   const now = new Date();
   const openUploads = await DocumentUpload.countDocuments({ userId, expiresAt: { $gt: now } });
   if (openUploads >= MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER) {
     throw httpErrors.badRequest(
       `Too many uploads in progress. You can run ${String(MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER)} at a time.`,
+    );
+  }
+
+  const documentCount = await Document.countDocuments({ userId });
+  if (documentCount >= MAX_DOCUMENTS_PER_USER) {
+    throw httpErrors.badRequest(
+      `Document limit reached. You can have a maximum of ${String(MAX_DOCUMENTS_PER_USER)} documents.`,
     );
   }
 
@@ -610,7 +754,7 @@ export const initUpload = catchAsync(async (req: Request, res: Response): Promis
   // Read as 0 when absent: an account created before this column existed, and the
   // `upgrade` gate's 0.7.0 fixture, both carry no value at all.
   const user = await User.findById(userId).select('vaultKeyVersion').lean();
-  const vaultKeyVersion = user?.vaultKeyVersion ?? 0;
+  const vaultKeyVersion = vaultKeyVersionOf(user);
 
   const uploadId = new mongoose.Types.ObjectId();
   const objectKey = buildObjectKey(userId, uploadId.toHexString());
@@ -651,21 +795,8 @@ export const initUpload = catchAsync(async (req: Request, res: Response): Promis
     throw error;
   }
 
-  logger.info('Document upload initiated', {
-    userId,
-    uploadId: uploadId.toHexString(),
-    declaredChunkCount: body.declaredChunkCount,
-  });
-
-  res.status(201).json({
-    success: true,
-    data: {
-      uploadId: uploadId.toHexString(),
-      vaultKeyVersion,
-      chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
-    },
-  });
-});
+  return { uploadId: uploadId.toHexString(), vaultKeyVersion };
+}
 
 /**
  * `GET /documents/uploads` — the caller's transfers.
@@ -1071,6 +1202,12 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
  *     cover.
  *   * The **`vaultKeyVersion` check** catches a rotation that has already
  *     COMMITTED, which the fence cannot see because the flag is cleared by then.
+ *     It compares the number the CLIENT sent — its own record of which vault key
+ *     it holds, published to it at sign-in — against the account's current one.
+ *     That distinction is the whole guard: a number this server echoed back at
+ *     init would agree with itself no matter which key the client actually held,
+ *     so a session still holding a superseded key would sail through, and the row
+ *     it committed would list, charge the quota and never open.
  *
  * The lock and the rotation lock are DISJOINT — one is keyed by upload, the other
  * by user — so holding this one says nothing whatever about whether a rotation is
@@ -1156,9 +1293,16 @@ export const completeUpload = catchAsync(async (req: Request, res: Response): Pr
     // instead of the entire file.
     res.status(409).json({
       success: false,
+      // The remedy is the same sentence either way — rewrap under this number and
+      // retry — but the diagnosis is not, and saying "rotated" to a client that
+      // reported a generation this account has never held would send whoever
+      // reads it looking for a rotation that never happened.
       message:
-        `The vault key was rotated during this upload. Rewrap the document key under vault ` +
-        `key version ${String(outcome.vaultKeyVersion)} and retry the completion.`,
+        (outcome.reason === 'rotated'
+          ? 'The vault key was rotated during this upload. '
+          : 'This upload reported a vault key version this account has never had. ') +
+        `Rewrap the document key under vault key version ` +
+        `${String(outcome.vaultKeyVersion)} and retry the completion.`,
       data: { vaultKeyVersion: outcome.vaultKeyVersion },
     });
     return;
@@ -1312,9 +1456,31 @@ async function completeUnderLock(
   // see because the flag is cleared by then.
   await assertVaultNotRotating(userId);
   const user = await User.findById(userId).select('vaultKeyVersion').lean();
-  const currentVaultKeyVersion = user?.vaultKeyVersion ?? 0;
+  const currentVaultKeyVersion = vaultKeyVersionOf(user);
+  // ABOVE the current version is named separately from merely different, even
+  // though the comparison below would refuse it anyway, because the two mean
+  // opposite things and only one of them is a rotation. The number in this body
+  // is the client's own record of which vault key it holds — not an echo of
+  // something this server said — and no client can hold a generation the account
+  // has never reached. So this is a bookkeeping fault or a forged body, it is
+  // worth saying so in the log, and it must stay refused if anyone ever decides
+  // the comparison below should only look for a version that is BEHIND.
+  //
+  // Answered with the same recoverable refusal rather than a hard 400: what
+  // matters is that nothing is committed, and handing back the current number
+  // lets a confused client rewrap and finish instead of losing a transfer that
+  // has already crossed the network in full.
+  if (body.vaultKeyVersion > currentVaultKeyVersion) {
+    logger.warn('A completion claimed a vault key version this account has never reached', {
+      userId,
+      uploadId: id,
+      claimed: body.vaultKeyVersion,
+      current: currentVaultKeyVersion,
+    });
+    return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion, reason: 'unreached' };
+  }
   if (body.vaultKeyVersion !== currentVaultKeyVersion) {
-    return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion };
+    return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion, reason: 'rotated' };
   }
 
   // Re-checked because the init-to-completion window is as long as the transfer. A
@@ -2128,6 +2294,25 @@ export const purgeDocument = catchAsync(async (req: Request, res: Response): Pro
  * counts and the request succeeds even when every delete failed, because in that
  * state nothing has been lost — the work is deferred, and the marker is what
  * defers it.
+ *
+ * ## …but a refusing ENGINE stops the walk, and the counts stay honest
+ *
+ * Carrying on is right for one bad key and wrong for an engine that is not
+ * answering at all: at the client's pinned five-second connect timeout and three
+ * attempts, walking a full trash against a dead engine holds this request open
+ * for hours against a caller that gave up long ago. So the walk shares the
+ * collector's circuit breaker (`utils/storageBreaker.ts`), and the two counts it
+ * answers with are the ones it ACTUALLY accumulated, never the size of the set it
+ * set out to empty — a walk that stopped early and claimed the whole trash would
+ * tell the user their documents are gone while every one of them is still there.
+ *
+ * Rows past the stopping point are left completely alone: still trashed, and
+ * deliberately UNMARKED, because a marker written without an attempt would send
+ * the collector after a document nothing tried to purge and would block its owner
+ * from restoring it (`restoreDocument` requires `purgePending: null`). They stay
+ * in the trash, they stay listed, and the client refetches the listing whenever
+ * `failedCount` is non-zero — which it always is when the breaker trips, since
+ * tripping it costs five recorded failures.
  */
 export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -2135,11 +2320,11 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
   const startTime = new Date();
   const trashed = { userId, deletedAt: { $exists: true, $ne: null, $lte: startTime } };
 
+  const breaker = createStorageBreaker();
   let deletedCount = 0;
-  let failedCount = 0;
   let lastId: mongoose.Types.ObjectId | undefined;
 
-  for (;;) {
+  while (!breaker.isRefusing()) {
     const page = await Document.find(
       lastId === undefined ? trashed : { ...trashed, _id: { $gt: lastId } },
     )
@@ -2153,6 +2338,9 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
     }
 
     for (const row of page) {
+      // Checked BEFORE the cursor moves, so the cursor names the last row this
+      // walk actually examined rather than one it skipped past.
+      if (breaker.isRefusing()) break;
       // The cursor advances BEFORE the work, not after it, and that is what makes
       // the walk monotonic: a row whose purge throws is left behind for the
       // collector and must not be read again, or the loop that is supposed to
@@ -2177,6 +2365,7 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
           continue;
         }
         await getStorage().deleteObject(row.objectKey);
+        breaker.recordSuccess();
         // The engine's own count, never a bare `+= 1`. A row purged by a
         // concurrent request between this page's read and this delete is removed
         // by that request and not by this one, so reporting it here would be a
@@ -2185,7 +2374,20 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
         const { deletedCount: removed } = await Document.deleteOne({ _id: row._id, userId });
         deletedCount += removed;
       } catch (error) {
-        failedCount += 1;
+        // Counted against the breaker whichever of the three steps threw. The
+        // claim is Mongo rather than storage, but a database that is refusing
+        // writes is no better a reason to walk a whole trash than a bucket that
+        // is refusing deletes, and stopping is the conservative direction:
+        // report, and leave everything recoverable.
+        //
+        // Note what this therefore does NOT bound: only the CLAIM and the object
+        // delete can ever trip it. `recordSuccess` fires between the object
+        // delete and the row delete, so a Mongo that accepts every claim and
+        // refuses every `deleteOne` never gets two failures in a row and walks
+        // the whole trash. That is unchanged from before this breaker existed
+        // and is very nearly unreachable — a database in that state fails the
+        // claim first, which does trip it — but it is not a bound this code has.
+        breaker.recordFailure();
         logger.error('Failed to purge a trashed document while emptying the trash', {
           userId,
           documentId: String(row._id),
@@ -2195,6 +2397,7 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
     }
   }
 
+  const failedCount = breaker.failures;
   const emptyCtx = getRequestContext(req);
   await createAuditLog(
     userId,
@@ -2207,7 +2410,23 @@ export const emptyDocumentTrash = catchAsync(async (req: Request, res: Response)
     emptyCtx.userAgent,
   );
 
-  logger.info('Document trash emptied', { userId, deletedCount, failedCount });
+  // `stoppedEarly` is in the LOG and NOT in the response, and the reason is who
+  // needs it rather than what it would cost. Adding an optional property to the
+  // body would be cheap — an addition is never an oasdiff-breaking change and the
+  // pinned snapshot would not move — but no client has a use for it. A caller
+  // already knows the walk may have stopped, because `failedCount` is non-zero
+  // whenever it did (tripping the breaker costs five recorded failures), and the
+  // authoritative answer to "what is left" is the trash listing it re-reads, not a
+  // third number in this body. The OPERATOR is the one who cannot get it anywhere
+  // else: five failures and a stopped walk are the same two counts as five
+  // failures and a finished one, so without this line an outage that left a whole
+  // account's trash unattempted reads exactly like five unreachable keys.
+  logger.info('Document trash emptied', {
+    userId,
+    deletedCount,
+    failedCount,
+    stoppedEarly: breaker.isRefusing(),
+  });
 
   res.status(200).json({
     success: true,

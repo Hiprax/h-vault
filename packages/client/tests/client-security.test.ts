@@ -105,8 +105,21 @@ vi.mock('../src/services/api/vaultApi', () => ({
   listTrashApi: (...args: unknown[]) => mockListTrashApi(...args),
 }));
 
-vi.mock('../src/services/offlineCache', () => ({
+vi.mock('../src/services/offlineCache', async (importOriginal) => ({
+  // Spread the real module so exports it grows (the error class, the
+  // classifier) stay real; only the IndexedDB-backed singleton is faked.
+  ...(await importOriginal<typeof import('../src/services/offlineCache')>()),
   offlineCache: {
+    // `setUser` is not optional plumbing and the double must carry it. `authStore`
+    // awaits it as the FIRST statement of the try/catch that scopes the offline
+    // database to the account signing in — the control that stops one account
+    // reading another's cached ciphertext — so a double without it calls
+    // `undefined(...)`, throws synchronously, and takes the catch branch before
+    // `clear()` is reached either. Nothing here asserts that branch; what it cost
+    // was a `TypeError` in the run's output and a login path quietly exercising its
+    // failure arm. The real scoping behaviour is tested against the unmocked module
+    // in `offlineCache.test.ts`.
+    setUser: vi.fn().mockResolvedValue(undefined),
     cacheItems: vi.fn().mockResolvedValue(undefined),
     cacheFolders: vi.fn().mockResolvedValue(undefined),
     getCachedItems: vi.fn().mockResolvedValue([]),

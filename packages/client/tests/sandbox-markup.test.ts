@@ -295,6 +295,174 @@ describe('the markdown renderer, on a corpus of hostile documents', () => {
         (i.getAttribute('src') ?? '').startsWith('https://'),
       ),
     ).toBe(true);
+    // The corpus's second remote vector, and the one an `img[src]` sweep cannot
+    // see: `<picture><source srcset>` survives whole, because the default schema
+    // allows `source: ['srcSet']` and filters no protocol on it.
+    const candidates = rendered.querySelector('picture source')?.getAttribute('srcset') ?? '';
+    expect(candidates).toContain('https://example.invalid/wide.png');
+    expect(candidates.startsWith('https://')).toBe(false);
+  });
+
+  it('tells the reader about a <picture> whose only remote reference is a srcset candidate', async () => {
+    // The sweep used to read `img[src]` and nothing else, so this document —
+    // whose every `src` is relative — produced a broken image and no sentence
+    // explaining it, which is the exact outcome the notice exists to prevent.
+    //
+    // The remote candidate is deliberately SECOND. `srcset` is a list, and
+    // testing the whole attribute value instead of each candidate finds nothing
+    // here, which is the mistake the descriptor syntax invites.
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="local-narrow.png 1x, https://example.invalid/wide.png 2x">' +
+          '<img src="local-narrow.png" alt="a responsive image"></picture>\n',
+      ),
+    );
+
+    expect(rendered.textContent).toContain(REMOTE_CONTENT_NOTICE);
+    // Nothing here is a remote `img[src]`, which is what makes the case
+    // discriminate rather than ride on the corpus's tracking pixel.
+    expect(
+      [...rendered.querySelectorAll('img')].every(
+        (image) => !(image.getAttribute('src') ?? '').startsWith('http'),
+      ),
+    ).toBe(true);
+    // The URL survives sanitisation with its descriptor intact: the default
+    // schema allows `source: ['srcSet']` and lists no protocol filter for
+    // `srcSet` at all. What refuses the request is `img-src`, which names no
+    // host — pinned in `packages/server/tests/sandbox-document.test.ts`. Telling
+    // the reader is the whole of the fix; widening the policy would BE the leak.
+    expect(rendered.querySelector('source')?.getAttribute('srcset')).toContain(
+      'https://example.invalid/wide.png 2x',
+    );
+  });
+
+  it('recognises every spelling of a remote reference the sanitizer lets through', async () => {
+    // The prefix test this replaces read `//`, `http://` and `https://` and
+    // nothing else, which is not what the URL parser does. A special scheme
+    // followed by ANY two slash-or-backslash characters enters the authority,
+    // whichever the document's own scheme is — so every one of these resolves
+    // to a third-party host (measured with `new URL(value, base)`), and every
+    // one survives `hast-util-sanitize`, whose protocol check reads only up to
+    // the colon (measured against the installed library).
+    //
+    // Nothing here is fetched — `img-src` names no host — so this is entirely
+    // about whether the reader is told. Being told for the wrong reason costs a
+    // banner; not being told costs the explanation the notice exists to give.
+    for (const src of [
+      '//example.invalid/p.png',
+      'http://example.invalid/p.png',
+      'https://example.invalid/p.png',
+      String.raw`https:\\example.invalid/p.png`,
+      String.raw`https:/\example.invalid/p.png`,
+      String.raw`https:\/example.invalid/p.png`,
+    ]) {
+      const rendered = await renderMarkdown(document, bytesOf(`<img src="${src}" alt="x">\n`));
+      expect(rendered.textContent, src).toContain(REMOTE_CONTENT_NOTICE);
+    }
+  });
+
+  it('says nothing for the references that reach no third party', async () => {
+    // The negatives that keep the notice meaningful, and the ones the fix could
+    // most easily break. A relative path is this document's own; a scheme with no
+    // host is not a request at all; and a `data:` src reaches nobody either.
+    //
+    // Say WHICH mechanism spares the `data:` one, because it is not the obvious
+    // one and the obvious one is what the first draft of this comment claimed.
+    // `hast-util-sanitize`'s default schema pins `protocols.src = ['http','https']`
+    // (measured against the installed library), so the ATTRIBUTE is stripped and
+    // that image never renders at all — `img-src data:` never comes into it. The
+    // case where a `data:` value really does survive and really does render is a
+    // `srcSet` candidate, which the schema applies no protocol filter to, and it
+    // is the case below.
+    for (const src of [
+      'local.png',
+      './nested/local.png',
+      '/rooted.png',
+      'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+      // A scheme with no host at all. The sanitizer passes it (its check stops
+      // at the colon) and `URL` refuses it — which must read as "no request",
+      // never as an exception out of the sweep.
+      'http://',
+    ]) {
+      const rendered = await renderMarkdown(document, bytesOf(`<img src="${src}" alt="x">\n`));
+      expect(rendered.textContent, src).not.toContain(REMOTE_CONTENT_NOTICE);
+    }
+  });
+
+  it('reads ONE slash after the document’s own scheme as a relative path', async () => {
+    // The boundary the two-slash spellings above sit a single character from,
+    // and the case that makes resolving the right answer rather than a tidier
+    // one: `scheme:` plus ONE slash-or-backslash is an authority when the scheme
+    // DIFFERS from the document's and a relative path when it matches, so no
+    // hard-coded fixture is correct both in a frame served over http and in one
+    // served over https. Taking the scheme from the document is what makes the
+    // case stable — and a list of prefixes could not have expressed it at all,
+    // which is the whole argument for the change.
+    const own = new URL(document.baseURI).protocol;
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(`<img src="${own}\\relative.png" alt="x">\n`),
+    );
+
+    expect(rendered.textContent).not.toContain(REMOTE_CONTENT_NOTICE);
+    expect(rendered.querySelector('img')?.getAttribute('src')).toBe(`${own}\\relative.png`);
+  });
+
+  it('splits srcset candidates on a bare comma, which needs no space after it', async () => {
+    // `srcset="a.png 1x,https://…/b.png 2x"` is valid and common, and the
+    // separator is the comma rather than the whitespace: a split on whitespace
+    // alone leaves `1x,https://…/b.png` as one token, which begins with neither
+    // a scheme nor a slash and is therefore invisible.
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="local.png 1x,https://example.invalid/wide.png 2x">' +
+          '<img src="local.png" alt="a responsive image"></picture>\n',
+      ),
+    );
+
+    expect(rendered.textContent).toContain(REMOTE_CONTENT_NOTICE);
+  });
+
+  it('says nothing about a srcset candidate that renders without reaching anyone', async () => {
+    // The `data:` case that DOES survive sanitization, unlike the `img src` one
+    // above: the default schema names no protocols for `srcSet`, so the candidate
+    // is kept, and `img-src` (`server/src/config/sandboxCsp.ts`) admits `data:`, so
+    // it renders. Announcing it as blocked would therefore be a lie — which is the
+    // one thing the sweep must not do — while the remote candidate beside it is
+    // still reported.
+    const localOnly = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="data:image/gif;base64,R0lGODlhAQABAAAAACw= 1x"><img src="local.png" alt="x"></picture>\n',
+      ),
+    );
+    expect(localOnly.textContent).not.toContain(REMOTE_CONTENT_NOTICE);
+
+    const mixed = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="data:image/gif;base64,R0lGODlhAQABAAAAACw= 1x, https://example.invalid/p.png 2x"><img src="local.png" alt="x"></picture>\n',
+      ),
+    );
+    expect(mixed.textContent).toContain(REMOTE_CONTENT_NOTICE);
+  });
+
+  it('says nothing about a <picture> whose candidates are all local', async () => {
+    // The other side of the same parse: `2x` and `640w` are descriptors, not
+    // URLs, and a sweep that flagged either would put the banner on every
+    // responsive image in every README.
+    const rendered = await renderMarkdown(
+      document,
+      bytesOf(
+        '<picture><source srcset="narrow.png 1x, wide.png 2x, huge.png 640w">' +
+          '<img src="narrow.png" alt="a local responsive image"></picture>\n',
+      ),
+    );
+
+    expect(rendered.textContent).not.toContain(REMOTE_CONTENT_NOTICE);
+    expect(rendered.querySelector('source')?.getAttribute('srcset')).toContain('640w');
   });
 
   it('says nothing about remote content for a document that asks for none', async () => {
@@ -376,5 +544,65 @@ describe('the HTML renderer', () => {
   it('shows a page with no markup at all rather than an empty frame', async () => {
     const rendered = await renderHtml(document, bytesOf('just text, no tags'));
     expect(rendered.textContent).toContain('just text, no tags');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A document that sanitises down to nothing
+// ---------------------------------------------------------------------------
+
+/**
+ * The empty page, which is a real document and not an edge case worth shrugging
+ * at.
+ *
+ * `hast-util-to-dom` decides its return type from the tree it was handed, and
+ * `fragment: true` does NOT settle it: `lib/index.js:142` sets
+ * `rootIsDocument = children.length === 0` and `:168-172` then builds a
+ * `Document` without consulting the option at all (measured against the
+ * installed copy: `nodeType` 9, an `XMLDocument`). Appending a `Document` to an
+ * element throws `HierarchyRequestError`, `sandbox.ts` catches it, and the
+ * reader is told "The document could not be displayed." — for a file that is
+ * perfectly well-formed and simply has nothing visible in it.
+ *
+ * Both inputs below are ordinary. Neither is hostile, and that is what makes
+ * them worth pinning: the failure looked like a corrupt document.
+ */
+/** A title string no other text in the rendered page could contain. */
+const TITLE_CANARY = 'this-title-must-not-become-body-text';
+
+describe('a document whose sanitized tree is empty', () => {
+  it('renders an empty markdown page for a file that is only an HTML comment', async () => {
+    // `rehype-sanitize`'s default schema has no `allowComments`, so the one node
+    // this document contains is dropped and the root is left with no children.
+    const rendered = await renderMarkdown(document, bytesOf('<!-- nothing to see -->\n'));
+
+    const article = rendered.querySelector('article.hv-markdown');
+    expect(article).not.toBeNull();
+    expect(article?.childNodes).toHaveLength(0);
+    // The comment did not survive as text, which is the other way this could
+    // have been made to "work".
+    expect(rendered.textContent).not.toContain('nothing to see');
+  });
+
+  it('renders an empty page for an HTML document with nothing in its body', async () => {
+    // `<head>` and `<title>` are removed whole by the raw-text step; `html` and
+    // `body` are not in the default schema's tag list and are unwrapped. What
+    // reaches `toDom` is a root with no children.
+    const rendered = await renderHtml(
+      document,
+      bytesOf(`<html><head><title>${TITLE_CANARY}</title></head><body></body></html>`),
+    );
+
+    const article = rendered.querySelector('article.hv-markdown');
+    expect(article).not.toBeNull();
+    expect(article?.childNodes).toHaveLength(0);
+    // The persistent banner still stands: an empty page is still a stored page,
+    // and the reader is still owed the sentence explaining what is disabled.
+    expect(rendered.textContent).toContain(HTML_PREVIEW_NOTICE);
+    // A DISTINCTIVE canary rather than a one-letter title: `<title>x</title>`
+    // would have made this assertion pass because `HTML_PREVIEW_NOTICE` happens
+    // to contain no letter `x`, so editing that sentence — which says nothing
+    // about `<head>` — could turn this red for a reason nobody cares about.
+    expect(rendered.textContent).not.toContain(TITLE_CANARY);
   });
 });

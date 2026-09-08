@@ -9,6 +9,7 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import type { OfflineCacheErrorType } from '../services/offlineCache';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -21,13 +22,28 @@ interface UIState {
   sidebarOpen: boolean;
   sidebarCollapsed: boolean;
   commandPaletteOpen: boolean;
-  offlineCacheAvailable: boolean;
+  /**
+   * `null` while the offline cache is healthy; otherwise WHY it is not, so the
+   * warning can say something the user can act on. A bare boolean was the
+   * previous shape and it threw away the only part of the failure that differs
+   * between "free some storage" and "your browser is blocking this".
+   *
+   * ONE slot, written by BOTH of `vaultStore`'s cache writes (items and folders),
+   * last write wins. That is deliberate rather than unnoticed: every cause this
+   * discriminant carries is an ORIGIN-level condition — quota, blocked site data,
+   * no IndexedDB at all — and both writes go through one `openDatabase()` against
+   * one database whose stores are created together, so there is no steady state in
+   * which one succeeds and the other fails. The reachable cost is a banner that
+   * clears one fetch early during a transient failure and returns on the next
+   * write; the alternative is two banners for one condition.
+   */
+  offlineCacheError: OfflineCacheErrorType | null;
 
   setTheme: (theme: ThemeValue) => void;
   toggleSidebar: () => void;
   toggleSidebarCollapsed: () => void;
   toggleCommandPalette: () => void;
-  setOfflineCacheAvailable: (available: boolean) => void;
+  setOfflineCacheError: (error: OfflineCacheErrorType | null) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +100,7 @@ export const useUIStore = create<UIState>()(
       sidebarOpen: true,
       sidebarCollapsed: false,
       commandPaletteOpen: false,
-      offlineCacheAvailable: true,
+      offlineCacheError: null,
 
       setTheme: (theme: ThemeValue): void => {
         applyThemeToDocument(theme);
@@ -103,8 +119,8 @@ export const useUIStore = create<UIState>()(
         set((state) => ({ commandPaletteOpen: !state.commandPaletteOpen }));
       },
 
-      setOfflineCacheAvailable: (available: boolean): void => {
-        set({ offlineCacheAvailable: available });
+      setOfflineCacheError: (error: OfflineCacheErrorType | null): void => {
+        set({ offlineCacheError: error });
       },
     }),
     {

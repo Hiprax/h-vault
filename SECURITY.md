@@ -68,22 +68,27 @@ security posture, not a disclaimer.
   tamperings makes the decryption fail rather than producing plausible bytes.
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
-- **Credential stuffing and online guessing.** Rate limiting, account lockout with
-  progressive delays, and 2FA — with the lockout and 2FA paths deliberately built so they
-  do not leak whether an account exists. The credential budget is kept separate from the
-  budgets for token refresh and vault unlock, so that ordinary use of the app can never spend
-  the allowance you need in order to sign in. A caller-supplied value (a header, a cookie, a
-  rotating token) appears in a rate-limit key only where an IP-keyed tier bounds the same route
-  regardless — the per-account tier keys on the submitted email for that reason, and the
-  refresh tier, which has no such companion, keys on the address alone. Getting either wrong
-  turns a limiter into a lockout of the legitimate user, an open door for the attacker, or both.
-  Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by the individual address,
-  because a single routed IPv6 allocation hands one attacker 18 quintillion addresses: keyed on the
-  full `/128`, an IP-keyed limiter is not a limiter at all, it is a counter that never reaches two.
-  That aggregation happens inside the library that parses the address, so it is a dependency this
-  project deliberately keeps current — the advisory that stood in exactly that code path
-  (`ip-address`, reachable from every rate-limit key) is cleared, and the `/64` bucketing is pinned
-  by a test rather than left to a default.
+- **Credential stuffing and online guessing.** Rate limiting, account lockout with progressive
+  delays, and 2FA — with the lockout and 2FA paths deliberately built so they do not leak
+  whether an account exists. The failed-attempt count behind that lockout is **one counter
+  shared by both sign-in steps**, and it is the only per-account limit on the second factor, so
+  it is discharged only by a sign-in that actually **completes** — never merely by a correct
+  password, which would let anyone already holding one reset the second factor's only brake
+  between batches of guesses. A lockout that has genuinely been waited out is the single
+  exception, and reaching it costs the full lockout duration. The credential budget is kept
+  separate from the budgets for token refresh and vault unlock, so that ordinary use of the app
+  can never spend the allowance you need in order to sign in. A caller-supplied value (a
+  header, a cookie, a rotating token) appears in a rate-limit key only where an IP-keyed tier
+  bounds the same route regardless — the per-account tier keys on the submitted email for that
+  reason, and the refresh tier, which has no such companion, keys on the address alone. Getting
+  either wrong turns a limiter into a lockout of the legitimate user, an open door for the
+  attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
+  the individual address, because a single routed IPv6 allocation hands one attacker 18
+  quintillion addresses: keyed on the full `/128`, an IP-keyed limiter is not a limiter at all,
+  it is a counter that never reaches two. That aggregation happens inside the library that
+  parses the address, so it is a dependency this project deliberately keeps current — the
+  advisory that stood in exactly that code path (`ip-address`, reachable from every rate-limit
+  key) is cleared, and the `/64` bucketing is pinned by a test rather than left to a default.
 - **One account reading or changing another's data.** Every route that takes an id scopes its query
   to the authenticated user, and that is asserted **exhaustively rather than by sampling**: the
   route table is built from the real Express router — so a route added tomorrow appears in it
@@ -91,6 +96,12 @@ security posture, not a disclaimer.
   account's credentials against the first account's resource. Both halves are checked, because only
   the second one is the security property: the request is refused, **and** the target is unchanged
   afterwards. A 404 that deleted the row on the way out would pass the first check on its own.
+- **A value you control selecting a code path on the server.** Cookies are decoded before they
+  reach the application, and a specially shaped value arrives as a number or an object rather than
+  the text that was sent — so a cookie is treated as a value only where it is genuinely text, and
+  that narrowing has exactly one definition that every reader goes through. A cookie the server
+  cannot read behaves **exactly as an absent one**, everywhere: not as a server error, and not as a
+  distinguishable rejection that would confirm the probe was understood.
 - **Backup theft.** Emailed and downloaded backups are encrypted under a _separate_
   backup password and carry an HMAC-SHA256 integrity signature that is verified on restore.
 - **Tampered backup files.** Restore validates the signature, rejects dangling and
@@ -199,6 +210,17 @@ The trusted-device model is built to fail safely:
   appears only in the `Set-Cookie` header — scoped to `/api/v1/auth`, `httpOnly`, `secure` and
   `sameSite=strict` in production — and never in a response body, a log, or the database. A
   client-asserted "I am trusted" flag would be forgeable; a stored hash is not.
+- **Granted only against a real second factor.** A remembered login that completes the 2FA step with
+  a **backup code** registers no trusted device. A TOTP code proves the second factor is on the
+  device right now; a backup code proves the opposite, since the batch of eight is kept precisely
+  where the authenticator app is not — printed, in another password manager, mailed to yourself.
+  Granting trust from one turned a single line off that sheet into a 30-day skip of the second
+  factor on that browser, and, because each trusted-device login mints a fresh remembered session
+  while the record keeps its own expiry, into up to 60 days without a TOTP code being presented
+  again. The remembered **session** is unaffected: signing in with a backup code and "Remember me"
+  still gives you the full 30 days. Only the 2FA skip is withheld. Spending a code is also audited
+  as `2fa_backup_code_used`, and the audit log shows how many codes are left beside that entry, so
+  you can see it happened and regenerate before the last one is gone.
 - **Checked only after the password.** The trusted-device cookie is read **strictly after** the
   bcrypt comparison and lockout evaluation succeed, and only when the cookie is actually present.
   Checking it earlier would turn the cookie into an authentication bypass and an
@@ -218,7 +240,15 @@ The trusted-device model is built to fail safely:
   reuse detection**, and account deletion. So trust can never outlive the second factor it was
   granted against, and an attacker who steals a refresh cookie cannot then skip 2FA. Ordinary
   single-session logout deliberately does **not** revoke trust — that would defeat the feature — and
-  you can revoke any or all trusted devices yourself from the Sessions page.
+  you can revoke any or all trusted devices yourself from the Sessions page. Because that revocation
+  is what makes the sentence above true, turning off the second factor **reads everything the
+  request carries before it changes anything**, so nothing you send can interrupt the switch-off
+  between the setting and the revocations that must accompany it — which is what used to leave an
+  account with the second factor off and every device it had been granted against still skipping
+  it. That is a statement about your input, and deliberately not a claim of atomicity: the four
+  writes are sequential rather than a single transaction, so a database failure part-way through
+  can still leave the setting cleared ahead of the revocations. If that happens, "log out
+  everywhere" on the Sessions page drops every other session and every trusted device on its own.
 
 **The real time bound.** Because a trusted-device login mints a fresh 30-day session while the trust
 record keeps its own 30-day expiry, a user who keeps returning can go up to
@@ -234,7 +264,15 @@ characters** of the hash to the server, which proxies the query to HIBP and retu
 list of matching hash suffixes; the full-suffix comparison happens **in the browser**. A
 password, or a hash that could identify one, never reaches the server. Outbound requests
 to HIBP set `Add-Padding` (so the queried prefix cannot be inferred from the response
-size on the wire) and follow no redirects.
+size on the wire), follow no redirects, and are **size-bounded**: the reply is capped at
+1 MiB — roughly ten times the largest legitimate padded range — enforced incrementally so
+the connection is dropped on the chunk that crosses the cap rather than after the body is
+already resident. This is the only outbound HTTP call the server makes, its reply is
+buffered whole before anything parses it, and the batch endpoint opens eight at once, so
+an unbounded reply from an unhealthy or hostile upstream would be a memory-exhaustion
+vector against a container with a 1 GB limit. An oversized reply is refused and reported
+as a failed check — never as a "not breached" result. The stored copy carries the same
+bound.
 
 - **Server-side breach cache (`pwned_range_cache`).** To avoid re-querying the third
   party, the server persists the range responses it fetches, keyed by that 5-char prefix,
@@ -383,6 +421,23 @@ correctness, and these are the things it does not buy:
    The property this design buys is that untrusted input is never _parsed_ there — not that it
    never exists there. A flaw in the application's own code is still a flaw in the application.
 
+### Rotating your vault key while another session is open
+
+Rotating your vault key does not sign out your other sessions, and that is deliberate: it is a
+key operation, not a credential change, and forcing every device to re-authenticate would make a
+routine hygiene step feel like a breach. The consequence is that a browser tab left open
+elsewhere goes on holding the key it was given when it signed in, and nothing tells it the
+account has moved past that key.
+
+Everything encrypted under the vault key is re-encrypted by the rotation itself, so an older
+session only matters when it writes something new. Uploading a document is that case, because a
+document's own key is wrapped in the browser under the vault key the browser holds. Each sign-in
+is therefore told which generation of the vault key it received, and an upload says which one it
+used; if that is no longer the current one the upload is refused, the browser fetches the current
+key, re-wraps the document's key and finishes — without re-sending the file. A document is never
+stored under a key the account no longer has. If you would rather not rely on that at all, sign
+out of your other devices from the Sessions page before rotating.
+
 ### Deleting a document, and why it cannot be undone
 
 A stored document is two things: an entry in the database and a file of ciphertext in object
@@ -418,6 +473,35 @@ uploaded file**, and it must be captured alongside the database and the deployme
 the wrapped keys live in the database, the ciphertext lives in the storage service, and neither
 half is usable without the other. The README's backup section gives the volumes and the
 procedure, including why a file-level copy of a running storage engine is not a backup.
+
+That answer is only available to the operator, and on a shared deployment the operator and the
+account holder are not the same person. **Download all**, on the Documents page, is the half that
+belongs to the account holder: it saves every document the list is showing to their own device,
+one at a time, through the identical verified read a single download uses — each file checked
+against the digest sealed inside it before a byte of it is written, and no file produced at all
+for a document that fails that check. Nothing is combined into an archive, deliberately: a ZIP
+writer is a format implementation fed entirely by attacker-chosen bytes and names, and it would
+run in the one origin holding the unlocked vault key. Three limits are worth being plain about,
+because an export that is trusted for more than it is is worse than none:
+
+- **It is a copy, not a backup, and it is plaintext.** What lands on the device is the decrypted
+  file, protected by nothing this application controls — the same trade the plaintext vault export
+  makes, and it deserves the same handling.
+- **It is one account's view at one moment.** It carries what that account can list: not another
+  account's documents, not a row whose sealed metadata will not open (there is no key left to open
+  it with, so there is nothing to hand back), and not a row already claimed for permanent deletion.
+  Each of those is named in the summary rather than quietly omitted, and the panel says how many
+  rows the view could not read at all.
+- **It cannot confirm where the files went.** Handing a file to the browser is the last thing the
+  page can observe; browsers refuse or queue several downloads from one action and report nothing
+  back. The summary therefore says documents were _verified and sent to your browser's downloads_
+  and never that they were saved, and it points at the browser's own download list, which is the
+  only authoritative record.
+
+The export changes nothing on the server: it is the same authenticated read of the same rows,
+under the same per-user rate limits, and it is not audited for the same reason no other read is.
+When those limits stop it, or the vault auto-locks part way through, it says which of the two
+happened, how much of the library is still on the server, and offers to resume from there.
 
 The hourly clean-up referred to above is the only thing in the system that deletes a stored
 file without a request having asked for it, so the rule it works to is stated in the negative:
@@ -474,12 +558,18 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 - **Backgrounding the window deliberately does not erase it.** Switching tabs, minimising,
   or being covered by another window is how you get to the application you are pasting
   into, so the deadline, not the visibility change, decides when the secret goes.
-- **The browser decides whether a page may erase the clipboard at all, and the answer
-  differs by engine.** Chromium rejects a clipboard write from an unfocused document, so if
-  the deadline passes while H-Vault is in the background the erase physically cannot happen
-  at that moment. Firefox and Safari are stricter: they require a user gesture for _every_
-  clipboard write, which means a purely timer-driven erase can never succeed on those
-  engines, foreground or background.
+- **The browser decides whether a page may erase the clipboard at all, and no engine
+  guarantees it.** Chromium rejects a clipboard write from an unfocused document, so if the
+  deadline passes while H-Vault is in the background the erase physically cannot happen at
+  that moment. Firefox and Safari state a stricter rule: they require a user gesture for
+  _every_ clipboard write, which means a purely timer-driven erase can never succeed on
+  those engines, foreground or background. **Do not read that contrast as "the timed erase
+  is reliable on Chromium".** This project's own browser tests drive the real deadline on
+  both engines it runs, with the page in front and — on Chromium — with the clipboard
+  permission granted, and the write is refused on **both**. Whatever the underlying rule
+  turns out to be on a given build, the design does not depend on knowing it: a timer-driven
+  erase is treated as something that may be refused anywhere, and the retry below is what
+  actually lands it.
   H-Vault does not abandon a refused erase. It retries on the next moment the engine will
   accept one: returning to the window, and — the trigger that also works on Firefox and
   Safari — your next click or keypress in H-Vault. In practice that means the erase lands

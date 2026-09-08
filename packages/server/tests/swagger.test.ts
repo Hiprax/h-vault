@@ -208,6 +208,113 @@ describe('API Documentation', () => {
   });
 
   // ──────────────────────────────────────────────────────────────────────────
+  // Identity and tagging, across the WHOLE document
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Every operation carries a unique `operationId` and a declared tag.
+   *
+   * `operationId` is the name a generated client gives the method, so an
+   * operation without one is a method a generator has to invent a name for — and
+   * two operations that share one is a client whose second method silently
+   * overwrites its first. Spectral's `operation-operationId`,
+   * `operation-operationId-unique` and `operation-tag-defined` all police this,
+   * and `audit:config` ratchets their findings downward, but a ratchet is a
+   * number: it says fifty-three became zero, not WHICH fifty-three, and it only
+   * speaks when that gate is run. Pinning it here means a fifty-fourth operation
+   * added without an id fails the ordinary server suite instead.
+   *
+   * Deliberately document-wide, unlike the document-store block below: this is
+   * the property that was missing from every operation OUTSIDE it.
+   */
+  describe('operation identity and tagging', () => {
+    const HTTP_METHODS = ['get', 'post', 'put', 'delete', 'patch'] as const;
+
+    /** Every operation in the document, keyed `METHOD /path`. */
+    const operations = new Map<string, { operationId?: unknown; tags?: unknown }>();
+    for (const [route, methods] of Object.entries(
+      swaggerSpec.paths as Record<string, Record<string, unknown>>,
+    )) {
+      for (const method of HTTP_METHODS) {
+        const operation = methods[method] as { operationId?: unknown; tags?: unknown } | undefined;
+        if (operation) operations.set(`${method.toUpperCase()} ${route}`, operation);
+      }
+    }
+
+    /** The tag names the document declares up front, which is the allowed set. */
+    const declaredTags = new Set(
+      (swaggerSpec.tags as { name?: unknown }[]).map((tag) => String(tag.name)),
+    );
+
+    // Each case below asserts an EMPTY offender list, a shape that passes over
+    // nothing if the map is ever empty — a restructured `paths`, a renamed key.
+    beforeAll(() => {
+      expect(operations.size).toBeGreaterThan(0);
+      expect(declaredTags.size).toBeGreaterThan(0);
+    });
+
+    it('gives every operation an operationId', () => {
+      const anonymous = [...operations.entries()]
+        .filter(([, op]) => typeof op.operationId !== 'string' || op.operationId === '')
+        .map(([key]) => key);
+      expect(anonymous).toEqual([]);
+    });
+
+    it('never repeats an operationId', () => {
+      const seen = new Map<string, string[]>();
+      for (const [key, op] of operations) {
+        if (typeof op.operationId !== 'string') continue;
+        seen.set(op.operationId, [...(seen.get(op.operationId) ?? []), key]);
+      }
+      const collisions = [...seen.entries()].filter(([, keys]) => keys.length > 1);
+      expect(collisions).toEqual([]);
+    });
+
+    it('keeps every operationId usable as a generated method name', () => {
+      // Spectral's `operation-operationId-valid-in-url` asks only that the id
+      // survives a URL; a generated CLIENT additionally has to turn it into an
+      // identifier, and `list-vault-items` or `2faSetup` does not become one
+      // without a rename nobody controls. camelCase, starting with a letter.
+      const malformed = [...operations.values()]
+        .map((op) => op.operationId)
+        .filter((id) => typeof id !== 'string' || !/^[a-z][A-Za-z0-9]*$/.test(id));
+      expect(malformed).toEqual([]);
+    });
+
+    it('tags every operation, and only with a tag the document declares', () => {
+      const untagged = [...operations.entries()]
+        .filter(
+          ([, op]) =>
+            !Array.isArray(op.tags) ||
+            op.tags.length === 0 ||
+            !op.tags.every((tag) => typeof tag === 'string' && declaredTags.has(tag)),
+        )
+        .map(([key]) => key);
+      expect(untagged).toEqual([]);
+    });
+
+    it('declares no tag it never uses', () => {
+      // The other direction, and the one a count would miss: a tag left behind
+      // by a removed endpoint shows up in every rendered client as an empty
+      // section, and nothing else in this suite would notice.
+      const used = new Set(
+        [...operations.values()].flatMap((op) => (Array.isArray(op.tags) ? op.tags : [])),
+      );
+      expect([...declaredTags].filter((tag) => !used.has(tag))).toEqual([]);
+    });
+
+    it('publishes contact information a consumer of this API can act on', () => {
+      // Spectral's `info-contact`. The URL matters more than the object: a
+      // consumer who finds a defect needs somewhere to take it, and SECURITY.md
+      // routes a VULNERABILITY somewhere else entirely (a private advisory), so
+      // this must be the ordinary-issues destination rather than an address.
+      const info = swaggerSpec.info as { contact?: { name?: unknown; url?: unknown } };
+      expect(typeof info.contact?.name).toBe('string');
+      expect(info.contact?.url).toMatch(/^https:\/\//);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
   // The document store, as a documentation CONTRACT
   // ──────────────────────────────────────────────────────────────────────────
 

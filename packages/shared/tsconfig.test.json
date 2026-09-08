@@ -31,7 +31,38 @@
     // copies of that contract would drift, and a package that quietly stopped
     // pinning `LC_ALL` would start depending on the developer's desktop locale).
     // Same reasoning as `packages/server/tsconfig.test.json`.
-    "rootDir": "../.."
+    "rootDir": "../..",
+    // Incremental build info, and the one place its rationale is written out; the
+    // other check-only configs point here.
+    //
+    // `type-check` runs SEVEN separate tsc invocations, and without build info each
+    // one re-reads and re-checks every file from scratch on every commit: measured
+    // at 1m 12s for the gate, against a 90-second budget for the whole tier. With
+    // build info an unchanged run reuses the previous program and re-reports its
+    // stored diagnostics rather than recomputing them, measured at 25s.
+    //
+    // Two rules, and both are load-bearing:
+    //
+    //   * ONE FILE PER INVOCATION. Two programs sharing a build-info file overwrite
+    //     each other's state on every alternate run, which costs the whole speedup
+    //     and reads, from the outside, exactly like the feature working.
+    //   * NEVER ON A CONFIG THAT EMITS. `packages/{shared,server,client}/tsconfig.json`
+    //     drive `npm run build` as well as `type-check`, and an incremental NON-BUILD
+    //     `tsc` does not check whether its outputs still exist (typescript 6.0.3
+    //     guards that loop with `if (!isIncremental)`, and only in build mode at
+    //     that) — so `dist/` deleted while the build info survived makes the build
+    //     exit 0 having emitted NOTHING, and it silences `tsc -b`'s own
+    //     output-existence check for the client. Measured, both ways. The three
+    //     checking passes therefore take their build info from a
+    //     `--tsBuildInfoFile` flag in each package's `type-check` script instead,
+    //     which is why only the check-only configs carry these two keys.
+    //
+    // `.cache/` is gitignored (`.gitignore:27`), the name is separately covered by
+    // `*.tsbuildinfo` (`.gitignore:7`), `.dockerignore` excludes both, and
+    // `npm run clean` removes it — this file describes one machine's tree state,
+    // and a stale one shadowing an image's own build would be worse than useless.
+    "incremental": true,
+    "tsBuildInfoFile": "../../.cache/tsbuildinfo/shared.tests.tsbuildinfo"
   },
   "include": ["src/**/*", "tests/**/*"]
 }

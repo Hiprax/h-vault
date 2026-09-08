@@ -9,6 +9,7 @@ import { TRASH_AUTO_PURGE_DAYS } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { getStorage } from '../services/storage/index.js';
+import { createStorageBreaker } from '../utils/storageBreaker.js';
 
 const logger = createModuleLogger('jobs/trashCleanup');
 
@@ -52,19 +53,37 @@ const TRASH_CLEANUP_LOCK_TTL_MS = 15 * 60 * 1000; // 15 minutes
  * not finish. They reuse `trash_auto_purge` — this is the same scheduled operation
  * reaching a second collection, not a sixth document action.
  *
- * Returns the totals, for the job's own log line.
+ * ## Why it gives up on an engine that is refusing
+ *
+ * Passing over a failing row is right for ONE unreachable key and wrong for an
+ * engine that is down. The S3 client is pinned to a five-second connect timeout
+ * and three attempts (`services/storage/s3Provider.ts`), so a night on which the
+ * bucket is unreachable would spend HOURS in this loop — and the moment the
+ * fifteen-minute lock TTL expires under it, the next tick can acquire the same
+ * lock and start a second run walking the same rows. So this shares the
+ * collector's circuit breaker (`utils/storageBreaker.ts`): after enough refusals
+ * in a row it stops, and the rows it never reached are left completely alone —
+ * still expired, still in the trash, and deliberately UNMARKED, because a marker
+ * written without an attempt would send the hourly collector after a document
+ * nothing tried to purge and would block its owner from restoring it
+ * (`restoreDocument` requires `purgePending: null`). They are simply the next
+ * night's work.
+ *
+ * Returns the totals it ACTUALLY accumulated, plus whether it gave up, for the
+ * job's own log line — a run that stopped early and reported only its counts
+ * would read exactly like a quiet night.
  */
 async function purgeTrashedDocuments(
   cutoffDate: Date,
   batchSize: number,
-): Promise<{ purged: number; failed: number }> {
+): Promise<{ purged: number; failed: number; gaveUp: boolean }> {
   let purged = 0;
-  let failed = 0;
+  const breaker = createStorageBreaker();
 
   const storage = getStorage();
   let lastId: mongoose.Types.ObjectId | undefined;
 
-  for (;;) {
+  while (!breaker.isRefusing()) {
     const expired = { deletedAt: { $lte: cutoffDate } };
     const page = await Document.find(
       lastId === undefined ? expired : { ...expired, _id: { $gt: lastId } },
@@ -78,6 +97,9 @@ async function purgeTrashedDocuments(
 
     const purgedByUser = new Map<string, number>();
     for (const row of page) {
+      // Checked BEFORE the cursor moves, so the cursor names the last row this
+      // walk actually examined rather than one it skipped past.
+      if (breaker.isRefusing()) break;
       // The cursor advances BEFORE the work, so a row that fails is passed over
       // rather than read again on the next page.
       lastId = row._id;
@@ -104,6 +126,7 @@ async function purgeTrashedDocuments(
         }
         marked = true;
         await storage.deleteObject(row.objectKey);
+        breaker.recordSuccess();
         // `userId` in the delete filter as well as `_id`, the same
         // defense-in-depth the item loop applies to its own `deleteMany`. No
         // `deletedAt` here: the claim above already won the row, and re-testing a
@@ -116,7 +139,16 @@ async function purgeTrashedDocuments(
           purged += deletedCount;
         }
       } catch (error: unknown) {
-        failed += 1;
+        // Counted against the breaker whichever step threw. The claim is Mongo
+        // rather than storage, but a database refusing writes is no better a
+        // reason to walk a whole collection than a bucket refusing deletes, and
+        // stopping is the direction that leaves everything recoverable for the
+        // next run. Only the CLAIM and the object delete can actually TRIP it,
+        // though: `recordSuccess` fires between the object delete and the row
+        // delete, so a failure confined to `deleteOne` never lands twice in a
+        // row. Unchanged from before the breaker, and unreachable in practice —
+        // a database in that state fails the claim first.
+        breaker.recordFailure();
         const message = error instanceof Error ? error.message : 'Unknown error';
         logger.error(
           `Trash cleanup could not purge document ${String(row._id)}; ` +
@@ -141,7 +173,7 @@ async function purgeTrashedDocuments(
     }
   }
 
-  return { purged, failed };
+  return { purged, failed: breaker.failures, gaveUp: breaker.isRefusing() };
 }
 
 export function startTrashCleanupJob(): ScheduledTask {
@@ -233,6 +265,17 @@ export function startTrashCleanupJob(): ScheduledTask {
               logger.info(
                 `Trash cleanup complete: permanently deleted ${String(documents.purged)} document(s), ` +
                   `${String(documents.failed)} left for the collector`,
+              );
+            }
+            if (documents.gaveUp) {
+              // Said separately, and at error level, because the counts above
+              // describe only what was attempted. Without this line a run that
+              // walked five rows into a dead engine and stopped is indistinguishable
+              // from a quiet night on which five keys happened to be unreachable.
+              logger.error(
+                'Trash cleanup stopped its document walk: object storage refused several ' +
+                  'deletes in a row, so the rest of the expired trash was not attempted and ' +
+                  'is left for the next run',
               );
             }
           }

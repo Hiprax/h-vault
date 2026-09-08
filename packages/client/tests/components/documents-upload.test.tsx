@@ -299,10 +299,18 @@ function renderPanel(config: DocumentsConfig = ENABLED_CONFIG) {
   );
 }
 
-function pick(name: string, size: number, type?: string): string[] {
+/**
+ * Choose a file, and hand back both the handle and its read log.
+ *
+ * The HANDLE matters as much as the log: several cases below assert that what
+ * was uploaded is the very `File` that is selected — object identity, not a
+ * matching name — because a name can agree while the bytes belong to a file the
+ * user replaced.
+ */
+function pick(name: string, size: number, type?: string): { file: File; reads: string[] } {
   const { file, reads } = makeFile(name, size, type);
   fireEvent.change(screen.getByLabelText('File to upload'), { target: { files: [file] } });
-  return reads;
+  return { file, reads };
 }
 
 beforeEach(() => {
@@ -677,7 +685,7 @@ describe('DocumentUploadPanel — guardrails applied before the file is read', (
 
   it('refuses a file over the advertised cap, reading none of it', () => {
     renderPanel();
-    const reads = pick('huge.pdf', 200 * 1024 * 1024);
+    const { reads } = pick('huge.pdf', 200 * 1024 * 1024);
 
     expect(screen.getByTestId('upload-refusal')).toHaveTextContent(
       /This server accepts documents up to 100 MB/,
@@ -689,7 +697,7 @@ describe('DocumentUploadPanel — guardrails applied before the file is read', (
 
   it('refuses a file type the server asks not to receive, reading none of it', () => {
     renderPanel({ ...ENABLED_CONFIG, allowedExtensions: ['pdf', 'md'] });
-    const reads = pick('archive.zip', 1024);
+    const { reads } = pick('archive.zip', 1024);
 
     expect(screen.getByTestId('upload-refusal')).toHaveTextContent(
       'This server asks for these file types only: pdf, md.',
@@ -924,7 +932,14 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
       'aria-valuenow',
       '100',
     );
-    expect(screen.getByText(/Part 1 of 1/)).toBeInTheDocument();
+    // The WHOLE sentence, not just its first half, because the part numbers are
+    // where a zero-byte document goes wrong. `documentChunkCountFor` floors its
+    // answer at 1 — a file with no bytes is still one segment, holding a tag and no
+    // plaintext — and this row states that floor rather than re-applying one of its
+    // own. A local clamp would keep printing "Part 1 of 1" even if the framing rule
+    // were removed from the shared helper, so the assertion here is the only thing
+    // that can notice.
+    expect(screen.getByText('Part 1 of 1 — 0 B of 0 B')).toBeInTheDocument();
   });
 
   it('says when a transfer has moved past its parts and is being committed', () => {
@@ -952,7 +967,7 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
     expect(cancelUpload).toHaveBeenCalledWith('up-2');
   });
 
-  it('offers a resume for a failed transfer, and explains what a resume re-sends', () => {
+  it('offers a resume for a failed transfer, and explains what a resume re-sends', async () => {
     const retryUpload = vi.fn().mockResolvedValue('up-1');
     useDocumentsStore.setState({
       retryUpload,
@@ -963,8 +978,67 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
     expect(
       screen.getByText(/Retry to send only the parts the server does not already hold/),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    // Awaited, because the click now settles a pending state on the way back:
+    // firing it bare leaves that update outside `act` and React says so.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
+    });
     expect(retryUpload).toHaveBeenCalledWith('up-1');
+  });
+
+  it('will not start a second resume while the first is still being prepared', async () => {
+    // The store refuses a second resume outright — a second transfer over the same
+    // parts ends with a document sealed under a key nobody holds. This is the
+    // affordance in front of that refusal: the button must say what is happening
+    // and must not hand the store a click it is going to reject.
+    //
+    // The resume is DEFERRED here, and that is the whole test: the real window is
+    // one round trip to the staging ledger, and a mock that resolves at once would
+    // never leave the button in the state being asserted.
+    let release = (): void => {};
+    const retryUpload = vi.fn().mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          release = () => {
+            resolve('up-1');
+          };
+        }),
+    );
+    useDocumentsStore.setState({
+      retryUpload: retryUpload as unknown as ReturnType<
+        typeof useDocumentsStore.getState
+      >['retryUpload'],
+      uploads: { 'up-1': makeUpload({ status: 'failed' }) },
+    });
+    renderPanel();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
+
+    // The accessible name changes with the state and still names the file: two
+    // failed transfers otherwise offer two controls both called "Retry".
+    const pendingRetry = await screen.findByRole('button', {
+      name: 'Retrying upload of holiday.zip',
+    });
+    expect(pendingRetry).toBeDisabled();
+    expect(pendingRetry).toHaveTextContent('Retrying');
+
+    fireEvent.click(pendingRetry);
+    fireEvent.click(pendingRetry);
+
+    // THE NEGATIVE: the two further clicks never reached the handler, so the store
+    // was never asked to start a resume it would have had to refuse.
+    expect(retryUpload).toHaveBeenCalledTimes(1);
+    expect(retryUpload).toHaveBeenCalledWith('up-1');
+    // And a refused click is not an error: nothing was said to the user about it.
+    expect(harness.toast).not.toHaveBeenCalled();
+
+    // The pending state settles rather than sticking: this row is still `failed`
+    // in the store, so the control comes back offering the resume again.
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'Retry upload of holiday.zip' })).toBeEnabled();
   });
 
   it('reports why a resume could not start, and stays silent when it was cancelled', async () => {
@@ -976,7 +1050,7 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
     renderPanel();
 
     expect(screen.getByText(/Upload failed\. the socket dropped/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
     await waitFor(() => {
       expect(harness.toast).toHaveBeenCalledWith({
         title: 'That upload has expired.',
@@ -986,7 +1060,17 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
 
     harness.toast.mockClear();
     retryUpload.mockRejectedValue(new UploadCancelledError());
-    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    // The button is DISABLED while a resume is pending, and `/retry/i` matches
+    // "Retrying" as well as "Retry" — so a second click issued against the
+    // pending name would silently no-op and this test would report a mystery.
+    // Waiting for the IDLE name is what makes the refusal it settled into
+    // observable, instead of resting on the order two microtask chains happen to
+    // land in.
+    const idleRetry = await screen.findByRole('button', {
+      name: 'Retry upload of holiday.zip',
+    });
+    expect(idleRetry).toBeEnabled();
+    fireEvent.click(idleRetry);
     await waitFor(() => {
       expect(retryUpload).toHaveBeenCalledTimes(2);
     });
@@ -1257,6 +1341,57 @@ describe('DocumentUploadPanel — format and repair', () => {
         bytesAfter: new Blob([text]).size,
       },
     };
+  }
+
+  /**
+   * A transform that has STARTED and has not yet answered.
+   *
+   * The pending window is the whole subject of the cases below, and it is the
+   * one thing `mockResolvedValue` cannot give: a promise that is already
+   * settled closes the window before a second file can be picked. That is why
+   * "forgets a review when a different file is picked" above does not cover
+   * any of this — it awaits the review first, so the window is already shut by
+   * the time it acts, and it passed throughout the period the panel was wrong.
+   */
+  function deferTransform(): {
+    settle: (attempt: unknown) => Promise<void>;
+    fail: (error: unknown) => Promise<void>;
+  } {
+    let settleInner!: (attempt: unknown) => void;
+    let failInner!: (error: unknown) => void;
+    harness.transformDocument.mockReturnValue(
+      new Promise<unknown>((resolve, reject) => {
+        settleInner = resolve;
+        failInner = reject;
+      }),
+    );
+    return {
+      settle: async (attempt: unknown) => {
+        await act(async () => {
+          settleInner(attempt);
+          await Promise.resolve();
+        });
+      },
+      fail: async (error: unknown) => {
+        await act(async () => {
+          failInner(error);
+          await Promise.resolve();
+        });
+      },
+    };
+  }
+
+  /** Start a transform of `config.json` that will not answer until told to. */
+  function startPendingTransform(): {
+    settle: (attempt: unknown) => Promise<void>;
+    fail: (error: unknown) => Promise<void>;
+  } {
+    const pending = deferTransform();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    expect(screen.getByTestId('transform-running')).toBeInTheDocument();
+    return pending;
   }
 
   it('offers both transforms for a JSON file', () => {
@@ -1607,6 +1742,254 @@ describe('DocumentUploadPanel — format and repair', () => {
     expect(review).toHaveTextContent(/too large to compare line by line/);
     expect(within(review).queryByTestId('transform-diff')).not.toBeInTheDocument();
   });
+
+  /* ------------------------------------------------------------------------ */
+  /*  A review belongs to ONE file, and to the selection that produced it      */
+  /* ------------------------------------------------------------------------ */
+
+  it('drops a review whose file was replaced while its transform was still running', async () => {
+    // `select` resets the phase but CANCELS NOTHING, so the promise for the
+    // first file is still in flight when the second is chosen and it lands
+    // afterwards. Shown against the second file, its confirm would upload the
+    // FIRST file's bytes under the SECOND file's name, sealed with the first
+    // file's `originalSha256` — a provenance block that then describes a
+    // document nobody uploaded.
+    renderPanel();
+    const pending = startPendingTransform();
+
+    const second = pick('other.json', 400).file;
+    await pending.settle(reviewOf('{ "a": 1 }\n'));
+
+    // Not the review, and not the spinner either: the panel belongs to the file
+    // selected now, and nothing about the file before it survives.
+    expect(screen.queryByTestId('transform-review')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('transform-running')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Upload the formatted file/ }),
+    ).not.toBeInTheDocument();
+    // …and the panel is usable for the file that IS selected: the Upload button
+    // is back and the checkboxes are not locked by a run this file never had.
+    expect(screen.getByText(/other\.json/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Format this document/)).toBeEnabled();
+    expect(screen.getByLabelText(/Format this document/)).not.toBeChecked();
+
+    // The only upload this panel can now start is the selected file's own
+    // bytes, under its own name, carrying no provenance from a run it never had.
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    const [input] = startUpload.mock.calls[0] as [Record<string, unknown>];
+    expect(input.source).toBe(second);
+    expect(input.name).toBe('other.json');
+    expect(input).not.toHaveProperty('transform');
+  });
+
+  it('drops a review whose file was CLEARED while its transform was still running', async () => {
+    // The other way the selection moves on. Clearing is not picking, so a
+    // binding that only watched the file input would let this one through and
+    // the review would reappear against whatever is chosen next.
+    renderPanel();
+    const pending = startPendingTransform();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selected file' }));
+    pick('other.json', 400);
+    await pending.settle(reviewOf('{ "a": 1 }\n'));
+
+    expect(screen.queryByTestId('transform-review')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeInTheDocument();
+    expect(startUpload).not.toHaveBeenCalled();
+  });
+
+  it('drops a FAILURE whose file was replaced while its transform was still running', async () => {
+    // The other arm of the same `.then`. A syntax error in the file the user
+    // has just moved on from must not be reported against the file they moved
+    // on TO — which has not been read, let alone parsed.
+    renderPanel();
+    const pending = startPendingTransform();
+
+    pick('other.json', 400);
+    await pending.settle({
+      status: 'failed',
+      failure: { message: 'Unexpected end of JSON input', line: 4, column: 1, excerpt: '{"a":' },
+    });
+
+    expect(screen.queryByTestId('transform-failure')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeInTheDocument();
+    expect(startUpload).not.toHaveBeenCalled();
+  });
+
+  it('drops a driver REJECTION whose file was replaced while it was still running', async () => {
+    // And the rejection arm, which reports "this file could not be read" — a
+    // sentence that would be flatly untrue about the file now on screen.
+    renderPanel();
+    const pending = startPendingTransform();
+
+    pick('other.json', 400);
+    await pending.fail(new Error('unreadable'));
+
+    expect(screen.queryByTestId('transform-failure')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeInTheDocument();
+    expect(startUpload).not.toHaveBeenCalled();
+  });
+
+  it('does not let a late answer take the screen from the run that is on now', async () => {
+    // Two files, two runs, and the FIRST one answers last. Dropping the stale
+    // answer is only half of it: it must also not take the spinner away from
+    // the run the user is actually waiting on, which an unguarded write did.
+    renderPanel();
+    const first = startPendingTransform();
+    pick('other.json', 400);
+    const second = deferTransform();
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    expect(screen.getByTestId('transform-running')).toBeInTheDocument();
+
+    await first.settle(reviewOf('{ "a": 1 }\n'));
+
+    expect(screen.getByTestId('transform-running')).toBeInTheDocument();
+    expect(screen.queryByTestId('transform-review')).not.toBeInTheDocument();
+
+    await second.settle(reviewOf('{\n  "b": 2\n}\n'));
+    expect(screen.getByTestId('transform-review')).toBeInTheDocument();
+  });
+
+  it('does not let a late answer replace a review that is already open', async () => {
+    // The same overlap, resolved the other way round. Replacing an open review
+    // discards a comparison the user is in the middle of reading AND puts a
+    // different file's bytes behind a confirmation they had already reached.
+    renderPanel();
+    const first = startPendingTransform();
+    pick('other.json', 400);
+    const second = deferTransform();
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    await second.settle(reviewOf('{\n  "b": 2\n}\n'));
+    await screen.findByTestId('transform-review');
+
+    await first.settle(reviewOf('{ "a": 1 }\n'));
+
+    // Still the review that was open, and confirming it sends ITS bytes.
+    expect(screen.getByTestId('transform-review')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Upload the formatted file/ }));
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    const [input] = startUpload.mock.calls[0] as [Record<string, unknown>];
+    expect(input.name).toBe('other.json');
+    expect(await (input.source as Blob).text()).toBe('{\n  "b": 2\n}\n');
+  });
+
+  /* ------------------------------------------------------------------------ */
+  /*  The size cap is checked on what will be UPLOADED, not on what was picked */
+  /* ------------------------------------------------------------------------ */
+
+  /** A review whose result is `size` bytes, from a picked file of 500. */
+  function reviewOfSize(size: number) {
+    const blob = new Blob([new Uint8Array(size)]);
+    const base = reviewOf('x');
+    return {
+      status: 'ready' as const,
+      review: { ...base.review, blob, bytesBefore: 500, bytesAfter: blob.size },
+    };
+  }
+
+  it('refuses a transform that grew the file past the cap, naming the limit', async () => {
+    // `refusalFor` measured the file that was PICKED; what `send` uploads is the
+    // blob the transform produced. A formatter that expands a minified document
+    // past the cap left the SERVER to notice, which it did — with its own size
+    // message, but only after the confirmation and after `send` had cleared the
+    // selection, so the answer landed beside no file and no comparison.
+    harness.transformDocument.mockResolvedValue(reviewOfSize(2 * 1024 * 1024));
+    renderPanel({ ...ENABLED_CONFIG, maxSizeMB: 1 });
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    const review = await screen.findByTestId('transform-review');
+    // The confirm is not OFFERED, rather than offered and then refused: the
+    // review is still shown, because what changed is exactly what the user
+    // needs to see to decide what to do instead.
+    expect(
+      within(review).queryByRole('button', { name: /Upload the formatted file/ }),
+    ).not.toBeInTheDocument();
+    // The same actionable sentence the picked-file guardrail uses, naming the
+    // limit rather than merely refusing — and naming the RESULT as its subject,
+    // because the summary directly above it reads `500 B → 2 MB` and "that file
+    // is 2 MB" would point at the one the reader chose.
+    const refusal = within(review).getByTestId('transform-refusal');
+    expect(refusal).toHaveTextContent(
+      'The formatted file is 2 MB. This server accepts documents up to 1 MB.',
+    );
+    // The picked-file guardrail still says what it always said.
+    expect(screen.getByTestId('upload-guardrail-note')).toHaveTextContent(
+      'Up to 1 MB per document, checked here before the file is read.',
+    );
+    expect(refusal).toHaveAttribute('role', 'alert');
+
+    // …and the way forward is the one that was always going to work: the file
+    // as it was picked, which passed the cap before a byte of it was read.
+    fireEvent.click(screen.getByRole('button', { name: /Upload the original unchanged/ }));
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    const [input] = startUpload.mock.calls[0] as [Record<string, unknown>];
+    expect(input.source).toBeInstanceOf(File);
+    expect(input).not.toHaveProperty('transform');
+  });
+
+  it('draws the transformed-size ceiling AT the bound, not near it', async () => {
+    // n and n+1 on the blob the transform produced. The comparison is
+    // `size > maxSizeBytes`, the same one `refusalFor` makes, so a result of
+    // exactly the cap is still offered and one byte more is not.
+    const cap = 1024 * 1024;
+    harness.transformDocument.mockResolvedValue(reviewOfSize(cap));
+    const { unmount } = renderPanel({ ...ENABLED_CONFIG, maxSizeMB: 1 });
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    let review = await screen.findByTestId('transform-review');
+    expect(
+      within(review).getByRole('button', { name: /Upload the formatted file/ }),
+    ).toBeInTheDocument();
+    expect(within(review).queryByTestId('transform-refusal')).not.toBeInTheDocument();
+    unmount();
+
+    harness.transformDocument.mockResolvedValue(reviewOfSize(cap + 1));
+    renderPanel({ ...ENABLED_CONFIG, maxSizeMB: 1 });
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    review = await screen.findByTestId('transform-review');
+    expect(
+      within(review).queryByRole('button', { name: /Upload the formatted file/ }),
+    ).not.toBeInTheDocument();
+    expect(within(review).getByTestId('transform-refusal')).toBeInTheDocument();
+  });
+
+  it('offers the confirm as usual when the server advertises no cap at all', async () => {
+    // `maxSizeMB` is optional, and a server that does not advertise one has no
+    // number to compare against — the transformed blob must not be refused by a
+    // comparison against `null`.
+    harness.transformDocument.mockResolvedValue(reviewOfSize(4 * 1024 * 1024));
+    const noCap: DocumentsConfig = { ...ENABLED_CONFIG };
+    delete noCap.maxSizeMB;
+    renderPanel(noCap);
+    // The guardrail note says so too, rather than quoting a limit that is not there.
+    expect(screen.getByTestId('upload-guardrail-note')).toHaveTextContent(
+      'Every file is encrypted in your browser before any of it is sent.',
+    );
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+
+    const review = await screen.findByTestId('transform-review');
+    expect(
+      within(review).getByRole('button', { name: /Upload the formatted file/ }),
+    ).toBeInTheDocument();
+    expect(within(review).queryByTestId('transform-refusal')).not.toBeInTheDocument();
+  });
 });
 
 /* ========================================================================== */
@@ -1651,6 +2034,36 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
     });
     renderPage();
     await screen.findByRole('heading', { name: 'Documents' });
+    // Then SETTLE, and this is load-bearing rather than tidy. `findBy*` returns
+    // the moment the heading appears, which is before the page's mount work is
+    // done. The straggler is ONE setter, and naming it precisely matters because
+    // the obvious suspects are innocent: the three fetches stubbed above resolve
+    // to `undefined` and `DocumentsPage`'s `load()` only `.catch()`es them, so
+    // they write no state at all. It is `useDocumentsConfig`'s
+    // `getDocumentsConfig().then((resolved) => setConfig(resolved))` that lands in
+    // a microtask, after the heading is on screen, outside any `act(...)`. A
+    // `fireEvent.click` immediately afterwards flushes THAT pending work inside
+    // its own `act`, and React is then free to defer the render caused by the
+    // click itself — so a synchronous `getBy*` on the next line reads a DOM one
+    // render behind while the store is already correct.
+    //
+    // Measured, because it presented as an ordinary flake and not as a bug: four
+    // failures in about fifty single-file runs, landing on three different cases
+    // in this block (the four-modes case, the row-date case, and the
+    // upload-target-folder case). Instrumenting the failing run showed
+    // `showTrash: true` with one trashed row loaded and the DOM still showing the
+    // active one — state right, paint behind. Forty consecutive runs after this
+    // line went in, with no failure.
+    //
+    // The await below yields one microtask checkpoint, which is exactly enough for
+    // a single `.then` and no more; a future mount that chains two ticks would
+    // need another. `waitFor` on each post-click assertion was the alternative and
+    // is worse twice over: it is polling with a timeout, which this project treats
+    // as synchronisation-by-retry, and it would have hidden how many renders
+    // behind the DOM was rather than removing the lag.
+    await act(async () => {
+      await Promise.resolve();
+    });
   }
 
   const names = () => screen.queryAllByTestId('document-name').map((n) => n.textContent);
@@ -1921,14 +2334,26 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
     // A partial run reported as a clean one is the dishonesty the server's own
     // `failedCount` exists to prevent — the rows it could not remove are still
     // there, still listed and still occupying storage.
+    //
+    // The sentence promises nothing about the residue, and that is the assertion.
+    // The server's walk gives up once storage has refused several deletes in a
+    // row, so `failedCount` counts only what it ATTEMPTED; the rows past that
+    // point carry no `purgePending` marker and the hourly collector will never
+    // look at them. A message saying they "will be cleaned up automatically"
+    // would be a promise this system does not keep, told to a user who is at that
+    // moment looking at a refreshed list that still holds every one of them.
     await waitFor(() => {
       expect(harness.toast).toHaveBeenCalledWith(
         expect.objectContaining({
-          title: '1 deleted. 1 could not be removed and will be cleaned up automatically.',
+          title:
+            '1 deleted. 1 could not be removed — the trash has been refreshed to show what is still there.',
           type: 'warning',
         }),
       );
     });
+    expect(harness.toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining('cleaned up automatically') }),
+    );
   });
 
   it('reports a refused empty rather than leaving the button spinning', async () => {

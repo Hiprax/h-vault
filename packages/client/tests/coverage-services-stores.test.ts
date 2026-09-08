@@ -17,7 +17,7 @@
  *     right route wrapper).
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createElement } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import 'fake-indexeddb/auto';
@@ -36,7 +36,7 @@ interface FakeRequest {
 
 interface FakeTransaction {
   oncomplete: (() => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((event: Event) => void) | null;
   error: unknown;
   objectStore: () => { clear: () => void; put: () => void; getAll: () => FakeRequest };
 }
@@ -49,8 +49,27 @@ function makeStore(getAllRequest?: FakeRequest) {
   };
 }
 
-/** A fake IDBDatabase whose transactions fail with `error` on the given attempt. */
-function makeFailingDb(error: unknown, failOnTransaction = 1) {
+/**
+ * A fake IDBDatabase whose Nth transaction fails with `error`.
+ *
+ * The failure is shaped the way a real engine produces one: the `error` event is
+ * dispatched at the failing REQUEST and bubbles to the transaction, so the
+ * handler is called with an event whose `target` carries the error — and
+ * `transaction.error` is still `null` at that moment, because the specification
+ * only populates it during the abort that follows.
+ *
+ * That last detail is not a nicety. This double used to put the error on the
+ * transaction itself, which no engine does at that point, and the production
+ * code read it from there — so both agreed, both were wrong, and every write
+ * failure in a real browser was reported as `unknown`, including the quota
+ * failure the test below claims to pin. Do not "simplify" this back.
+ */
+function makeFailingDb(
+  error: unknown,
+  failOnTransaction = 1,
+  opts: { targetHasError?: boolean } = {},
+) {
+  const { targetHasError = true } = opts;
   let calls = 0;
   const close = vi.fn();
   const db = {
@@ -61,12 +80,14 @@ function makeFailingDb(error: unknown, failOnTransaction = 1) {
       const tx: FakeTransaction = {
         oncomplete: null,
         onerror: null,
-        error: shouldFail ? error : null,
+        error: null,
         objectStore: () => makeStore(),
       };
       queueMicrotask(() => {
-        if (shouldFail) tx.onerror?.();
-        else tx.oncomplete?.();
+        if (shouldFail) {
+          const target = targetHasError ? { error } : {};
+          tx.onerror?.({ target } as unknown as Event);
+        } else tx.oncomplete?.();
       });
       return tx;
     },
@@ -98,21 +119,14 @@ async function importOfflineCache() {
 }
 
 describe('offlineCache — IndexedDB failure paths', () => {
-  // Per WebIDL, `DOMException` inherits from `Error` in every real browser
-  // (`new DOMException(...) instanceof Error === true`). jsdom's DOMException
-  // sits on a prototype chain that does NOT satisfy the global `instanceof
-  // Error`, which would make the production code's `error instanceof Error`
-  // guard behave differently here than in a browser. Align the environment
-  // with the spec so these tests exercise the real branch.
-  const originalDomExceptionProto: unknown = Object.getPrototypeOf(DOMException.prototype);
-
-  beforeAll(() => {
-    Object.setPrototypeOf(DOMException.prototype, Error.prototype);
-  });
-
-  afterAll(() => {
-    Object.setPrototypeOf(DOMException.prototype, originalDomExceptionProto as object);
-  });
+  // This block used to repoint `DOMException.prototype` at `Error.prototype` in
+  // a `beforeAll`, because jsdom's DOMException does NOT satisfy `instanceof
+  // Error` (it inherits from a different realm's `Error.prototype`) while every
+  // browser's does. That patch existed to make the production code's
+  // `instanceof Error` guards take the browser's arm here. The guards are gone —
+  // they are null checks now, which every realm answers the same way — so the
+  // patch is gone with them. Mutating a global prototype to make a suite agree
+  // with production is a sign the production code is the thing to change.
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -188,6 +202,25 @@ describe('offlineCache — IndexedDB failure paths', () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to a stand-in message when the failing request carries no error', async () => {
+    // The only thing `transactionFailureError`'s fallback is for. An engine that
+    // dispatches an error event with nothing in `error` must still produce a
+    // rejection a caller can report, rather than `undefined` reaching
+    // `classifyError` and being described as an unknown IndexedDB error with no
+    // message at all.
+    const { offlineCache, OfflineCacheError } = await importOfflineCache();
+    const { db } = makeFailingDb(undefined);
+    stubOpen({ db });
+
+    const err: unknown = await offlineCache.clear().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(OfflineCacheError);
+    expect((err as InstanceType<typeof OfflineCacheError>).type).toBe('unknown');
+    expect((err as InstanceType<typeof OfflineCacheError>).message).toBe(
+      'IndexedDB transaction failed',
+    );
+  });
+
   it('surfaces a failed read (getAll) as an OfflineCacheError instead of hanging', async () => {
     const { offlineCache, OfflineCacheError } = await importOfflineCache();
     const getAllRequest: FakeRequest = {
@@ -241,6 +274,61 @@ describe('offlineCache — IndexedDB failure paths', () => {
 
     expect(err).toBeInstanceOf(OfflineCacheError);
     expect((err as InstanceType<typeof OfflineCacheError>).message).toBe('IndexedDB read failed');
+  });
+
+  it.each([
+    ['getCachedItems', (c: { getCachedItems: () => Promise<unknown> }) => c.getCachedItems()],
+    ['getCachedFolders', (c: { getCachedFolders: () => Promise<unknown> }) => c.getCachedFolders()],
+  ])(
+    '%s falls back to a stand-in message when the failed read carries no error',
+    async (_name, run) => {
+      // The `?? new Error('IndexedDB read failed')` arm. A real failing request
+      // always populates `error`, so only a double can reach it — and reaching it
+      // matters, because without the fallback the promise would reject with
+      // `null` and `classifyError` would describe it as an unknown IndexedDB
+      // error carrying no message at all.
+      const { offlineCache, OfflineCacheError } = await importOfflineCache();
+      const getAllRequest: FakeRequest = {
+        onsuccess: null,
+        onerror: null,
+        onupgradeneeded: null,
+        result: undefined,
+        error: null,
+      };
+      const db = {
+        close: vi.fn(),
+        transaction: () => ({
+          objectStore: () => {
+            queueMicrotask(() => getAllRequest.onerror?.());
+            return makeStore(getAllRequest);
+          },
+        }),
+      };
+      stubOpen({ db });
+
+      const err: unknown = await run(offlineCache).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(OfflineCacheError);
+      expect((err as InstanceType<typeof OfflineCacheError>).message).toBe('IndexedDB read failed');
+      expect((err as InstanceType<typeof OfflineCacheError>).type).toBe('unknown');
+    },
+  );
+
+  it('falls back when the failing transaction event has no target to read', async () => {
+    // `transactionFailureError`'s outer guard. An `error` or `abort` event whose
+    // target is not something carrying an `error` — a shape a browser does not
+    // produce, but the arm exists so that a rejection is always an Error rather
+    // than `undefined` reaching `classifyError`.
+    const { offlineCache, OfflineCacheError } = await importOfflineCache();
+    const { db } = makeFailingDb(undefined, 1, { targetHasError: false });
+    stubOpen({ db });
+
+    const err: unknown = await offlineCache.clear().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(OfflineCacheError);
+    expect((err as InstanceType<typeof OfflineCacheError>).message).toBe(
+      'IndexedDB transaction failed',
+    );
   });
 
   it('reports type "unavailable" when IndexedDB does not exist in the environment', async () => {

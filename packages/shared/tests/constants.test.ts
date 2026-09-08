@@ -108,6 +108,8 @@ import {
   TRANSFORM_SYNTAXES,
   TRANSFORM_SYNTAX_NAMES,
   MAX_PREVIEW_BYTES,
+  MAX_PREVIEW_TABLE_CELLS,
+  MAX_PREVIEW_TABLE_COLUMNS,
   MAX_PREVIEW_TEXT_LINES,
   PREVIEW_MODES,
   PREVIEW_MODE_NAMES,
@@ -740,12 +742,28 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 46 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 47 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("46 distinct operations"). If a new audit action is added, bump both
+    // ("47 distinct operations"). If a new audit action is added, bump both
     // this assertion and the README number together.
-    expect(AUDIT_ACTIONS.length).toBe(46);
+    expect(AUDIT_ACTIONS.length).toBe(47);
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
+  });
+
+  it('audits spending a backup code, separately from regenerating the batch', () => {
+    // Two distinct events that the log used to conflate into one — and, before
+    // that, into none: spending a code produced a server log line and no row at
+    // all. They must stay separate, because "someone used a recovery credential
+    // on my account" and "someone replaced my recovery credentials" call for
+    // different reactions from the person reading the log.
+    expect(AUDIT_ACTIONS).toContain('2fa_backup_code_used');
+    expect(AUDIT_ACTIONS).toContain('2fa_backup_codes_regenerated');
+    expect(AUDIT_ACTIONS.filter((action) => action.startsWith('2fa_'))).toEqual([
+      '2fa_enable',
+      '2fa_disable',
+      '2fa_backup_codes_regenerated',
+      '2fa_backup_code_used',
+    ]);
   });
 
   it('includes the trusted-device audit actions', () => {
@@ -1347,5 +1365,20 @@ describe('TRANSFORM_SYNTAXES, transformSyntaxForName and canRepairSyntax', () =>
     // between them is worth pinning rather than assuming.
     expect(MAX_PREVIEW_BYTES).toBeGreaterThan(MAX_FORMATTABLE_SIZE_BYTES);
     expect(MAX_PREVIEW_TEXT_LINES).toBe(50_000);
+    // The row cap is not a NODE budget on its own, because a table's node count
+    // is rows TIMES columns and the width comes from the file: a 25 MiB line of
+    // commas is under MAX_PREVIEW_BYTES and asks for twenty-six million cells in
+    // one row. The width cap and the product cap are what bound it, and the
+    // ordering between the three is the property worth pinning rather than the
+    // three numbers on their own.
+    expect(MAX_PREVIEW_TABLE_COLUMNS).toBe(1_000);
+    expect(MAX_PREVIEW_TABLE_CELLS).toBe(250_000);
+    // A budget smaller than one full-width row would render no table at all.
+    expect(MAX_PREVIEW_TABLE_CELLS).toBeGreaterThan(MAX_PREVIEW_TABLE_COLUMNS);
+    // And the product cap has to be the binding one, or it is decoration: the
+    // other two together still permit fifty million cells.
+    expect(MAX_PREVIEW_TABLE_CELLS).toBeLessThan(
+      MAX_PREVIEW_TEXT_LINES * MAX_PREVIEW_TABLE_COLUMNS,
+    );
   });
 });

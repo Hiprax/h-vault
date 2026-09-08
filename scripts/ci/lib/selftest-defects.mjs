@@ -501,9 +501,22 @@ export const DEFECTS = {
     },
     // `a11y.json` records every scan, including the views that were clean, so a
     // predicate matching a VIEW name would be satisfied by a fully green report —
-    // the trap recorded on `test:security`. Only a finding carries a rule id, and
-    // only the planted defect produces this one on that view.
-    evidence: (text) => /"id":\s*"select-name"/.test(text) && /item-form-note/.test(text),
+    // the trap recorded on `test:security`.
+    //
+    // Matched as ONE `blocking` entry rather than as two independent substrings,
+    // and the difference is not cosmetic. `blocking` is the only place the report
+    // puts `"view"` immediately before `"id"`: a scan's own record has `"view"`
+    // followed by `"url"`, and the gate's `undecided` list deliberately calls the
+    // rule `"rule"` for this reason. The looser pair this replaced (`"id":
+    // "select-name"` anywhere AND `item-form-note` anywhere) stopped being
+    // attributable the moment the gate started recording the checks axe could not
+    // decide, because `select-name`'s `no-implicit-explicit-label` check can come
+    // back undecided and the view name is in every report. The predicate is only
+    // consulted on a NON-ZERO exit (`selftest.mjs` computes `failed && attributed`),
+    // so the hole was not a green run reporting `proven`: it was any UNRELATED
+    // red run being credited to this plant, which is the same lie one step over —
+    // the run says the gate can fail for this defect when it failed for another.
+    evidence: (text) => /"view":\s*"item-form-note",\s*"id":\s*"select-name"/.test(text),
   },
 
   'audit:bundle': {

@@ -92,6 +92,22 @@ interface AuthState {
 
   // Encrypted vault key data (persisted so we can unlock without re-login)
   encryptedVaultKeyData: EncryptedVaultKeyData | null;
+  /**
+   * WHICH vault key `vaultKey` and `encryptedVaultKeyData` are — the account's
+   * vault-key generation as it stood in the response that delivered them.
+   *
+   * It moves with the wrapped key and never on its own. `unlock()` re-derives
+   * from the very `encryptedVaultKeyData` recorded here, so an unlock cannot
+   * change which generation this session holds; only a sign-in, a cold-start
+   * resume, or this session performing the rotation itself can.
+   *
+   * A rotation started elsewhere revokes no session and refreshes no key, so a
+   * session can hold a superseded key indefinitely and has no way to notice.
+   * That is what this number is for: anything binding data to the vault key
+   * sends THIS, so the server can tell "the key you hold" from "the key that is
+   * current" — a distinction it cannot make from a number of its own.
+   */
+  vaultKeyVersion: number;
   kdfIterations: number;
 
   // 2FA flow
@@ -182,6 +198,7 @@ export const useAuthStore = create<AuthState>()(
       vaultKey: null,
       mek: null,
       encryptedVaultKeyData: null,
+      vaultKeyVersion: 0,
       kdfIterations: KDF_ITERATIONS,
       twoFactorRequired: false,
       tempToken: null,
@@ -328,6 +345,11 @@ export const useAuthStore = create<AuthState>()(
             vaultKey,
             mek: masterEncryptionKey,
             encryptedVaultKeyData,
+            // Recorded from the SAME response that delivered the key above, so
+            // the two can never describe different generations. `?? 0` for a
+            // server that predates the field, matching how the server itself
+            // reads a missing column.
+            vaultKeyVersion: loginData.vaultKeyVersion ?? 0,
             kdfIterations: loginData.kdfIterations,
             twoFactorRequired: false,
             tempToken: null,
@@ -413,6 +435,7 @@ export const useAuthStore = create<AuthState>()(
             vaultKey,
             mek,
             encryptedVaultKeyData,
+            vaultKeyVersion: loginData.vaultKeyVersion ?? 0,
             kdfIterations: loginData.kdfIterations,
             twoFactorRequired: false,
             tempToken: null,
@@ -630,6 +653,7 @@ export const useAuthStore = create<AuthState>()(
           vaultKey: null,
           mek: null,
           encryptedVaultKeyData: null,
+          vaultKeyVersion: 0,
           kdfIterations: KDF_ITERATIONS,
           twoFactorRequired: false,
           tempToken: null,
@@ -720,6 +744,13 @@ export const useAuthStore = create<AuthState>()(
         user: state.user,
         isAuthenticated: state.isAuthenticated,
         encryptedVaultKeyData: state.encryptedVaultKeyData,
+        // Persisted BECAUSE `encryptedVaultKeyData` is: an unlock re-derives the
+        // vault key from that blob, so the generation it belongs to has to
+        // survive the same rehydrate. Dropping it would leave every rehydrated
+        // session claiming generation 0, which for a rotated account means every
+        // upload taking the recovery path it exists to make rare. It is a
+        // monotonic counter, not key material.
+        vaultKeyVersion: state.vaultKeyVersion,
         kdfIterations: state.kdfIterations,
       }),
       onRehydrateStorage: () => (state) => {

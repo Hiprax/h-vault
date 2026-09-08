@@ -197,6 +197,116 @@ describe('CSRF — malformed token handling', () => {
     expect(res.status).toBe(403);
   });
 
+  // ─── Token malleability: the HMAC segment must be EXACTLY the digest ───
+  //
+  // The verifier compares only `receivedHmac.slice(0, 64)` against the expected
+  // SHA-256 hex digest, so without an exact-length format check a valid token
+  // with arbitrary bytes appended to its HMAC segment still verified. That makes
+  // the token malleable: one issued token expands into an unbounded family of
+  // distinct strings the server accepts, which is exactly what a token meant to
+  // be unforgeable must not do.
+  //
+  // The over-length cases append exactly ONE character, so they sit at 65 — the
+  // smallest possible violation, and the one an off-by-one in the length check
+  // would let through. Together with the 63- and 64-character cases below the
+  // boundary is pinned on both sides.
+
+  it('rejects an authenticated token with bytes appended to the HMAC segment', async () => {
+    const agent = request(app);
+    const user = await createTestUser();
+    const { token, cookie } = await getCsrfBase(agent, `refreshToken=${user.refreshToken}`);
+
+    const dot = token.indexOf('.');
+    expect(dot).toBe(64); // the control: a well-formed token's HMAC is 64 hex chars
+    const malleable = `${token.slice(0, dot)}f${token.slice(dot)}`;
+    expect(malleable.indexOf('.')).toBe(65);
+
+    const res = await agent
+      .put(`${API}/user/settings`)
+      .set('Authorization', authHeader(user.accessToken))
+      .set('x-csrf-token', malleable)
+      .set('Cookie', `${cookie}; refreshToken=${user.refreshToken}`)
+      .send({ theme: 'dark' });
+
+    // The unmodified token is accepted with 200 by the sibling test in
+    // "session binding", so a 403 here is the appended bytes and nothing else.
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('rejects an anonymous token with bytes appended to the HMAC segment', async () => {
+    const agent = request(app);
+    const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+    const dot = csrfToken.indexOf('.');
+    const malleable = `${csrfToken.slice(0, dot)}0`.concat(csrfToken.slice(dot));
+    expect(malleable.indexOf('.')).toBe(65);
+
+    const res = await agent
+      .post(`${API}/auth/login`)
+      .set('x-csrf-token', malleable)
+      .set('Cookie', csrfCookie)
+      .send({ email: 'test@example.com', authHash: 'hash' });
+
+    // The unmodified anon token reaches the login handler and comes back 401
+    // (see "should accept a token that is less than 24 hours old"), so 403 here
+    // is the CSRF middleware refusing the padded HMAC.
+    expect(res.status).toBe(403);
+  });
+
+  // Deliberately labelled for what it actually proves. Reverting `formatValid`
+  // does NOT turn this one red: a 63-character correct PREFIX is already refused
+  // by the padded comparison, because `Buffer.alloc` zero-fills the missing
+  // 64th byte and no hex digit is NUL. It pins that truncation defence, which is
+  // a different guarantee from the exact-length check and would be lost by
+  // anyone "simplifying" the padding scheme to compare only the shorter side.
+  it('refuses a truncated HMAC segment via the zero-padded comparison', async () => {
+    const agent = request(app);
+    const user = await createTestUser();
+    const { token, cookie } = await getCsrfBase(agent, `refreshToken=${user.refreshToken}`);
+
+    const dot = token.indexOf('.');
+    const truncated = `${token.slice(0, dot - 1)}${token.slice(dot)}`;
+
+    const res = await agent
+      .put(`${API}/user/settings`)
+      .set('Authorization', authHeader(user.accessToken))
+      .set('x-csrf-token', truncated)
+      .set('Cookie', `${cookie}; refreshToken=${user.refreshToken}`)
+      .send({ theme: 'dark' });
+
+    expect(res.status).toBe(403);
+  });
+
+  it('accepts the issued token and ONLY that encoding of it', async () => {
+    // The counterpart to the three refusals above, and deliberately not just
+    // "a good token still works" — the session-binding block already asserts
+    // that. The property here is that the accepted set has exactly ONE member:
+    // the issued string, and no re-encoding of it. Case is the probe, because
+    // the digest is lowercase hex and "be lenient, compare case-insensitively"
+    // is the plausible change that would quietly widen the set again.
+    const agent = request(app);
+    const user = await createTestUser();
+    const { token, cookie } = await getCsrfBase(agent, `refreshToken=${user.refreshToken}`);
+
+    const send = (headerValue: string): request.Test =>
+      agent
+        .put(`${API}/user/settings`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', headerValue)
+        .set('Cookie', `${cookie}; refreshToken=${user.refreshToken}`)
+        .send({ theme: 'dark' });
+
+    const dot = token.indexOf('.');
+    const upperHmac = `${token.slice(0, dot).toUpperCase()}${token.slice(dot)}`;
+    // Guard the probe itself: an all-digit digest would upper-case to itself and
+    // silently make the negative below vacuous.
+    expect(upperHmac).not.toBe(token);
+
+    await expect(send(upperHmac).then((r) => r.status)).resolves.toBe(403);
+    await expect(send(token).then((r) => r.status)).resolves.toBe(200);
+  });
+
   it('should reject a token signed with a different secret', async () => {
     const timestamp = Date.now().toString(36);
     const randomValue = crypto.randomBytes(32).toString('hex');

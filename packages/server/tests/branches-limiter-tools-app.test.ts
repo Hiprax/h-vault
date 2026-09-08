@@ -327,6 +327,76 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
       expect(hibpCache.get('fresh')?.data).toBe('new');
     });
 
+    // The three cases below pin `hibpEarliestExpiry`, the lower bound that keeps the
+    // expired-victim scan off the insert hot path. Each one names a distinct way the
+    // bound can go stale-HIGH, which is the only direction that changes behaviour: a
+    // bound that is too high skips a scan that should have run, and a live entry is
+    // sacrificed while an expired one stays. Without the bound the scan is correct but
+    // walks the whole Map on every insert once the cache is full — 5,000 inserts against
+    // a full cache is 50 M iterations, which is what made the mutation gate's dry run
+    // exceed the 30 s test timeout on `batch7-fixes.test.ts`.
+    describe('the recorded earliest-expiry bound', () => {
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('is lowered by an insert, so an entry that ARRIVES expired is harvested, not a live one', () => {
+        fillToCap(future);
+        // Overflowing the cap runs the scan, which finds nothing expired and records
+        // "the earliest expiry in here is still in the future".
+        setHibpCacheEntry('primed', { data: 'p', expires: future() });
+        expect(hibpCache.has('k0')).toBe(false);
+
+        setHibpCacheEntry('stale', { data: 's', expires: past() });
+
+        // The newcomer is the only expired entry, so it is its own victim. A bound that
+        // ignored new arrivals would have skipped the scan and dropped live `k1`.
+        expect(hibpCache.has('stale')).toBe(false);
+        expect(hibpCache.get('k1')?.data).toBe('d1');
+        expect(hibpCache.has('primed')).toBe(true);
+        expect(hibpCache.size).toBe(HIBP_CACHE_MAX_ENTRIES);
+      });
+
+      it('is the MINIMUM the scan saw, so it stops holding once that entry expires', () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const t0 = Date.now();
+        // `k5000` is the earliest-expiring entry but NOT the oldest, so recording the
+        // first entry seen instead of the minimum would hide it for the full hour.
+        fillToCap((i) => (i === 5000 ? t0 + 60_000 : t0 + 3_600_000));
+
+        setHibpCacheEntry('primed', { data: 'p', expires: t0 + 3_600_000 });
+        expect(hibpCache.has('k0')).toBe(false);
+        expect(hibpCache.has('k5000')).toBe(true);
+
+        vi.setSystemTime(t0 + 120_000);
+        setHibpCacheEntry('later', { data: 'l', expires: Date.now() + 3_600_000 });
+
+        expect(hibpCache.has('k5000')).toBe(false);
+        expect(hibpCache.get('k1')?.data).toBe('d1');
+      });
+
+      it('is left UNKNOWN by a scan that stopped early, because it saw only a prefix', () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const t0 = Date.now();
+        fillToCap((i) => {
+          if (i === 5000) return t0 - 1; // already expired — the scan stops here
+          if (i === 9000) return t0 + 60_000; // expires during this test
+          return t0 + 3_600_000;
+        });
+
+        setHibpCacheEntry('a', { data: 'a', expires: t0 + 3_600_000 });
+        expect(hibpCache.has('k5000')).toBe(false);
+
+        // The scan above saw only `k0`..`k4999`, all far-future. Recording that prefix as
+        // the bound would hide `k9000` once it expired.
+        vi.setSystemTime(t0 + 120_000);
+        setHibpCacheEntry('b', { data: 'b', expires: Date.now() + 3_600_000 });
+
+        expect(hibpCache.has('k9000')).toBe(false);
+        expect(hibpCache.get('k0')?.data).toBe('d0');
+      });
+    });
+
     it('pruneHibpCache sweeps expired entries only on every 100th access, and keeps live ones', () => {
       hibpCache.set('expired', { data: 'stale', expires: past() });
       hibpCache.set('live', { data: 'fresh', expires: future() });

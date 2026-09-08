@@ -25,6 +25,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
+import { NUMBER_WORDS } from './support/numberWords';
 import {
   blockingDependency,
   resolveExitCode,
@@ -62,7 +64,7 @@ import sharedFlakeConfig from '../../shared/vitest.flake.config';
 import serverFlakeConfig from '../vitest.flake.config';
 import clientFlakeConfig from '../../client/vitest.flake.config';
 import { CORE_MODULES, MUTATION_LEGS } from '../../../scripts/ci/lib/mutation-scope.mjs';
-import playwrightConfig from '../../../playwright.config';
+import playwrightConfig, { FIREFOX_SUITE } from '../../../playwright.config';
 import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
 import flakePlaywrightConfig, { FLAKE_REPEAT_EACH } from '../../../playwright.flake.config';
 import { A11Y_BLOCKING_IMPACTS, A11Y_VIEWS, A11Y_VIEW_IDS } from '../../../e2e/a11yViews';
@@ -257,19 +259,38 @@ describe('manifest and runner agree', () => {
 
 describe('tiers', () => {
   it('keeps T0 to the seven gates that fit a 90-second pre-commit budget', () => {
-    // RE-MEASURED end to end on the reference machine over three runs: 2m 23s, 2m 10s
-    // and 1m 49s, so **T0 IS NOW OVER ITS 90-SECOND BUDGET** even on the quietest, and
-    // the runner prints OVER on every run. (It was 85s when this comment was written.)
-    // The quietest breakdown: engines 0.0s, secrets 0.2s, lint 39.2s, format 21.3s,
-    // type-check 44.8s, integrity 3.5s, ratchet 0.1s.
-    // The two anti-cheat gates cost 4.1s between them; the unit suite alone is
+    // RE-MEASURED end to end on the reference machine (four cores) over fifteen
+    // runs, 2026-09-06, and the answer is BIMODAL — which is the finding, because
+    // a single number hid it for twenty-five phases. IDLE: **1m 18s**, five runs
+    // spanning ONE second (engines 0.0s, secrets 0.2s, lint 39.6s, format 21.8s,
+    // type-check 12.9s, integrity 3.5s, ratchet 0.1s), i.e. TWELVE SECONDS
+    // INSIDE the budget. BUSY, the same cores running unrelated
+    // work: 1m 19s to 2m 44s, and the runner prints OVER accordingly. (It was 85s
+    // when this comment was first written.)
+    // The two anti-cheat gates cost 3.6s between them; the unit suite alone is
     // ~3 minutes and the server suite ~5, which is why both are T1. A tier over
     // budget gets bypassed, and a bypassed hook gates nothing, so ADDING ANYTHING
-    // HERE REQUIRES RE-MEASURING AND BUYING THE TIME BACK FIRST: there is no
-    // headroom left to spend. `lint` and `type-check` are ~100s of the total, so
-    // that is where it would have to come from (ESLint's --cache, or running the
-    // independent T0 gates in parallel). The 90 in `tiers.mjs` does NOT move: a
-    // budget raised to fit the measurement stops being a budget.
+    // HERE REQUIRES RE-MEASURING AND BUYING THE TIME BACK FIRST: twelve seconds
+    // is the whole of what is left. The time is in `lint` and `format` — 61s of
+    // the idle 78s, and 1m 42s to 2m 00s when busy, more than this entire budget
+    // between them — while `type-check` fell to 13-32s once every tsc invocation
+    // started keeping incremental build information.
+    //
+    // Two ways of buying it back have already been tried and must not be
+    // re-proposed from this comment. ESLint's `--cache` is refused on
+    // CORRECTNESS, not speed: with `projectService: true` the cache keys on the
+    // linted file rather than on the files its types come from, so a type-aware
+    // rule can go stale when a DEPENDENCY changes. ESLint's worker concurrency
+    // was measured over eight interleaved pairs of runs and finished level on
+    // wall clock while costing +37.5% CPU and +0.95 GB of peak memory every
+    // time, because each worker builds its own TypeScript program — a trade
+    // that is backwards here twice over, since the extra CPU only becomes wall
+    // clock when cores are idle (when this tier already fits) and costs most
+    // when they are not (the only time it needs help). Both
+    // measurements are recorded beside the constructor in
+    // `scripts/ci/lint-gate.mjs`; read them before spending an afternoon.
+    // The 90 in `tiers.mjs` does NOT move: a budget raised to fit the
+    // measurement stops being a budget.
     //
     // The order matters as much as the membership: `ratchet` reads the report
     // `integrity` writes, so it must come after it. Running the cheap ratchet
@@ -1012,6 +1033,56 @@ describe('machine-readable reports', () => {
     }
   });
 
+  it('states the right number of core modules everywhere that states one', () => {
+    // Two sentences count this list, and both are OPERATOR-FACING rather than
+    // decorative: `verify.json`'s `gate` string is what a `--list` reader is told
+    // a green `test:mutation` means, and `ratchet-check.mjs`'s docblock is the
+    // explanation of why module keys are sanitised at all. Neither is pinned by
+    // anything else — the manifest's `gate` is only checked for being non-empty —
+    // and both were left saying "six" when the document controller joined the
+    // list as the seventh. Phase 27 edited that exact docblock and did not notice.
+    //
+    // Both numbers are DERIVED from `CORE_MODULES`, never written twice, which is
+    // the whole point: a copy that agrees today is what produced the drift. The
+    // regex capture plus the not-found guard is the technique `docs-sync.test.ts`
+    // uses for the accessibility view count, and for the same reason — a sentence
+    // that has been reworded away must fail loudly rather than pass vacuously.
+
+    const total = CORE_MODULES.length;
+    const namedFiles = CORE_MODULES.filter((modulePath) => modulePath.endsWith('.ts')).length;
+    // The denominator. A list that came back empty would make every comparison
+    // below `undefined` against `undefined`.
+    expect(total).toBeGreaterThan(0);
+    expect(namedFiles).toBeGreaterThan(0);
+    expect(namedFiles).toBeLessThan(total);
+    expect(NUMBER_WORDS[total], `no word for ${String(total)}`).toBeDefined();
+    expect(NUMBER_WORDS[namedFiles], `no word for ${String(namedFiles)}`).toBeDefined();
+
+    const mutationGate = manifest.tasks['test:mutation']?.gate ?? '';
+    const gateMatch = /with the ([a-z-]+) core modules held to their own recorded scores/.exec(
+      mutationGate,
+    );
+    expect(
+      gateMatch,
+      'verify.json no longer contains the sentence this pins about core modules',
+    ).not.toBeNull();
+    expect(gateMatch![1]).toBe(NUMBER_WORDS[total]);
+
+    const ratchetSource = readFileSync(
+      path.join(repoRoot, 'scripts/ci/ratchet-check.mjs'),
+      'utf-8',
+    );
+    const docMatch = /A core module is a path, ([a-z-]+) of the ([a-z-]+) end in `\.ts`/.exec(
+      ratchetSource,
+    );
+    expect(
+      docMatch,
+      'ratchet-check.mjs no longer contains the sentence this pins about core modules',
+    ).not.toBeNull();
+    expect(docMatch![1]).toBe(NUMBER_WORDS[namedFiles]);
+    expect(docMatch![2]).toBe(NUMBER_WORDS[total]);
+  });
+
   it('keeps every core module inside the declared scope, so a threshold cannot be dodged', () => {
     // The failure this forbids: excluding a core module from `mutate` while
     // leaving it in `CORE_MODULES`. The per-module score then disappears rather
@@ -1349,6 +1420,255 @@ describe('machine-readable reports', () => {
     expect(a11yPlaywrightConfig.webServer).toEqual(playwrightConfig.webServer);
   });
 
+  it('runs a second engine over the specs that turn on engine behaviour, and only those', () => {
+    // The E2E gate was single-engine until this leg existed, which made every
+    // browser claim in this repository a claim about Chromium. The subsystem that
+    // understated most is the clipboard guard, whose refusal-retry machine in
+    // `services/clipboard/clipboardService.ts` exists because a browser can refuse
+    // a write outright — Chromium on a Permissions API entry and document focus,
+    // Gecko and WebKit on transient user activation. Running the same guard against
+    // a second, independent set of platform rules is the point; it is also how the
+    // long-standing "Chromium is the permissive engine" reading was measured wrong.
+    //
+    // Three things are pinned together because each fails silently on its own:
+    //
+    //  1. **Both projects, by name.** Deleting the Firefox project leaves a green
+    //     gate that has quietly stopped testing a second engine, and a smaller run
+    //     is exactly what a passing summary looks like.
+    //  2. **The Firefox project's scope, in BOTH directions.** Playwright errors
+    //     only when NOTHING matches, so a half-stale `testMatch` shrinks the leg
+    //     without a word — the failure `A11Y_SUITE` is pinned against above.
+    //  3. **The Chromium project's ABSENCE of a `testMatch`.** It is what makes
+    //     that project the whole suite; giving it one would narrow the E2E gate to
+    //     whatever list was written, and every remaining test would still pass.
+    const projects = playwrightConfig.projects ?? [];
+    expect(projects.map((project) => project.name)).toEqual(['chromium', 'firefox']);
+
+    const chromium = projects.find((project) => project.name === 'chromium');
+    const firefox = projects.find((project) => project.name === 'firefox');
+    expect(chromium?.testMatch).toBeUndefined();
+    expect(firefox?.testMatch).toEqual([...FIREFOX_SUITE]);
+
+    expect([...FIREFOX_SUITE].sort()).toEqual(['auto-lock.spec.ts', 'clipboard-hygiene.spec.ts']);
+    for (const file of FIREFOX_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'e2e', file)), file).toBe(true);
+    }
+
+    // It is a PROJECT rather than a config of its own because `e2e/start-server.ts`
+    // binds MongoDB on a fixed port, one dev server and one storage container, so
+    // two Playwright runs cannot be in flight at once. That only holds while the
+    // run stays single-worker and unparallelised — two workers would put both
+    // engines on one stack at the same time, which is the shared-state race
+    // `SUP-0025` records for the specs that already exist.
+    expect(playwrightConfig.workers).toBe(1);
+    expect(playwrightConfig.fullyParallel).toBe(false);
+  });
+
+  it('keeps the second engine out of the accessibility gate and inside the flake gate', () => {
+    // Both derived configs spread `playwright.config.ts`, so both inherit
+    // `projects` unless they say otherwise — and the right answer differs.
+    //
+    // The accessibility config MUST pin Chromium, and the reason is not a
+    // preference: a `TestProject.testMatch` OVERRIDES a top-level one, so the
+    // Firefox project would ignore that config's `testMatch: A11Y_SUITE` entirely
+    // and add the clipboard and auto-lock specs to the a11y report — a gate that
+    // ratchets `a11y.viewsScanned` reporting four tests where it scanned two views.
+    expect(a11yPlaywrightConfig.projects?.map((project) => project.name)).toEqual(['chromium']);
+
+    // The flake config must NOT narrow, for the mirror-image reason: its claim is
+    // about the suite `test:e2e` runs, and a leg that measured one engine's flake
+    // rate while the gate ran two would be a measurement of something else. It
+    // inherits through the spread, so the assertion is EQUALITY WITH THE BASE
+    // rather than `toBeUndefined()` — the spread copies the key, so "absent" is
+    // not a state this config can be in.
+    expect(flakePlaywrightConfig.projects).toEqual(playwrightConfig.projects);
+
+    // Both multi-engine configs must carry the project name INTO the JUnit report.
+    // It is not the reporter's default: without it the artifact holds two suites of
+    // the same name, told apart only by a `hostname` attribute nothing here reads,
+    // and `flake-run.mjs` names a failing test as `classname › name` — so a
+    // cross-browser failure would be attributable in whichever terminal somebody
+    // was watching and nowhere else. That is exactly the claim the second engine
+    // was added to be able to make, so it is pinned rather than trusted.
+    for (const [what, config] of [
+      ['the E2E gate', playwrightConfig],
+      ['the flake gate', flakePlaywrightConfig],
+    ] as const) {
+      const junit = playwrightReporter('junit', config);
+      expect(junit?.['includeProjectInTestName'], what).toBe(true);
+    }
+  });
+
+  it('resolves every Playwright config to one worker, and names the gates a raise would move', () => {
+    // `workers: 1` is a FLAKE-HIDE marker — `scripts/ci/integrity-scan.mjs` matches the
+    // literal `1` inside any runner config — so it is ledgered, dated and expiring
+    // rather than treated as settled. What this test pins is the thing that makes
+    // raising it a larger act than the one-character diff looks like:
+    // `playwright.a11y.config.ts` and `playwright.flake.config.ts` both spread the base
+    // config and override only `testMatch` / `projects` / `reporter` / `repeatEach`, so
+    // `workers` and `fullyParallel` reach them by INHERITANCE. One edit to the base
+    // therefore changes the concurrency model of THREE gates — `e2e`, `a11y` and
+    // `flake` — two of which nobody raising it would think to re-measure.
+    //
+    // The constraint is not costless and was measured rather than assumed. On the
+    // reference machine (four cores), `--workers=2` ran the whole suite 218 of 218
+    // green in 6.8 minutes against 10.6 at one worker. It stands anyway, and the
+    // reason is not the one people reach for: a second worker does NOT race on a port.
+    // Playwright's `webServer` is a per-RUN facility, so every worker shares the single
+    // dev server, the single mongod and the single storage container that
+    // `e2e/start-server.ts` stands up. It races on ACCOUNT MINTING. `e2e/helpers.ts`
+    // `testEmail()` draws from a module-level counter and a stream seeded from the
+    // run-wide `SEED` that the base config pins into the environment, so a second
+    // worker PROCESS restarts both at their initial values and the only entropy left
+    // between two workers is `Date.now()` in milliseconds — and a collision does not
+    // fail closed, because `createAuthenticatedUser` signs in with a CONSTANT auth
+    // hash, so the second worker signs into the FIRST one's account and the two drive
+    // one vault until something unrelated fails. The full enumeration, both
+    // measurements and the removal condition are in
+    // `.testfortress/phase-logs/e2e-worker-measurements.md`.
+    //
+    // Hence all three, labelled — and SOFT, for the reason `e2e/a11y.spec.ts` gives for
+    // the same choice: one failing arm must not hide the state of the others. A hard
+    // `expect` aborts on the first, so a raise would report the E2E gate and say nothing
+    // about the two that were converted along with it, which is precisely the silence
+    // this test exists to break.
+    for (const [gate, config] of [
+      ['the E2E gate', playwrightConfig],
+      ['the accessibility gate', a11yPlaywrightConfig],
+      ['the flake gate', flakePlaywrightConfig],
+    ] as const) {
+      expect.soft(config.workers, gate).toBe(1);
+      expect.soft(config.fullyParallel, gate).toBe(false);
+    }
+  });
+
+  it('keeps a top-level await out of the shared harness, which three CommonJS callers require', () => {
+    // `tests/harness/package.json` declares `"type": "module"` for this directory
+    // alone, and it states the invariant this test exists for: NO FILE HERE MAY
+    // TAKE A TOP-LEVEL AWAIT. Until now nothing pinned it, which the file said
+    // about itself.
+    //
+    // Why it matters: three CommonJS callers reach into this directory —
+    // `playwright.config.ts` (the CONFIG load), `e2e/helpers.ts` and
+    // `e2e/start-server.ts` — so a top-level await here breaks `e2e` and `a11y`,
+    // both push-tier gates. MEASURED, with a throwaway file in this directory and
+    // a throwaway config importing it: Playwright transpiles the file to
+    // CommonJS and `require`s it, so the failure is
+    //   SyntaxError: await is only valid in async functions and the top level
+    //   bodies of modules
+    // out of Node's CJS loader (`wrapSafe`), at exit 1 — and it arrives behind a
+    // warning that says `Make sure to set "type": "module" in the nearest
+    // package.json`, which is ALREADY set and is the wrong fix. That misdirection
+    // is the real cost, and it is why a guard here is worth more than a comment.
+    //
+    // A REGEX IS REFUSED, and that is measured too: `s3Server.ts` holds nine
+    // legitimate `await`s, four of them at the start of a line, all inside async
+    // functions. So this parses. `typescript` is a root devDependency and a
+    // sibling suite already imports it the same way
+    // (`tsconfig-incremental.test.ts`).
+    const harnessDir = path.join(repoRoot, 'tests/harness');
+    const files = readdirSync(harnessDir).filter((name) => name.endsWith('.ts'));
+
+    // The denominator. A walker over an empty list reports no offenders, which is
+    // exactly the vacuous pass this whole gate surface exists to refuse — and the
+    // two files a CommonJS caller actually reaches are named, because those are
+    // the ones whose breakage is not local to a vitest run.
+    expect(files.length).toBeGreaterThanOrEqual(7);
+    expect(files).toContain('determinism.ts');
+    expect(files).toContain('s3Server.ts');
+
+    const offenders: string[] = [];
+    for (const name of files) {
+      const source = readFileSync(path.join(harnessDir, name), 'utf-8');
+      const parsed = ts.createSourceFile(name, source, ts.ScriptTarget.ES2022, true);
+
+      /** Whether `node` sits inside a function, where `await` is legal. */
+      const insideFunction = (node: ts.Node): boolean => {
+        // `isFunctionLike` deliberately does NOT include a class static block,
+        // and that is the safe direction: `await` in a static block is a
+        // SyntaxError anyway, so flagging it costs nothing and widening this
+        // boundary later would open the hole.
+        for (let parent = node.parent; parent; parent = parent.parent) {
+          if (ts.isFunctionLike(parent)) return true;
+        }
+        return false;
+      };
+
+      const walk = (node: ts.Node): void => {
+        if (ts.isAwaitExpression(node) && !insideFunction(node)) {
+          offenders.push(`${name}: await expression at top level`);
+        }
+        // `for await (… of …)` carries its await as a modifier rather than an
+        // `AwaitExpression`, so it is invisible to the check above.
+        if (ts.isForOfStatement(node) && node.awaitModifier && !insideFunction(node)) {
+          offenders.push(`${name}: for-await at top level`);
+        }
+        // `await using`, and the comparison is an EQUALITY on purpose.
+        // `NodeFlags.AwaitUsing` is 6, which is `Const | Using` (2 | 4), so a
+        // bitwise truthiness test matches every plain `const` in the directory
+        // and this guard would have failed on all seven files on its first run.
+        if (
+          ts.isVariableDeclarationList(node) &&
+          (node.flags & ts.NodeFlags.AwaitUsing) === ts.NodeFlags.AwaitUsing &&
+          !insideFunction(node)
+        ) {
+          offenders.push(`${name}: await using at top level`);
+        }
+        ts.forEachChild(node, walk);
+      };
+      walk(parsed);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('keeps the CommonJS-reachable half of the harness free of third-party imports', () => {
+    // The honest limit of the test above: Node's rule is about the module GRAPH,
+    // not about one directory's syntax. A harness file that imported a third
+    // party which itself takes a top-level await would pass that walker and still
+    // break the `require`. What keeps that from being a live hole is that the two
+    // files a CommonJS caller can reach import nothing but `node:` builtins and
+    // relative paths — `determinism.ts` imports nothing at all — so this asserts
+    // that rather than assuming it.
+    //
+    // The other harness files DO use third parties (`fast-check` in
+    // `property.ts`, `vitest` in `clock.ts` and `repoWrites.ts`) and are
+    // deliberately not covered here: they are reached only from a vitest worker,
+    // which loads real ESM and for which a top-level await anywhere in the graph
+    // is legal.
+    const reachable = ['determinism.ts', 's3Server.ts'];
+    // The same flat enumeration the guard above walks, so "inside the scanned
+    // set" means exactly "parsed by that test" rather than "somewhere in this
+    // directory".
+    const scanned = new Set(
+      readdirSync(path.join(repoRoot, 'tests/harness')).filter((name) => name.endsWith('.ts')),
+    );
+    const offenders: string[] = [];
+    for (const name of reachable) {
+      const source = readFileSync(path.join(repoRoot, 'tests/harness', name), 'utf-8');
+      const parsed = ts.createSourceFile(name, source, ts.ScriptTarget.ES2022, true);
+      for (const statement of parsed.statements) {
+        if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) continue;
+        const specifier = statement.moduleSpecifier;
+        if (!specifier || !ts.isStringLiteral(specifier)) continue;
+        const from = specifier.text;
+        if (from.startsWith('node:')) continue;
+        if (from.startsWith('.')) {
+          // A relative import must land on a file the syntax guard above
+          // actually scanned, and that guard is deliberately NOT recursive: a
+          // `./nested/x.js` would otherwise satisfy both tests while never being
+          // parsed. The `.js` specifier is the ESM one for a `.ts` source, which
+          // is why the extension is swapped back before the check.
+          const target = from.replace(/^\.\//, '').replace(/\.js$/, '.ts');
+          if (scanned.has(target)) continue;
+          offenders.push(`${name} imports ${from}, which is outside the scanned set`);
+          continue;
+        }
+        offenders.push(`${name} imports ${from}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it('pins WHICH views the accessibility gate scans, and what fails it', () => {
     // The reason this list is pinned rather than merely counted: an axe run over
     // NOTHING reports zero violations, exactly like an axe run over a clean page.
@@ -1360,6 +1680,11 @@ describe('machine-readable reports', () => {
     expect([...A11Y_VIEW_IDS]).toEqual([
       'login',
       'register',
+      'forgot-password',
+      'reset-password',
+      'verify-email',
+      'unlock-account',
+      'not-found',
       'vault-list',
       'item-detail',
       'item-form-login',
@@ -1369,7 +1694,12 @@ describe('machine-readable reports', () => {
       'item-form-card-billing',
       'item-form-address-picker',
       'item-form-identity',
+      'generator',
       'settings',
+      'audit-log',
+      'sessions',
+      'backup-settings',
+      'export-data',
       'vault-health',
       'file-encryption',
       'documents-list',
@@ -1378,6 +1708,7 @@ describe('machine-readable reports', () => {
       'document-viewer',
       'document-viewer-expanded',
       'documents-trash',
+      'documents-download-all',
       'unlock-screen',
       'sandbox-rendered',
     ]);
@@ -1396,7 +1727,40 @@ describe('machine-readable reports', () => {
       'document-viewer',
       'document-viewer-expanded',
       'documents-trash',
+      'documents-download-all',
     ]) {
+      expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(
+        A11Y_VIEW_IDS.indexOf('unlock-screen'),
+      );
+    }
+    // The other end of the same constraint, and one of these five is not merely
+    // an optimisation. Every view from `vault-list` onwards needs an unlocked
+    // session, so the pages that need none are scanned FIRST — and
+    // `/forgot-password` sits behind `PublicOnlyRoute` (as `login` and `register`
+    // already did), which redirects a signed-in visitor away, so before the
+    // sign-in is the ONLY point in the walk where it renders at all. The other
+    // four are reachable only through a full `page.goto`, which reloads the SPA
+    // and drops the in-memory vault key; put any of them after the sign-in and
+    // the walk continues against a locked vault, scanning unlock screens under
+    // other views' names.
+    for (const view of [
+      'forgot-password',
+      'reset-password',
+      'verify-email',
+      'unlock-account',
+      'not-found',
+    ]) {
+      expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(A11Y_VIEW_IDS.indexOf('vault-list'));
+    }
+    // And the five views added on the authenticated side belong with the rest of
+    // it, for the same reason the document views do: each needs an unlocked
+    // vault, and the unlock step is what ends that. Listed rather than derived
+    // because "everything between `vault-list` and `unlock-screen`" is what the
+    // assertion would then be, which is true by construction and proves nothing.
+    for (const view of ['generator', 'audit-log', 'sessions', 'backup-settings', 'export-data']) {
+      expect(A11Y_VIEW_IDS.indexOf(view), view).toBeGreaterThan(
+        A11Y_VIEW_IDS.indexOf('vault-list'),
+      );
       expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(
         A11Y_VIEW_IDS.indexOf('unlock-screen'),
       );
@@ -1422,6 +1786,22 @@ describe('machine-readable reports', () => {
     expect(a11yGate).toContain(
       `const BLOCKING_IMPACTS = [${A11Y_BLOCKING_IMPACTS.map((i) => `'${i}'`).join(', ')}];`,
     );
+    // And one more restatement in the same file, coupled to a DIFFERENT gate:
+    // the checks axe could not decide are published under `rule`, never `id`.
+    // `verify:selftest`'s defect case for `test:a11y` proves failability by
+    // finding a `blocking` entry, and `blocking` is the only place the report
+    // puts `"view"` immediately before `"id"` — a scan's own record has `"view"`
+    // then `"url"`, and an undecided entry has `"view"` then `"rule"`. Tidy the
+    // key back to `id` and that predicate starts matching an undecided finding
+    // too, which would attribute an unrelated red run to a defect nobody planted.
+    // Pinned here rather than left to two comments facing each other, because it
+    // is a one-word edit whose symptom appears in neither file.
+    expect(a11yGate).toContain('undecided.push({ view: scan.view, rule: id, ...rest });');
+    const selftestDefects = readFileSync(
+      path.join(repoRoot, 'scripts/ci/lib/selftest-defects.mjs'),
+      'utf8',
+    );
+    expect(selftestDefects).toContain('/"view":\\s*"item-form-note",\\s*"id":\\s*"select-name"/');
   });
 
   it('keeps every re-run subset out of the test headcount, because its files run twice elsewhere', () => {
