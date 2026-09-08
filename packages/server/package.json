@@ -1,6 +1,6 @@
 {
   "name": "@hvault/server",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -40,7 +40,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.9.5",
     "node-cron": "^4.6.0",
-    "nodemailer": "^9.0.3",
+    "nodemailer": "^9.1.1",
     "otpauth": "^9.5.2",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
@@ -59,12 +59,12 @@
     "@types/passport-jwt": "^4.0.1",
     "@types/supertest": "^7.2.1",
     "@types/swagger-ui-express": "^4.1.8",
-    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/coverage-v8": "^4.1.11",
     "fast-check": "^4.9.0",
     "mongodb-memory-server": "^11.2.0",
     "supertest": "^7.2.2",
     "tsx": "^4.23.13",
-    "vitest": "^4.0.18",
+    "vitest": "^4.1.11",
     "winston-transport": "^4.9.0",
     "yaml": "^2.9.0"
   }
