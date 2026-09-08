@@ -1548,7 +1548,76 @@ describe('Docker deployment', () => {
       // unprivileged uid 101 — the root switch is only for the apk transaction.
       // Assert the ORDER: root, then the apk RUN, then drop back to 101 as the
       // final (serving) user — not merely that all three tokens appear somewhere.
-      expect(webStage).toMatch(/USER root[\s\S]*RUN apk upgrade --no-cache[\s\S]*USER 101/);
+      // `USER 0`, spelled numerically like the `USER 101` it is paired with.
+      expect(webStage).toMatch(/^USER 0$[\s\S]*RUN apk upgrade --no-cache[\s\S]*^USER 101$/m);
+    });
+
+    it('upgrades BEFORE it edits nginx.conf, in one RUN that fixes that order', () => {
+      // An nginx package upgrade rewrites /etc/nginx/nginx.conf and takes
+      // `worker_processes 2;` with it, so the sed has to come second. As two
+      // separate RUN instructions that order was a convention a reordering edit
+      // could break silently — the image still builds, and the only symptom is
+      // nginx forking one worker per HOST core inside a `cpus: '0.5'` service.
+      // `&&` makes the order the instruction rather than the layout, and it is
+      // also what clears hadolint DL3059 (which fires on two consecutive RUNs
+      // only when NEITHER already chains).
+      const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
+      expect(webStage).toMatch(
+        /RUN apk upgrade --no-cache \\\n \&\& sed -i 's\/\^worker_processes \.\*\/worker_processes 2;\/' \/etc\/nginx\/nginx\.conf/,
+      );
+      // NEGATIVE: the sed must not ALSO exist as an instruction of its own, which
+      // is what a half-applied revert would leave behind — the second copy would
+      // run after the upgrade either way today, and stop doing so the moment
+      // anything is inserted between them.
+      expect(webStage).not.toMatch(/^RUN sed -i/m);
+    });
+
+    it('names both node runtime users by the uid their tmpfs mounts are pinned to', () => {
+      // `USER node` and `USER 1000:1000` select the SAME account — the base
+      // image's /etc/passwd carries `node:x:1000:1000`, and a numeric USER is
+      // resolved through it, so even $HOME is unchanged (measured on
+      // node:24-alpine3.23). The reason to insist on the number is that the other
+      // half of this contract is already written as one: every tmpfs these two
+      // services mount is pinned to `uid=1000,gid=1000`, and a tmpfs whose owner
+      // disagrees with the process is the silent-restart bug the compose tests
+      // above exist for. One spelling of one uid is how the two stay comparable.
+      //
+      // The expected uid is DERIVED from compose rather than written twice: a
+      // second literal would agree with a wrong Dockerfile as readily as a right
+      // one. hadolint DL3066 wants the same thing for its own reason — a name has
+      // to be resolvable at runtime, a number always is.
+      const uid = /uid=(\d+)/.exec(tmpfsOptions(app, '/app/logs'))?.[1];
+      expect(uid).toBe('1000');
+
+      for (const stage of ['bootstrap', 'app']) {
+        const start = dockerfile.indexOf(`AS ${stage}\n`);
+        expect(start, `stage ${stage} must exist`).toBeGreaterThan(-1);
+        const end = dockerfile.indexOf('\nFROM ', start + 1);
+        const body = dockerfile.slice(start, end === -1 ? undefined : end);
+        const users = [...body.matchAll(/^USER (.+)$/gm)].map((match) => match[1]);
+        expect(users, `stage ${stage} must drop out of root`).toEqual([`${uid}:${uid}`]);
+      }
+    });
+
+    it('probes health through an exec-form HEALTHCHECK, with no shell in between', () => {
+      // The shell form (`HEALTHCHECK CMD node -e "…"`) wraps the probe in
+      // `/bin/sh -c`, so every 30-second check forks an extra process and the
+      // status Docker records is the SHELL's, not node's — a difference that only
+      // shows up when the probe is killed. The exec form also matches the CMD
+      // below it, so both entry points into this image read the same way.
+      // hadolint DL3025 asks for it; the extra process is the reason to want it.
+      const appStage = dockerfile.slice(
+        dockerfile.indexOf('FROM base AS app'),
+        dockerfile.indexOf('FROM build-client AS web-root'),
+      );
+      expect(appStage).toMatch(/\n {2}CMD \["node", "-e", "fetch\(/);
+      // NEGATIVE: no shell-form CMD anywhere in the stage — neither the
+      // healthcheck's nor the entry point's. Both are JSON arrays.
+      const directives = appStage
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n');
+      expect(directives).not.toMatch(/^\s*CMD (?!\[)/m);
     });
 
     it('patches the Node base image OS packages that Trivy flags as fixable HIGH', () => {
