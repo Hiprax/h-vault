@@ -3,11 +3,11 @@
  * `test:a11y` — the accessibility suite, run as its own gate.
  *
  * Two specs, driven by `playwright.a11y.config.ts` against the real application:
- * `e2e/a11y.spec.ts` runs axe over thirty-two views and modals in the authenticated
+ * `e2e/a11y.spec.ts` runs axe over thirty-three views and modals in the authenticated
  * DOM, and `e2e/a11y-keyboard.spec.ts` pins the focus and keyboard behaviours a
  * scanner cannot infer.
  *
- * Six of those thirty-two views are the document store's, so this gate DECLARES
+ * Seven of those thirty-three views are the document store's, so this gate DECLARES
  * `docker` beside `build:shared` in `.testfortress/verify.json` and in
  * `scripts/ci/local-ci.mjs`: `playwright.a11y.config.ts` spreads the base
  * config's `webServer`, which runs `e2e/start-server.ts`, which stands the real

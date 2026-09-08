@@ -168,6 +168,17 @@ the sidebar and nothing to switch off.
   every file. If the engine refuses several files in a row it stops there rather than spending hours
   on a service that is plainly down, reports what it actually attempted, and reloads the trash so
   what you see is what is really still in it. Nothing is destroyed on that path and nothing is lost.
+- **Take them all with you, in one action.** "Download all" on the Documents page saves every
+  document the list is showing — which makes the folder, favorites, trash and search filters part
+  of the export, and is how a library too large for one run is broken into pieces. They go **one
+  at a time and through exactly the same verified read a single download uses**, so every file is
+  checked against the digest sealed with it before a byte reaches your disk; nothing is combined
+  into an archive, because building one would mean assembling attacker-supplied bytes in the page
+  that holds your unlocked vault key. You get a progress line as it goes, **one failure never
+  stops the rest**, and it ends by naming every document it could not save and why — a missing
+  stored file, a document whose key will not unwrap, a checksum that did not match. If the server's
+  per-user read budget runs out, or your vault auto-locks part way, it says so and offers
+  **Continue**, which resumes from where it stopped rather than downloading everything again.
 - **Rotating your vault key does not re-upload anything.** A rotation rewraps **32 bytes per
   document** instead of rewriting every file, which is the only way rotation stays possible once
   an account holds gigabytes. The request must name every item, folder and document the account
@@ -244,6 +255,13 @@ uploaded file**, and it has to be captured together with the database and the de
 is usable without the other. The procedure, the volume names and why a file-level copy of a
 running storage engine is not a backup are in
 [Back up the database AND the document storage](#back-up-the-database-and-the-document-storage).
+
+That is the operator's answer, and it is not available to somebody who merely _uses_ an instance
+someone else runs. Theirs is **Download all** on the Documents page: plain decrypted files on their
+own device, verified on the way out, owing nothing to the server afterwards. It is not a substitute
+for the operator's backup — it is a copy of what one account can see at one moment, and it lands
+wherever that browser puts downloads rather than anywhere the account controls — but it does mean
+no user of a shared deployment is stuck inside it.
 
 ### Experience
 
@@ -1406,7 +1424,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                                   | _new_                      |
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                            | _new_                      |
 | `e2e`              | T1   | Playwright against an auto-started stack (dev server, in-memory MongoDB, the pinned storage engine in a container): Chromium over every spec, and a second Firefox project over the two whose answers depend on the engine — clipboard hygiene and auto-lock | `e2e` job                  |
-| `a11y`             | T1   | axe-core over thirty-two primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                            | _new_                      |
+| `a11y`             | T1   | axe-core over thirty-three primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                          | _new_                      |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                                       | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                                             | _new_                      |
 | `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline                                                                                                     | _new_                      |
@@ -1825,7 +1843,7 @@ is the point of the paragraph.
 and Trivy-scans three of them — the database image is built and deliberately not scanned;
 `storage` (push tier) runs the storage port against the pinned engine in a container;
 `e2e` and `a11y` (push tier) drive a harness that starts that same engine, because the
-document store is switched off without it and its journeys and six of its scanned views
+document store is switched off without it and its journeys and seven of its scanned views
 would fail for a reason that is not about them; `flake` (release tier) runs the Playwright
 suite three times over and so inherits the same need; and `deploy` (release tier) stands
 the whole Compose stack up from nothing. All six declare the daemon as a prerequisite and

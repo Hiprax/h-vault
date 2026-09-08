@@ -474,6 +474,35 @@ the wrapped keys live in the database, the ciphertext lives in the storage servi
 half is usable without the other. The README's backup section gives the volumes and the
 procedure, including why a file-level copy of a running storage engine is not a backup.
 
+That answer is only available to the operator, and on a shared deployment the operator and the
+account holder are not the same person. **Download all**, on the Documents page, is the half that
+belongs to the account holder: it saves every document the list is showing to their own device,
+one at a time, through the identical verified read a single download uses — each file checked
+against the digest sealed inside it before a byte of it is written, and no file produced at all
+for a document that fails that check. Nothing is combined into an archive, deliberately: a ZIP
+writer is a format implementation fed entirely by attacker-chosen bytes and names, and it would
+run in the one origin holding the unlocked vault key. Three limits are worth being plain about,
+because an export that is trusted for more than it is is worse than none:
+
+- **It is a copy, not a backup, and it is plaintext.** What lands on the device is the decrypted
+  file, protected by nothing this application controls — the same trade the plaintext vault export
+  makes, and it deserves the same handling.
+- **It is one account's view at one moment.** It carries what that account can list: not another
+  account's documents, not a row whose sealed metadata will not open (there is no key left to open
+  it with, so there is nothing to hand back), and not a row already claimed for permanent deletion.
+  Each of those is named in the summary rather than quietly omitted, and the panel says how many
+  rows the view could not read at all.
+- **It cannot confirm where the files went.** Handing a file to the browser is the last thing the
+  page can observe; browsers refuse or queue several downloads from one action and report nothing
+  back. The summary therefore says documents were _verified and sent to your browser's downloads_
+  and never that they were saved, and it points at the browser's own download list, which is the
+  only authoritative record.
+
+The export changes nothing on the server: it is the same authenticated read of the same rows,
+under the same per-user rate limits, and it is not audited for the same reason no other read is.
+When those limits stop it, or the vault auto-locks part way through, it says which of the two
+happened, how much of the library is still on the server, and offers to resume from there.
+
 The hourly clean-up referred to above is the only thing in the system that deletes a stored
 file without a request having asked for it, so the rule it works to is stated in the negative:
 it deletes a file only when it can prove nothing refers to it. A file is left where it is

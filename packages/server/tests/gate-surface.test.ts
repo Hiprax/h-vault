@@ -1529,6 +1529,7 @@ describe('machine-readable reports', () => {
       'document-viewer',
       'document-viewer-expanded',
       'documents-trash',
+      'documents-download-all',
       'unlock-screen',
       'sandbox-rendered',
     ]);
@@ -1547,6 +1548,7 @@ describe('machine-readable reports', () => {
       'document-viewer',
       'document-viewer-expanded',
       'documents-trash',
+      'documents-download-all',
     ]) {
       expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(
         A11Y_VIEW_IDS.indexOf('unlock-screen'),

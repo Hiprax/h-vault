@@ -182,6 +182,24 @@ export const A11Y_VIEWS = [
     id: 'documents-trash',
     description: 'the documents page in trash mode, with one trashed document and Empty trash',
   },
+  {
+    // The bulk export's SUMMARY, which is the only state of that panel this walk
+    // does not already cover: at rest the panel is a plain `<section>` mounted on
+    // the documents page, so `documents-list` above scans its heading, its button
+    // and its empty live region for free. What is here instead is the report — a
+    // live region carrying a real sentence, and a list naming each document that
+    // could not be saved with its reason.
+    //
+    // It is driven OFFLINE, and that is what makes it deterministic. The panel
+    // never opens a save dialog, so the run's only variable is the network; with
+    // the context offline every document is refused for the same stated reason,
+    // the failure list is populated, and — the part that matters for a gate — not
+    // one browser download is started, so nothing here depends on how Chromium
+    // answers several downloads from one action.
+    id: 'documents-download-all',
+    description:
+      'the documents page after a bulk export run offline, settled on its summary with the failure list showing',
+  },
   { id: 'unlock-screen', description: 'the unlock screen, vault locked' },
   {
     // THE ONE ENTRY THAT IS NOT A VIEW OF THIS APPLICATION, and its reason is a

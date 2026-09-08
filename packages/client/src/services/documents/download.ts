@@ -466,6 +466,34 @@ export interface SaveableDocument {
   meta: DocumentMeta;
 }
 
+/** What {@link saveDocument} accepts beyond the options every read shares. */
+export interface SaveDocumentOptions extends ReadDocumentOptions {
+  /**
+   * Whether the save dialog may be used where the browser has one. Defaults to
+   * `true`; only a caller saving SEVERAL documents in one gesture passes
+   * `false`.
+   *
+   * It is a caller's choice rather than a detail of this module because the
+   * constraint that decides it belongs to the caller: `showSaveFilePicker`
+   * requires TRANSIENT ACTIVATION, and transient activation does not survive an
+   * await on the network. A single download opens its dialog on the click's own
+   * activation, before the first request, and is fine. The second document of a
+   * sequential run reaches the dialog after a full read of the first, by which
+   * time the activation is long gone, and the browser refuses with a
+   * `SecurityError` — not the `AbortError` that means "the user closed it", so
+   * it would be reported to that user as a failed download of a document
+   * nothing was wrong with.
+   *
+   * Turning the dialog off costs the streaming write ({@link saveThroughPicker}
+   * keeps memory flat; {@link saveThroughBlob} holds one document at a time) and
+   * buys the two things a bulk run needs: no per-file gesture, and no partial
+   * file anywhere — the blob path writes nothing at all until the digest has
+   * been checked, so a document that fails verification produces no file to
+   * mistake for it rather than an emptied one.
+   */
+  useSaveDialog?: boolean;
+}
+
 /**
  * Save one document to disk, through the save dialog where the browser has one
  * and through a Blob download where it does not.
@@ -487,9 +515,11 @@ export interface SaveableDocument {
  */
 export async function saveDocument(
   doc: SaveableDocument,
-  options: ReadDocumentOptions = {},
+  options: SaveDocumentOptions = {},
 ): Promise<string> {
-  const picker = getSaveFilePicker();
+  // `=== false` rather than a falsy test, so an omitted option keeps the dialog:
+  // the single download is the common case and it must not have to opt in.
+  const picker = options.useSaveDialog === false ? null : getSaveFilePicker();
   if (picker === null) return saveThroughBlob(doc.id, options);
 
   let handle: FileSystemFileHandle;

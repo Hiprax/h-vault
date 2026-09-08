@@ -327,7 +327,7 @@
       "file": "playwright.config.ts",
       "symbol": "B9 visual regression",
       "maxHits": 1,
-      "reason": "Testing-matrix row B9 (visual regression) is APPLICABLE in principle to any UI, so a 'not applicable' would not be earned by a fact. It is deferred because there is no protected design contract to regress against, and because function \u2014 the thing a screenshot diff is a proxy for \u2014 is already covered directly: `test:a11y` runs axe over thirty-two views and asserts the keyboard invariants, the component suites assert rendered output, and the E2E suite drives the real journeys. A pixel baseline added now would mostly report intended CSS churn. Removal condition: a stable design system, or a recurrence of a defect that only a rendered diff would have caught.",
+      "reason": "Testing-matrix row B9 (visual regression) is APPLICABLE in principle to any UI, so a 'not applicable' would not be earned by a fact. It is deferred because there is no protected design contract to regress against, and because function \u2014 the thing a screenshot diff is a proxy for \u2014 is already covered directly: `test:a11y` runs axe over thirty-three views and asserts the keyboard invariants, the component suites assert rendered output, and the E2E suite drives the real journeys. A pixel baseline added now would mostly report intended CSS churn. Removal condition: a stable design system, or a recurrence of a defect that only a rendered diff would have caught.",
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2026-11-11",

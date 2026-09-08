@@ -130,7 +130,7 @@ const AUDIT_PAGE_SIZE = 20;
  * there and reported here. And the interesting views are all BEHIND a sign-in
  * that involves a 600,000-iteration key derivation, a vault key held only in
  * memory, and ciphertext that has to make a round trip; a suite that scanned only
- * what a signed-out browser can reach would miss most of the thirty-two views below.
+ * what a signed-out browser can reach would miss most of the thirty-three views below.
  *
  * ## One test, one registration
  *
@@ -138,13 +138,13 @@ const AUDIT_PAGE_SIZE = 20;
  * wall clock and the suite runs single-worker, so the whole authenticated walk
  * shares one account. Each view is a `test.step`, and every scan asserts SOFTLY
  * (`expect.soft`) so one failing view does not hide the state of the other
- * thirty-one — an accessibility report that stops at the first finding is a
- * report somebody has to run thirty-two times.
+ * thirty-two — an accessibility report that stops at the first finding is a
+ * report somebody has to run thirty-three times.
  */
 
 test.describe('accessibility: every primary view and modal', () => {
   test('has no serious or critical axe violations', async ({ page }, testInfo) => {
-    // Two 600k-iteration derivations for the sign-in, thirty-two axe runs over a
+    // Two 600k-iteration derivations for the sign-in, thirty-three axe runs over a
     // fully rendered SPA, and three real documents uploaded through the browser's
     // own AES-GCM to the storage engine the harness starts.
     // `registerAndSignInViaUI` raises the timeout to its own floor; this raises it
@@ -174,7 +174,7 @@ test.describe('accessibility: every primary view and modal', () => {
     /**
      * Scans the current DOM and records it.
      *
-     * Soft, so the walk continues: thirty-one more views are worth more than
+     * Soft, so the walk continues: thirty-two more views are worth more than
      * failing fast on the first, and the run still fails at the end.
      */
     const scan = async (view: string): Promise<void> => {
@@ -563,6 +563,31 @@ test.describe('accessibility: every primary view and modal', () => {
         // Put the rail back, so the walk does not abandon a filtered view behind
         // the unlock step.
         await page.getByRole('button', { name: /^All Documents/ }).click();
+
+        // The bulk export's summary, driven OFFLINE on purpose.
+        //
+        // Two things follow from that and both are the point. Every document is
+        // refused for one stated reason, so the failure list — the only DOM in
+        // this panel the walk does not already cover through `documents-list` —
+        // is populated deterministically rather than depending on how many
+        // documents happen to be listed. And no browser download is started at
+        // all, so this step never touches Chromium's handling of several
+        // downloads from one action, which is the one part of the feature a
+        // headless run has no business asserting anything about.
+        await page.context().setOffline(true);
+        await page.getByRole('button', { name: 'Download all' }).click();
+        await page.getByRole('button', { name: 'Start download' }).click();
+        await expect(page.getByTestId('documents-download-all-failures')).toBeVisible({
+          timeout: 60_000,
+        });
+        await scan('documents-download-all');
+
+        // Back to rest, and back online, before the walk moves on: a summary
+        // left standing and a context left offline are both state this step has
+        // no business handing to the next one.
+        await page.getByRole('button', { name: 'Dismiss' }).click();
+        await page.context().setOffline(false);
+        await expect(page.getByTestId('documents-offline')).toHaveCount(0, { timeout: 60_000 });
       });
 
       // Near-last, because reaching it locks the vault: the key lives in memory

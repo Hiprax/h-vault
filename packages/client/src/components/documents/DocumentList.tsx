@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { TRASH_AUTO_PURGE_DAYS, formatBytes } from '@hvault/shared';
 import { cn } from '../../lib/utils';
+import { UNOPENABLE_DOCUMENT_NAME } from '../../services/documents/downloadAll';
 import type { DecryptedDocument } from '../../stores/documentsStore';
 import type { DocumentListMode } from '../../hooks/useDocumentsFilterView';
 
@@ -114,7 +115,11 @@ const DocumentRow = memo(function DocumentRow({ doc, folderName }: DocumentRowPr
   // arrive in would be right by coincidence.
   const deletedAt = doc.deletedAt;
   const trashed = deletedAt !== undefined;
-  const name = degraded ? 'Unopenable document' : meta.name;
+  // The shared constant, not a second literal: a bulk export's failure summary
+  // names a degraded row by the same words, and a reader has to be able to match
+  // the two — it is the only name such a row has, its real one being sealed
+  // inside the blob that would not open.
+  const name = degraded ? UNOPENABLE_DOCUMENT_NAME : meta.name;
   const badge = degraded ? DEGRADED_LABEL : meta.ext.toUpperCase() || NO_EXTENSION_LABEL;
   const subtitle = degraded ? '' : formatBytes(meta.plaintextBytes);
   const stamp = new Date(deletedAt ?? doc.updatedAt).toLocaleDateString(undefined, {

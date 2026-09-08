@@ -19,6 +19,7 @@ import {
 import { DOCUMENT_SEARCH_RESULTS_ID, SearchBar } from '../components/vault/SearchBar';
 import { FolderRail } from '../components/folders/FolderRail';
 import { RailLayout } from '../components/layout/RailLayout';
+import { DocumentBulkDownload } from '../components/documents/DocumentBulkDownload';
 import { DocumentList } from '../components/documents/DocumentList';
 import { DocumentTransfers } from '../components/documents/DocumentTransfers';
 import { DocumentUploadPanel } from '../components/documents/DocumentUploadPanel';
@@ -281,6 +282,13 @@ function DocumentsView({ config }: DocumentsViewProps) {
               </span>
             </p>
           )}
+
+          {/* Above the list and below everything that describes it, because what
+              it acts on is exactly the rows underneath: the same folder, the same
+              favorites or trash filter, the same search. A control placed in the
+              toolbar beside the search box would have read as an action on the
+              page rather than on that list. */}
+          <DocumentBulkDownload documents={view.rows} invalidCount={view.invalidCount} />
 
           <DocumentList
             id={DOCUMENT_SEARCH_RESULTS_ID}
