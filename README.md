@@ -178,7 +178,10 @@ the sidebar and nothing to switch off.
   stops the rest**, and it ends by naming every document it could not save and why — a missing
   stored file, a document whose key will not unwrap, a checksum that did not match. If the server's
   per-user read budget runs out, or your vault auto-locks part way, it says so and offers
-  **Continue**, which resumes from where it stopped rather than downloading everything again.
+  **Continue**, which resumes from where it stopped rather than downloading everything again —
+  and "where it stopped" includes the document the rate limit interrupted, which is retried rather
+  than listed as a failure, because a rate limit is something the server did to the run and not
+  something wrong with that file. The wait the server asked for is quoted in the summary.
 - **Rotating your vault key does not re-upload anything.** A rotation rewraps **32 bytes per
   document** instead of rewriting every file, which is the only way rotation stays possible once
   an account holds gigabytes. The request must name every item, folder and document the account

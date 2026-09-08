@@ -6,6 +6,7 @@ import * as OTPAuth from 'otpauth';
 import { seededRandom } from '../tests/harness/determinism.js';
 import {
   expectVaultVisible,
+  lockViaUi,
   registerAndSignInViaUI,
   testDb,
   testEmail,
@@ -676,7 +677,11 @@ test.describe('zero-knowledge boundary', () => {
 
     // ── Lock and unlock ─────────────────────────────────────────────────────
     await test.step('lock and unlock', async () => {
-      await page.getByRole('button', { name: /lock vault/i }).click();
+      // `lockViaUi`, not a locator written out here: the substring spelling this
+      // replaced ALSO matches the unlock screen's own `Unlock Vault` button, so a
+      // lock click could land on the wrong screen entirely (see
+      // `unlockedLayoutMarker` in `helpers.ts`).
+      await lockViaUi(page);
       await expect(page.getByText('Vault Locked')).toBeVisible({ timeout: 30_000 });
       await unlockVault(page, MASTER_PASSWORD);
       // `expectVaultVisible`, not a bare URL check: locking does not navigate, so

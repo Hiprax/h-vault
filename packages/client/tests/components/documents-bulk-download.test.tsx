@@ -373,6 +373,75 @@ describe('DocumentBulkDownload — the summary', () => {
     expect(status()).toHaveTextContent('2 not reached.');
   });
 
+  it('offers the rate-limited document itself to Continue, and quotes the wait', async () => {
+    // The resume point is `savedCount + failures.length` rows in, so a 429 that
+    // was recorded as a failure CONSUMED its own row and Continue skipped it —
+    // the one refusal that is purely transient was the one a resume could not
+    // reach. `saveAllDocuments` now leaves that row unreached and puts the wait
+    // on `stoppedDetail`; this is the panel half of that contract.
+    renderPanel();
+    startRun();
+    await finishWith(
+      result({
+        savedCount: 1,
+        failures: [],
+        stopped: 'rate-limited',
+        stoppedDetail: 'Too many attempts. Please try again in 30 seconds.',
+      }),
+    );
+
+    // The wait reaches the reader, on the summary rather than on a row.
+    expect(status()).toHaveTextContent('Too many attempts. Please try again in 30 seconds.');
+    expect(status()).toHaveTextContent('2 not reached.');
+    expect(screen.queryByTestId('documents-download-all-failures')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    // BOTH remaining documents, starting with the one the limit interrupted.
+    expect(currentRun().targets).toEqual([THREE[1], THREE[2]]);
+  });
+
+  it('carries THIS leg’s stop detail, never the one the previous leg reported', async () => {
+    renderPanel();
+    startRun();
+    await finishWith(
+      result({
+        savedCount: 1,
+        failures: [],
+        stopped: 'rate-limited',
+        stoppedDetail: 'Too many attempts. Please try again in 30 seconds.',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+
+    await finishWith({
+      total: 2,
+      savedCount: 1,
+      failures: [],
+      stopped: 'rate-limited',
+      stoppedDetail: 'Too many attempts. Please try again in 5 minutes.',
+    });
+
+    // The second leg's wait, which is the one in front of the reader. A merge
+    // that kept the carried value would make every later rate limit quieter than
+    // the first, on the leg where the wait matters most.
+    expect(status()).toHaveTextContent('Too many attempts. Please try again in 5 minutes.');
+    expect(status()).not.toHaveTextContent('30 seconds');
+  });
+
+  it('says nothing extra when the stop had nothing to add', async () => {
+    // The negative: `stoppedDetail` is absent for the other three endings, and an
+    // absent one must not render as a stray space or the word "undefined".
+    renderPanel();
+    startRun();
+    await finishWith(result({ savedCount: 1, stopped: 'vault-locked' }));
+
+    expect(status()).toHaveTextContent(
+      "The vault locked, so the download stopped. 1 of 3 document(s) verified and sent to your browser's downloads. 2 not reached.",
+    );
+    expect(status()).not.toHaveTextContent('undefined');
+  });
+
   it('resumes from where a stopped run got to, counting the whole export', async () => {
     renderPanel();
     startRun();

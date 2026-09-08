@@ -1,5 +1,5 @@
-import { test, expect, type BrowserContext, type Page } from '@playwright/test';
-import { registerAndSignInViaUI } from './helpers';
+import { test, expect, type Page } from '@playwright/test';
+import { grantClipboardWrite, registerAndSignInViaUI } from './helpers';
 
 /**
  * Clipboard hygiene, in a real browser.
@@ -43,35 +43,6 @@ interface ClipboardWrite {
 
 interface ClipboardSpyWindow {
   __hvClipboardWrites?: ClipboardWrite[];
-}
-
-/**
- * Give the page permission to write to the clipboard, on the engines that have
- * such a permission to give.
- *
- * This is a difference in the PLATFORM, not a difference in what is asserted
- * below: both engines run every line of all three tests. Chromium gates
- * `writeText()` on a Permissions API entry named `clipboard-write`, which is
- * auto-granted to the active tab in a normal browser and has to be granted
- * explicitly to an automated context. Gecko has no such permission at all — it
- * gates the same call on TRANSIENT USER ACTIVATION instead — so the name does
- * not exist there and Playwright rejects it outright with
- * `browserContext.grantPermissions: Unknown permission: clipboard-write`
- * (measured, Playwright 1.61.1 / Firefox 151).
- *
- * Hence the condition, which is on the engine's permission model rather than on
- * a test that is expected to fail: a `try`/`catch` around the grant would have
- * hidden a genuine permission error just as effectively, and skipping the spec
- * on Firefox would have thrown away the only run that exercises the activation
- * rule the guard was written for.
- */
-async function grantClipboardWrite(
-  context: BrowserContext,
-  browserName: 'chromium' | 'firefox' | 'webkit',
-): Promise<void> {
-  if (browserName === 'chromium') {
-    await context.grantPermissions(['clipboard-write']);
-  }
 }
 
 /**
@@ -347,6 +318,13 @@ test.describe('clipboard hygiene', () => {
     // gesture-scoped erase is the only kind either engine will take here. The
     // guarantee SECURITY.md states, that locking erases the clipboard immediately
     // on every engine, had only one engine's evidence behind it before this leg.
+    // The SHORTCUT rather than `lockViaUi`, and here it is load-bearing rather
+    // than convenient: the whole assertion below is that the erase rides the
+    // keypress that requested it. `useKeyboardShortcuts` suppresses every
+    // shortcut while focus is in an `INPUT`/`TEXTAREA`/`SELECT`, so this works
+    // only because `copyGeneratedPassword` leaves focus on a button — see the
+    // note on `lockViaUi` in `helpers.ts` for the failure that precondition once
+    // produced elsewhere.
     await page.keyboard.press('Control+l');
     await expect(page.getByText('Vault Locked')).toBeVisible({ timeout: 30_000 });
 

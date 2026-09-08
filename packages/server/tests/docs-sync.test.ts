@@ -9,6 +9,7 @@ import { TIER_BUDGET_SECONDS } from '../../../scripts/ci/lib/tiers.mjs';
 // the same import `gate-surface.test.ts` takes, for the same reason: a count
 // written down twice is a count that drifts.
 import { A11Y_VIEW_IDS } from '../../../e2e/a11yViews.js';
+import { NUMBER_WORDS } from './support/numberWords';
 
 // Documentation-lint: the README API reference, rate-limit table, env table,
 // and counts must stay in sync with the code. Resolve the monorepo-root
@@ -562,60 +563,29 @@ describe('README documentation sync', () => {
  * Spelled-out words rather than digits, because that is how these sentences are
  * written and rewriting seven documents to suit a regular expression is the wrong
  * way round. The same technique, and the same reason, as the CONTRIBUTING
- * gate-count case above.
+ * gate-count case above. The word table itself is `support/numberWords.ts`, one
+ * definition shared with `gate-surface.test.ts`'s core-module count: two copies
+ * of it would be the same defect these tests are about, one level down.
  *
  * The document-store subset is derived rather than listed: every id that names a
  * document begins with `document`, and `sandbox-rendered` — the isolated render
  * document, scanned as a top-level page — deliberately does not, because it needs
  * neither a session nor the storage engine. Two of the sentences below count that
  * subset instead of the whole, and both had it wrong as well.
+ *
+ * **`CHANGELOG.md` is deliberately NOT a site, and that is the one exception to
+ * the rule above.** It states this number too, and it stated it wrongly for a
+ * while — so the exclusion is a decision rather than an oversight. A site here
+ * FAILS when its sentence cannot be found (`not.toBeNull()` below), and a
+ * changelog entry is not a standing description of the system: `## [Unreleased]`
+ * becomes `## [X.Y.Z]` at the next release and is then frozen release history,
+ * which `scripts/ci/changelog-extract.mjs` publishes verbatim as the Release
+ * body. Pinning a sentence inside it would demand rewriting a published release
+ * every time a view is added, and would turn this suite red the first time a
+ * release left the section empty. The entry is checked by review, like every
+ * other claim in that file.
  */
 describe('the accessibility gate’s scanned-view count', () => {
-  /** `n` spelled the way English spells it, for the range these counts live in. */
-  const NUMBER_WORDS = [
-    'zero',
-    'one',
-    'two',
-    'three',
-    'four',
-    'five',
-    'six',
-    'seven',
-    'eight',
-    'nine',
-    'ten',
-    'eleven',
-    'twelve',
-    'thirteen',
-    'fourteen',
-    'fifteen',
-    'sixteen',
-    'seventeen',
-    'eighteen',
-    'nineteen',
-    'twenty',
-    'twenty-one',
-    'twenty-two',
-    'twenty-three',
-    'twenty-four',
-    'twenty-five',
-    'twenty-six',
-    'twenty-seven',
-    'twenty-eight',
-    'twenty-nine',
-    'thirty',
-    'thirty-one',
-    'thirty-two',
-    'thirty-three',
-    'thirty-four',
-    'thirty-five',
-    'thirty-six',
-    'thirty-seven',
-    'thirty-eight',
-    'thirty-nine',
-    'forty',
-  ] as const;
-
   const viewIds = A11Y_VIEW_IDS;
   const total = viewIds.length;
   const documentViews = viewIds.filter((id) => id.startsWith('document')).length;

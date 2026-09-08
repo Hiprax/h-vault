@@ -55,10 +55,16 @@ import {
   readDocumentPlaintext,
   saveDocument,
 } from '../../services/documents/download';
+import { UNOPENABLE_DOCUMENT_NAME } from '../../services/documents/downloadAll';
 
 // ---------------------------------------------------------------------------
 // Copy that more than one element has to agree on
 // ---------------------------------------------------------------------------
+//
+// {@link UNOPENABLE_DOCUMENT_NAME} belongs to this group and is imported rather
+// than declared, because it is shared with `DocumentList` and with the bulk
+// export's failure summary. Its definition, and the reason all three must agree,
+// are in `services/documents/downloadAll.ts`.
 
 /**
  * The id of {@link UndecodableDocumentNotice}'s body, so the unavailable Edit
@@ -810,7 +816,12 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
         </span>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-xl font-semibold text-[hsl(var(--foreground))]">
-            {degraded ? 'Unopenable document' : meta.name}
+            {/* The shared constant, not a second literal. A degraded row has no
+                other name to be identified by — the only copy of its real one is
+                inside the blob that would not open — so the list, this heading and
+                a bulk export's failure summary have to say the same words, and a
+                reader moving between them has to be able to match them up. */}
+            {degraded ? UNOPENABLE_DOCUMENT_NAME : meta.name}
           </h1>
           <p className="text-sm text-[hsl(var(--muted-foreground))]">
             Last modified {formatTimestamp(doc.updatedAt)}

@@ -157,6 +157,22 @@ export interface DocumentDownloadAllResult {
   failures: DocumentDownloadFailure[];
   /** Why the run ended. */
   stopped: DocumentDownloadStop;
+  /**
+   * One sentence about the STOP, when the stop has something to say that
+   * {@link DocumentDownloadStop} does not carry on its own.
+   *
+   * Set only for a rate limit today, and it is not decoration: a 429 can quote a
+   * wait from `Retry-After`, and that is the only actionable part of the answer.
+   * It used to reach the reader as the offending document's failure line, which
+   * is precisely what took that document out of the resume (see the rate-limit
+   * branch below), so the sentence had to move somewhere that survives the row
+   * being retried.
+   *
+   * NOT a restatement of anything already on this object — the "no second field
+   * that can disagree" rule above is about `total - savedCount -
+   * failures.length`, which is derivable. This is what the server said.
+   */
+  stoppedDetail?: string;
 }
 
 /** The document a run is working on, for a progress line. */
@@ -232,6 +248,10 @@ export async function saveAllDocuments(
   const failures: DocumentDownloadFailure[] = [];
   let savedCount = 0;
   let stopped: DocumentDownloadStop = 'complete';
+  // `undefined` rather than `''`, and spread rather than assigned at the return:
+  // `exactOptionalPropertyTypes` makes `{ stoppedDetail: undefined }` a different
+  // type from an absent key, and an empty string would render as a blank line.
+  let stoppedDetail: string | undefined;
 
   // Built once, and the branch is `exactOptionalPropertyTypes` rather than
   // style: `{ signal: undefined }` is not a `{ signal?: AbortSignal }` under this
@@ -295,8 +315,9 @@ export async function saveAllDocuments(
         stopped = 'cancelled';
         break;
       }
-      failures.push({ id: candidate.id, name, reason: describeFailure(error) });
-      // A rate limit ENDS the run, and it is the one refusal that does.
+      // A rate limit ENDS the run, and it is the one refusal that does. It is
+      // also checked BEFORE the failure is recorded, and that order is the whole
+      // point rather than a tidy-up.
       //
       // Reading a document costs a request for the row and one per segment, and
       // both routes are user-keyed and bounded — the row read against 60 a
@@ -305,15 +326,35 @@ export async function saveAllDocuments(
       // application that reaches either. Carrying on would spend the whole list
       // against a closed window, turn a hundred documents into a hundred
       // identical refusals, and keep the window open by attempting more; and the
-      // reader's answer is the same for all of them, which is to wait. So the
-      // run stops here with the count it really achieved, and the summary says
-      // to run it again.
+      // reader's answer is the same for all of them, which is to wait.
+      //
+      // WHY IT IS NOT RECORDED AS A FAILURE. The caller's resume point is
+      // `savedCount + failures.length` rows in, and every other way this loop
+      // stops leaves the current row UNCONSUMED — the abort guard above, the
+      // vault-lock check above, and a cancellation raised mid-read, which breaks
+      // without recording. Recording here consumed the row, so the panel's
+      // Continue offered only the documents AFTER it: the one refusal that is
+      // purely transient by definition was the one refusal a resume could not
+      // reach, and the only way to get that document was to run the whole export
+      // again. Nothing is lost by leaving it unreached — it is counted in
+      // `total - savedCount - failures.length`, the summary says so, and the
+      // sentence the reader needs (the wait, quoted from `Retry-After`) goes on
+      // {@link DocumentDownloadAllResult.stoppedDetail} instead of on a row that
+      // is about to be retried.
       if (isRateLimited(error)) {
         stopped = 'rate-limited';
+        stoppedDetail = describeFailure(error);
         break;
       }
+      failures.push({ id: candidate.id, name, reason: describeFailure(error) });
     }
   }
 
-  return { total, savedCount, failures, stopped };
+  return {
+    total,
+    savedCount,
+    failures,
+    stopped,
+    ...(stoppedDetail === undefined ? {} : { stoppedDetail }),
+  };
 }

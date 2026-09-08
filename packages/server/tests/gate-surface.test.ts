@@ -25,6 +25,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
+import { NUMBER_WORDS } from './support/numberWords';
 import {
   blockingDependency,
   resolveExitCode,
@@ -1031,6 +1033,56 @@ describe('machine-readable reports', () => {
     }
   });
 
+  it('states the right number of core modules everywhere that states one', () => {
+    // Two sentences count this list, and both are OPERATOR-FACING rather than
+    // decorative: `verify.json`'s `gate` string is what a `--list` reader is told
+    // a green `test:mutation` means, and `ratchet-check.mjs`'s docblock is the
+    // explanation of why module keys are sanitised at all. Neither is pinned by
+    // anything else — the manifest's `gate` is only checked for being non-empty —
+    // and both were left saying "six" when the document controller joined the
+    // list as the seventh. Phase 27 edited that exact docblock and did not notice.
+    //
+    // Both numbers are DERIVED from `CORE_MODULES`, never written twice, which is
+    // the whole point: a copy that agrees today is what produced the drift. The
+    // regex capture plus the not-found guard is the technique `docs-sync.test.ts`
+    // uses for the accessibility view count, and for the same reason — a sentence
+    // that has been reworded away must fail loudly rather than pass vacuously.
+
+    const total = CORE_MODULES.length;
+    const namedFiles = CORE_MODULES.filter((modulePath) => modulePath.endsWith('.ts')).length;
+    // The denominator. A list that came back empty would make every comparison
+    // below `undefined` against `undefined`.
+    expect(total).toBeGreaterThan(0);
+    expect(namedFiles).toBeGreaterThan(0);
+    expect(namedFiles).toBeLessThan(total);
+    expect(NUMBER_WORDS[total], `no word for ${String(total)}`).toBeDefined();
+    expect(NUMBER_WORDS[namedFiles], `no word for ${String(namedFiles)}`).toBeDefined();
+
+    const mutationGate = manifest.tasks['test:mutation']?.gate ?? '';
+    const gateMatch = /with the ([a-z-]+) core modules held to their own recorded scores/.exec(
+      mutationGate,
+    );
+    expect(
+      gateMatch,
+      'verify.json no longer contains the sentence this pins about core modules',
+    ).not.toBeNull();
+    expect(gateMatch![1]).toBe(NUMBER_WORDS[total]);
+
+    const ratchetSource = readFileSync(
+      path.join(repoRoot, 'scripts/ci/ratchet-check.mjs'),
+      'utf-8',
+    );
+    const docMatch = /A core module is a path, ([a-z-]+) of the ([a-z-]+) end in `\.ts`/.exec(
+      ratchetSource,
+    );
+    expect(
+      docMatch,
+      'ratchet-check.mjs no longer contains the sentence this pins about core modules',
+    ).not.toBeNull();
+    expect(docMatch![1]).toBe(NUMBER_WORDS[namedFiles]);
+    expect(docMatch![2]).toBe(NUMBER_WORDS[total]);
+  });
+
   it('keeps every core module inside the declared scope, so a threshold cannot be dodged', () => {
     // The failure this forbids: excluding a core module from `mutate` while
     // leaving it in `CORE_MODULES`. The per-module score then disappears rather
@@ -1488,6 +1540,133 @@ describe('machine-readable reports', () => {
       expect.soft(config.workers, gate).toBe(1);
       expect.soft(config.fullyParallel, gate).toBe(false);
     }
+  });
+
+  it('keeps a top-level await out of the shared harness, which three CommonJS callers require', () => {
+    // `tests/harness/package.json` declares `"type": "module"` for this directory
+    // alone, and it states the invariant this test exists for: NO FILE HERE MAY
+    // TAKE A TOP-LEVEL AWAIT. Until now nothing pinned it, which the file said
+    // about itself.
+    //
+    // Why it matters: three CommonJS callers reach into this directory —
+    // `playwright.config.ts` (the CONFIG load), `e2e/helpers.ts` and
+    // `e2e/start-server.ts` — so a top-level await here breaks `e2e` and `a11y`,
+    // both push-tier gates. MEASURED, with a throwaway file in this directory and
+    // a throwaway config importing it: Playwright transpiles the file to
+    // CommonJS and `require`s it, so the failure is
+    //   SyntaxError: await is only valid in async functions and the top level
+    //   bodies of modules
+    // out of Node's CJS loader (`wrapSafe`), at exit 1 — and it arrives behind a
+    // warning that says `Make sure to set "type": "module" in the nearest
+    // package.json`, which is ALREADY set and is the wrong fix. That misdirection
+    // is the real cost, and it is why a guard here is worth more than a comment.
+    //
+    // A REGEX IS REFUSED, and that is measured too: `s3Server.ts` holds nine
+    // legitimate `await`s, four of them at the start of a line, all inside async
+    // functions. So this parses. `typescript` is a root devDependency and a
+    // sibling suite already imports it the same way
+    // (`tsconfig-incremental.test.ts`).
+    const harnessDir = path.join(repoRoot, 'tests/harness');
+    const files = readdirSync(harnessDir).filter((name) => name.endsWith('.ts'));
+
+    // The denominator. A walker over an empty list reports no offenders, which is
+    // exactly the vacuous pass this whole gate surface exists to refuse — and the
+    // two files a CommonJS caller actually reaches are named, because those are
+    // the ones whose breakage is not local to a vitest run.
+    expect(files.length).toBeGreaterThanOrEqual(7);
+    expect(files).toContain('determinism.ts');
+    expect(files).toContain('s3Server.ts');
+
+    const offenders: string[] = [];
+    for (const name of files) {
+      const source = readFileSync(path.join(harnessDir, name), 'utf-8');
+      const parsed = ts.createSourceFile(name, source, ts.ScriptTarget.ES2022, true);
+
+      /** Whether `node` sits inside a function, where `await` is legal. */
+      const insideFunction = (node: ts.Node): boolean => {
+        // `isFunctionLike` deliberately does NOT include a class static block,
+        // and that is the safe direction: `await` in a static block is a
+        // SyntaxError anyway, so flagging it costs nothing and widening this
+        // boundary later would open the hole.
+        for (let parent = node.parent; parent; parent = parent.parent) {
+          if (ts.isFunctionLike(parent)) return true;
+        }
+        return false;
+      };
+
+      const walk = (node: ts.Node): void => {
+        if (ts.isAwaitExpression(node) && !insideFunction(node)) {
+          offenders.push(`${name}: await expression at top level`);
+        }
+        // `for await (… of …)` carries its await as a modifier rather than an
+        // `AwaitExpression`, so it is invisible to the check above.
+        if (ts.isForOfStatement(node) && node.awaitModifier && !insideFunction(node)) {
+          offenders.push(`${name}: for-await at top level`);
+        }
+        // `await using`, and the comparison is an EQUALITY on purpose.
+        // `NodeFlags.AwaitUsing` is 6, which is `Const | Using` (2 | 4), so a
+        // bitwise truthiness test matches every plain `const` in the directory
+        // and this guard would have failed on all seven files on its first run.
+        if (
+          ts.isVariableDeclarationList(node) &&
+          (node.flags & ts.NodeFlags.AwaitUsing) === ts.NodeFlags.AwaitUsing &&
+          !insideFunction(node)
+        ) {
+          offenders.push(`${name}: await using at top level`);
+        }
+        ts.forEachChild(node, walk);
+      };
+      walk(parsed);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('keeps the CommonJS-reachable half of the harness free of third-party imports', () => {
+    // The honest limit of the test above: Node's rule is about the module GRAPH,
+    // not about one directory's syntax. A harness file that imported a third
+    // party which itself takes a top-level await would pass that walker and still
+    // break the `require`. What keeps that from being a live hole is that the two
+    // files a CommonJS caller can reach import nothing but `node:` builtins and
+    // relative paths — `determinism.ts` imports nothing at all — so this asserts
+    // that rather than assuming it.
+    //
+    // The other harness files DO use third parties (`fast-check` in
+    // `property.ts`, `vitest` in `clock.ts` and `repoWrites.ts`) and are
+    // deliberately not covered here: they are reached only from a vitest worker,
+    // which loads real ESM and for which a top-level await anywhere in the graph
+    // is legal.
+    const reachable = ['determinism.ts', 's3Server.ts'];
+    // The same flat enumeration the guard above walks, so "inside the scanned
+    // set" means exactly "parsed by that test" rather than "somewhere in this
+    // directory".
+    const scanned = new Set(
+      readdirSync(path.join(repoRoot, 'tests/harness')).filter((name) => name.endsWith('.ts')),
+    );
+    const offenders: string[] = [];
+    for (const name of reachable) {
+      const source = readFileSync(path.join(repoRoot, 'tests/harness', name), 'utf-8');
+      const parsed = ts.createSourceFile(name, source, ts.ScriptTarget.ES2022, true);
+      for (const statement of parsed.statements) {
+        if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) continue;
+        const specifier = statement.moduleSpecifier;
+        if (!specifier || !ts.isStringLiteral(specifier)) continue;
+        const from = specifier.text;
+        if (from.startsWith('node:')) continue;
+        if (from.startsWith('.')) {
+          // A relative import must land on a file the syntax guard above
+          // actually scanned, and that guard is deliberately NOT recursive: a
+          // `./nested/x.js` would otherwise satisfy both tests while never being
+          // parsed. The `.js` specifier is the ESM one for a `.ts` source, which
+          // is why the extension is swapped back before the check.
+          const target = from.replace(/^\.\//, '').replace(/\.js$/, '.ts');
+          if (scanned.has(target)) continue;
+          offenders.push(`${name} imports ${from}, which is outside the scanned set`);
+          continue;
+        }
+        offenders.push(`${name} imports ${from}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 
   it('pins WHICH views the accessibility gate scans, and what fails it', () => {

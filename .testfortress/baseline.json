@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-09-08",
-  "commit": "728c8c7",
+  "commit": "5280ecf",
   "tests": {
-    "count": 9941
+    "count": 9952
   },
   "coverage": {
     "diff": 100
@@ -141,7 +141,7 @@
         ]
       },
       "tests": {
-        "count": 3985
+        "count": 3988
       }
     },
     "packages/client": {
@@ -149,8 +149,8 @@
         "line": 99.12,
         "branch": 93.23,
         "function": 98.84,
-        "linesTotal": 9182,
-        "branchesTotal": 6421,
+        "linesTotal": 9184,
+        "branchesTotal": 6427,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -316,7 +316,7 @@
         ]
       },
       "tests": {
-        "count": 4452
+        "count": 4460
       }
     },
     "e2e": {
@@ -535,7 +535,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 28 close-out: banks the plan's remaining measured gains after a full verify:full on an idle four-core host. Phase 24's below-error reductions (spectral 54 to 0, hadolint 5 to 0, warnings.audit:config 59 to 0) were measured during Phase 25 and deliberately left unaccepted so a dependency refresh could not claim them; Phase 26's document bulk export raised a11y.viewsScanned to 33 and the client and e2e test counts; this phase covered the loop-head abort guard in saveAllDocuments, bounded the HIBP L1 eviction scan, and fixed an in-file isolation leak in document-sandbox.test.tsx that made the flake gate red at order seed 1340, which is why flake.e2eExecutions is measured fresh at 654. mutation is NOT seeded: its server leg is a measured 120-130 hours on this hardware and did not complete.",
+  "reason": "Validation pass over phases 21-28: banks the floors the pass's own tests raised. New tests: the E2E locked/unlocked discriminator (auto-lock, both engines) after expectVaultVisible's substring name matcher was found to match the unlock screen's own Unlock Vault button and to have left the e2e gate intermittently red; the core-module count pinned in gate-surface from CORE_MODULES itself, both sentences having said six since documentController joined; a top-level-await guard over tests/harness plus a relative-import containment check, for an invariant the directory declared and nothing enforced; and the bulk document export's rate-limit resume, where a 429 was recorded as a failure and so consumed the one row Continue existed to retry. mutation is NOT seeded and remains unrecorded.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

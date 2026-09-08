@@ -1253,21 +1253,109 @@ describe('saveAllDocuments — taking a whole library out, one document at a tim
     expect(urls().some((url) => url.includes(ID_C))).toBe(false);
   });
 
-  it('stops on a rate limit, quoting the server rather than blaming the documents', async () => {
+  it('stops on a rate limit WITHOUT consuming the document it stopped on', async () => {
+    // THIS TEST WAS REWRITTEN, and the reason belongs here rather than in a
+    // commit message. It used to assert `failures` had length 1 with a
+    // "Too many attempts" reason — that is, it pinned the rate-limited document
+    // as a FAILED one. That was the defect, not the specification.
+    //
+    // The panel resumes from `savedCount + failures.length`
+    // (`DocumentBulkDownload.tsx`), which every other stop path leaves pointing
+    // AT the document that was not saved: the loop-head abort, the vault-lock
+    // check and a cancellation raised mid-read all break WITHOUT recording. A
+    // rate limit recorded a failure and then broke, so it consumed the row and
+    // Continue offered only the documents after it — and `README.md` promises
+    // Continue "resumes from where it stopped rather than downloading everything
+    // again". A 429 is the ONE refusal in the whole classifier that is purely
+    // transient by definition (`isRateLimited` is exactly 429), and
+    // `GET /documents/:id` is user-keyed at 60 a minute, so an export of a large
+    // library reaches it by construction: the single document a resume could not
+    // reach was the single document nothing was wrong with.
+    //
+    // So the row is now left UNREACHED, exactly as a cancellation leaves it, and
+    // the wait the reader needs moves to `stoppedDetail`.
     const built = await threeDocuments();
     refuseSegment(ID_B, 0, { status: 429, message: 'Too many document read requests' });
 
     const result = await saveAllDocuments(built.map(candidate));
 
     expect(result).toMatchObject({ total: 3, savedCount: 1, stopped: 'rate-limited' });
-    expect(result.failures).toHaveLength(1);
+    // Not a failure. A rate limit is something the SERVER did to the run, not
+    // something wrong with this document, and listing it as a refusal is what
+    // took it out of the resume.
+    expect(result.failures).toEqual([]);
     // The transient-failure vocabulary, not the raw message: a reader needs to
-    // be told to wait, not told a number.
-    expect(result.failures[0]?.reason).toMatch(/Too many attempts/);
+    // be told to wait, not told a number. It is on the RESULT now, so it
+    // survives a document that is going to be retried.
+    expect(result.stoppedDetail).toMatch(/Too many attempts/);
     // Carrying on would have turned one closed window into three identical
     // refusals and kept the window open by asking again.
     expect(urls().some((url) => url.includes(ID_C))).toBe(false);
   });
+
+  it('leaves the resume point on the rate-limited row even when an earlier one failed', async () => {
+    // The shape nobody covered, and the one where the arithmetic could go wrong
+    // in the other direction: a NON-transient failure earlier in the run, so
+    // `failures` is not empty when the 429 arrives. `savedCount + failures.length`
+    // must still land exactly on the rate-limited row.
+    const built = await threeDocuments();
+    refuseSegment(ID_B, 0, { status: 404, message: 'The stored file is no longer available.' });
+    refuseSegment(ID_C, 0, { status: 429, message: 'Too many document read requests' });
+
+    const result = await saveAllDocuments(built.map(candidate));
+
+    // A saved, B failed for good, C rate-limited and therefore unreached.
+    expect(result).toMatchObject({ total: 3, savedCount: 1, stopped: 'rate-limited' });
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toMatchObject({ id: ID_B, name: 'beta.txt' });
+    expect(result.savedCount + result.failures.length).toBe(2);
+    expect(result.stoppedDetail).toMatch(/Too many attempts/);
+  });
+
+  it.each([
+    ['complete', 3],
+    ['cancelled', 1],
+    ['rate-limited', 1],
+    ['vault-locked', 1],
+  ] as const)(
+    'consumes exactly savedCount + failures.length rows when it stops as %s',
+    async (stopped, expectedConsumed) => {
+      // THE cross-module identity, stated once. `DocumentBulkDownload.tsx`
+      // computes its resume point as `targets.slice(savedCount + failures.length)`
+      // and nothing said that number is the count of rows the loop actually
+      // consumed. It is what makes Continue resume from the right place on every
+      // one of the four ways a run can end, and it is one line of arithmetic away
+      // from being wrong — which is exactly what a rate limit made it.
+      const built = await threeDocuments();
+      const controller = new AbortController();
+
+      if (stopped === 'cancelled') {
+        onRequest = (request) => {
+          if (request.url === `/documents/${ID_B}`) controller.abort();
+        };
+      }
+      if (stopped === 'rate-limited') {
+        refuseSegment(ID_B, 0, { status: 429, message: 'Too many document read requests' });
+      }
+      if (stopped === 'vault-locked') {
+        onRequest = (request) => {
+          if (request.url === `/documents/${ID_A}/segments/0`) {
+            useAuthStore.setState({ vaultKey: null });
+          }
+        };
+      }
+
+      const result = await saveAllDocuments(built.map(candidate), {
+        signal: controller.signal,
+      });
+
+      expect(result.stopped).toBe(stopped);
+      expect(result.savedCount + result.failures.length).toBe(expectedConsumed);
+      // And the row the resume point lands on is never one that was saved: the
+      // documents behind it are exactly the ones already dealt with.
+      expect(savedFiles).toHaveLength(result.savedCount);
+    },
+  );
 
   it('stops when the vault locks, rather than blaming every remaining document', async () => {
     const built = await threeDocuments();

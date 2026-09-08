@@ -63,8 +63,11 @@ const JUNIT_OPTIONS = { outputFile: JUNIT_REPORT, includeProjectInTestName: true
  *    a clipboard write outright: Chromium gates it on a Permissions API entry and
  *    on document focus, Gecko and WebKit on TRANSIENT USER ACTIVATION for every
  *    write. The permission is the visible difference — Gecko has no such name and
- *    Playwright rejects it — and the spec's `grantClipboardWrite` is the one line
- *    that has to know about it. What a second engine buys beyond that is a second
+ *    Playwright rejects it — and `grantClipboardWrite` in `e2e/helpers.ts` is the
+ *    one place that has to know about it. It lives there rather than in the spec
+ *    that first needed it because a second spec was already granting the
+ *    permission unconditionally, which is inert only while this list does not
+ *    name that spec. What a second engine buys beyond that is a second
  *    independent set of platform rules over the same guard, which is the only way
  *    to find out that a claim made about one of them is not a claim about the
  *    others: this leg is how the "Chromium is the permissive case" reading was

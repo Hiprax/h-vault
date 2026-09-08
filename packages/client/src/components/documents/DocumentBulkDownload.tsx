@@ -119,7 +119,13 @@ function summarize(result: DocumentDownloadAllResult): string {
   const refused =
     result.failures.length === 0 ? '' : ` ${String(result.failures.length)} could not be saved.`;
   const missed = notReached === 0 ? '' : ` ${String(notReached)} not reached.`;
-  return `${STOP_LEAD[result.stopped]}${sent}${refused}${missed}`;
+  // What the STOP itself had to say, when it had anything. Only a rate limit does
+  // today, and it is the wait quoted from `Retry-After` — the one actionable part
+  // of that answer. It used to reach the reader as the offending document's
+  // failure line; that is what took the document out of the resume, so the
+  // sentence moved onto the result and is appended here instead.
+  const detail = result.stoppedDetail === undefined ? '' : ` ${result.stoppedDetail}`;
+  return `${STOP_LEAD[result.stopped]}${sent}${refused}${missed}${detail}`;
 }
 
 export function DocumentBulkDownload({ documents, invalidCount }: DocumentBulkDownloadProps) {
@@ -184,6 +190,15 @@ export function DocumentBulkDownload({ documents, invalidCount }: DocumentBulkDo
                 savedCount: carried.savedCount + result.savedCount,
                 failures: [...carried.failures, ...result.failures],
                 stopped: result.stopped,
+                // THIS leg's detail, never the carried one: it describes how the
+                // run in front of the reader ended. Dropping it would make a
+                // second rate limit silently quieter than the first, which is
+                // the leg where the wait matters most. Spread rather than
+                // assigned, because `exactOptionalPropertyTypes` distinguishes an
+                // absent key from an explicit `undefined`.
+                ...(result.stoppedDetail === undefined
+                  ? {}
+                  : { stoppedDetail: result.stoppedDetail }),
               };
         setRun({
           kind: 'done',

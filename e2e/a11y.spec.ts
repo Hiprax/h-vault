@@ -594,6 +594,12 @@ test.describe('accessibility: every primary view and modal', () => {
       // only, so everything above is unreachable afterwards without another
       // derivation.
       await test.step('unlock screen', async () => {
+        // The shortcut, not `lockViaUi`: this walk has just left the rail in its
+        // default state and focus on a button, which is the precondition
+        // `useKeyboardShortcuts` needs (it suppresses every shortcut while focus
+        // is in an `INPUT`/`TEXTAREA`/`SELECT`, and this page carries a search
+        // field). The assertion below is what catches it if that ever stops
+        // holding, rather than a later step failing unrecognisably.
         await page.keyboard.press('Control+l');
         await expect(page.getByText('Vault Locked')).toBeVisible({ timeout: 60_000 });
         await scan('unlock-screen');

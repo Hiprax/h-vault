@@ -537,7 +537,7 @@ function fromJunit(xml) {
  *    memory is what stops a module deleted from the declaration quietly ceasing
  *    to be measured.
  *  - Module keys are matched with BOTH sides sanitised through `moduleKey`.
- *    A core module is a path, three of the six end in `.ts`, and an unsanitised
+ *    A core module is a path, four of the seven end in `.ts`, and an unsanitised
  *    key would flatten to a field whose wildcard is
  *    `mutation.modules.…rateLimiter.*` — declared nowhere, so the field would
  *    fail as having no direction. Sanitising both sides cannot change which
