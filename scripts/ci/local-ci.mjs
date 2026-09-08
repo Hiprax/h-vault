@@ -682,7 +682,7 @@ const GATES = [
     id: 'e2e',
     task: 'test:e2e',
     tier: 1,
-    title: 'E2E (Playwright, Chromium)',
+    title: 'E2E (Playwright, Chromium + a Firefox leg)',
     ci: 'e2e job',
     dependsOn: ['build'],
     // `docker` is APPENDED to the shared build rather than replacing it, and both
@@ -691,7 +691,7 @@ const GATES = [
     // build as a broken browser journey. And `e2e/start-server.ts` now stands the
     // real object-storage engine up in a container before it spawns the dev
     // server: without it the server answers `documents: { enabled: false }`, the
-    // client hides the whole section, and the document specs plus four of the
+    // client hides the whole section, and the document specs plus six of the
     // accessibility views fail with symptoms that say nothing about the code. A
     // DECLARED prerequisite that is absent is reported as COULD NOT RUN (exit 2),
     // which is the honest verdict for a machine with no daemon; a discovered one

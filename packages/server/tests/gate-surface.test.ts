@@ -62,7 +62,7 @@ import sharedFlakeConfig from '../../shared/vitest.flake.config';
 import serverFlakeConfig from '../vitest.flake.config';
 import clientFlakeConfig from '../../client/vitest.flake.config';
 import { CORE_MODULES, MUTATION_LEGS } from '../../../scripts/ci/lib/mutation-scope.mjs';
-import playwrightConfig from '../../../playwright.config';
+import playwrightConfig, { FIREFOX_SUITE } from '../../../playwright.config';
 import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
 import flakePlaywrightConfig, { FLAKE_REPEAT_EACH } from '../../../playwright.flake.config';
 import { A11Y_BLOCKING_IMPACTS, A11Y_VIEWS, A11Y_VIEW_IDS } from '../../../e2e/a11yViews';
@@ -1366,6 +1366,85 @@ describe('machine-readable reports', () => {
     // from the one every other spec drives.
     expect(a11yPlaywrightConfig.use).toEqual(playwrightConfig.use);
     expect(a11yPlaywrightConfig.webServer).toEqual(playwrightConfig.webServer);
+  });
+
+  it('runs a second engine over the specs that turn on engine behaviour, and only those', () => {
+    // The E2E gate was single-engine until this leg existed, which made every
+    // browser claim in this repository a claim about Chromium. The subsystem that
+    // understated most is the clipboard guard, whose refusal-retry machine in
+    // `services/clipboard/clipboardService.ts` exists because a browser can refuse
+    // a write outright — Chromium on a Permissions API entry and document focus,
+    // Gecko and WebKit on transient user activation. Running the same guard against
+    // a second, independent set of platform rules is the point; it is also how the
+    // long-standing "Chromium is the permissive engine" reading was measured wrong.
+    //
+    // Three things are pinned together because each fails silently on its own:
+    //
+    //  1. **Both projects, by name.** Deleting the Firefox project leaves a green
+    //     gate that has quietly stopped testing a second engine, and a smaller run
+    //     is exactly what a passing summary looks like.
+    //  2. **The Firefox project's scope, in BOTH directions.** Playwright errors
+    //     only when NOTHING matches, so a half-stale `testMatch` shrinks the leg
+    //     without a word — the failure `A11Y_SUITE` is pinned against above.
+    //  3. **The Chromium project's ABSENCE of a `testMatch`.** It is what makes
+    //     that project the whole suite; giving it one would narrow the E2E gate to
+    //     whatever list was written, and every remaining test would still pass.
+    const projects = playwrightConfig.projects ?? [];
+    expect(projects.map((project) => project.name)).toEqual(['chromium', 'firefox']);
+
+    const chromium = projects.find((project) => project.name === 'chromium');
+    const firefox = projects.find((project) => project.name === 'firefox');
+    expect(chromium?.testMatch).toBeUndefined();
+    expect(firefox?.testMatch).toEqual([...FIREFOX_SUITE]);
+
+    expect([...FIREFOX_SUITE].sort()).toEqual(['auto-lock.spec.ts', 'clipboard-hygiene.spec.ts']);
+    for (const file of FIREFOX_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'e2e', file)), file).toBe(true);
+    }
+
+    // It is a PROJECT rather than a config of its own because `e2e/start-server.ts`
+    // binds MongoDB on a fixed port, one dev server and one storage container, so
+    // two Playwright runs cannot be in flight at once. That only holds while the
+    // run stays single-worker and unparallelised — two workers would put both
+    // engines on one stack at the same time, which is the shared-state race
+    // `SUP-0025` records for the specs that already exist.
+    expect(playwrightConfig.workers).toBe(1);
+    expect(playwrightConfig.fullyParallel).toBe(false);
+  });
+
+  it('keeps the second engine out of the accessibility gate and inside the flake gate', () => {
+    // Both derived configs spread `playwright.config.ts`, so both inherit
+    // `projects` unless they say otherwise — and the right answer differs.
+    //
+    // The accessibility config MUST pin Chromium, and the reason is not a
+    // preference: a `TestProject.testMatch` OVERRIDES a top-level one, so the
+    // Firefox project would ignore that config's `testMatch: A11Y_SUITE` entirely
+    // and add the clipboard and auto-lock specs to the a11y report — a gate that
+    // ratchets `a11y.viewsScanned` reporting four tests where it scanned two views.
+    expect(a11yPlaywrightConfig.projects?.map((project) => project.name)).toEqual(['chromium']);
+
+    // The flake config must NOT narrow, for the mirror-image reason: its claim is
+    // about the suite `test:e2e` runs, and a leg that measured one engine's flake
+    // rate while the gate ran two would be a measurement of something else. It
+    // inherits through the spread, so the assertion is EQUALITY WITH THE BASE
+    // rather than `toBeUndefined()` — the spread copies the key, so "absent" is
+    // not a state this config can be in.
+    expect(flakePlaywrightConfig.projects).toEqual(playwrightConfig.projects);
+
+    // Both multi-engine configs must carry the project name INTO the JUnit report.
+    // It is not the reporter's default: without it the artifact holds two suites of
+    // the same name, told apart only by a `hostname` attribute nothing here reads,
+    // and `flake-run.mjs` names a failing test as `classname › name` — so a
+    // cross-browser failure would be attributable in whichever terminal somebody
+    // was watching and nowhere else. That is exactly the claim the second engine
+    // was added to be able to make, so it is pinned rather than trusted.
+    for (const [what, config] of [
+      ['the E2E gate', playwrightConfig],
+      ['the flake gate', flakePlaywrightConfig],
+    ] as const) {
+      const junit = playwrightReporter('junit', config);
+      expect(junit?.['includeProjectInTestName'], what).toBe(true);
+    }
   });
 
   it('pins WHICH views the accessibility gate scans, and what fails it', () => {

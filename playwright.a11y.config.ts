@@ -1,5 +1,5 @@
 import { defineConfig } from '@playwright/test';
-import base from './playwright.config';
+import base, { CHROMIUM_PROJECT } from './playwright.config';
 
 /**
  * `test:a11y` — the accessibility suite, run as its own gate.
@@ -16,7 +16,7 @@ import base from './playwright.config';
  * `countsTests: false` in the manifest for exactly that reason — counting them
  * twice would ratchet the same two tests as though they were four.
  *
- * ## Two things this config must keep
+ * ## Three things this config must keep
  *
  * 1. **Its own JUnit report.** Pointed at `junit-e2e.xml` it would overwrite the
  *    E2E gate's evidence, and `audit:ratchet:full` reads that file for the test
@@ -26,6 +26,17 @@ import base from './playwright.config';
  *    writes it to `playwright-report/`; a second run would overwrite the E2E
  *    run's report with a two-test one, which is how an investigation ends up
  *    looking at the wrong artifact.
+ * 3. **`projects` pinned to Chromium alone.** The base config gained a second
+ *    engine project whose scope is its own two specs, and a `TestProject.testMatch`
+ *    OVERRIDES the top-level one rather than intersecting with it — so spreading
+ *    the base and narrowing `testMatch` here is not enough: the Firefox project
+ *    would ignore the narrowing entirely and run the clipboard and auto-lock specs
+ *    inside this gate. `a11y.viewsScanned` is read from the scan report rather than
+ *    from the test count, so the ratcheted number would not have moved; what would
+ *    have moved is this gate's runtime and its verdict, which would then go red for
+ *    a clipboard failure that has nothing to do with accessibility. Naming the
+ *    project is the fix; there is nothing accessibility-specific about a second
+ *    engine, and axe is injected into the page the same way on either.
  */
 export const A11Y_SUITE = ['a11y.spec.ts', 'a11y-keyboard.spec.ts'] as const;
 
@@ -34,5 +45,6 @@ const JUNIT_REPORT = '.testfortress/reports/junit-a11y.xml';
 export default defineConfig({
   ...base,
   testMatch: [...A11Y_SUITE],
+  projects: [CHROMIUM_PROJECT],
   reporter: [['list'], ['junit', { outputFile: JUNIT_REPORT }]],
 });

@@ -529,12 +529,18 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 - **Backgrounding the window deliberately does not erase it.** Switching tabs, minimising,
   or being covered by another window is how you get to the application you are pasting
   into, so the deadline, not the visibility change, decides when the secret goes.
-- **The browser decides whether a page may erase the clipboard at all, and the answer
-  differs by engine.** Chromium rejects a clipboard write from an unfocused document, so if
-  the deadline passes while H-Vault is in the background the erase physically cannot happen
-  at that moment. Firefox and Safari are stricter: they require a user gesture for _every_
-  clipboard write, which means a purely timer-driven erase can never succeed on those
-  engines, foreground or background.
+- **The browser decides whether a page may erase the clipboard at all, and no engine
+  guarantees it.** Chromium rejects a clipboard write from an unfocused document, so if the
+  deadline passes while H-Vault is in the background the erase physically cannot happen at
+  that moment. Firefox and Safari state a stricter rule: they require a user gesture for
+  _every_ clipboard write, which means a purely timer-driven erase can never succeed on
+  those engines, foreground or background. **Do not read that contrast as "the timed erase
+  is reliable on Chromium".** This project's own browser tests drive the real deadline on
+  both engines it runs, with the page in front and — on Chromium — with the clipboard
+  permission granted, and the write is refused on **both**. Whatever the underlying rule
+  turns out to be on a given build, the design does not depend on knowing it: a timer-driven
+  erase is treated as something that may be refused anywhere, and the retry below is what
+  actually lands it.
   H-Vault does not abandon a refused erase. It retries on the next moment the engine will
   accept one: returning to the window, and — the trigger that also works on Firefox and
   Safari — your next click or keypress in H-Vault. In practice that means the erase lands

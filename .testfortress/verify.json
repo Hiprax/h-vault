@@ -304,7 +304,7 @@
     "test:e2e": {
       "cmd": "npm run test:e2e",
       "tier": 1,
-      "gate": "every Playwright spec passes, against a harness that starts an in-memory MongoDB AND the pinned object-storage engine in a container, so the document journeys run against the engine the stack ships rather than against a double",
+      "gate": "every Playwright spec passes, against a harness that starts an in-memory MongoDB AND the pinned object-storage engine in a container, so the document journeys run against the engine the stack ships rather than against a double \u2014 Chromium over every spec, and a second Firefox project over the clipboard-hygiene and auto-lock specs, whose answers depend on the browser's clipboard-activation and visibility rules rather than on this application",
       "report": "junit-e2e.xml",
       "requires": ["build:shared", "docker"]
     },
@@ -331,10 +331,10 @@
       "review": "2026-11-11"
     },
     {
-      "area": "cross-browser end-to-end",
-      "detail": "playwright.config.ts declares a single `chromium` project, so every browser assertion in this repository is an assertion about one engine. The subsystem this understates most is the clipboard guard, whose refusal-retry state machine exists for the Firefox/Safari transient-activation rule and is verified only by unit tests with simulated refusals.",
+      "area": "cross-browser end-to-end: WebKit",
+      "detail": "playwright.config.ts now declares two engine projects: Chromium over every spec, and Firefox over the two whose answers depend on the engine (clipboard-hygiene, auto-lock), attributed in the JUnit report by project name. That leg drives a GENUINE transient-activation refusal on Gecko and the gesture-scoped retry that follows it, so the clipboard guard is no longer verified only by unit tests with simulated refusals. What is still asserted about one engine only: WebKit, and the other nineteen specs \u2014 the latter deliberately, because they assert application behaviour that does not vary by engine.",
       "ledger": ["SUP-0042"],
-      "review": "2026-10-13"
+      "review": "2026-11-11"
     },
     {
       "area": "non-functional load and performance",

@@ -9,8 +9,15 @@ pipeline and about tests are not optional.
 
 ## Getting set up
 
-You need **Node 24+** (pinned in `.nvmrc`) and **Docker** (for MongoDB and the object
-storage the document store uses, and for the `docker` pipeline gate).
+You need **Node 24+** (pinned in `.nvmrc`), **Docker** (for MongoDB and the object
+storage the document store uses, and for the `docker` pipeline gate), and **two Playwright
+browsers** — the end-to-end gate declares a Chromium project over every spec and a Firefox
+project over the clipboard and auto-lock specs, and a browser that is not installed fails
+those specs outright rather than reporting "could not run":
+
+```bash
+npx playwright install --with-deps chromium firefox
+```
 
 ```bash
 git clone https://github.com/Hiprax/h-vault.git

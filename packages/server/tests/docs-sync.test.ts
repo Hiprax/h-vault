@@ -742,6 +742,18 @@ describe('the accessibility gate’s scanned-view count', () => {
       expected: documentViews,
       what: 'the runner’s reason for declaring `docker`',
     },
+    // A THIRD sentence in the same file, three lines above the `e2e` gate's title,
+    // found only when the cross-browser leg was added and the gate around it was
+    // read line by line. It still said "four" — the number two sweeps ago — while
+    // its exact twin in `CONTRIBUTING.md` was pinned and correct at six. That is
+    // the rule at the top of this block earning itself for the third time: a
+    // sentence in a file that already has entries is not covered by them.
+    {
+      file: 'scripts/ci/local-ci.mjs',
+      pattern: /the document specs plus ([a-z-]+) of the\n    \/\/ accessibility views fail/,
+      expected: documentViews,
+      what: 'the runner’s reason for declaring `docker` on `e2e`',
+    },
     // Two more found on a second sweep of the tree, both saying "twenty" and
     // "four" long after the numbers were 32 and 6, and both the direct twin of a
     // sentence already pinned above: the README's Docker-prerequisite paragraph

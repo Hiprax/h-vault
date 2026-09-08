@@ -32,6 +32,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import playwrightConfig from '../../../playwright.config';
 import {
   computeNextTag,
   majorBumpAccountsForBreaking,
@@ -193,6 +194,35 @@ describe('release workflow', () => {
     const install = (release.jobs['verify']?.steps ?? []).map((step) => step.run ?? '').join('\n');
     for (const binary of ['actionlint', 'hadolint', 'oasdiff', 'diff-cover']) {
       expect(install, `prerequisite ${binary}`).toContain(binary);
+    }
+  });
+
+  it('installs a browser for every Playwright project the E2E gate declares', () => {
+    // The one prerequisite `local-ci.mjs` cannot declare, because it is not a
+    // binary on `PATH` but a per-version download in Playwright's own cache. A
+    // missing one is NOT reported as "could not run": Playwright fails the spec
+    // with `browserType.launch: Executable doesn't exist at …`, which is exit 1
+    // and reads exactly like a defect. MEASURED, on the day the second engine was
+    // added: all six of its tests failed that way before the browser was fetched.
+    //
+    // Derived from the config rather than written out, so adding a third project
+    // turns THIS red on the machine, in a second, instead of turning the hosted
+    // release run red minutes into the gauntlet.
+    // The `playwright install` LINE, not the whole job. Joining every step's `run`
+    // and asking whether it contains "firefox" is satisfied by the word appearing in
+    // a comment, or in an unrelated step, while the install command itself has
+    // quietly dropped it — which is the exact failure this is here to catch.
+    const installLine = (release.jobs['verify']?.steps ?? [])
+      .flatMap((step) => (step.run ?? '').split('\n'))
+      .find((line) => /\bplaywright install\b/.test(line));
+    expect(installLine, 'release.yml must install Playwright browsers at all').toBeDefined();
+
+    const projects = playwrightConfig.projects ?? [];
+    expect(projects.length).toBeGreaterThan(0);
+    for (const project of projects) {
+      expect(installLine, `Playwright browser for project ${String(project.name)}`).toContain(
+        String(project.name),
+      );
     }
   });
 

@@ -311,6 +311,18 @@ export function testEmail(): string {
 export async function expectVaultVisible(page: Page): Promise<void> {
   ensureTestTimeoutAtLeast(PBKDF2_STEP_TIMEOUT_MS + 30_000);
   await expect(page).toHaveURL(/\/vault/, { timeout: PBKDF2_STEP_TIMEOUT_MS });
+  // The URL alone is NOT enough, and the gap was load-bearing: locking the vault
+  // does not navigate — `ProtectedRoute` swaps the layout for the unlock screen at
+  // the SAME url — so a URL-only assertion passed for a LOCKED vault. Every caller
+  // that used this to mean "the unlock worked" was therefore asserting nothing, and
+  // the failure that produced surfaced two steps later and unrecognisably: the next
+  // `lockViaUi()` waited for a control the unlock screen does not have until the
+  // whole test timed out, five minutes away from the line that was actually wrong.
+  // The sidebar's lock control exists only in the unlocked layout, so it is the
+  // cheapest thing that distinguishes the two states.
+  await expect(page.getByRole('button', { name: /lock vault/i })).toBeVisible({
+    timeout: PBKDF2_STEP_TIMEOUT_MS,
+  });
 }
 
 /**
@@ -397,10 +409,57 @@ export async function gotoFileEncryptionTool(page: Page): Promise<void> {
   });
 }
 
-/** Unlocks the vault via the unlock screen. */
+/**
+ * Unlocks the vault via the unlock screen.
+ *
+ * ## Why this activates the control from the keyboard rather than with `click()`
+ *
+ * MEASURED, once, on the run that first put `auto-lock.spec.ts` on a second
+ * engine: `several lock/unlock cycles in a row all succeed` burned its entire
+ * 300 s budget inside one `click()`, on a machine that was also running the rest
+ * of a fifteen-minute suite. The call log ends
+ *
+ *   - waiting for element to be visible, enabled and stable
+ *   - element is not stable
+ *   - retrying click action
+ *   - element was detached from the DOM, retrying
+ *
+ * and then goes silent, and the page snapshot taken at the timeout shows THE
+ * VAULT, sidebar and all. So the unlock had already succeeded: a click landed,
+ * the unlock screen unmounted, and `click()` — which cannot tell "the element
+ * vanished because my click worked" from "the element vanished before my click
+ * landed" — re-resolved a locator that now matches nothing and waited for it
+ * until the test died. The app did exactly the right thing and the helper
+ * reported a failure; that is a defect in the helper.
+ *
+ * The shape is general: every submit control whose success unmounts its own
+ * screen can do this, and a contended machine is what makes the first
+ * actionability pass fail and the second one race the unmount. It is not
+ * engine-specific — Firefox is simply where it came up first.
+ *
+ * So the control is ACTIVATED FROM THE KEYBOARD instead. `press('Enter')` focuses
+ * the button and dispatches the key events in a single step, with no stability
+ * poll and no hit-target retry to be caught in when the element leaves as a result
+ * of what it just did. Nothing is waved through to get there: the two assertions
+ * above it state, as assertions rather than as implicit preconditions, the part of
+ * actionability that matters here — the control is on screen and it is enabled.
+ * And Enter on a focused `type="submit"` button is a real user path this suite did
+ * not otherwise cover.
+ *
+ * A `hover()` + `page.mouse.down()/up()` pair was tried first, on the theory that
+ * it keeps every actionability check while making the click positional. MEASURED:
+ * it did not activate the button on Chromium at all, and — because
+ * {@link expectVaultVisible} then only compared the URL, which a lock does not
+ * change — it failed two steps later as another five-minute hang. Both halves of
+ * that are fixed; do not reintroduce the first half.
+ */
 export async function unlockVault(page: Page, password: string): Promise<void> {
   await page.getByLabel(/master password/i).fill(password);
-  await page.getByRole('button', { name: /unlock/i }).click();
+
+  const unlock = page.getByRole('button', { name: /unlock/i });
+  await expect(unlock).toBeVisible();
+  await expect(unlock).toBeEnabled();
+  await unlock.press('Enter');
 }
 
 // ─── Vault Item Helpers ──────────────────────────────────────────────────────

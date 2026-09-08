@@ -4,7 +4,13 @@ import { open, readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import * as OTPAuth from 'otpauth';
 import { seededRandom } from '../tests/harness/determinism.js';
-import { registerAndSignInViaUI, testDb, testEmail, unlockVault } from './helpers';
+import {
+  expectVaultVisible,
+  registerAndSignInViaUI,
+  testDb,
+  testEmail,
+  unlockVault,
+} from './helpers';
 
 /**
  * The zero-knowledge boundary, asserted NEGATIVELY across one whole session.
@@ -673,7 +679,10 @@ test.describe('zero-knowledge boundary', () => {
       await page.getByRole('button', { name: /lock vault/i }).click();
       await expect(page.getByText('Vault Locked')).toBeVisible({ timeout: 30_000 });
       await unlockVault(page, MASTER_PASSWORD);
-      await expect(page).toHaveURL(/\/vault/, { timeout: 120_000 });
+      // `expectVaultVisible`, not a bare URL check: locking does not navigate, so
+      // `toHaveURL(/\/vault/)` passes for a vault that is still LOCKED and would
+      // have let this step run its remaining assertions against the unlock screen.
+      await expectVaultVisible(page);
       await expect(page).not.toHaveURL(/\/login/);
     });
 

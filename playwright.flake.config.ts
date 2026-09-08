@@ -11,6 +11,18 @@ import base from './playwright.config';
  * about the suite `test:e2e` runs, and a filtered version of it would be a
  * flake measurement of something other than the gate it describes.
  *
+ * For the same reason `projects` is INHERITED rather than pinned, which is the
+ * opposite choice to the accessibility config beside it and is deliberate: the
+ * base config runs a Chromium project over every spec and a Firefox project over
+ * the clipboard and auto-lock specs, so inheriting both is what keeps this leg a
+ * measurement of the gate. A second engine is also where a flake rate is most
+ * likely to differ, because the two specs it runs turn on clipboard activation
+ * and visibility policy rather than on application logic.
+ * `flake.e2eExecutions` is ratcheted higher-is-better, so those extra executions
+ * raise the floor rather than needing a baseline edit — but they DO spend wall
+ * clock inside `E2E_DEADLINE_MS` in `scripts/ci/flake-run.mjs`, which is the
+ * number to look at first if this leg ever reports exit 124.
+ *
  * ## The three settings that are pinned rather than inherited
  *
  * 1. **`repeatEach: 3`.** Declared here rather than passed as `--repeat-each=3`
@@ -19,10 +31,10 @@ import base from './playwright.config';
  *    executions per test is the sample; one is the thing this phase exists to
  *    say is not a measurement.
  *
- * 2. **`retries: 0`, unconditionally.** The base config computes
- *    `process.env.CI ? 2 : 0`, which is 0 for every local run today — but this
- *    leg's verdict is precisely "does a test pass on its FIRST attempt, every
- *    time", so it must not be one environment variable away from being a lie.
+ * 2. **`retries: 0`, unconditionally.** The base config pins the same value today,
+ *    but it once computed `process.env.CI ? 2 : 0` — and this leg's verdict is
+ *    precisely "does a test pass on its FIRST attempt, every time", so it must not
+ *    be one environment variable away from being a lie even if the base drifts.
  *    `e2e/helpers.ts` records that the retry count this pipeline's E2E gate used
  *    to carry concealed two genuine failures; a retried flake measurement would
  *    conceal them again, and this time silently.
@@ -43,6 +55,16 @@ import base from './playwright.config';
  */
 const JUNIT_REPORT = '.testfortress/reports/junit-flake-e2e.xml';
 
+/**
+ * The project name has to reach the report here for the same reason it does in the
+ * base config, and it matters MORE in this leg: `scripts/ci/flake-run.mjs` names
+ * the tests that failed by `classname › name`, read straight out of this file, and
+ * without the prefix two engines' runs of the same spec are one indistinguishable
+ * name. A flake report that cannot say which engine flaked is a flake report about
+ * nothing.
+ */
+const JUNIT_OPTIONS = { outputFile: JUNIT_REPORT, includeProjectInTestName: true };
+
 /** Executions per test. Named so the gate's report and this config cannot disagree. */
 export const FLAKE_REPEAT_EACH = 3;
 
@@ -51,5 +73,5 @@ export default defineConfig({
   repeatEach: FLAKE_REPEAT_EACH,
   retries: 0,
   forbidOnly: true,
-  reporter: [['list'], ['junit', { outputFile: JUNIT_REPORT }]],
+  reporter: [['list'], ['junit', JUNIT_OPTIONS]],
 });

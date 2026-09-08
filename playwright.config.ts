@@ -38,6 +38,100 @@ const CLIENT_ORIGIN = `http://127.0.0.1:${String(CLIENT_PORT)}`;
 const JUNIT_REPORT = '.testfortress/reports/junit-e2e.xml';
 
 /**
+ * `includeProjectInTestName` is NOT the reporter's default, and this run needs it.
+ *
+ * With two engine projects over the same files, the JUnit report otherwise holds
+ * two `<testsuite name="clipboard-hygiene.spec.ts">` elements whose only
+ * difference is a `hostname` attribute that nothing here reads — so a failing test
+ * name, which is what `scripts/ci/flake-run.mjs` reports and what an investigation
+ * starts from, would not say which engine produced it. With it on, every name
+ * carries its `[chromium]` or `[firefox]` prefix and the artifact says what the
+ * terminal said.
+ */
+const JUNIT_OPTIONS = { outputFile: JUNIT_REPORT, includeProjectInTestName: true };
+
+/**
+ * The specs that run on a SECOND engine, and the reason there are exactly two.
+ *
+ * Everything else this suite asserts is application behaviour — a form validates,
+ * a route redirects, ciphertext leaves the browser sealed — and those answers do
+ * not change with the engine rendering them. These two do, because both are built
+ * on platform policy that Chromium and Gecko implement DIFFERENTLY:
+ *
+ *  - `clipboard-hygiene.spec.ts` drives `services/clipboard/clipboardService.ts`,
+ *    whose entire refusal-retry state machine exists because a browser may refuse
+ *    a clipboard write outright: Chromium gates it on a Permissions API entry and
+ *    on document focus, Gecko and WebKit on TRANSIENT USER ACTIVATION for every
+ *    write. The permission is the visible difference — Gecko has no such name and
+ *    Playwright rejects it — and the spec's `grantClipboardWrite` is the one line
+ *    that has to know about it. What a second engine buys beyond that is a second
+ *    independent set of platform rules over the same guard, which is the only way
+ *    to find out that a claim made about one of them is not a claim about the
+ *    others: this leg is how the "Chromium is the permissive case" reading was
+ *    measured wrong, since the deadline erase is refused on BOTH.
+ *  - `auto-lock.spec.ts` turns on page visibility, on `document.hidden`, and on
+ *    whether a virtual clock's fast-forward fires the timers the guard armed —
+ *    all of which are engine-owned.
+ *
+ * Adding the other nineteen specs would roughly double the gate's executions to
+ * re-assert answers that do not vary, so the scope is deliberately narrow and
+ * stated here rather than inferred from a glob.
+ */
+export const FIREFOX_SUITE = ['clipboard-hygiene.spec.ts', 'auto-lock.spec.ts'] as const;
+
+/**
+ * The two engine projects, exported because the derived configs must choose
+ * between them EXPLICITLY.
+ *
+ * A `TestProject.testMatch` overrides a top-level `testMatch`, so a config that
+ * spreads this one and narrows its file set — `playwright.a11y.config.ts` does
+ * exactly that — would still pick up the Firefox project's own two specs and
+ * silently report four tests as two. Naming the projects makes that choice a line
+ * of code in each derived config instead of a surprise.
+ */
+export const CHROMIUM_PROJECT = {
+  name: 'chromium',
+  use: { ...devices['Desktop Chrome'] },
+};
+
+/**
+ * The cross-browser leg.
+ *
+ * It is a PROJECT inside this config rather than a separate config with its own
+ * gate id, for two reasons and one constraint.
+ *
+ * The constraint: `e2e/start-server.ts` binds MongoDB on the fixed port 27017, one
+ * dev server on one port, and one storage-engine container, so no two Playwright
+ * runs can be in flight at once. That does not forbid a second SEQUENTIAL gate —
+ * `test:a11y` already is one — so it is a constraint on the shape rather than a
+ * proof. The two reasons are proportionality and cost: standing the whole stack up
+ * a second time (a bring-up this config budgets 420 s for) to re-run two of
+ * twenty-one specs on another engine buys nothing, and a new gate id obliges a
+ * `verify:selftest` defect case, a README gate-table row checked in both
+ * directions, and a `gate-surface.test.ts` entry — machinery for a leg that is
+ * already attributable without any of it.
+ *
+ * As a project it shares the single `webServer` below, and because the run is
+ * single-worker and unparallelised it goes strictly after the Chromium project
+ * against that same stack — no second server, no shared-state race.
+ *
+ * It is still its own reported leg. The console reporters prefix every title with
+ * the project name for free, but the JUnit reporter does NOT: its
+ * `includeProjectInTestName` defaults to false, so without it `junit-e2e.xml`
+ * carries two identically-named suites distinguished only by a `hostname`
+ * attribute nothing in this pipeline reads. `scripts/ci/flake-run.mjs` builds its
+ * failing-test list from `classname › name`, so the flake gate could not have said
+ * WHICH engine flaked — in the one leg where the two are most likely to differ.
+ * The reporter below turns it on, which is what makes the attribution a property
+ * of the artifact rather than of the terminal somebody happened to be watching.
+ */
+export const FIREFOX_PROJECT = {
+  name: 'firefox',
+  use: { ...devices['Desktop Firefox'] },
+  testMatch: [...FIREFOX_SUITE],
+};
+
+/**
  * The determinism pins, applied INSIDE the harness rather than as a
  * `TZ=UTC npx playwright test` prefix — this project is developed on Windows too,
  * where that prefix is not valid shell syntax, so a prefix-based pin is one half
@@ -45,10 +139,11 @@ const JUNIT_REPORT = '.testfortress/reports/junit-e2e.xml';
  *
  * This assignment covers the Playwright runner process and, by inheritance, the
  * dev server and the in-memory mongod that `e2e/start-server.ts` spawns. The
- * BROWSER is pinned separately, in `use` below: a Chromium context takes its
- * timezone and locale from launch options, not from the parent's environment, and
- * the browser is where the app's date rendering (secret expiry countdowns, the
- * vault-health "last checked" label) actually happens.
+ * BROWSER is pinned separately, in `use` below: a browser context takes its
+ * timezone and locale from launch options, not from the parent's environment —
+ * that is true of both engines in `projects` — and the browser is where the app's
+ * date rendering (secret expiry countdowns, the vault-health "last checked"
+ * label) actually happens.
  */
 process.env.TZ = PINNED_TZ;
 process.env['LANG'] = PINNED_LOCALE;
@@ -73,8 +168,8 @@ export default defineConfig({
   // streams progress, and the HTML report is pinned to `open: 'never'` — its
   // default (`on-failure`) launches a browser, which hangs a git hook forever.
   reporter: process.env.CI
-    ? [['github'], ['junit', { outputFile: JUNIT_REPORT }]]
-    : [['list'], ['html', { open: 'never' }], ['junit', { outputFile: JUNIT_REPORT }]],
+    ? [['github'], ['junit', JUNIT_OPTIONS]]
+    : [['list'], ['html', { open: 'never' }], ['junit', JUNIT_OPTIONS]],
   timeout: 30_000,
   expect: {
     timeout: 10_000,
@@ -93,12 +188,7 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     video: 'on-first-retry',
   },
-  projects: [
-    {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
-    },
-  ],
+  projects: [CHROMIUM_PROJECT, FIREFOX_PROJECT],
   // An explicit `webServer: undefined` is not assignable under
   // `exactOptionalPropertyTypes`, so drop the key entirely when the caller
   // points the run at an already-running stack via `E2E_BASE_URL`.
