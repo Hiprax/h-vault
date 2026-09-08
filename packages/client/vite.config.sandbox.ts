@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
-import { SANDBOX_ASSETS_DIR, SANDBOX_HTML, sandboxManualChunks } from './vite.config.helpers';
+import { SANDBOX_ASSETS_DIR, SANDBOX_HTML, sandboxManualChunks } from './vite.config.helpers.ts';
 
 /**
  * The document sandbox's build — a SECOND build, not a second input.

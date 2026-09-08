@@ -33,6 +33,7 @@ import { render, screen, act, waitFor, cleanup } from '@testing-library/react';
 import { DocumentSandbox } from '../src/components/documents/DocumentSandbox';
 import { renderText } from '../src/sandbox/renderers/text';
 import { frameMessage, parseRenderRequest } from '../src/sandbox/protocol';
+import { PRETTIER_VERSION } from '../src/sandbox/transform/formatEngine';
 
 // ---------------------------------------------------------------------------
 // A stub frame
@@ -845,7 +846,13 @@ describe('the frame’s program', () => {
       formatted: true,
       repaired: false,
       tool: 'prettier',
-      toolVersion: '3.9.5',
+      // The CONSTANT, never a second copy of the literal. `PRETTIER_VERSION` is
+      // already pinned to the installed package by `document-format.test.ts`, so
+      // this is not a tautology — it is the same fact, asserted once. A literal
+      // here made a Prettier PATCH bump fail this suite with a diff about a
+      // version string, in a test whose subject is that the frame's reply
+      // reaches the host verbatim and that a transform frame draws nothing.
+      toolVersion: PRETTIER_VERSION,
     });
     // The transform frame is HIDDEN and renders nothing: it must touch neither
     // the render target nor the theme, both of which belong to the other job.

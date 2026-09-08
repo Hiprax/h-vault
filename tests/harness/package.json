@@ -1,0 +1,31 @@
+{
+  "//": [
+    "This directory only. It declares what these files already are \u2014 ES modules \u2014 so that Vite's",
+    "config loader stops reporting them as CommonJS carrying ESM syntax.",
+    "",
+    "All three packages' vitest.config.ts reach determinism.ts through their own",
+    "tests/determinism.ts re-export, which pulls a REPO-ROOT file into the config bundle. The root",
+    "package.json has no \"type\", so Vite classified these as CommonJS and printed a",
+    "configLoader: 'native' incompatibility notice on every test gate. Vite's only other lever is",
+    "VITE_CONFIG_NATIVE_IGNORE_WARNING, which suppresses the message rather than answering it, and",
+    "scripts/ci/report.mjs counts that notice into warnings.compiler, which is ratcheted at zero.",
+    "",
+    "SCOPED HERE, NEVER AT THE ROOT. Adding \"type\": \"module\" to the root package.json was tried",
+    "and is measurably wrong: Playwright loads e2e/*.ts through a CommonJS require path and those",
+    "files use __dirname deliberately (see the note at e2e/helpers.ts:493), so e2e and a11y both",
+    "died with 'ReferenceError: __dirname is not defined in ES module scope'; and CodeQL's own",
+    "vendored parser wrapper is a CommonJS .js file under .cache/, which the root package scope",
+    "reaches, so sast died with 'exports is not defined in ES module scope' as well.",
+    "",
+    "THREE CommonJS callers import this directory across that boundary, and all three are exercised",
+    "by the e2e and a11y gates on every push: playwright.config.ts:6 (the CONFIG load, whose failure",
+    "shape is the silent 'No tests found'), e2e/helpers.ts:5, and e2e/start-server.ts:5.",
+    "",
+    "THE INVARIANT THAT ARRANGEMENT DEPENDS ON, and nothing else pins it: NO FILE IN THIS DIRECTORY",
+    "MAY TAKE A TOP-LEVEL AWAIT. require() of an ESM module works only while the module graph is",
+    "synchronous; one top-level await turns every one of those three imports into",
+    "ERR_REQUIRE_ASYNC_MODULE. s3Server.ts, which stands a container up, is where somebody will",
+    "reach for one."
+  ],
+  "type": "module"
+}

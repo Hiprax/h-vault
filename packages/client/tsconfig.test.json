@@ -29,6 +29,19 @@
     // read those files; it relaxes nothing about the TypeScript it checks, and
     // `src/` is unaffected because the build config does not set it.
     "allowJs": true,
+    // `vite.config.ts` and `vite.config.sandbox.ts` import `./vite.config.helpers.ts`
+    // WITH its extension, and this is the flag that lets them. Vite's config loader
+    // reports an extensionless relative import as incompatible with
+    // `configLoader: 'native'` — the loader that hands the config to Node's own
+    // type stripping, where ESM specifiers must be exact — and it prints that as a
+    // build warning, which `scripts/ci/report.mjs` counts into `warnings.compiler`
+    // (ratcheted at zero, direction lower). The only alternatives were an env-var
+    // suppression and a `.js` specifier that resolves today and would not resolve
+    // natively, so the extension is the honest fix and this flag is its cost.
+    // It relaxes no type-safety rule and it cannot reach shipped code: `src/` is
+    // also checked by `tsconfig.json`, which does NOT set this, so a `.ts` import
+    // anywhere under `src/` still fails the build type-check.
+    "allowImportingTsExtensions": true,
     // Its own build info, never the build config's and never shared with another
     // project: see `packages/shared/tsconfig.test.json` for both rules and why the
     // configs that EMIT must not carry these two keys.

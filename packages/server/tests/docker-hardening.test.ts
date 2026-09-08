@@ -1469,8 +1469,17 @@ describe('Docker deployment', () => {
       // Only real registry artifacts qualify. The root entry ("") and the workspace
       // sources ("packages/…") are not downloaded, and the `node_modules/@hvault/*`
       // entries are symlinks into this repo — none of them can carry a hash.
+      //
+      // `includes`, not `startsWith`: npm places a package NESTED when hoisting it
+      // would break a peer range, and a workspace-nested artifact is keyed
+      // `packages/<ws>/node_modules/<pkg>` — a path that a `startsWith` filter drops
+      // on the floor. Measured: a dependency refresh moved `@vitejs/plugin-react`
+      // and `@hookform/resolvers` under `packages/client/node_modules/` and this
+      // assertion stopped covering them, silently, while still passing. The
+      // supply-chain claim is about every downloaded tarball, so the predicate has
+      // to be about every downloaded tarball too, wherever npm decided to put it.
       const registryPackages = Object.entries(lockfile.packages).filter(
-        ([name, entry]) => name.startsWith('node_modules/') && !entry.link && entry.version,
+        ([name, entry]) => name.includes('node_modules/') && !entry.link && entry.version,
       );
       expect(registryPackages.length).toBeGreaterThan(500);
 
