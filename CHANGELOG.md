@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-21
+
 ### Added
 
 - **The password generator can now guarantee how many of each character type a password contains.** Sites that demand "at least two digits" or "at least one symbol" were impossible to satisfy reliably, because the generator drew every position independently and honoured no requirement at all: a 20-character password over the full pool came out with no digit at all about nine times in every hundred. Each enabled character type now has a minimum you can set, up to five, and the generator guarantees it. It does so without the usual sleight of hand. It does not generate a password and then overwrite a character, and it does not place the required characters first and shuffle, because both of those quietly distort which passwords are possible and neither can say how strong the result is. Instead it counts exactly how many passwords satisfy your settings and picks one of them uniformly at random, which means every allowed password remains equally likely and the strength figure beside it is the true one.
@@ -647,7 +649,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Hiprax/h-vault/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Hiprax/h-vault/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Hiprax/h-vault/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/Hiprax/h-vault/compare/v0.10.0...v0.10.1
