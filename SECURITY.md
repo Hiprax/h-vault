@@ -515,6 +515,52 @@ and no key can bring back. The clean-up also stops early once the storage servic
 several operations in a row, so a failing service produces one short run an hour rather than a
 run that never ends.
 
+### Importing codes from Google Authenticator
+
+Reading an authenticator export happens entirely in your browser. The QR code is decoded, the
+payload inside it is parsed, and the keys are turned into `otpauth://` links without any of it
+reaching the server. The server is involved only if you then choose to create a vault item or
+save the set into the document store, and by then the value is encrypted like anything else.
+
+Three things about it are worth stating plainly.
+
+**The decoder runs in the isolated document, not in the page that holds your vault key.** A QR
+decoder is third-party code being fed pixels from whatever a camera was pointed at, which is the
+one kind of input this application takes from outside the machine. It therefore runs in the same
+sandboxed frame the document viewer uses: an opaque origin, no vault key beside it, no token, no
+storage, and a policy of `connect-src 'none'`. Running it in the application's own origin would
+put it next to the unlocked vault with a full network available to it.
+
+**The residual risk that frame does leave.** Its policy allows `img-src 'self'`, and any iframe can
+navigate itself, so a compromised release of that decoder could make credential-less same-origin
+GET requests. It could not read the responses, and no cookie would be attached, but a request URL
+would land in this server's own access log. That channel cannot be closed for any iframe, and it
+is much smaller than the alternative, where the same compromise would have the vault key in reach.
+The decoder is a small, zero-dependency package and is pinned like everything else.
+
+**What the decoded keys are while they are on screen.** They are unwrapped TOTP secrets, which is
+the plainest secret this application ever holds. They live in one module-level map, never in a
+component's props or in a store, and they are overwritten with zeros when you leave the page, when
+the vault locks, when you sign out, and when you press Start over. Strings derived from them for
+display cannot be overwritten, because JavaScript strings are immutable; those are built at the
+moment of use and not kept. Auto-lock is deliberately not suspended while the page is open, so a
+long import can be interrupted by the lock, and the page says so rather than holding the vault
+open for convenience.
+
+### Your password generator settings are stored in the clear
+
+The length, character types and minimum counts the generator uses are saved on your account as
+ordinary settings, beside your auto-lock timeout and theme. They are not encrypted, so an operator
+with database access, or anyone who obtains a copy of it, can see the policy behind the passwords
+you generate.
+
+This does not weaken a password in the way it may first appear. The strength figure this
+application reports already assumes an attacker who knows the policy, which is the conservative
+assumption and the correct one; a generated password's strength comes from the random choice
+within that policy, not from the policy being secret. It is recorded here because it is
+nonetheless a thing the server learns about you, and the threat model above should not have to be
+read between the lines.
+
 ### Auto-lock
 
 The vault locks after `autoLockTimeout` minutes without interaction (1 to 1440, default 15).

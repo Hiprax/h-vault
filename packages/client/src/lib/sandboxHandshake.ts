@@ -72,8 +72,16 @@ interface SandboxConnection {
    * The port, never the window: posting INTO an opaque origin requires
    * `targetOrigin: '*'`, so nothing of value may travel there. The port is the
    * channel precisely because it dies with the document that held it.
+   *
+   * `transfer` is OPTIONAL and every caller but one leaves it out, deliberately.
+   * A render request's bytes are COPIED, because that buffer is a prop the host
+   * was lent and must still own afterwards; transferring would detach it and the
+   * second post of the same document would throw. The scanner is the exception:
+   * it mints one image per request, never looks at it again, and moves megabytes
+   * per camera frame across what is in Chromium a separate process, so there the
+   * copy is the thing worth avoiding.
    */
-  readonly post: (message: unknown) => void;
+  readonly post: (message: unknown, transfer?: Transferable[]) => void;
   /**
    * Give up on this frame, reporting why. Tears the channel down and calls
    * `onUnavailable` AT MOST ONCE, however many times it is called.
@@ -177,8 +185,12 @@ export function connectSandbox(options: ConnectSandboxOptions): SandboxSession {
   };
 
   const connection: SandboxConnection = {
-    post: (message: unknown) => {
-      port?.postMessage(message);
+    post: (message: unknown, transfer?: Transferable[]) => {
+      if (transfer === undefined) {
+        port?.postMessage(message);
+        return;
+      }
+      port?.postMessage(message, transfer);
     },
     fail,
   };

@@ -26,6 +26,10 @@ import {
   MAX_TRUSTED_DEVICES,
   AUTO_LOCK_TIMEOUT_MINUTES,
   CLIPBOARD_CLEAR_SECONDS,
+  DEFAULT_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  MAX_PASSWORD_LENGTH,
+  MAX_PASSWORD_CLASS_MINIMUM,
   LOCK_ON_HIDDEN_DEFAULT,
   LOCK_ON_HIDDEN_DELAY_MINUTES,
 } from '@hvault/shared';
@@ -76,6 +80,56 @@ function withSettingsDefaults<T extends IUserSettings>(settings: T): T {
     lockOnHidden: raw.lockOnHidden ?? LOCK_ON_HIDDEN_DEFAULT,
     lockOnHiddenDelay: raw.lockOnHiddenDelay ?? LOCK_ON_HIDDEN_DELAY_MINUTES,
     clipboardClearTimeout: raw.clipboardClearTimeout ?? CLIPBOARD_CLEAR_SECONDS,
+    defaultPasswordLength: clampLength(raw.defaultPasswordLength),
+    defaultPasswordOptions: normalisePasswordGenOptions(raw.defaultPasswordOptions),
+  };
+}
+
+/** A stored length, repaired into the range the generator can actually use. */
+function clampLength(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_PASSWORD_LENGTH;
+  return Math.min(MAX_PASSWORD_LENGTH, Math.max(MIN_PASSWORD_LENGTH, Math.round(value)));
+}
+
+function clampMinimum(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 0;
+  return Math.min(MAX_PASSWORD_CLASS_MINIMUM, Math.round(value));
+}
+
+/**
+ * Repair a stored generator policy on the way OUT, rather than rejecting it.
+ *
+ * Two things make this the right layer. First, nothing narrows an accepted
+ * request range anywhere in this schema, deliberately (a narrowing is a breaking
+ * OpenAPI change), so a value outside the generator's working range is storable
+ * and has to be handled somewhere. Second, `registerType: 'prompt'` means a
+ * client that has not accepted an update is still running older code against
+ * this response, so repairing here reaches those users without shipping
+ * anything.
+ *
+ * It must NEVER `.parse()`: this helper feeds both `getProfile` and
+ * `updateSettings`, so a thrown `ZodError` would turn `GET /user/profile` into a
+ * 500, and since the client reads all of its settings from that one response,
+ * that would lock the affected user out of a vault that is working perfectly.
+ */
+function normalisePasswordGenOptions(value: unknown): IUserSettings['defaultPasswordOptions'] {
+  const raw = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>;
+  const bool = (key: string, fallback: boolean): boolean =>
+    typeof raw[key] === 'boolean' ? raw[key] : fallback;
+
+  return {
+    length: clampLength(raw.length),
+    uppercase: bool('uppercase', true),
+    lowercase: bool('lowercase', true),
+    numbers: bool('numbers', true),
+    symbols: bool('symbols', true),
+    excludeAmbiguous: bool('excludeAmbiguous', false),
+    minUppercase: clampMinimum(raw.minUppercase),
+    minLowercase: clampMinimum(raw.minLowercase),
+    // 1 rather than 0: Mongoose has materialised exactly this on every account
+    // since the subdocument existed, so it is what "unset" has always meant here.
+    minNumbers: raw.minNumbers === undefined ? 1 : clampMinimum(raw.minNumbers),
+    minSymbols: raw.minSymbols === undefined ? 1 : clampMinimum(raw.minSymbols),
   };
 }
 

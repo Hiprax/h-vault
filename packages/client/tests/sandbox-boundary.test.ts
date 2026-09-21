@@ -129,25 +129,43 @@ describe('the sandbox boundary', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('lets no application module import Prettier or the JSON repairer', () => {
+  it('lets no application module import Prettier, the JSON repairer or the QR decoder', () => {
     // The consequence rather than the shape, so a future module that reached
-    // them WITHOUT going through `src/sandbox/` is caught too. Both are declared
-    // dependencies of this package precisely so the sandbox can load them, and
-    // nothing else may.
+    // them WITHOUT going through `src/sandbox/` is caught too. All three are
+    // declared dependencies of this package precisely so the sandbox can load
+    // them, and nothing else may.
+    //
+    // The QR decoder earns its place here for a reason the other two do not
+    // have: it is the only one fed bytes that came from OUTSIDE the machine, by
+    // way of a camera. A compromised release of it inside the application's
+    // origin would sit beside an unlocked vault key with `location =` available;
+    // inside the frame it has no key, no token, no storage, and no way out but a
+    // credential-less same-origin GET.
+    const isolated = (specifier: string): boolean =>
+      specifier === 'prettier' ||
+      specifier.startsWith('prettier/') ||
+      specifier === 'jsonrepair' ||
+      specifier === 'qr' ||
+      specifier.startsWith('qr/');
+
     const offenders: string[] = [];
     for (const file of files) {
       if (file.startsWith(`${sandboxDir}${path.sep}`)) continue;
       for (const specifier of runtimeSpecifiers(readFileSync(file, 'utf8'))) {
-        if (
-          specifier === 'prettier' ||
-          specifier.startsWith('prettier/') ||
-          specifier === 'jsonrepair'
-        ) {
+        if (isolated(specifier)) {
           offenders.push(`${path.relative(clientRoot, file)} -> ${specifier}`);
         }
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('detects an application module reaching the QR decoder', () => {
+    // The check above passes over a clean tree, so this proves it can fail.
+    const hostile = ["import decodeQR from 'qr/decode.js';", "import { encodeQR } from 'qr';"].join(
+      '\n',
+    );
+    expect([...runtimeSpecifiers(hostile)]).toEqual(['qr/decode.js', 'qr']);
   });
 
   it('detects the edge it is meant to detect', () => {

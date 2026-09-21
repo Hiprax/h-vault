@@ -143,6 +143,11 @@ export const A11Y_VIEWS = [
   },
   { id: 'vault-health', description: 'the vault health page after its checks have run' },
   { id: 'file-encryption', description: 'the file-encryption tool' },
+  {
+    id: 'totp-import',
+    description:
+      'the authenticator-import tool showing decoded accounts, reached by pasting an export link rather than by using a camera',
+  },
   { id: 'documents-list', description: 'the documents page with two documents stored' },
   {
     // NOT the panel at rest. At rest it is already inside `documents-list` — it

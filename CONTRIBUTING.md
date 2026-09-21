@@ -222,7 +222,7 @@ because the obvious way past each of them is the wrong one.
   pinned object-storage engine, in a container. **Both declare the `docker` CLI**, and
   the reason is worth stating because it is not obvious from the gate names: with no
   engine the server reports `documents: { enabled: false }`, the client hides the whole
-  section, and the document journeys plus seven of the thirty-three scanned accessibility views
+  section, and the document journeys plus seven of the thirty-four scanned accessibility views
   fail with symptoms that say nothing about the code. Without a daemon both report **could
   not run** rather than passing quietly. `flake` inherits the same requirement, because
   the Playwright suite is three of the runs it makes.

@@ -22,7 +22,7 @@
  *
  * ## Why this is a source assertion rather than a rendered one
  *
- * The application's own accessibility gate (`test:a11y`, axe over thirty-three views)
+ * The application's own accessibility gate (`test:a11y`, axe over thirty-four views)
  * runs one theme: Playwright's default colour scheme is `light` and the walk
  * does not override it, so it is structurally blind to this. jsdom cannot help
  * either — it performs no layout and computes no colour, so a rendered

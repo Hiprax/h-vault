@@ -84,6 +84,30 @@ export function passwordEntropyBits(length: number, charsetSize: number): number
  * from a list of `wordlistSize` words: wordCount * log2(wordlistSize). The separator
  * is user-chosen (fixed, not random) and therefore contributes 0 bits.
  */
+/**
+ * The entropy of a uniform choice among `count` possibilities, exactly.
+ *
+ * The counterpart to {@link passwordEntropyBits} for a generator that samples
+ * uniformly over a CONSTRAINED set. Once a policy requires, say, at least one
+ * digit, the keyspace is no longer `pool^length` and `length * log2(pool)`
+ * becomes an OVER-statement, which is the one direction this module promises
+ * never to err in. The generator counts the valid passwords exactly, as a
+ * `bigint`, and this turns that count into bits.
+ *
+ * `Math.log2(Number(count))` is the obvious spelling and it is a trap: `Number`
+ * saturates to `Infinity` somewhere past 1024 bits, so it happens to work today
+ * only because the longest supported password is about 827 bits. Shifting the
+ * value down to 53 significant bits and adding the shift back is
+ * unconditionally correct, and costs nothing.
+ */
+export function passwordEntropyBitsFromCount(count: bigint): number {
+  if (count <= 1n) return 0;
+  const bits = count.toString(2).length;
+  if (bits <= 53) return Math.log2(Number(count));
+  const shift = bits - 53;
+  return Math.log2(Number(count >> BigInt(shift))) + shift;
+}
+
 export function passphraseEntropyBits(wordCount: number, wordlistSize: number): number {
   if (!Number.isFinite(wordCount) || !Number.isFinite(wordlistSize)) return 0;
   if (wordCount <= 0 || wordlistSize <= 1) return 0;

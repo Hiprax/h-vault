@@ -728,7 +728,7 @@ const GATES = [
     // It runs AFTER `e2e`, and that order is worth keeping: both drive the same
     // dev server, and Playwright reuses one that is already listening, so the
     // second run does not pay for Vite's cold transform of every route chunk.
-    title: 'Accessibility (axe over thirty-three views, plus the keyboard invariants)',
+    title: 'Accessibility (axe over thirty-four views, plus the keyboard invariants)',
     ci: 'new — no hosted job ever checked whether this application can be used without a mouse',
     dependsOn: ['build'],
     // `docker` for the same reason `e2e` carries it, and it is not optional here

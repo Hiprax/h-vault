@@ -861,6 +861,67 @@ describe('the frame’s program', () => {
     document.body.innerHTML = '';
   });
 
+  it('answers on the port when the decoder chunk itself cannot be loaded', async () => {
+    // A chunk that fails to load is a real condition, and the frame must still
+    // answer: the host arms a deadline per request, so a silent path would hold
+    // it open for the whole budget and report a miss for the wrong reason.
+    document.body.innerHTML = '<div id="root"></div>';
+    const ready = vi.fn();
+    vi.spyOn(window, 'postMessage').mockImplementation(ready as never);
+    vi.resetModules();
+    vi.doMock('../src/sandbox/qrScan', () => {
+      throw new Error('chunk load failed');
+    });
+    try {
+      await import('../src/sandbox/sandbox');
+      const channel = new MessageChannel();
+      const event = new MessageEvent('message', { data: { kind: 'channel' } });
+      Object.defineProperty(event, 'ports', { configurable: true, get: () => [channel.port2] });
+      window.dispatchEvent(event);
+      channel.port1.start();
+
+      const reply = nextReply(channel.port1);
+      channel.port1.postMessage({ kind: 'qrScan', requestId: 1, image: {} });
+
+      await expect(reply).resolves.toEqual({
+        kind: 'failed',
+        reason: 'The scanner could not be loaded.',
+      });
+    } finally {
+      vi.doUnmock('../src/sandbox/qrScan');
+      vi.resetModules();
+    }
+  });
+
+  it('refuses a scan request it cannot parse, on the port', async () => {
+    // Everything is answered ON THE PORT, including a refusal: the host arms a
+    // deadline per request, and a silent path would hold it open until it fired.
+    const { host } = await bootFrame();
+    const reply = nextReply(host);
+    host.postMessage({ kind: 'qrScan', requestId: 'not a number', image: {} });
+
+    await expect(reply).resolves.toEqual({
+      kind: 'failed',
+      reason: 'The scan request was not understood.',
+    });
+  });
+
+  it('answers a scan request from the decoder, echoing the request id', async () => {
+    // The image here is neither an `ImageBitmap` nor a `Blob`, so the decoder
+    // refuses it; what this pins is the DISPATCH — that a third request kind
+    // reaches its own handler and its reply comes back on the port rather than
+    // being answered by the render path as "the preview request was not
+    // understood".
+    const { host } = await bootFrame();
+    const reply = nextReply(host);
+    host.postMessage({ kind: 'qrScan', requestId: 12, image: { not: 'an image' } });
+
+    await expect(reply).resolves.toEqual({
+      kind: 'failed',
+      reason: 'The scan request was not understood.',
+    });
+  });
+
   it('runs a transform and answers with the engine’s own reply', async () => {
     const { host } = await bootFrame();
     // Cleared explicitly: `documentElement` outlives a test, so an earlier

@@ -2312,6 +2312,67 @@ describe('passwordGenOptionsSchema', () => {
     // length defaults to 20; minSymbols defaults to 1 → 25 + 1 > 20
     expect(passwordGenOptionsSchema.safeParse({ minNumbers: 25 }).success).toBe(false);
   });
+
+  it('defaults the two newer class minimums to zero', () => {
+    // Nothing is stored for these, so zero is the value that imposes no
+    // constraint the user did not choose. `minNumbers`/`minSymbols` keep their
+    // default of 1 because Mongoose has been persisting exactly that on every
+    // account since the field existed.
+    const result = passwordGenOptionsSchema.parse({});
+    expect(result.minUppercase).toBe(0);
+    expect(result.minLowercase).toBe(0);
+  });
+
+  it('counts all four minimums against the length, not just two', () => {
+    expect(
+      passwordGenOptionsSchema.safeParse({
+        length: 8,
+        minUppercase: 3,
+        minLowercase: 3,
+        minNumbers: 2,
+        minSymbols: 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('counts a minimum only while its class is enabled', () => {
+    // 20 uppercase would overflow a 20-character password once the other
+    // minimums are added, but the class is off, so the generator never draws
+    // from it and the requirement is inert.
+    expect(
+      passwordGenOptionsSchema.safeParse({ length: 20, uppercase: false, minUppercase: 20 })
+        .success,
+    ).toBe(true);
+  });
+
+  it('accepts the shape its own defaults produce for a disabled class', () => {
+    // The regression this pins: per-field defaults are applied independently of
+    // the class booleans, so this is a value the schema itself emits and which
+    // is already persisted. A rule that required a positive minimum to have its
+    // class enabled would make the schema reject its own output.
+    const parsed = passwordGenOptionsSchema.parse({ numbers: false });
+    expect(parsed.minNumbers).toBe(1);
+    expect(passwordGenOptionsSchema.safeParse(parsed).success).toBe(true);
+  });
+
+  it('rejects a configuration with no character class at all', () => {
+    const result = passwordGenOptionsSchema.safeParse({
+      uppercase: false,
+      lowercase: false,
+      numbers: false,
+      symbols: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('carries no upper bound on a class minimum, so no stored value can become invalid', () => {
+    // Deliberate: a maximum here narrows an accepted request range, which is a
+    // breaking OpenAPI change. The bound is applied by the generator and the
+    // settings read path, which clamp instead of rejecting.
+    expect(
+      passwordGenOptionsSchema.safeParse({ length: 128, minNumbers: 60, minSymbols: 60 }).success,
+    ).toBe(true);
+  });
 });
 
 describe('updateSettingsSchema', () => {

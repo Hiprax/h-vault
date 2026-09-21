@@ -5,6 +5,7 @@ import {
   MAX_TRANSFORM_EXCERPT_LENGTH,
   MAX_TRANSFORM_MESSAGE_LENGTH,
 } from '@hvault/shared';
+import { createHiddenSandboxFrame } from '../../lib/sandboxFrame';
 import { connectSandbox } from '../../lib/sandboxHandshake';
 import { diffText, type TextDiff } from '../../lib/textDiff';
 
@@ -237,27 +238,6 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 }
 
 /**
- * Build the hidden frame one transform runs in.
- *
- * Exactly the attributes the viewer's frame carries, because they are the
- * containment rather than presentation: `allow-scripts` WITHOUT
- * `allow-same-origin` is what gives the document an opaque origin, and the two
- * must never appear together. It is hidden with `display: none` rather than by
- * being left unattached — an unattached iframe never loads a document at all.
- */
-function createTransformFrame(): HTMLIFrameElement {
-  const frame = document.createElement('iframe');
-  frame.src = '/sandbox.html';
-  frame.setAttribute('sandbox', 'allow-scripts');
-  frame.referrerPolicy = 'no-referrer';
-  frame.setAttribute('allow', '');
-  frame.setAttribute('aria-hidden', 'true');
-  frame.title = 'Document formatter';
-  frame.style.display = 'none';
-  return frame;
-}
-
-/**
  * Ask the isolated document to format and/or repair one file.
  *
  * Resolves, never rejects: every failure — a frame that never loaded, a frame
@@ -325,7 +305,7 @@ function requestTransform(
   options: { readonly ext: string; readonly format: boolean; readonly repair: boolean },
 ): Promise<TransformReply> {
   return new Promise<TransformReply>((resolve) => {
-    const frame = createTransformFrame();
+    const frame = createHiddenSandboxFrame('Document formatter');
     let replyTimer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
 

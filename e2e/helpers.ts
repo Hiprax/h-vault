@@ -542,6 +542,46 @@ export async function gotoFileEncryptionTool(page: Page): Promise<void> {
 }
 
 /**
+ * A Google Authenticator export link holding two accounts.
+ *
+ * RECORDED rather than generated at run time, and deliberately so: the point of
+ * driving the tool through this value is that the whole pipeline — base64,
+ * protobuf, base32, the URI builder — is exercised against bytes this repository
+ * did not just produce from the same code that reads them.
+ *
+ * It was emitted once by `packages/client/tests/support/migrationEncoder.ts`,
+ * which builds the wire format independently of the reader, from two accounts
+ * whose keys are the ten bytes `Hello!` + `DEADBEEF` rotated. Neither key is
+ * real. To regenerate it, call `encodeMigrationUri` with those two entries.
+ */
+export const SAMPLE_AUTHENTICATOR_EXPORT_URI =
+  'otpauth-migration://offline?data=CjAKCkhlbGxvId6tvu8SFkFjbWU6YWxpY2VAZXhhbXBsZS5jb20aBEFjbWUgASgBMAIKMgoKId6tvu9IZWxsbxIWR2xvYmV4OmJvYkBleGFtcGxlLmNvbRoGR2xvYmV4IAIoAjACEAEYASAAKNIJ';
+
+/**
+ * Opens the authenticator-import tool and reads the sample export into it.
+ *
+ * The PASTE path, never the camera: a browser under test has no camera worth
+ * pointing at anything, and this exercises every step after the decoder while
+ * staying completely deterministic.
+ */
+export async function gotoTotpImportTool(page: Page): Promise<void> {
+  await page.getByRole('link', { name: /import from authenticator/i }).click();
+  await expect(page).toHaveURL(/\/tools\/totp-import/);
+  // A lazy chunk, like the file-encryption panel: this is the request that makes
+  // the dev server transform it on demand.
+  await expect(page.getByText(/Transfer accounts/i)).toBeVisible({
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
+}
+
+export async function readSampleExport(page: Page): Promise<void> {
+  await page.getByText(/Paste an export link instead/i).click();
+  await page.locator('#totp-paste').fill(SAMPLE_AUTHENTICATOR_EXPORT_URI);
+  await page.getByRole('button', { name: /read link/i }).click();
+  await expect(page.getByText(/Nothing here is saved yet/i)).toBeVisible();
+}
+
+/**
  * Unlocks the vault via the unlock screen.
  *
  * ## Why this activates the control from the keyboard rather than with `click()`

@@ -1,5 +1,10 @@
 import type { SandboxRenderRequest } from '@hvault/shared';
-import { frameMessage, parseRenderRequest, parseTransformRequest } from './protocol';
+import {
+  frameMessage,
+  parseQrScanRequest,
+  parseRenderRequest,
+  parseTransformRequest,
+} from './protocol';
 import { previewRefusal } from './sniff';
 import './sandbox.css';
 
@@ -72,18 +77,55 @@ import './sandbox.css';
  */
 
 /**
- * Which of the document's two jobs a port message is asking for.
+ * Which of the document's three jobs a port message is asking for.
  *
  * A one-field peek, deliberately: the full validation belongs to the parser for
- * whichever kind this names, and a message whose `kind` is neither takes the
- * render path and is refused there. That keeps ONE place where an unparseable
- * message is answered, rather than two that could drift.
+ * whichever kind this names, and a message whose `kind` is none of them takes
+ * the render path and is refused there. That keeps ONE place where an
+ * unparseable message is answered, rather than three that could drift.
  */
-function isTransformKind(data: unknown): boolean {
-  return (
-    typeof data === 'object' && data !== null && (data as { kind?: unknown }).kind === 'transform'
-  );
+function requestKind(data: unknown): 'transform' | 'qrScan' | 'render' {
+  if (typeof data !== 'object' || data === null) return 'render';
+  const kind = (data as { kind?: unknown }).kind;
+  if (kind === 'transform') return 'transform';
+  if (kind === 'qrScan') return 'qrScan';
+  return 'render';
 }
+
+/**
+ * Find a QR code in one image and answer on the port.
+ *
+ * The decoder is imported ON DEMAND, so a document opened for a preview never
+ * downloads it, and it is the import boundary that gives the decoder its own
+ * chunk. Everything is answered on the port, including failure, because the
+ * host arms a deadline per request and a silent path would hold it open.
+ */
+async function qrScanRequest(port: MessagePort, data: unknown): Promise<void> {
+  const request = parseQrScanRequest(data);
+  if (!request) {
+    port.postMessage(frameMessage.failed('The scan request was not understood.'));
+    return;
+  }
+  try {
+    const { scanImage } = await import('./qrScan');
+    port.postMessage(
+      await scanImage(request.requestId, request.image, QR_EFFORT, QR_TIME_LIMIT_MS),
+    );
+  } catch {
+    port.postMessage(frameMessage.failed('The scanner could not be loaded.'));
+  }
+}
+
+/**
+ * How hard the decoder tries, per image.
+ *
+ * Tuned for a live camera rather than a photograph: a frame that does not read
+ * quickly is better dropped for the next one, since the next one is about 120 ms
+ * away and is very likely better aimed. The host escalates by sending the same
+ * frame again only when it has been missing for a while.
+ */
+const QR_EFFORT = 2;
+const QR_TIME_LIMIT_MS = 120;
 
 /**
  * The port the host transferred, or `null` before the handshake completes.
@@ -374,8 +416,12 @@ export function startSandbox(win: Window): void {
       // chunk, and both resolve rather than reject on every path — every failure
       // inside them is answered ON THE PORT, which is the contract the host's
       // deadline depends on.
-      const kind = isTransformKind(message.data);
-      void (kind ? transformRequest(port, message.data) : renderRequest(doc, port, message.data));
+      const kind = requestKind(message.data);
+      void (kind === 'transform'
+        ? transformRequest(port, message.data)
+        : kind === 'qrScan'
+          ? qrScanRequest(port, message.data)
+          : renderRequest(doc, port, message.data));
     });
     port.start();
   };

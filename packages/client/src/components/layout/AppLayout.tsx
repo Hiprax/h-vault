@@ -4,6 +4,7 @@ import {
   Shield,
   Key,
   FileLock2,
+  ScanLine,
   Files,
   Settings,
   Lock,
@@ -77,6 +78,7 @@ const VAULT_NAV_ITEM: NavItem = {
 const REMAINING_NAV_ITEMS: NavItem[] = [
   { label: 'Password Generator', to: '/generator', icon: Key },
   { label: 'File Encryption', to: '/tools/file-encryption', icon: FileLock2 },
+  { label: 'Import from Authenticator', to: '/tools/totp-import', icon: ScanLine },
   { label: 'Vault Health', to: '/vault/health', icon: Activity },
   { label: 'Settings', to: '/settings', icon: Settings },
 ];

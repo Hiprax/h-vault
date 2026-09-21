@@ -8,6 +8,7 @@ import {
   buildCharset,
   getEffectiveCharsetSize,
   passwordEntropyBits,
+  passwordEntropyBitsFromCount,
   passphraseEntropyBits,
   classifyStrength,
   formatCrackTime,
@@ -295,5 +296,48 @@ describe('end-to-end sanity — realistic generator settings', () => {
   it('5-word passphrase = 55 bits → Weak; 12-word = 132 bits → Very Strong', () => {
     expect(classifyStrength(passphraseEntropyBits(5, 2048)).label).toBe('Weak');
     expect(classifyStrength(passphraseEntropyBits(12, 2048)).label).toBe('Very Strong');
+  });
+});
+
+describe('passwordEntropyBitsFromCount', () => {
+  it('agrees exactly with the pool-based figure for an unconstrained keyspace', () => {
+    // The compatibility guarantee: with no class minimum the constrained count
+    // IS pool^length, so the constrained and unconstrained readouts coincide.
+    for (const [pool, length] of [
+      [88, 20],
+      [83, 8],
+      [26, 128],
+    ] as const) {
+      const exact = passwordEntropyBitsFromCount(BigInt(pool) ** BigInt(length));
+      expect(exact).toBeCloseTo(passwordEntropyBits(length, pool), 9);
+    }
+  });
+
+  it('is exact on powers of two', () => {
+    expect(passwordEntropyBitsFromCount(2n ** 800n)).toBe(800);
+    expect(passwordEntropyBitsFromCount(1024n)).toBe(10);
+  });
+
+  it('stays finite far past the point where Number() saturates', () => {
+    // `Math.log2(Number(count))` returns Infinity somewhere past 1024 bits. The
+    // shift-then-add form has no such cliff, and this is the test that would
+    // catch a "simplification" back to the naive spelling.
+    const bits = passwordEntropyBitsFromCount(2n ** 4000n);
+    expect(Number.isFinite(bits)).toBe(true);
+    expect(bits).toBe(4000);
+  });
+
+  it('reports no entropy for a keyspace with nothing to choose', () => {
+    expect(passwordEntropyBitsFromCount(0n)).toBe(0);
+    expect(passwordEntropyBitsFromCount(1n)).toBe(0);
+  });
+
+  it('is monotone in the size of the keyspace', () => {
+    let previous = -1;
+    for (let n = 2n; n < 200n; n += 7n) {
+      const bits = passwordEntropyBitsFromCount(n);
+      expect(bits).toBeGreaterThan(previous);
+      previous = bits;
+    }
   });
 });

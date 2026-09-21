@@ -70,7 +70,8 @@ const LEGS = [
   {
     package: 'packages/client',
     report: 'junit-fuzz-client.xml',
-    subject: 'the seven import parsers and the format-and-repair engine',
+    subject:
+      'the seven import parsers, the format-and-repair engine and the authenticator-export reader',
   },
   {
     package: 'packages/server',

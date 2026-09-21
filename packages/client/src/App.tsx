@@ -24,6 +24,7 @@ const ExportDataPage = lazy(() => import('./pages/ExportDataPage'));
 const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
 const GeneratorPage = lazy(() => import('./pages/GeneratorPage'));
 const FileEncryptionPage = lazy(() => import('./pages/FileEncryptionPage'));
+const TotpImportPage = lazy(() => import('./pages/TotpImportPage'));
 const DocumentsPage = lazy(() => import('./pages/DocumentsPage'));
 const DocumentPage = lazy(() => import('./pages/DocumentPage'));
 const VaultHealthPage = lazy(() => import('./pages/VaultHealthPage'));
@@ -110,6 +111,7 @@ export function App() {
                   <Route path="/vault" element={<VaultPage />} />
                   <Route path="/generator" element={<GeneratorPage />} />
                   <Route path="/tools/file-encryption" element={<FileEncryptionPage />} />
+                  <Route path="/tools/totp-import" element={<TotpImportPage />} />
                   <Route path="/documents" element={<DocumentsPage />} />
                   <Route path="/documents/:id" element={<DocumentPage />} />
                   <Route path="/vault/health" element={<VaultHealthPage />} />

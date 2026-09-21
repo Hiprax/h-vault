@@ -132,6 +132,18 @@ vi.mock('../src/hooks/useUserSettings', () => ({
     autoLockTimeout: 15,
     clipboardClearTimeout: 30,
     theme: 'system',
+    defaultPasswordOptions: {
+      length: 20,
+      uppercase: true,
+      lowercase: true,
+      numbers: true,
+      symbols: true,
+      excludeAmbiguous: false,
+      minUppercase: 0,
+      minLowercase: 0,
+      minNumbers: 1,
+      minSymbols: 1,
+    },
   }),
   clearSettingsCache: vi.fn(),
 }));

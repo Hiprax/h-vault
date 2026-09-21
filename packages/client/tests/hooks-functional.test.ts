@@ -140,6 +140,7 @@ import {
 import {
   AUTO_LOCK_TIMEOUT_MINUTES,
   CLIPBOARD_CLEAR_SECONDS,
+  DEFAULT_PASSWORD_LENGTH,
   LOCK_ON_HIDDEN_DEFAULT,
   LOCK_ON_HIDDEN_DELAY_MINUTES,
 } from '@hvault/shared';
@@ -1154,12 +1155,34 @@ describe('useUserSettings', () => {
   // sources them from `@hvault/shared` precisely so the client fallback and the
   // server model default cannot drift, and asserting against a hand-copied number
   // would defeat that.
+  /**
+   * The generator policy every settings response now carries.
+   *
+   * `minNumbers`/`minSymbols` are 1 rather than 0 because the server model has
+   * materialised exactly that on every account since the subdocument existed,
+   * so 1 is what "unset" has always meant here; the two newer minimums are new
+   * fields with nothing stored, so they are 0.
+   */
+  const DEFAULT_GEN_OPTIONS = {
+    length: DEFAULT_PASSWORD_LENGTH,
+    uppercase: true,
+    lowercase: true,
+    numbers: true,
+    symbols: true,
+    excludeAmbiguous: false,
+    minUppercase: 0,
+    minLowercase: 0,
+    minNumbers: 1,
+    minSymbols: 1,
+  };
+
   const DEFAULT_SETTINGS = {
     autoLockTimeout: AUTO_LOCK_TIMEOUT_MINUTES,
     lockOnHidden: LOCK_ON_HIDDEN_DEFAULT,
     lockOnHiddenDelay: LOCK_ON_HIDDEN_DELAY_MINUTES,
     clipboardClearTimeout: CLIPBOARD_CLEAR_SECONDS,
     theme: 'system',
+    defaultPasswordOptions: DEFAULT_GEN_OPTIONS,
   };
 
   /**
@@ -1175,6 +1198,7 @@ describe('useUserSettings', () => {
     return {
       lockOnHidden: LOCK_ON_HIDDEN_DEFAULT,
       lockOnHiddenDelay: LOCK_ON_HIDDEN_DELAY_MINUTES,
+      defaultPasswordOptions: DEFAULT_GEN_OPTIONS,
       ...settings,
     };
   }

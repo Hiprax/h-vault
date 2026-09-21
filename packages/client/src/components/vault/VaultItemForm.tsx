@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   useForm,
   useFieldArray,
@@ -1352,6 +1352,18 @@ interface VaultItemFormProps {
   onCancel: () => void;
 }
 
+/**
+ * The QR scanner, loaded only when somebody presses the button.
+ *
+ * `lazy` rather than a direct import, and not for elegance: this component's
+ * chunk has a measured size budget, and the scanner pulls in the sandbox driver,
+ * the camera module and the migration reader behind it. A static import would
+ * put all of that into the bundle every person editing any item downloads.
+ */
+const TotpScanDialog = lazy(() =>
+  import('../tools/TotpScanDialog').then((m) => ({ default: m.TotpScanDialog })),
+);
+
 export function VaultItemForm({
   item,
   defaultType,
@@ -1377,6 +1389,7 @@ export function VaultItemForm({
   const [favorite, setFavorite] = useState(item?.favorite ?? false);
   const [saving, setSaving] = useState(false);
   const [showPasswordGen, setShowPasswordGen] = useState(false);
+  const [scanningTotp, setScanningTotp] = useState(false);
   const [showPasswordField, setShowPasswordField] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [showBillingAddress, setShowBillingAddress] = useState(() => {
@@ -1941,14 +1954,44 @@ export function VaultItemForm({
             </div>
           </div>
 
-          <BoundedTextField
-            name="totp"
-            label="TOTP Secret"
-            placeholder="TOTP secret key (optional)"
-            maxLength={MAX_LOGIN_TOTP_LENGTH}
-            register={register}
-            errors={errors}
-          />
+          <div className="space-y-2">
+            <BoundedTextField
+              name="totp"
+              label="TOTP Secret"
+              placeholder="TOTP secret key (optional)"
+              maxLength={MAX_LOGIN_TOTP_LENGTH}
+              register={register}
+              errors={errors}
+            />
+            <button
+              type="button"
+              onClick={() => setScanningTotp(true)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[hsl(var(--input))] px-2.5 py-1.5 text-xs text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
+            >
+              Scan QR code
+            </button>
+            {scanningTotp && (
+              <div className="rounded-lg border border-[hsl(var(--border))] p-3">
+                <Suspense
+                  fallback={
+                    <p className="text-sm text-[hsl(var(--muted-foreground))]">Loading scanner…</p>
+                  }
+                >
+                  <TotpScanDialog
+                    onCancel={() => setScanningTotp(false)}
+                    onScanned={(value) => {
+                      // The whole `otpauth://` URI, not just its secret: it
+                      // carries the algorithm, digit count and period, and a
+                      // bare secret would silently generate wrong codes for any
+                      // service that does not use the defaults.
+                      setValue('totp', value, { shouldDirty: true });
+                      setScanningTotp(false);
+                    }}
+                  />
+                </Suspense>
+              </div>
+            )}
+          </div>
 
           {/* Backup codes: the 2FA recovery codes for the account this login
               unlocks. Sits with TOTP because they are the same concept, and in the

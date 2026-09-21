@@ -11,6 +11,7 @@ import { RefreshToken } from '../src/models/RefreshToken.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { JobLock } from '../src/models/JobLock.js';
 import { acquireJobLock } from '../src/utils/jobLock.js';
+import { DEFAULT_PASSWORD_LENGTH, MAX_PASSWORD_CLASS_MINIMUM } from '@hvault/shared';
 import { cryptoManager } from '../src/utils/cryptoManager.js';
 import { twoFactorEncryptionKey } from '../src/config/index.js';
 import { getProgressiveDelay } from '../src/controllers/authController.js';
@@ -516,6 +517,52 @@ describe('userController — PUT /user/settings validation', () => {
     expect(after!.settings.defaultPasswordOptions.length).toBe(10);
     expect(after!.settings.defaultPasswordOptions.minNumbers).toBe(5);
   });
+
+  it('backfills the generator settings a pre-existing account never stored', async () => {
+    // `getProfile` reads `.lean()`, which bypasses Mongoose hydration entirely,
+    // so no subdocument default is applied to a document that predates the
+    // field. `IUserSettings` declares both required, so a client reading
+    // `settings.defaultPasswordOptions.length` would throw at render.
+    await User.updateOne(
+      { _id: user.id },
+      { $unset: { 'settings.defaultPasswordOptions': '', 'settings.defaultPasswordLength': '' } },
+    );
+    const stripped = await User.findById(user.id).lean();
+    expect(stripped!.settings.defaultPasswordOptions).toBeUndefined();
+
+    const res = await agent
+      .get(`${API}/user/profile`)
+      .set('Authorization', authHeader(user.accessToken));
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.settings.defaultPasswordLength).toBe(DEFAULT_PASSWORD_LENGTH);
+    expect(res.body.data.settings.defaultPasswordOptions).toMatchObject({
+      length: DEFAULT_PASSWORD_LENGTH,
+      minNumbers: 1,
+      minSymbols: 1,
+      minUppercase: 0,
+      minLowercase: 0,
+    });
+  });
+
+  it('clamps a stored class minimum that no bound has ever rejected', async () => {
+    // Nothing narrows on the wire, by design, so a value like this is storable
+    // and must be repaired on READ rather than rejected on write. Left alone it
+    // would hand the generator a counting table of 61^4 states.
+    await User.updateOne(
+      { _id: user.id },
+      { $set: { 'settings.defaultPasswordOptions.minNumbers': 60 } },
+    );
+
+    const res = await agent
+      .get(`${API}/user/profile`)
+      .set('Authorization', authHeader(user.accessToken));
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.settings.defaultPasswordOptions.minNumbers).toBe(
+      MAX_PASSWORD_CLASS_MINIMUM,
+    );
+  });
 });
 
 describe('User model — defaultPasswordOptions cross-field validator (defense-in-depth)', () => {
@@ -532,7 +579,7 @@ describe('User model — defaultPasswordOptions cross-field validator (defense-i
     });
 
     await expect(user.save()).rejects.toThrow(
-      /Password length must be at least the sum of minNumbers and minSymbols/,
+      /Password length must be at least the sum of the required character minimums/,
     );
     expect(await User.countDocuments({ email: user.email })).toBe(0);
   });
@@ -560,7 +607,9 @@ describe('User model — defaultPasswordOptions cross-field validator (defense-i
         },
         { runValidators: true, returnDocument: 'after' },
       ),
-    ).rejects.toThrow(/Password length must be at least the sum of minNumbers and minSymbols/);
+    ).rejects.toThrow(
+      /Password length must be at least the sum of the required character minimums/,
+    );
 
     const after = await User.findById(seeded.id).lean();
     expect(after!.settings.defaultPasswordOptions).toEqual(before!.settings.defaultPasswordOptions);

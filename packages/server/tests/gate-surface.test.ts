@@ -1702,6 +1702,7 @@ describe('machine-readable reports', () => {
       'export-data',
       'vault-health',
       'file-encryption',
+      'totp-import',
       'documents-list',
       'document-upload-review',
       'document-detail',

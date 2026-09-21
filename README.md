@@ -135,6 +135,18 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   **account-agnostic**: it never touches your vault key or master password, so a file encrypted
   while signed in as one user decrypts with the same password on any machine, as anyone, or as
   nobody. Lose the password and the file is gone — the UI says so, plainly.
+- **Import from Authenticator.** Google Authenticator gives you one way out: a set of QR codes on
+  the phone, and no export file at all. Hold the phone up to your webcam and this reads them, one
+  part at a time for a batched export, and shows you every account it found with a live code beside
+  it. Nothing is attached to a login for you. Matching an imported code to a vault item by name
+  would be guessing, and a code on the wrong account is worse than one not imported, so you place
+  each one yourself: copy the key, create a login from it, or add it to a login you pick from a
+  list. Replacing an existing code keeps the old one in a hidden field by default, because a TOTP
+  key cannot be recovered once it is overwritten. The decoded set can be saved into the encrypted
+  document store in one action, as plain `otpauth://` links so the file is a real escape hatch.
+  Pasting an export link and reading a photo of the code both work, for a machine with no camera
+  or a camera too coarse for a dense code. The QR decoder itself runs inside the isolated
+  document, never in the page that holds your unlocked vault key.
 - **Soft delete.** A 30-day trash with restore, purged by a nightly job.
 
 ### Documents
@@ -1427,7 +1439,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                                   | _new_                      |
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                            | _new_                      |
 | `e2e`              | T1   | Playwright against an auto-started stack (dev server, in-memory MongoDB, the pinned storage engine in a container): Chromium over every spec, and a second Firefox project over the two whose answers depend on the engine — clipboard hygiene and auto-lock | `e2e` job                  |
-| `a11y`             | T1   | axe-core over thirty-three primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                          | _new_                      |
+| `a11y`             | T1   | axe-core over thirty-four primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                           | _new_                      |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                                       | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                                             | _new_                      |
 | `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline                                                                                                     | _new_                      |

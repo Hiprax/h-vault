@@ -378,7 +378,7 @@ describe('VaultItemDetail / TotpDisplay', () => {
     );
   });
 
-  it('shows an error panel (and no copy button) for a secret whose length is not a base32 multiple of 8', async () => {
+  it('shows an error panel (and no copy button) for a secret whose length decodes to no whole number of bytes', async () => {
     renderDetail(totpItem('JBSWY3DP2'));
 
     expect(await screen.findByText('Invalid TOTP secret (not valid base32)')).toBeInTheDocument();
@@ -391,10 +391,112 @@ describe('VaultItemDetail / TotpDisplay', () => {
     expect(await screen.findByText('Invalid TOTP secret (not valid base32)')).toBeInTheDocument();
   });
 
-  it('rejects a whitespace-only secret (normalises to the empty string)', async () => {
+  it('reports a whitespace-only secret as absent rather than as malformed base32', async () => {
+    // The message changed deliberately when the parser started distinguishing
+    // "there is nothing here" from "what is here is not base32". A value that
+    // normalises to the empty string is the former, and saying so is strictly
+    // more accurate than blaming the encoding. The test is not weaker for it:
+    // it still pins an error panel AND the absence of a copy button.
     renderDetail(totpItem('    '));
 
+    expect(await screen.findByText('No TOTP secret is set')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Negatives that only became reachable once URIs were accepted
+  // -------------------------------------------------------------------------
+
+  it('refuses a counter-based otpauth://hotp URI with its own message, rather than generating', async () => {
+    // Before URIs were understood at all, the base32 gate rejected this by
+    // accident. Generating it as though it were time-based would produce a
+    // confidently wrong code forever, so the refusal is deliberate and named.
+    renderDetail(totpItem('otpauth://hotp/Acme:alice?secret=JBSWY3DPEHPK3PXP&counter=7'));
+
+    expect(
+      await screen.findByText('Counter-based (HOTP) codes are not generated here'),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+  });
+
+  it('refuses an otpauth:// URI that carries no secret', async () => {
+    renderDetail(totpItem('otpauth://totp/Acme:alice?issuer=Acme'));
+
+    expect(await screen.findByText('This TOTP link carries no secret')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+  });
+
+  it('refuses an otpauth:// URI whose secret is not base32', async () => {
+    renderDetail(totpItem('otpauth://totp/Acme:alice?secret=not-base32-at-all!'));
+
     expect(await screen.findByText('Invalid TOTP secret (not valid base32)')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+  });
+
+  it('refuses an algorithm it cannot generate instead of falling back to SHA1', async () => {
+    // Falling back would be the dangerous failure: a code that looks right and
+    // never matches the service.
+    renderDetail(totpItem('otpauth://totp/Acme:alice?secret=JBSWY3DPEHPK3PXP&algorithm=MD5'));
+
+    expect(
+      await screen.findByText('This TOTP uses a hash algorithm this app cannot generate'),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Regressions: a 16-byte secret, and a full otpauth:// URI
+  // -------------------------------------------------------------------------
+  //
+  // Both of these are shapes the application itself produces. `toOtpauthUri`
+  // (services/export/portableItem.ts) emits a URI on every export, and all four
+  // third-party import parsers store one verbatim, so an export/import round
+  // trip lands here. A 26-character secret is the standard 128-bit secret most
+  // services issue.
+
+  it('renders a code for a 26-character (16-byte) base32 secret', async () => {
+    const secret16 = 'JBSWY3DPEHPK3PXPJBSWY3DPEB';
+    expect(secret16).toHaveLength(26);
+
+    renderDetail(totpItem(secret16));
+
+    const codes = expectedCodes(secret16);
+    await waitFor(() => {
+      const rendered = screen.getByLabelText('Copy TOTP code').textContent ?? '';
+      const digits = rendered.replace(/\s/g, '');
+      expect(digits).not.toBe('------');
+      expect(codes).toContain(digits);
+    });
+  });
+
+  it('renders an 8-digit SHA256 code for a full otpauth:// URI, honouring its parameters', async () => {
+    const uri =
+      'otpauth://totp/GitHub:alice%40example.com' +
+      '?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&algorithm=SHA256&digits=8&period=60';
+
+    renderDetail(totpItem(uri));
+
+    // Built independently, so a component that ignored the URI's parameters and
+    // fell back to SHA1/6/30 would render a different code and fail here.
+    const totp = new TOTP({
+      secret: 'JBSWY3DPEHPK3PXP',
+      algorithm: 'SHA256',
+      digits: 8,
+      period: 60,
+    });
+    const now = Date.now();
+    const codes = [
+      totp.generate({ timestamp: now }),
+      totp.generate({ timestamp: now + 60_000 }),
+      totp.generate({ timestamp: now - 60_000 }),
+    ];
+
+    await waitFor(() => {
+      const rendered = screen.getByLabelText('Copy TOTP code').textContent ?? '';
+      const digits = rendered.replace(/\s/g, '');
+      expect(digits).toHaveLength(8);
+      expect(codes).toContain(digits);
+    });
   });
 });
 

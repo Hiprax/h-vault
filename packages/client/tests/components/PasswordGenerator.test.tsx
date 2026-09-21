@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { PasswordGenerator } from '../../src/components/vault/PasswordGenerator';
+import { MAX_PASSWORD_CLASS_MINIMUM } from '@hvault/shared';
 import { buildCharset, AMBIGUOUS } from '../../src/utils/passwordEntropy';
 import { __resetClipboardGuardForTests } from '../../src/services/clipboard/clipboardService';
 
@@ -8,12 +9,17 @@ import { __resetClipboardGuardForTests } from '../../src/services/clipboard/clip
 // Mocks
 // ---------------------------------------------------------------------------
 
+const mockToast = vi.fn();
 vi.mock('../../src/components/ui/Toast', () => ({
   useToast: () => ({
-    toast: vi.fn(),
+    toast: mockToast,
     dismiss: vi.fn(),
     update: vi.fn(),
   }),
+}));
+
+vi.mock('../../src/services/api/userApi', () => ({
+  updateSettingsApi: vi.fn().mockResolvedValue({ data: { success: true, data: {} } }),
 }));
 
 vi.mock('../../src/hooks/useUserSettings', () => ({
@@ -21,7 +27,24 @@ vi.mock('../../src/hooks/useUserSettings', () => ({
     autoLockTimeout: 15,
     clipboardClearTimeout: 30,
     theme: 'system',
+    // The generator seeds its controls from the account's saved policy, so the
+    // mock has to carry one. These are the shipped defaults: a guaranteed digit
+    // and symbol, which is the behaviour the stored settings have always
+    // described and which the generator now actually honours.
+    defaultPasswordOptions: {
+      length: 20,
+      uppercase: true,
+      lowercase: true,
+      numbers: true,
+      symbols: true,
+      excludeAmbiguous: false,
+      minUppercase: 0,
+      minLowercase: 0,
+      minNumbers: 1,
+      minSymbols: 1,
+    },
   }),
+  clearSettingsCache: vi.fn(),
 }));
 
 // NOTE: the generator no longer uses zxcvbn — generated-password strength is measured
@@ -731,10 +754,15 @@ describe('PasswordGenerator', () => {
         vi.advanceTimersByTime(100);
       });
 
-      // 8 * log2(88) ≈ 51.68 → floored to 51 bits (display never rounds up), in the
-      // 40–63 Weak band. Previously zxcvbn under-/over-stated this; the exact figure is honest.
-      expect(screen.getByText('51 bits')).toBeInTheDocument();
+      // 50 rather than 51, and the change is the point of this feature. The
+      // unconstrained figure is 8 * log2(88) = 51.68, but the shipped policy
+      // guarantees one digit and one symbol, and those requirements shrink the
+      // keyspace to 50.87 bits. Quoting 51 here would be the over-statement this
+      // meter exists not to make. The band is unchanged: both sit in 40-63.
+      expect(screen.getByText('50 bits')).toBeInTheDocument();
       expect(screen.getByText('Weak')).toBeInTheDocument();
+      // And the cost is stated out loud rather than left as a silent shortfall.
+      expect(screen.getByText(/Required minimums cost 0\.80 bits/)).toBeInTheDocument();
     });
 
     it('renders exactly 5 strength bars', async () => {
@@ -915,15 +943,22 @@ describe('PasswordGenerator', () => {
   // M4: Rejection sampling eliminates modular bias
   // -------------------------------------------------------------------------
   describe('rejection sampling in getSecureRandom', () => {
-    it('rejects modular-bias values instead of taking them modulo the charset', async () => {
-      // getSecureRandom rejects any 32-bit value >= floor(2^32/max)*max so that
-      // no residue class is over-represented. Feed the generator a first RNG
-      // draw of 0xFFFFFFFF — which lies in the rejection region for any non-
-      // power-of-two charset size (the whole 88-char default pool) — followed by
-      // zeros. Correct code discards 0xFFFFFFFF, draws again (0), and maps EVERY
-      // character to charset[0]; the biased `arr[0] % max` variant would instead
-      // map the first character to charset[0xFFFFFFFF % max] (a different index),
-      // making the first character differ from the rest and using one fewer draw.
+    it('spends exactly one CSPRNG draw per password, and unranks it', async () => {
+      // This replaces a test of `getSecureRandom`, a per-character rejection
+      // sampler that no longer exists. The specification changed: the generator
+      // now draws ONE uniform integer below the number of VALID passwords and
+      // unranks it, so "how many draws per character" is no longer a proxy for
+      // anything. Bias resistance moved to evidence that is strictly stronger
+      // than counting draws: `passwordGeneratorExhaustive.test.ts` proves the
+      // unranking is a bijection by enumerating every valid password, and
+      // `secureRandom.test.ts` proves the masked rejection loop discards an
+      // out-of-range draw rather than folding it with a modulo.
+      //
+      // What is worth pinning HERE is the seam: that this component defers to
+      // that generator instead of drawing characters itself. An all-zero draw
+      // unranks to index 0, which is the first password the ordering defines,
+      // and the trailing '0!' is the two required characters being placed by the
+      // counting rather than patched in afterwards.
       vi.useRealTimers();
       vi.useFakeTimers();
 
@@ -931,10 +966,8 @@ describe('PasswordGenerator', () => {
       const spy = vi
         .spyOn(globalThis.crypto, 'getRandomValues')
         .mockImplementation(<T extends ArrayBufferView | null>(arr: T): T => {
-          if (arr instanceof Uint32Array) {
-            arr[0] = calls === 0 ? 0xffffffff : 0;
-          }
           calls += 1;
+          if (arr instanceof Uint8Array) arr.fill(0);
           return arr;
         });
 
@@ -950,18 +983,167 @@ describe('PasswordGenerator', () => {
           .getByRole('button', { name: 'Copy password' })
           .closest('div')!
           .querySelector('code')!;
-        const password = codeEl.textContent!;
 
-        expect(password.length).toBe(20);
-        // Rejection-sampled result: 0xFFFFFFFF discarded, all draws resolve to
-        // index 0, so every character is charset[0] — a single distinct char.
-        // The biased variant would leave the first character different.
-        expect(new Set(password).size).toBe(1);
-        // One extra draw happened for the rejected value: 21 draws for 20 chars.
-        expect(calls).toBeGreaterThan(password.length);
+        expect(codeEl.textContent).toBe('AAAAAAAAAAAAAAAAAA0!');
+        expect(calls).toBe(1);
       } finally {
         spy.mockRestore();
       }
     });
+  });
+});
+
+// ===========================================================================
+// Per-class minimums, the control surface this feature exists for
+// ===========================================================================
+
+describe('PasswordGenerator — class minimums', () => {
+  async function setMinimum(label: string, times: number) {
+    const button = screen.getByLabelText(`Increase minimum ${label}`);
+    for (let i = 0; i < times; i += 1) {
+      await act(async () => {
+        fireEvent.click(button);
+      });
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+    });
+  }
+
+  function currentPassword(): string {
+    return (
+      screen.getByRole('button', { name: 'Copy password' }).closest('div')!.querySelector('code')!
+        .textContent ?? ''
+    );
+  }
+
+  it('shows a stepper for each enabled class and hides it when the class is switched off', async () => {
+    await renderAndWait();
+
+    expect(screen.getByLabelText('Minimum numbers')).toBeInTheDocument();
+    expect(screen.getByLabelText('Minimum symbols')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Numbers (0-9)'));
+    });
+
+    // A stepper for a class the generator drops would be a control with no
+    // effect on the password.
+    expect(screen.queryByLabelText('Minimum numbers')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Minimum symbols')).toBeInTheDocument();
+  });
+
+  it('actually guarantees the requested number of digits', async () => {
+    // The defect this whole change exists for: the stored minimum was validated
+    // twice, persisted, and then ignored by the generator.
+    await renderAndWait();
+    await setMinimum('numbers', 3);
+
+    const digits = [...currentPassword()].filter((char) => '0123456789'.includes(char));
+    expect(digits.length).toBeGreaterThanOrEqual(4); // the default 1, plus 3 more
+  });
+
+  it('lowers the reported entropy when a minimum is raised, and never raises it', async () => {
+    await renderAndWait();
+
+    const bitsNow = () => Number(/(\d+) bits/.exec(document.body.textContent ?? '')?.[1] ?? '0');
+    const before = bitsNow();
+    await setMinimum('numbers', 5);
+    const after = bitsNow();
+
+    // Constraining the keyspace cannot add entropy. Reporting the unconstrained
+    // figure here would be an over-statement in the attacker's favour.
+    expect(after).toBeLessThanOrEqual(before);
+  });
+
+  it('refuses to generate when no character type is selected, and says why', async () => {
+    await renderAndWait();
+
+    for (const label of ['Uppercase (A-Z)', 'Lowercase (a-z)', 'Numbers (0-9)', 'Symbols (!@#$)']) {
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText(label));
+      });
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+    });
+
+    // The generator used to answer this by silently substituting lowercase,
+    // handing back a weaker password than the one that was asked for.
+    expect(
+      screen.getByText('Select at least one character type to generate a password.'),
+    ).toBeInTheDocument();
+    expect(currentPassword()).toBe('');
+  });
+
+  it('warns when the minimums cannot fit in the chosen length', async () => {
+    await renderAndWait();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Length'), { target: { value: '8' } });
+    });
+    await setMinimum('uppercase', 5);
+    await setMinimum('lowercase', 5);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/only 8 long/);
+  });
+
+  it('lowers a minimum with its decrease control', async () => {
+    await renderAndWait();
+    await setMinimum('numbers', 2);
+    expect(screen.getByLabelText('Minimum numbers')).toHaveTextContent('3');
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Decrease minimum numbers'));
+    });
+    expect(screen.getByLabelText('Minimum numbers')).toHaveTextContent('2');
+  });
+
+  it('will not step a minimum past its bounds', async () => {
+    await renderAndWait();
+    // The control cannot offer a policy the generator would have to clamp.
+    await setMinimum('uppercase', MAX_PASSWORD_CLASS_MINIMUM + 2);
+    expect(screen.getByLabelText('Minimum uppercase')).toHaveTextContent(
+      String(MAX_PASSWORD_CLASS_MINIMUM),
+    );
+    expect(screen.getByLabelText('Increase minimum uppercase')).toBeDisabled();
+    expect(screen.getByLabelText('Decrease minimum lowercase')).toBeDisabled();
+  });
+
+  it('reports a failed save rather than claiming the default was stored', async () => {
+    const { updateSettingsApi } = await import('../../src/services/api/userApi');
+    vi.mocked(updateSettingsApi).mockRejectedValueOnce(new Error('nope'));
+    await renderAndWait();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Save as my default'));
+    });
+
+    // A flush rather than `waitFor`: this suite runs on fake timers, where
+    // `waitFor`'s own polling never advances and simply burns the test timeout.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error' }) as unknown as Record<string, unknown>,
+    );
+  });
+
+  it('saves the current policy as the account default', async () => {
+    const { updateSettingsApi } = await import('../../src/services/api/userApi');
+    await renderAndWait();
+    await setMinimum('numbers', 2);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Save as my default'));
+    });
+
+    expect(updateSettingsApi).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultPasswordLength: 20,
+        defaultPasswordOptions: expect.objectContaining({ minNumbers: 3 }),
+      }),
+    );
   });
 });

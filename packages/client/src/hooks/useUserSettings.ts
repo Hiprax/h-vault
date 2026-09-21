@@ -6,6 +6,11 @@ import {
   CLIPBOARD_CLEAR_SECONDS,
   LOCK_ON_HIDDEN_DEFAULT,
   LOCK_ON_HIDDEN_DELAY_MINUTES,
+  DEFAULT_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  MAX_PASSWORD_LENGTH,
+  MAX_PASSWORD_CLASS_MINIMUM,
+  type PasswordGenOptions,
 } from '@hvault/shared';
 import { getProfileApi } from '../services/api/userApi';
 import { useAuthStore } from '../stores/authStore';
@@ -16,6 +21,16 @@ interface UserSettings {
   lockOnHiddenDelay: number;
   clipboardClearTimeout: number;
   theme: string;
+  /**
+   * The generator policy this account last saved.
+   *
+   * Clamped on the way in, like every other value here. Nothing narrows these
+   * on the wire, deliberately, so a stored policy can legitimately sit outside
+   * the range the generator can work with, and the generator's own spec builder
+   * clamps again. Two layers rather than one because the value is also read
+   * before any fetch lands.
+   */
+  defaultPasswordOptions: PasswordGenOptions;
 }
 
 // Every default is the SHARED constant, never a literal repeated here. These
@@ -29,7 +44,52 @@ const DEFAULT_SETTINGS: UserSettings = {
   lockOnHiddenDelay: LOCK_ON_HIDDEN_DELAY_MINUTES,
   clipboardClearTimeout: CLIPBOARD_CLEAR_SECONDS,
   theme: 'system',
+  defaultPasswordOptions: {
+    length: DEFAULT_PASSWORD_LENGTH,
+    uppercase: true,
+    lowercase: true,
+    numbers: true,
+    symbols: true,
+    excludeAmbiguous: false,
+    minUppercase: 0,
+    minLowercase: 0,
+    // 1, matching what the server model has materialised on every account since
+    // this subdocument existed. Zero here would silently disagree with storage.
+    minNumbers: 1,
+    minSymbols: 1,
+  },
 };
+
+/** Keep a stored class minimum inside the range the generator can work with. */
+function clampClassMinimum(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 0;
+  return Math.min(MAX_PASSWORD_CLASS_MINIMUM, Math.round(value));
+}
+
+function clampGenOptions(raw: unknown): PasswordGenOptions {
+  const fallback = DEFAULT_SETTINGS.defaultPasswordOptions;
+  if (typeof raw !== 'object' || raw === null) return fallback;
+  const value = raw as Partial<Record<keyof PasswordGenOptions, unknown>>;
+  const bool = (key: keyof PasswordGenOptions, or: boolean): boolean =>
+    typeof value[key] === 'boolean' ? value[key] : or;
+  const length =
+    typeof value.length === 'number' && Number.isFinite(value.length)
+      ? Math.min(MAX_PASSWORD_LENGTH, Math.max(MIN_PASSWORD_LENGTH, Math.round(value.length)))
+      : fallback.length;
+
+  return {
+    length,
+    uppercase: bool('uppercase', true),
+    lowercase: bool('lowercase', true),
+    numbers: bool('numbers', true),
+    symbols: bool('symbols', true),
+    excludeAmbiguous: bool('excludeAmbiguous', false),
+    minUppercase: clampClassMinimum(value.minUppercase),
+    minLowercase: clampClassMinimum(value.minLowercase),
+    minNumbers: value.minNumbers === undefined ? 1 : clampClassMinimum(value.minNumbers),
+    minSymbols: value.minSymbols === undefined ? 1 : clampClassMinimum(value.minSymbols),
+  };
+}
 
 /**
  * Keep a minutes value inside the bounds `updateSettingsSchema` enforces on the
@@ -187,6 +247,7 @@ async function fetchSettings(): Promise<void> {
           ),
           clipboardClearTimeout: settings.clipboardClearTimeout,
           theme: settings.theme,
+          defaultPasswordOptions: clampGenOptions(settings.defaultPasswordOptions),
         };
         cachedSettings = s;
       }

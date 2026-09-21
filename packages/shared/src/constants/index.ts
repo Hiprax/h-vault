@@ -71,6 +71,35 @@ export const LOGIN_RATE_LIMIT_MAX_PER_IP = 20;
 export const LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT = 20;
 export const BACKUP_CODES_COUNT = 8;
 export const DEFAULT_PASSWORD_LENGTH = 20;
+
+// The generated-password length bounds. Named because four places have to agree
+// on them and nothing forced them to: the wire schema, the settings schema, the
+// generator's length slider and the OpenAPI description string.
+export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_LENGTH = 128;
+
+/**
+ * The largest per-class minimum the generator will honour, e.g. "at least this
+ * many digits".
+ *
+ * A COST bound, and deliberately NOT a wire bound. The generator counts the
+ * valid passwords for a given policy with a dynamic program whose state space is
+ * the product of `(minimum + 1)` over the four character classes, so this caps
+ * it at `(MAX_PASSWORD_LENGTH + 1) * 6^4` states. Measured on a four-core
+ * desktop: 73 ms to build the table at this value and 438 ms at 10, against
+ * 0.07 ms to generate once it is built and memoised.
+ *
+ * It is enforced where that cost is paid, by the generator's spec builder, by
+ * the settings read path and by the stepper controls. It is NOT enforced in
+ * `passwordGenOptionsSchema`, because narrowing an accepted request range is a
+ * breaking OpenAPI change that `audit:openapi` grades at `--fail-on WARN`, and
+ * it would demand a MAJOR version bump for a field no client has ever sent. A
+ * larger stored value is clamped on read rather than rejected.
+ *
+ * Five covers every password policy in the wild with headroom. Minimums only
+ * ever REDUCE entropy, so there is no security argument for a larger cap.
+ */
+export const MAX_PASSWORD_CLASS_MINIMUM = 5;
 export const MAX_TAGS_PER_ITEM = 20;
 export const MAX_TAG_LENGTH = 50;
 export const MAX_BULK_OPERATIONS = 100;

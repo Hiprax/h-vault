@@ -45,6 +45,44 @@ export default tseslint.config(
       },
     },
     rules: {
+      // `Math.random` is not a CSPRNG. Its output is predictable from a handful
+      // of observations, which is the exact attack a password manager must not
+      // be vulnerable to, and a single accidental use would be invisible to
+      // every other gate here: the passwords would still look random.
+      //
+      // A lint rule rather than a test, deliberately. It runs in the T0 gate at
+      // zero warnings, it covers files that have no test, it fires in the
+      // editor, and evading it needs an `eslint-disable` that `audit:integrity`
+      // records by exact rule id. A test could only implement this by reading
+      // source text, which is the false-coverage pattern this repository
+      // documents deleting.
+      //
+      // `no-restricted-properties` alone misses `const { random } = Math`, so
+      // the two selectors below close that and the `globalThis` spelling.
+      'no-restricted-properties': [
+        'error',
+        {
+          object: 'Math',
+          property: 'random',
+          message:
+            'Math.random is not a CSPRNG. Use lib/secureRandom (client) or crypto.getRandomValues.',
+        },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            "MemberExpression[object.object.name='globalThis'][object.property.name='Math'][property.name='random']",
+          message:
+            'Math.random is not a CSPRNG. Use lib/secureRandom (client) or crypto.getRandomValues.',
+        },
+        {
+          selector:
+            "VariableDeclarator[init.name='Math'] > ObjectPattern > Property[key.name='random']",
+          message:
+            'Math.random is not a CSPRNG. Use lib/secureRandom (client) or crypto.getRandomValues.',
+        },
+      ],
       // Downgrade some strict rules to warnings for practical development
       '@typescript-eslint/no-unused-vars': [
         'warn',

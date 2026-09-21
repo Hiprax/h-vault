@@ -151,6 +151,11 @@ vi.mock('@hvault/shared', async () => {
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
+import {
+  endScanSession,
+  heldSecretCount,
+  holdEntries,
+} from '../src/services/totpImport/scanSession';
 import { useAuthStore } from '../src/stores/authStore.js';
 import { cryptoService } from '../src/services/crypto/cryptoService.js';
 import {
@@ -1780,5 +1785,72 @@ describe('document session teardown on lock and logout', () => {
     // The server call is skipped entirely on this path; the local teardown is not.
     expect(logoutApi).not.toHaveBeenCalled();
     expect(mockDocumentsClearStore).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// Authenticator-import keys are torn down with everything else
+// ===========================================================================
+
+describe('authStore — scanned TOTP keys', () => {
+  beforeEach(() => {
+    endScanSession();
+  });
+
+  /**
+   * The REAL scan session here, not a spy.
+   *
+   * What matters is not that a function was called but that the bytes are gone,
+   * and these are the plainest secret this application ever holds: an unwrapped
+   * TOTP key, useful to anyone who reads it. Asserting the zeroing directly is
+   * the difference between pinning the guarantee and pinning a call site that
+   * could later stop delivering it.
+   */
+  function heldKey() {
+    const secret = Uint8Array.from([7, 7, 7, 7, 7, 7, 7, 7, 7, 7]);
+    holdEntries([
+      {
+        type: 'totp',
+        secret,
+        name: 'alice',
+        issuer: 'Acme',
+        algorithm: 'SHA1',
+        digits: 6,
+        counter: null,
+      },
+    ]);
+    return secret;
+  }
+
+  it('zeroes them on lock', async () => {
+    const secret = heldKey();
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      isLocked: false,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().lock();
+
+    expect([...secret]).toEqual(Array<number>(10).fill(0));
+    expect(heldSecretCount()).toBe(0);
+  });
+
+  it('zeroes them on logout', async () => {
+    const secret = heldKey();
+    useAuthStore.setState({
+      accessToken: 'access-token',
+      isAuthenticated: true,
+      isLocked: false,
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect([...secret]).toEqual(Array<number>(10).fill(0));
+    expect(heldSecretCount()).toBe(0);
   });
 });

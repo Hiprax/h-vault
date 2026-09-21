@@ -21,6 +21,8 @@ interface IPasswordGenOptions {
   numbers: boolean;
   symbols: boolean;
   excludeAmbiguous: boolean;
+  minUppercase: number;
+  minLowercase: number;
   minNumbers: number;
   minSymbols: number;
 }
@@ -134,6 +136,17 @@ const passwordGenOptionsSchema = new Schema<IPasswordGenOptions>(
     numbers: { type: Boolean, default: true },
     symbols: { type: Boolean, default: true },
     excludeAmbiguous: { type: Boolean, default: false },
+    // The two newer minimums default to 0 because nothing is stored for them.
+    // `minNumbers`/`minSymbols` keep their default of 1, which Mongoose has been
+    // materialising on every account since this subdocument existed, so changing
+    // it would move stored data rather than preserve it.
+    //
+    // None of the four carries `min`/`max`. A model-level maximum would be the
+    // only narrowing in this change set and could fail a save on a legacy
+    // document; the bound is applied by the generator and the settings read
+    // path, which clamp rather than reject.
+    minUppercase: { type: Number, default: 0 },
+    minLowercase: { type: Number, default: 0 },
     minNumbers: { type: Number, default: 1 },
     minSymbols: { type: Number, default: 1 },
   },
@@ -141,18 +154,36 @@ const passwordGenOptionsSchema = new Schema<IPasswordGenOptions>(
 );
 
 // Defense-in-depth: validate the full subdocument at the parent path so the
-// constraint is enforced even when only sibling fields (minNumbers/minSymbols)
-// are bumped without changing `length`, and during `findOneAndUpdate` where a
-// field-level `this` may be bound to the query rather than the subdocument.
+// constraint is enforced even when only sibling minimums are bumped without
+// changing `length`, and during `findOneAndUpdate` where a field-level `this`
+// may be bound to the query rather than the subdocument.
+//
+// Counts a minimum only while its class is enabled, matching
+// `passwordGenOptionsSchema`. The two must agree, and the reason the shared
+// schema counts this way is that its per-field defaults are applied
+// independently of the class booleans, so `{ numbers: false, minNumbers: 1 }` is
+// a shape it emits and which is already persisted here.
+const numberOr = (value: unknown, fallback: number): number =>
+  typeof value === 'number' ? value : fallback;
+
+// A class counts as enabled unless it is explicitly switched off, so a legacy
+// document that predates one of these booleans is treated as having it on,
+// matching the schema defaults. Takes `unknown` because the declared type says
+// `boolean` while a lean read of an old document may carry nothing at all.
+const classEnabled = (value: unknown): boolean => value !== false;
+
 const passwordGenOptionsCrossFieldValidator = {
   validator: function (value: IPasswordGenOptions | undefined | null) {
     if (!value) return true;
-    const length = typeof value.length === 'number' ? value.length : 0;
-    const minNumbers = typeof value.minNumbers === 'number' ? value.minNumbers : 0;
-    const minSymbols = typeof value.minSymbols === 'number' ? value.minSymbols : 0;
-    return length >= minNumbers + minSymbols;
+    const length = numberOr(value.length, 0);
+    const required =
+      (classEnabled(value.uppercase) ? numberOr(value.minUppercase, 0) : 0) +
+      (classEnabled(value.lowercase) ? numberOr(value.minLowercase, 0) : 0) +
+      (classEnabled(value.numbers) ? numberOr(value.minNumbers, 0) : 0) +
+      (classEnabled(value.symbols) ? numberOr(value.minSymbols, 0) : 0);
+    return length >= required;
   },
-  message: 'Password length must be at least the sum of minNumbers and minSymbols',
+  message: 'Password length must be at least the sum of the required character minimums',
 };
 
 const backupSettingsSchema = new Schema<IBackupSettingsDoc>(

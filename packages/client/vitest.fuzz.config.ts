@@ -12,7 +12,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  *   - the seven IMPORT parsers, driven with arbitrary bytes, hostile documents
  *     and a committed corpus;
  *   - the in-browser FORMAT-AND-REPAIR engine, driven with a second committed
- *     corpus through every combination of the two transforms a user can tick.
+ *     corpus through every combination of the two transforms a user can tick;
+ *   - the GOOGLE AUTHENTICATOR export reader, driven with arbitrary bytes and
+ *     with payloads built by an independent encoder. It is the most sensitive of
+ *     the three, because the bytes it reads are secret keys: one of its
+ *     properties asserts that no error message can contain any run of its own
+ *     input, which is the shortest path from a key to a log or a bug report.
  *
  * Every file here also runs under `test:unit`, which is the whole client suite —
  * so this narrows NOTHING. It exists for the same reason `test:security` and
@@ -31,6 +36,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const CLIENT_FUZZ_SUITE = [
   'tests/fuzz/parsers.fuzz.test.ts',
   'tests/fuzz/format.fuzz.test.ts',
+  'tests/fuzz/totpMigration.fuzz.test.ts',
 ];
 
 /**

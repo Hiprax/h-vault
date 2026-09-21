@@ -19,28 +19,85 @@ import {
   CLIPBOARD_CLEAR_MAX_SECONDS,
   AUTO_LOCK_MIN_MINUTES,
   AUTO_LOCK_MAX_MINUTES,
+  DEFAULT_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  MAX_PASSWORD_LENGTH,
 } from '../constants/index.js';
 import { objectIdSchema } from './common.js';
 
+/**
+ * How many characters of a class the generator must guarantee, counting only the
+ * classes that are switched ON.
+ *
+ * Restricted to enabled classes deliberately. The per-field defaults are applied
+ * INDEPENDENTLY of the class booleans, so `parse({ numbers: false })` yields
+ * `{ numbers: false, minNumbers: 1 }` — a shape this schema has produced since
+ * the field existed and which is therefore already persisted. A rule that
+ * required a positive minimum to have its class enabled would make the schema
+ * reject its own output. Counting only enabled classes is self-consistent and
+ * semantically right: the generator never sees a disabled class, so a minimum on
+ * one is inert rather than unsatisfiable.
+ */
+function requiredCharacters(options: {
+  uppercase: boolean;
+  lowercase: boolean;
+  numbers: boolean;
+  symbols: boolean;
+  minUppercase: number;
+  minLowercase: number;
+  minNumbers: number;
+  minSymbols: number;
+}): number {
+  return (
+    (options.uppercase ? options.minUppercase : 0) +
+    (options.lowercase ? options.minLowercase : 0) +
+    (options.numbers ? options.minNumbers : 0) +
+    (options.symbols ? options.minSymbols : 0)
+  );
+}
+
 export const passwordGenOptionsSchema = z
   .object({
-    length: z.number().int().min(8).max(128).default(20),
+    length: z
+      .number()
+      .int()
+      .min(MIN_PASSWORD_LENGTH)
+      .max(MAX_PASSWORD_LENGTH)
+      .default(DEFAULT_PASSWORD_LENGTH),
     uppercase: z.boolean().default(true),
     lowercase: z.boolean().default(true),
     numbers: z.boolean().default(true),
     symbols: z.boolean().default(true),
     excludeAmbiguous: z.boolean().default(false),
+    // `minNumbers` and `minSymbols` keep their default of 1. Mongoose
+    // materialises this subdocument at account creation, so that value is
+    // already persisted on every existing account; changing it here would move
+    // stored data, not preserve it. The two newer fields default to 0 because
+    // nothing is stored for them and imposing a constraint nobody chose would be
+    // a behaviour change with no mandate.
+    //
+    // None of the four carries a maximum, and that is a decision rather than an
+    // omission: narrowing an accepted request range is a breaking OpenAPI change
+    // (`audit:openapi` runs `oasdiff breaking --fail-on WARN`) and would demand
+    // a MAJOR version bump. `MAX_PASSWORD_CLASS_MINIMUM` is applied by the
+    // generator and by the settings read path, which clamp rather than reject.
+    minUppercase: z.number().int().min(0).default(0),
+    minLowercase: z.number().int().min(0).default(0),
     minNumbers: z.number().int().min(0).default(1),
     minSymbols: z.number().int().min(0).default(1),
   })
-  // Cross-field invariant: a password cannot satisfy `minNumbers` + `minSymbols`
-  // required characters if its total `length` is smaller than their sum. This is
-  // the first line of defense (the User model carries the same check as a
-  // defense-in-depth backstop). The refinement runs after defaults are applied,
-  // so all three operands are always concrete numbers here.
-  .refine((o) => o.length >= o.minNumbers + o.minSymbols, {
-    message: 'Password length must be at least the sum of minNumbers and minSymbols',
+  // Cross-field invariant: a password cannot carry more required characters than
+  // it has positions. This is the first line of defense; the User model carries
+  // the same check as a defense-in-depth backstop. The refinement runs after
+  // defaults are applied, so every operand is a concrete number here.
+  .refine((o) => o.length >= requiredCharacters(o), {
+    message: 'Password length must be at least the sum of the required character minimums',
     path: ['length'],
+  })
+  // A generator with no character class to draw from has nothing to generate.
+  .refine((o) => o.uppercase || o.lowercase || o.numbers || o.symbols, {
+    message: 'At least one character type must be enabled',
+    path: ['lowercase'],
   });
 
 export const updateSettingsSchema = z.object({
@@ -69,7 +126,12 @@ export const updateSettingsSchema = z.object({
     .min(CLIPBOARD_CLEAR_MIN_SECONDS)
     .max(CLIPBOARD_CLEAR_MAX_SECONDS)
     .optional(),
-  defaultPasswordLength: z.number().int().min(8).max(128).optional(),
+  defaultPasswordLength: z
+    .number()
+    .int()
+    .min(MIN_PASSWORD_LENGTH)
+    .max(MAX_PASSWORD_LENGTH)
+    .optional(),
   defaultPasswordOptions: passwordGenOptionsSchema.optional(),
   theme: z.enum(THEMES).optional(),
   language: z.string().min(2).max(10).optional(),

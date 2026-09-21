@@ -6,6 +6,9 @@ import {
   HIBP_BATCH_MAX_PREFIXES,
   MAX_DOCUMENTS_PER_ROTATION,
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
+  MAX_PASSWORD_CLASS_MINIMUM,
+  MIN_PASSWORD_LENGTH,
+  MAX_PASSWORD_LENGTH,
 } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
@@ -693,7 +696,10 @@ export const swaggerSpec: JsonObject = {
             description: 'Minutes hidden before locking, when lockOnHidden is true (1-1440)',
           },
           clipboardClearTimeout: { type: 'integer', description: 'Seconds (5-300)' },
-          defaultPasswordLength: { type: 'integer', description: '8-128' },
+          defaultPasswordLength: {
+            type: 'integer',
+            description: `${String(MIN_PASSWORD_LENGTH)}-${String(MAX_PASSWORD_LENGTH)}`,
+          },
           defaultPasswordOptions: {
             type: 'object',
             properties: {
@@ -703,8 +709,22 @@ export const swaggerSpec: JsonObject = {
               numbers: { type: 'boolean' },
               symbols: { type: 'boolean' },
               excludeAmbiguous: { type: 'boolean' },
-              minNumbers: { type: 'integer' },
-              minSymbols: { type: 'integer' },
+              minUppercase: {
+                type: 'integer',
+                description: `Minimum uppercase characters. Values above ${String(MAX_PASSWORD_CLASS_MINIMUM)} are clamped by the generator.`,
+              },
+              minLowercase: {
+                type: 'integer',
+                description: `Minimum lowercase characters. Values above ${String(MAX_PASSWORD_CLASS_MINIMUM)} are clamped by the generator.`,
+              },
+              minNumbers: {
+                type: 'integer',
+                description: `Minimum digits. Values above ${String(MAX_PASSWORD_CLASS_MINIMUM)} are clamped by the generator.`,
+              },
+              minSymbols: {
+                type: 'integer',
+                description: `Minimum symbols. Values above ${String(MAX_PASSWORD_CLASS_MINIMUM)} are clamped by the generator.`,
+              },
             },
           },
           theme: { type: 'string', enum: ['light', 'dark', 'system'] },

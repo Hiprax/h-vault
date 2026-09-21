@@ -54,7 +54,45 @@ vi.mock('../src/components/ui/Toast', () => ({
 }));
 
 vi.mock('../src/hooks/useUserSettings', () => ({
-  useUserSettings: () => ({ autoLockTimeout: 15, clipboardClearTimeout: 30, theme: 'system' }),
+  useUserSettings: () => ({
+    autoLockTimeout: 15,
+    clipboardClearTimeout: 30,
+    theme: 'system',
+    defaultPasswordOptions: {
+      length: 20,
+      uppercase: true,
+      lowercase: true,
+      numbers: true,
+      symbols: true,
+      excludeAmbiguous: false,
+      minUppercase: 0,
+      minLowercase: 0,
+      minNumbers: 1,
+      minSymbols: 1,
+    },
+  }),
+}));
+
+vi.mock('../src/components/tools/TotpScanDialog', () => ({
+  TotpScanDialog: ({
+    onScanned,
+    onCancel,
+  }: {
+    onScanned: (value: string) => void;
+    onCancel: () => void;
+  }) => (
+    <div>
+      <button
+        type="button"
+        onClick={() => onScanned('otpauth://totp/A:b?secret=JBSWY3DPEHPK3PXP&digits=8')}
+      >
+        fake scan
+      </button>
+      <button type="button" onClick={onCancel}>
+        fake cancel
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock('../src/hooks/useClipboardCountdown', () => ({
@@ -153,6 +191,34 @@ describe('VaultItemForm — login payload', () => {
     const data = createdData();
     expect(data.totp).toBe('JBSWY3DPEHPK3PXP');
     expect(data.notes).toBe('recovery codes in safe');
+  });
+
+  it('fills the TOTP field from a scanned code, with the whole link', async () => {
+    // The whole `otpauth://` link, not just its secret: it carries the
+    // algorithm, digit count and period, and a bare secret would silently
+    // generate wrong codes for any service that does not use the defaults.
+    renderForm();
+    typeIn('Item name', 'GitHub');
+
+    fireEvent.click(screen.getByRole('button', { name: /scan qr code/i }));
+    fireEvent.click(await screen.findByText('fake scan'));
+
+    submit();
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect(createdData().totp).toBe('otpauth://totp/A:b?secret=JBSWY3DPEHPK3PXP&digits=8');
+  });
+
+  it('closes the scanner without touching the field on cancel', async () => {
+    renderForm();
+    typeIn('Item name', 'GitHub');
+
+    fireEvent.click(screen.getByRole('button', { name: /scan qr code/i }));
+    fireEvent.click(await screen.findByText('fake cancel'));
+    expect(screen.queryByText('fake scan')).not.toBeInTheDocument();
+
+    submit();
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect(createdData().totp).toBeUndefined();
   });
 
   it('rejects a URI whose scheme is not http/https/mailto', async () => {

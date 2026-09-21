@@ -1,5 +1,6 @@
 import type {
   SandboxFrameMessage,
+  SandboxQrRequest,
   SandboxRenderRequest,
   SandboxTheme,
   SandboxTransformFailedMessage,
@@ -22,9 +23,9 @@ import type {
  * gate would report it.
  *
  * What is actually needed here is smaller than a schema library, and saying so
- * is not a cost argument. The frame accepts exactly TWO message shapes — render
- * a document, and transform one — and it does not need to know the list of valid
- * render modes at runtime: it `switch`es on the mode and its `default` branch is
+ * is not a cost argument. The frame accepts exactly THREE message shapes: render
+ * a document, transform one, and find a QR code in an image. It does not need to
+ * know the list of valid render modes at runtime: it `switch`es on the mode and its `default` branch is
  * "no renderer for this", which is the same answer an unknown mode deserves. So
  * the validation reduces to a handful of `typeof` checks over a few fields.
  *
@@ -129,6 +130,26 @@ export function parseTransformRequest(data: unknown): SandboxTransformRequest | 
   if (typeof format !== 'boolean' || typeof repair !== 'boolean') return null;
   if (!format && !repair) return null;
   return { kind: 'transform', text, ext, format, repair };
+}
+
+/**
+ * Parse a host-to-frame SCAN message, or return `null`.
+ *
+ * The image itself is checked only for being an object, and that is the right
+ * amount of checking to do HERE. `instanceof ImageBitmap` is the wrong spelling
+ * across a realm boundary for the same reason `instanceof ArrayBuffer` is (see
+ * {@link isArrayBuffer}), and the decoder has to narrow it properly anyway
+ * before it can use it, where a failure has somewhere to be reported. What this
+ * does enforce is the part the decoder cannot infer later: a `requestId` it can
+ * echo, without which a reply could not be matched to a request at all.
+ */
+export function parseQrScanRequest(data: unknown): SandboxQrRequest | null {
+  if (!isRecord(data)) return null;
+  if (data.kind !== 'qrScan') return null;
+  const { requestId, image } = data;
+  if (typeof requestId !== 'number' || !Number.isSafeInteger(requestId)) return null;
+  if (typeof image !== 'object' || image === null) return null;
+  return { kind: 'qrScan', requestId, image };
 }
 
 /**

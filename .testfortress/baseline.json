@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-09-08",
-  "commit": "5280ecf",
+  "recordedAt": "2026-09-21",
+  "commit": "54f472d",
   "tests": {
-    "count": 9952
+    "count": 10334
   },
   "coverage": {
     "diff": 100
@@ -17,20 +17,20 @@
   "a11y": {
     "critical": 0,
     "serious": 0,
-    "viewsScanned": 33
+    "viewsScanned": 34
   },
   "suppressions": {
-    "count": 20,
-    "totalHits": 27
+    "count": 19,
+    "totalHits": 26
   },
   "packages": {
     "packages/shared": {
       "coverage": {
         "line": 100,
-        "branch": 98.91,
+        "branch": 98.94,
         "function": 100,
-        "linesTotal": 656,
-        "branchesTotal": 367,
+        "linesTotal": 661,
+        "branchesTotal": 379,
         "filesMeasured": [
           "src/constants/index.ts",
           "src/index.ts",
@@ -46,16 +46,16 @@
         ]
       },
       "tests": {
-        "count": 1286
+        "count": 1294
       }
     },
     "packages/server": {
       "coverage": {
         "line": 98.86,
-        "branch": 93.12,
-        "function": 98.35,
-        "linesTotal": 4118,
-        "branchesTotal": 2094,
+        "branch": 93.2,
+        "function": 98.37,
+        "linesTotal": 4128,
+        "branchesTotal": 2117,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/seedBreachesArgs.ts",
@@ -141,16 +141,16 @@
         ]
       },
       "tests": {
-        "count": 3988
+        "count": 3990
       }
     },
     "packages/client": {
       "coverage": {
-        "line": 99.12,
-        "branch": 93.23,
-        "function": 98.84,
-        "linesTotal": 9184,
-        "branchesTotal": 6427,
+        "line": 99.23,
+        "branch": 93.3,
+        "function": 98.89,
+        "linesTotal": 10126,
+        "branchesTotal": 7116,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -175,6 +175,11 @@
           "src/components/layout/ReloadPrompt.tsx",
           "src/components/tools/FileDecryptPanel.tsx",
           "src/components/tools/FileEncryptPanel.tsx",
+          "src/components/tools/TotpAttachDialog.tsx",
+          "src/components/tools/TotpImportFlow.tsx",
+          "src/components/tools/TotpImportResults.tsx",
+          "src/components/tools/TotpScanDialog.tsx",
+          "src/components/tools/TotpScanPanel.tsx",
           "src/components/ui/Badge.tsx",
           "src/components/ui/BrandLogo.tsx",
           "src/components/ui/Button.tsx",
@@ -195,6 +200,7 @@
           "src/components/vault/PasswordGenerator.tsx",
           "src/components/vault/SavedAddressPicker.tsx",
           "src/components/vault/SearchBar.tsx",
+          "src/components/vault/TotpDisplay.tsx",
           "src/components/vault/VaultItemDetail.tsx",
           "src/components/vault/VaultItemForm.tsx",
           "src/components/vault/VaultList.tsx",
@@ -220,8 +226,12 @@
           "src/lib/lazySha256.ts",
           "src/lib/lazyZxcvbn.ts",
           "src/lib/logger.ts",
+          "src/lib/passwordGenerator.ts",
+          "src/lib/sandboxFrame.ts",
           "src/lib/sandboxHandshake.ts",
+          "src/lib/secureRandom.ts",
           "src/lib/textDiff.ts",
+          "src/lib/totp.ts",
           "src/lib/utils.ts",
           "src/lib/vaultData.ts",
           "src/lib/vaultDisplay.ts",
@@ -240,6 +250,7 @@
           "src/pages/ResetPasswordPage.tsx",
           "src/pages/SessionsPage.tsx",
           "src/pages/SettingsPage.tsx",
+          "src/pages/TotpImportPage.tsx",
           "src/pages/UnlockAccountPage.tsx",
           "src/pages/VaultHealthPage.tsx",
           "src/pages/VaultItemPage.tsx",
@@ -248,6 +259,7 @@
           "src/sandbox/decode.ts",
           "src/sandbox/dom.ts",
           "src/sandbox/protocol.ts",
+          "src/sandbox/qrScan.ts",
           "src/sandbox/renderers/html.ts",
           "src/sandbox/renderers/image.ts",
           "src/sandbox/renderers/markdown.ts",
@@ -305,6 +317,12 @@
           "src/services/import/types.ts",
           "src/services/import/uri.ts",
           "src/services/offlineCache.ts",
+          "src/services/totpImport/batch.ts",
+          "src/services/totpImport/camera.ts",
+          "src/services/totpImport/migrationReader.ts",
+          "src/services/totpImport/migrationUri.ts",
+          "src/services/totpImport/qrSandbox.ts",
+          "src/services/totpImport/scanSession.ts",
           "src/stores/authStore.ts",
           "src/stores/documentsStore.ts",
           "src/stores/encryptedStorage.ts",
@@ -316,12 +334,12 @@
         ]
       },
       "tests": {
-        "count": 4460
+        "count": 4827
       }
     },
     "e2e": {
       "tests": {
-        "count": 218
+        "count": 223
       }
     }
   },
@@ -499,7 +517,7 @@
     ]
   },
   "duplication": {
-    "percentage": 1.88,
+    "percentage": 1.78,
     "clones": 120,
     "duplicatedLines": 1450,
     "totalLines": 52849,
@@ -535,7 +553,7 @@
       "spectral": 1
     }
   },
-  "reason": "Validation pass over phases 21-28: banks the floors the pass's own tests raised. New tests: the E2E locked/unlocked discriminator (auto-lock, both engines) after expectVaultVisible's substring name matcher was found to match the unlock screen's own Unlock Vault button and to have left the e2e gate intermittently red; the core-module count pinned in gate-surface from CORE_MODULES itself, both sentences having said six since documentController joined; a top-level-await guard over tests/harness plus a relative-import containment check, for an invariant the directory declared and nothing enforced; and the bulk document export's rate-limit resume, where a 429 was recorded as a failure and so consumed the one row Continue existed to retry. mutation is NOT seeded and remains unrecorded.",
+  "reason": "Authenticator import and generator minimums: 34th a11y view, one suppression removed, coverage and test counts raised by the new suites",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

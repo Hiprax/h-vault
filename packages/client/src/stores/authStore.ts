@@ -17,6 +17,7 @@ import { offlineCache } from '../services/offlineCache.js';
 import { clearHealthResults } from '../services/health/healthResultsStore.js';
 import { clearSettingsCache } from '../hooks/useUserSettings.js';
 import { eraseCopiedSecretNow } from '../services/clipboard/clipboardService.js';
+import { endScanSession } from '../services/totpImport/scanSession.js';
 import { logger } from '../lib/logger.js';
 import { decodeJwtPayload } from '../lib/accessToken.js';
 import { useVaultStore } from './vaultStore.js';
@@ -576,6 +577,12 @@ export const useAuthStore = create<AuthState>()(
         // the lock, and the per-upload abort it fires is itself un-awaited and
         // bounded so a stalled connection cannot hold the lock open.
         useDocumentsStore.getState().clearStore();
+        // Zero any TOTP keys an authenticator import is still holding, for the
+        // same reason and in the same breath. They are the plainest secret this
+        // application ever has in memory: unwrapped, unencrypted, and useless to
+        // nobody. Scanning is not activity either, so a lock part way through an
+        // import is expected rather than exceptional.
+        endScanSession();
 
         // Record the vault_lock audit entry best-effort, AFTER local state is
         // already secured. Fire-and-forget with a bounded per-call timeout so a
@@ -628,6 +635,12 @@ export const useAuthStore = create<AuthState>()(
         // five-second timeout — on the one path where the user has explicitly
         // asked to end the session.
         useDocumentsStore.getState().clearStore();
+        // Zero any TOTP keys an authenticator import is still holding, for the
+        // same reason and in the same breath. They are the plainest secret this
+        // application ever has in memory: unwrapped, unencrypted, and useless to
+        // nobody. Scanning is not activity either, so a lock part way through an
+        // import is expected rather than exceptional.
+        endScanSession();
 
         if (accessToken) {
           try {

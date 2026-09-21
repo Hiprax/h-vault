@@ -1,67 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, RefreshCw, Check, Eye, EyeOff, History, Loader2 } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import {
+  MAX_PASSWORD_CLASS_MINIMUM,
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+} from '@hvault/shared';
+import { cn, getApiErrorMessage } from '../../lib/utils';
 import { PASSPHRASE_WORDS } from '../../constants/passphraseWords';
 import {
-  buildCharset,
   classifyStrength,
   formatCrackTime,
-  getEffectiveCharsetSize,
   passphraseEntropyBits,
-  passwordEntropyBits,
   OFFLINE_GPU_GUESSES_PER_SEC,
   OFFLINE_GPU_RATE_LABEL,
 } from '../../utils/passwordEntropy';
+import {
+  PasswordGeneratorError,
+  generatePassphrase,
+  generatePassword,
+  passwordEntropyBitsForOptions,
+  type PasswordGenOptionsLike,
+} from '../../lib/passwordGenerator';
 import { useToast } from '../ui/Toast';
-import { useUserSettings } from '../../hooks/useUserSettings';
+import { clearSettingsCache, useUserSettings } from '../../hooks/useUserSettings';
+import { updateSettingsApi } from '../../services/api/userApi';
 import { copySecretToClipboard } from '../../services/clipboard/clipboardService';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-// Character sets and the shared `buildCharset` pool builder live in
-// ../../utils/passwordEntropy so the generator and the entropy metrics always agree.
-
-function getSecureRandom(max: number): number {
-  if (max <= 0) return 0;
-  // Rejection sampling to eliminate modular bias.
-  // Values >= limit would introduce bias when mapped via modulo.
-  const limit = Math.floor(0x100000000 / max) * max;
-  const arr = new Uint32Array(1);
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  while (true) {
-    crypto.getRandomValues(arr);
-    const value = arr[0] ?? 0;
-    if (value < limit) return value % max;
-  }
-}
-
-function generatePassword(options: {
-  length: number;
-  uppercase: boolean;
-  lowercase: boolean;
-  numbers: boolean;
-  symbols: boolean;
-  excludeAmbiguous: boolean;
-}): string {
-  // buildCharset is the single source of truth shared with the entropy metrics, so the
-  // strength readout is always computed from the exact pool drawn from here.
-  const charset = buildCharset(options);
-
-  const result = Array.from(
-    { length: options.length },
-    () => charset[getSecureRandom(charset.length)] ?? '',
-  ).join('');
-  return result;
-}
-
-function generatePassphrase(wordCount: number, separator: string): string {
-  const words: string[] = [];
-  for (let i = 0; i < wordCount; i++) {
-    words.push(PASSPHRASE_WORDS[getSecureRandom(PASSPHRASE_WORDS.length)] ?? 'word');
-  }
-  return words.join(separator);
-}
+// Generation, counting and the exact entropy live in ../../lib/passwordGenerator.
+// This component owns the controls and nothing else: it never draws a random
+// number itself, so there is one place where bias could be introduced and one
+// place where it has to be proved absent.
 
 // ---------------------------------------------------------------------------
 // Strength indicator
@@ -82,7 +53,13 @@ const STRENGTH_COLORS = [
  * string), so the meter differentiates across the whole range instead of saturating the
  * way a zxcvbn score does past ~33 bits.
  */
-function StrengthIndicator({ bits }: { bits: number }) {
+function StrengthIndicator({
+  bits,
+  constraintCostBits,
+}: {
+  bits: number;
+  constraintCostBits: number;
+}) {
   const { level, label } = classifyStrength(bits);
 
   return (
@@ -110,6 +87,13 @@ function StrengthIndicator({ bits }: { bits: number }) {
         Time to crack (offline GPU, {OFFLINE_GPU_RATE_LABEL}):{' '}
         {formatCrackTime(bits, OFFLINE_GPU_GUESSES_PER_SEC)}
       </p>
+      {/* Required minimums shrink the keyspace. Saying so is the honest thing:
+          the near-universal belief is that complexity rules add strength. */}
+      {constraintCostBits > 0 && (
+        <p className="text-xs text-[hsl(var(--muted-foreground))]">
+          Required minimums cost {constraintCostBits.toFixed(2)} bits
+        </p>
+      )}
     </div>
   );
 }
@@ -127,14 +111,21 @@ interface PasswordGeneratorProps {
 
 export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProps) {
   const { toast } = useToast();
-  const { clipboardClearTimeout } = useUserSettings();
+  const { clipboardClearTimeout, defaultPasswordOptions } = useUserSettings();
   const [mode, setMode] = useState<'password' | 'passphrase'>('password');
-  const [length, setLength] = useState(20);
-  const [uppercase, setUppercase] = useState(true);
-  const [lowercase, setLowercase] = useState(true);
-  const [numbers, setNumbers] = useState(true);
-  const [symbols, setSymbols] = useState(true);
-  const [excludeAmbiguous, setExcludeAmbiguous] = useState(false);
+  // Seeded from the account's saved policy. `useState`'s initialiser runs once,
+  // so a later profile fetch does not yank the controls out from under someone
+  // mid-adjustment; the "Save as my default" action is what writes back.
+  const [length, setLength] = useState(defaultPasswordOptions.length);
+  const [uppercase, setUppercase] = useState(defaultPasswordOptions.uppercase);
+  const [lowercase, setLowercase] = useState(defaultPasswordOptions.lowercase);
+  const [numbers, setNumbers] = useState(defaultPasswordOptions.numbers);
+  const [symbols, setSymbols] = useState(defaultPasswordOptions.symbols);
+  const [excludeAmbiguous, setExcludeAmbiguous] = useState(defaultPasswordOptions.excludeAmbiguous);
+  const [minUppercase, setMinUppercase] = useState(defaultPasswordOptions.minUppercase);
+  const [minLowercase, setMinLowercase] = useState(defaultPasswordOptions.minLowercase);
+  const [minNumbers, setMinNumbers] = useState(defaultPasswordOptions.minNumbers);
+  const [minSymbols, setMinSymbols] = useState(defaultPasswordOptions.minSymbols);
   const [wordCount, setWordCount] = useState(5);
   const [separator, setSeparator] = useState('-');
   const [password, setPassword] = useState('');
@@ -143,21 +134,89 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
   const [history, setHistory] = useState<string[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  const [savingDefaults, setSavingDefaults] = useState(false);
+
+  const options: PasswordGenOptionsLike = {
+    length,
+    uppercase,
+    lowercase,
+    numbers,
+    symbols,
+    excludeAmbiguous,
+    minUppercase,
+    minLowercase,
+    minNumbers,
+    minSymbols,
+  };
+
+  // A policy with no character class cannot generate anything. The controls make
+  // this reachable (all four boxes unticked), so it is a state the UI has to
+  // name rather than a case to fall back from: the generator used to answer it
+  // by silently substituting lowercase, which is a weaker password than the one
+  // the user thought they had asked for.
+  const noClassSelected = !uppercase && !lowercase && !numbers && !symbols;
+  const requiredTotal =
+    (uppercase ? minUppercase : 0) +
+    (lowercase ? minLowercase : 0) +
+    (numbers ? minNumbers : 0) +
+    (symbols ? minSymbols : 0);
+  const tooManyRequired = !noClassSelected && requiredTotal > length;
+  const canGenerate = mode === 'passphrase' || (!noClassSelected && !tooManyRequired);
   // Exact Shannon entropy of the CURRENT generation settings, computed from the inputs
   // (mode/options) — which is exact — rather than by inspecting the generated output.
   const entropyBits = useMemo(() => {
     if (mode === 'passphrase') {
       return passphraseEntropyBits(wordCount, PASSPHRASE_WORDS.length);
     }
-    const poolSize = getEffectiveCharsetSize({
-      uppercase,
-      lowercase,
-      numbers,
-      symbols,
-      excludeAmbiguous,
+    if (noClassSelected || tooManyRequired) return 0;
+    // The EXACT entropy of the constrained keyspace, not `length * log2(pool)`.
+    // Once a minimum is required the two differ, and they differ in the
+    // attacker-favourable direction, which is the one this readout promises
+    // never to take.
+    return passwordEntropyBitsForOptions(options);
+  }, [
+    mode,
+    wordCount,
+    length,
+    uppercase,
+    lowercase,
+    numbers,
+    symbols,
+    excludeAmbiguous,
+    minUppercase,
+    minLowercase,
+    minNumbers,
+    minSymbols,
+    noClassSelected,
+    tooManyRequired,
+  ]);
+
+  // The honest cost of the required minimums, shown only when there are any.
+  const constraintCostBits = useMemo(() => {
+    if (mode === 'passphrase' || noClassSelected || tooManyRequired || requiredTotal === 0) {
+      return 0;
+    }
+    const unconstrained = passwordEntropyBitsForOptions({
+      ...options,
+      minUppercase: 0,
+      minLowercase: 0,
+      minNumbers: 0,
+      minSymbols: 0,
     });
-    return passwordEntropyBits(length, poolSize);
-  }, [mode, wordCount, length, uppercase, lowercase, numbers, symbols, excludeAmbiguous]);
+    return unconstrained - entropyBits;
+  }, [
+    mode,
+    noClassSelected,
+    tooManyRequired,
+    requiredTotal,
+    entropyBits,
+    length,
+    uppercase,
+    lowercase,
+    numbers,
+    symbols,
+    excludeAmbiguous,
+  ]);
 
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const regenerateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -172,17 +231,21 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
     // still does real work, and the paint keeps the control responsive).
     regenerateTimerRef.current = setTimeout(() => {
       let newPassword: string;
-      if (mode === 'passphrase') {
-        newPassword = generatePassphrase(wordCount, separator);
-      } else {
-        newPassword = generatePassword({
-          length,
-          uppercase,
-          lowercase,
-          numbers,
-          symbols,
-          excludeAmbiguous,
-        });
+      try {
+        newPassword =
+          mode === 'passphrase'
+            ? generatePassphrase(wordCount, separator, PASSPHRASE_WORDS)
+            : generatePassword(options);
+      } catch (error) {
+        // A policy the generator refuses: no character class at all, or more
+        // required characters than there are positions. Clear the field rather
+        // than leaving a stale password beside contradictory settings, which
+        // would read as though it satisfied them.
+        setPassword('');
+        setRegenerating(false);
+        regenerateTimerRef.current = null;
+        if (!(error instanceof PasswordGeneratorError)) throw error;
+        return;
       }
       setPassword(newPassword);
       setHistory((prev) => {
@@ -200,14 +263,61 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
     numbers,
     symbols,
     excludeAmbiguous,
+    minUppercase,
+    minLowercase,
+    minNumbers,
+    minSymbols,
     wordCount,
     separator,
   ]);
 
   // Generate on mount and when options change
   useEffect(() => {
+    // No `canGenerate` gate here, deliberately. The generator's own spec builder
+    // already refuses a policy it cannot satisfy, and duplicating that decision
+    // in the effect meant two places had to agree about what is generable; the
+    // catch inside `regenerate` is the single place that decides, and clearing
+    // the field is what it does about it. `canGenerate` remains, but only to
+    // drive what the UI SAYS.
     regenerate();
   }, [regenerate]);
+
+  /**
+   * Persist the current policy as this account's default.
+   *
+   * The settings endpoint has accepted `defaultPasswordOptions` since it was
+   * written; nothing ever sent it, so the stored value has always been whatever
+   * the model defaulted to. This is the action that makes the field mean
+   * something, and `clearSettingsCache()` is what makes every other mounted
+   * consumer re-read it rather than keep rendering the pre-save value.
+   */
+  const handleSaveDefaults = useCallback(async () => {
+    setSavingDefaults(true);
+    try {
+      await updateSettingsApi({
+        defaultPasswordLength: length,
+        defaultPasswordOptions: options,
+      });
+      clearSettingsCache();
+      toast({ title: 'Saved as your default', type: 'success', duration: 2000 });
+    } catch (error) {
+      toast({ title: getApiErrorMessage(error, 'Could not save your default'), type: 'error' });
+    } finally {
+      setSavingDefaults(false);
+    }
+  }, [
+    length,
+    uppercase,
+    lowercase,
+    numbers,
+    symbols,
+    excludeAmbiguous,
+    minUppercase,
+    minLowercase,
+    minNumbers,
+    minSymbols,
+    toast,
+  ]);
 
   const handleCopy = useCallback(async () => {
     // `password` is empty until the debounced first generation lands, so a click
@@ -254,9 +364,18 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
     return () => {
       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
       if (regenerateTimerRef.current) clearTimeout(regenerateTimerRef.current);
-      // Clear generated password history to prevent sensitive data from lingering
-      // in memory after the component is unmounted.
-      setHistory([]);
+      // The history is NOT cleared here, and the `setHistory([])` that used to
+      // sit on this line was removed rather than kept for reassurance: setting
+      // state on an unmounting component is a no-op that React discards, so it
+      // delivered none of the safety its comment claimed.
+      //
+      // What is actually true is narrower and worth stating instead. The history
+      // is five generated passwords held as ordinary strings in this component's
+      // state; they become unreachable when it unmounts and are collected
+      // whenever the engine decides to, and being strings they cannot be
+      // overwritten in the meantime. Anything COPIED from the list is a separate
+      // matter and is covered: it goes through `copySecretToClipboard`, so the
+      // shared erase deadline owns it.
     };
   }, []);
 
@@ -327,7 +446,7 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
       </div>
 
       {/* Strength indicator */}
-      {password && <StrengthIndicator bits={entropyBits} />}
+      {password && <StrengthIndicator bits={entropyBits} constraintCostBits={constraintCostBits} />}
 
       {/* Password mode options */}
       {mode === 'password' && (
@@ -348,8 +467,8 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
             <input
               id="pw-length"
               type="range"
-              min={8}
-              max={128}
+              min={MIN_PASSWORD_LENGTH}
+              max={MAX_PASSWORD_LENGTH}
               value={length}
               onChange={(e) => setLength(Number(e.target.value))}
               className="mt-1 w-full accent-[hsl(var(--primary))]"
@@ -369,6 +488,50 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
               tooltip="Removes easily confused characters: l, I, 1, O, 0"
             />
           </div>
+
+          {/* Minimum counts, one per ENABLED class. A stepper for a class that
+              is switched off would be a control with no effect: the generator
+              drops the class entirely, which is what makes its minimum inert. */}
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-[hsl(var(--foreground))]">
+              Minimum characters of each type
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              {uppercase && (
+                <MinimumStepper label="Uppercase" value={minUppercase} onChange={setMinUppercase} />
+              )}
+              {lowercase && (
+                <MinimumStepper label="Lowercase" value={minLowercase} onChange={setMinLowercase} />
+              )}
+              {numbers && (
+                <MinimumStepper label="Numbers" value={minNumbers} onChange={setMinNumbers} />
+              )}
+              {symbols && (
+                <MinimumStepper label="Symbols" value={minSymbols} onChange={setMinSymbols} />
+              )}
+            </div>
+            {tooManyRequired && (
+              <p role="alert" className="text-xs text-[hsl(var(--destructive))]">
+                Those minimums need {requiredTotal} characters, but the password is only {length}{' '}
+                long.
+              </p>
+            )}
+          </div>
+
+          {noClassSelected && (
+            <p role="alert" className="text-xs text-[hsl(var(--destructive))]">
+              Select at least one character type to generate a password.
+            </p>
+          )}
+
+          <button
+            type="button"
+            onClick={() => void handleSaveDefaults()}
+            disabled={savingDefaults || !canGenerate}
+            className="text-xs text-[hsl(var(--muted-foreground))] underline underline-offset-2 hover:text-[hsl(var(--foreground))] disabled:opacity-50"
+          >
+            {savingDefaults ? 'Saving…' : 'Save as my default'}
+          </button>
         </div>
       )}
 
@@ -480,6 +643,56 @@ export function PasswordGenerator({ onSelect, className }: PasswordGeneratorProp
 // ---------------------------------------------------------------------------
 // Toggle helper component
 // ---------------------------------------------------------------------------
+
+/**
+ * A bounded numeric stepper for a per-class minimum.
+ *
+ * Buttons rather than `<input type="number">`, because the range is tiny and a
+ * free-text number field invites a value the generator would have to clamp
+ * silently. The bound comes from the shared constant, so the control cannot
+ * offer a policy the generator refuses to honour.
+ */
+function MinimumStepper({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-sm text-[hsl(var(--foreground))]">{label}</span>
+      <span className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onChange(Math.max(0, value - 1))}
+          disabled={value <= 0}
+          aria-label={`Decrease minimum ${label.toLowerCase()}`}
+          className="h-6 w-6 rounded border border-[hsl(var(--input))] text-sm leading-none text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-40"
+        >
+          -
+        </button>
+        <output
+          aria-label={`Minimum ${label.toLowerCase()}`}
+          className="w-5 text-center text-sm font-mono text-[hsl(var(--foreground))]"
+        >
+          {value}
+        </output>
+        <button
+          type="button"
+          onClick={() => onChange(Math.min(MAX_PASSWORD_CLASS_MINIMUM, value + 1))}
+          disabled={value >= MAX_PASSWORD_CLASS_MINIMUM}
+          aria-label={`Increase minimum ${label.toLowerCase()}`}
+          className="h-6 w-6 rounded border border-[hsl(var(--input))] text-sm leading-none text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-40"
+        >
+          +
+        </button>
+      </span>
+    </div>
+  );
+}
 
 function Toggle({
   label,

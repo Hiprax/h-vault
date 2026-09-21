@@ -227,3 +227,94 @@ export interface SandboxTransformFailedMessage {
  */
 export type SandboxTransformReply =
   SandboxTransformedMessage | SandboxTransformFailedMessage | SandboxFailedMessage;
+
+/**
+ * Host to frame: find a QR code in this image.
+ *
+ * ---------------------------------------------------------------------------
+ * A THIRD REQUEST KIND, AND WHY THE BOUNDARY IS DRAWN HERE
+ * ---------------------------------------------------------------------------
+ *
+ * The frame runs the QR decoder, and NOTHING else about the import happens
+ * there. It is handed pixels and answers with one short string. The migration
+ * link it finds is then parsed in the application's own origin.
+ *
+ * That split is deliberate, and the reasoning is the opposite of the obvious
+ * one. Moving the parser into the frame as well would not reduce what the frame
+ * can see: the decoded string IS the export, base64 and all, so the frame holds
+ * every secret either way the moment it decodes anything. What the split changes
+ * is where the THIRD-PARTY code sits. The decoder is a dependency; the parser is
+ * this repository's own, fuzzed and covered. So the dependency goes where a
+ * compromised release can reach nothing, and the first-party parser stays where
+ * it can be measured.
+ *
+ * `image` is typed `unknown` because this package is compiled without the DOM
+ * library, being shared with the server. It is an `ImageBitmap` or a `Blob`, and
+ * the frame narrows it before touching it, which it would have to do regardless:
+ * nothing arriving on the port is trusted, whatever a type here claims.
+ *
+ * TWO DEPARTURES from the render contract above, both deliberate:
+ *
+ *  1. The image is TRANSFERRED, where `SandboxRenderRequest.bytes` is copied.
+ *     The render request is copied because its buffer is a prop the host was
+ *     lent and must still own afterwards. Here the host mints the image for this
+ *     one request and never looks at it again, so transferring is free and
+ *     avoids moving megabytes per frame across a process boundary.
+ *  2. One frame answers MANY requests, where a render frame answers one. A
+ *     scanning session is a stream of camera frames, and standing a new
+ *     document up per frame would cost a handshake each time. `requestId` is
+ *     what keeps that honest: a reply that matches no outstanding request is a
+ *     frame that has gone wrong, and the host tears it down.
+ */
+export interface SandboxQrRequest {
+  readonly kind: 'qrScan';
+  /** Echoed back, so a late or invented reply can be told apart from an answer. */
+  readonly requestId: number;
+  /** An `ImageBitmap` or a `Blob`. See above for why this is not typed. */
+  readonly image: unknown;
+}
+
+/**
+ * Frame to host: a code was read.
+ *
+ * `text` is bounded and is checked by the frame to begin with an `otpauth:` or
+ * `otpauth-migration:` scheme, so the host is never handed an arbitrary string
+ * scraped off a poster. It is still DATA: the host parses it, validates it and
+ * never renders it as markup.
+ */
+export interface SandboxQrFoundMessage {
+  readonly kind: 'qrFound';
+  readonly requestId: number;
+  readonly text: string;
+}
+
+/** Frame to host: no code in this image. The ordinary answer while aiming. */
+export interface SandboxQrMissMessage {
+  readonly kind: 'qrMiss';
+  readonly requestId: number;
+}
+
+/**
+ * Everything the frame may say IN ANSWER TO A SCAN REQUEST.
+ *
+ * Disjoint from the render and transform replies, like those two are from each
+ * other. A frame answering a scan with a `rendered` message is a frame that has
+ * gone wrong, and the host tears it down rather than guessing.
+ */
+export type SandboxQrReply = SandboxQrFoundMessage | SandboxQrMissMessage | SandboxFailedMessage;
+
+/** The longest decoded string the frame will hand back. */
+export const MAX_SANDBOX_QR_TEXT_LENGTH = 8192;
+
+/** The largest image side the frame will decode, in pixels. */
+export const MAX_SANDBOX_QR_IMAGE_SIDE = 4096;
+
+/**
+ * The largest uploaded image the frame will decode, in bytes.
+ *
+ * This is the only bound standing between a decompression bomb and the tab: a
+ * 64000 x 64000 PNG is a few hundred kilobytes on the wire and about 16 GB
+ * decoded. The frame also refuses on the decoded dimensions, because a small
+ * file can still declare a huge canvas.
+ */
+export const MAX_SANDBOX_QR_IMAGE_BYTES = 12 * 1024 * 1024;

@@ -29,6 +29,9 @@ import {
   LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
   BACKUP_CODES_COUNT,
   DEFAULT_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  MAX_PASSWORD_LENGTH,
+  MAX_PASSWORD_CLASS_MINIMUM,
   MAX_TAGS_PER_ITEM,
   MAX_BULK_OPERATIONS,
   PASSWORD_HISTORY_MAX,
@@ -225,6 +228,24 @@ describe('App constants', () => {
 
   it('DEFAULT_PASSWORD_LENGTH is 20', () => {
     expect(DEFAULT_PASSWORD_LENGTH).toBe(20);
+  });
+
+  it('MIN_PASSWORD_LENGTH and MAX_PASSWORD_LENGTH are the bounds they replaced', () => {
+    // These were inline literals in four unlinked places. Naming them must not
+    // move them: a different value makes an already-stored length unsavable.
+    expect(MIN_PASSWORD_LENGTH).toBe(8);
+    expect(MAX_PASSWORD_LENGTH).toBe(128);
+    expect(DEFAULT_PASSWORD_LENGTH).toBeGreaterThanOrEqual(MIN_PASSWORD_LENGTH);
+    expect(DEFAULT_PASSWORD_LENGTH).toBeLessThanOrEqual(MAX_PASSWORD_LENGTH);
+  });
+
+  it('MAX_PASSWORD_CLASS_MINIMUM keeps the generator table small enough to build', () => {
+    expect(MAX_PASSWORD_CLASS_MINIMUM).toBe(5);
+    // The generator's counting table is (length + 1) x (minimum + 1)^4 states.
+    // Measured at 73 ms to build at this size; raising the constant is a
+    // deliberate act that has to move this number with it.
+    const states = (MAX_PASSWORD_LENGTH + 1) * (MAX_PASSWORD_CLASS_MINIMUM + 1) ** 4;
+    expect(states).toBe(167_184);
   });
 
   it('MAX_TAGS_PER_ITEM is 20', () => {
