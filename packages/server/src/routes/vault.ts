@@ -9,6 +9,7 @@ import {
   holdingLargeBodySlot,
   parseLargeJsonBody,
 } from '../middleware/largeBodyAdmission.js';
+import { sanitizeRequestBody } from '../middleware/sanitizeBody.js';
 import {
   listVaultItemsSchema,
   listTrashSchema,
@@ -67,12 +68,14 @@ router.post('/items/restore/:id', validateObjectId(), restoreItem);
 router.post('/items/bulk-delete', heavyOpLimiter, validate(bulkDeleteSchema, 'body'), bulkDelete);
 router.post('/items/bulk-move', heavyOpLimiter, validate(bulkMoveSchema, 'body'), bulkMove);
 // The limiter and the admission slot run BEFORE the 30 MB body is read, or they
-// bound nothing (see `middleware/largeBodyAdmission.ts`).
+// bound nothing (see `middleware/largeBodyAdmission.ts`). The sanitizer runs
+// straight AFTER the parser, because the app-level one ran before this body existed.
 router.post(
   '/items/bulk-reencrypt',
   passwordVerifyLimiter,
   holdLargeBodySlot,
   parseLargeJsonBody,
+  sanitizeRequestBody,
   validate(bulkReEncryptSchema, 'body'),
   holdingLargeBodySlot(bulkReEncrypt),
 );

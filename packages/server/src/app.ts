@@ -23,6 +23,7 @@ import {
 } from './config/sandboxCsp.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
+import { sanitizeRequestBody } from './middleware/sanitizeBody.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './config/swagger.js';
 import { warnIfSwaggerEnabledInProduction } from './utils/swaggerWarning.js';
@@ -144,7 +145,8 @@ app.use(
 // limit. The global parser skips those routes so the route-level parser can handle
 // them instead. Keep this set in sync with the route-level parser that owns each path
 // (`parseLargeJsonBody` in middleware/largeBodyAdmission.ts, mounted by routes/backup.ts
-// and routes/vault.ts behind their limiter and admission slot).
+// and routes/vault.ts behind their limiter and admission slot, and followed there by
+// `sanitizeRequestBody`, because the app-level sanitizer below runs before it).
 const CUSTOM_BODY_LIMIT_PATHS = new Set<string>([
   '/api/v1/backup/restore',
   '/api/v1/vault/items/bulk-reencrypt',
@@ -163,53 +165,13 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Cookie parsing
 app.use(cookieParser());
 
-// MongoDB injection prevention (custom middleware — express-mongo-sanitize is incompatible with Express 5)
-function sanitizeValue(val: unknown): unknown {
-  if (typeof val === 'string') return val;
-  if (val === null || val === undefined) return val;
-  if (Array.isArray(val)) return val.map(sanitizeValue);
-  if (typeof val === 'object') {
-    const obj = val as Record<string, unknown>;
-    const clean: Record<string, unknown> = {};
-    for (const key of Object.keys(obj)) {
-      // Strip MongoDB operator injection keys and prototype pollution vectors
-      if (
-        key.startsWith('$') ||
-        key === '__proto__' ||
-        key === 'constructor' ||
-        key === 'prototype'
-      )
-        continue;
-      clean[key] = sanitizeValue(obj[key]);
-    }
-    return clean;
-  }
-  return val;
-}
-app.use((_req: Request, _res: Response, next: NextFunction) => {
-  if (_req.body && typeof _req.body === 'object') {
-    _req.body = sanitizeValue(_req.body);
-  }
-  // Note: We only sanitize req.body because it is the only source of nested
-  // user-controlled objects.
-  //
-  // - Route params are always plain strings (no nested objects possible).
-  // - Query params CAN contain nested objects via bracket syntax in Express 4
-  //   (e.g. ?tags[$ne]=foo), but Express 5's default query parser ("simple")
-  //   does NOT parse bracket notation — it treats them as literal characters,
-  //   so operator injection via query strings is not possible.
-  // - Zod validation on all endpoints catches any unexpected shapes downstream
-  //   as a defense-in-depth measure.
-  // - COOKIES are the one other source, and they are handled elsewhere rather
-  //   than here: `cookieParser()` below JSON-decodes any `j:`-prefixed value, so
-  //   `req.cookies[x]` really can be an object or a number. Nothing reads one
-  //   except through `utils/cookies.ts` `readStringCookie`, which yields a value
-  //   only when it is a non-empty string, so no cookie ever reaches a query as an
-  //   operand. Narrow there, not here — see that file for why.
-  //
-  // Additionally, req.query and req.params are read-only getters in Express 5.
-  next();
-});
+// MongoDB operator injection and prototype-pollution prevention, over every body the
+// global parser above produced. This mount does NOT cover the routes in
+// `CUSTOM_BODY_LIMIT_PATHS`: their body is still unparsed here, so each of them
+// mounts the same middleware again straight after its own parser, and
+// `tests/route-table.test.ts` fails any route-level JSON parser that is not followed
+// by it. See `middleware/sanitizeBody.ts` for why only the body is filtered.
+app.use(sanitizeRequestBody);
 
 // HTTP Parameter Pollution protection
 app.use(
@@ -233,6 +195,11 @@ app.use(
     // busiest logger in the process, exactly what `utils/logger.ts` exists to
     // route through one place.
     logger: createModuleLogger('http'),
+    // Every credential and every piece of wrapped key material a request body can
+    // carry. This list is NOT maintained by hand-audit alone:
+    // `tests/request-logger-masking.test.ts` reads every schema the routes validate
+    // a body with and fails on any field that is neither listed here nor named, with
+    // a reason, as not secret. Adding a request field means deciding which it is.
     maskBodyKeys: [
       'password',
       'authHash',
@@ -244,12 +211,30 @@ app.use(
       'newAuthHash',
       'currentAuthHash',
       'newEncryptedVaultKey',
+      // The rotation wrapper a password change carries across: a vault key sealed
+      // under the new MEK, exactly as `newEncryptedVaultKey` is.
+      'newPendingEncryptedVaultKey',
       'encryptedBWK',
+      'newEncryptedBWK',
+      // The vault key sealed under the backup key, which is what a cross-account
+      // restore unwraps, in both the setup and the backup-password-change bodies.
+      'bwkEncryptedVaultKey',
+      'newBwkEncryptedVaultKey',
       // The wrapped document key. It crosses the wire TWICE — at upload init and
       // again at completion, which is what makes a stale-vault-key 409
-      // recoverable without re-sending the file — so it is the one new secret
-      // this feature puts in a request body, and it is logged nowhere.
+      // recoverable without re-sending the file — and it is logged nowhere.
       'encryptedDek',
+      // The password-reset / email-verification / account-unlock JWT, the signed
+      // 2FA challenge, and a TOTP or backup code: each completes an
+      // authentication step on its own.
+      'token',
+      'tempToken',
+      'code',
+      // A restore's entire backup file, as ONE JSON string. It carries
+      // `encryptedVaultKey`, `encryptedBWK` and `bwkEncryptedVaultKey` inside it,
+      // near the start, where key-by-key masking cannot reach: the string is masked
+      // whole.
+      'data',
     ],
     skip: (req) => {
       // Skip request logging for health probes. The logger's LoggableRequest

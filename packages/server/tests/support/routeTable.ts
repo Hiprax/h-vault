@@ -57,6 +57,7 @@ import {
   requirePartContentLength,
 } from '../../src/middleware/documentPartBody.js';
 import { holdLargeBodySlot, parseLargeJsonBody } from '../../src/middleware/largeBodyAdmission.js';
+import { sanitizeRequestBody } from '../../src/middleware/sanitizeBody.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
 
@@ -433,9 +434,15 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['passwordVerifyLimiter'],
-    // The limiter and the slot BEFORE the 30 MB parser, and the handler wrapped so
-    // the slot outlives an aborted response.
-    chain: ['passwordVerifyLimiter', 'holdLargeBodySlot', 'parseLargeJsonBody', 'largeBodyHandler'],
+    // The limiter and the slot BEFORE the 30 MB parser, the sanitizer straight
+    // after it, and the handler wrapped so the slot outlives an aborted response.
+    chain: [
+      'passwordVerifyLimiter',
+      'holdLargeBodySlot',
+      'parseLargeJsonBody',
+      'sanitizeRequestBody',
+      'largeBodyHandler',
+    ],
     owned: null,
     when: 'always',
     note: 'Takes owned ids in the BODY; covered by phase7-cross-user-edge-cases.test.ts. Admission is pinned by large-body-admission.test.ts.',
@@ -729,7 +736,13 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['passwordVerifyLimiter'],
-    chain: ['passwordVerifyLimiter', 'holdLargeBodySlot', 'parseLargeJsonBody', 'largeBodyHandler'],
+    chain: [
+      'passwordVerifyLimiter',
+      'holdLargeBodySlot',
+      'parseLargeJsonBody',
+      'sanitizeRequestBody',
+      'largeBodyHandler',
+    ],
     owned: null,
     when: 'always',
     note: 'Admission (limiter, slot, then the 30 MB parser) is pinned by large-body-admission.test.ts.',
@@ -985,6 +998,12 @@ interface ObservedRoute {
   readonly limiters: readonly string[];
   /** Every limiter and admission middleware on the route, in stack order. */
   readonly chain: readonly string[];
+  /**
+   * EVERY handler on the route, in order, named as in `chain` where it can be and
+   * `<other>` where it cannot (a validator, a controller). `chain` drops the unnamed
+   * ones, so only this can say what sits directly after a given middleware.
+   */
+  readonly stack: readonly string[];
   /** The router prefix this route came from, or `null` when `app.ts` mounts it directly. */
   readonly mount: string | null;
 }
@@ -1060,9 +1079,15 @@ const limitersOf = (route: NonNullable<RouterLayer['route']>): string[] =>
     .map((entry) => LIMITER_NAMES.get(entry.handle))
     .filter((name): name is string => name !== undefined);
 
+/** The chain name of `sanitizeRequestBody`. */
+export const BODY_SANITIZER = 'sanitizeRequestBody';
+
 /**
  * The body-admission middlewares, by FUNCTION IDENTITY, exactly as the limiters
  * are named: each is a module-level export, so the one mounted is the one named.
+ * `sanitizeRequestBody` is not admission, but it belongs in the chain for the same
+ * reason the parsers do: WHERE it sits is the control (straight after a route's own
+ * parser), and a chain that could not show it could not pin that.
  */
 export const ADMISSION_NAMES = new Map<unknown, string>([
   [requirePartContentLength, 'requirePartContentLength'],
@@ -1070,6 +1095,7 @@ export const ADMISSION_NAMES = new Map<unknown, string>([
   [parsePartUploadBody, 'parsePartUploadBody'],
   [holdLargeBodySlot, 'holdLargeBodySlot'],
   [parseLargeJsonBody, 'parseLargeJsonBody'],
+  [sanitizeRequestBody, BODY_SANITIZER],
 ]);
 
 /** The route-level parsers named above. */
@@ -1099,6 +1125,18 @@ export const BODY_PARSER_FUNCTION_NAMES: ReadonlySet<string> = new Set([
   'urlencodedParser',
 ]);
 
+/**
+ * The route-level parsers whose output is a parsed OBJECT, and so must be followed
+ * immediately by {@link BODY_SANITIZER}: the app-level sanitizer runs before any
+ * route-level parser, and sees nothing of what one produces.
+ *
+ * `parsePartUploadBody` is deliberately absent. It is a raw parser and its body is
+ * a `Buffer` of ciphertext: there are no keys in it to inject, and walking a
+ * `Buffer` as an object would replace the ciphertext with a map of its indices. An
+ * unnamed `jsonParser`/`urlencodedParser` is covered by {@link isStructuredBodyParser}.
+ */
+export const STRUCTURED_BODY_PARSERS: ReadonlySet<string> = new Set(['parseLargeJsonBody']);
+
 /** The prefix an un-exported body parser is reported under. */
 export const UNNAMED_PARSER_PREFIX = 'unnamedBodyParser:';
 
@@ -1119,10 +1157,22 @@ function chainNameOf(handle: unknown): string | undefined {
 export const isBodyParser = (name: string): boolean =>
   NAMED_BODY_PARSERS.has(name) || name.startsWith(UNNAMED_PARSER_PREFIX);
 
+/** Whether a chain name is a parser whose output must be sanitized before anything reads it. */
+export const isStructuredBodyParser = (name: string): boolean =>
+  STRUCTURED_BODY_PARSERS.has(name) ||
+  name === `${UNNAMED_PARSER_PREFIX}jsonParser` ||
+  name === `${UNNAMED_PARSER_PREFIX}urlencodedParser`;
+
 const chainOf = (route: NonNullable<RouterLayer['route']>): string[] =>
   (route.stack ?? [])
     .map((entry) => chainNameOf(entry.handle))
     .filter((name): name is string => name !== undefined);
+
+/** The name every unclassified handler is reported under in {@link ObservedRoute.stack}. */
+export const OTHER_HANDLER = '<other>';
+
+const stackOf = (route: NonNullable<RouterLayer['route']>): string[] =>
+  (route.stack ?? []).map((entry) => chainNameOf(entry.handle) ?? OTHER_HANDLER);
 
 /**
  * Walks the real Express app and reports every route it would answer, with the
@@ -1150,6 +1200,7 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
           path: String(layer.route.path),
           limiters: limitersOf(layer.route),
           chain: chainOf(layer.route),
+          stack: stackOf(layer.route),
           mount: null,
         });
       }
@@ -1184,6 +1235,7 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
             path: `${mount}${suffix}`,
             limiters: limitersOf(child.route),
             chain: chainOf(child.route),
+            stack: stackOf(child.route),
             mount,
           });
         }

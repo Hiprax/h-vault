@@ -31,12 +31,14 @@ import { describe, it, expect } from 'vitest';
 import app from '../src/app.js';
 import * as rateLimiters from '../src/middleware/rateLimiter.js';
 import {
+  BODY_SANITIZER,
   LARGE_BODY_HANDLER,
   LIMITER_NAMES,
   ROUTE_TABLE,
   SLOT_HOLDERS,
   UNNAMED_PARSER_PREFIX,
   isBodyParser,
+  isStructuredBodyParser,
   ROUTER_MOUNTS,
   collectAppRoutes,
   isMountedUnderTest,
@@ -174,6 +176,37 @@ describe('the route table matches the real Express router stack', () => {
     expect(violations).toEqual([]);
     // Vacuity guard: the rule examined the three routes that carry a parser.
     expect(observed.routes.filter((route) => route.chain.some(isBodyParser))).toHaveLength(3);
+  });
+
+  it('sanitizes the body straight after every route-level parser that produces an object', () => {
+    // THE RULE, over the real stack. The app-level sanitizer runs before any
+    // route-level parser, so a route that parses its own body is filtered only by a
+    // sanitizer mounted after that parser. Both 30 MB routes once lacked it and
+    // reached their controllers with `$`-prefixed and `__proto__` keys intact.
+    // IMMEDIATELY after, not merely later: anything between the two reads an
+    // unfiltered body.
+    // Read on the RAW stack, where a validator or any other unnamed handler still
+    // occupies a position: on `chain`, which drops them, a validator slipped in
+    // between would look adjacent.
+    const violations: string[] = [];
+    for (const route of observed.routes) {
+      route.stack.forEach((name, index) => {
+        if (isStructuredBodyParser(name) && route.stack[index + 1] !== BODY_SANITIZER) {
+          violations.push(`${rowKey(route)}: ${name} is not followed by ${BODY_SANITIZER}`);
+        }
+        if (name === BODY_SANITIZER && !isStructuredBodyParser(route.stack[index - 1] ?? '')) {
+          violations.push(`${rowKey(route)}: ${BODY_SANITIZER} does not follow a parser`);
+        }
+      });
+    }
+    expect(violations).toEqual([]);
+    // Vacuity guard: the two routes that parse a JSON body of their own.
+    expect(
+      observed.routes
+        .filter((route) => route.chain.some(isStructuredBodyParser))
+        .map(rowKey)
+        .sort(),
+    ).toEqual(['POST /api/v1/backup/restore', 'POST /api/v1/vault/items/bulk-reencrypt']);
   });
 
   it('mounts no body parser at router level', () => {

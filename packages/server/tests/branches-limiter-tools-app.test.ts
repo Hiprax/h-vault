@@ -612,7 +612,7 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
 
   // ── app.ts: MongoDB operator stripping walks ARRAYS, not just objects ──
 
-  describe('app.ts — request-body sanitization', () => {
+  describe('request-body sanitization (the app-level sanitizeRequestBody mount)', () => {
     it('passes an explicit null through untouched, so a null-valued field keeps its meaning', async () => {
       // `folderId: null` is the API's "move this item out of every folder"
       // signal. The sanitizer must return null verbatim: coerce it (e.g. into

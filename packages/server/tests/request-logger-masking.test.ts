@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import express from 'express';
+import * as shared from '@hvault/shared';
 import request from 'supertest';
 import TransportStream from 'winston-transport';
 import winston from 'winston';
@@ -23,9 +24,18 @@ import { authHeader, createTestUser, getCsrf, sampleVaultItem } from './helpers.
 // This version instead:
 //   1. Captures the ACTUAL `maskBodyKeys` app.ts passes at RUNTIME (by wrapping
 //      `createRequestLogger` so the array can't drift from a copied literal).
-//   2. Drives the REAL @hiprax/logger masking engine with that exact list and a
-//      capturing winston transport, and asserts each configured secret value is
-//      redacted while benign fields survive.
+//   2. Derives what that list MUST contain from the request schemas the routes
+//      actually mount (every `validate(schema, 'body')`, captured the same way):
+//      every key those schemas accept is either masked or named, with a reason, in
+//      a ledger of keys that are not secret. A field added to any request schema
+//      tomorrow is in neither, and fails here until someone decides which it is.
+//      The list is checked in both directions, so a masked key that no longer
+//      exists anywhere and a ledger entry that went stale both fail too. Then it
+//      drives the REAL @hiprax/logger masking engine over a body BUILT FROM those
+//      schemas, never from the list, so a key missing from the list is a secret
+//      value visible in the captured log line. (The version before this planted
+//      one value per CONFIGURED key, which is why it could never notice a key that
+//      was not configured: six live secret fields went unmasked under it.)
 //   3. Plants those same values in REAL requests and requires that none of them
 //      reaches an audit row.
 //   4. Captures the `createErrorMiddleware` options the same way and drives the
@@ -40,8 +50,25 @@ const { captured } = vi.hoisted(() => ({
   captured: {
     maskBodyKeys: [] as string[],
     errorOptions: undefined as { exposeServerErrors?: boolean } | undefined,
+    bodySchemas: new Set<unknown>(),
   },
 }));
+
+// Record every schema a route validates its BODY with, at the moment the route is
+// built (importing app.ts builds them all), and call straight through, so the app
+// under test is unchanged. This is the set of request bodies the server accepts,
+// read from the routes themselves rather than from a list kept beside them.
+vi.mock('../src/middleware/validate.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/middleware/validate.js')>();
+  return {
+    ...actual,
+    validate: (...args: Parameters<typeof actual.validate>) => {
+      const [schema, location = 'body'] = args;
+      if (location === 'body') captured.bodySchemas.add(schema);
+      return actual.validate(...args);
+    },
+  };
+});
 
 vi.mock('@hiprax/logger', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@hiprax/logger')>();
@@ -101,6 +128,9 @@ function runRequestLogger(body: unknown, maskBodyKeys: string[]): Record<string,
     // under info.http so the captured log record carries it — otherwise the
     // middleware logs only the one-line summary string.
     includeHttpContext: true,
+    // Never truncate: a secret past the default 3,000-character cap would be absent
+    // from the line for the wrong reason, and the assertions below would pass on it.
+    maxBodyLength: Number.POSITIVE_INFINITY,
     maskBodyKeys,
   });
 
@@ -123,6 +153,317 @@ function runRequestLogger(body: unknown, maskBodyKeys: string[]): Record<string,
   return capture.records;
 }
 
+// ---------------------------------------------------------------------------
+// The classification ledger
+// ---------------------------------------------------------------------------
+
+const PUBLIC_PARAMETER =
+  'an IV, auth tag, salt, nonce or KDF parameter: public by construction and useless without the key';
+const CIPHERTEXT =
+  'bulk ciphertext under the vault key or a document key; the server stores it, and it is not key material';
+const METADATA = 'a plain setting, identifier, flag, count or structural field';
+const PERSONAL = 'personal data the server already stores in the clear, not a credential';
+
+/**
+ * Every request-body key that is deliberately NOT masked, and why.
+ *
+ * The rule the entries follow: a CREDENTIAL (a password, an auth hash, a one-time
+ * code, a bearer token) and WRAPPED KEY MATERIAL (a vault key, backup key or document
+ * key sealed under another key) are masked; bulk ciphertext, the public parameters
+ * that travel beside it, settings and identifiers are not. A new schema field goes
+ * on this list only with a reason in that vocabulary; if it does not fit, it is a
+ * secret and belongs in `maskBodyKeys` in app.ts.
+ */
+const LOGGABLE_BODY_KEYS = new Map<string, string>([
+  ['autoLockTimeout', METADATA],
+  ['backupEmails', PERSONAL],
+  ['bwkIv', PUBLIC_PARAMETER],
+  ['bwkSalt', PUBLIC_PARAMETER],
+  ['bwkTag', PUBLIC_PARAMETER],
+  ['bwkVaultKeyIv', PUBLIC_PARAMETER],
+  ['bwkVaultKeyTag', PUBLIC_PARAMETER],
+  ['changedAt', METADATA],
+  ['clipboardClearTimeout', METADATA],
+  ['color', METADATA],
+  ['conflictStrategy', METADATA],
+  ['dataIv', PUBLIC_PARAMETER],
+  ['dataTag', PUBLIC_PARAMETER],
+  ['declaredChunkCount', METADATA],
+  ['declaredPlaintextBytes', METADATA],
+  ['defaultPasswordLength', METADATA],
+  ['defaultPasswordOptions', METADATA],
+  ['dekIv', PUBLIC_PARAMETER],
+  ['dekTag', PUBLIC_PARAMETER],
+  ['deviceInfo', METADATA],
+  ['discardPendingVaultKey', METADATA],
+  ['documents', METADATA],
+  ['email', PERSONAL],
+  ['enabled', METADATA],
+  ['encryptedData', CIPHERTEXT],
+  ['encryptedMeta', CIPHERTEXT],
+  ['encryptedName', CIPHERTEXT],
+  // A PREVIOUS password of an item, sealed under the vault key exactly as
+  // `encryptedData` is: the same class of bulk ciphertext, not a wrapped key.
+  ['encryptedPassword', CIPHERTEXT],
+  ['encryptionVersion', PUBLIC_PARAMETER],
+  ['excludeAmbiguous', METADATA],
+  ['favorite', METADATA],
+  ['fingerprint', PERSONAL],
+  ['folderId', METADATA],
+  ['folders', METADATA],
+  ['format', METADATA],
+  // The first five hex digits of a SHA-1: the k-anonymity range the server forwards
+  // to the breach service, public by design.
+  ['hashPrefix', PUBLIC_PARAMETER],
+  ['hashPrefixes', PUBLIC_PARAMETER],
+  ['icon', METADATA],
+  ['id', METADATA],
+  // An opaque retry token scoped to one account's rotation: replaying it can only
+  // make that account's own retry a no-op, so it authenticates nothing.
+  ['idempotencyKey', METADATA],
+  ['ids', METADATA],
+  ['inserts', METADATA],
+  ['itemType', METADATA],
+  ['items', METADATA],
+  ['iv', PUBLIC_PARAMETER],
+  ['kdfAlgorithm', PUBLIC_PARAMETER],
+  ['kdfIterations', PUBLIC_PARAMETER],
+  ['language', METADATA],
+  ['length', METADATA],
+  ['lockOnHidden', METADATA],
+  ['lockOnHiddenDelay', METADATA],
+  ['lowercase', METADATA],
+  ['metaIv', PUBLIC_PARAMETER],
+  ['metaTag', PUBLIC_PARAMETER],
+  ['minLowercase', METADATA],
+  ['minNumbers', METADATA],
+  ['minSymbols', METADATA],
+  ['minUppercase', METADATA],
+  ['nameIv', PUBLIC_PARAMETER],
+  ['nameTag', PUBLIC_PARAMETER],
+  ['newBwkIv', PUBLIC_PARAMETER],
+  ['newBwkSalt', PUBLIC_PARAMETER],
+  ['newBwkTag', PUBLIC_PARAMETER],
+  ['newBwkVaultKeyIv', PUBLIC_PARAMETER],
+  ['newBwkVaultKeyTag', PUBLIC_PARAMETER],
+  ['newPendingVaultKeyIv', PUBLIC_PARAMETER],
+  ['newPendingVaultKeyTag', PUBLIC_PARAMETER],
+  ['newVaultKeyIv', PUBLIC_PARAMETER],
+  ['newVaultKeyTag', PUBLIC_PARAMETER],
+  ['noncePrefix', PUBLIC_PARAMETER],
+  ['numbers', METADATA],
+  ['operations', METADATA],
+  ['parentId', METADATA],
+  ['passwordHistory', METADATA],
+  ['portableFormat', METADATA],
+  ['rememberMe', METADATA],
+  ['scheduleHour', METADATA],
+  // An HMAC of the item NAME, stored server-side for duplicate detection; it reveals
+  // nothing the stored row does not.
+  ['searchHash', METADATA],
+  ['sortOrder', METADATA],
+  ['streamSalt', PUBLIC_PARAMETER],
+  ['symbols', METADATA],
+  ['tag', PUBLIC_PARAMETER],
+  ['tags', METADATA],
+  ['theme', METADATA],
+  ['updates', METADATA],
+  ['uppercase', METADATA],
+  ['userAgent', PERSONAL],
+  ['vaultKeyIv', PUBLIC_PARAMETER],
+  ['vaultKeyTag', PUBLIC_PARAMETER],
+  ['vaultKeyVersion', METADATA],
+]);
+
+/**
+ * Masked keys that no request schema accepts today, kept on purpose. Each is a
+ * value that must never appear in a log if a client ever sends it, which is exactly
+ * the case a schema cannot vouch for. If one of these becomes a real schema field,
+ * the reverse check below fails and asks for it to move out of this list: it is
+ * then an ordinary, schema-backed secret.
+ */
+const DEFENSIVE_MASK_KEYS = new Map<string, string>([
+  ['masterPassword', 'never leaves the device; a client bug that sent it must still not be logged'],
+  ['twoFactorSecret', 'the stored TOTP seed; no endpoint accepts it, and none may leak it'],
+  ['pendingTwoFactorSecret', 'the TOTP seed of an unfinished enrolment; same reason'],
+  ['backupCodes', 'the stored 2FA recovery codes; same reason'],
+]);
+
+/**
+ * The secrets named one by one, independently of the ledger: moving one of these
+ * onto `LOGGABLE_BODY_KEYS` to quiet the classification check still fails here.
+ */
+const KNOWN_SECRET_BODY_KEYS = [
+  'password',
+  'authHash',
+  'currentAuthHash',
+  'newAuthHash',
+  'encryptedVaultKey',
+  'newEncryptedVaultKey',
+  // The wrapper a crashed rotation left behind, carried across a password change:
+  // a vault key sealed under the MEK, exactly as `newEncryptedVaultKey` is.
+  'newPendingEncryptedVaultKey',
+  'encryptedBWK',
+  'newEncryptedBWK',
+  'bwkEncryptedVaultKey',
+  'newBwkEncryptedVaultKey',
+  // The wrapped document key. It crosses the wire twice per upload, at init and
+  // again at completion, which is what makes a stale-vault-key 409 recoverable
+  // without re-sending the file.
+  'encryptedDek',
+  // The password-reset, email-verification and account-unlock JWT.
+  'token',
+  // The signed 2FA challenge: presented with a code, it completes a sign-in.
+  'tempToken',
+  // A TOTP or 2FA backup code.
+  'code',
+  // A restore's whole backup file as one JSON string, which carries
+  // `encryptedVaultKey`, `encryptedBWK` and `bwkEncryptedVaultKey` inside it. Key
+  // masking cannot reach into a string, so the string itself is masked.
+  'data',
+] as const;
+
+// ---------------------------------------------------------------------------
+// Reading the request schemas
+// ---------------------------------------------------------------------------
+
+/** The slice of a Zod 4 schema definition this walk reads. */
+interface ZodDef {
+  type: string;
+  shape?: Record<string, unknown>;
+  catchall?: unknown;
+  element?: unknown;
+  innerType?: unknown;
+  in?: unknown;
+  out?: unknown;
+  options?: unknown[];
+  left?: unknown;
+  right?: unknown;
+  getter?: () => unknown;
+  items?: unknown[];
+  rest?: unknown;
+  values?: unknown[];
+}
+
+const defOf = (schema: unknown): ZodDef => (schema as { _zod: { def: ZodDef } })._zod.def;
+
+/** Leaf kinds: they carry a value and no keys. */
+const LEAF_TYPES = new Set([
+  'string',
+  'number',
+  'boolean',
+  'bigint',
+  'date',
+  'enum',
+  'literal',
+  'null',
+  'undefined',
+  'nan',
+  'transform',
+]);
+
+/** Wrappers whose keys are exactly their inner schema's. */
+const WRAPPER_TYPES = new Set([
+  'optional',
+  'nullable',
+  'default',
+  'prefault',
+  'readonly',
+  'nonoptional',
+  'catch',
+]);
+
+/**
+ * The schemas directly beneath one, in the order a sample should prefer them, or
+ * `null` for a leaf. An unknown kind THROWS: a record, a map or an `unknown` hides
+ * keys this walk cannot name, and a wrapper Zod adds tomorrow must not quietly
+ * hide a field from the classification.
+ */
+function childrenOf(schema: unknown, where: string): unknown[] | null {
+  const def = defOf(schema);
+  if (LEAF_TYPES.has(def.type)) return null;
+  if (WRAPPER_TYPES.has(def.type)) return [def.innerType];
+  switch (def.type) {
+    case 'pipe':
+      return [def.in, def.out];
+    case 'union':
+      return def.options ?? [];
+    case 'intersection':
+      return [def.left, def.right];
+    case 'lazy':
+      return [def.getter!()];
+    case 'tuple':
+      return [...(def.items ?? []), ...(def.rest === undefined ? [] : [def.rest])];
+    case 'array':
+      return [def.element];
+    default:
+      throw new Error(`cannot enumerate the keys of a "${def.type}" schema at ${where}`);
+  }
+}
+
+/** Every object key a schema accepts, at any depth, with the paths it appears at. */
+function collectBodyKeys(schema: unknown, where: string, into: Map<string, string[]>): void {
+  const def = defOf(schema);
+  if (def.type === 'object') {
+    if (def.catchall !== undefined && defOf(def.catchall).type !== 'never') {
+      throw new Error(`${where} accepts arbitrary keys, which no ledger can classify`);
+    }
+    for (const [key, child] of Object.entries(def.shape ?? {})) {
+      const path = `${where}.${key}`;
+      into.set(key, [...(into.get(key) ?? []), path]);
+      collectBodyKeys(child, path, into);
+    }
+    return;
+  }
+  for (const child of childrenOf(schema, where) ?? []) collectBodyKeys(child, where, into);
+}
+
+/**
+ * A body shaped like one the schema accepts, with a UNIQUE sentinel string at every
+ * string leaf, and the path of keys that leads to each sentinel. Validity is beside
+ * the point (the logger never validates); what matters is that every key the schema
+ * names is present, at the depth a real request puts it.
+ */
+function sampleBody(
+  schema: unknown,
+  path: readonly string[],
+  sentinels: Map<string, readonly string[]>,
+): unknown {
+  const def = defOf(schema);
+  if (def.type === 'object') {
+    return Object.fromEntries(
+      Object.entries(def.shape ?? {}).map(([key, child]) => [
+        key,
+        sampleBody(child, [...path, key], sentinels),
+      ]),
+    );
+  }
+  if (def.type === 'string') {
+    const sentinel = `SENTINEL-${sentinels.size}-${path.join('.')}`;
+    sentinels.set(sentinel, path);
+    return sentinel;
+  }
+  if (def.type === 'array') return [sampleBody(def.element, path, sentinels)];
+  const children = childrenOf(schema, path.join('.'));
+  if (children === null) return def.values?.[0] ?? 1;
+  // A wrapper, a pipe (its input side), a union (its first option) and so on.
+  return sampleBody(children[0], path, sentinels);
+}
+
+/** The export name of each captured schema, so a failure names the schema it is about. */
+const sharedExportNames = new Map<unknown, string>(
+  Object.entries(shared).map(([name, value]) => [value, name]),
+);
+
+/** Every key any captured request-body schema accepts, with the paths it appears at. */
+function requestBodyKeys(): Map<string, string[]> {
+  const keys = new Map<string, string[]>();
+  for (const schema of captured.bodySchemas) {
+    collectBodyKeys(schema, sharedExportNames.get(schema) ?? '<unexported schema>', keys);
+  }
+  return keys;
+}
+
 describe('Request Logger Sensitive Field Masking', () => {
   beforeAll(() => {
     // Importing app.ts (statically, at the top of this file) evaluates its
@@ -135,56 +476,118 @@ describe('Request Logger Sensitive Field Masking', () => {
     expect(captured.errorOptions).toBeDefined();
   });
 
-  it('configures the app to mask all documented sensitive fields', () => {
-    expect(captured.maskBodyKeys.length).toBeGreaterThanOrEqual(12);
-    for (const expected of [
-      'password',
-      'authHash',
-      'masterPassword',
-      'encryptedVaultKey',
-      'twoFactorSecret',
-      'backupCodes',
-      'pendingTwoFactorSecret',
-      'newAuthHash',
-      'currentAuthHash',
-      'newEncryptedVaultKey',
-      'encryptedBWK',
-      // The wrapped document key. It crosses the wire twice per upload — at init
-      // and again at completion, which is what makes a stale-vault-key 409
-      // recoverable without re-sending the file — so it is in more request bodies
-      // than any other ciphertext field this feature introduces.
-      'encryptedDek',
+  it('reads the request-body schemas from the routes, and every one is a shared export', () => {
+    // Vacuity guard for everything below: the capture saw the routes being built,
+    // including the ones this phase exists for.
+    for (const schema of [
+      shared.loginSchema,
+      shared.login2faSchema,
+      shared.restoreBackupSchema,
+      shared.bulkReEncryptSchema,
+      shared.backupChangePasswordSchema,
+      shared.changePasswordSchema,
     ]) {
-      expect(captured.maskBodyKeys).toContain(expected);
+      expect(captured.bodySchemas.has(schema)).toBe(true);
+    }
+    // A body schema defined inside the server would escape an audit that reads the
+    // shared package, and would name no export in the messages below.
+    const unexported = [...captured.bodySchemas].filter((schema) => !sharedExportNames.has(schema));
+    expect(unexported).toHaveLength(0);
+    expect(captured.bodySchemas.size).toBeGreaterThanOrEqual(30);
+  });
+
+  it('masks every key a request schema accepts unless the ledger says why it is not secret', () => {
+    const masked = new Set(captured.maskBodyKeys);
+    const unclassified = [...requestBodyKeys()]
+      .filter(([key]) => !masked.has(key) && !LOGGABLE_BODY_KEYS.has(key))
+      .map(([key, paths]) => `${key} (${paths.slice(0, 3).join(', ')})`);
+
+    expect(
+      unclassified,
+      'each of these request fields must be added to maskBodyKeys in app.ts, or to ' +
+        'LOGGABLE_BODY_KEYS here with the reason it is not a secret',
+    ).toEqual([]);
+  });
+
+  it('holds the mask list and the ledger to real fields, in the other direction', () => {
+    const bodyKeys = requestBodyKeys();
+    const masked = new Set(captured.maskBodyKeys);
+
+    // A masked name no schema accepts is dead configuration unless it is a
+    // deliberate defensive entry…
+    expect(
+      captured.maskBodyKeys.filter((key) => !bodyKeys.has(key) && !DEFENSIVE_MASK_KEYS.has(key)),
+      'masked keys no request schema accepts',
+    ).toEqual([]);
+    // …a defensive entry that a schema now accepts is an ordinary secret, and a
+    // defensive entry that is not masked protects nothing…
+    expect([...DEFENSIVE_MASK_KEYS.keys()].filter((key) => bodyKeys.has(key))).toEqual([]);
+    expect([...DEFENSIVE_MASK_KEYS.keys()].filter((key) => !masked.has(key))).toEqual([]);
+    // …a ledger entry naming a field that no longer exists is stale…
+    expect(
+      [...LOGGABLE_BODY_KEYS.keys()].filter((key) => !bodyKeys.has(key)),
+      'LOGGABLE_BODY_KEYS entries no request schema accepts',
+    ).toEqual([]);
+    // …and a key on both sides is a contradiction the classification cannot resolve.
+    expect([...LOGGABLE_BODY_KEYS.keys()].filter((key) => masked.has(key))).toEqual([]);
+    // Every ledger entry carries a reason.
+    for (const [key, reason] of LOGGABLE_BODY_KEYS) expect(reason, key).not.toBe('');
+  });
+
+  it('masks each named secret, independently of the ledger', () => {
+    const bodyKeys = requestBodyKeys();
+    for (const key of KNOWN_SECRET_BODY_KEYS) {
+      expect(captured.maskBodyKeys, `${key} must be masked`).toContain(key);
+      // Named because a live schema accepts it, not from memory.
+      expect(bodyKeys.has(key), `${key} is a real request field`).toBe(true);
+    }
+    for (const key of DEFENSIVE_MASK_KEYS.keys()) {
+      expect(captured.maskBodyKeys, `${key} must be masked`).toContain(key);
     }
   });
 
-  it('redacts every configured secret value in the logged body while keeping benign fields', () => {
-    const maskBodyKeys = captured.maskBodyKeys;
-    expect(maskBodyKeys.length).toBeGreaterThanOrEqual(12);
+  it('redacts every secret in a body built from each request schema, and nothing else', () => {
+    // The body is generated from the SCHEMA and the expectation from the LEDGER;
+    // the mask list is only the thing under test. A secret key missing from it is
+    // a sentinel that survives into the captured log line.
+    let checkedSecrets = 0;
+    let checkedLoggable = 0;
+    for (const schema of captured.bodySchemas) {
+      const name = sharedExportNames.get(schema)!;
+      const sentinels = new Map<string, readonly string[]>();
+      const body = sampleBody(schema, [], sentinels);
 
-    // Give each configured key a UNIQUE plaintext value plus one benign field.
-    const body: Record<string, string> = { benignField: 'KEEP_THIS_PLAINTEXT' };
-    const secretValues: Record<string, string> = {};
-    for (const key of maskBodyKeys) {
-      const value = `SECRET_${key}_PLAINTEXT`;
-      body[key] = value;
-      secretValues[key] = value;
+      const records = runRequestLogger(body, captured.maskBodyKeys);
+      expect(records, name).toHaveLength(1);
+      const serialized = JSON.stringify(records[0]);
+
+      for (const [sentinel, path] of sentinels) {
+        const secret = path.some((key) => !LOGGABLE_BODY_KEYS.has(key));
+        if (secret) {
+          checkedSecrets += 1;
+          expect(serialized, `${name}.${path.join('.')} must be redacted`).not.toContain(sentinel);
+        } else {
+          checkedLoggable += 1;
+          expect(serialized, `${name}.${path.join('.')} must be logged`).toContain(sentinel);
+        }
+      }
     }
-
-    const records = runRequestLogger(body, maskBodyKeys);
-    expect(records.length).toBe(1);
-    const serialized = JSON.stringify(records[0]);
-
-    // The masking engine redacted the body it captured…
-    expect(serialized).toContain('[REDACTED]');
-    // …and NOT ONE configured secret's plaintext survived. Dropping a key from
-    // the app's maskBodyKeys would let that key's plaintext appear here.
-    for (const key of maskBodyKeys) {
-      expect(serialized).not.toContain(secretValues[key]);
+    // The defensive names no schema carries go through the same engine, so a list
+    // entry that the logger silently failed to honour would show here too.
+    const defensiveBody = Object.fromEntries(
+      [...DEFENSIVE_MASK_KEYS.keys()].map((key) => [key, `DEFENSIVE-SENTINEL-${key}`]),
+    );
+    const defensiveLine = JSON.stringify(runRequestLogger(defensiveBody, captured.maskBodyKeys));
+    for (const key of DEFENSIVE_MASK_KEYS.keys()) {
+      checkedSecrets += 1;
+      expect(defensiveLine, `${key} must be redacted`).not.toContain(`DEFENSIVE-SENTINEL-${key}`);
     }
-    // Non-secret fields are logged verbatim (masking is targeted, not blanket).
-    expect(serialized).toContain('KEEP_THIS_PLAINTEXT');
+    expect(defensiveLine).toContain('[REDACTED]');
+
+    // Both halves did real work: secrets were planted and hidden, and ordinary
+    // fields were planted and shown, so masking is targeted, not blanket.
+    expect(checkedSecrets).toBeGreaterThanOrEqual(KNOWN_SECRET_BODY_KEYS.length);
+    expect(checkedLoggable).toBeGreaterThan(checkedSecrets);
   });
 
   it('masks a key case-insensitively (engine contract relied on by the config)', () => {

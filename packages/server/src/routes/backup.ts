@@ -11,6 +11,7 @@ import {
   holdingLargeBodySlot,
   parseLargeJsonBody,
 } from '../middleware/largeBodyAdmission.js';
+import { sanitizeRequestBody } from '../middleware/sanitizeBody.js';
 import {
   backupSetupSchema,
   backupSettingsSchema,
@@ -60,12 +61,15 @@ router.put(
 );
 // Restore accepts a 30 MB body, so the ORDER in front of its parser is the control
 // (see `middleware/largeBodyAdmission.ts`): the limiter and the admission slot run
-// BEFORE the body is read, or they bound nothing.
+// BEFORE the body is read, or they bound nothing. The sanitizer runs straight AFTER
+// the parser: the global parser in `app.ts` skips this path, so the app-level
+// sanitizer ran before this body existed and filtered nothing.
 router.post(
   '/restore',
   passwordVerifyLimiter,
   holdLargeBodySlot,
   parseLargeJsonBody,
+  sanitizeRequestBody,
   validate(restoreBackupSchema, 'body'),
   holdingLargeBodySlot(restoreBackup),
 );
