@@ -218,8 +218,16 @@ export default function BackupSettingsPage() {
       // Encrypt BWK with BEK
       const encryptedBWK = await cryptoService.encryptBWK(bwk, bek);
 
-      // Encrypt vault key with BWK for cross-account restore support
-      const vaultKey = useAuthStore.getState().vaultKey;
+      // Encrypt vault key with BWK for cross-account restore support.
+      //
+      // ONE `getState()` for the key AND its generation: the number names the key
+      // the wrapper below is built from, and a pair taken from two snapshots
+      // could name a combination that never existed at the same instant. The
+      // generation is sent even when this session holds no key and writes no
+      // wrapper, because the body's `else` branch CLEARS the stored one, and a
+      // check decided from which fields a request happens to carry is one the
+      // sender can step around.
+      const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
       let bwkVaultKeyData: { encrypted: string; iv: string; tag: string } | undefined;
       if (vaultKey) {
         bwkVaultKeyData = await cryptoService.encryptVaultKeyWithBWK(vaultKey, bwk);
@@ -231,6 +239,7 @@ export default function BackupSettingsPage() {
         bwkIv: encryptedBWK.iv,
         bwkTag: encryptedBWK.tag,
         bwkSalt: cryptoService.arrayBufferToBase64(salt),
+        vaultKeyVersion,
         ...(bwkVaultKeyData
           ? {
               bwkEncryptedVaultKey: bwkVaultKeyData.encrypted,
@@ -244,8 +253,20 @@ export default function BackupSettingsPage() {
       setConfirmBackupPassword('');
       setSetupMasterPassword('');
       toast({ title: 'Backup encryption configured', type: 'success' });
-    } catch {
-      toast({ title: 'Failed to setup backup encryption', type: 'error' });
+    } catch (err) {
+      // The wrapper this request stores is the account's vault key sealed under
+      // the backup key, so the server refuses it on a superseded generation like
+      // any other write derived from that key. Raise the app-wide notice, exactly
+      // as the restore driver above does: nothing on this page refreshes
+      // `authStore.vaultKeyVersion`, so without it a retry would resend the same
+      // stale number for ever, and the server's own remedy sentence — reload —
+      // would never reach the user.
+      noteStaleVaultKey(err);
+      toast({
+        title: 'Failed to setup backup encryption',
+        description: getApiErrorMessage(err, 'An unexpected error occurred. Please try again.'),
+        type: 'error',
+      });
     } finally {
       setSettingUpEncryption(false);
       if (authKey) cryptoService.clearKey(authKey);
@@ -871,8 +892,10 @@ export default function BackupSettingsPage() {
       // Encrypt new BWK with new BEK
       const encryptedBWK = await cryptoService.encryptBWK(newBwk, newBek);
 
-      // Re-encrypt vault key with new BWK for cross-account restore support
-      const vaultKey = useAuthStore.getState().vaultKey;
+      // Re-encrypt vault key with new BWK for cross-account restore support. One
+      // `getState()` for the key and its generation, for the reason the setup
+      // driver above gives.
+      const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
       let bwkVaultKeyData: { encrypted: string; iv: string; tag: string } | undefined;
       if (vaultKey) {
         bwkVaultKeyData = await cryptoService.encryptVaultKeyWithBWK(vaultKey, newBwk);
@@ -884,6 +907,7 @@ export default function BackupSettingsPage() {
         newBwkIv: encryptedBWK.iv,
         newBwkTag: encryptedBWK.tag,
         newBwkSalt: cryptoService.arrayBufferToBase64(newSalt),
+        vaultKeyVersion,
         ...(bwkVaultKeyData
           ? {
               newBwkEncryptedVaultKey: bwkVaultKeyData.encrypted,
@@ -896,8 +920,14 @@ export default function BackupSettingsPage() {
       setShowChangePassword(false);
       setNewBackupPassword('');
       setChangeBackupCurrentPassword('');
-    } catch {
-      toast({ title: 'Failed to change backup password', type: 'error' });
+    } catch (err) {
+      // Same wrapper, same refusal, same remedy as the setup driver above.
+      noteStaleVaultKey(err);
+      toast({
+        title: 'Failed to change backup password',
+        description: getApiErrorMessage(err, 'An unexpected error occurred. Please try again.'),
+        type: 'error',
+      });
     } finally {
       setChangingBackupPassword(false);
       if (authKey) cryptoService.clearKey(authKey);

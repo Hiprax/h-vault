@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { AxiosError } from 'axios';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router';
 import React from 'react';
@@ -256,6 +257,30 @@ async function performRestore(
   fireEvent.change(passwordInput, { target: { value: 'BackupPass!' } });
   await act(async () => {
     fireEvent.click(screen.getByText('Restore'));
+  });
+}
+
+/**
+ * The recoverable refusal the two vault-key-sealing backup writes answer with:
+ * a 409 whose `data` carries the account's CURRENT generation. Discriminated on
+ * the presence of that number and never on the message, which is what
+ * `staleVaultKeyVersion` does.
+ */
+function staleVaultKeyRejection(): AxiosError {
+  // A REAL `AxiosError`, because `staleVaultKeyVersion` gates on `isAxiosError`
+  // before it looks at anything else — a hand-rolled `{ response: … }` would be
+  // ignored and this case would assert that the notice stays silent while
+  // believing it asserts the opposite.
+  return new AxiosError('conflict', 'ERR_BAD_REQUEST', undefined, undefined, {
+    status: 409,
+    statusText: 'Conflict',
+    headers: {},
+    config: { headers: {} } as never,
+    data: {
+      success: false,
+      message: 'The vault key was rotated elsewhere. Reload to pick up vault key version 9.',
+      data: { vaultKeyVersion: 9 },
+    },
   });
 }
 
@@ -1316,6 +1341,191 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
       expect(mockToast).toHaveBeenCalledWith({ title: 'Passwords do not match', type: 'error' });
     });
     expect(mockApiPost).not.toHaveBeenCalledWith('/backup/setup', expect.anything());
+  });
+
+  /**
+   * Both of these endpoints store the account's VAULT KEY, wrapped under the
+   * backup key — the copy a cross-account restore unwraps. The server refuses
+   * either unless the request says which vault key it sealed, so a session on a
+   * superseded generation cannot silently replace the re-wrap a rotation
+   * performed. The number must come from the SAME `getState()` read as the key.
+   */
+  it('names the vault-key generation when it configures backup encryption', async () => {
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
+    );
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Backup encryption password'));
+
+    fireEvent.change(screen.getByPlaceholderText('Backup encryption password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Confirm backup password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Setup Encryption'));
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith(
+        '/backup/setup',
+        expect.objectContaining({ vaultKeyVersion: 7 }),
+      );
+    });
+    // And the wrapper it guards really is in the same body, so this is not a
+    // number attached to a request that seals nothing.
+    const body = mockApiPost.mock.calls.find((call) => call[0] === '/backup/setup')?.[1] as Record<
+      string,
+      unknown
+    >;
+    expect(body.bwkEncryptedVaultKey).toBeDefined();
+  });
+
+  it('names the vault-key generation when it re-keys backup encryption', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByText('Change backup encryption password'));
+
+    fireEvent.click(screen.getByText('Change backup encryption password'));
+
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('New backup password'), {
+      target: { value: 'BrandNewBackupPass1!' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Change Password'));
+    });
+
+    await waitFor(() => {
+      expect(mockApiPut).toHaveBeenCalledWith(
+        '/backup/change-password',
+        expect.objectContaining({ vaultKeyVersion: 7 }),
+      );
+    });
+    const body = mockApiPut.mock.calls.find(
+      (call) => call[0] === '/backup/change-password',
+    )?.[1] as Record<string, unknown> | undefined;
+    expect(body?.newBwkEncryptedVaultKey).toBeDefined();
+  });
+
+  it('names the generation even when this session holds no key and the wrapper is CLEARED', async () => {
+    // The `$unset` branch: a body with no wrapper triple clears the stored one,
+    // which is how a client legitimately drops a wrapper a rotation superseded.
+    // It is the same guarded address, so it carries the generation too — and the
+    // guard must not be decided from which fields the body happens to carry.
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
+    );
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Backup encryption password'));
+
+    useAuthStore.setState({ vaultKey: null });
+
+    fireEvent.change(screen.getByPlaceholderText('Backup encryption password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Confirm backup password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Setup Encryption'));
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith(
+        '/backup/setup',
+        expect.objectContaining({ vaultKeyVersion: 7 }),
+      );
+    });
+    const body = mockApiPost.mock.calls.find((call) => call[0] === '/backup/setup')?.[1] as Record<
+      string,
+      unknown
+    >;
+    expect(body).not.toHaveProperty('bwkEncryptedVaultKey');
+  });
+
+  /**
+   * The refusal has to REACH the user, and on this page nothing else can tell
+   * them: `authStore.vaultKeyVersion` is never refreshed here, so a naive retry
+   * resends the same stale number for ever. The restore driver on this same page
+   * already raises the app-wide notice; these two now do too.
+   */
+  it('raises the reload notice when backup setup is refused for a superseded key', async () => {
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
+    );
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Backup encryption password'));
+    expect(useUIStore.getState().staleVaultKeyVersion).toBeNull();
+
+    mockApiPost.mockRejectedValueOnce(staleVaultKeyRejection());
+    fireEvent.change(screen.getByPlaceholderText('Backup encryption password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Confirm backup password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Setup Encryption'));
+    });
+
+    await waitFor(() => {
+      // The NUMBER the server reported, not a boolean: the banner is DERIVED by
+      // comparing it against this session's own generation, so a re-login or a
+      // rotation driven here clears it with nothing to remember.
+      expect(useUIStore.getState().staleVaultKeyVersion).toBe(9);
+    });
+    // And the server's own sentence reaches the user rather than a generic one.
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Failed to setup backup encryption',
+        description: expect.stringMatching(/rotated elsewhere/i) as unknown as string,
+        type: 'error',
+      }),
+    );
+  });
+
+  it('raises the reload notice when a backup re-key is refused for a superseded key', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByText('Change backup encryption password'));
+    expect(useUIStore.getState().staleVaultKeyVersion).toBeNull();
+
+    mockApiPut.mockRejectedValueOnce(staleVaultKeyRejection());
+    fireEvent.click(screen.getByText('Change backup encryption password'));
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('New backup password'), {
+      target: { value: 'BrandNewBackupPass1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Change Password'));
+    });
+
+    await waitFor(() => {
+      expect(useUIStore.getState().staleVaultKeyVersion).toBe(9);
+    });
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Failed to change backup password',
+        description: expect.stringMatching(/rotated elsewhere/i) as unknown as string,
+        type: 'error',
+      }),
+    );
   });
 
   it('refuses to change the backup password when no user is loaded', async () => {

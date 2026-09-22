@@ -34,7 +34,11 @@ import { AuditLog } from '../src/models/AuditLog.js';
 import { User } from '../src/models/User.js';
 import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
 import { JobLock } from '../src/models/JobLock.js';
-import { pickAllowedFields, vaultImportLockName } from '../src/utils/controllerHelpers.js';
+import {
+  pickAllowedFields,
+  vaultImportLockName,
+  vaultRotationLockName,
+} from '../src/utils/controllerHelpers.js';
 import { ALLOWED_ITEM_FIELDS, ALLOWED_UPDATE_FIELDS } from '../src/controllers/toolsController.js';
 import {
   createTestUser,
@@ -729,20 +733,27 @@ describe('an update whose target moves mid-request', () => {
   });
 });
 
-describe('the import lock is released before the response is written', () => {
+describe("both of the import's locks are released before the response is written", () => {
   // The spy below replaces a model method, so restore it rather than relying on
   // this staying the last block in the file.
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('has already freed the lock by the time the client sees 201', async () => {
+  it('has already freed BOTH by the time the client sees 201, innermost first', async () => {
     // PLAN Task 6.2 calls this ordering load-bearing: the client fires batch n+1
     // the moment batch n's response lands, so responding while the release is
     // still in flight would 409 a legitimate multi-batch migration against its
     // own lock. Move `releaseJobLock` after `res.json(...)` and every other test
     // in this file still passes — each one's next request is separated by a full
     // CSRF round-trip. This asserts the order directly instead.
+    //
+    // An import now holds TWO locks: `vault-import:<userId>` for the cap, and
+    // `vault-rotation:<userId>` so the vault-key checks stay true all the way to
+    // `insertMany`. Both are named here rather than counted, because the release
+    // order is itself the contract — the exclusion lock is acquired last and
+    // released first, the reverse of acquisition, and it goes first because its
+    // loss blocks four other operations rather than one.
     const user = await createTestUser({ email: 'release-order@example.com' });
     const order: string[] = [];
 
@@ -753,7 +764,7 @@ describe('the import lock is released before the response is written', () => {
       return (async () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         const result = await realDeleteOne(filter);
-        order.push('lock-released');
+        order.push(`released:${String(filter.jobName)}`);
         return result;
       })();
     }) as never);
@@ -762,7 +773,11 @@ describe('the import lock is released before the response is written', () => {
     order.push('response-received');
 
     expect(res.status).toBe(201);
-    expect(order).toEqual(['lock-released', 'response-received']);
+    expect(order).toEqual([
+      `released:${vaultRotationLockName(user.id)}`,
+      `released:${vaultImportLockName(user.id)}`,
+      'response-received',
+    ]);
   });
 });
 

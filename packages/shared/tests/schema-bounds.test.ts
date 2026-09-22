@@ -53,6 +53,8 @@ import {
   checkBreachBatchSchema,
   disable2faSchema,
   importSchema,
+  backupSetupSchema,
+  backupChangePasswordSchema,
   restoreBackupSchema,
   verify2faSchema,
 } from '../src/schemas/user.js';
@@ -106,6 +108,20 @@ const validImport = {
   operations: { inserts: [{ ...validItem, searchHash: HASH }], updates: [] },
 };
 const validRestore = { data: chars(64) };
+const validBackupSetup = {
+  authHash: chars(20),
+  encryptedBWK: chars(40),
+  bwkIv: chars(16),
+  bwkTag: chars(24),
+  bwkSalt: chars(24),
+};
+const validBackupChangePassword = {
+  password: chars(20),
+  newEncryptedBWK: chars(40),
+  newBwkIv: chars(16),
+  newBwkTag: chars(24),
+  newBwkSalt: chars(24),
+};
 
 /** `safeParse`, reported as the issue list a caller would actually see. */
 const issues = (schema: z.ZodType, value: unknown) => {
@@ -668,6 +684,26 @@ describe('vaultKeyVersion is carried, bounded, and never silently dropped', () =
         restoreBackupSchema.parse({ ...validRestore, vaultKeyVersion }).vaultKeyVersion,
       accepts: (vaultKeyVersion) =>
         accepts(restoreBackupSchema, { ...validRestore, vaultKeyVersion }),
+    },
+    {
+      // The wrapper these two store is the account's VAULT KEY sealed under the
+      // backup key, so they carry the generation for the same reason every other
+      // write derived from that key does. Both wrap their object in a refinement,
+      // which is exactly the shape in which a field added to the wrong side of
+      // the `.superRefine(...)` / `.refine(...)` call would be silently stripped.
+      name: 'backupSetupSchema',
+      parse: (vaultKeyVersion) =>
+        backupSetupSchema.parse({ ...validBackupSetup, vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) =>
+        accepts(backupSetupSchema, { ...validBackupSetup, vaultKeyVersion }),
+    },
+    {
+      name: 'backupChangePasswordSchema',
+      parse: (vaultKeyVersion) =>
+        backupChangePasswordSchema.parse({ ...validBackupChangePassword, vaultKeyVersion })
+          .vaultKeyVersion,
+      accepts: (vaultKeyVersion) =>
+        accepts(backupChangePasswordSchema, { ...validBackupChangePassword, vaultKeyVersion }),
     },
   ];
 

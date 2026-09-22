@@ -1864,6 +1864,9 @@ export default function SettingsPage() {
           // profile before acting, so the stale offer answers "nothing left to
           // finish" rather than re-committing a superseded key.
           setProfile(profileData.data);
+          // The generation the account is NOW on, read from the same response.
+          // An account with no stored generation has never rotated, so `0`.
+          const rotatedVaultKeyVersion = profileData.data.vaultKeyVersion ?? 0;
           const backup = profileData.data.settings.backup;
           if (
             backup.isConfigured &&
@@ -1898,6 +1901,13 @@ export default function SettingsPage() {
                 bwkEncryptedVaultKey: bwkVaultKeyData.encrypted,
                 bwkVaultKeyIv: bwkVaultKeyData.iv,
                 bwkVaultKeyTag: bwkVaultKeyData.tag,
+                // FROM THE PROFILE just re-read, not from `authStore`. This runs
+                // AFTER the rotation committed and BEFORE step 6 moves the
+                // store's own number, so `useAuthStore.getState()` still reports
+                // the generation the rotation replaced — and the endpoint would
+                // refuse it. The profile read above is what makes the current
+                // number available here at all.
+                vaultKeyVersion: rotatedVaultKeyVersion,
               });
             } else {
               // No backup password — clear stale bwkEncryptedVaultKey
@@ -1907,6 +1917,11 @@ export default function SettingsPage() {
                 bwkIv: backup.bwkIv,
                 bwkTag: backup.bwkTag,
                 bwkSalt: backup.bwkSalt,
+                // Named on the CLEARING branch too: this call is how a client
+                // legitimately drops a wrapper the rotation just made stale, and
+                // the endpoint is guarded as a whole rather than by which fields
+                // a body happens to carry.
+                vaultKeyVersion: rotatedVaultKeyVersion,
               });
               toast({
                 title:

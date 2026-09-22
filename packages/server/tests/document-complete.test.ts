@@ -71,7 +71,8 @@ import { DocumentUpload } from '../src/models/DocumentUpload.js';
 import { Folder } from '../src/models/Folder.js';
 import { JobLock } from '../src/models/JobLock.js';
 import { User } from '../src/models/User.js';
-import { documentCompleteLockName } from '../src/utils/controllerHelpers.js';
+import { documentCompleteLockName, vaultRotationLockName } from '../src/utils/controllerHelpers.js';
+import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
 import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
 import { authHeader, createTestUser, getCsrf, type TestUser } from './helpers.js';
@@ -872,6 +873,171 @@ describe('POST /documents/uploads/:id/complete', () => {
       expect(res.body.data).toEqual({ vaultKeyVersion: 0 });
       expect(await Document.countDocuments({})).toBe(0);
       expect(await stateOf(seeded)).toEqual(state);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The exclusion lock: what makes the pair above hold all the way to the insert
+  // -------------------------------------------------------------------------
+
+  /**
+   * The fence and the version check are READS, and the distance from them to
+   * `Document.create` is not a statement or two: for a multipart transfer it
+   * contains the engine's own completion call, which is seconds for a large
+   * object. A rotation that begins and commits entirely inside that span
+   * enumerates an account this document is not yet part of, so its completeness
+   * check has nothing to catch and the row lands wrapped under a superseded key.
+   * That row then makes EVERY future rotation abort: the client cannot unwrap its
+   * DEK, so it can never re-key it, and the coverage check refuses a payload that
+   * does not name it. One completion in the wrong millisecond permanently ends
+   * the account's ability to rotate.
+   *
+   * The version check cannot simply move after the engine call instead — the
+   * engine invalidates the upload id on success, so a client told to rewrap would
+   * find nothing left to complete. So the span is made atomic rather than short:
+   * the completion holds `vault-rotation:<userId>`, the same lock `bulkReEncrypt`
+   * takes before it raises the fence, from before the late pair until after the
+   * insert.
+   *
+   * The cost is named rather than hidden: two completions of DIFFERENT uploads
+   * for the same account no longer overlap. The loser is refused with a 409 that
+   * preserves its staging row, which is the retryable shape every other refusal
+   * here already uses, and the client treats a 409 carrying no number as an
+   * ordinary failure it re-drives.
+   */
+  describe('the vault-key exclusion lock, held from the late pair to the insert', () => {
+    /** Takes the exclusion lock as a rotation would, and returns its release. */
+    async function holdExclusionLock(): Promise<() => Promise<void>> {
+      const lockId = await acquireJobLock(vaultRotationLockName(user.id), 60_000);
+      expect(lockId, 'the fixture could not take the lock it is testing').not.toBeNull();
+      return async () => {
+        await releaseJobLock(vaultRotationLockName(user.id), lockId as string);
+      };
+    }
+
+    const exclusionLocks = async (): Promise<number> =>
+      JobLock.countDocuments({ jobName: vaultRotationLockName(user.id) });
+
+    it('refuses while a rotation holds the lock, and leaves the transfer retryable', async () => {
+      const seeded = await seedTransfer(user);
+      const release = await holdExclusionLock();
+      const before = await stateOf(seeded);
+
+      const res = await complete(user, seeded.id);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(String(res.body.message)).toMatch(/already in progress/i);
+      // No number: the caller's generation is fine and rewrapping would be the
+      // wrong remedy, so the refusal must not look like the stale-key one.
+      expect(res.body.data).toBeUndefined();
+      // THE NEGATIVE: the staging row, its ledger and the stored bytes are all
+      // exactly as they were, so the retry costs one request and not the file.
+      expect(await stateOf(seeded)).toEqual(before);
+      expect(await DocumentUpload.findById(seeded.id).lean()).not.toBeNull();
+      // The per-upload lock is taken first and must still be released.
+      expect(
+        await JobLock.countDocuments({ jobName: documentCompleteLockName(user.id, seeded.id) }),
+      ).toBe(0);
+
+      await release();
+      const retried = await complete(user, seeded.id);
+      expect(retried.status, JSON.stringify(retried.body)).toBe(201);
+      expect(await exclusionLocks()).toBe(0);
+    });
+
+    it('still holds the lock at the moment the row is inserted', async () => {
+      // The case a check-and-release cannot pass: the probe runs inside the write
+      // itself and tries to take the lock a rotation would take.
+      const seeded = await seedTransfer(user);
+      const realCreate = Document.create.bind(Document);
+      let lockWasFreeAtInsertTime: boolean | null = null;
+      vi.spyOn(Document, 'create').mockImplementation((async (doc: never) => {
+        const stolen = await acquireJobLock(vaultRotationLockName(user.id), 60_000);
+        lockWasFreeAtInsertTime = stolen !== null;
+        if (stolen !== null) await releaseJobLock(vaultRotationLockName(user.id), stolen);
+        return realCreate(doc);
+      }) as never);
+
+      const res = await complete(user, seeded.id);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(
+        lockWasFreeAtInsertTime,
+        'the probe never ran, so this case proves nothing about the span',
+      ).not.toBeNull();
+      expect(
+        lockWasFreeAtInsertTime,
+        'a rotation could take the exclusion lock while the completion was inserting',
+      ).toBe(false);
+    });
+
+    it('still holds the lock while the engine assembles a multipart object', async () => {
+      // The seconds-long half of the span, and the half the version check cannot
+      // be moved past. A rotation must not be able to slip in here either.
+      const seeded = await seedTransfer(user, {
+        partSizes: [DOCUMENT_CIPHERTEXT_CHUNK_BYTES, 1024 + DOCUMENT_TAG_BYTES],
+      });
+      const engine = storageRef.current!;
+      const realComplete = engine.completeMultipartUpload.bind(engine);
+      let lockWasFreeMidAssembly: boolean | null = null;
+      vi.spyOn(engine, 'completeMultipartUpload').mockImplementation(
+        async (key: string, uploadId: string, parts: { partNumber: number; etag: string }[]) => {
+          const stolen = await acquireJobLock(vaultRotationLockName(user.id), 60_000);
+          lockWasFreeMidAssembly = stolen !== null;
+          if (stolen !== null) await releaseJobLock(vaultRotationLockName(user.id), stolen);
+          return realComplete(key, uploadId, parts);
+        },
+      );
+
+      const res = await complete(user, seeded.id);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(lockWasFreeMidAssembly, 'the probe never ran').not.toBeNull();
+      expect(
+        lockWasFreeMidAssembly,
+        'a rotation could take the exclusion lock while the engine was assembling the object',
+      ).toBe(false);
+    });
+
+    it('releases the lock when the completion is refused for an unrelated reason', async () => {
+      const seeded = await seedTransfer(user, {
+        partSizes: [DOCUMENT_CIPHERTEXT_CHUNK_BYTES],
+        declaredChunkCount: 2,
+      });
+
+      expect((await complete(user, seeded.id)).status).toBe(400);
+
+      // A leaked exclusion lock is not one stalled upload: it blocks rotation,
+      // import, restore, every other completion and the master-password change
+      // for the whole five-minute TTL.
+      expect(await exclusionLocks()).toBe(0);
+    });
+
+    it('does not take the exclusion lock when the per-upload lock is contended', async () => {
+      // Acquisition order is per-upload lock first, exclusion lock second. A loser
+      // of the first must leave the second untouched, or one duplicated retry
+      // would block a rotation for nothing.
+      const seeded = await seedTransfer(user);
+      await JobLock.create({
+        jobName: documentCompleteLockName(user.id, seeded.id),
+        lockedBy: 'another-completion',
+        lockedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+      const res = await complete(user, seeded.id);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(String(res.body.message)).toMatch(/already being completed/i);
+      expect(await exclusionLocks()).toBe(0);
+    });
+
+    it('holds nothing once an ordinary completion has succeeded', async () => {
+      const seeded = await seedTransfer(user);
+
+      expect((await complete(user, seeded.id)).status).toBe(201);
+
+      expect(await exclusionLocks()).toBe(0);
     });
   });
 

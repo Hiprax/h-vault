@@ -198,6 +198,13 @@ export const backupSetupSchema = z
     bwkEncryptedVaultKey: z.string().min(1).max(500).optional(),
     bwkVaultKeyIv: z.string().min(1).max(24).optional(),
     bwkVaultKeyTag: z.string().min(1).max(32).optional(),
+    // `bwkEncryptedVaultKey` is the account's VAULT KEY, wrapped under the backup
+    // key instead of under the MEK — the copy a CROSS-ACCOUNT restore unwraps. A
+    // session on a superseded generation that configures backup encryption
+    // replaces the re-wrap the rotation performed and stores the old key, and
+    // nothing fails until somebody restores a later backup into another account
+    // and every row fails to decrypt. See `optionalVaultKeyVersionSchema`.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   .superRefine((data, ctx) => {
     const hasKey = data.bwkEncryptedVaultKey !== undefined;
@@ -228,6 +235,10 @@ export const backupChangePasswordSchema = z
     newBwkEncryptedVaultKey: z.string().min(1).max(500).optional(),
     newBwkVaultKeyIv: z.string().min(1).max(24).optional(),
     newBwkVaultKeyTag: z.string().min(1).max(32).optional(),
+    // Same wrapper, same reason as `backupSetupSchema`: re-keying backup
+    // encryption re-seals the account's vault key, so the request has to say
+    // which vault key it sealed.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   .refine(
     (data) => {

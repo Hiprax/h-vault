@@ -12,11 +12,18 @@ import { sendEmail, escapeHtml } from '../utils/email.js';
 import { config, emailConfigured } from '../config/index.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import {
+  StaleVaultKeyError,
+  acquireVaultRotationLock,
+  assertVaultKeyVersion,
   assertVaultNotRotating,
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  releaseVaultRotationLock,
   resolveVaultKeyVersion,
+  sendStaleVaultKey,
+  vaultKeyVersionFilter,
+  vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import { collectDocumentSummary } from '../utils/documentSummary.js';
@@ -205,6 +212,32 @@ async function collectBackupData(
   };
 }
 
+/**
+ * Answers the conditional wrapper write that matched nothing.
+ *
+ * Both backup writes that seal the vault key take the same shape — guard, then a
+ * filtered `findOneAndUpdate` — and a miss means the same thing on both: the
+ * account exists (the password proof above read it), so a rotation committed
+ * between the guard's read and this write. Written once because the diagnosis and
+ * the envelope must be identical on both, and because a second copy is a second
+ * place for the number the client rewraps under to be left out.
+ */
+async function sendSupersededBackupWrite(
+  res: Response,
+  userId: string,
+  guarded: number,
+  endpoint: string,
+): Promise<void> {
+  const current = vaultKeyVersionOf(await User.findById(userId).select('vaultKeyVersion').lean());
+  logger.warn('A backup key write was refused: the vault key was rotated mid-request', {
+    userId,
+    endpoint,
+    guarded,
+    current,
+  });
+  sendStaleVaultKey(res, new StaleVaultKeyError(current, 'rotated'));
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────
 
 export const setupBackup = catchAsync(async (req: Request, res: Response): Promise<void> => {
@@ -230,6 +263,30 @@ export const setupBackup = catchAsync(async (req: Request, res: Response): Promi
     );
     throw httpErrors.unauthorized('Current password is incorrect');
   }
+
+  // ── The vault-key guard pair ───────────────────────────────────────────────
+  //
+  // `bwkEncryptedVaultKey` below is the account's VAULT KEY, wrapped under the
+  // backup key rather than under the MEK — the copy a CROSS-ACCOUNT restore
+  // unwraps to read a backup's rows. A session still holding a superseded vault
+  // key writes the OLD key there and silently replaces the re-wrap the rotation
+  // itself performed. Nothing fails at the time: the live vault is untouched, and
+  // a same-account restore goes through the MEK path instead. It fails when
+  // somebody restores a later backup into another account and every single row
+  // fails to decrypt, which is as far from the mistake as a failure can get.
+  //
+  // AFTER the password proof, for the same two reasons `changePassword` places
+  // its pair there: a wrong password must keep earning its 401 and its
+  // `password_verification_failed` audit row rather than being answered 409 for
+  // the duration of every rotation, and a 409 names a condition of the account,
+  // so it is handed only to a caller that has proved it holds the credential.
+  //
+  // No lock, unlike the bulk writers: everything below is ONE conditional
+  // `findOneAndUpdate`, so the check can travel in the write's own filter and a
+  // rotation committing in between matches nothing instead of clobbering.
+  await assertVaultNotRotating(userId);
+  const resolvedVaultKeyVersion = await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion);
+  if (resolvedVaultKeyVersion === null) return;
 
   const setFields: Record<string, unknown> = {
     'settings.backup.encryptedBWK': body.encryptedBWK,
@@ -257,12 +314,24 @@ export const setupBackup = catchAsync(async (req: Request, res: Response): Promi
     updateOp.$unset = unsetFields;
   }
 
-  const user = await User.findByIdAndUpdate(userId, updateOp, { returnDocument: 'after' })
+  // `vaultKeyVersionFilter` and NOT a bare `vaultKeyVersion: resolved` — the
+  // field has no backfill migration and MongoDB equality on `0` does not match a
+  // missing one, so a bare filter would refuse every legacy account for ever. The
+  // measurement is in that helper's docblock.
+  const user = await User.findOneAndUpdate(
+    { _id: userId, vaultKeyVersion: vaultKeyVersionFilter(resolvedVaultKeyVersion) },
+    updateOp,
+    { returnDocument: 'after' },
+  )
     .select('-__v')
     .lean();
 
   if (!user) {
-    throw httpErrors.notFound('User not found');
+    // The account exists — the password proof above read it — so a miss here is
+    // the narrow interleaving the guard's own read cannot see: a rotation
+    // committed between that read and this write. Nothing was written.
+    await sendSupersededBackupWrite(res, userId, resolvedVaultKeyVersion, 'backup_setup');
+    return;
   }
 
   const setupCtx = getRequestContext(req);
@@ -618,6 +687,14 @@ export const changeBackupPassword = catchAsync(
       throw httpErrors.unauthorized('Current password is incorrect');
     }
 
+    // The same guard pair, for the same reason, on the same wrapper — see
+    // `setupBackup`. Re-keying backup encryption re-seals the account's vault key
+    // under a new backup key, so the request has to say which vault key it
+    // sealed, and the write below carries the answer in its own filter.
+    await assertVaultNotRotating(userId);
+    const resolvedVaultKeyVersion = await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion);
+    if (resolvedVaultKeyVersion === null) return;
+
     const pwSetFields: Record<string, unknown> = {
       'settings.backup.encryptedBWK': body.newEncryptedBWK,
       'settings.backup.bwkIv': body.newBwkIv,
@@ -642,12 +719,22 @@ export const changeBackupPassword = catchAsync(
       pwUpdateOp.$unset = pwUnsetFields;
     }
 
-    const user = await User.findByIdAndUpdate(userId, pwUpdateOp, { returnDocument: 'after' })
+    const user = await User.findOneAndUpdate(
+      { _id: userId, vaultKeyVersion: vaultKeyVersionFilter(resolvedVaultKeyVersion) },
+      pwUpdateOp,
+      { returnDocument: 'after' },
+    )
       .select('-__v')
       .lean();
 
     if (!user) {
-      throw httpErrors.notFound('User not found');
+      await sendSupersededBackupWrite(
+        res,
+        userId,
+        resolvedVaultKeyVersion,
+        'change_backup_password',
+      );
+      return;
     }
 
     const changeCtx = getRequestContext(req);
@@ -668,8 +755,31 @@ export const changeBackupPassword = catchAsync(
   },
 );
 
-export const restoreBackup = catchAsync(async (req: Request, res: Response): Promise<void> => {
-  const userId = getUserId(req);
+/** What a completed restore reports, so the lock can be released before it is sent. */
+interface RestoreOutcome {
+  itemsRestored: number;
+  itemsSkipped: number;
+  foldersRestored: number;
+  foldersSkipped: number;
+  itemSkipReasons: IItemSkipReason[];
+  folderSkipReasons: IFolderSkipReason[];
+}
+
+/**
+ * Everything `restoreBackup` does while it holds the per-user vault-key
+ * exclusion lock.
+ *
+ * Split out so that lock can be released BEFORE the response is written rather
+ * than after it, which is the ordering `importVault` and `completeUpload` both
+ * take: a client that fires its next request the moment this one lands must not
+ * race the release round trip and be refused by a span that has already
+ * finished. It therefore RETURNS its counts instead of sending them. A refusal
+ * still throws — an `httpErrors` throw carries its own status and the `finally`
+ * around the call releases the lock on the way past — and the one refusal that
+ * is ANSWERED rather than thrown, the recoverable stale-generation 409, returns
+ * `null` to say so.
+ */
+async function restoreUnderRotationLock(req: Request, userId: string): Promise<RestoreOutcome> {
   const body = req.body as RestoreBackupInput;
   const { conflictStrategy, data } = body;
 
@@ -766,13 +876,16 @@ export const restoreBackup = catchAsync(async (req: Request, res: Response): Pro
   // Between the two lie a multi-megabyte `JSON.parse`, the entry-count cap and
   // four collection scans for the net-new counts — hundreds of milliseconds in
   // which a rotation can commit and leave every row below sealed under a key
-  // the account has already replaced. `null` means the recoverable 409 carrying
-  // the current generation has already been answered.
+  // the account has already replaced. The exclusion lock the caller holds is what
+  // makes that span atomic rather than merely short.
   //
-  // Unlike the import there is no transaction to abort and no lock to release,
-  // so the respond-and-return form is the correct one here; Phase 5 is what
-  // makes this span atomic rather than merely short.
-  if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
+  // `assertVaultKeyVersion` and NOT `resolveVaultKeyVersion`, because the helper
+  // ANSWERS the 409 where it is called and that would be inside the lock's span.
+  // The throw is rendered by the caller, after its `finally` has released: a
+  // response written under the lock invites the client to retry into a lock that
+  // has not been let go of yet and be told a finished request is "already in
+  // progress".
+  await assertVaultKeyVersion(userId, body.vaultKeyVersion);
 
   let itemsRestored = 0;
   let itemsSkipped = 0;
@@ -1319,18 +1432,83 @@ export const restoreBackup = catchAsync(async (req: Request, res: Response): Pro
     }
   }
 
+  return {
+    itemsRestored,
+    itemsSkipped,
+    foldersRestored,
+    foldersSkipped,
+    itemSkipReasons,
+    folderSkipReasons,
+  };
+}
+
+/**
+ * `POST /backup/restore` — add the backup's rows to this account, under the
+ * vault key the client re-encrypted them with.
+ *
+ * ## Why this handler is a lock and nothing else
+ *
+ * The work is in {@link restoreUnderRotationLock}; what is here is the span that
+ * work has to be atomic over. A restore's vault-key checks are reads, and the
+ * distance from them to the first row written is a multi-megabyte `JSON.parse`,
+ * the entry-count cap and four counted collection scans — long enough for a
+ * rotation to raise its fence, enumerate an account these rows are not yet part
+ * of, and commit. Every row the restore then writes is sealed under the key that
+ * rotation has just replaced: stranded on arrival, unreadable afterwards, and
+ * silent at the time. `bulkReEncrypt` takes this same lock before it raises that
+ * fence, so holding it here means the two exclude each other outright rather
+ * than merely rarely interleaving.
+ *
+ * A conditional filter — the mechanism the master-password change uses instead —
+ * cannot do the job here: the writes are inserts into two other collections and
+ * there is nothing on them to condition on the account's generation.
+ *
+ * The lock is taken BEFORE the fence read inside, which is the order
+ * `acquireVaultRotationLock` documents, and released in a `finally` on every
+ * path including a refusal — a leaked one is a five-minute outage on rotation,
+ * import, restore, document completion and the master-password change at once.
+ */
+export const restoreBackup = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const { conflictStrategy } = req.body as RestoreBackupInput;
+
+  const rotationLockId = await acquireVaultRotationLock(userId);
+  let outcome: RestoreOutcome | undefined;
+  let staleVaultKey: StaleVaultKeyError | null = null;
+  try {
+    outcome = await restoreUnderRotationLock(req, userId);
+  } catch (error) {
+    // Caught NARROWLY, by type, and OUTSIDE the span: rendering it inside would
+    // put the response on the wire while the lock is still held. A blanket catch
+    // would turn any failure in there — a dropped connection, a timeout — into a
+    // 409 saying the key was rotated, which is both false and unactionable.
+    if (!(error instanceof StaleVaultKeyError)) throw error;
+    staleVaultKey = error;
+  } finally {
+    await releaseVaultRotationLock(userId, rotationLockId);
+  }
+  if (staleVaultKey !== null) {
+    sendStaleVaultKey(res, staleVaultKey);
+    return;
+  }
+  // Unreachable with no outcome: the only way out of the span without one is the
+  // refusal answered above, and every other failure was rethrown.
+  if (outcome === undefined) return;
+
   const restoreCtx = getRequestContext(req);
   await createAuditLog(
     userId,
     'backup_restored',
     {
-      itemsRestored,
-      itemsSkipped,
-      foldersRestored,
-      foldersSkipped,
+      itemsRestored: outcome.itemsRestored,
+      itemsSkipped: outcome.itemsSkipped,
+      foldersRestored: outcome.foldersRestored,
+      foldersSkipped: outcome.foldersSkipped,
       conflictStrategy,
-      ...(itemSkipReasons.length > 0 ? { itemSkipReasons } : {}),
-      ...(folderSkipReasons.length > 0 ? { folderSkipReasons } : {}),
+      ...(outcome.itemSkipReasons.length > 0 ? { itemSkipReasons: outcome.itemSkipReasons } : {}),
+      ...(outcome.folderSkipReasons.length > 0
+        ? { folderSkipReasons: outcome.folderSkipReasons }
+        : {}),
     },
     restoreCtx.ip,
     restoreCtx.userAgent,
@@ -1338,22 +1516,22 @@ export const restoreBackup = catchAsync(async (req: Request, res: Response): Pro
 
   logger.info('Backup restored', {
     userId,
-    itemsRestored,
-    itemsSkipped,
-    foldersRestored,
-    foldersSkipped,
+    itemsRestored: outcome.itemsRestored,
+    itemsSkipped: outcome.itemsSkipped,
+    foldersRestored: outcome.foldersRestored,
+    foldersSkipped: outcome.foldersSkipped,
   });
 
   res.status(200).json({
     success: true,
     message: 'Backup restored successfully',
     data: {
-      itemsRestored,
-      itemsSkipped,
-      foldersRestored,
-      foldersSkipped,
-      itemSkipReasons,
-      folderSkipReasons,
+      itemsRestored: outcome.itemsRestored,
+      itemsSkipped: outcome.itemsSkipped,
+      foldersRestored: outcome.foldersRestored,
+      foldersSkipped: outcome.foldersSkipped,
+      itemSkipReasons: outcome.itemSkipReasons,
+      folderSkipReasons: outcome.folderSkipReasons,
     },
   });
 });

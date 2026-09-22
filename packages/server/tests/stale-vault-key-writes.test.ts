@@ -47,7 +47,7 @@
  * generation like every other caller. Deciding it from the body instead would
  * put a security control behind a predicate the caller chooses.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
@@ -80,6 +80,10 @@ let user: TestUser;
 
 beforeEach(async () => {
   user = await createTestUser();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 /** One authenticated, CSRF-bearing request. */
@@ -627,6 +631,327 @@ describe('POST /backup/restore refuses rows sealed under a superseded vault key'
     expect(res.status).toBe(200);
     expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
     expect(await Folder.countDocuments({ userId: user.id })).toBe(1);
+  });
+});
+
+/**
+ * `POST /backup/setup` and `PUT /backup/change-password` both store the account's
+ * VAULT KEY wrapped under the backup key, from a client-supplied body.
+ *
+ * ## Why they belong here and not with the backup suite
+ *
+ * `settings.backup.bwkEncryptedVaultKey` is the same secret `encryptedVaultKey`
+ * is, sealed differently: it is what a CROSS-ACCOUNT restore unwraps to read the
+ * backup's rows. A session holding a superseded vault key that configures or
+ * re-keys backup encryption writes the OLD key there, silently replacing the
+ * re-wrap the rotation itself performed. Nothing breaks at the time — the live
+ * vault is untouched and a same-account restore goes through the MEK path
+ * instead — and the failure surfaces only when somebody restores a later backup
+ * into another account and every single row fails to decrypt. That is as far from
+ * the mistake as a failure can get, which is why the refusal is worth having.
+ *
+ * ## The `$unset` branch is the case to be careful about
+ *
+ * A body that carries no wrapper triple CLEARS the stored one, and that is how a
+ * client legitimately drops a wrapper a rotation made stale. It is a guarded
+ * write like any other on these endpoints — the guard belongs to the address, not
+ * to which fields the body happens to carry — so it too must name the current
+ * generation, and it must still clear the wrapper when it does.
+ */
+describe('the two backup writes that also seal the vault key', () => {
+  const BWK_WRAPPER = {
+    bwkEncryptedVaultKey: 'vault-key-wrapped-under-the-BACKUP-key',
+    bwkVaultKeyIv: 'bwk-vault-key-iv',
+    bwkVaultKeyTag: 'bwk-vault-key-tag',
+  };
+
+  const SETUP_BODY = {
+    authHash: 'placeholder-replaced-per-request',
+    encryptedBWK: 'encrypted-bwk',
+    bwkIv: 'bwk-iv',
+    bwkTag: 'bwk-tag',
+    bwkSalt: 'bwk-salt',
+  };
+
+  const CHANGE_BODY = {
+    password: 'placeholder-replaced-per-request',
+    newEncryptedBWK: 'new-encrypted-bwk',
+    newBwkIv: 'new-bwk-iv',
+    newBwkTag: 'new-bwk-tag',
+    newBwkSalt: 'new-bwk-salt',
+  };
+
+  /** The wrapper the account currently stores, or `undefined` when it stores none. */
+  async function storedWrapper(): Promise<string | undefined> {
+    const row = await User.findById(user.id).lean();
+    return row?.settings.backup.bwkEncryptedVaultKey;
+  }
+
+  /** Puts a wrapper on the account without going through a guarded endpoint. */
+  async function seedWrapper(value: string): Promise<void> {
+    await User.updateOne(
+      { _id: user.id },
+      {
+        $set: {
+          'settings.backup.isConfigured': true,
+          'settings.backup.encryptedBWK': 'seeded-bwk',
+          'settings.backup.bwkIv': 'seeded-iv',
+          'settings.backup.bwkTag': 'seeded-tag',
+          'settings.backup.bwkSalt': 'seeded-salt',
+          'settings.backup.bwkEncryptedVaultKey': value,
+          'settings.backup.bwkVaultKeyIv': 'seeded-vk-iv',
+          'settings.backup.bwkVaultKeyTag': 'seeded-vk-tag',
+        },
+      },
+    );
+  }
+
+  async function setupBackup(extra: Record<string, unknown> = {}): Promise<request.Response> {
+    return send('post', '/api/v1/backup/setup', {
+      ...SETUP_BODY,
+      authHash: user.rawPassword,
+      ...BWK_WRAPPER,
+      ...extra,
+    });
+  }
+
+  async function changeBackupPassword(
+    extra: Record<string, unknown> = {},
+  ): Promise<request.Response> {
+    return send('put', '/api/v1/backup/change-password', {
+      ...CHANGE_BODY,
+      password: user.rawPassword,
+      newBwkEncryptedVaultKey: BWK_WRAPPER.bwkEncryptedVaultKey,
+      newBwkVaultKeyIv: BWK_WRAPPER.bwkVaultKeyIv,
+      newBwkVaultKeyTag: BWK_WRAPPER.bwkVaultKeyTag,
+      ...extra,
+    });
+  }
+
+  describe('POST /backup/setup', () => {
+    it('refuses a generation BEHIND the account and leaves the stored wrapper alone', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      const current = await rotateVaultKey();
+
+      const res = await setupBackup({ vaultKeyVersion: current - 1 });
+
+      expectRecoverableConflict(res, current, /rotated elsewhere/i);
+      expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+    });
+
+    it('refuses a request naming NO generation once the account has rotated', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      const current = await rotateVaultKey();
+
+      const res = await setupBackup();
+
+      expectRecoverableConflict(res, current, /did not say which vault key/i);
+      expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+    });
+
+    it('refuses while a rotation is IN PROGRESS, which the generation alone cannot see', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      await User.updateOne({ _id: user.id }, { $set: { rotationInProgress: true } });
+
+      const res = await setupBackup({ vaultKeyVersion: 0 });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.message).toMatch(/rotation is in progress/i);
+      expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+    });
+
+    it('stores the wrapper when the request names the current generation', async () => {
+      const current = await rotateVaultKey();
+
+      const res = await setupBackup({ vaultKeyVersion: current });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(await storedWrapper()).toBe(BWK_WRAPPER.bwkEncryptedVaultKey);
+    });
+
+    it('still CLEARS a stale wrapper when the body carries none and names the generation', async () => {
+      await seedWrapper('wrapper-made-stale-by-the-rotation');
+      const current = await rotateVaultKey();
+
+      const res = await send('post', '/api/v1/backup/setup', {
+        ...SETUP_BODY,
+        authHash: user.rawPassword,
+        vaultKeyVersion: current,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      // The `$unset` branch is how a client legitimately drops a wrapper a
+      // rotation superseded; guarding the endpoint must not break it.
+      expect(await storedWrapper()).toBeUndefined();
+    });
+
+    it('accepts a never-rotated account that names no generation', async () => {
+      const res = await setupBackup();
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(await storedWrapper()).toBe(BWK_WRAPPER.bwkEncryptedVaultKey);
+    });
+
+    it('still answers a wrong master password with 401, not a conflict', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      await rotateVaultKey();
+
+      const res = await setupBackup({ authHash: 'not-the-password', vaultKeyVersion: 0 });
+
+      // The password proof comes FIRST, exactly as on the master-password
+      // change: a wrong credential must keep earning its 401 and its audit row
+      // rather than being answered 409 for the duration of every rotation.
+      expect(res.status, JSON.stringify(res.body)).toBe(401);
+      expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+    });
+  });
+
+  /**
+   * The interleaving the guard's READ cannot see, on both endpoints: a rotation
+   * that commits between it and the write.
+   *
+   * What makes these two safe against it is the FILTER on the write, not the read
+   * before it, and producing the case needs a seam inside the handler's own span.
+   * The wrapper write is the only one there: the spy performs the concurrent
+   * increment through the ORIGINAL method — captured before the spy, so it cannot
+   * re-enter — and then calls through unchanged.
+   */
+  function racingARotation(): void {
+    // Landed on the GUARD'S OWN READ rather than beside the write, and AWAITED
+    // there, because the ordering has to be a fact and not a likelihood. The
+    // first draft fired the increment un-awaited from inside the write's mock and
+    // relied on it winning the round trip; nothing orders two commands issued
+    // that way, so a run in which the increment landed after the filtered write
+    // evaluated its predicate would answer 200 and fail for a reason nobody
+    // cares about. Hooking the read instead makes the sequence explicit: the
+    // guard resolves generation 0, THEN the increment commits, THEN the write
+    // filters on 0 and must miss.
+    //
+    // Fired ONCE. The refusal's own diagnosis re-reads the same projection to
+    // report the current number, and a second increment there would make it say
+    // 2 for a rotation that happened once.
+    let raced = false;
+    const realFindById = User.findById.bind(User);
+    vi.spyOn(User, 'findById').mockImplementation(((id: string) => {
+      const query = realFindById(id);
+      const realSelect = query.select.bind(query);
+      query.select = ((fields: string) => {
+        const selected = realSelect(fields) as unknown as { lean: () => Promise<unknown> };
+        if (fields !== 'vaultKeyVersion' || raced) return selected;
+        raced = true;
+        const realLean = selected.lean.bind(selected);
+        return {
+          lean: async () => {
+            const value = await realLean();
+            await User.updateOne({ _id: user.id }, { $inc: { vaultKeyVersion: 1 } });
+            return value;
+          },
+        };
+      }) as never;
+      return query;
+    }) as never);
+  }
+
+  it('refuses a setup whose generation moved between the guard and the write', async () => {
+    await seedWrapper('wrapper-the-rotation-wrote');
+    racingARotation();
+
+    const res = await setupBackup({ vaultKeyVersion: 0 });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body.data).toEqual({ vaultKeyVersion: 1 });
+    expect(res.body.message).toMatch(/rotated elsewhere/i);
+    vi.restoreAllMocks();
+    expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+  });
+
+  it('refuses a backup-password change whose generation moved between the guard and the write', async () => {
+    await seedWrapper('wrapper-the-rotation-wrote');
+    racingARotation();
+
+    const res = await changeBackupPassword({ vaultKeyVersion: 0 });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body.data).toEqual({ vaultKeyVersion: 1 });
+    expect(res.body.message).toMatch(/rotated elsewhere/i);
+    vi.restoreAllMocks();
+    expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+  });
+
+  describe('PUT /backup/change-password', () => {
+    it('refuses a generation BEHIND the account and leaves the stored wrapper alone', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      const current = await rotateVaultKey();
+
+      const res = await changeBackupPassword({ vaultKeyVersion: current - 1 });
+
+      expectRecoverableConflict(res, current, /rotated elsewhere/i);
+      expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+    });
+
+    it('refuses a request naming NO generation once the account has rotated', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      const current = await rotateVaultKey();
+
+      const res = await changeBackupPassword();
+
+      expectRecoverableConflict(res, current, /did not say which vault key/i);
+      expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+    });
+
+    it('refuses while a rotation is IN PROGRESS, which the generation alone cannot see', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      await User.updateOne({ _id: user.id }, { $set: { rotationInProgress: true } });
+
+      const res = await changeBackupPassword({ vaultKeyVersion: 0 });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.message).toMatch(/rotation is in progress/i);
+      expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+    });
+
+    it('stores the wrapper when the request names the current generation', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      const current = await rotateVaultKey();
+
+      const res = await changeBackupPassword({ vaultKeyVersion: current });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(await storedWrapper()).toBe(BWK_WRAPPER.bwkEncryptedVaultKey);
+    });
+
+    it('still CLEARS a stale wrapper when the body carries none and names the generation', async () => {
+      await seedWrapper('wrapper-made-stale-by-the-rotation');
+      const current = await rotateVaultKey();
+
+      const res = await send('put', '/api/v1/backup/change-password', {
+        ...CHANGE_BODY,
+        password: user.rawPassword,
+        vaultKeyVersion: current,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(await storedWrapper()).toBeUndefined();
+    });
+
+    it('accepts a never-rotated account that names no generation', async () => {
+      await seedWrapper('wrapper-from-before');
+
+      const res = await changeBackupPassword();
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(await storedWrapper()).toBe(BWK_WRAPPER.bwkEncryptedVaultKey);
+    });
+
+    it('still answers a wrong master password with 401, not a conflict', async () => {
+      await seedWrapper('wrapper-the-rotation-wrote');
+      await rotateVaultKey();
+
+      const res = await changeBackupPassword({ password: 'not-the-password', vaultKeyVersion: 0 });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(401);
+      expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');
+    });
   });
 });
 

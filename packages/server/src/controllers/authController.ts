@@ -685,9 +685,21 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // would lower the fence mid-run and readmit a second session's stale-key write
   // that the rotation's client-enumerated set does not cover — stranding that row
   // under the superseded key, the exact data loss the fence prevents. A crashed
-  // rotation's lock TTL-expires (ROTATION_LOCK_TTL_MS), after which the next
-  // login clears the stuck flag; a live rotation clears it itself on
+  // rotation's lock TTL-expires (VAULT_ROTATION_LOCK_TTL_MS), after which the
+  // next login clears the stuck flag; a live rotation clears it itself on
   // commit/abort, so nothing is left wedged either way.
+  //
+  // That lock now has four holders besides the rotation — the import, the
+  // restore, the document completion and the master-password change all take it
+  // across their own check-to-commit spans — so a `true` answer no longer means
+  // "a rotation is live". It means "somebody is mid-span", and the effect here is
+  // that the cleanup of a stuck flag is DEFERRED to the next login rather than
+  // performed during someone else's span. Deferring costs nothing: every one of
+  // those holders is itself refused by the stuck flag it would be racing, so none
+  // can hold the lock for more than the round trip it takes to be told so, and
+  // lowering a fence has never been urgent. The error in the other direction —
+  // clearing the flag out from under a live rotation — is the one that strands a
+  // row, and this predicate still cannot make it.
   if (user.rotationInProgress && !(await isVaultRotationLockHeld(user._id.toString()))) {
     // Read from the document this handler already loaded rather than re-reading:
     // the fence is down only for a rotation with no live lock, so nothing can be

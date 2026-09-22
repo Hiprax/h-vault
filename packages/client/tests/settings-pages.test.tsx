@@ -1093,9 +1093,20 @@ describe('SettingsPage', () => {
       },
     };
 
-    mockGetProfileApi
-      .mockResolvedValueOnce({ data: backupProfile })
-      .mockResolvedValueOnce({ data: backupProfile });
+    // The SECOND read is the one the rotation takes after it commits, and it
+    // reports a generation that is neither the store's (2) nor absent. That makes
+    // the send site below discriminable three ways: the profile's number is 3,
+    // `useAuthStore.getState().vaultKeyVersion` is 2, and a deleted line sends
+    // nothing at all. Without that spread this assertion would pass against the
+    // wrong source — which matters, because the whole block is wrapped in a
+    // `catch` that treats a failure as non-critical, so the server's 409 would be
+    // swallowed and the stale BWK-wrapped vault key would simply never be updated.
+    mockGetProfileApi.mockResolvedValueOnce({ data: backupProfile }).mockResolvedValueOnce({
+      data: {
+        ...backupProfile,
+        data: { ...backupProfile.data, vaultKeyVersion: 3 },
+      },
+    });
 
     answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
@@ -1125,6 +1136,11 @@ describe('SettingsPage', () => {
           bwkEncryptedVaultKey: 'bwkEncVK',
           bwkVaultKeyIv: 'bwkVKIv',
           bwkVaultKeyTag: 'bwkVKTag',
+          // FROM THE PROFILE re-read after the rotation committed, never from
+          // `authStore` — whose own number does not move until the step AFTER
+          // this call, so it still names the generation the rotation replaced and
+          // the server would refuse the write.
+          vaultKeyVersion: 3,
         }),
       );
     });
@@ -1167,9 +1183,20 @@ describe('SettingsPage', () => {
       },
     };
 
-    mockGetProfileApi
-      .mockResolvedValueOnce({ data: backupProfile })
-      .mockResolvedValueOnce({ data: backupProfile });
+    // The SECOND read is the one the rotation takes after it commits, and it
+    // reports a generation that is neither the store's (2) nor absent. That makes
+    // the send site below discriminable three ways: the profile's number is 3,
+    // `useAuthStore.getState().vaultKeyVersion` is 2, and a deleted line sends
+    // nothing at all. Without that spread this assertion would pass against the
+    // wrong source — which matters, because the whole block is wrapped in a
+    // `catch` that treats a failure as non-critical, so the server's 409 would be
+    // swallowed and the stale BWK-wrapped vault key would simply never be updated.
+    mockGetProfileApi.mockResolvedValueOnce({ data: backupProfile }).mockResolvedValueOnce({
+      data: {
+        ...backupProfile,
+        data: { ...backupProfile.data, vaultKeyVersion: 3 },
+      },
+    });
 
     answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
@@ -1187,10 +1214,13 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByText('Confirm Rotation'));
 
     await waitFor(() => {
-      // Should send without bwkEncryptedVaultKey fields
+      // Should send without bwkEncryptedVaultKey fields — but WITH the
+      // generation, because this branch CLEARS the stored wrapper and clearing is
+      // as guarded as writing: the check belongs to the address, not to which
+      // fields the body happens to carry.
       expect(mockApiPost).toHaveBeenCalledWith(
         '/backup/setup',
-        expect.objectContaining({ authHash: 'mock-auth-hash' }),
+        expect.objectContaining({ authHash: 'mock-auth-hash', vaultKeyVersion: 3 }),
       );
       // Verify bwkEncryptedVaultKey is NOT in the call
       const setupCall = mockApiPost.mock.calls.find((c: unknown[]) => c[0] === '/backup/setup');

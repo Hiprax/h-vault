@@ -11,11 +11,13 @@ import { createAuditLog } from '../services/auditService.js';
 import { config } from '../config/index.js';
 import {
   StaleVaultKeyError,
+  acquireVaultRotationLock,
   assertVaultKeyVersion,
   assertVaultNotRotating,
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  releaseVaultRotationLock,
   sendStaleVaultKey,
   vaultImportLockName,
 } from '../utils/controllerHelpers.js';
@@ -799,8 +801,36 @@ async function executeImportOperations(
 
   let insertedCount = 0;
   let updatedCount = 0;
+  let rotationLockId: string | null = null;
 
   try {
+    // ── The vault-key exclusion lock ───────────────────────────────────────
+    //
+    // The generation check below is a READ, and a read is only worth the
+    // distance to the write that trusts it. From here to `insertMany` lie the
+    // cap count, a transaction start and, on the way in, everything already
+    // done above; a rotation that raises its fence anywhere inside that span is
+    // one both the fence read and the generation read have already decided does
+    // not exist, and every row this handler then commits is sealed under a key
+    // the rotation is in the middle of replacing. Those rows are stranded the
+    // instant they land — the rotation enumerated the account before they
+    // existed — and nothing tells the importer.
+    //
+    // This is the lock `bulkReEncrypt` takes BEFORE it raises that fence and
+    // releases AFTER it lowers it, so holding it here means no rotation can
+    // start: the two genuinely exclude each other instead of merely being
+    // unlikely to interleave. A conditional filter cannot do the job on this
+    // endpoint, because the write is an `insertMany` into another collection
+    // and there is nothing on those documents to condition.
+    //
+    // Taken INSIDE this `try`, after the import lock, so the one `finally`
+    // below releases both and in the reverse order. Acquisition order is fixed
+    // — import lock outside, exclusion lock inside, never the other way — and
+    // it is documented at `acquireVaultRotationLock`; every acquisition is
+    // non-blocking, so no ordering can deadlock, but a stable order keeps that
+    // reviewable rather than merely true today.
+    rotationLockId = await acquireVaultRotationLock(userId);
+
     // Cap measured against NET-NEW inserts only (updates rewrite rows that
     // already exist), before any write, so a rejected import leaves nothing.
     const existingItemCount = await VaultItem.countDocuments({ userId });
@@ -897,10 +927,15 @@ async function executeImportOperations(
       await execute();
     }
   } finally {
+    // Reverse acquisition order, and the exclusion lock first because it is the
+    // one whose loss blocks four other operations rather than one.
+    if (rotationLockId !== null) {
+      await releaseVaultRotationLock(userId, rotationLockId);
+    }
     await releaseJobLock(lockName, lockId);
   }
 
-  // The lock is released BEFORE the response is written, deliberately. The
+  // Both locks are released BEFORE the response is written, deliberately. The
   // client sends its batches sequentially and fires batch n+1 the moment
   // batch n's response lands; responding while the release round-trip is still
   // in flight would 409 a legitimate multi-batch migration against its own lock.

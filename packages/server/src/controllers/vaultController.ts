@@ -8,16 +8,16 @@ import { Folder } from '../models/Folder.js';
 import { Document } from '../models/Document.js';
 import { User } from '../models/User.js';
 import { createAuditLog } from '../services/auditService.js';
-import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import {
+  acquireVaultRotationLock,
   assertFolderOwned,
   assertVaultNotRotating,
   buildFolderAwareUpdate,
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  releaseVaultRotationLock,
   resolveVaultKeyVersion,
-  vaultRotationLockName,
 } from '../utils/controllerHelpers.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { MAX_ITEMS_PER_USER } from '@hvault/shared';
@@ -643,16 +643,19 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     return;
   }
 
-  // Acquire a per-user distributed lock to prevent concurrent vault key rotations.
-  // The same lock name is what login crash-recovery probes (via
-  // `isVaultRotationLockHeld`) to tell a live rotation from a crashed one, so it
-  // is built from the shared helper to keep the two sites in lockstep.
-  const rotationJobName = vaultRotationLockName(userId);
-  const ROTATION_LOCK_TTL_MS = 5 * 60 * 1000; // 5 minutes
-  const lockId = await acquireJobLock(rotationJobName, ROTATION_LOCK_TTL_MS);
-  if (!lockId) {
-    throw httpErrors.conflict('Vault key rotation is already in progress');
-  }
+  // Acquire the per-user vault-key exclusion lock. It prevents concurrent
+  // rotations, it is what login crash-recovery probes (via
+  // `isVaultRotationLockHeld`) to tell a live rotation from a crashed one, and it
+  // is what every other write whose vault-key check cannot be folded into its own
+  // filter holds across its check-to-commit span.
+  //
+  // Through the shared helper rather than an `acquireJobLock` spelled here, so
+  // the TTL and the refusal cannot differ between this holder and the five
+  // others. A per-site TTL is how one holder ends up holding the lock for longer
+  // than another believes it can be held, which lets a rotation in mid-span and
+  // breaks the exclusion silently; a per-site message is how a loser gets told
+  // which holder won, which it cannot know.
+  const lockId = await acquireVaultRotationLock(userId);
 
   // The idempotency check, again and authoritatively, now that the lock is held.
   //
@@ -680,17 +683,49 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
   } catch (readError) {
     // The lock is ours and nothing else will free it before its TTL, so a failure
     // to answer this question must not leave it held for five minutes.
-    await releaseJobLock(rotationJobName, lockId);
+    await releaseVaultRotationLock(userId, lockId);
     throw readError;
   }
   if (alreadyRotated) {
     // Released BEFORE the response, exactly as the `finally` below does it: a
     // client that fires its next request the moment this one lands must not race
     // the release round trip and be told a finished rotation is still running.
-    await releaseJobLock(rotationJobName, lockId);
+    await releaseVaultRotationLock(userId, lockId);
     sendAlreadyRotated();
     return;
   }
+
+  /**
+   * The filter BOTH branches put on the write that replaces the vault key, so a
+   * master-password change committed since this request read the account cannot
+   * be clobbered by it.
+   *
+   * `changePassword` re-wraps the vault key under a MEK derived from the NEW
+   * password and stores that as the account's only copy. This handler stores the
+   * NEW vault key wrapped under the MEK the rotating session holds — which is the
+   * OLD one if the password changed since. Unconditional, the later of the two
+   * writes wins and the account is left with a password that works and a wrapper
+   * nothing can open: total, unrecoverable loss.
+   *
+   * The lock does not close it on its own, which is why this filter exists as
+   * well. `user` was read BEFORE the lock was taken — it had to be, the bcrypt
+   * compare above depends on it — so a password change that commits and releases
+   * inside that gap is invisible here, and Passport does not catch it either: it
+   * re-checks `iat` against `passwordChangedAt` per REQUEST, and this request is
+   * already past it.
+   *
+   * `authHash` and not `passwordChangedAt`, and the difference matters: `authHash`
+   * is `required` on the model, so every row has one and no legacy widening of the
+   * kind `vaultKeyVersionFilter` needs applies here, while bcrypt salts every hash
+   * afresh so a change always moves it — even a change back to the same password.
+   */
+  const unchangedCredentialFilter = { _id: userId, authHash: user.authHash };
+
+  /** What a rotation that lost that race is told. */
+  const credentialMovedMessage =
+    'Vault key rotation failed: the master password for this account was changed while the ' +
+    'rotation was running, so the new vault key would have been sealed under a password that ' +
+    'no longer exists. The vault key was not changed. Sign in again and retry.';
 
   // Track errors from the non-transactional fallback path so that
   // partial failures can be reported in the response.
@@ -946,8 +981,12 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           // them redundant, and the `finally` also runs on every abort. The
           // guard above has already established that a rotation reaching this
           // point either adopts the pending wrapper or was told to discard it.
-          await User.updateOne(
-            { _id: userId },
+          //
+          // Conditioned on the credential this request authenticated against —
+          // see `unchangedCredentialFilter`. A miss throws, which aborts the
+          // whole transaction, so nothing this rotation wrote survives it.
+          const keyWrite = await User.updateOne(
+            unchangedCredentialFilter,
             {
               $set: userUpdate,
               $inc: { vaultKeyVersion: 1 },
@@ -959,6 +998,12 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
             },
             { session: txnSession },
           );
+          if (keyWrite.matchedCount === 0) {
+            logger.warn('Vault key rotation aborted: the master password changed mid-rotation', {
+              userId,
+            });
+            throw httpErrors.conflict(credentialMovedMessage);
+          }
         });
       } finally {
         // Lower the fence on BOTH outcomes — a committed rotation and an aborted
@@ -1071,7 +1116,70 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       const folderSnapshotById = new Map(folderSnapshots.map((s) => [String(s._id), s]));
       const documentSnapshotById = new Map(documentSnapshots.map((s) => [String(s._id), s]));
 
+      /**
+       * True when undoing the rewritten ciphertext would DESTROY the account
+       * rather than save it.
+       *
+       * The final `User.updateOne` below is the one write in this branch whose
+       * failure is ambiguous. A connection that drops after the server applied it
+       * is indistinguishable, from this process, from one that dropped before —
+       * and the two demand opposite responses. If it applied, every row already
+       * carries ciphertext sealed under the new key, that key IS now the
+       * account's key, and restoring the snapshots would leave every one of those
+       * rows readable only with a key nothing anywhere holds. The rollback that
+       * exists to prevent exactly that loss would be the thing that caused it, on
+       * an account whose data was, at that instant, completely intact.
+       *
+       * `encryptedVaultKey` answers it definitively: nothing but that final write
+       * puts the new wrapper there, and the wrapper is a fresh random key the
+       * client minted for this attempt, so equality is proof rather than
+       * coincidence.
+       *
+       * An unreadable answer is treated as "may have applied", which is the one
+       * asymmetry worth stating. The two unknown outcomes are not equally bad:
+       * skipping a rollback that was needed leaves rows under the pending wrapper
+       * — which this same branch stored precisely so an interrupted rotation can
+       * be finished, and which the client can still open — while performing one
+       * that was not needed is irreversible and total. When the datastore will not
+       * say, the non-destructive branch is the only defensible one.
+       */
+      const rollbackWouldDestroyACommittedRotation = async (): Promise<boolean> => {
+        try {
+          const committed = await User.findById(userId).select('encryptedVaultKey').lean();
+          return committed?.encryptedVaultKey === newEncryptedVaultKey;
+        } catch (readErr) {
+          logger.error(
+            'Could not determine whether the rotation committed; skipping the rollback rather ' +
+              'than risk restoring ciphertext under a key that has already been replaced',
+            {
+              userId,
+              error: readErr instanceof Error ? readErr.message : String(readErr),
+            },
+          );
+          return true;
+        }
+      };
+
       const rollbackPartialWrites = async (): Promise<void> => {
+        // Asked HERE rather than at either call site, so the rule covers both the
+        // orderly abort above and the exception path below with one statement. On
+        // the orderly abort the answer is always false — that path is reached
+        // before the final write runs at all — so this costs it one indexed read
+        // and changes nothing about it.
+        if (await rollbackWouldDestroyACommittedRotation()) {
+          logger.error(
+            'Vault key rotation failed AFTER its final write landed — the rotation is committed, ' +
+              'so the re-encrypted rows are left in place and NOT rolled back',
+            {
+              userId,
+              itemsUpdated: writtenItemIds.length,
+              foldersUpdated: writtenFolderIds.length,
+              documentsUpdated: writtenDocumentIds.length,
+            },
+          );
+          return;
+        }
+
         let rolledBackItems = 0;
         let rolledBackFolders = 0;
         let rolledBackDocuments = 0;
@@ -1309,29 +1417,40 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           throw httpErrors.conflict(rotationFailureMessage());
         }
 
-        await User.updateOne(
-          { _id: userId },
-          {
-            $set: {
-              encryptedVaultKey: newEncryptedVaultKey,
-              vaultKeyIv: newVaultKeyIv,
-              vaultKeyTag: newVaultKeyTag,
-              rotationInProgress: false,
-              ...(idempotencyKey
-                ? { lastRotationKey: idempotencyKey, lastRotationAt: new Date() }
-                : {}),
-            },
-            // Same update document as the key it names, and `$inc` rather than a
-            // value computed from the `user` read above, which happened before the
-            // rotation lock was taken.
-            $inc: { vaultKeyVersion: 1 },
-            $unset: {
-              pendingEncryptedVaultKey: '',
-              pendingVaultKeyIv: '',
-              pendingVaultKeyTag: '',
-            },
+        // Conditioned on the credential this request authenticated against — see
+        // `unchangedCredentialFilter`. A miss means a master-password change
+        // committed while this rotation ran, so the wrapper below is sealed under
+        // a MEK the account no longer has. Throwing here reaches the catch under
+        // it, which rolls every rewritten row back and lowers the fence; the
+        // rollback is correct precisely because this write did NOT apply, and
+        // `rollbackWouldDestroyACommittedRotation` confirms that rather than
+        // assuming it.
+        const keyWrite = await User.updateOne(unchangedCredentialFilter, {
+          $set: {
+            encryptedVaultKey: newEncryptedVaultKey,
+            vaultKeyIv: newVaultKeyIv,
+            vaultKeyTag: newVaultKeyTag,
+            rotationInProgress: false,
+            ...(idempotencyKey
+              ? { lastRotationKey: idempotencyKey, lastRotationAt: new Date() }
+              : {}),
           },
-        );
+          // Same update document as the key it names, and `$inc` rather than a
+          // value computed from the `user` read above, which happened before the
+          // rotation lock was taken.
+          $inc: { vaultKeyVersion: 1 },
+          $unset: {
+            pendingEncryptedVaultKey: '',
+            pendingVaultKeyIv: '',
+            pendingVaultKeyTag: '',
+          },
+        });
+        if (keyWrite.matchedCount === 0) {
+          logger.warn('Vault key rotation aborted: the master password changed mid-rotation', {
+            userId,
+          });
+          throw httpErrors.conflict(credentialMovedMessage);
+        }
       } catch (rotationErr) {
         // Unexpected exception path (not the orderly conflict abort above). Roll
         // back any partially-written ciphertext and clean up rotation state so
@@ -1354,7 +1473,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       }
     }
   } finally {
-    await releaseJobLock(rotationJobName, lockId);
+    await releaseVaultRotationLock(userId, lockId);
   }
 
   const totalErrors =

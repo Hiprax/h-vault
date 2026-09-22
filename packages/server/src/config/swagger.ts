@@ -1089,6 +1089,7 @@ export const swaggerSpec: JsonObject = {
           bwkIv: { type: 'string', minLength: 1, maxLength: 24 },
           bwkTag: { type: 'string', minLength: 1, maxLength: 32 },
           bwkSalt: { type: 'string', minLength: 1, maxLength: 64 },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
       BackupSettingsRequest: {
@@ -1111,6 +1112,7 @@ export const swaggerSpec: JsonObject = {
           newBwkIv: { type: 'string', minLength: 1, maxLength: 24 },
           newBwkTag: { type: 'string', minLength: 1, maxLength: 32 },
           newBwkSalt: { type: 'string', minLength: 1, maxLength: 64 },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
       RestoreBackupRequest: {
@@ -3339,6 +3341,12 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          409: staleVaultKeyConflict(
+            "The wrapper this request stores is the account's vault key sealed under the backup " +
+              'key, so it is guarded like any other write derived from that key. The same status, ' +
+              'carrying no `data`, is also how a vault-key rotation that is currently in progress ' +
+              'is reported; that one is retried unchanged once it finishes.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3462,6 +3470,12 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          409: staleVaultKeyConflict(
+            "Re-keying backup encryption re-seals the account's vault key under a new backup " +
+              'key, so it is guarded like any other write derived from that key. The same status, ' +
+              'carrying no `data`, is also how a vault-key rotation that is currently in progress ' +
+              'is reported; that one is retried unchanged once it finishes.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },

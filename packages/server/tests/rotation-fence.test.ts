@@ -379,6 +379,153 @@ describe('Vault key rotation fence', () => {
       expect(write.status).toBe(201);
     });
 
+    /**
+     * The sequential path's final `User.updateOne` is the one write whose failure
+     * is AMBIGUOUS. A socket that drops after the server applied it looks exactly
+     * like one that dropped before, and the two demand opposite responses: the
+     * rows are already re-encrypted under the new key, which is now the account's
+     * key, so restoring them to their pre-rotation ciphertext would leave every
+     * one of them sealed under a key nothing holds. The rollback that exists to
+     * PREVENT that loss would be the thing that causes it, and it would do so on
+     * an account whose data was, at that moment, entirely intact.
+     *
+     * So the rollback asks the datastore what actually landed before it undoes
+     * anything. It is a question with a definite answer — `encryptedVaultKey` is
+     * either the new wrapper or it is not, and only the final write can have put
+     * it there — and it is asked in `rollbackPartialWrites` itself rather than at
+     * the catch, so BOTH call sites are covered by one rule.
+     */
+    it('does not roll back over a final write that may already have applied', async () => {
+      // An ambiguous failure, reproduced faithfully: the write is performed for
+      // real and THEN the call rejects, which is what a connection dropping after
+      // the server applied it looks like to this process.
+      const realUpdateOne = User.updateOne.bind(User);
+      vi.spyOn(User, 'updateOne').mockImplementation((async (
+        filter: never,
+        update: never,
+        options?: never,
+      ) => {
+        const applied = await realUpdateOne(filter, update, options);
+        if (JSON.stringify(update).includes('encryptedVaultKey')) {
+          throw new Error('connection reset after the write was applied');
+        }
+        return applied;
+      }) as never);
+
+      const res = await mutate(
+        'post',
+        '/api/v1/vault/items/bulk-reencrypt',
+        rotationBody([{ id: itemId }], [{ id: folderId }]),
+      );
+      // The request still fails: the server genuinely does not know it succeeded,
+      // and reporting a success it cannot see would be a different lie.
+      expect(res.status).toBe(500);
+
+      vi.restoreAllMocks();
+      const after = await User.findById(user.id).lean();
+      // The rotation DID land. Everything below is what makes that survivable.
+      expect(after!.encryptedVaultKey).toBe('rotated-vault-key');
+      expect(after!.vaultKeyVersion).toBe(1);
+      // THE NEGATIVE, and the whole point: the rows were NOT restored to the
+      // ciphertext only the superseded key can open.
+      expect((await VaultItem.findById(itemId).lean())!.encryptedName).toBe('rotated-name');
+      expect((await Folder.findById(folderId).lean())!.encryptedName).toBe('rotated-folder-name');
+      // And the account is not left wedged: the fence is down and the lock freed.
+      expect(after!.rotationInProgress).toBe(false);
+      expect(await JobLock.countDocuments({ jobName: `vault-rotation:${user.id}` })).toBe(0);
+    });
+
+    it('still rolls back in full when the final write genuinely did not apply', async () => {
+      // The other side of the same decision, and the case that proves the skip is
+      // a CHECK and not a blanket "never roll back". Here the final write is
+      // rejected without being performed, so the vault key is untouched and the
+      // rows carry ciphertext only the NEW key could open — which nothing holds.
+      // Restoring them is the only correct answer.
+      const realUpdateOne = User.updateOne.bind(User);
+      vi.spyOn(User, 'updateOne').mockImplementation((async (
+        filter: never,
+        update: never,
+        options?: never,
+      ) => {
+        if (JSON.stringify(update).includes('encryptedVaultKey')) {
+          throw new Error('connection reset before the write was applied');
+        }
+        return realUpdateOne(filter, update, options);
+      }) as never);
+
+      const res = await mutate(
+        'post',
+        '/api/v1/vault/items/bulk-reencrypt',
+        rotationBody([{ id: itemId }], [{ id: folderId }]),
+      );
+      expect(res.status).toBe(500);
+
+      vi.restoreAllMocks();
+      const after = await User.findById(user.id).lean();
+      expect(after!.encryptedVaultKey).toBe('test-encrypted-vault-key');
+      expect(after!.vaultKeyVersion ?? 0).toBe(0);
+      // Rolled back to the ciphertext the untouched key still opens.
+      expect((await VaultItem.findById(itemId).lean())!.encryptedName).toBe('pre-existing-item');
+      expect((await Folder.findById(folderId).lean())!.encryptedName).toBe('pre-existing-folder');
+      // The pending wrapper survives, because a crash may already have sealed
+      // rows under it — the outstanding-rotation guard's contract.
+      expect(after!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
+      expect(await JobLock.countDocuments({ jobName: `vault-rotation:${user.id}` })).toBe(0);
+    });
+
+    it('skips the rollback when it CANNOT tell whether the rotation committed', async () => {
+      // The third outcome, and the one whose default matters most. When the
+      // datastore will not answer, the two mistakes are not equally bad: rolling
+      // back a rotation that committed is irreversible and total, while skipping
+      // one that did not leaves the rows under the pending wrapper this branch
+      // stored expressly so an interrupted rotation can be finished. So an
+      // unreadable answer takes the non-destructive branch.
+      //
+      // Only the rollback's own read is broken; the writes and every other read in
+      // the request stay real, so the request reaches the rollback for a genuine
+      // reason rather than a manufactured one.
+      const realUpdateOne = User.updateOne.bind(User);
+      vi.spyOn(User, 'updateOne').mockImplementation((async (
+        filter: never,
+        update: never,
+        options?: never,
+      ) => {
+        if (JSON.stringify(update).includes('encryptedVaultKey')) {
+          throw new Error('connection reset before the write was applied');
+        }
+        return realUpdateOne(filter, update, options);
+      }) as never);
+      const realFindById = User.findById.bind(User);
+      vi.spyOn(User, 'findById').mockImplementation(((id: string) => {
+        const query = realFindById(id);
+        const realSelect = query.select.bind(query);
+        query.select = ((fields: string) =>
+          fields === 'encryptedVaultKey'
+            ? { lean: () => Promise.reject(new Error('datastore unavailable')) }
+            : realSelect(fields)) as never;
+        return query;
+      }) as never);
+
+      const res = await mutate(
+        'post',
+        '/api/v1/vault/items/bulk-reencrypt',
+        rotationBody([{ id: itemId }], [{ id: folderId }]),
+      );
+      expect(res.status).toBe(500);
+
+      vi.restoreAllMocks();
+      // The vault key was never replaced, so this account is NOT lost — and the
+      // rows were left as the rotation wrote them rather than restored blindly.
+      const after = await User.findById(user.id).lean();
+      expect(after!.encryptedVaultKey).toBe('test-encrypted-vault-key');
+      expect((await VaultItem.findById(itemId).lean())!.encryptedName).toBe('rotated-name');
+      // The route back: the pending wrapper is the key those rows are under, and
+      // it survives.
+      expect(after!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
+      expect(after!.rotationInProgress).toBe(false);
+      expect(await JobLock.countDocuments({ jobName: `vault-rotation:${user.id}` })).toBe(0);
+    });
+
     it('never fences the rotation endpoint itself, so a stuck flag can be retried', async () => {
       await setRotating(true);
 
@@ -449,6 +596,15 @@ describe('Vault key rotation fence', () => {
   // live fence would readmit a second session's stale-key write that the
   // rotation's enumerated set does not cover — the exact data loss the fence
   // closes.
+  //
+  // That lock now has four other holders — the import, the restore, the document
+  // completion and the master-password change all take it across their own
+  // check-to-commit spans — so "lock held" means "somebody is mid-span", not
+  // "a rotation is live". The implication the login branch needs still runs the
+  // right way: a live rotation always holds it, so a `false` answer is still
+  // proof that no rotation is running, and a `true` answer merely DEFERS the
+  // cleanup of a stuck flag to the next login. What the cases below pin is that
+  // branch, so they take the lock by hand and say nothing about who holds it.
 
   it('leaves the fence up on login while a rotation is actively in progress (lock held)', async () => {
     // A LIVE rotation: the flag is committed AND the rotation lock is held with a

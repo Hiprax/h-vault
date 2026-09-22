@@ -6,6 +6,8 @@ import { z } from 'zod';
 import * as sharedSchemas from '@hvault/shared';
 import {
   APP_VERSION,
+  backupChangePasswordSchema,
+  backupSetupSchema,
   changePasswordSchema,
   createFolderSchema,
   createVaultItemSchema,
@@ -588,6 +590,25 @@ describe('API Documentation', () => {
         component: 'RestoreBackupRequest',
         route: '/backup/restore',
         method: 'post',
+      },
+      // The two that store the account's vault key sealed under the BACKUP key —
+      // the copy a cross-account restore unwraps. Both wrap their object in a
+      // refinement, which is the shape in which a field added to the wrong side
+      // of the `.superRefine(...)` / `.refine(...)` call is silently stripped, so
+      // `schema.shape` is read here for the same reason the bound tests read it.
+      {
+        schemaName: 'backupSetupSchema',
+        schema: backupSetupSchema,
+        component: 'BackupSetupRequest',
+        route: '/backup/setup',
+        method: 'post',
+      },
+      {
+        schemaName: 'backupChangePasswordSchema',
+        schema: backupChangePasswordSchema,
+        component: 'BackupChangePasswordRequest',
+        route: '/backup/change-password',
+        method: 'put',
       },
     ];
 

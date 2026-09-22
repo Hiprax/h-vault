@@ -474,12 +474,35 @@ what makes that refusable. A change attempted while a rotation is still being pr
 refused as well, and the two controls in the interface hold each other back so neither can be
 started while the other runs.
 
-One narrow window remains open and is stated here rather than left to be found: a rotation that
-begins after the check and commits after the write can still overwrite a committed password
-change, because the rotation's own final write is not itself conditional. Closing it requires the
-two operations to take the same per-user lock, which is a change with its own cost — a rotation
-interrupted by a crash holds that lock until its timeout lapses, blocking every password change
-in the meantime — so it is tracked separately rather than folded in here.
+The two also replace the same stored value from opposite directions — one re-wraps the existing
+vault key under a new password, the other stores a new vault key wrapped under the current one —
+so started together they could once interleave such that whichever finished second overwrote the
+other's work. They are now held apart for their whole duration by a per-user lock, and because a
+rotation reads the account before it takes that lock, it also checks at the moment it stores the
+key that the master password has not moved since; if it has, it undoes what it re-encrypted and
+asks you to sign in again. Whichever of the two loses is told so and can be retried. The cost of
+that lock is that a rotation interrupted by a crash holds it until its timeout lapses, during
+which a master password cannot be changed — which is not a new limit, because the same crash also
+leaves the write fence raised, and only signing in lowers that, which cannot happen any sooner.
+
+### Where the key is held steady, and what it costs
+
+The generation check is a read, and a read is only worth the distance to the write that trusts it.
+Four operations have real work between the two: an import parses and validates a whole file, a
+restore does the same and then counts four collections, a document upload waits for the storage
+service to assemble the file, and a master-password change revokes every session. A rotation
+starting inside one of those gaps had already listed the vault without the arriving entries, so
+they were sealed under a key the account was in the middle of replacing — unreadable from the
+moment they landed, and silent about it. For a document the consequence went further: an
+unreadable document cannot be re-keyed, and a rotation refuses to run unless it covers every
+entry, so one badly timed upload permanently ended that account's ability to rotate at all.
+
+All four now hold the account's vault key steady, with the same per-user lock, from their check
+until their last write, and a rotation arriving meanwhile is asked to wait. The cost is stated
+rather than left to be discovered: finishing several document uploads at the very same instant
+now completes them one at a time. An upload asked to wait keeps every byte it has already
+uploaded; retrying re-reads the staging ledger, skips the parts the server already holds, and
+re-sends none of them.
 
 For every other write the remedy is deliberately blunter. The refusal carries the generation the
 account is on, but the application does not use it to fetch the current key and carry on: the
@@ -498,6 +521,14 @@ A rotation re-encrypts every entry and then swaps the vault key, and on a databa
 give it a transaction it does so one entry at a time. A crash, a lost connection or a restart in
 the middle therefore leaves entries on both sides of the swap: some sealed under the key the
 rotation was moving to, the rest under the key the account still uses.
+
+An interruption at the very last step — after the entries were re-encrypted, while the new key was
+being stored — is a case of its own, because the server cannot tell whether that write landed. It
+used to assume it had not and restore every entry to its previous encryption, which was the right
+answer half the time and, the other half, was itself what destroyed the vault: the key HAD been
+swapped, so the restored entries were readable only with a key the account no longer had. It now
+asks what actually landed before undoing anything, undoes nothing when it cannot tell, and still
+restores in full when the key genuinely was not stored.
 
 That key is kept. It is stored wrapped under your master password, exactly as the live one is, so
 the server holds something it cannot open and nobody else can either — and it is the only copy

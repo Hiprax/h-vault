@@ -533,23 +533,36 @@ describe('Crash consistency — sequential path (standalone mongod)', () => {
     expect(await VaultItem.countDocuments({ userId: account.userId })).toBe(PLAINTEXTS.length);
     expect(await AuditLog.countDocuments({ userId: account.userId, action: 'import' })).toBe(0);
 
-    // The dead process still owns the per-user import lock, so the next attempt
-    // is refused rather than allowed to interleave with a request that might
-    // still be running somewhere. That refusal is the correct answer to "I
-    // cannot tell whether the other one is alive".
+    // The dead process still owns BOTH of the import's per-user locks, so the
+    // next attempt is refused rather than allowed to interleave with a request
+    // that might still be running somewhere. That refusal is the correct answer
+    // to "I cannot tell whether the other one is alive".
+    //
+    // Both are asserted, and the second one is the one with teeth beyond this
+    // endpoint: `vault-rotation:<userId>` is the exclusion lock the import holds
+    // so its vault-key checks stay true to `insertMany`, and a crash leaves it
+    // held for its own TTL — which blocks a rotation, a restore, a document
+    // completion and a master-password change too. That is the price of making
+    // the span atomic, and it is stated here rather than discovered.
     const lockName = `vault-import:${account.userId}`;
-    const held = await JobLock.findOne({ jobName: lockName }).lean();
-    expect(held).not.toBeNull();
-    expect(held!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    const exclusionLockName = `vault-rotation:${account.userId}`;
+    for (const name of [lockName, exclusionLockName]) {
+      const held = await JobLock.findOne({ jobName: name }).lean();
+      expect(held, `${name} was not held by the dead process`).not.toBeNull();
+      expect(held!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    }
 
     const blocked = await post('/api/v1/tools/import', account.token, body);
     expect(blocked.status).toBe(409);
     expect(JSON.stringify(blocked.body)).toMatch(/already in progress/i);
     expect(await VaultItem.countDocuments({ userId: account.userId })).toBe(PLAINTEXTS.length);
 
-    // And it is a delay, not a wedge: once the lock's TTL passes, the retry
-    // lands the whole import exactly once.
+    // And it is a delay, not a wedge: once both TTLs pass, the retry lands the
+    // whole import exactly once. Expiring the exclusion lock is not bookkeeping
+    // here — `expireLock` asserts it matched a row, so a change that stopped the
+    // import taking that lock fails this line rather than passing quietly.
     await expireLock(lockName);
+    await expireLock(exclusionLockName);
     const retry = await post('/api/v1/tools/import', account.token, body);
     expect(retry.status).toBe(201);
     expect(retry.body.data).toEqual({ insertedCount: 5, updatedCount: 0 });
@@ -580,9 +593,14 @@ describe('Crash consistency — sequential path (standalone mongod)', () => {
       expect(row.searchHash).toMatch(/^[a-f0-9]{64}$/);
     }
 
-    // The lock is released in a `finally` that runs BEFORE the audit row is
+    // BOTH locks are released in a `finally` that runs BEFORE the audit row is
     // written, so a crash in this window leaves the user free to import again.
+    // The exclusion lock is named as well as the import lock, and not for
+    // symmetry: an implementation that released one and leaked the other would
+    // satisfy a single-lock assertion while blocking this account's rotation,
+    // restore, document completions and master-password change for the full TTL.
     expect(await JobLock.countDocuments({ jobName: `vault-import:${account.userId}` })).toBe(0);
+    expect(await JobLock.countDocuments({ jobName: `vault-rotation:${account.userId}` })).toBe(0);
 
     // The audit row is what was lost. Recorded rather than glossed over: a write
     // this account will never see an entry for is the honest cost of a crash in
@@ -708,9 +726,11 @@ describe('Crash consistency — transactional path (replica set)', () => {
       `the aborted import transaction left ${String(settled - PLAINTEXTS.length)} item(s) behind`,
     ).toBe(PLAINTEXTS.length);
 
-    // And the retry, once the dead process's lock has expired, imports exactly
-    // once — five rows, not ten.
+    // And the retry, once the dead process's locks have expired, imports exactly
+    // once — five rows, not ten. Both, because an import holds the per-user
+    // exclusion lock as well for the span its vault-key checks have to survive.
     await expireLock(`vault-import:${account.userId}`);
+    await expireLock(`vault-rotation:${account.userId}`);
     const retry = await post('/api/v1/tools/import', account.token, body);
     expect(retry.status).toBe(201);
     expect(retry.body.data).toEqual({ insertedCount: 5, updatedCount: 0 });

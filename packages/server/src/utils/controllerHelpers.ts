@@ -3,6 +3,7 @@ import { ErrorHandler, httpErrors } from '@hiprax/errors';
 import { User } from '../models/User.js';
 import { Folder } from '../models/Folder.js';
 import { JobLock } from '../models/JobLock.js';
+import { acquireJobLock, releaseJobLock } from './jobLock.js';
 import { createModuleLogger } from './logger.js';
 
 const logger = createModuleLogger('controller-helpers');
@@ -168,6 +169,19 @@ export function buildFolderAwareUpdate(update: Record<string, unknown>): Record<
  * Not called by `bulkReEncrypt` itself: the flag is its own, and a stuck flag
  * left by a crashed rotation must never lock the user out of retrying (login
  * crash-recovery in `authController.login` also clears such a flag).
+ *
+ * ## It is a READ, and a read is not a fence on its own
+ *
+ * Nothing here holds anything. Between this read and the write it is protecting
+ * lie whatever validation, lookups and network calls the handler performs, and a
+ * rotation that raises its own flag inside that gap is one this read has already
+ * decided does not exist. The flag is therefore necessary and not sufficient:
+ * a handler whose gap is more than a statement or two takes
+ * {@link acquireVaultRotationLock} across it, which makes this answer stay true
+ * until the write lands. Most such handlers call this AFTER taking the lock;
+ * `importVault` reads it first, before a multi-megabyte body is validated, and
+ * that is sound for a reason set out at {@link acquireVaultRotationLock} rather
+ * than assumed here.
  */
 export async function assertVaultNotRotating(userId: string): Promise<void> {
   const user = await User.findById(userId).select('rotationInProgress').lean();
@@ -177,14 +191,136 @@ export async function assertVaultNotRotating(userId: string): Promise<void> {
 }
 
 /**
- * The distributed-lock name a vault-key rotation holds for its user. Sole source
- * of the string so the writer (`vaultController.bulkReEncrypt`, which acquires
- * and releases it) and the liveness probe ({@link isVaultRotationLockHeld}, used
- * by login crash-recovery) can never drift apart — a mismatch would silently
- * defeat the guard.
+ * The distributed-lock name that EXCLUDES a vault-key rotation for one user.
+ * Sole source of the string, so no holder and no probe can drift from another —
+ * a mismatch would silently defeat every guarantee below.
+ *
+ * ## Five holders, not one
+ *
+ * It is named for the rotation because the rotation is what it exists to
+ * exclude, but `vaultController.bulkReEncrypt` is only its first holder. Every
+ * operation whose vault-key check cannot be folded into its own write as a
+ * filter takes it too, for the span between that check and its commit:
+ * `toolsController.importVault`, `backupController.restoreBackup`,
+ * `documentController.completeUpload` and `userController.changePassword`.
+ * {@link assertVaultKeyVersion}'s docblock states the rule that decides which of
+ * the two mechanisms an endpoint gets.
+ *
+ * Holding it means no rotation can START, because `bulkReEncrypt` acquires it
+ * before it raises `rotationInProgress` and releases it after clearing that
+ * flag. It says nothing about a rotation that has already COMMITTED, which is
+ * what the generation check is for, nor about one that CRASHED, which is what
+ * the fence read is for.
+ *
+ * ## What it costs the probe
+ *
+ * {@link isVaultRotationLockHeld} can no longer read a held lock as "a rotation
+ * is live"; it reads it as "some holder is mid-span". That is the fail-closed
+ * direction for its one caller and is spelled out there.
  */
 export function vaultRotationLockName(userId: string): string {
   return `vault-rotation:${userId}`;
+}
+
+/**
+ * How long any one holder of {@link vaultRotationLockName} may hold it before it
+ * is treated as crashed and re-acquirable.
+ *
+ * ONE number for every holder, deliberately, and generous rather than tuned per
+ * site. The two failure directions are not symmetrical: a TTL that lapses inside
+ * a live span lets a rotation acquire the lock alongside the holder and breaks
+ * the exclusion **silently**, with a stranded row as the only evidence; a TTL
+ * that outlives a crashed span costs availability, loudly, on an operation the
+ * user can retry. Five minutes bounds the longest span any holder has — a
+ * restore writing up to `MAX_IMPORT_ITEMS` rows one at a time — with room to
+ * spare, and it is the number `bulkReEncrypt` has always used.
+ *
+ * What a crashed holder blocks for those five minutes is a rotation, an import,
+ * a restore, a document completion and a master-password change. On the
+ * master-password change specifically that is not a new cost: a crashed rotation
+ * also leaves `rotationInProgress` raised, and the fence refuses that endpoint
+ * until a LOGIN lowers it — which cannot happen until this same TTL lapses,
+ * because login crash-recovery declines while the lock is live.
+ */
+export const VAULT_ROTATION_LOCK_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * The refusal every loser of {@link vaultRotationLockName} receives.
+ *
+ * ONE sentence for all five holders, because the loser cannot tell which of them
+ * won and must not be told a story that might be false: naming "a rotation"
+ * specifically was accurate while the rotation was the only holder and is a lie
+ * now. It keeps the words "already in progress" that the rotation's own refusal
+ * has always carried.
+ */
+const VAULT_ROTATION_LOCK_BUSY_MESSAGE =
+  'Another change that re-seals this account under its vault key is already in progress ' +
+  '(a vault key rotation, an import, a backup restore, a document completion or a master ' +
+  'password change). Please wait and retry.';
+
+/**
+ * Takes {@link vaultRotationLockName} for the caller's check-to-commit span.
+ *
+ * ## Why a lock rather than a filter
+ *
+ * {@link assertVaultKeyVersion} answers "is the caller holding the current vault
+ * key?" with a READ, and a read is only worth the distance to the write that
+ * trusts it. A handler whose write can carry the answer in its own filter uses
+ * {@link vaultKeyVersionFilter} and needs nothing here. A handler whose write
+ * cannot — because it writes a different collection (`insertMany`, `Document`),
+ * writes many rows, or spends seconds in a storage engine between the two —
+ * holds this instead, and the rotation's own acquisition then genuinely excludes
+ * it rather than merely being unlikely to interleave.
+ *
+ * ## Non-blocking, and that is the design
+ *
+ * A loser is refused with a 409 it can retry, never queued. Queueing on a lock
+ * whose longest holder is a five-minute rotation would turn a rare conflict into
+ * a request that holds a connection open for minutes, and the operations that
+ * take this lock are all ones a client re-issues cheaply. Because nothing ever
+ * waits, no ordering of acquisitions can deadlock — but the order is fixed
+ * anyway so it stays reviewable: this lock is the INNERMOST one every handler
+ * takes. `importVault` holds `vault-import:<userId>` outside it and
+ * `completeUpload` holds `document-complete:<userId>:<uploadId>` outside it;
+ * nothing takes this one first and then takes either of those.
+ *
+ * ## Where the fence read goes, and why either side of this is sound
+ *
+ * {@link assertVaultNotRotating} stays: this lock and that flag catch different
+ * rotations. Holding the lock means none can START; the flag is the only thing
+ * that sees one that CRASHED, whose lock has since TTL-expired and whose fence is
+ * stuck up.
+ *
+ * `restoreBackup`, `completeUpload` and `changePassword` acquire first and read
+ * the fence second, which is the order that needs no argument. `importVault`
+ * reads the fence at the top of the handler, before a multi-megabyte body is
+ * validated, and acquires later — and that is sound for a reason worth writing
+ * down rather than re-deriving: a rotation that started after that read either
+ * still holds this lock, in which case the acquisition below fails, or has
+ * finished and lowered its flag, in which case the generation check catches it.
+ * The only state the early read can be stale about is one the acquisition or the
+ * generation check refuses anyway.
+ *
+ * @throws 409 when another holder has it. Callers release with
+ *   {@link releaseVaultRotationLock} from a `finally`, before the response is
+ *   written.
+ */
+export async function acquireVaultRotationLock(userId: string): Promise<string> {
+  const lockId = await acquireJobLock(vaultRotationLockName(userId), VAULT_ROTATION_LOCK_TTL_MS);
+  if (lockId === null) {
+    throw httpErrors.conflict(VAULT_ROTATION_LOCK_BUSY_MESSAGE);
+  }
+  return lockId;
+}
+
+/**
+ * Releases a lock taken with {@link acquireVaultRotationLock}.
+ *
+ * Scoped to the acquisition id by `releaseJobLock`, so a holder whose TTL lapsed
+ * mid-span cannot free the lock a later holder has since taken.
+ */
+export async function releaseVaultRotationLock(userId: string, lockId: string): Promise<void> {
+  await releaseJobLock(vaultRotationLockName(userId), lockId);
 }
 
 /**
@@ -254,10 +390,19 @@ export function documentInitLockName(userId: string): string {
  *
  * That difference is the design. Completing a transfer touches exactly one
  * staging row, one stored object and one `documents` row, all named by this id,
- * so two completions of DIFFERENT uploads cannot interfere and must not queue
- * behind each other: a user may legitimately run
- * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` transfers and finish them at the
- * same moment.
+ * so two completions of DIFFERENT uploads cannot interfere through anything THIS
+ * lock protects, and must not queue behind each other for it.
+ *
+ * They do queue for something else, and it is worth being exact rather than
+ * leaving the sentence above to read as more than it says: a completion also
+ * holds the per-user {@link vaultRotationLockName} across its
+ * version-read-to-insert span, so a user running
+ * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` transfers and finishing them at the
+ * same moment now has all but one of those completions refused with a retryable
+ * 409. That is a deliberate trade recorded at `completeUpload`: the alternative
+ * is a document sealed under a superseded vault key, which permanently ends the
+ * account's ability to rotate. It is not a reason to widen THIS lock to the user,
+ * which would serialise the engine calls as well and buy nothing.
  *
  * What it does exclude is a completion racing ITSELF — a client retry after a
  * timeout, or a double-clicked button. The unique `_id` on `documents` already
@@ -270,10 +415,12 @@ export function documentInitLockName(userId: string): string {
  *
  * Note what this lock deliberately does NOT overlap: the per-user
  * {@link documentInitLockName} that the OTHER end of the same transfer takes, nor
- * the per-user {@link vaultRotationLockName}. All three are disjoint, which is exactly why
- * completion needs {@link assertVaultNotRotating} as well as its vault-key
- * version check — holding this lock says nothing at all about whether a rotation
- * is running.
+ * the per-user {@link vaultRotationLockName}. All three are distinct names, which
+ * is exactly why completion needs {@link assertVaultNotRotating} as well as its
+ * vault-key version check — holding this lock says nothing at all about whether a
+ * rotation is running — and why it takes the exclusion lock as well rather than
+ * assuming this one stands in for it. Acquisition order is this lock OUTSIDE the
+ * exclusion lock, never the reverse.
  *
  * The name carries the OWNER as well as the upload, even though an upload id is
  * already globally unique and adding the owner changes nothing for the account that
@@ -288,14 +435,16 @@ export function documentCompleteLockName(userId: string, uploadId: string): stri
 }
 
 /**
- * True while a vault-key rotation is ACTIVELY processing for `userId`.
+ * True while SOME holder of {@link vaultRotationLockName} is mid-span for
+ * `userId` — which includes, but is no longer limited to, a vault-key rotation
+ * that is actively processing.
  *
- * `bulkReEncrypt` acquires the {@link vaultRotationLockName} JobLock BEFORE it
- * raises the `rotationInProgress` flag and releases it AFTER clearing that flag,
- * so a live rotation holds this lock for the entire flag-true window; a rotation
- * that crashed mid-flight leaves a lock whose `expiresAt` has passed (the TTL
- * reaper may not have removed the row yet, hence the explicit `expiresAt` range
- * predicate rather than mere existence).
+ * `bulkReEncrypt` acquires the JobLock BEFORE it raises the `rotationInProgress`
+ * flag and releases it AFTER clearing that flag, so a live rotation holds this
+ * lock for the entire flag-true window; a rotation that crashed mid-flight leaves
+ * a lock whose `expiresAt` has passed (the TTL reaper may not have removed the
+ * row yet, hence the explicit `expiresAt` range predicate rather than mere
+ * existence).
  *
  * This is the discriminator login crash-recovery needs. `rotationInProgress`
  * doubles as the live write-fence read by {@link assertVaultNotRotating}, so
@@ -303,6 +452,21 @@ export function documentCompleteLockName(userId: string, uploadId: string): stri
  * never for one still in progress — clearing a live fence would readmit a
  * second session's stale-key write that the rotation's enumerated set does not
  * cover, stranding that row under the superseded key.
+ *
+ * ## The implication that runs one way only
+ *
+ * "A live rotation holds this lock" is still true. "This lock is held, therefore
+ * a rotation is live" is NOT, and has not been since the lock acquired its other
+ * four holders (see {@link vaultRotationLockName}). What the caller gets from a
+ * `true` answer is therefore weaker than it used to be: it means "do not touch
+ * the flag right now", not "a rotation is running". That is the direction the
+ * one caller needs. An import, a restore, a completion or a password change
+ * holding the lock makes login recovery DEFER the cleanup of a stuck flag to the
+ * next login, which is free — those holders are all refused by that same stuck
+ * flag anyway, so none of them can hold the lock for long while it is raised,
+ * and the flag's cleanup has never been urgent. The opposite error, clearing a
+ * live rotation's fence, is the one that costs a row, and this predicate still
+ * cannot make it.
  */
 export async function isVaultRotationLockHeld(userId: string): Promise<boolean> {
   const lock = await JobLock.exists({

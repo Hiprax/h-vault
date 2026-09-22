@@ -69,7 +69,9 @@ import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { hashToken } from '../src/utils/token.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
-import { vaultKeyVersionOf } from '../src/utils/controllerHelpers.js';
+import { vaultKeyVersionOf, vaultRotationLockName } from '../src/utils/controllerHelpers.js';
+import * as jobLock from '../src/utils/jobLock.js';
+import { JobLock } from '../src/models/JobLock.js';
 import { createTestUser, authHeader, getCsrf, type TestUser } from './helpers.js';
 import { useReplicaSetConnection } from './mongoHarness.js';
 
@@ -508,6 +510,149 @@ function defineChangePasswordGuardCases(expectTransactions: boolean): void {
     expect(res.body.data).toBeUndefined();
     vi.restoreAllMocks();
     await expectNothingChanged(before);
+  });
+
+  /**
+   * ## The window a filter cannot reach, from either side
+   *
+   * The conditional write above closes every interleaving in which a rotation
+   * COMMITS before this handler writes. It cannot close the one where the
+   * rotation commits AFTER: the rotation raises its fence, enumerates, and is
+   * still on generation N while this handler's filtered write matches and stores
+   * the new `authHash` beside a wrapper of the OLD vault key under the NEW MEK —
+   * and then the rotation's own final write replaces that wrapper with one of the
+   * NEW vault key under the OLD MEK, and bumps the generation. The account is left
+   * with a password that works and a wrapper nothing can open. Every item, folder,
+   * note and document is gone, permanently, and the rotation legs are EMPTY for an
+   * account with no rows, so the window is milliseconds wide but not exotic.
+   *
+   * It takes TWO changes to close, and neither alone is enough.
+   *
+   * The lock is the first: both operations take `vault-rotation:<userId>`, so they
+   * cannot overlap at all. On its own it still leaves a hole, because the rotation
+   * reads the account — including the `authHash` it verifies against — BEFORE it
+   * takes that lock. A password change that commits and releases inside that gap
+   * is invisible to the rotation, which then proceeds on a credential that no
+   * longer exists and writes its wrapper under a MEK the account has replaced.
+   * Passport does not catch it either: it re-checks `iat` against
+   * `passwordChangedAt` per REQUEST, and this request is already past it.
+   *
+   * So the rotation's final write is conditioned on the `authHash` it read, which
+   * is the second change. That column is `required`, so unlike `vaultKeyVersion` it
+   * needs no legacy widening, and bcrypt salts every hash afresh so a change always
+   * moves it. A rotation whose filter no longer matches rolls back and reports a
+   * conflict rather than committing over the password change.
+   */
+  describe('the master-password change and the rotation are serialised', () => {
+    it('refuses the change while a rotation holds the exclusion lock, and writes nothing', async () => {
+      const lockId = await jobLock.acquireJobLock(vaultRotationLockName(user.id), 60_000);
+      expect(lockId).not.toBeNull();
+      const before = await snapshot();
+
+      const res = await changePassword({ vaultKeyVersion: 0, ...LIVE_WRAPPER });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(String(res.body.message)).toMatch(/already in progress/i);
+      // Not the recoverable stale-generation refusal: the caller's generation is
+      // fine, and a client handed a number would rewrap for no reason.
+      expect(res.body.data).toBeUndefined();
+      await expectNothingChanged(before);
+      // Including the sessions: the revocation must not have run either, or a
+      // rotation in another tab would sign this user out of everything.
+      expect(before.refreshTokens).toBeGreaterThan(0);
+
+      await jobLock.releaseJobLock(vaultRotationLockName(user.id), lockId as string);
+    });
+
+    it('holds the lock at the moment it writes, and releases it before responding', async () => {
+      // The case a check-and-release cannot pass. The probe runs inside the
+      // vault-key write itself and tries to take the lock a rotation would take.
+      const realUpdateOne = User.updateOne.bind(User);
+      let lockWasFreeAtWriteTime: boolean | null = null;
+      vi.spyOn(User, 'updateOne').mockImplementation((async (
+        filter: never,
+        update: never,
+        options?: never,
+      ) => {
+        if (lockWasFreeAtWriteTime === null && JSON.stringify(update).includes('authHash')) {
+          const stolen = await jobLock.acquireJobLock(vaultRotationLockName(user.id), 60_000);
+          lockWasFreeAtWriteTime = stolen !== null;
+          if (stolen !== null) {
+            await jobLock.releaseJobLock(vaultRotationLockName(user.id), stolen);
+          }
+        }
+        return realUpdateOne(filter, update, options);
+      }) as never);
+
+      const res = await changePassword({ vaultKeyVersion: 0, ...LIVE_WRAPPER });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(lockWasFreeAtWriteTime, 'the probe never ran').not.toBeNull();
+      expect(
+        lockWasFreeAtWriteTime,
+        'a rotation could take the exclusion lock while the password was being written',
+      ).toBe(false);
+      vi.restoreAllMocks();
+      // And nothing is left holding it once the response is out.
+      expect(await JobLock.countDocuments({ jobName: vaultRotationLockName(user.id) })).toBe(0);
+    });
+
+    it('releases the lock when the change is refused for an unrelated reason', async () => {
+      const res = await changePassword({ currentAuthHash: 'not-the-password' });
+
+      expect(res.status).toBe(401);
+      expect(await JobLock.countDocuments({ jobName: vaultRotationLockName(user.id) })).toBe(0);
+    });
+
+    it('refuses a rotation that would overwrite a password change committed since it read the account', async () => {
+      // The mirror half. The password change runs to completion in the gap
+      // between the rotation's read of the account and its acquisition of the
+      // lock — the one place the lock cannot exclude it — so the rotation arrives
+      // holding a credential and a MEK the account has already replaced.
+      const realAcquire = jobLock.acquireJobLock;
+      let raced = false;
+      let racedResponse: request.Response | undefined;
+      vi.spyOn(jobLock, 'acquireJobLock').mockImplementation(async (jobName, ttlMs) => {
+        if (!raced && jobName === vaultRotationLockName(user.id)) {
+          raced = true;
+          racedResponse = await changePassword({ vaultKeyVersion: 0, ...LIVE_WRAPPER });
+        }
+        return realAcquire(jobName, ttlMs);
+      });
+
+      const rotation = await send('post', '/api/v1/vault/items/bulk-reencrypt', {
+        authHash: user.rawPassword,
+        items: [],
+        folders: [],
+        documents: [],
+        newEncryptedVaultKey: ROTATED_VAULT_KEY,
+        newVaultKeyIv: 'rotated-vault-key-iv',
+        newVaultKeyTag: 'rotated-vault-key-tag',
+      });
+
+      expect(raced, 'the interleaving never happened, so this case proves nothing').toBe(true);
+      expect(racedResponse?.status, JSON.stringify(racedResponse?.body)).toBe(200);
+      expect(rotation.status, JSON.stringify(rotation.body)).toBe(409);
+      expect(String(rotation.body.message)).toMatch(/master password/i);
+
+      vi.restoreAllMocks();
+      const after = await User.findById(user.id).lean();
+      // THE NEGATIVE, and the whole point of this case: the wrapper the password
+      // change stored is STILL THERE. Before this guard the rotation replaced it
+      // with one sealed under the old MEK, and the account was unrecoverable.
+      expect(after?.encryptedVaultKey).toBe(LIVE_WRAPPER.newEncryptedVaultKey);
+      expect(after?.vaultKeyIv).toBe(LIVE_WRAPPER.newVaultKeyIv);
+      expect(after?.vaultKeyTag).toBe(LIVE_WRAPPER.newVaultKeyTag);
+      // The generation did not move, so no client is told to rewrap under a
+      // rotation that did not happen.
+      expect(vaultKeyVersionOf(after)).toBe(0);
+      // The new password is the account's password, and the old one is dead.
+      expect(await passwordStillWorks(NEW_AUTH_HASH)).toBe(true);
+      expect(await passwordStillWorks(user.rawPassword)).toBe(false);
+      // The rotation left nothing wedged.
+      expect(after?.rotationInProgress).toBe(false);
+      expect(await JobLock.countDocuments({ jobName: vaultRotationLockName(user.id) })).toBe(0);
+    });
   });
 
   it('accounts for the session revocation according to what its branch can undo', async () => {
