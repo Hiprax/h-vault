@@ -25,7 +25,8 @@ import { useUIStore } from './uiStore.js';
 import { useDocumentsStore } from './documentsStore.js';
 import { isAxiosError } from 'axios';
 import type { SuccessfulLoginResponse } from '@hvault/shared';
-import { KDF_ITERATIONS, KDF_ALGORITHM, ENCRYPTION_VERSION, ERROR_CODES } from '@hvault/shared';
+import { KDF_ITERATIONS, KDF_ALGORITHM, ENCRYPTION_VERSION } from '@hvault/shared';
+import { is2faSessionDead } from '../services/auth/sessionFailure.js';
 import { getDeviceFingerprint } from '../utils/deviceFingerprint.js';
 
 /**
@@ -453,30 +454,25 @@ export const useAuthStore = create<AuthState>()(
         } catch (error) {
           // Decide whether the same temp token can be retried:
           //   Retryable     → a wrong-but-correctable 2FA code or a transient
-          //     network error (an Axios error whose code is NOT in
-          //     NON_RETRYABLE_CODES). Keep the MEK and the abandon-cleanup
-          //     timer so the user can resubmit and the 5-minute reaper still
-          //     fires if they walk away.
+          //     network error (an Axios failure {@link is2faSessionDead} does
+          //     not speak for). Keep the MEK and the abandon-cleanup timer so
+          //     the user can resubmit and the 5-minute reaper still fires if
+          //     they walk away.
           //   Non-retryable → the temp token / session is dead (expired,
           //     invalid, locked) OR a post-verification crypto/parse failure
           //     (corrupt or rotated vault key, malformed JWT) that surfaced as
           //     a plain, non-Axios Error. A resubmit cannot fix any of these,
           //     and the abandon timer was the only reaper, so clear the MEK
           //     immediately instead of leaving it resident with no cleanup.
-          const NON_RETRYABLE_CODES: string[] = [
-            ERROR_CODES.TOKEN_EXPIRED,
-            ERROR_CODES.TOKEN_INVALID,
-            ERROR_CODES.ACCOUNT_LOCKED,
-          ];
-          let retryable = false;
-          if (isAxiosError(error)) {
-            const errorCode = (error.response?.data as Record<string, unknown> | undefined)?.error;
-            const code =
-              typeof errorCode === 'object' && errorCode !== null
-                ? (errorCode as Record<string, unknown>).code
-                : undefined;
-            retryable = !(typeof code === 'string' && NON_RETRYABLE_CODES.includes(code));
-          }
+          //
+          // The classification lives in `services/auth/sessionFailure.ts`, which
+          // already reads the FLAT `{ success, message, statusCode, statusText }`
+          // envelope the API actually emits. It was inlined here against a NESTED
+          // `data.error.code` the server has never produced, so the code was
+          // always `undefined`, every Axios failure read as retryable, and this
+          // teardown was dead: a dead 2FA session left the master-password-derived
+          // MEK resident for the full five minutes.
+          const retryable = isAxiosError(error) && !is2faSessionDead(error);
           if (!retryable) {
             const { mek: currentMek, _2faTimeoutId: tid } = get();
             if (tid) clearTimeout(tid);

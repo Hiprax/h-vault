@@ -17,6 +17,7 @@ import {
   isSessionGone,
   isAccountLocked,
   isCsrfRejection,
+  is2faSessionDead,
   isRateLimited,
   retryAfterSeconds,
   describeTransientFailure,
@@ -136,6 +137,84 @@ describe('isAccountLocked', () => {
     expect(
       isAccountLocked({ response: { status: 403, data: { message: 'ACCOUNT_LOCKED' } } }),
     ).toBe(false);
+  });
+});
+
+describe('is2faSessionDead', () => {
+  /**
+   * The EXACT body `createErrorMiddleware` puts on the wire: flat, four fields,
+   * `message` carrying the machine-readable `ERROR_CODES` constant. Built here
+   * rather than inline so that every case below is provably a shape the API can
+   * actually produce — which is the whole defect this predicate closes.
+   */
+  function refusal(status: number, code: string, statusText: string): AxiosError {
+    return axiosError(status, { success: false, message: code, statusCode: status, statusText });
+  }
+
+  it.each([
+    ['an expired refresh row', 401, 'TOKEN_EXPIRED', 'Unauthorized'],
+    ['a dead or foreign temp token', 401, 'TOKEN_INVALID', 'Unauthorized'],
+    ['an account that locked mid-flow', 403, 'ACCOUNT_LOCKED', 'Forbidden'],
+  ])('is TRUE for %s', (_label, status, code, statusText) => {
+    expect(is2faSessionDead(refusal(status, code, statusText))).toBe(true);
+  });
+
+  it('is FALSE for a wrong 2FA code, the one refusal the same token survives', () => {
+    // The case the whole split exists to protect: `TWO_FA_INVALID` is a 401 too,
+    // so the status alone can never decide this. If it ever reads TRUE, a mistyped
+    // digit destroys the MEK and the user has to start the sign-in over.
+    expect(is2faSessionDead(refusal(401, 'TWO_FA_INVALID', 'Unauthorized'))).toBe(false);
+  });
+
+  it('is FALSE for TWO_FA_NOT_ENABLED — a 400 the abandon timer still reaps', () => {
+    expect(is2faSessionDead(refusal(400, 'TWO_FA_NOT_ENABLED', 'Bad Request'))).toBe(false);
+  });
+
+  it('is FALSE for the NESTED envelope the server has never emitted', () => {
+    // The shape `verify2fa` used to read, and the shape three tests fabricated.
+    // It must stay unrecognised: accepting it here would re-legitimise a body no
+    // route can produce and let the fabricated tests pass again.
+    expect(
+      is2faSessionDead(axiosError(401, { success: false, error: { code: 'TOKEN_INVALID' } })),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['a rate limit', 429],
+    ['a server error', 500],
+    ['a bad gateway', 502],
+  ])('is FALSE for %s carrying the same message — the status corroborates', (_label, status) => {
+    // A proxy, a captive portal or a WAF can return any JSON body it likes.
+    expect(is2faSessionDead(refusal(status, 'TOKEN_INVALID', 'Error'))).toBe(false);
+  });
+
+  it.each([
+    ['the code in lower case', { message: 'token_invalid' }],
+    ['the code as a substring', { message: 'reason: TOKEN_INVALID' }],
+    ['no message at all', {}],
+    ['a non-string message', { message: { code: 'TOKEN_INVALID' } }],
+    ['a null body', null],
+  ])('is FALSE for %s — matched exactly, like isAccountLocked', (_label, data) => {
+    expect(is2faSessionDead(axiosError(401, data))).toBe(false);
+  });
+
+  it('is FALSE for a network error with no response at all', () => {
+    // Offline, DNS, a restarting container: the temp token was never judged, so
+    // the MEK stays and the user can simply resubmit.
+    expect(is2faSessionDead(axiosError())).toBe(false);
+  });
+
+  it.each([
+    ['a plain Error', new Error('TOKEN_INVALID')],
+    ['a string', 'TOKEN_INVALID'],
+    ['null', null],
+    ['undefined', undefined],
+    [
+      'an object shaped like a response',
+      { response: { status: 401, data: { message: 'TOKEN_INVALID' } } },
+    ],
+  ])('is FALSE for %s — it cannot prove anything', (_label, value) => {
+    expect(is2faSessionDead(value)).toBe(false);
   });
 });
 

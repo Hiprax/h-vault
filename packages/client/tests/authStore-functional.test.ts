@@ -156,6 +156,7 @@ import {
   heldSecretCount,
   holdEntries,
 } from '../src/services/totpImport/scanSession';
+import { ERROR_CODES } from '@hvault/shared';
 import { useAuthStore } from '../src/stores/authStore.js';
 import { cryptoService } from '../src/services/crypto/cryptoService.js';
 import {
@@ -792,67 +793,157 @@ describe('authStore.verify2fa', () => {
     expect(useAuthStore.getState()._2faTimeoutId).toBeNull();
   });
 
-  it('should clear MEK immediately on non-retryable 2FA failure (TOKEN_EXPIRED)', async () => {
+  // -------------------------------------------------------------------------
+  // The 2FA failure envelope, and what the client is allowed to read from it.
+  //
+  // Every case below is built from the envelope the API ACTUALLY emits:
+  // `createErrorMiddleware` (`app.ts`) writes a FLAT
+  // `{ success, message, statusCode, statusText }`, where `message` is the
+  // machine-readable `ERROR_CODES` constant. There is no nested
+  // `data.error.code` anywhere on the wire, and an earlier version of these
+  // three tests fabricated one — which is why the MEK-teardown branch read as
+  // covered while being dead for every real Axios failure.
+  //
+  // `serverRefusal` exists so that fabricating a shape the server cannot emit
+  // takes a deliberate edit rather than a copy-paste.
+  // -------------------------------------------------------------------------
+
+  /** The exact four-field refusal `POST /auth/2fa/login` puts on the wire. */
+  async function serverRefusal(
+    status: number,
+    code: string,
+    statusText: string,
+  ): Promise<import('axios').AxiosError> {
     const { AxiosError } = await import('axios');
-    const axiosError = new AxiosError('Token expired', '401', undefined, undefined, {
-      status: 401,
-      data: { success: false, error: { code: 'TOKEN_EXPIRED', message: 'Token expired' } },
-      statusText: 'Unauthorized',
-      headers: {},
-      config: {} as never,
-    });
+    return new AxiosError(
+      `Request failed with status code ${String(status)}`,
+      String(status),
+      undefined,
+      undefined,
+      {
+        status,
+        data: { success: false, message: code, statusCode: status, statusText },
+        statusText,
+        headers: {},
+        config: {} as never,
+      },
+    );
+  }
+
+  it('clears the MEK immediately when the temp token is dead (401 TOKEN_INVALID)', async () => {
+    // `login2fa` answers an expired, malformed, purpose-mismatched or
+    // device-mismatched temp token with TOKEN_INVALID — resubmitting the code
+    // cannot fix any of them, and the abandon timer was the only reaper, so the
+    // master-password-derived MEK must not be left resident for five minutes.
+    const axiosError = await serverRefusal(401, ERROR_CODES.TOKEN_INVALID, 'Unauthorized');
     vi.mocked(login2faApi).mockRejectedValue(axiosError);
 
     const mockTimeoutId = setTimeout(() => {}, 300_000);
     useAuthStore.setState({ _2faTimeoutId: mockTimeoutId });
 
     // The original Axios rejection is re-thrown unchanged, so the caller can
-    // read the status and code it needs to decide what to show.
+    // read the status and message it needs to decide what to show.
     await expect(useAuthStore.getState().verify2fa('123456')).rejects.toBe(axiosError);
 
-    // MEK should be cleared immediately
-    expect(useAuthStore.getState().mek).toBeNull();
-    expect(useAuthStore.getState().twoFactorRequired).toBe(false);
-    expect(useAuthStore.getState().tempToken).toBeNull();
-    expect(useAuthStore.getState()._2faTimeoutId).toBeNull();
     expect(cryptoService.clearCryptoKey).toHaveBeenCalledWith(mockMek);
+    const state = useAuthStore.getState();
+    expect(state.mek).toBeNull();
+    expect(state.twoFactorRequired).toBe(false);
+    expect(state.tempToken).toBeNull();
+    expect(state._2faTimeoutId).toBeNull();
+    expect(state.isLoading).toBe(false);
+    // Negative: a dead 2FA session must not leave a half-signed-in store behind.
+    expect(state.isAuthenticated).toBe(false);
+    expect(state.accessToken).toBeNull();
 
     clearTimeout(mockTimeoutId);
   });
 
-  it('should clear MEK immediately on non-retryable 2FA failure (ACCOUNT_LOCKED)', async () => {
-    const { AxiosError } = await import('axios');
-    const axiosError = new AxiosError('Account locked', '403', undefined, undefined, {
-      status: 403,
-      data: { success: false, error: { code: 'ACCOUNT_LOCKED', message: 'Account locked' } },
-      statusText: 'Forbidden',
-      headers: {},
-      config: {} as never,
-    });
+  it('clears the MEK immediately when the account locked mid-flow (403 ACCOUNT_LOCKED)', async () => {
+    // A lockout that lands between the password step and the 2FA step: the temp
+    // token is spent as far as this flow is concerned, and only a fresh sign-in
+    // can recover, so the MEK goes now rather than on the abandon timer.
+    const axiosError = await serverRefusal(403, ERROR_CODES.ACCOUNT_LOCKED, 'Forbidden');
     vi.mocked(login2faApi).mockRejectedValue(axiosError);
+
+    const mockTimeoutId = setTimeout(() => {}, 300_000);
+    useAuthStore.setState({ _2faTimeoutId: mockTimeoutId });
 
     await expect(useAuthStore.getState().verify2fa('123456')).rejects.toBe(axiosError);
 
-    expect(useAuthStore.getState().mek).toBeNull();
-    expect(useAuthStore.getState().twoFactorRequired).toBe(false);
+    expect(cryptoService.clearCryptoKey).toHaveBeenCalledWith(mockMek);
+    const state = useAuthStore.getState();
+    expect(state.mek).toBeNull();
+    expect(state.twoFactorRequired).toBe(false);
+    expect(state.tempToken).toBeNull();
+    expect(state._2faTimeoutId).toBeNull();
+
+    clearTimeout(mockTimeoutId);
   });
 
-  it('should NOT clear MEK on retryable 2FA failure (TWO_FA_INVALID)', async () => {
-    const { AxiosError } = await import('axios');
-    const axiosError = new AxiosError('Invalid code', '401', undefined, undefined, {
-      status: 401,
-      data: { success: false, error: { code: 'TWO_FA_INVALID', message: 'Invalid code' } },
-      statusText: 'Unauthorized',
-      headers: {},
-      config: {} as never,
-    });
+  it('KEEPS the MEK and the abandon timer on a wrong code (401 TWO_FA_INVALID)', async () => {
+    // The whole point of the split: a mistyped code is correctable on the same
+    // temp token, so the MEK stays and the five-minute reaper stays armed.
+    const axiosError = await serverRefusal(401, 'TWO_FA_INVALID', 'Unauthorized');
     vi.mocked(login2faApi).mockRejectedValue(axiosError);
+
+    const mockTimeoutId = setTimeout(() => {}, 300_000);
+    useAuthStore.setState({ _2faTimeoutId: mockTimeoutId });
 
     await expect(useAuthStore.getState().verify2fa('123456')).rejects.toBe(axiosError);
 
-    // MEK should still be available for retry
-    expect(useAuthStore.getState().mek).toBe(mockMek);
-    expect(useAuthStore.getState().isLoading).toBe(false);
+    const state = useAuthStore.getState();
+    expect(state.mek).toBe(mockMek);
+    expect(state.isLoading).toBe(false);
+    // Negatives: nothing was torn down, so the user can simply retype the code.
+    expect(cryptoService.clearCryptoKey).not.toHaveBeenCalled();
+    expect(state.twoFactorRequired).toBe(true);
+    expect(state.tempToken).toBe('temp-token-123');
+    expect(state._2faTimeoutId).toBe(mockTimeoutId);
+
+    clearTimeout(mockTimeoutId);
+  });
+
+  it('KEEPS the MEK and the abandon timer on a 500 — the session was never judged', async () => {
+    // A 5xx says nothing about the temp token. Tearing the flow down here would
+    // make a restarting container cost the user their whole sign-in.
+    const axiosError = await serverRefusal(500, 'Internal Server Error', 'Internal Server Error');
+    vi.mocked(login2faApi).mockRejectedValue(axiosError);
+
+    const mockTimeoutId = setTimeout(() => {}, 300_000);
+    useAuthStore.setState({ _2faTimeoutId: mockTimeoutId });
+
+    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toBe(axiosError);
+
+    const state = useAuthStore.getState();
+    expect(state.mek).toBe(mockMek);
+    expect(cryptoService.clearCryptoKey).not.toHaveBeenCalled();
+    expect(state.twoFactorRequired).toBe(true);
+    expect(state._2faTimeoutId).toBe(mockTimeoutId);
+
+    clearTimeout(mockTimeoutId);
+  });
+
+  it('KEEPS the MEK and the abandon timer on a network error with no response', async () => {
+    const { AxiosError } = await import('axios');
+    // No `response` at all: offline, DNS, a dropped connection. Identical
+    // treatment to the 500, and the case the nested-envelope read could never
+    // have distinguished either.
+    const axiosError = new AxiosError('Network Error', 'ERR_NETWORK');
+    vi.mocked(login2faApi).mockRejectedValue(axiosError);
+
+    const mockTimeoutId = setTimeout(() => {}, 300_000);
+    useAuthStore.setState({ _2faTimeoutId: mockTimeoutId });
+
+    await expect(useAuthStore.getState().verify2fa('123456')).rejects.toBe(axiosError);
+
+    const state = useAuthStore.getState();
+    expect(state.mek).toBe(mockMek);
+    expect(cryptoService.clearCryptoKey).not.toHaveBeenCalled();
+    expect(state.twoFactorRequired).toBe(true);
+    expect(state._2faTimeoutId).toBe(mockTimeoutId);
+
+    clearTimeout(mockTimeoutId);
   });
 
   it('should clear MEK and cancel the timer when post-verification crypto fails (non-Axios)', async () => {

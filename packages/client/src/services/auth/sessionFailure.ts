@@ -141,6 +141,59 @@ export function isSessionGone(error: unknown): boolean {
 }
 
 /**
+ * The refusals that mean a 2FA temp token is spent: resubmitting the same code,
+ * or a corrected one, against the same token can never succeed.
+ *
+ * `POST /auth/2fa/login` answers an expired, malformed, purpose-mismatched or
+ * device-mismatched temp token — and an account that no longer exists, or is
+ * mid-erasure — with `TOKEN_INVALID`; an account that locked between the
+ * password step and this one with `ACCOUNT_LOCKED`. `TOKEN_EXPIRED` is listed
+ * because this predicate lives in the module the refresh consumers share and
+ * `/auth/refresh` does emit it; the 2FA route itself does not.
+ *
+ * Deliberately NOT here: `TWO_FA_INVALID` (a mistyped code, correctable on the
+ * same token, which is the case the split exists to protect) and
+ * `TWO_FA_NOT_ENABLED` (a 400, and the abandon timer still reaps behind it).
+ */
+const DEAD_2FA_SESSION_MESSAGES: readonly string[] = [
+  ERROR_CODES.TOKEN_EXPIRED,
+  ERROR_CODES.TOKEN_INVALID,
+  ERROR_CODES.ACCOUNT_LOCKED,
+];
+
+/**
+ * Whether `error` proves the 2FA temp token behind an in-flight sign-in is dead.
+ *
+ * The consequence is narrower than {@link isSessionGone}'s and points the other
+ * way: there is no session yet to destroy, and what is at stake is the
+ * master-password-derived MEK that `login()` left resident so the user could
+ * finish the second factor. A dead temp token means nothing will finish, and the
+ * five-minute abandon timer is the ONLY reaper, so `authStore.verify2fa` clears
+ * the key immediately rather than leaving it in memory for five minutes.
+ *
+ * It reads `data.message`, the flat envelope `createErrorMiddleware` actually
+ * emits — `{ success, message, statusCode, statusText }` — which is the whole
+ * reason this lives here rather than at the call site. The call site read
+ * `data.error.code`, a NESTED shape the API has never emitted, so the code was
+ * always `undefined`, every Axios failure was classified retryable, and the
+ * teardown branch was unreachable. Three tests fabricated that shape and so
+ * pinned nothing.
+ *
+ * Corroborated by status, exactly like {@link isAccountLocked}: 401 for the two
+ * token verdicts, 403 for the lockout. A body alone is not enough — a proxy or a
+ * captive portal can return any JSON it likes with a 200 — and a status alone is
+ * not either, because a 401 `TWO_FA_INVALID` is the retryable case.
+ */
+export function is2faSessionDead(error: unknown): boolean {
+  if (!isAxiosError(error)) return false;
+  const response = error.response;
+  if (response === undefined) return false;
+  if (response.status !== 401 && response.status !== 403) return false;
+  const message: unknown = (response.data as Record<string, unknown> | undefined)?.message;
+  return typeof message === 'string' && DEAD_2FA_SESSION_MESSAGES.includes(message);
+}
+
+/**
  * Whether `error` is a rate-limit rejection (HTTP 429).
  *
  * Split out from {@link isSessionGone} because a 429 needs its own treatment
