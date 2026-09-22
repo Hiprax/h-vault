@@ -30,9 +30,10 @@
  * answer produces is itself a case worth keeping in the same file as the happy
  * path.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
+import { httpErrors } from '@hiprax/errors';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
@@ -686,18 +687,231 @@ describe('DELETE /documents/uploads/:id abandons a transfer', () => {
     expect(storageRef.current!.storedKeys()).toEqual([]);
   });
 
-  it('deletes a single-segment transfer without calling the engine at all', async () => {
-    // No `s3UploadId` means no multipart upload to abort. Calling the engine here
-    // anyway would be a request per cancellation for nothing, and on a
-    // single-segment transfer there is no handle to pass it.
-    const uploadId = await seedUpload(user);
+  it('reclaims the object a single-segment transfer already stored, and aborts nothing', async () => {
+    // A single-segment transfer's one part is written with `PutObject` straight to
+    // the FINAL key, so by the time a user cancels it the bytes may already be a
+    // whole object in the bucket. Deleting only the row released the concurrency
+    // slot and the quota reservation while leaving those bytes behind, charged to
+    // nobody (`committedBytesFor` counts `documents` rows) until the orphan sweep
+    // reached them a day later. No `s3UploadId` means there is no multipart upload
+    // to abort, so the engine is asked to delete the object and nothing else.
+    const uploadId = await seedUpload(user, {
+      parts: [{ partNumber: 1, bytes: 1024 + DOCUMENT_TAG_BYTES }],
+      receivedBytes: 1024 + DOCUMENT_TAG_BYTES,
+    });
+    const objectKey = buildObjectKey(user.id, uploadId);
+    await storageRef.current!.putObject(objectKey, Buffer.alloc(1024 + DOCUMENT_TAG_BYTES, 5));
+    expect(storageRef.current!.storedKeys(), 'the fixture stored nothing').toEqual([objectKey]);
     const abortSpy = vi.spyOn(storageRef.current!, 'abortMultipartUpload');
 
     const res = await call('delete', `${UPLOADS_PATH}/${uploadId}`, user);
 
-    expect(res.status).toBe(200);
-    expect(abortSpy).not.toHaveBeenCalled();
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.success).toBe(true);
     expect(await DocumentUpload.findById(uploadId).lean()).toBeNull();
+    expect(storageRef.current!.storedKeys()).toEqual([]);
+    // THE NEGATIVES: no handle was invented to abort, and no document appeared.
+    expect(abortSpy).not.toHaveBeenCalled();
+    expect(await Document.countDocuments({})).toBe(0);
+  });
+
+  it('cancels a single-segment transfer that never stored its part, which the engine treats as done', async () => {
+    // `DeleteObject` on an absent key succeeds, so a transfer cancelled before its
+    // one part arrived is not a failure to report.
+    const uploadId = await seedUpload(user);
+    const deleteSpy = vi.spyOn(storageRef.current!, 'deleteObject');
+
+    const res = await call('delete', `${UPLOADS_PATH}/${uploadId}`, user);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(deleteSpy).toHaveBeenCalledExactlyOnceWith(buildObjectKey(user.id, uploadId));
+    expect(await DocumentUpload.findById(uploadId).lean()).toBeNull();
+    expect(storageRef.current!.storedKeys()).toEqual([]);
+  });
+
+  it('still cancels when the engine cannot delete the object, leaving it for the collector', async () => {
+    // The row is claimed BEFORE the engine is called, so by the time the delete
+    // fails there is nothing left to retry against: a 503 here would be followed by
+    // a 404 on the retry, and the slot and the reservation are already released.
+    // The object is the orphan sweep's to reclaim, which is the case it exists for.
+    const uploadId = await seedUpload(user, {
+      parts: [{ partNumber: 1, bytes: 1024 + DOCUMENT_TAG_BYTES }],
+      receivedBytes: 1024 + DOCUMENT_TAG_BYTES,
+    });
+    const objectKey = buildObjectKey(user.id, uploadId);
+    await storageRef.current!.putObject(objectKey, Buffer.alloc(1024 + DOCUMENT_TAG_BYTES, 5));
+    vi.spyOn(storageRef.current!, 'deleteObject').mockRejectedValueOnce(
+      httpErrors.serviceUnavailable('Object storage is unavailable'),
+    );
+
+    const res = await call('delete', `${UPLOADS_PATH}/${uploadId}`, user);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(await DocumentUpload.findById(uploadId).lean()).toBeNull();
+    // THE NEGATIVE: the handler did not pretend the bytes were gone.
+    expect(storageRef.current!.storedKeys()).toEqual([objectKey]);
+    expect((await call('delete', `${UPLOADS_PATH}/${uploadId}`, user)).status).toBe(404);
+  });
+
+  describe('against a completion of the same single-segment transfer', () => {
+    const COMPLETION = {
+      encryptedMeta: 'document-metadata-ciphertext',
+      metaIv: 'meta-iv',
+      metaTag: 'meta-tag',
+      encryptedDek: 'completion-dek-ciphertext',
+      dekIv: 'completion-dek-iv',
+      dekTag: 'completion-dek-tag',
+      vaultKeyVersion: 0,
+    };
+    const PART_BYTES = 1024 + DOCUMENT_TAG_BYTES;
+
+    // `Document.create` is spied on the MODEL, which outlives the test; the storage
+    // spies die with their per-test double.
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** A finished single-segment transfer: its object stored, its ledger recording it. */
+    async function seedFinished(): Promise<{ id: string; objectKey: string }> {
+      const id = await seedUpload(user, {
+        parts: [{ partNumber: 1, bytes: PART_BYTES }],
+        receivedBytes: PART_BYTES,
+      });
+      const objectKey = buildObjectKey(user.id, id);
+      await storageRef.current!.putObject(objectKey, Buffer.alloc(PART_BYTES, 9));
+      return { id, objectKey };
+    }
+
+    /**
+     * Resolves once `parked` opens, and fails fast instead of timing out if the
+     * request it is waiting on is answered without ever reaching the park.
+     */
+    async function untilParked(
+      parked: Promise<void>,
+      response: Promise<request.Response>,
+      what: string,
+    ): Promise<void> {
+      await Promise.race([
+        parked,
+        response.then((res) => {
+          throw new Error(
+            `the ${what} was answered before it was parked: ${String(res.status)} ${JSON.stringify(res.body)}`,
+          );
+        }),
+      ]);
+    }
+
+    /** A promise and the function that settles it, for parking one request. */
+    function gate(): { opened: Promise<void>; open: () => void } {
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      return { opened, open };
+    }
+
+    it('wins when it claims first: the completion is refused and no document names a deleted object', async () => {
+      // The completion is parked after it read the engine's account of the object
+      // and BEFORE its own claim, which is the window in which an abort that
+      // deleted the object without first claiming the row would have let the
+      // completion commit a document whose bytes were already gone.
+      const { id, objectKey } = await seedFinished();
+      const engine = storageRef.current!;
+      const realHead = engine.headObject.bind(engine);
+      const parked = gate();
+      const abortDone = gate();
+      vi.spyOn(engine, 'headObject').mockImplementationOnce(async (key: string) => {
+        const stat = await realHead(key);
+        parked.open();
+        await abortDone.opened;
+        return stat;
+      });
+
+      const completion = call('post', `${UPLOADS_PATH}/${id}/complete`, user, COMPLETION);
+      await untilParked(parked.opened, completion, 'completion');
+      const aborted = await call('delete', `${UPLOADS_PATH}/${id}`, user);
+      abortDone.open();
+      const completed = await completion;
+
+      expect(aborted.status, JSON.stringify(aborted.body)).toBe(200);
+      expect(completed.status, JSON.stringify(completed.body)).toBe(409);
+      expect(String(completed.body.message)).toMatch(/changed while it was being completed/i);
+      expect(await Document.countDocuments({})).toBe(0);
+      expect(await DocumentUpload.findById(id).lean()).toBeNull();
+      expect(engine.storedKeys()).not.toContain(objectKey);
+    });
+
+    it('loses when the completion claimed first, and never touches the committed object', async () => {
+      // The completion is parked INSIDE the insert, after its claim deleted the
+      // row. The abort must then find nothing to claim, answer 404, and leave the
+      // object alone: it is about to be the only copy of a committed document.
+      const { id, objectKey } = await seedFinished();
+      const engine = storageRef.current!;
+      const deleteSpy = vi.spyOn(engine, 'deleteObject');
+      const realCreate = Document.create.bind(Document);
+      const parked = gate();
+      const abortDone = gate();
+      vi.spyOn(Document, 'create').mockImplementationOnce((async (doc: never) => {
+        parked.open();
+        await abortDone.opened;
+        return realCreate(doc);
+      }) as never);
+
+      const completion = call('post', `${UPLOADS_PATH}/${id}/complete`, user, COMPLETION);
+      await untilParked(parked.opened, completion, 'completion');
+      const aborted = await call('delete', `${UPLOADS_PATH}/${id}`, user);
+      abortDone.open();
+      const completed = await completion;
+
+      expect(aborted.status, JSON.stringify(aborted.body)).toBe(404);
+      expect(completed.status, JSON.stringify(completed.body)).toBe(201);
+      expect(deleteSpy).not.toHaveBeenCalled();
+      expect(engine.storedKeys()).toEqual([objectKey]);
+      expect(await Document.countDocuments({ _id: id })).toBe(1);
+    });
+
+    it('loses the CLAIM itself when the completion commits between its read and its claim', async () => {
+      // The interleaving the claim exists for. The abort has already READ the row
+      // and is parked just before claiming it; the completion then claims the same
+      // row and commits a document at the same object key. An abort that trusted
+      // its read, or deleted the object before claiming, would now destroy the
+      // only copy of a committed document's bytes. The claim must find nothing,
+      // and the object must survive.
+      const { id, objectKey } = await seedFinished();
+      const engine = storageRef.current!;
+      const deleteSpy = vi.spyOn(engine, 'deleteObject');
+      const realClaim = DocumentUpload.findOneAndDelete.bind(DocumentUpload);
+      const parked = gate();
+      const completionDone = gate();
+      // Once: the abort's claim is the first to arrive, and the completion's own
+      // claim then runs unparked against the real collection.
+      vi.spyOn(DocumentUpload, 'findOneAndDelete').mockImplementationOnce(((
+        ...args: Parameters<typeof DocumentUpload.findOneAndDelete>
+      ) => {
+        // The REAL query, so the handler's own `.select().lean()` chain and filter
+        // run unchanged; only its execution is held until the completion is done.
+        const query = realClaim(...args);
+        const realExec = query.exec.bind(query);
+        query.exec = (async () => {
+          parked.open();
+          await completionDone.opened;
+          return realExec();
+        }) as never;
+        return query;
+      }) as never);
+
+      const abort = call('delete', `${UPLOADS_PATH}/${id}`, user);
+      await untilParked(parked.opened, abort, 'abort');
+      const completed = await call('post', `${UPLOADS_PATH}/${id}/complete`, user, COMPLETION);
+      completionDone.open();
+      const aborted = await abort;
+
+      expect(completed.status, JSON.stringify(completed.body)).toBe(201);
+      expect(aborted.status, JSON.stringify(aborted.body)).toBe(404);
+      expect(deleteSpy).not.toHaveBeenCalled();
+      expect(engine.storedKeys()).toEqual([objectKey]);
+      expect(await Document.countDocuments({ _id: id })).toBe(1);
+    });
   });
 
   it('answers 404 the second time, having already deleted the row', async () => {

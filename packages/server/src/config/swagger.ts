@@ -1680,7 +1680,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Cancel a transfer',
         description:
-          'Aborts the engine-side multipart upload, then deletes the staging row — in that order, so a crash between the two leaves a row that still names the upload rather than an upload nothing names. No document is created and no committed document is affected.',
+          'Releases what the transfer holds in the storage engine and deletes the staging row. A multipart transfer has its engine-side upload aborted first and its row deleted second, so a crash between the two leaves a row that still names the upload rather than an upload nothing names. A single-segment transfer has its row claimed first and then its stored object deleted, so the bytes are reclaimed at once instead of waiting a day for the collector; the claim is what decides a race with a completion of the same transfer, so a cancel that loses it answers 404 and leaves the committed document intact. No document is created and no committed document is affected.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [UPLOAD_ID_PARAM],
         responses: {
@@ -1776,7 +1776,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Turn a finished transfer into a document',
         description:
-          "Verifies every part against the storage engine's own ledger, DERIVES the document's chunk count and its ciphertext and plaintext sizes from that ledger rather than from this request, re-checks the storage quota against the bytes actually received, and commits the document row. Nothing the client says about the size of its own file is believed. Refused with 400 when a part is missing, when the engine and the server disagree about a part, or when the parts cannot frame a document (a final segment holding only its authentication tag is the case that looks valid and is not); with 409 while a vault-key rotation is running, when the wrapped key was produced under a superseded vault key, or when another completion of the same transfer is already in flight. A repeat completion returns the document the first one committed, so a client that retried after a timeout cannot tell whether its first attempt landed.",
+          "Verifies every part against the storage engine's own ledger, DERIVES the document's chunk count and its ciphertext and plaintext sizes from that ledger rather than from this request, re-checks the storage quota against the bytes actually received, and commits the document row. Nothing the client says about the size of its own file is believed. Refused with 400 when a part is missing, when the engine and the server disagree about a part, or when the parts cannot frame a document (a final segment holding only its authentication tag is the case that looks valid and is not); with 409 while a vault-key rotation is running, when the wrapped key was produced under a superseded vault key, or when another completion for the same account is already in flight. Completions of one account are decided one at a time, so the quota is measured against every document committed before this one and is not overshot by several finishing together. A repeat completion returns the document the first one committed, so a client that retried after a timeout cannot tell whether its first attempt landed.",
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [UPLOAD_ID_PARAM],
         requestBody: {

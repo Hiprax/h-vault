@@ -621,7 +621,10 @@ until their last write, and a rotation arriving meanwhile is asked to wait. The 
 rather than left to be discovered: finishing several document uploads at the very same instant
 now completes them one at a time. An upload asked to wait keeps every byte it has already
 uploaded; retrying re-reads the staging ledger, skips the parts the server already holds, and
-re-sends none of them.
+re-sends none of them. A document completion takes that lock a step earlier than its key check
+needs, before it measures the account's storage quota, so the quota's read and the insert it
+permits are one decision per account: uploads finishing together can no longer each see room
+for themselves and all be kept past the limit.
 
 For every other write the remedy is deliberately blunter. The refusal carries the generation the
 account is on, but the application does not use it to fetch the current key and carry on: the

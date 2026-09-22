@@ -203,7 +203,14 @@ async function committedBytesFor(userId: string): Promise<number> {
   const [row] = await Document.aggregate<{ total: number }>([
     { $match: { userId: new mongoose.Types.ObjectId(userId) } },
     { $group: { _id: null, total: { $sum: '$plaintextBytes' } } },
-  ]);
+  ])
+    // From the PRIMARY whatever the connection string prefers. A completion's quota
+    // read is serialized against every other completion's insert by the exclusion
+    // lock, and that only holds if the read can see the insert the previous holder
+    // made: a deployment whose `MONGODB_URI` sets `readPreference=secondaryPreferred`
+    // would otherwise hand it a lagging secondary that has not seen the winner's row
+    // yet, and the overshoot the lock closes would come straight back.
+    .read('primary');
   return row?.total ?? 0;
 }
 
@@ -857,17 +864,41 @@ export const getUpload = catchAsync(async (req: Request, res: Response): Promise
 /**
  * `DELETE /documents/uploads/:id` — abandon a transfer.
  *
- * The engine-side upload is aborted FIRST and the row deleted second, never the
- * other way round: a crash between the two then leaves a staging row that still
- * names the upload, which the garbage collector can finish, rather than an open
- * multipart upload nothing in the database knows about.
+ * The two modes release their storage in OPPOSITE orders, and each order is the
+ * one that is safe for what that mode holds.
  *
- * A single-segment transfer has no `s3UploadId` and nothing is aborted. If its
- * one part had already been stored, the object it wrote is reclaimed by the
- * collector's orphan sweep — a key that parses to a document id with no row.
- * Deleting it here instead would be one request cheaper and one race worse, since
- * this handler cannot yet tell an abandoned single-segment upload from one whose
- * completion is committing the very same key.
+ * A MULTIPART transfer has its engine-side upload aborted FIRST and its row deleted
+ * second: a crash between the two then leaves a staging row that still names the
+ * upload, which the garbage collector can finish, rather than an open multipart
+ * upload nothing in the database knows about. Nothing can race it into harm either,
+ * because a completion assembles the object from the parts it names and the engine
+ * refuses that once the upload is aborted.
+ *
+ * A SINGLE-SEGMENT transfer has no `s3UploadId` and nothing to abort, but its one
+ * part may already be a whole object: `PutObject` writes it straight to the FINAL
+ * key. Leaving that object for the collector's orphan sweep kept the bytes in the
+ * bucket for at least `max(ORPHAN_MIN_AGE_MS, DOCUMENT_UPLOAD_TTL_HOURS + 1h)`,
+ * 25 hours at the defaults, while this handler released both the concurrency slot
+ * and the quota reservation, so they were charged to nobody. It is deleted here, and
+ * the row is CLAIMED FIRST, with one atomic `findOneAndDelete`, because the object
+ * key is also the key a completion commits: deleting the bytes of a transfer whose
+ * completion had already claimed the row would leave a document that lists, counts
+ * against the quota and never opens. The claim decides which of the two wins.
+ * `completeUnderLock` claims a single-segment row the same way, so exactly one of
+ * the two deletes it: an abort that claims first makes the completion's claim fail
+ * with its existing 409 before any document exists, and a completion that claims
+ * first leaves this handler nothing to claim, so it answers 404 and never touches
+ * the object.
+ *
+ * The delete after the claim is best-effort, the policy `releaseTransfer` takes for
+ * the same reason: the row is gone by then, so a failure there has nothing left to
+ * retry against, and a 503 would only be followed by a 404. What remains is an
+ * orphan for the collector, which is the case its sweep exists for. So is the one
+ * window the claim cannot close: a part upload already past its own row lookup and
+ * inside its storage write when the claim lands can store the object again after
+ * this delete, and its ledger update then finds no row and leaves the bytes behind.
+ * Closing that would mean serialising every part against a cancel, the cost the
+ * completion's docblock declines for the same window.
  *
  * An engine that answers 404 has ALREADY done what this request asked, and the row
  * is deleted anyway. S3's abort is idempotent by contract, and the alternative is
@@ -890,7 +921,26 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
     throw httpErrors.notFound('Upload not found');
   }
 
-  if (upload.s3UploadId !== undefined) {
+  if (upload.s3UploadId === undefined) {
+    // Claim, THEN delete. The read above only decided the mode, which cannot change
+    // (`s3UploadId` is written once, at init); whether this request still owns the
+    // transfer is decided here, atomically, against a completion's own claim.
+    const claimed = await DocumentUpload.findOneAndDelete({ _id: id, userId })
+      .select('objectKey')
+      .lean();
+    if (!claimed) {
+      throw httpErrors.notFound('Upload not found');
+    }
+    try {
+      await getStorage().deleteObject(claimed.objectKey);
+    } catch (error) {
+      logger.error('Failed to delete the object of a cancelled single-segment transfer', {
+        userId,
+        uploadId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  } else {
     try {
       await getStorage().abortMultipartUpload(upload.objectKey, upload.s3UploadId);
     } catch (error) {
@@ -900,9 +950,9 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
         uploadId: id,
       });
     }
-  }
 
-  await DocumentUpload.deleteOne({ _id: id, userId });
+    await DocumentUpload.deleteOne({ _id: id, userId });
+  }
 
   logger.info('Document upload aborted', { userId, uploadId: id });
 
@@ -949,18 +999,20 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
  * mid-transfer for a total the client can still bring back under the cap by
  * finishing, and would not remove the need for the check at completion anyway.
  *
- * What that paragraph used to claim, and what is actually true, are not the same
- * thing, so the difference is written down rather than left to be rediscovered:
- * the over-reservation IS bounded, but "so it never becomes a stored document" was
- * false. `completeUpload`'s quota check reads `committedBytesFor(userId)` and then
- * inserts, and the lock it holds over the insert is taken AFTER that read, so two
- * completions of different uploads can each measure a total that fits before
- * either has committed. Both then commit, and the account is over quota by the
- * lesser of the two. The per-document cap is not exposed the same way — it is
- * measured on one transfer's own bytes and nothing else can move it — so this is a
- * quota-only overshoot, bounded by one chunk per concurrent transfer, and it is
- * closed by making that read and the insert one atomic decision rather than by
- * anything this handler could do.
+ * So the over-reservation never becomes a stored document, and that sentence is
+ * true now for a reason worth naming, because for a while it was not. (It holds for
+ * as long as that lock does: a holder that outlives `VAULT_ROTATION_LOCK_TTL_MS`
+ * loses the exclusion, the one failure every holder of that lock shares and the
+ * reason its TTL is generous.) The quota at
+ * completion is a read of `committedBytesFor(userId)` followed by an insert, and a
+ * read-then-write holds only if nothing else can insert in between. The per-upload
+ * lock does not provide that: two completions of DIFFERENT transfers could each
+ * measure a total that fit before either had committed, and both then committed.
+ * `completeUnderLock` therefore takes the per-user exclusion lock BEFORE the quota
+ * read and holds it through the insert, so completions of one account are decided
+ * one at a time and each is measured against every document committed before it.
+ * The per-document cap never had the exposure: it is measured on one transfer's own
+ * bytes, which nothing else can move.
  */
 export const uploadPart = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -1224,7 +1276,9 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
  *     it committed would list, charge the quota and never open.
  *   * The **per-user vault-key exclusion lock** (`acquireVaultRotationLock`) makes
  *     the two checks above stay true until the row is written, which neither can do
- *     on its own because both are reads. See below.
+ *     on its own because both are reads; and, taken just before the quota's read
+ *     of the committed total, makes that read and the insert one decision per
+ *     account as well. See below.
  *
  * The per-upload lock and the exclusion lock are DISJOINT — one is keyed by upload,
  * the other by user — so holding the first says nothing whatever about whether a
@@ -1254,6 +1308,13 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
  * it raises the fence and releases AFTER it lowers it — from before the late pair
  * until after the insert, so a rotation either loses that acquisition and is
  * refused, or wins it and this completion is refused with its transfer intact.
+ *
+ * The same lock is taken a little EARLIER than the late pair needs, before the
+ * quota's read of the committed total, because that read is the other half of a
+ * read-then-insert. Every completion takes it and `Document.create` has no other
+ * caller, so holding it across both makes the quota one decision per account:
+ * two completions of different uploads can no longer each measure a total that
+ * fits and then both commit.
  *
  * The price is that two completions of DIFFERENT uploads for one account no longer
  * overlap, which the per-upload lock's own docblock had deliberately allowed. The
@@ -1467,30 +1528,28 @@ async function completeUnderLock(
     );
   }
 
-  // The quota, measured on the bytes that actually arrived rather than on the size
-  // the transfer reserved at init — the two differ whenever a client sends a fuller
-  // final segment than it declared. Other transfers still in flight are deliberately
-  // NOT counted: their reservations exist to stop init from over-committing, and init
-  // has already checked this transfer against them, so charging them again here would
-  // refuse the last of three legitimate uploads.
-  const committedBytes = await committedBytesFor(userId);
-  if (committedBytes + plaintextBytes > storageQuotaBytes()) {
-    // The OTHER refusal here that releases the transfer instead of leaving it
-    // retryable. See `releaseTransfer`: the bytes in the bucket are precisely the
-    // bytes this account cannot hold.
-    await releaseTransfer(upload, engine);
-    throw httpErrors.badRequest(
-      `Storage quota exceeded. Your limit is ${String(config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER)} MB.`,
-    );
-  }
-
   // ── The vault-key exclusion lock ───────────────────────────────────────
   //
-  // Held from here to the insert, because the pair below is two READS and the
-  // distance from them to `Document.create` is not a statement or two: for a
-  // multipart transfer it contains the engine's own completion call, which is
-  // seconds for a large object. A rotation that begins and commits entirely
-  // inside that span enumerates an account this document is not yet part of, so
+  // Held from here to the insert, and it guards TWO decisions that are both reads
+  // followed, some distance later, by `Document.create`: the quota, and the
+  // vault-key pair.
+  //
+  // The QUOTA first, because it is the one a second completion can break. It is a
+  // read of every committed byte followed by an insert that adds more, and the
+  // per-upload lock around this function is keyed by upload, so on its own it lets
+  // completions of DIFFERENT transfers each read a total that still fits before
+  // either has inserted, and then both commit, leaving the account over quota by
+  // up to one document per transfer it runs at once. `Document.create` has exactly
+  // one caller, below, and every completion takes this lock before its quota read,
+  // so holding it across read and insert makes the pair one decision per account:
+  // a second completion is refused at the acquisition, before it has read anything,
+  // with its transfer intact, and when it retries it reads a total that includes
+  // the winner's row.
+  //
+  // The vault-key pair is two READS for the same reason, and there the distance to
+  // the insert is not a statement or two: for a multipart transfer it contains the
+  // engine's own completion call, which is seconds for a large object. A rotation
+  // that begins and commits entirely inside that span enumerates an account this document is not yet part of, so
   // its completeness check has nothing to catch, and the row lands wrapped under
   // a key the account has already replaced. That row is worse than lost: the
   // client cannot unwrap its DEK, so it can never re-key it, and
@@ -1510,13 +1569,36 @@ async function completeUnderLock(
   // per-upload lock was deliberately keyed by upload so they would not queue —
   // and it is accepted because the loser is refused with a 409 that leaves its
   // staging row, its ledger and its stored bytes untouched, which is the same
-  // retryable shape every other refusal here already takes.
+  // retryable shape every other refusal here already takes. One consequence of
+  // taking it ahead of the quota: a completion that would NOT fit, arriving while
+  // another holder has the lock, is told to retry rather than refused, and meets
+  // the quota's 400 on the retry. That is the honest order, since the total it
+  // would have been refused against was still moving.
   //
   // Taken BEFORE the fence read, the order `acquireVaultRotationLock` documents:
   // holding it means no rotation can START, which leaves the read below exactly
   // one case to catch, a rotation that CRASHED and whose lock has lapsed.
   const rotationLockId = await acquireVaultRotationLock(userId);
   try {
+    // The quota, measured on the bytes that actually arrived rather than on the size
+    // the transfer reserved at init — the two differ whenever a client sends a fuller
+    // final segment than it declared. Other transfers still in flight are deliberately
+    // NOT counted: their reservations exist to stop init from over-committing, and init
+    // has already checked this transfer against them, so charging them again here would
+    // refuse the last of three legitimate uploads.
+    const committedBytes = await committedBytesFor(userId);
+    if (committedBytes + plaintextBytes > storageQuotaBytes()) {
+      // The OTHER refusal here that releases the transfer instead of leaving it
+      // retryable. See `releaseTransfer`: the bytes in the bucket are precisely the
+      // bytes this account cannot hold. Released under the lock, and nothing is lost
+      // by that: the release creates no ciphertext, and the `finally` below frees the
+      // lock on the way past this throw.
+      await releaseTransfer(upload, engine);
+      throw httpErrors.badRequest(
+        `Storage quota exceeded. Your limit is ${String(config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER)} MB.`,
+      );
+    }
+
     // The late pair, as close to the insert as the work allows. Everything above this
     // point is arithmetic over bytes that are already stored; everything below commits
     // a key. The fence catches a rotation that is IN PROGRESS — its flag is raised

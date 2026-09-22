@@ -76,6 +76,8 @@ vi.mock('../../src/services/storage/index.js', async (importOriginal) => {
 });
 
 import app from '../../src/app.js';
+import { config } from '../../src/config/index.js';
+import { Document } from '../../src/models/Document.js';
 import { DocumentUpload } from '../../src/models/DocumentUpload.js';
 import { PART_DIGEST_HEADER } from '../../src/controllers/documentController.js';
 import { buildObjectKey } from '../../src/utils/documentObjects.js';
@@ -147,6 +149,9 @@ function pattern(bytes: number, seed = 0): Buffer {
   }
   return buffer;
 }
+
+/** The operator's per-user byte quota, as the completion handler computes it. */
+const QUOTA_BYTES = config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER * 1024 * 1024;
 
 const digestOf = (body: Buffer): string => createHash('sha256').update(body).digest('hex');
 
@@ -550,5 +555,188 @@ describe('the server in front of that engine', () => {
     expect(ledger.map((part) => part.bytes)).toEqual([DOCUMENT_TAG_BYTES]);
 
     await provider.abortMultipartUpload(seeded.objectKey, seeded.s3UploadId);
+  });
+
+  /**
+   * A live SINGLE-SEGMENT staging row: no engine-side upload, because its one part
+   * is written with `PutObject` straight to the final key. The part itself is sent
+   * through the real route, so the object in the engine is the one production
+   * stores.
+   */
+  async function seedSingleSegment(
+    plaintextBytes: number,
+    seed: number,
+  ): Promise<{ id: string; objectKey: string }> {
+    const uploadId = new mongoose.Types.ObjectId();
+    const objectKey = buildObjectKey(user.id, uploadId.toHexString());
+    await DocumentUpload.create({
+      _id: uploadId,
+      userId: user.id,
+      objectKey,
+      ...FRAMING,
+      declaredPlaintextBytes: plaintextBytes,
+      declaredChunkCount: 1,
+      chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+      vaultKeyVersion: 0,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    const id = String(uploadId);
+    const stored = await putPart(id, 1, pattern(plaintextBytes + DOCUMENT_TAG_BYTES, seed));
+    expect(stored.status, JSON.stringify(stored.body)).toBe(200);
+    expect((await provider.headObject(objectKey)).bytes).toBe(plaintextBytes + DOCUMENT_TAG_BYTES);
+    return { id, objectKey };
+  }
+
+  /** One authenticated, CSRF-paired JSON request through the real app. */
+  async function sendJson(
+    method: 'post' | 'delete',
+    path: string,
+    body?: Record<string, unknown>,
+  ): Promise<request.Response> {
+    const agent = request.agent(app);
+    const pending = agent[method](path).set('Authorization', authHeader(user.accessToken));
+    const pair = await getCsrf(agent);
+    return pending
+      .set('Cookie', pair.cookie)
+      .set('x-csrf-token', pair.token)
+      .send(body ?? {});
+  }
+
+  const complete = (id: string): Promise<request.Response> =>
+    sendJson('post', `/api/v1/documents/uploads/${id}/complete`, {
+      encryptedMeta: 'ZG9jdW1lbnQtbWV0YWRhdGE=',
+      metaIv: 'bWV0YS1pdg==',
+      metaTag: 'bWV0YS10YWc=',
+      encryptedDek: FRAMING.encryptedDek,
+      dekIv: FRAMING.dekIv,
+      dekTag: FRAMING.dekTag,
+      vaultKeyVersion: 0,
+    });
+
+  it('deletes a cancelled single-segment transfer’s object from the engine, not only its row', async () => {
+    // The part was stored as a whole object at the final key. Cancelling used to
+    // delete the row and leave the object for the orphan sweep, a day later, with
+    // the slot and the reservation already released and the bytes charged to no
+    // one. Asserted against the engine's own HEAD, so a double that forgot the
+    // object on the server's behalf cannot make this pass.
+    const { id, objectKey } = await seedSingleSegment(1024, 11);
+
+    const res = await sendJson('delete', `/api/v1/documents/uploads/${id}`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(await DocumentUpload.findById(id).lean()).toBeNull();
+    await expect(provider.headObject(objectKey)).rejects.toMatchObject({ statusCode: 404 });
+    // THE NEGATIVE: no document was committed from the bytes on the way out.
+    expect(await Document.countDocuments({ _id: id })).toBe(0);
+  });
+
+  it('decides completions of one account one at a time against the quota, releasing only what the quota refuses', async () => {
+    // Room for exactly ONE more 1 KiB document. The first completion is parked
+    // inside its insert, holding the account's exclusion lock; the second arrives
+    // meanwhile and must be refused for CONTENTION, keeping its object in the
+    // engine, rather than reading a total that still fits and committing after the
+    // first. Retried once the first has landed, it meets the quota, and that
+    // refusal, and only that one, deletes its object from the engine.
+    const committedId = new mongoose.Types.ObjectId();
+    await Document.create({
+      _id: committedId,
+      userId: user.id,
+      objectKey: buildObjectKey(user.id, committedId.toHexString()),
+      ...FRAMING,
+      encryptedMeta: 'meta',
+      metaIv: 'iv',
+      metaTag: 'tag',
+      chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+      chunkCount: 1,
+      ciphertextBytes: QUOTA_BYTES - 1024 + DOCUMENT_TAG_BYTES,
+      plaintextBytes: QUOTA_BYTES - 1024,
+    });
+    const first = await seedSingleSegment(1024, 12);
+    const second = await seedSingleSegment(1024, 13);
+
+    // The interleaving that overshoots when the quota is read outside the lock:
+    // the second completion reads the committed total while the first is parked in
+    // its insert, and that read is held back until the first has been answered. A
+    // handler that decides the quota under the lock never reaches the read at all.
+    let reachInsert!: () => void;
+    const insertReached = new Promise<void>((resolve) => {
+      reachInsert = resolve;
+    });
+    let secondProgressed!: () => void;
+    const secondMoved = new Promise<void>((resolve) => {
+      secondProgressed = resolve;
+    });
+    let firstAnswered!: () => void;
+    const firstDone = new Promise<void>((resolve) => {
+      firstAnswered = resolve;
+    });
+    let firstParked = false;
+    const realCreate = Document.create.bind(Document);
+    const createSpy = vi.spyOn(Document, 'create').mockImplementationOnce((async (doc: never) => {
+      firstParked = true;
+      reachInsert();
+      await secondMoved;
+      return realCreate(doc);
+    }) as never);
+    const realExec = mongoose.Aggregate.prototype.exec;
+    const execSpy = vi.spyOn(mongoose.Aggregate.prototype, 'exec').mockImplementation(function (
+      this: mongoose.Aggregate<unknown>,
+    ) {
+      const run = (): Promise<unknown> => realExec.call(this);
+      if (!firstParked || this.model() !== Document) return run() as never;
+      return (async () => {
+        const result = await run();
+        secondProgressed();
+        await firstDone;
+        return result;
+      })() as never;
+    });
+
+    try {
+      const firstResponse = complete(first.id).then((res) => {
+        firstAnswered();
+        return res;
+      });
+      // Fails fast rather than timing out if the first completion is answered
+      // without ever reaching its insert, which would leave nothing parked.
+      await Promise.race([
+        insertReached,
+        firstResponse.then((res) => {
+          throw new Error(
+            `the first completion was answered before its insert: ${String(res.status)} ${JSON.stringify(res.body)}`,
+          );
+        }),
+      ]);
+      const contended = await complete(second.id).then((res) => {
+        secondProgressed();
+        return res;
+      });
+      const won = await firstResponse;
+
+      expect(won.status, JSON.stringify(won.body)).toBe(201);
+      expect(contended.status, JSON.stringify(contended.body)).toBe(409);
+      expect(String(contended.body.message)).toMatch(/already in progress/i);
+      expect(await Document.countDocuments({ userId: user.id })).toBe(2);
+      expect(await DocumentUpload.findById(second.id).lean()).not.toBeNull();
+      expect((await provider.headObject(second.objectKey)).bytes).toBe(1024 + DOCUMENT_TAG_BYTES);
+      expect((await provider.headObject(first.objectKey)).bytes).toBe(1024 + DOCUMENT_TAG_BYTES);
+    } finally {
+      secondProgressed();
+      firstAnswered();
+      createSpy.mockRestore();
+      execSpy.mockRestore();
+    }
+
+    const retried = await complete(second.id);
+
+    expect(retried.status, JSON.stringify(retried.body)).toBe(400);
+    expect(String(retried.body.message)).toMatch(/quota/i);
+    expect(await DocumentUpload.findById(second.id).lean()).toBeNull();
+    await expect(provider.headObject(second.objectKey)).rejects.toMatchObject({ statusCode: 404 });
+    // The winner's object is untouched by the loser's release.
+    expect((await provider.headObject(first.objectKey)).bytes).toBe(1024 + DOCUMENT_TAG_BYTES);
+    expect(await Document.countDocuments({ userId: user.id })).toBe(2);
+
+    await provider.deleteObject(first.objectKey);
   });
 });

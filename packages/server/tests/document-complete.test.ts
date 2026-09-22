@@ -1083,6 +1083,9 @@ describe('POST /documents/uploads/:id/complete', () => {
       expect(await Document.findById(seeded.id).lean()).toBeNull();
       expect(await DocumentUpload.findById(seeded.id).lean()).toBeNull();
       expect(storageRef.current!.storedKeys()).toEqual([]);
+      // The refusal is decided under the exclusion lock now, and a throw from inside
+      // that span must not leave it held for the rest of its five-minute TTL.
+      expect(await JobLock.countDocuments({ jobName: vaultRotationLockName(user.id) })).toBe(0);
     });
 
     it('aborts the engine-side upload too when a MULTIPART transfer breaches the quota', async () => {
@@ -1141,6 +1144,185 @@ describe('POST /documents/uploads/:id/complete', () => {
 
       expect(res.status, JSON.stringify(res.body)).toBe(201);
       expect(await Document.countDocuments({})).toBe(2);
+    });
+
+    describe('when several completions of DIFFERENT uploads race for the same room', () => {
+      /** One committed document of `plaintextBytes`, standing in for everything already stored. */
+      async function seedCommitted(plaintextBytes: number): Promise<void> {
+        const documentId = new mongoose.Types.ObjectId();
+        await Document.create({
+          _id: documentId,
+          userId: user.id,
+          objectKey: buildObjectKey(user.id, documentId.toHexString()),
+          ...STAGED_DEK,
+          ...FRAMING,
+          encryptedMeta: 'meta',
+          metaIv: 'iv',
+          metaTag: 'tag',
+          chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+          chunkCount: 1,
+          ciphertextBytes: plaintextBytes + DOCUMENT_TAG_BYTES,
+          plaintextBytes,
+        });
+      }
+
+      /**
+       * Runs `around` in place of every aggregation executed against `documents`,
+       * handing it the real execution to call.
+       *
+       * At `Aggregate#exec` rather than `Model.aggregate`, because the handler chains
+       * `.read(...)` onto the `Aggregate` the model returns, so a replacement for the
+       * model method would have to be a whole `Aggregate`. `committedBytesFor` is the
+       * only aggregation over `documents` a completion runs.
+       */
+      function interceptDocumentAggregates(
+        around: (
+          run: () => Promise<unknown>,
+          aggregate: mongoose.Aggregate<unknown>,
+        ) => Promise<unknown>,
+      ): void {
+        const realExec = mongoose.Aggregate.prototype.exec;
+        vi.spyOn(mongoose.Aggregate.prototype, 'exec').mockImplementation(function (
+          this: mongoose.Aggregate<unknown>,
+        ) {
+          const run = (): Promise<unknown> => realExec.call(this);
+          return (this.model() === Document ? around(run, this) : run()) as never;
+        });
+      }
+
+      /** A promise and the function that settles it. */
+      function gate(): { opened: Promise<void>; open: () => void } {
+        let open!: () => void;
+        const opened = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        return { opened, open };
+      }
+
+      it('reads the committed total while holding the exclusion lock, not before it', async () => {
+        // The structural half: the quota's read and the insert it licenses are one
+        // decision only if nothing that could insert can run between them, and every
+        // completion takes this lock. A probe inside the read tries to take it.
+        const seeded = await seedTransfer(user);
+        let lockWasFreeAtQuotaRead: boolean | null = null;
+        const readPreferences: unknown[] = [];
+        interceptDocumentAggregates(async (run, aggregate) => {
+          readPreferences.push(aggregate.options.readPreference);
+          const stolen = await acquireJobLock(vaultRotationLockName(user.id), 60_000);
+          lockWasFreeAtQuotaRead = stolen !== null;
+          if (stolen !== null) await releaseJobLock(vaultRotationLockName(user.id), stolen);
+          return run();
+        });
+
+        const res = await complete(user, seeded.id);
+
+        expect(res.status, JSON.stringify(res.body)).toBe(201);
+        expect(lockWasFreeAtQuotaRead, 'the probe never ran').not.toBeNull();
+        expect(
+          lockWasFreeAtQuotaRead,
+          'another completion could commit between the quota read and this insert',
+        ).toBe(false);
+        // …and from the primary, because the lock only serializes the read against the
+        // previous winner's insert if the read can SEE that insert: a secondary a
+        // `readPreference=secondaryPreferred` connection string hands out may not yet.
+        expect(readPreferences).toEqual([{ mode: 'primary' }]);
+      });
+
+      it('commits exactly one of three the quota has room for, and keeps the other two retryable', async () => {
+        // Room for ONE more 1 KiB document, and three finished 1 KiB transfers
+        // completing at once. The first is parked INSIDE its insert until each of
+        // the other two has either read the committed total or been answered;
+        // any read taken while it is parked is held back until it has committed.
+        // That is the interleaving that overshoots when the read happens outside
+        // the lock: both late reads see a total that still fits, and both then
+        // commit after the first. Serialised, neither gets as far as the read.
+        await seedCommitted(QUOTA_BYTES - 1024);
+        const [first, second, third] = [
+          await seedTransfer(user),
+          await seedTransfer(user),
+          await seedTransfer(user),
+        ] as [Seeded, Seeded, Seeded];
+
+        const insertReached = gate();
+        const firstSettled = gate();
+        const othersProgressed = gate();
+        let progressed = 0;
+        const progress = (): void => {
+          progressed += 1;
+          if (progressed >= 2) othersProgressed.open();
+        };
+        let firstParked = false;
+
+        const realCreate = Document.create.bind(Document);
+        vi.spyOn(Document, 'create').mockImplementation((async (doc: never) => {
+          if (!firstParked) {
+            firstParked = true;
+            insertReached.open();
+            await othersProgressed.opened;
+          }
+          return realCreate(doc);
+        }) as never);
+        interceptDocumentAggregates(async (run) => {
+          const result = await run();
+          if (firstParked) {
+            progress();
+            await firstSettled.opened;
+          }
+          return result;
+        });
+
+        const firstResponse = complete(user, first.id).then((res) => {
+          firstSettled.open();
+          return res;
+        });
+        // Fails fast rather than timing out if the first completion is answered
+        // without ever reaching its insert, which would leave nothing parked.
+        await Promise.race([
+          insertReached.opened,
+          firstResponse.then((res) => {
+            throw new Error(
+              `the first completion was answered before its insert: ${String(res.status)} ${JSON.stringify(res.body)}`,
+            );
+          }),
+        ]);
+        const later = [second, third].map((seeded) =>
+          complete(user, seeded.id).then((res) => {
+            progress();
+            return res;
+          }),
+        );
+        const [won, ...lost] = await Promise.all([firstResponse, ...later]);
+
+        expect(won!.status, JSON.stringify(won!.body)).toBe(201);
+        for (const res of lost) {
+          expect(res.status, JSON.stringify(res.body)).toBe(409);
+          expect(String(res.body.message)).toMatch(/already in progress/i);
+        }
+        // Exactly one of the three became a document, and the account is exactly full.
+        expect(
+          await Document.countDocuments({ _id: { $in: [first.id, second.id, third.id] } }),
+        ).toBe(1);
+        expect(await Document.findById(first.id).lean()).not.toBeNull();
+        // THE NEGATIVE: the two that lost kept every byte and every ledger entry, so
+        // they were refused for contention and not quietly released.
+        for (const seeded of [second, third]) {
+          const row = await DocumentUpload.findById(seeded.id).lean();
+          expect(row, 'a losing transfer lost its staging row').not.toBeNull();
+          expect(row!.receivedBytes).toBe(seeded.partSizes[0]);
+          expect(storageRef.current!.storedKeys()).toContain(seeded.objectKey);
+        }
+        expect(await JobLock.countDocuments({ jobName: vaultRotationLockName(user.id) })).toBe(0);
+
+        // Retried once the winner has committed, a loser meets the quota honestly,
+        // and that refusal, unlike contention, releases what it holds.
+        vi.restoreAllMocks();
+        const retried = await complete(user, second.id);
+        expect(retried.status, JSON.stringify(retried.body)).toBe(400);
+        expect(String(retried.body.message)).toMatch(/quota/i);
+        expect(await DocumentUpload.findById(second.id).lean()).toBeNull();
+        expect(storageRef.current!.storedKeys()).not.toContain(second.objectKey);
+        expect(await Document.countDocuments({ userId: user.id })).toBe(2);
+      });
     });
 
     it("does not charge another account's documents against this caller's quota", async () => {

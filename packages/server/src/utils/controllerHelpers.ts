@@ -401,14 +401,17 @@ export function documentInitLockName(userId: string): string {
  *
  * They do queue for something else, and it is worth being exact rather than
  * leaving the sentence above to read as more than it says: a completion also
- * holds the per-user {@link vaultRotationLockName} across its
- * version-read-to-insert span, so a user running
- * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` transfers and finishing them at the
- * same moment now has all but one of those completions refused with a retryable
- * 409. That is a deliberate trade recorded at `completeUpload`: the alternative
- * is a document sealed under a superseded vault key, which permanently ends the
- * account's ability to rotate. It is not a reason to widen THIS lock to the user,
- * which would serialise the engine calls as well and buy nothing.
+ * holds the per-user {@link vaultRotationLockName} from its quota read to its
+ * insert, so a user running `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER` transfers
+ * and finishing them at the same moment now has all but one of those completions
+ * refused with a retryable 409. That is a deliberate trade recorded at
+ * `completeUpload`, and it buys two things this lock cannot: a document can never
+ * be sealed under a superseded vault key, which would permanently end the
+ * account's ability to rotate, and the per-user quota is measured against every
+ * document committed before the insert it licenses, which a lock keyed by upload
+ * leaves two completions free to overshoot together. Neither is a reason to widen
+ * THIS lock to the user: the per-user lock already covers both spans, and this one
+ * would additionally serialise the ledger reads and buy nothing.
  *
  * What it does exclude is a completion racing ITSELF — a client retry after a
  * timeout, or a double-clicked button. The unique `_id` on `documents` already
