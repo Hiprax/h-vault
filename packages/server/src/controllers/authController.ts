@@ -306,7 +306,16 @@ async function registerFailedAuthAttempt(
   // reports which identity won. `lockoutEpisodeId` is `select: false`, so it is
   // asked for by name; without the `+` this mails no link at all, which is what
   // every test in `lockout-unlock-token-survival.test.ts` would say.
-  const locked = await User.findById(userId).select('+lockoutEpisodeId');
+  //
+  // Pinned to the PRIMARY, and that is not belt-and-braces. `MONGODB_URI` is the
+  // operator's, and a deployment that sets `readPreference=secondaryPreferred` on
+  // it makes this a read that may legitimately predate the write two lines above:
+  // it would answer `undefined`, take the bail below, and the account would be
+  // locked for thirty minutes with NO unlock link ever mailed — the exact silence
+  // this whole mechanism exists to end, reachable by a connection-string option
+  // nothing else in the code would object to. Read-your-own-write is a property
+  // of the primary, so it is asked for by name rather than assumed.
+  const locked = await User.findById(userId).read('primary').select('+lockoutEpisodeId');
 
   // The account was deleted, or its lockout discharged, since that write. There is
   // no episode to name, so there is nothing a link could unlock; mailing one bound
@@ -873,7 +882,8 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // here, as this handler used to, is therefore the one irreversible act available
   // at this point: a flag can be recomputed, a key cannot. It is kept, reported by
   // `GET /user/profile` as `interruptedRotation`, and cleared by the next rotation
-  // that COMMITS (`clearRotationState` and the sequential commit both `$unset` it),
+  // that COMMITS (both commit paths `$unset` it; `lowerRotationFence`, which runs on
+  // every ABORT, deliberately does not),
   // which is the only event that makes it redundant.
   //
   // The transactional path never writes the wrapper at all: it rolls back atomically,
@@ -2014,6 +2024,29 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   user.encryptedVaultKey = newEncryptedVaultKey;
   user.vaultKeyIv = newVaultKeyIv;
   user.vaultKeyTag = newVaultKeyTag;
+  // An interrupted rotation's wrapper is dropped HERE, and this is the one place
+  // dropping it is correct rather than destructive.
+  //
+  // `changePassword` re-wraps that key under the new MEK because the key is still
+  // the only way to read the rows the crashed rotation had already re-sealed. A
+  // RESET cannot: it is reached without the old master password, so the old MEK
+  // does not exist anywhere and the client mints a brand-new vault key. Every row
+  // in the account is already unreadable at this point — `ResetPasswordPage` says
+  // so before the user confirms — so the pending wrapper is not a key any more,
+  // just ciphertext nothing can open.
+  //
+  // Keeping it is not neutral. `getProfile` derives `interruptedRotation` from
+  // its presence, so the Settings page would offer to finish a rotation that can
+  // never be finished, for ever; and `bulkReEncrypt`'s outstanding-rotation guard
+  // reads the same field, so every future rotation on the account would be
+  // refused until the user discarded a wrapper nothing had told them about.
+  user.pendingEncryptedVaultKey = undefined;
+  user.pendingVaultKeyIv = undefined;
+  user.pendingVaultKeyTag = undefined;
+  // Same reasoning for the write fence: a reset that lands while a rotation was
+  // still flagged would otherwise leave the account refusing its own writes until
+  // the next login lowered it, over a rotation whose subject no longer exists.
+  user.rotationInProgress = false;
   clearLockoutStateOnDocument(user);
   user.passwordChangedAt = new Date();
   await user.save();

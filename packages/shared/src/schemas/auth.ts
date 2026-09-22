@@ -104,6 +104,32 @@ export const changePasswordSchema = z.object({
   // that everything under the old one is gone, so there is no generation to
   // supersede. See `optionalVaultKeyVersionSchema`.
   vaultKeyVersion: optionalVaultKeyVersionSchema,
+  /**
+   * The INTERRUPTED rotation's vault key, re-wrapped under the new MEK.
+   *
+   * A crashed sequential rotation leaves a second key on the account:
+   * `User.pendingEncryptedVaultKey`, the key it was moving to, wrapped under the
+   * master-encryption key in force at the time. Every row the rotation had
+   * already re-sealed is readable only with THAT key, and nothing else anywhere
+   * stores it — which is why login crash-recovery keeps it and `GET /user/profile`
+   * reports it as `interruptedRotation`.
+   *
+   * A master-password change re-wraps the LIVE vault key under the new MEK. If it
+   * leaves the pending wrapper alone, that wrapper is still sealed under a MEK
+   * nobody can derive any more: "Finish Rotation" can never open it again and the
+   * rows behind it are lost for good, silently, at the moment the password
+   * changes. So the two wrappers move together or not at all.
+   *
+   * Optional on the wire because almost no account has one. The server refuses
+   * the change when the account HAS a pending wrapper and the request does not
+   * carry its replacement, and ignores a replacement offered for an account that
+   * has none — it must never write a wrapper for a rotation that is not
+   * outstanding, because that is what `bulkReEncrypt`'s outstanding-rotation
+   * guard reads, and inventing one would block every future rotation.
+   */
+  newPendingEncryptedVaultKey: z.string().min(1).max(200).optional(),
+  newPendingVaultKeyIv: z.string().min(1).max(24).optional(),
+  newPendingVaultKeyTag: z.string().min(1).max(32).optional(),
 });
 
 export const unlockAccountSchema = z.object({

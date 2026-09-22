@@ -81,8 +81,13 @@ security posture, not a disclaimer.
   the **lock episode** rather than to the moment the lockout is due to end. Extending a lockout
   extends the episode, so the link already sent keeps working however long an attacker grinds,
   and a fresh one is sent only when the outstanding link would expire before the lockout it
-  covers — at most one new link per lockout, which is what stops that guarantee from becoming a
-  mail-flood vector of its own. The link a replacement supersedes stays valid until its own hour
+  covers — at most one new link per unlock-link lifetime, which is what stops that guarantee from
+  becoming a mail-flood vector of its own. The honest bound is per **window** rather than per
+  episode: a link lives an hour and a lockout lasts thirty minutes, so an attacker who keeps an
+  episode alive indefinitely can cause a new link to be sent roughly every half hour. That is
+  the price of the guarantee it replaces — a locked-out owner whose only link had been killed by
+  the attacker's next attempt, with no replacement ever sent — and it is bounded and stated here
+  rather than left to be discovered. The link a replacement supersedes stays valid until its own hour
   is up, so two can verify at once; that is harmless, because links naming one episode are one
   capability, and spending either ends the episode and kills the rest. A lockout also costs
   nothing but the wait: refreshing a session while one stands is refused **before** the
@@ -118,9 +123,15 @@ security posture, not a disclaimer.
   that narrowing has exactly one definition that every reader goes through. A cookie the server
   cannot read behaves **exactly as an absent one**, everywhere: not as a server error, and not as a
   distinguishable rejection that would confirm the probe was understood.
-- **Backup theft.** Emailed and downloaded backups are encrypted under a _separate_
-  backup password and carry an HMAC-SHA256 integrity signature, computed under a key
-  separated from the backup wrapping key by HKDF.
+- **Backup theft.** Emailed and downloaded backups carry no plaintext: every row in them is
+  ciphertext under the vault key, and the copy of that vault key they carry for a
+  cross-account restore is sealed under a _separate_ backup password. A backup you
+  **download from the browser** additionally carries an HMAC-SHA256 integrity signature,
+  computed under a key separated from the backup wrapping key by HKDF. A backup that
+  **arrives by email** — the scheduled one, and the one the Back Up Now button sends — does
+  not: it is assembled on the server, which has neither the backup password nor the key
+  derived from it, so there is nothing there to sign with. That is why restoring an emailed
+  backup asks for confirmation; see the next bullet for what the confirmation means.
 - **Tampered backup files.** Restore rejects dangling and self-referential folder links,
   and breaks any folder cycle a malicious file plants. It also checks the integrity
   signature before anything is sent — but the sentence that matters is **which key it is
@@ -575,9 +586,12 @@ For every other write the remedy is deliberately blunter. The refusal carries th
 account is on, but the application does not use it to fetch the current key and carry on: the
 entries already on screen were read with the key this session holds, so adopting a different one
 partway through a session would leave it working with two. It says instead that your vault key
-was changed on another device, and offers to reload — which starts again from a single consistent
-state. That notice cannot be dismissed, because a session in which nothing can be saved and
-nothing says so is the state it exists to prevent.
+was changed on another device, and offers to sign out — which starts again from a single
+consistent state. Reloading the page is deliberately not what that button does: the browser keeps
+its own copy of the replaced key, so a reload would ask for your master password and then hand
+you the same superseded key, with the same notice back in front of it. That notice cannot be
+dismissed, because a session in which nothing can be saved and nothing says so is the state it
+exists to prevent.
 
 If you would rather not rely on any of this, sign out of your other devices from the Sessions
 page before rotating.
@@ -655,8 +669,15 @@ only durable record that its data still needs removing — which is why nothing 
 the erasure it guards is done. For as long as it stands, **the account cannot be served**: an
 existing session is refused, a token refresh is refused, and signing in afresh is refused too,
 with the same answer a wrong password gets so that nothing new is revealed about the address.
-Nothing is written under it either, not a session row and not an audit row, because the scheduled
-clean-up must find the record exactly as the failed erasure left it.
+No session row and no audit row is written by any of those three, because the scheduled clean-up
+must find the record exactly as the failed erasure left it. What the marker does **not** stop is
+the four unauthenticated recovery routes, which are reached with an emailed token rather than a
+session: verifying an address, requesting a password reset, completing one, and spending an
+unlock link. Each of those still writes — a reset rewrites the stored credential and the wrapped
+vault key, and two of them write an audit row. They are left open deliberately, because gating
+them would remove the account's last self-service exit for the sake of a record the clean-up is
+about to delete anyway; but "nothing is written" is true of the three doors a session goes
+through, not of the whole account.
 
 Neither deletion is recoverable, and neither is undone by restoring a backup. The same fact
 has an operational consequence that belongs to whoever runs the server rather than to whoever

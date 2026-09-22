@@ -158,6 +158,46 @@ describe('what the frame refuses to decode at all', () => {
     });
   });
 
+  it('ends the SESSION when the engine itself cannot read images, not one request', async () => {
+    // An engine with no usable 2D context refuses every frame it is ever handed,
+    // so a per-image refusal leaves a running camera looping in silence: the
+    // panel's pump swallows those by design, because at eight frames a second it
+    // must. Answering `failed` is what puts a sentence on screen and stops the
+    // camera, which is the honest outcome when no later image can improve.
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        getContext() {
+          return null;
+        }
+      },
+    );
+    const reply = await scanImage(11, bitmap(), 2, 120);
+    expect(reply).toEqual({ kind: 'failed', reason: 'This browser cannot read images here.' });
+    // The negative: NOT attributed to this one image, because the next one would
+    // fail identically.
+    expect(reply).not.toHaveProperty('requestId');
+  });
+
+  it('ends the session when the engine has no OffscreenCanvas at all', async () => {
+    // The same fault one step earlier. Named rather than left to throw a bare
+    // `ReferenceError`, so the host has a sentence to show instead of the
+    // decoder-load wording, which would be false.
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    const reply = await scanImage(12, bitmap(), 2, 120);
+    expect(reply).toEqual({ kind: 'failed', reason: 'This browser cannot read images here.' });
+    expect(reply).not.toHaveProperty('requestId');
+  });
+
+  it('still releases the decoded pixels when the engine refuses', async () => {
+    // The `finally` that closes the bitmap must survive the new throw path, or an
+    // engine fault leaks one decoded frame on its way out.
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    const source = new FakeImageBitmap(100, 100);
+    await scanImage(13, source as unknown as ImageBitmap, 2, 120);
+    expect(source.close).toHaveBeenCalledTimes(1);
+  });
+
   it('decodes an uploaded file by way of the browser, in the frame', async () => {
     decodeQR.mockReturnValue('otpauth://totp/a?secret=AA');
     const reply = await scanImage(3, new Blob([new Uint8Array(4)]), 2, 120);

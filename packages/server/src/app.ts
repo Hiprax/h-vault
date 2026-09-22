@@ -314,7 +314,16 @@ if (config.NODE_ENV === 'production') {
   );
   const sandboxHtml = requireBuildArtifact(
     readSandboxDocument,
-    'Production build missing the document sandbox (sandbox.html). Run: npm run build:client',
+    // Names the STAGING step and not just the build, because on the pm2 path the
+    // build is almost certainly not what is missing: `npm run build:client`
+    // writes the document to `packages/client/dist-sandbox/`, and something has to
+    // copy it to `packages/server/sandbox-document/` (the Dockerfile does; a
+    // bare-metal deployment does it by hand, exactly as it already copies
+    // `packages/client/dist` to `packages/server/public`). Telling an operator to
+    // re-run a build they have just run, while the file sits on disk one
+    // directory away, is a message that sends them the wrong way.
+    'Production build missing the document sandbox (sandbox.html). Run: npm run build:client, ' +
+      'then copy packages/client/dist-sandbox to packages/server/sandbox-document',
   );
 
   // The isolated render document.

@@ -1077,10 +1077,14 @@ describe('FileDecryptPanel — keyboard submit and error classification', () => 
  *    leave a permanent "reload" notice in front of a healthy session.
  */
 describe('AppLayout — the superseded-vault-key notice', () => {
+  /** The banner's own action, captured so the remedy can be asserted. */
+  let bannerLogout: ReturnType<typeof vi.fn>;
+
   function setupLayout(vaultKeyVersion: number): void {
+    bannerLogout = vi.fn().mockResolvedValue(undefined);
     authState = {
       user: { userId: 'u1', email: 'test@example.com' },
-      logout: vi.fn(),
+      logout: bannerLogout,
       lock: vi.fn(),
       isLocked: false,
       vaultKeyVersion,
@@ -1129,7 +1133,7 @@ describe('AppLayout — the superseded-vault-key notice', () => {
     expect(screen.queryByTestId('stale-vault-key-banner')).not.toBeInTheDocument();
   });
 
-  it('names the condition and offers a reload once a write is refused', () => {
+  it('names the condition and offers a sign-out once a write is refused', () => {
     setupLayout(3);
     renderLayout();
 
@@ -1137,17 +1141,22 @@ describe('AppLayout — the superseded-vault-key notice', () => {
 
     const banner = screen.getByTestId('stale-vault-key-banner');
     expect(banner).toHaveTextContent(
-      'Your vault key was changed on another device, so changes from this tab can no longer be saved. Reload to continue.',
+      'Your vault key was changed on another device, so changes from this tab can no longer be saved. Sign in again to continue.',
     );
     expect(banner).toHaveAttribute('role', 'alert');
-    expect(within(banner).getByRole('button', { name: /reload/i })).toBeInTheDocument();
+    expect(within(banner).getByRole('button', { name: /sign out/i })).toBeInTheDocument();
+    // The remedy it used to offer, and could not deliver: a reload rehydrates
+    // `isAuthenticated`, so no profile is read, and the Unlock screen re-derives
+    // the vault key from the PERSISTED wrapper — which is exactly as superseded
+    // as the write that was just refused. The banner came straight back.
+    expect(within(banner).queryByRole('button', { name: /^reload$/i })).not.toBeInTheDocument();
     // The negative that matters: there is no way to dismiss it. A session in
     // which nothing can be saved and nothing says so is the state this exists to
     // prevent, and a dismiss button restores it with one click.
     expect(within(banner).queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument();
   });
 
-  it('reloads the document when the action is taken', () => {
+  it('signs out when the action is taken, rather than reloading into the same state', () => {
     setupLayout(3);
     renderLayout();
     serverReported(4);
@@ -1157,9 +1166,13 @@ describe('AppLayout — the superseded-vault-key notice', () => {
       value: { ...window.location, reload },
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /reload/i }));
+    fireEvent.click(screen.getByRole('button', { name: /sign out/i }));
 
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(bannerLogout).toHaveBeenCalledTimes(1);
+    // The negative that pins the fix: a reload is NOT what happens, because a
+    // reload cannot clear this condition. Signing in is the only path that reads
+    // the live wrapper and the live generation from the server.
+    expect(reload).not.toHaveBeenCalled();
   });
 
   it('stays silent when the reported generation is the one this session holds', () => {

@@ -52,6 +52,7 @@ import { afterAll, describe, it, expect, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 
 /**
@@ -140,6 +141,10 @@ vi.mock('../src/config/clientArtifacts.js', async (importOriginal) => {
 // drops the file from the package report entirely.
 import app from '../src/app.js';
 import { requireBuildArtifact, SANDBOX_CSP_HEADER } from '../src/config/sandboxCsp.js';
+// The canonical list of URL spellings that miss the sandbox route, shared with
+// `test:smoke` and `test:deploy`. `clean-room.test.ts` already reaches into the
+// same module from this tier, so the import path is an established one.
+import { SANDBOX_BYPASS_SPELLINGS } from '../../../scripts/ci/lib/sandbox-headers.mjs';
 
 // Readable aliases for the fixtures. They live in the hoisted box because the
 // mock factory needs them and runs during `import app` — i.e. before any
@@ -206,12 +211,31 @@ describe('the production block mounts the client and the isolated document', () 
     // is the isolation silently ceasing to exist while every renderer keeps
     // working. Measured, not theorised; the transcript is in the plan for this
     // change and reproduced by this block.
-    const missesTheRoute = [
-      '/sandbox%2Ehtml', // the dot, percent-encoded
-      '//sandbox.html', // an empty leading path segment
-      '/sandbox.htm%6C', // the trailing "l", percent-encoded
-      '/%73andbox.html', // the leading "s", percent-encoded
-    ];
+    // The list is IMPORTED from the gate library rather than restated, which is
+    // the same one-definition discipline the repository applies to
+    // `unlockedLayoutMarker` and `connectSandbox`. `test:smoke` and `test:deploy`
+    // already ask these spellings from there; a private copy here meant a sixth
+    // spelling added to the shared list would never reach the FAST tier — the only
+    // one that runs on every push — and the regression would surface at T1 or T2,
+    // or not at all if neither gate could run.
+    //
+    // The traversal probe is the one entry this block handles separately: it is a
+    // `send` property rather than a route-matching one, and it has its own case
+    // with its own reasoning below.
+    const missesTheRoute = SANDBOX_BYPASS_SPELLINGS.filter((s) => !s.includes('..'));
+
+    it('asks every spelling the wire gates ask, and no fewer', () => {
+      // Guards the guard: a `filter` that silently matched nothing — or a shared
+      // list that shrank — would make the loop below vacuous.
+      expect(missesTheRoute).toEqual([
+        '/sandbox%2Ehtml', // the dot, percent-encoded
+        '//sandbox.html', // an empty leading path segment
+        '/sandbox.htm%6C', // the trailing "l", percent-encoded
+        '/%73andbox.html', // the leading "s", percent-encoded
+      ]);
+      // And the traversal probe really is the only thing the filter removed.
+      expect(SANDBOX_BYPASS_SPELLINGS).toHaveLength(missesTheRoute.length + 1);
+    });
 
     for (const spelling of missesTheRoute) {
       it(`answers ${spelling} without handing out the sandbox document`, async () => {
@@ -348,6 +372,28 @@ describe('a production build missing an artifact fails loudly at boot', () => {
       ),
     ).toThrow(/document sandbox \(sandbox\.html\)/);
     expect(() => requireBuildArtifact(thrown, 'a')).not.toThrow(/client dist/);
+  });
+
+  it('tells the operator to STAGE the sandbox document, not just to build it', () => {
+    // The message `app.ts` actually passes, read from the source rather than
+    // restated, because what matters is the sentence an operator sees at boot.
+    //
+    // On the pm2 path the build is almost never what is missing: `build:client`
+    // writes the document to `packages/client/dist-sandbox/`, and something has to
+    // copy it to `packages/server/sandbox-document/` — the Dockerfile does, a
+    // bare-metal deployment does it by hand. "Run npm run build:client" alone
+    // sends an operator to re-run a build they have just run while the file sits
+    // one directory away.
+    const appSource = readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app.ts'),
+      'utf8',
+    );
+    const message = /'Production build missing the document sandbox[\s\S]{0,400}?\);/.exec(
+      appSource,
+    );
+    expect(message).not.toBeNull();
+    expect(message?.[0]).toContain('dist-sandbox');
+    expect(message?.[0]).toContain('packages/server/sandbox-document');
   });
 
   it('returns the file untouched when the read succeeds', () => {

@@ -43,6 +43,28 @@ import {
 
 const OTP_URI = /^otpauth(-migration)?:/i;
 
+/**
+ * This ENGINE cannot read images at all — as opposed to this IMAGE being one it
+ * will not read.
+ *
+ * The two are answered with opposite message kinds and the difference is the
+ * whole point of the split. Everything about one image (too many bytes, too many
+ * pixels, a format that will not decode) is a `qrFailed` naming that request, so
+ * a running camera keeps going and the next frame gets its chance. A browser with
+ * no usable `OffscreenCanvas` 2D context will refuse every frame it is ever
+ * handed, so answering per-image leaves the camera looping in silence for ever
+ * with nothing on screen — `TotpScanPanel.pump` swallows per-image refusals by
+ * design, because at 8 frames a second it must. That case is exactly what the
+ * session-ending `failed` exists for, and it is the only category `toImageData`
+ * raises that no later image can improve.
+ */
+class QrEngineUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'QrEngineUnavailableError';
+  }
+}
+
 /** Pixels, however the request carried them. */
 async function toImageData(image: unknown): Promise<ImageData> {
   let bitmap: ImageBitmap;
@@ -67,9 +89,18 @@ async function toImageData(image: unknown): Promise<ImageData> {
     if (bitmap.width > MAX_SANDBOX_QR_IMAGE_SIDE || bitmap.height > MAX_SANDBOX_QR_IMAGE_SIDE) {
       throw new Error('That image is too large to read.');
     }
+    // Both of these describe the ENGINE, never the image, so both are raised as
+    // {@link QrEngineUnavailableError} and end the session rather than refusing
+    // one frame. `OffscreenCanvas` is checked by name rather than left to throw a
+    // `ReferenceError`, so the refusal carries a sentence somebody can act on.
+    if (typeof OffscreenCanvas === 'undefined') {
+      throw new QrEngineUnavailableError('This browser cannot read images here.');
+    }
     const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
     const context = canvas.getContext('2d');
-    if (context === null) throw new Error('This browser cannot read images here.');
+    if (context === null) {
+      throw new QrEngineUnavailableError('This browser cannot read images here.');
+    }
     context.drawImage(bitmap, 0, 0);
     return context.getImageData(0, 0, bitmap.width, bitmap.height);
   } finally {
@@ -98,12 +129,18 @@ export async function scanImage(
   try {
     pixels = await toImageData(image);
   } catch (error) {
+    // One exception: a fault in the ENGINE rather than in the image. It will
+    // refuse the next frame too, so answering per-image would leave a camera
+    // scanning in silence for ever. See {@link QrEngineUnavailableError}.
+    if (error instanceof QrEngineUnavailableError) {
+      return { kind: 'failed', reason: error.message };
+    }
     // `qrFailed`, NOT `failed`, and the difference is the whole point of the
-    // two kinds. Everything `toImageData` refuses is a property of THIS image —
-    // too many bytes, too many pixels, a format this engine cannot decode — and
-    // the next image may well be fine. Answering with the unattributable
-    // `failed` told the host the session had died, which stopped a running
-    // camera because somebody picked one oversized photograph.
+    // two kinds. Everything else `toImageData` refuses is a property of THIS
+    // image — too many bytes, too many pixels, a format this engine cannot
+    // decode — and the next image may well be fine. Answering with the
+    // unattributable `failed` told the host the session had died, which stopped a
+    // running camera because somebody picked one oversized photograph.
     return {
       kind: 'qrFailed',
       requestId,

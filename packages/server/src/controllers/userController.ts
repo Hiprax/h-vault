@@ -198,8 +198,12 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
     // crash had already re-sealed.
     //
     // The `select: false` fields (`authHash`, `twoFactorSecret`,
-    // `pendingTwoFactorSecret`, `pendingTwoFactorExpiry`, `backupCodes`) are absent
-    // from the `.lean()` read above and none of them is added back here.
+    // `pendingTwoFactorSecret`, `pendingTwoFactorExpiry`, `backupCodes`,
+    // `lockoutEpisodeId`, `lockoutNotifiedAt`) are absent from the `.lean()` read
+    // above and none of them is added back here. The last two matter most to this
+    // list: the read is an unprojected `.lean()` spread, so `select: false` is the
+    // ONLY thing keeping the unlock-link identity off the wire, and an enumeration
+    // that fell behind the model is how somebody concludes it is safe to drop.
     ...(interruptedRotation
       ? {
           pendingEncryptedVaultKey: user.pendingEncryptedVaultKey,
@@ -323,6 +327,40 @@ class SupersededVaultKeyWrite extends Error {
   }
 }
 
+/**
+ * Thrown inside {@link changePassword}'s guarded span when the account carries an
+ * interrupted rotation's vault key and the request does not carry its
+ * replacement.
+ *
+ * ## The second key on the account, and why a password change can destroy it
+ *
+ * A crashed SEQUENTIAL rotation commits `pendingEncryptedVaultKey` and its IV/tag
+ * before it re-encrypts anything: the key it was moving to, wrapped under the
+ * master-encryption key in force at that moment. Every row it had already
+ * re-sealed is readable only with that key, and nothing else anywhere stores it —
+ * not the client, which minted it in memory, and not a backup, which stores
+ * ciphertext. That is exactly why login crash-recovery keeps it (it lowers only
+ * the write fence) and why `getProfile` reports it as `interruptedRotation`.
+ *
+ * A master-password change re-wraps the LIVE vault key under the NEW MEK and
+ * stores that as the account's only copy. Leave the pending wrapper alone and it
+ * is still sealed under a MEK nobody can derive any more: "Finish Rotation" can
+ * never open it again, and the rows behind it are lost for good — silently, at
+ * the moment the password changes, on an account whose data was intact a
+ * millisecond earlier. The two wrappers move together or the change is refused.
+ *
+ * Refused rather than written-through, because only the client can re-wrap: the
+ * server has neither MEK and the wrappers are opaque to it. Thrown rather than
+ * answered where it is raised, for the reason the whole span documents — nothing
+ * writes to `res` while the exclusion lock is still held.
+ */
+class InterruptedRotationNotCarried extends Error {
+  constructor() {
+    super('the account holds an interrupted rotation the request did not carry forward');
+    this.name = 'InterruptedRotationNotCarried';
+  }
+}
+
 export const changePassword = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
   const body = req.body as ChangePasswordInput;
@@ -423,6 +461,26 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
   let supersededMidWrite = false;
   let guardedVaultKeyVersion = 0;
   let staleVaultKey: StaleVaultKeyError | null = null;
+  let interruptedRotationNotCarried = false;
+
+  /**
+   * The interrupted rotation's key, re-wrapped by the client under the new MEK —
+   * or `null` when the request did not offer a complete one.
+   *
+   * All three fields or none: two thirds of a wrapper is not a wrapper, and
+   * writing a partial one would replace a recoverable key with an unopenable one,
+   * which is worse than refusing. See {@link InterruptedRotationNotCarried}.
+   */
+  const rewrappedPendingVaultKey =
+    body.newPendingEncryptedVaultKey !== undefined &&
+    body.newPendingVaultKeyIv !== undefined &&
+    body.newPendingVaultKeyTag !== undefined
+      ? {
+          pendingEncryptedVaultKey: body.newPendingEncryptedVaultKey,
+          pendingVaultKeyIv: body.newPendingVaultKeyIv,
+          pendingVaultKeyTag: body.newPendingVaultKeyTag,
+        }
+      : null;
 
   const rotationLockId = await acquireVaultRotationLock(userId);
   try {
@@ -432,6 +490,30 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     // be inside the span. The throw is caught below, after the `finally`, and
     // rendered there with the NUMBER the client rewraps under.
     guardedVaultKeyVersion = await assertVaultKeyVersion(userId, body.vaultKeyVersion);
+
+    // ── The interrupted rotation's key, which is the OTHER key this write can
+    // destroy ────────────────────────────────────────────────────────────────
+    //
+    // Read INSIDE the span for the same reason the fence and the generation are:
+    // holding the exclusion lock is what makes this answer still true when the
+    // write below lands, since a rotation is what writes a pending wrapper and a
+    // rotation cannot start while the lock is held. Its own read rather than a
+    // wider projection on `assertVaultKeyVersion`, because that helper is shared
+    // by eight other handlers and none of the rest has a second key to carry.
+    //
+    // The three outcomes, and the middle one is the fix:
+    //   * no pending wrapper  -> write none, and IGNORE any the request offered.
+    //     Inventing one would set the very field `bulkReEncrypt`'s
+    //     outstanding-rotation guard reads, blocking every future rotation on the
+    //     account behind a 200 from a request that looked ordinary.
+    //   * pending wrapper, request carries its replacement -> move both together.
+    //   * pending wrapper, request carries nothing -> refuse. See
+    //     {@link InterruptedRotationNotCarried}.
+    const outstanding = await User.findById(userId).select('pendingEncryptedVaultKey').lean();
+    const interruptedRotationOutstanding = outstanding?.pendingEncryptedVaultKey !== undefined;
+    if (interruptedRotationOutstanding && rewrappedPendingVaultKey === null) {
+      throw new InterruptedRotationNotCarried();
+    }
 
     // The filter is what makes the guard above safe, not the read it performed:
     // a rotation committing between that read and this write matches nothing here
@@ -455,6 +537,12 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
         vaultKeyIv: body.newVaultKeyIv,
         vaultKeyTag: body.newVaultKeyTag,
         passwordChangedAt,
+        // Spread only when the account actually HAS an interrupted rotation, so
+        // the two wrappers move in the same write or not at all — and so an
+        // offered wrapper can never conjure one onto an account with none.
+        ...(interruptedRotationOutstanding && rewrappedPendingVaultKey !== null
+          ? rewrappedPendingVaultKey
+          : {}),
       },
     };
 
@@ -519,14 +607,30 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     // Caught NARROWLY, by type. A blanket catch here would turn any failure in
     // the span — a dropped connection, a timeout — into a 409 telling the user
     // their key was rotated, which is both false and unactionable.
-    if (!(error instanceof StaleVaultKeyError)) throw error;
-    staleVaultKey = error;
+    if (error instanceof InterruptedRotationNotCarried) {
+      interruptedRotationNotCarried = true;
+    } else if (error instanceof StaleVaultKeyError) {
+      staleVaultKey = error;
+    } else {
+      throw error;
+    }
   } finally {
     // Released BEFORE the response is written, and before the audit row, the same
     // ordering `importVault` and `completeUpload` take: a client that fires its
     // next request the moment this one lands must not race the release round trip
     // and be refused by a span that has already finished.
     await releaseVaultRotationLock(userId, rotationLockId);
+  }
+
+  if (interruptedRotationNotCarried) {
+    // Answered after the `finally`, so the lock is already released, and kept
+    // under 200 characters with the remedy leading because the client slices a
+    // 4xx sentence there (`getApiErrorMessage`). Nothing was written.
+    throw httpErrors.conflict(
+      'An interrupted vault key rotation is outstanding on this account. Reload the application ' +
+        'and change your password again, so the key that rotation was moving to is carried ' +
+        'across rather than stranded.',
+    );
   }
 
   if (staleVaultKey !== null) {

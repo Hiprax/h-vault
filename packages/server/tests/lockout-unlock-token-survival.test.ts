@@ -378,7 +378,7 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
     );
   });
 
-  it('mints no link when the account disappears between the increment and the lock', async () => {
+  it('mints no link when the episode read-back finds nothing', async () => {
     // The one defensive arm in the lock helper. If the account is deleted (or its
     // lockout discharged) between the atomic increment and the write that starts
     // the episode, there is no episode to name — and a link minted anyway would
@@ -392,11 +392,21 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
     // The read-back after the atomic lock write finds nothing, which is what a
     // vanished (or discharged) document looks like from there. Everything before
     // it — the increment and the lock write — runs for real.
+    const readPreferences: string[] = [];
     const spy = vi
       .spyOn(User, 'findById')
-      // The production read chains `.select('+lockoutEpisodeId')`, so the stand-in
-      // has to be query-shaped rather than a bare promise.
-      .mockReturnValueOnce({ select: () => Promise.resolve(null) } as never);
+      // The production read chains `.read('primary').select('+lockoutEpisodeId')`,
+      // so the stand-in has to be query-shaped rather than a bare promise — and
+      // shaped like the WHOLE chain. `read('primary')` is load-bearing there: a
+      // deployment whose `MONGODB_URI` names a secondary read preference would
+      // otherwise let this read predate the lock write two lines above it and mail
+      // no link at all.
+      .mockReturnValueOnce({
+        read: (preference: string) => {
+          readPreferences.push(preference);
+          return { select: () => Promise.resolve(null) };
+        },
+      } as never);
 
     try {
       const res = await postLogin(agent, user.email, 'wrong-auth-hash');
@@ -404,6 +414,13 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
 
       expect(mockedUnlockEmail).not.toHaveBeenCalled();
       expect(spy).toHaveBeenCalledTimes(1);
+      // The read preference is asserted, not merely accommodated. A deployment
+      // whose `MONGODB_URI` carries `readPreference=secondaryPreferred` would
+      // otherwise let this read predate the lock write two lines above it in
+      // production: it would answer `undefined`, take the bail this case covers
+      // for the WRONG reason, and the account would sit locked for thirty minutes
+      // with no unlock link ever sent.
+      expect(readPreferences).toEqual(['primary']);
     } finally {
       spy.mockRestore();
     }
@@ -413,6 +430,13 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
     // exists to end.
     const after = await readUser(user.id);
     expect(after!.lockoutNotifiedAt).toBeUndefined();
+    // The lock itself DID land — the bail is after the atomic write, not instead
+    // of it — so the account is genuinely locked and genuinely has an episode to
+    // be mailed about on the next attempt. Without this the case would also pass
+    // on a handler that gave up before locking at all, which is a different and
+    // much worse behaviour wearing the same assertions.
+    expect(after!.lockoutUntil).toBeInstanceOf(Date);
+    expect(after!.lockoutEpisodeId).toEqual(expect.any(String));
   });
 
   it('claims no mail for an episode that was discharged while the lock was being written', async () => {
@@ -433,19 +457,22 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
 
     const original = User.findById.bind(User);
     const spy = vi.spyOn(User, 'findById').mockImplementationOnce(((id: string) => ({
-      select: async (projection: string) => {
-        const snapshot = await original(id).select(projection);
-        // The owner's discharge commits here, after the handler's lock write and
-        // before its claim.
-        await User.updateOne(
-          { _id: id },
-          {
-            $set: { failedLoginAttempts: 0 },
-            $unset: { lockoutUntil: 1, lockoutEpisodeId: 1, lockoutNotifiedAt: 1 },
-          },
-        );
-        return snapshot;
-      },
+      // Mirrors the production chain, `.read('primary').select(...)`.
+      read: (preference: string) => ({
+        select: async (projection: string) => {
+          const snapshot = await original(id).read(preference).select(projection);
+          // The owner's discharge commits here, after the handler's lock write
+          // and before its claim.
+          await User.updateOne(
+            { _id: id },
+            {
+              $set: { failedLoginAttempts: 0 },
+              $unset: { lockoutUntil: 1, lockoutEpisodeId: 1, lockoutNotifiedAt: 1 },
+            },
+          );
+          return snapshot;
+        },
+      }),
     })) as never);
 
     try {

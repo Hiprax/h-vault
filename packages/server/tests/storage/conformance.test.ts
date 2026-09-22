@@ -44,7 +44,11 @@ import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   DOCUMENT_TAG_BYTES,
 } from '@hvault/shared';
-import { startStorageEngine, type StorageEngine } from '../../../../tests/harness/s3Server.js';
+import {
+  startStorageEngine,
+  type StorageConnection,
+  type StorageEngine,
+} from '../../../../tests/harness/s3Server.js';
 import { createS3Provider } from '../../src/services/storage/s3Provider.js';
 import type { StorageProvider, StorageRangeRead } from '../../src/services/storage/types.js';
 import { runStorageContract } from '../helpers/storageContract.js';
@@ -77,22 +81,44 @@ import { PART_DIGEST_HEADER } from '../../src/controllers/documentController.js'
 import { buildObjectKey } from '../../src/utils/documentObjects.js';
 import { authHeader, createTestUser, getCsrf, type TestUser } from '../helpers.js';
 
-let engine: StorageEngine;
+/**
+ * Declared as possibly-undefined on purpose, and `afterAll` reads it that way.
+ *
+ * Vitest runs `afterAll` even when `beforeAll` threw, and everything that can
+ * fail here fails BEFORE the assignment: a daemon that is not running, an image
+ * that will not pull, a host port lost five times over, a readiness probe that
+ * times out. Typed non-nullable, the teardown then threw `Cannot read properties
+ * of undefined (reading 'stop')` on top of the real cause — and that TypeError
+ * is the one printed last, which is the one people read. MEASURED, on the run
+ * that produced this file's port-collision fix.
+ */
+let engine: StorageEngine | undefined;
+/**
+ * The same engine as the CONNECTION the cases below build clients from.
+ *
+ * Split from `engine` rather than asserted away at each use: a case only runs
+ * when `beforeAll` succeeded, which is exactly the fact a non-nullable
+ * declaration records, while the teardown has to survive the run where it did
+ * not. Declaring one binding both ways is what produced the cascade above.
+ */
+let connection: StorageConnection;
 let provider: StorageProvider;
 
 beforeAll(async () => {
-  engine = await startStorageEngine({
+  const started = await startStorageEngine({
     // The readiness probe IS the port's own `headBucket`, built from the same
     // provider every case below uses — so "ready" means ready for this client's
     // credentials, signing and addressing, not merely that a socket answers.
-    probe: (connection) => createS3Provider(connection).headBucket(),
+    probe: (candidate) => createS3Provider(candidate).headBucket(),
   });
-  provider = createS3Provider(engine);
+  engine = started;
+  connection = started;
+  provider = createS3Provider(started);
   providerRef.current = provider;
 }, 120_000);
 
 afterAll(async () => {
-  await engine.stop();
+  await engine?.stop();
 });
 
 /**
@@ -317,12 +343,12 @@ describe('the names this engine gives an absence, which decide 404 or 503', () =
   /** A provider pointed at a bucket that was never created. */
   const wrongBucket = (): StorageProvider =>
     createS3Provider({
-      endpoint: engine.endpoint,
-      region: engine.region,
+      endpoint: connection.endpoint,
+      region: connection.region,
       bucket: 'hvault-harness-no-such-bucket',
-      accessKeyId: engine.accessKeyId,
-      secretAccessKey: engine.secretAccessKey,
-      forcePathStyle: engine.forcePathStyle,
+      accessKeyId: connection.accessKeyId,
+      secretAccessKey: connection.secretAccessKey,
+      forcePathStyle: connection.forcePathStyle,
     });
 
   it('names the missing BUCKET on every operation that can carry an error body, so it reads as 503', async () => {

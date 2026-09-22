@@ -1067,9 +1067,10 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
         (call[0] as { title?: string }).title ===
         'This backup’s integrity signature does not match its contents.',
     );
-    expect(String((refusal?.[0] as { description?: string }).description)).not.toContain(
-      'tampered',
-    );
+    // Case-INSENSITIVE, and on the stem rather than one inflection: "Tampered"
+    // at the start of a sentence, or "tampering", is the same accusation and a
+    // `toContain('tampered')` would let either through.
+    expect(String((refusal?.[0] as { description?: string }).description)).not.toMatch(/tamper/i);
   });
 
   // ---- The restore-signature gate -----------------------------------------
@@ -1145,6 +1146,41 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
       });
     });
     expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it("dismissing the prompt with the dialog's own close control cancels the restore", async () => {
+    // The third way out of this prompt, and each way is its OWN function:
+    // Escape and the overlay go through `onOpenChange`, `Cancel Restore` has its
+    // own inline handler, and the corner control is `DialogContent`'s `onClose`
+    // — a prop the component renders NOTHING for when it is absent. Only this
+    // case reaches the third, so a prompt that silently lost its close control,
+    // or gained one wired to something that does not answer, is visible here
+    // and nowhere else.
+    //
+    // And the assertion that carries the weight is not "no request was sent" —
+    // a promise nobody settles sends nothing either, so that passes on the
+    // broken version. It is that the awaiting `handleRestore` REACHED ITS
+    // `finally` and released both wrapping keys.
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+    expect(zeroedKeys()).not.toContain(FILE_BWK);
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Close'));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Restore cancelled. Nothing was changed.',
+        type: 'info',
+      });
+    });
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+    expect(zeroedKeys()).toContain(FILE_BWK);
+    expect(zeroedKeys()).toContain(ACCOUNT_BWK);
   });
 
   it('zeroes the wrapping keys when the page is unmounted with the prompt still open', async () => {

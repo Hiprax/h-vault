@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   classifyBackupSignature,
   resolveBackupSignature,
@@ -260,5 +263,86 @@ describe('resolveBackupSignature — which key gets to answer, and in what order
 
     expect(Object.keys(everySource).sort()).toEqual([...KEY_SOURCES].sort());
     expect(VERIFIED_UNDER).toEqual([...KEY_SOURCES, null]);
+  });
+});
+
+/**
+ * The linkage half, which the exhaustive policy cases above cannot assert.
+ *
+ * Everything before this proves that `resolveBackupSignature` is a correct
+ * verdict function. None of it proves the restore path USES it. A refactor that
+ * inlined the decision back into the page would leave every case above green and
+ * every UI case green too if it happened to reproduce the same branches — and the
+ * fall-through this whole phase exists to remove would be one edit away from
+ * coming back, with nothing anchoring it. `knip` would not notice either: the
+ * test file is an entry point, so a module reachable only from a test still
+ * counts as used.
+ *
+ * So the anchor is on the PRIMITIVE. `cryptoService.verifyBackupHmac` is the only
+ * thing that can produce a signature verdict at all, and exactly one module under
+ * `src/` is allowed to reach it: `lib/backupSignature.ts` decides, everybody else
+ * asks. Inlining the decision means calling that primitive somewhere else, which
+ * is what this fails on.
+ */
+describe('the restore path routes its signature verdict through one module', () => {
+  const clientRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const srcDir = path.join(clientRoot, 'src');
+
+  /** Every `.ts`/`.tsx` file under a directory. */
+  function sourceFiles(dir: string): string[] {
+    const found: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const absolute = path.join(dir, entry);
+      if (statSync(absolute).isDirectory()) {
+        found.push(...sourceFiles(absolute));
+        continue;
+      }
+      if (entry.endsWith('.ts') || entry.endsWith('.tsx')) found.push(absolute);
+    }
+    return found;
+  }
+
+  /** Source with comments blanked, so prose naming a symbol is not a call site. */
+  function code(file: string): string {
+    return readFileSync(file, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ' '))
+      .replace(/(^|[^:])\/\/.*$/gm, (_match, before: string) => before);
+  }
+
+  it('finds files to scan at all', () => {
+    // Guards the guard: a moved `src/` would make both assertions below vacuous.
+    const files = sourceFiles(srcDir);
+    expect(files.length).toBeGreaterThan(150);
+    expect(files.some((f) => f.endsWith(path.join('lib', 'backupSignature.ts')))).toBe(true);
+  });
+
+  it('lets only the page HAND the primitive to the one module that decides', () => {
+    // A member access, `.verifyBackupHmac(`, so the method's own DEFINITION in
+    // `services/crypto/cryptoService.ts` is not counted as a call site.
+    const callers = sourceFiles(srcDir)
+      .filter((file) => /\.verifyBackupHmac\s*\(/.test(code(file)))
+      .map((file) => path.relative(srcDir, file).split(path.sep).join('/'));
+
+    // The page passes it IN as a dependency; nothing else may call it. A second
+    // caller is a second verdict, and a second verdict is how the fall-through
+    // returns.
+    expect(callers).toEqual(['pages/BackupSettingsPage.tsx']);
+  });
+
+  it('routes the page through `resolveBackupSignature`, and nothing else does', () => {
+    const page = code(path.join(srcDir, 'pages', 'BackupSettingsPage.tsx'));
+
+    // Imported from the one module…
+    expect(page).toMatch(
+      /import \{[^}]*resolveBackupSignature[^}]*\} from '\.\.\/lib\/backupSignature'/,
+    );
+    // …and actually invoked, not merely imported for its types.
+    expect(page).toMatch(/await resolveBackupSignature\(/);
+    // And the verdict really does gate the only write: the restore POST appears
+    // once, and after the call that decides whether it may happen.
+    const decisionAt = page.indexOf('await resolveBackupSignature(');
+    const restorePosts = [...page.matchAll(/\/backup\/restore/g)];
+    expect(restorePosts).toHaveLength(1);
+    expect(restorePosts[0]?.index).toBeGreaterThan(decisionAt);
   });
 });

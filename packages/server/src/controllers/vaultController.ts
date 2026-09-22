@@ -774,12 +774,17 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       logger.warn('Vault key rotation refused: an interrupted rotation is still outstanding', {
         userId,
       });
+      // Under 200 characters, and that is a requirement rather than a style
+      // preference: the client renders a 4xx through `getApiErrorMessage`, which
+      // SLICES at `MAX_ERROR_MESSAGE_LENGTH` (200). The first draft of this
+      // sentence ran to 397 and put the remedy at the end, so every word telling
+      // the user what to do was cut — mid-word, in the middle of an explanation
+      // of why they were stuck. The remedy leads; the reason follows it and is
+      // the only part a cap could ever take.
       throw httpErrors.conflict(
-        'An interrupted vault key rotation is still outstanding on this account. Entries ' +
-          'already re-encrypted are sealed under the key it was moving to, and that key is ' +
-          'stored only as the wrapper this account holds, so rotating to a different one ' +
-          'would leave them unreadable for ever. Finish the interrupted rotation instead, or ' +
-          'resend this request with `discardPendingVaultKey` to abandon it deliberately.',
+        'An interrupted vault key rotation is still outstanding. Finish it, or resend with ' +
+          '`discardPendingVaultKey` to abandon it: rotating to a different key would strand ' +
+          'every entry it re-encrypted.',
       );
     }
 

@@ -1561,11 +1561,12 @@ describe('machine-readable reports', () => {
     // package.json`, which is ALREADY set and is the wrong fix. That misdirection
     // is the real cost, and it is why a guard here is worth more than a comment.
     //
-    // A REGEX IS REFUSED, and that is measured too: `s3Server.ts` holds nine
-    // legitimate `await`s, four of them at the start of a line, all inside async
-    // functions. So this parses. `typescript` is a root devDependency and a
-    // sibling suite already imports it the same way
-    // (`tsconfig-incremental.test.ts`).
+    // A REGEX IS REFUSED, and that is measured too: `s3Server.ts` holds ten
+    // matches for the word, four of them at the start of a line — nine
+    // legitimate `await`s, all inside async functions, and ONE inside a comment,
+    // which is precisely the distinction a regex cannot draw. So this parses.
+    // `typescript` is a root devDependency and a sibling suite already imports
+    // it the same way (`tsconfig-incremental.test.ts`).
     const harnessDir = path.join(repoRoot, 'tests/harness');
     const files = readdirSync(harnessDir).filter((name) => name.endsWith('.ts'));
 

@@ -1,5 +1,6 @@
 // @vitest-environment node
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -41,6 +42,22 @@ import { describe, expect, it } from 'vitest';
  * only a `data` (optionally through a cast) whose very next property access is
  * `error` is reported. `errors`, `errorCode` and `errorMessage` are untouched,
  * because the boundary is `\berror\b`.
+ *
+ * ## What it therefore CANNOT see, stated rather than implied
+ *
+ * Anchoring on the chain means two spellings escape by construction, and a guard
+ * that does not say where it stops is one a reader will over-trust:
+ *
+ *  - indirection through a local — `const body = err.response?.data;` and then
+ *    `body?.error?.code` — because the second line has no `data` in it;
+ *  - destructuring — `const { error } = response.data;` — for the same reason.
+ *
+ * Widening to either would mean tracking an identifier across statements, which
+ * is a type-aware analysis rather than a pattern, and both spellings would be a
+ * deliberate detour rather than the autocomplete this exists to catch. The
+ * spelling that IS one keystroke away is `response.data.error`, and it is
+ * covered — including after `npm run format` has wrapped it, which is the gap
+ * this guard shipped with.
  */
 
 const clientRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -61,15 +78,23 @@ function sourceFiles(dir: string): string[] {
 }
 
 /**
- * Source with comments removed, so a docblock that NAMES the forbidden read (as
+ * Source with comments blanked, so a docblock that NAMES the forbidden read (as
  * several deliberately do, including the one above) is not itself a violation.
+ *
+ * Every removed character is replaced by a SPACE rather than by nothing, and the
+ * newlines inside a block comment are kept. Deleting them collapsed the file, so
+ * every `file:line` this test reported after the first docblock named a line that
+ * was not the one at fault — in a codebase this comment-dense, usually by
+ * hundreds. Blanking preserves both the line and the column.
  *
  * The line-comment strip requires the `//` not to be preceded by `:`, so a URL
  * in a string literal (`otpauth://`, `https://`) does not swallow the rest of
  * its line and hide a real violation sitting after it.
  */
 function withoutComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/.*$/gm, (_match, before: string) => before);
 }
 
 /**
@@ -77,20 +102,58 @@ function withoutComments(source: string): string {
  * property access is `error`, in dot or bracket form.
  *
  * Matches `res.data.error`, `error.response?.data?.error`,
- * `(err.response?.data as Record<string, unknown> | undefined)?.error` and
- * `data['error']`.
+ * `(err.response?.data as Record<string, unknown> | undefined)?.error`,
+ * `data['error']`, and — the spelling that matters most — any of those broken
+ * across two lines by Prettier.
+ *
+ * ## Why the cast body stops at a newline and the rest does not
+ *
+ * `[^)\n]*` for the `as` clause, so a cast can never run past the end of its own
+ * line looking for a closing paren several statements away; the surrounding
+ * `\s*` runs deliberately DO cross newlines, because that is where
+ * `printWidth: 100` actually breaks this expression:
+ *
+ * ```ts
+ * const serverMessage: unknown = (error.response?.data as Record<string, unknown> | undefined)
+ *   ?.message;
+ * ```
+ *
+ * That exact shape is already in the tree at `src/lib/utils.ts`, for `?.message`.
+ * Its `?.error` twin is therefore not a hypothetical spelling but the one a
+ * reintroduction would take after a single `npm run format`.
  */
 const NESTED_ENVELOPE_READ =
-  /\bdata\b(?:\s+as\s+[^)]*)?\)?\s*\??\s*(?:\.\s*error\b|\[\s*['"]error['"]\s*\])/;
+  /\bdata\b(?:\s+as\s+[^)\n]*)?\s*\)?\s*\??\s*(?:\.\s*error\b|\[\s*['"]error['"]\s*\])/g;
 
-/** `file:line` for every line of `file` that makes the forbidden read. */
+/**
+ * Whether `source` — one line, one file, or anything in between — makes the read.
+ *
+ * Shared by the recognition table and the file scan below so the two
+ * cannot be testing two different things, which is precisely how the line-by-line
+ * scan survived: its table only ever fed it single lines.
+ */
+function matchesNestedEnvelopeRead(source: string): boolean {
+  // `NESTED_ENVELOPE_READ` is global, so it carries `lastIndex` between calls.
+  NESTED_ENVELOPE_READ.lastIndex = 0;
+  return NESTED_ENVELOPE_READ.test(source);
+}
+
+/**
+ * `file:line` for every forbidden read in `file`.
+ *
+ * Scans the WHOLE comment-stripped text rather than each line in turn, and
+ * derives the line number from `match.index`. A per-line scan cannot see an
+ * expression Prettier has wrapped, which is the formatting this repository
+ * enforces on every commit.
+ */
 function violations(file: string): string[] {
   const relative = path.relative(clientRoot, file);
-  return withoutComments(readFileSync(file, 'utf8'))
-    .split('\n')
-    .flatMap((line, index) =>
-      NESTED_ENVELOPE_READ.test(line) ? [`${relative}:${String(index + 1)} ${line.trim()}`] : [],
-    );
+  const source = withoutComments(readFileSync(file, 'utf8'));
+  NESTED_ENVELOPE_READ.lastIndex = 0;
+  return [...source.matchAll(NESTED_ENVELOPE_READ)].map((match) => {
+    const line = source.slice(0, match.index).split('\n').length;
+    return `${relative}:${String(line)} ${match[0].replace(/\s+/g, ' ').trim()}`;
+  });
 }
 
 describe('the client never reads the nested error envelope', () => {
@@ -119,8 +182,14 @@ describe('the client never reads the nested error envelope', () => {
       'const code = err.response?.data?.error?.code;',
       'const errorCode = (error.response?.data as Record<string, unknown> | undefined)?.error;',
       "const code = data['error'];",
+      // The spelling Prettier PRODUCES. `printWidth: 100` breaks that cast after
+      // the closing paren — `src/lib/utils.ts:65-66` already carries the
+      // `?.message` twin — so this is the shape a reintroduction would actually
+      // take in this codebase, and a scanner that reads one line at a time
+      // cannot see it.
+      'const c: unknown = (error.response?.data as Record<string, unknown> | undefined)\n  ?.error;',
     ]) {
-      expect(NESTED_ENVELOPE_READ.test(spelling)).toBe(true);
+      expect(matchesNestedEnvelopeRead(spelling)).toBe(true);
     }
   });
 
@@ -133,8 +202,53 @@ describe('the client never reads the nested error envelope', () => {
       'const code = response.data.errorCode;',
       'const list = response.data.errors;',
       'items.push({ ...item, data: result.data as Record<string, unknown> });',
+      // The wrapped shape of a LEGITIMATE read. Scanning whole files rather than
+      // single lines is what makes this one worth pinning: the cast body is
+      // bounded to its own line precisely so this cannot run forward to a `)`
+      // several statements away and find an unrelated `?.error` behind it.
+      'const m: unknown = (error.response?.data as Record<string, unknown> | undefined)\n  ?.message;',
     ]) {
-      expect(NESTED_ENVELOPE_READ.test(spelling)).toBe(false);
+      expect(matchesNestedEnvelopeRead(spelling)).toBe(false);
+    }
+  });
+
+  it('the SCANNER sees a wrapped read in a real file, not just the pattern', () => {
+    // The gap the per-line scan actually left. Asserting the regex alone was not
+    // enough: the regex was always capable of matching across a newline, and the
+    // scanner never handed it one. This drives `violations()` — the function the
+    // guard assertion above calls — over a file on disk, so the two can never
+    // diverge again.
+    const scratch = mkdtempSync(path.join(tmpdir(), 'envelope-guard-'));
+    try {
+      const file = path.join(scratch, 'wrapped.ts');
+      writeFileSync(
+        file,
+        [
+          '/**',
+          ' * A docblock naming response.data.error, which must NOT count.',
+          ' */',
+          'export function read(error: unknown): unknown {',
+          '  const code: unknown = (error.response?.data as Record<string, unknown> | undefined)',
+          '    ?.error;',
+          '  return code;',
+          '}',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const found = violations(file);
+
+      expect(found).toHaveLength(1);
+      // The line number is the one a human would point at — proof that blanking
+      // comments rather than deleting them kept the offsets honest. The docblock
+      // above occupies lines 1-3 and contributes nothing.
+      expect(found[0]).toMatch(/wrapped\.ts:5 /);
+      // And the docblock really was scanned and really was ignored: exactly one
+      // finding, from the code, never from the prose describing it.
+      expect(found[0]).not.toMatch(/docblock/);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 });

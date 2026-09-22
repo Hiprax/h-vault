@@ -68,13 +68,28 @@
  *     base, therefore nothing changed, therefore 100%" would turn every
  *     environment with an unusual checkout into a silent pass — which is the
  *     failure mode this whole tier exists to remove.
+ *
+ *  f. THE DIFF IS BUILT HERE AND HANDED OVER, rather than left to diff-cover.
+ *     Driving git itself, diff-cover unions three diffs — `<base>...HEAD`,
+ *     `git diff` and `git diff --cached` — whose `+` line numbers belong to
+ *     three DIFFERENT files (HEAD, the working tree, the index), and then looks
+ *     those numbers up in coverage produced from the working tree. On a clean
+ *     tree the three agree; on a dirty one, which is every pre-push run with
+ *     work in progress, the union describes no file that exists. It reported a
+ *     comment line of this repository as an uncovered changed line, and it
+ *     passes a genuinely uncovered new line whenever that line's HEAD number
+ *     lands on a covered working-tree line. `lib/changed-diff.mjs` builds one
+ *     diff in one coordinate system — the working tree, which is what ran — and
+ *     `--diff-file` makes diff-cover measure exactly that.
  */
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { color, note, warn } from './lib/ui.mjs';
 import { loadManifest, writeJsonReport } from './lib/reports.mjs';
 import { repoRoot, captureExe } from './lib/proc.mjs';
 import { parseLcov } from './lib/lcov.mjs';
+import { buildChangedDiff } from './lib/changed-diff.mjs';
 import { inCoverageScope, packageOfPath, COVERAGE_SCOPE_GLOBS } from './lib/coverage-scope.mjs';
 
 const TF = path.join(repoRoot, '.testfortress');
@@ -258,22 +273,28 @@ if (onTrunk && firstParent === null && git(['rev-parse', '--is-shallow-repositor
 const mergeBase = firstParent ?? rawMergeBase;
 
 // ---------------------------------------------------------------------------
-// the changed production files: committed, staged, unstaged and untracked
+// the changed production files: tracked and untracked
 //
 // Enumerated here as well as inside diff-cover because the two answer different
 // questions. diff-cover reports on the changed lines it can find IN A COVERAGE
 // REPORT; this set is every changed production file, including the ones no
 // report mentions — which is the whole point of the check below.
+//
+// ONE diff, and the same one decision (f) hands to diff-cover: `git diff
+// <commit>` compares the WORKING TREE, so the committed, staged and unstaged
+// changes arrive as a single answer. Asking for them separately — as this did —
+// also made a file that a commit changed and the working tree changed BACK
+// count as changed, which is a file with nothing to measure.
 // ---------------------------------------------------------------------------
 const lines = (out) => (out ? out.split('\n').filter(Boolean).map(posix) : []);
+const untrackedFiles = lines(git(['ls-files', '--others', '--exclude-standard']));
 const changedFiles = new Set([
   // Two dots, from the ALREADY-RESOLVED merge base: `a...b` asks git to resolve
   // the merge base itself, which would be the same answer computed twice and a
   // second place for the two halves of this gate to disagree about what "since
   // the trunk" means.
-  ...lines(git(['diff', '--name-only', '--diff-filter=d', `${mergeBase}..HEAD`])),
-  ...lines(git(['diff', '--name-only', '--diff-filter=d', 'HEAD'])),
-  ...lines(git(['ls-files', '--others', '--exclude-standard'])),
+  ...lines(git(['diff', '--name-only', '--diff-filter=d', mergeBase])),
+  ...untrackedFiles,
 ]);
 const changedProduction = [...changedFiles]
   .filter((rel) => inCoverageScope(rel))
@@ -300,19 +321,59 @@ const diffJson = path.join(TF, 'reports', 'diff-cover.json');
 // nothing, and this gate would then measure yesterday's diff against today's
 // tree and report it as green.
 rmSync(diffJson, { force: true });
+
+// (f) One diff, in the working tree's line numbers. Only the untracked files
+// this gate could ever report on are folded in: `inCoverageScope` is a superset
+// of every measured file — `coverage-gate.test.ts` pins that direction — so a
+// file outside it cannot appear in a coverage report, and adding it would grow
+// the document without changing an answer.
+const untrackedInScope = untrackedFiles.filter((rel) => {
+  if (!inCoverageScope(rel)) return false;
+  // And a REGULAR file: `--no-index` against a fifo would block for ever, and
+  // against a path that vanished since the enumeration it produces nothing
+  // anyway. Declining to diff it costs nothing, because a new module that no
+  // coverage report mentions is reported by the check above, not by this diff.
+  return statSync(path.join(repoRoot, rel), { throwIfNoEntry: false })?.isFile() === true;
+});
+let unifiedDiff = '';
+try {
+  unifiedDiff = buildChangedDiff({
+    mergeBase,
+    untracked: untrackedInScope,
+    git: (args) => captureExe('git', args),
+  });
+} catch (error) {
+  // Built, not measured: a diff that could not be produced is an unrunnable
+  // gate, never a coverage verdict.
+  cannotRun(error instanceof Error ? error.message : String(error));
+}
+// Outside the repository, because a stray document under `.testfortress/` would
+// survive the report sweep (the runner clears a gate's DECLARED reports and
+// nothing else) and read as this run's evidence on the next one.
+const diffScratch = mkdtempSync(path.join(tmpdir(), 'hvault-coverage-'));
+const diffFile = path.join(diffScratch, 'changed.diff');
+writeFileSync(diffFile, unifiedDiff);
 const diffCover = captureExe('diff-cover', [
   ...artifacts.map((artifact) => artifact.cobertura),
-  // The RESOLVED base, not the ref: on a branch the two are the same answer
-  // (`diff-cover` resolves `main...HEAD` to this very commit), and on the trunk
-  // — where `main` IS `HEAD` — passing the ref means diffing a commit against
-  // itself and reporting 100% over zero lines. See `mergeBase` above.
+  '--diff-file',
+  diffFile,
+  // With `--diff-file` this selects nothing — diff-cover runs no git of its own
+  // — but it is still what NAMES the comparison in the report, so the RESOLVED
+  // base goes here rather than the ref. On the trunk, where `main` IS `HEAD`,
+  // the ref would name a commit compared against itself. See `mergeBase` above.
   '--compare-branch',
   mergeBase,
-  '--include-untracked',
+  // Both stages are already IN the document above. Left on, they would only add
+  // "staged and unstaged changes" to a name describing a file that contains
+  // them, and `--include-untracked` would be a pure no-op — its `untracked()`
+  // returns nothing on this code path, which is why they are folded in by hand.
+  '--ignore-staged',
+  '--ignore-unstaged',
   '--format',
   `json:${diffJson}`,
   '--quiet',
 ]);
+rmSync(diffScratch, { recursive: true, force: true });
 if (!existsSync(diffJson)) {
   cannotRun(
     `diff-cover wrote no report (exit ${String(diffCover.status)}). ${diffCover.stderr.trim() || diffCover.stdout.trim()}`,
@@ -426,7 +487,15 @@ writeJsonReport('coverage.json', {
     // than a branch's whole diff. Recorded because it changes what the number
     // below describes.
     onTrunk,
-    describedAs: diff.diff_name,
+    // What was actually compared. diff-cover's own `diff_name` is assembled from
+    // `--compare-branch` and reads `<base>...HEAD`, which is not this: the
+    // subject is the WORKING TREE, because that is the tree the suites ran
+    // against and the only one the coverage line numbers describe.
+    describedAs:
+      `${mergeBase}..<working tree>` +
+      (untrackedInScope.length > 0
+        ? `, plus ${String(untrackedInScope.length)} untracked file(s)`
+        : ''),
     totalLines,
     coveredPercent: measuredPercent,
     effectivePercent,

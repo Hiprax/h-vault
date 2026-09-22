@@ -398,11 +398,11 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
       const after = await User.findById(user.id).lean();
       expect(after!.rotationInProgress).toBe(false);
       // `vaultKeyVersion` is what an in-flight upload compares itself against, so a
-      // rotation that did not happen must not have moved it — the commit `$inc`s
-      // it — and `clearRotationState`'s `$unset` must have left no half-written
-      // pending wrap for login's crash-recovery to find. Both are negatives on the
-      // same footing as the one above, mirroring what the documents leg's twin
-      // asserts (`rotation-documents.test.ts`).
+      // rotation that did not happen must not have moved it — only the commit
+      // `$inc`s it. A negative on the same footing as the one above, mirroring what
+      // the documents leg's twin asserts (`rotation-documents.test.ts`). The
+      // pending wrapper is asserted separately below, and in the OPPOSITE
+      // direction: an abort keeps it.
       expect(after!.vaultKeyVersion).toBe(0);
       // The pending wrapper SURVIVES the abort, deliberately: it is the only
       // stored copy of the key this rotation was moving to, and an abort is
@@ -470,11 +470,11 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
       expect(await vaultKeyOf(user.id)).toBe(ORIGINAL_KEY);
       const after = await User.findById(user.id).lean();
       expect(after!.rotationInProgress).toBe(false);
-      // Reinforcing, not unique: `clearRotationState` is one shared function, so
+      // Reinforcing, not unique: `lowerRotationFence` is one shared function, so
       // the documents leg's twin (`rotation-documents.test.ts`) already kills a
-      // mutant that neuters its `$unset`. Asserted here anyway, because a guard
-      // that cleared the fence for some legs and not others would show up only in
-      // the leg it skipped.
+      // mutant that neuters it. Asserted here anyway, because a guard that cleared
+      // the fence for some legs and not others would show up only in the leg it
+      // skipped.
       expect(after!.vaultKeyVersion).toBe(0);
       // The pending wrapper SURVIVES the abort, deliberately: it is the only
       // stored copy of the key this rotation was moving to, and an abort is

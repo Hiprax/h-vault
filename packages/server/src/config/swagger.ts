@@ -834,6 +834,15 @@ export const swaggerSpec: JsonObject = {
           newVaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
           newVaultKeyTag: { type: 'string', minLength: 1, maxLength: 32 },
           vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
+          newPendingEncryptedVaultKey: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 200,
+            description:
+              "An interrupted vault key rotation's key, re-wrapped under the new master-encryption key. A crashed rotation leaves a second key on the account (reported by GET /user/profile as interruptedRotation), wrapped under the master-encryption key in force at the time, and every entry that rotation had already re-encrypted is readable only with it. Changing the master password replaces that master-encryption key, so a change that does not carry this across strands those entries for ever. Send all three fields or none: the request is refused with 409 when the account has such a key and this is absent, and the fields are ignored for an account that has none.",
+          },
+          newPendingVaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
+          newPendingVaultKeyTag: { type: 'string', minLength: 1, maxLength: 32 },
         },
       },
       Setup2faRequest: {
@@ -2858,7 +2867,7 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'This is the endpoint where the refusal matters most: the new wrapper REPLACES the stored one, so accepting a wrapper built from a superseded vault key would overwrite the only copy of the live one and there is nothing anywhere that could decrypt the vault afterwards. The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes.',
+            'This is the endpoint where the refusal matters most: the new wrapper REPLACES the stored one, so accepting a wrapper built from a superseded vault key would overwrite the only copy of the live one and there is nothing anywhere that could decrypt the vault afterwards. The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes, and how a change is refused for not carrying an outstanding interrupted rotation forward (see `newPendingEncryptedVaultKey`), which is resolved by re-reading the profile and re-sending with all three of those fields.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },

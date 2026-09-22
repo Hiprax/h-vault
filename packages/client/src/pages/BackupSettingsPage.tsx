@@ -1607,7 +1607,7 @@ export default function BackupSettingsPage() {
             <DialogDescription>
               {unverifiedRestore === 'self_signed'
                 ? 'This file’s integrity signature could only be checked against key material the file itself carries, so it shows that the file agrees with itself and nothing about where the file came from. A backup from another account, or one taken before you changed your backup password, looks exactly like this.'
-                : 'This file carries no integrity signature at all, so there is no way to tell whether it is still the file that was downloaded. Backups written before signing existed look exactly like this.'}
+                : 'This file carries no integrity signature at all, so there is no way to tell whether it is still the file that was written. A backup that arrived by email is never signed — the server assembles it and has no backup password to sign with — and backups written before signing existed look the same way.'}
             </DialogDescription>
           </DialogHeader>
           <ul className="list-disc space-y-1 pl-5 text-sm text-[hsl(var(--foreground))]">

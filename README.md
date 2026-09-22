@@ -869,6 +869,8 @@ password, but `TWO_FACTOR_ENCRYPTION_KEY` is what makes the stored 2FA secrets r
 
 ```bash
 npm run build
+cp -r packages/client/dist/.        packages/server/public/          # the SPA
+cp -r packages/client/dist-sandbox/. packages/server/sandbox-document/ # the isolated viewer
 npm run create-indexes -w packages/server   # nothing does this for you here
 pm2 start ecosystem.config.cjs --env production
 ```
@@ -877,6 +879,15 @@ pm2 start ecosystem.config.cjs --env production
 distributed MongoDB locks, so they never double-run across instances. Express serves the SPA
 itself in this mode (there is no internal Nginx), so front it with
 `docker/nginx/system.pm2.example.conf` and set `TRUST_PROXY=1`.
+
+**The two copy steps are not optional and nothing else performs them.** The build writes the
+application into `packages/client/dist` and the document viewer into
+`packages/client/dist-sandbox`, and the server reads them from `packages/server/public` and
+`packages/server/sandbox-document`. They are two directories on purpose: the viewer is served with
+its own, far stricter policy, and keeping it outside every static root is what stops an alternative
+spelling of its URL being answered off disk under the application's policy instead. The Docker image
+does both copies for you; here, the server refuses to start until they are done, and says which one
+is missing.
 
 **There is no storage engine here**, so the document store is simply **off** unless you point
 `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` at storage of your own —

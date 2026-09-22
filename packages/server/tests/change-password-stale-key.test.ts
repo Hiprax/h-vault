@@ -368,6 +368,115 @@ function defineChangePasswordGuardCases(expectTransactions: boolean): void {
     });
   });
 
+  // ── The OTHER key on the account: an interrupted rotation's wrapper ───
+
+  describe('while an interrupted rotation is still outstanding', () => {
+    /**
+     * What a crashed sequential rotation leaves behind: the key it was moving to,
+     * wrapped under the master-encryption key in force at the time.
+     *
+     * Every row that rotation had already re-sealed is readable only with THAT
+     * key, and nothing else anywhere stores it — not the client, which minted it
+     * in memory, and not a backup, which stores ciphertext. Login crash-recovery
+     * deliberately keeps it (it clears only the write fence) and
+     * `GET /user/profile` reports it as `interruptedRotation` so the account can
+     * finish what the crash interrupted.
+     */
+    const PENDING = {
+      pendingEncryptedVaultKey: 'the-interrupted-rotations-vault-key-under-the-OLD-mek',
+      pendingVaultKeyIv: 'pending-iv',
+      pendingVaultKeyTag: 'pending-tag',
+    } as const;
+
+    /** The same key, re-wrapped by the client under the NEW master-encryption key. */
+    const REWRAPPED = {
+      newPendingEncryptedVaultKey: 'the-SAME-pending-vault-key-under-the-NEW-mek',
+      newPendingVaultKeyIv: 'rewrapped-pending-iv',
+      newPendingVaultKeyTag: 'rewrapped-pending-tag',
+    } as const;
+
+    beforeEach(async () => {
+      await User.updateOne({ _id: user.id }, { $set: PENDING });
+    });
+
+    it('refuses a change that does not carry the pending wrapper forward', async () => {
+      // The silent total-loss path. A password change re-wraps the LIVE vault key
+      // under the new MEK and stores it; left alone, the PENDING wrapper is still
+      // sealed under a MEK nobody can derive any more. "Finish Rotation" can never
+      // open it again, so every row the crashed rotation had already re-sealed is
+      // gone — at the moment the password changes, with nothing said at the time.
+      const res = await changePassword({ vaultKeyVersion: 0, ...LIVE_WRAPPER });
+
+      expect(res.status).toBe(409);
+      expect(res.body.message).toMatch(/interrupted vault key rotation/i);
+
+      // The negatives: nothing moved, in either direction.
+      const after = await User.findById(user.id).lean();
+      expect(after?.encryptedVaultKey).toBe('test-encrypted-vault-key');
+      expect(after?.pendingEncryptedVaultKey).toBe(PENDING.pendingEncryptedVaultKey);
+      expect(after?.pendingVaultKeyIv).toBe(PENDING.pendingVaultKeyIv);
+      expect(after?.pendingVaultKeyTag).toBe(PENDING.pendingVaultKeyTag);
+      expect(await passwordStillWorks(user.rawPassword)).toBe(true);
+      expect(await passwordStillWorks(NEW_AUTH_HASH)).toBe(false);
+      expect(await passwordChangeAudits()).toBe(0);
+      const sessions = await RefreshToken.countDocuments({ userId: user.id });
+      expect(sessions).toBeGreaterThan(0);
+    });
+
+    it('accepts a change that re-wraps the pending key, and moves BOTH wrappers', async () => {
+      const res = await changePassword({ vaultKeyVersion: 0, ...LIVE_WRAPPER, ...REWRAPPED });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const after = await User.findById(user.id).lean();
+      expect(after?.encryptedVaultKey).toBe(LIVE_WRAPPER.newEncryptedVaultKey);
+      // The whole point: the interrupted rotation is still finishable afterwards.
+      expect(after?.pendingEncryptedVaultKey).toBe(REWRAPPED.newPendingEncryptedVaultKey);
+      expect(after?.pendingVaultKeyIv).toBe(REWRAPPED.newPendingVaultKeyIv);
+      expect(after?.pendingVaultKeyTag).toBe(REWRAPPED.newPendingVaultKeyTag);
+      expect(await passwordStillWorks(NEW_AUTH_HASH)).toBe(true);
+      expect(await passwordChangeAudits()).toBe(1);
+    });
+
+    it('refuses a change carrying only PART of the re-wrapped triple', async () => {
+      // Two thirds of a wrapper is not a wrapper. Writing it would replace a
+      // recoverable key with an unopenable one, which is worse than refusing.
+      const res = await changePassword({
+        vaultKeyVersion: 0,
+        ...LIVE_WRAPPER,
+        newPendingEncryptedVaultKey: REWRAPPED.newPendingEncryptedVaultKey,
+      });
+
+      expect(res.status).toBe(409);
+      const after = await User.findById(user.id).lean();
+      expect(after?.pendingEncryptedVaultKey).toBe(PENDING.pendingEncryptedVaultKey);
+      expect(after?.encryptedVaultKey).toBe('test-encrypted-vault-key');
+    });
+  });
+
+  describe('when NO interrupted rotation is outstanding', () => {
+    it('ignores a pending wrapper it was offered anyway, and writes none', async () => {
+      // The direction that must fail CLOSED the other way. `bulkReEncrypt`'s
+      // outstanding-rotation guard reads `pendingEncryptedVaultKey` and refuses to
+      // rotate to any other key while one is set, so inventing a wrapper for a
+      // rotation that never happened would block every future rotation on the
+      // account — behind a 200, from a request that looked ordinary.
+      const res = await changePassword({
+        vaultKeyVersion: 0,
+        ...LIVE_WRAPPER,
+        newPendingEncryptedVaultKey: 'a-wrapper-for-a-rotation-that-never-happened',
+        newPendingVaultKeyIv: 'phantom-iv',
+        newPendingVaultKeyTag: 'phantom-tag',
+      });
+
+      expect(res.status).toBe(200);
+      const after = await User.findById(user.id).lean();
+      expect(after?.encryptedVaultKey).toBe(LIVE_WRAPPER.newEncryptedVaultKey);
+      expect(after?.pendingEncryptedVaultKey).toBeUndefined();
+      expect(after?.pendingVaultKeyIv).toBeUndefined();
+      expect(after?.pendingVaultKeyTag).toBeUndefined();
+    });
+  });
+
   // ── The fence: a rotation that has not finished yet ───────────────────
 
   describe('while a rotation is being processed', () => {

@@ -730,6 +730,170 @@ describe('SettingsPage — error paths and branches', () => {
     expect(cs.encryptVaultKey).toHaveBeenCalledWith(OLD_VAULT_KEY, { mek: 'NewMasterPassword1!' });
   });
 
+  it('re-reads the profile after a failed rotation, so the offer catches up', async () => {
+    // A rotation that got far enough to raise the fence has already committed the
+    // key it was moving to. The server then refuses every rotation to a DIFFERENT
+    // key until that wrapper is finished or deliberately abandoned — so a page
+    // still showing the pre-rotation `interruptedRotation: false` offers "Rotate
+    // Key", mints a fresh key, re-encrypts the whole vault, and is refused again.
+    // Only a manual reload broke the loop, and nothing said to perform one.
+    mockGetProfileApi
+      .mockResolvedValueOnce({ data: { success: true, data: { ...defaultProfile } } })
+      .mockResolvedValue({
+        data: { success: true, data: { ...defaultProfile, ...PENDING_WRAPPER } },
+      });
+    mockBulkReEncrypt.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: {
+          success: false,
+          message: 'An interrupted vault key rotation is still outstanding.',
+        },
+      },
+    });
+    await renderSettings();
+    const profileReadsBefore = mockGetProfileApi.mock.calls.length;
+
+    fireEvent.click(screen.getByText('Rotate Key'));
+    await waitFor(() => screen.getByPlaceholderText('Master password'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Rotation'));
+    });
+
+    // The failure is still reported verbatim…
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: expect.stringContaining('interrupted') }),
+    );
+    // …and exactly one profile read followed it, which is what flips the control.
+    await waitFor(() => {
+      expect(mockGetProfileApi.mock.calls.length - profileReadsBefore).toBe(1);
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/An interrupted vault key rotation is outstanding/i)).toBeVisible();
+    });
+  });
+
+  // ── The OTHER key a password change can destroy ──────────────────────────
+
+  it("carries an interrupted rotation's key across, re-wrapped under the new MEK", async () => {
+    // A crashed rotation leaves a SECOND key on the account, wrapped under the
+    // MEK in force at the time. Changing the master password replaces the MEK, so
+    // a change that leaves that wrapper alone strands every entry the rotation
+    // had already re-sealed: "Finish Rotation" can never open it again, and
+    // nothing else anywhere stores that key. The two wrappers move together.
+    setProfile(PENDING_WRAPPER);
+    mockChangePasswordApi.mockResolvedValue({ data: { success: true } });
+    await renderSettings();
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+    });
+    const payload = mockChangePasswordApi.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.newPendingEncryptedVaultKey).toBe('vk-wrapped-with:NewMasterPassword1!');
+    expect(payload.newPendingVaultKeyIv).toBe('vkIv');
+    expect(payload.newPendingVaultKeyTag).toBe('vkTag');
+
+    // WHICH key was re-wrapped, by identity on `mock.calls` rather than on the
+    // returned string: the stub names only the MEK, so the live key and the
+    // pending key produce the same wrapper text and only the argument tells them
+    // apart. This is the assertion that fails if the live key were sent twice.
+    expect(
+      cs.encryptVaultKey.mock.calls.some(
+        ([key, mek]) =>
+          key === PENDING_VAULT_KEY && (mek as { mek: string }).mek === 'NewMasterPassword1!',
+      ),
+    ).toBe(true);
+    // And it was opened with the OLD MEK, which is the only one that can open it.
+    expect(cs.decryptVaultKey).toHaveBeenCalledWith(
+      PENDING_WRAPPER.pendingEncryptedVaultKey,
+      PENDING_WRAPPER.pendingVaultKeyIv,
+      PENDING_WRAPPER.pendingVaultKeyTag,
+      MEK,
+    );
+    // The plaintext bytes and the imported key are both released.
+    expect(cs.clearKey).toHaveBeenCalledWith(
+      `raw:${PENDING_WRAPPER.pendingEncryptedVaultKey}:under:mek`,
+    );
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(PENDING_VAULT_KEY);
+  });
+
+  it('sends NO pending wrapper when no interrupted rotation is outstanding', async () => {
+    // The negative that stops the fix becoming its own defect: writing a pending
+    // wrapper onto an account with none would set the very field
+    // `bulkReEncrypt`'s outstanding-rotation guard reads, blocking every future
+    // rotation on that account behind an apparently successful password change.
+    mockChangePasswordApi.mockResolvedValue({ data: { success: true } });
+    await renderSettings();
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+    });
+    const payload = mockChangePasswordApi.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('newPendingEncryptedVaultKey');
+    expect(payload).not.toHaveProperty('newPendingVaultKeyIv');
+    expect(payload).not.toHaveProperty('newPendingVaultKeyTag');
+    // And nothing was unwrapped on the way: no pending wrapper was even read.
+    expect(cs.decryptVaultKey).not.toHaveBeenCalled();
+  });
+
+  it('sends no pending wrapper when the profile claims a rotation but withholds its key', async () => {
+    // `interruptedRotation` is DERIVED on the server from the wrapper's
+    // presence, so the two cannot disagree in a response this client wrote — but
+    // this client is not the authority on that and must not behave as if it
+    // were. Inventing a wrapper here would set the very field the
+    // outstanding-rotation guard reads, blocking every future rotation on the
+    // account behind an apparently successful password change; refusing the
+    // change outright would lock an account out of its own password change on
+    // the strength of a response it cannot check. So the request goes exactly as
+    // it would with no rotation outstanding, and the server — which reads the
+    // account rather than this response — decides.
+    setProfile({ interruptedRotation: true });
+    mockChangePasswordApi.mockResolvedValue({ data: { success: true } });
+    await renderSettings();
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+    });
+    const payload = mockChangePasswordApi.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('newPendingEncryptedVaultKey');
+    expect(payload).not.toHaveProperty('newPendingVaultKeyIv');
+    expect(payload).not.toHaveProperty('newPendingVaultKeyTag');
+    // Nothing was opened with the old MEK: there was nothing to open, and an
+    // attempt would have been made with three `undefined` arguments.
+    expect(cs.decryptVaultKey).not.toHaveBeenCalled();
+    // The negative that separates this from the locked-vault refusal below: the
+    // change was NOT refused on the client.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to change password' }),
+    );
+  });
+
+  it('refuses the change rather than stranding a pending key it cannot open', async () => {
+    // A locked vault has no MEK, so the pending wrapper cannot be carried. The
+    // honest answer is to refuse and say so: sending the change without it is the
+    // silent total-loss path this whole pair exists to close.
+    setProfile(PENDING_WRAPPER);
+    await renderSettings();
+    useAuthStore.setState({ mek: null });
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    expect(mockChangePasswordApi).not.toHaveBeenCalled();
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to change password', type: 'error' }),
+    );
+  });
+
   // ── The stale-generation refusal, and the one retry it earns ────────────
 
   /**
@@ -1525,12 +1689,18 @@ describe('SettingsPage — error paths and branches', () => {
     });
   });
 
-  it('aborts, sending nothing, when NOT ONE row could be decrypted', async () => {
+  it('aborts an ORDINARY rotation, sending nothing, when NOT ONE row could be decrypted', async () => {
     // The safety valve that keeps skip-and-report from becoming a data-loss path.
-    // A single poisoned row is a poisoned row; EVERY row failing means the key this
-    // session holds is not the account's — a session left behind by a rotation
-    // elsewhere — and committing a payload of pass-throughs there would swap the
-    // vault key for one that opens nothing at all.
+    // A single poisoned row is a poisoned row; EVERY row failing means no key this
+    // rotation holds opens this vault, and committing a payload of pass-throughs
+    // there would swap the vault key for one that opens nothing at all.
+    //
+    // The REMEDY is asserted, not just the refusal, and it is asserted per MODE.
+    // On an ordinary rotation the cause is a session left behind by a rotation
+    // performed elsewhere, which a fresh sign-in fixes. The discard case below
+    // has a different cause and a different remedy, and a single sentence
+    // covering both is how one of the two users got told to do something that
+    // cannot help.
     mockListItems.mockResolvedValue({
       data: { success: true, data: [vaultItem('i1')], pagination: { totalPages: 1 } },
     });
@@ -1549,16 +1719,56 @@ describe('SettingsPage — error paths and branches', () => {
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({
           title:
-            'Rotation aborted: none of the 2 entries in this vault could be decrypted, so the key this session holds is not this account’s. Reload and try again.',
+            'Rotation aborted: none of the 2 entries in this vault could be decrypted, so nothing was changed.',
+          description: expect.stringContaining('Sign in again and retry'),
           type: 'error',
         }),
       );
     });
+    // The other cause's remedy must not be offered here: this account has no
+    // interrupted rotation, so pointing at Finish Rotation would send this user
+    // looking for a control that is not on the page.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: expect.stringContaining('Finish Rotation'),
+      }),
+    );
     expect(mockBulkReEncrypt).not.toHaveBeenCalled();
     // The key that will now never be used is destroyed, and the session keeps the
     // one it started with.
     expect(cs.clearCryptoKey).toHaveBeenCalledWith(NEW_VAULT_KEY);
     expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+  });
+
+  it('gives a one-entry vault its own sentence instead of a count', async () => {
+    // The boundary, and it is reachable rather than hypothetical: a vault with
+    // one row produced "none of the 1 entries in this vault", which is the kind
+    // of sentence that tells a user nobody read the screen they are looking at.
+    //
+    // Driven through the ORDINARY control, because the count is mode-independent
+    // and an interrupted rotation is a larger fixture than this behaviour needs.
+    mockListItems.mockResolvedValue({
+      data: { success: true, data: [vaultItem('i1')], pagination: { totalPages: 1 } },
+    });
+    cs.decryptData.mockRejectedValue(new Error('GCM tag mismatch'));
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            'Rotation aborted: the only entry in this vault could not be decrypted, so nothing was changed.',
+          type: 'error',
+        }),
+      );
+    });
+    // And the plural sentence is NOT what a one-row vault is shown.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining('none of the 1') }),
+    );
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
@@ -2010,6 +2220,26 @@ describe('SettingsPage — error paths and branches', () => {
   }
 
   /**
+   * Opens the same dialog through the SECONDARY control, which abandons the
+   * interrupted rotation instead of finishing it.
+   *
+   * One definition rather than a third copy of the clicks: the mode is what the
+   * cases below discriminate on, so a test that opened the wrong control would
+   * assert the other branch's behaviour and pass.
+   */
+  async function confirmDiscardRotation(password = 'MasterPassword1!') {
+    fireEvent.click(screen.getByText(/abandoning the interrupted one/i));
+    await waitFor(() => screen.getByPlaceholderText('Master password'));
+    expect(screen.getByText('Abandon the Interrupted Rotation')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: password },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Rotation'));
+    });
+  }
+
+  /**
    * A vault half-way through a crashed rotation: `old-row` is still sealed under
    * the key the account uses, `pending-row` was already re-sealed under the key
    * the crash interrupted. Only a driver that tries BOTH keys can carry both
@@ -2208,15 +2438,7 @@ describe('SettingsPage — error paths and branches', () => {
     installHalfRotatedVault();
 
     await renderSettings();
-    fireEvent.click(screen.getByText(/abandoning the interrupted one/i));
-    await waitFor(() => screen.getByPlaceholderText('Master password'));
-    expect(screen.getByText('Abandon the Interrupted Rotation')).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText('Master password'), {
-      target: { value: 'MasterPassword1!' },
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByText('Confirm Rotation'));
-    });
+    await confirmDiscardRotation();
 
     await waitFor(() => {
       expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
@@ -2251,6 +2473,67 @@ describe('SettingsPage — error paths and branches', () => {
         description: expect.stringContaining('nothing was lost here'),
       }),
     );
+  });
+
+  it('does not tell a DISCARDING user to sign in again when nothing opened', async () => {
+    // The one path on which "sign in again and retry" is FALSE, and it is
+    // reachable rather than theoretical: a crash whose sequential loop had
+    // already re-sealed EVERY row before it died, and an owner abandoning the
+    // interrupted rotation because its wrapper can no longer be opened at all.
+    // A discard tries the LIVE key only — `candidateKeys` is `[oldVaultKey]`
+    // unless the mode is `finish` — so nothing opens, and yet the key this
+    // session holds IS this account's. Signing in again changes nothing and
+    // reloading changes nothing, which is exactly what the single undifferentiated
+    // sentence this pair replaced told that user to do.
+    setProfile(PENDING_WRAPPER);
+    mockListItems.mockResolvedValue({
+      data: {
+        success: true,
+        data: [vaultItem('pending-row'), vaultItem('pending-row-2')],
+        pagination: { totalPages: 1 },
+      },
+    });
+    // Every row is sealed under the key the interrupted rotation was moving to,
+    // which a discard deliberately never holds.
+    cs.decryptData.mockRejectedValue(new Error('GCM tag mismatch'));
+
+    await renderSettings();
+    await confirmDiscardRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            'Rotation aborted: none of the 2 entries in this vault could be decrypted, so nothing was changed.',
+          description: expect.stringContaining('try Finish Rotation first'),
+          type: 'error',
+        }),
+      );
+    });
+    // The advice that cannot help must not be the advice this user is given.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: expect.stringContaining('Sign in again'),
+      }),
+    );
+    // Nor may it claim the loss it has not caused: the request was never sent,
+    // so `discardPendingVaultKey` never reached the server, the wrapper is still
+    // on the account, and FINISH would open exactly these rows.
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: expect.stringContaining('only a backup can recover them'),
+      }),
+    );
+    // The proof that "nothing was changed" is true: the offer this abort would
+    // have consumed is still standing, and it is the one that can still succeed.
+    expect(screen.getByText('Finish Rotation')).toBeInTheDocument();
+    expect(screen.getByText(/abandoning the interrupted one/i)).toBeInTheDocument();
+    // A discard MINTS a key — unlike a finish, which adopts the pending one — so
+    // the abort has one to destroy, and the session keeps what it started with.
+    expect(cs.rotateVaultKey).toHaveBeenCalledTimes(1);
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(NEW_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
   });
 
   it('does not name a discard on an ordinary rotation', async () => {
@@ -2309,6 +2592,13 @@ describe('SettingsPage — error paths and branches', () => {
     expect(mockBulkReEncrypt).not.toHaveBeenCalled();
     expect(cs.rotateVaultKey).not.toHaveBeenCalled();
     expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    // And the dialog closes. Left open it still reads "Finish Interrupted
+    // Rotation" over a Confirm button whose only remaining behaviour is to repeat
+    // that same toast, in front of a profile that has just said there is nothing
+    // there — an offer the page is holding open against its own evidence.
+    await waitFor(() => {
+      expect(screen.queryByText('Confirm Rotation')).not.toBeInTheDocument();
+    });
   });
 
   it('discards the typed passwords when the rotation dialog is cancelled', async () => {

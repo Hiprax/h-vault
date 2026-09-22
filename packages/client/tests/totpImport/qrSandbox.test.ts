@@ -46,7 +46,18 @@ function openWithStub(options: { handshake?: 'immediate' | 'deferred' } = {}): {
   openChannel: () => void;
 } {
   const post = vi.fn<PostFn>();
-  const fail = vi.fn<FailFn>();
+  // `fail` FORWARDS to `onUnavailable`, exactly as the real handshake does
+  // (`lib/sandboxHandshake.ts`: `fail` sets `dead`, tears the channel down and
+  // calls `onUnavailable`). A stub that merely recorded the call could only ever
+  // assert that the driver ASKED for a teardown, never that the teardown left
+  // the caller's promise settled — which is how a `qrFound` that killed the
+  // session while stranding the scan it was answering went unnoticed.
+  let failed = false;
+  const fail = vi.fn<FailFn>((reason: string) => {
+    if (failed) return;
+    failed = true;
+    captured?.onUnavailable(reason);
+  });
   const close = vi.fn<() => void>();
   let captured: Captured | null = null;
   let openChannel = (): void => {
@@ -325,15 +336,62 @@ describe('openQrScanner', () => {
     expect(captured.fail).toHaveBeenCalled();
   });
 
-  it('refuses an oversized decoded string rather than handing it on', () => {
+  it('refuses an oversized decoded string rather than handing it on', async () => {
     const { captured, scanner } = openWithStub();
-    void scanner.scan(image);
+    // AWAITED, not `void`ed. Since a session-ending refusal settles every
+    // outstanding scan, a `void` here leaves the rejection unconsumed — which
+    // Node reports as an unhandled rejection and vitest counts as an error
+    // beside a green suite, so the run exits 1 with every test passing. It is
+    // also the stronger assertion: what this case is really about is that the
+    // caller waiting on that image is told, not merely that the session died.
+    const pending = scanner.scan(image);
     const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
     captured.onMessage(
       { kind: 'qrFound', requestId, text: 'o'.repeat(20_000) },
       { post: captured.post, fail: captured.fail },
     );
     expect(captured.fail).toHaveBeenCalled();
+    await expect(pending).rejects.toThrow(/unreadable result/);
+  });
+
+  it.each([
+    ['an oversized decoded string', 'o'.repeat(20_000)],
+    ['a decoded value that is not a string', 42],
+  ])('SETTLES the scan it was answering when %s kills the session', async (_label, text) => {
+    // The session-ending refusals reach the caller through `die`, which settles
+    // every outstanding scan by sweeping `pending`. A `qrFound` whose payload is
+    // unusable used to be removed from `pending` BEFORE that payload was judged,
+    // so `die` swept a map the entry had already left and the promise never
+    // settled at all — not resolved, not rejected. `TotpScanPanel.scanFile`'s
+    // `finally` therefore never ran, `setBusy(false)` never fired, and the photo
+    // input stayed `disabled` for the life of the tab; on the camera path the
+    // pump parked on a promise that could not complete.
+    //
+    // The outcome is captured through a variable rather than awaited directly,
+    // so a regression fails on a concrete value instead of hanging until the
+    // suite's timeout and reporting nothing about why.
+    const { captured, scanner } = openWithStub();
+    let outcome: string | null = null;
+    void scanner.scan(image).then(
+      (value) => {
+        outcome = `resolved: ${String(value)}`;
+      },
+      (error: unknown) => {
+        outcome = error instanceof Error ? error.message : String(error);
+      },
+    );
+    const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+    captured.onMessage(
+      { kind: 'qrFound', requestId, text },
+      { post: captured.post, fail: captured.fail },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(captured.fail).toHaveBeenCalledWith(expect.stringContaining('unreadable result'));
+    expect(outcome).toBe('The scanner sent an unreadable result.');
+    // The negative that matters: it was REFUSED, never handed the bad payload.
+    expect(outcome).not.toMatch(/^resolved/);
   });
 
   it('treats one slow image as a miss, not as a dead session', async () => {
@@ -557,11 +615,15 @@ describe('openQrScanner', () => {
     expect(captured.fail).toHaveBeenCalledWith('The scanner failed.');
   });
 
-  it('tears the session down on a reply that names no request at all', () => {
+  it('tears the session down on a reply that names no request at all', async () => {
     const { captured, scanner } = openWithStub();
-    void scanner.scan(image);
+    // Awaited for the reason the oversized-string case above gives: the
+    // teardown settles this scan, and a rejection nobody consumes is an
+    // unhandled rejection that reds the run while every test passes.
+    const pending = scanner.scan(image);
     captured.onMessage({ kind: 'qrMiss' }, { post: captured.post, fail: captured.fail });
     expect(captured.fail).toHaveBeenCalledWith(expect.stringContaining('without saying to what'));
+    await expect(pending).rejects.toThrow(/without saying to what/);
   });
 
   it('reports the frame as unavailable at most once, however it dies', () => {

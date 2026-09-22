@@ -155,8 +155,11 @@ const MAX_REMEMBERED_TIMEOUTS = 16;
  *
  * The test is `instanceof Blob` rather than `instanceof ImageBitmap`, and that
  * is not stylistic either: `ImageBitmap` is absent from some environments this
- * module is driven in (jsdom has no such global, so the check would silently
- * answer "not a bitmap" for everything), while `Blob` exists everywhere. The two
+ * module is driven in (jsdom has no such global, so a bare `instanceof ImageBitmap`
+ * THROWS a `ReferenceError`, and the guarded spelling that avoids the throw —
+ * `typeof ImageBitmap !== 'undefined' && …`, which is what `sandbox/qrScan.ts`
+ * uses — answers "not a bitmap" for everything instead), while `Blob` exists
+ * everywhere. The two
  * named types are the whole of `scan`'s input, so testing the one that always
  * exists is what keeps the rule enforceable rather than accidentally inverted.
  */
@@ -365,6 +368,26 @@ export function openQrScanner(onUnavailable: (reason: string) => void): QrScanne
         connection.fail('The scanner replied to a request that was not made.');
         return;
       }
+      // A `qrFound` payload is judged BEFORE the entry leaves `pending`, and the
+      // order is load-bearing rather than tidy. An unusable payload is a protocol
+      // fault, so it ends the SESSION rather than answering this one request —
+      // and `die` settles every outstanding scan by sweeping `pending`. Removing
+      // the entry first put it beyond that sweep, so its promise never settled at
+      // all: not resolved, not rejected. `TotpScanPanel.scanFile`'s `finally`
+      // therefore never ran and its photo input stayed `disabled` for the life of
+      // the tab, while the camera's pump parked on a promise that could not
+      // complete. Nothing said why, because from the caller's side nothing had
+      // happened.
+      let found: string | null = null;
+      if (kind === 'qrFound') {
+        const text = data.text;
+        if (typeof text !== 'string' || text.length > MAX_SANDBOX_QR_TEXT_LENGTH) {
+          connection.fail('The scanner sent an unreadable result.');
+          return;
+        }
+        found = text;
+      }
+
       pending.delete(requestId);
       clearTimeout(entry.timer);
 
@@ -378,16 +401,9 @@ export function openQrScanner(onUnavailable: (reason: string) => void): QrScanne
         );
         return;
       }
-      if (kind === 'qrMiss') {
-        entry.resolve(null);
-        return;
-      }
-      const text = data.text;
-      if (typeof text !== 'string' || text.length > MAX_SANDBOX_QR_TEXT_LENGTH) {
-        connection.fail('The scanner sent an unreadable result.');
-        return;
-      }
-      entry.resolve(text);
+      // `qrMiss` carries no text and leaves `found` null, which IS its answer;
+      // `qrFound`'s was validated above and cannot be null here.
+      entry.resolve(found);
     },
     onUnavailable: die,
   });

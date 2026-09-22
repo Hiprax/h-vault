@@ -296,6 +296,17 @@ export function sandboxAssetUrls(html) {
  * reasons: `test:smoke` asks Express directly, `test:deploy` asks through Nginx,
  * whose `try_files $uri @app` normalises `$uri` before the proxy hop — so the
  * pair also answers whether the raw or the normalised URI reaches the app.
+ *
+ * MEASURED, 2026-09-22, through the Compose clean room (`test:deploy`) on the
+ * single loopback port: **Nginx forwards the RAW spelling**. All four bypass
+ * spellings arrived at Express exactly as sent and were answered 200 with the
+ * application shell, i.e. Express saw the spelling and the SPA catch-all took it,
+ * which is the outcome the fix produces because the document is no longer in any
+ * static root. The traversal probe was refused with a 400 before either layer
+ * could answer it. That number is recorded HERE, beside the question, because the
+ * gate report it came from (`.testfortress/reports/deploy.json`) is gitignored and
+ * is cleared at the start of every run — so the answer would otherwise have to be
+ * re-earned with a multi-minute Compose drill by whoever next read the question.
  */
 export const SANDBOX_BYPASS_SPELLINGS = Object.freeze([
   '/sandbox%2Ehtml',

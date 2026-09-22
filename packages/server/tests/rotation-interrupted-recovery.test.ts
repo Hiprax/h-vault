@@ -258,6 +258,29 @@ describe('Interrupted vault key rotation: recovery and disclosure', () => {
       expect(after!.rotationInProgress).toBe(false);
     });
 
+    it('says what to DO inside the length the client will actually show', async () => {
+      // `getApiErrorMessage` (client `lib/utils.ts`) slices a 4xx sentence at
+      // `MAX_ERROR_MESSAGE_LENGTH` = 200 before it reaches a toast. The first
+      // version of this refusal ran to 397 characters with the remedy at the end,
+      // so the user was shown a paragraph that stopped mid-word and never said
+      // what to do — on the one refusal a same-tab retry can never clear by
+      // itself, because the client only learns the rotation is outstanding from a
+      // profile read it has no reason to make.
+      //
+      // Pinned by MEASURING the served message, not by comparing two constants:
+      // the number lives in the client and the sentence lives in the server, and
+      // the only thing that couples them is what goes on the wire.
+      const res = await rotate(rotationBody());
+      const CLIENT_MESSAGE_CAP = 200;
+
+      expect(res.status).toBe(409);
+      expect(String(res.body.message).length).toBeLessThanOrEqual(CLIENT_MESSAGE_CAP);
+      // Both exits survive the cap: finishing it, and abandoning it on purpose.
+      const shown = String(res.body.message).slice(0, CLIENT_MESSAGE_CAP);
+      expect(shown).toMatch(/finish it/i);
+      expect(shown).toContain('discardPendingVaultKey');
+    });
+
     it('accepts the rotation that ADOPTS the pending wrapper, and clears it on commit', async () => {
       const res = await rotate(
         rotationBody({

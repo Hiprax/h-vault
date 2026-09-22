@@ -966,11 +966,14 @@ describe('transactional (replica-set) auth branches', () => {
     expect(rows).toHaveLength(0);
   });
 
-  it('aborts the claim AND the successor when the account is locked, keeping the cookie', async () => {
+  it('rolls the claim back when the account is locked, keeping the cookie', async () => {
     // The production topology is a replica set, so this is the path that
     // actually runs in production. Here the account gate lives INSIDE the
-    // transaction: a refusal throws from the callback, `withTransaction` aborts,
-    // and the claim is rolled back with the successor that never shipped.
+    // transaction, BETWEEN the claim and the successor: a refusal throws from the
+    // callback and `withTransaction` rolls the claim back. No successor is ever
+    // created on this path — the gate runs before `RefreshToken.create` — which is
+    // a stronger property than aborting one, and the assertions below say so by
+    // counting rows.
     const DAY_MS = 24 * 60 * 60 * 1000;
     const user = await createTestUser({ emailVerified: true });
     const absolute = new Date(Date.now() + config.REFRESH_TOKEN_REMEMBER_DAYS * DAY_MS);

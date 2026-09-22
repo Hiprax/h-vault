@@ -30,15 +30,31 @@
  *
  * So the shared thing is the PREDICATE, not the response, and this returns three
  * named booleans rather than one verdict: a single ordered answer would have to
- * pick a precedence, and no two of the four callers share one. A caller that does
- * not supply `lockoutUntil` must simply not read `lockedOut`, which cannot
- * distinguish "not locked" from "not asked for".
+ * pick a precedence, and no two of the four callers share one. What an absent
+ * field means is set out on {@link AccountStatusFields}, and it is not the same
+ * for all three.
  */
 
 /**
  * The subset of a user record these conditions read. Every field is optional so
- * a caller can pass exactly what it projected; a field that is absent reads as
- * "this condition does not apply".
+ * a caller can pass exactly what it projected.
+ *
+ * What an ABSENT field means differs per condition, and the difference is
+ * deliberate rather than an oversight, so it is stated rather than generalised:
+ *
+ *  - `deletionPending` and `lockoutUntil` read as "this condition does not
+ *    apply". Both are markers written only when the condition starts, so their
+ *    absence and their falsehood are the same state.
+ *  - `emailVerified` reads as UNVERIFIED, because it is a positive assertion and
+ *    its absence is the absence of that assertion. A caller that does not project
+ *    it is therefore refused rather than waved through, which is the fail-closed
+ *    direction — but it means "do not read `emailUnverified` unless you projected
+ *    the field" is a real rule, not a stylistic preference. `middleware/auth.ts`
+ *    projects it for exactly this reason.
+ *
+ * The lockout is the one a caller may legitimately leave out entirely, and that
+ * caller must simply not read `lockedOut`, which cannot distinguish "not locked"
+ * from "not asked for".
  */
 export interface AccountStatusFields {
   deletionPending?: boolean | undefined;

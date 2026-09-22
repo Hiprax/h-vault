@@ -536,14 +536,24 @@ export function AppLayout() {
             refused — and `alert` is the role whose announcement survives being
             inserted along with its message.
 
-            The only action offered is a reload, and that is the whole point of
-            the phase this belongs to. The server has told this session which
-            generation it is on; ADOPTING that number, or re-deriving the vault
-            key to match it, would be taking a key the server chose on a session
-            whose in-memory data was all decrypted under the old one. A reload
-            re-reads everything from one consistent starting point instead. It
-            is not dismissible for the same reason: dismissing it would leave a
-            session in which nothing can be saved and nothing says so. */}
+            The server has told this session which generation it is on;
+            ADOPTING that number, or re-deriving the vault key to match it,
+            would be taking a key the server chose on a session whose in-memory
+            data was all decrypted under the old one. So the remedy is to start
+            again from one consistent state. It is not dismissible for the same
+            reason: dismissing it would leave a session in which nothing can be
+            saved and nothing says so.
+
+            That remedy is a SIGN-OUT and not a reload, and the difference is
+            not cosmetic. A reload rehydrates `isAuthenticated` from persisted
+            state, so `shouldAttemptResume()` is false and no profile is read;
+            the Unlock screen then re-derives the vault key from the PERSISTED
+            `encryptedVaultKeyData`, which moves with the key this session holds
+            and is therefore exactly as superseded as the writes that were just
+            refused. The banner came straight back, and the button that promised
+            to fix it was the thing that could not. Signing in reads the live
+            wrapper and the live generation from the server unconditionally,
+            which is the only path that does. */}
         {holdingSupersededVaultKey && (
           <div
             role="alert"
@@ -553,17 +563,17 @@ export function AppLayout() {
             <AlertTriangle className="h-4 w-4 flex-shrink-0" />
             <span className="flex-1">
               Your vault key was changed on another device, so changes from this tab can no longer
-              be saved. Reload to continue.
+              be saved. Sign in again to continue.
             </span>
             <button
               type="button"
               onClick={() => {
-                window.location.reload();
+                void logout();
               }}
               className="inline-flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-800/30"
             >
               <RefreshCw className="h-3 w-3" />
-              Reload
+              Sign out
             </button>
           </div>
         )}
