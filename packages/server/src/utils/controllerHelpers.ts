@@ -241,8 +241,15 @@ export function vaultRotationLockName(userId: string): string {
  * also leaves `rotationInProgress` raised, and the fence refuses that endpoint
  * until a LOGIN lowers it — which cannot happen until this same TTL lapses,
  * because login crash-recovery declines while the lock is live.
+ *
+ * Module-private, exactly like {@link VAULT_ROTATION_LOCK_BUSY_MESSAGE} below
+ * and for the same reason: {@link acquireVaultRotationLock} is the ONE thing
+ * that applies it, so there is nothing outside this file that may legitimately
+ * read it — and an export nobody imports is how a second, divergent TTL gets
+ * introduced at a call site. Other modules refer to it by NAME in prose, which
+ * is the right kind of reference to a number they must not restate.
  */
-export const VAULT_ROTATION_LOCK_TTL_MS = 5 * 60 * 1000;
+const VAULT_ROTATION_LOCK_TTL_MS = 5 * 60 * 1000;
 
 /**
  * The refusal every loser of {@link vaultRotationLockName} receives.

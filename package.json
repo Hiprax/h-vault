@@ -79,7 +79,7 @@
     "lint:report": "node scripts/ci/lint-gate.mjs",
     "report": "node scripts/ci/report.mjs",
     "release:next-version": "node scripts/ci/next-version.mjs",
-    "clean": "rimraf packages/*/dist packages/*/node_modules node_modules logs .cache/tsbuildinfo packages/shared/tsconfig.tsbuildinfo packages/client/tsconfig.tsbuildinfo",
+    "clean": "rimraf packages/*/dist packages/client/dist-sandbox packages/*/node_modules node_modules logs .cache/tsbuildinfo packages/shared/tsconfig.tsbuildinfo packages/client/tsconfig.tsbuildinfo",
     "prepare": "husky",
     "deadcode": "node scripts/ci/deadcode-gate.mjs",
     "deadcode:duplication": "jscpd --config .jscpd.json",

@@ -31,6 +31,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { DOCUMENT_CIPHERTEXT_CHUNK_BYTES } from '@hvault/shared';
+import { SANDBOX_DOCUMENT_PATH } from '../src/config/clientArtifacts.js';
 import { resolveComposeImage, STORAGE_COMPOSE_SERVICE } from '../../../tests/harness/s3Server.js';
 
 interface HealthCheck {
@@ -1520,6 +1521,40 @@ describe('Docker deployment', () => {
       // index.html sitting in Nginx's root would be a header-free copy of the app one
       // URL away. Nginx cannot serve what it does not have.
       expect(dockerfile).toMatch(/rm -f \/app\/packages\/client\/dist\/index\.html/);
+    });
+
+    it('lands the sandbox document OUTSIDE the Express static root', () => {
+      // The Express half of the same argument the next test makes for Nginx, and
+      // the half that was missing. `packages/server/public` is the
+      // `express.static` root; the isolated document's whole containment is the
+      // per-response Content-Security-Policy Express attaches to it
+      // (src/config/sandboxCsp.ts). While the document sat inside that root,
+      // four URL spellings reached it off disk under helmet's APPLICATION policy
+      // — `/sandbox%2Ehtml`, `//sandbox.html`, `/sandbox.htm%6C` and
+      // `/%73andbox.html` — because Express 5 matches the RAW pathname while
+      // `send` decodes and normalises it, so none of them hit the route that was
+      // supposed to claim the document. Ordering is a control a spelling walks
+      // around; a directory the static mount does not serve is not.
+      //
+      // Asserted as the COPY pair rather than as one line, because the failure
+      // this guards is the destination drifting back under `public/` — which
+      // would leave every other assertion in this file green.
+      const publicCopy =
+        /COPY --from=build-client \/app\/packages\/client\/dist \.\/packages\/server\/public(?:\s|$)/m;
+      const documentCopy =
+        /COPY --from=build-client \/app\/packages\/client\/dist-sandbox \.\/packages\/server\/(\S+)/m;
+      expect(dockerfile).toMatch(publicCopy);
+      const destination = documentCopy.exec(dockerfile)?.[1];
+      expect(destination, 'the sandbox document is not copied into the image').toBeDefined();
+      // The negative that is the whole point: the destination is not the static
+      // root, and not anything beneath it.
+      expect(destination).not.toBe('public');
+      expect(destination?.startsWith('public/')).toBe(false);
+      // And it is the directory the server actually reads, so the image layout
+      // and `config/clientArtifacts.ts` cannot drift apart.
+      expect(path.join('/', String(destination))).toBe(
+        path.join('/', path.basename(path.dirname(SANDBOX_DOCUMENT_PATH))),
+      );
     });
 
     it('removes sandbox.html from the Nginx document root too', () => {

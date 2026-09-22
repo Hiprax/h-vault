@@ -25,6 +25,14 @@
  * alone would pass while the route sent something else; a served-header test
  * alone would leave the constant free to drift. Both halves are needed and
  * neither substitutes for the other.
+ *
+ * One thing this file used to be the only home of is now reachable in this tier:
+ * `app-production-client.test.ts` drives the production block itself, over a
+ * temporary directory that re-roots the real artifact layout, which is what makes
+ * the WIRING assertable — including that no URL spelling serves the document
+ * without this policy. It reaches production mode by mocking the config module
+ * and both artifact paths, which is the constraint above being routed around
+ * rather than lifted.
  */
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';

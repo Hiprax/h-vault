@@ -12,10 +12,11 @@
  * publishes.
  *
  * It is also the ONLY gate where the real Nginx, the real image layout and the
- * real header set meet, which makes it the only place two things are actually
- * proven: that the `web-root` stage's deletion of `sandbox.html` leaves the
- * isolated render document to Express with its own far stricter policy, and that
- * the two CORS-ish headers an opaque origin needs are scoped to
+ * real header set meet, which makes it the only place three things are actually
+ * proven: that the isolated render document reaches a client from Express with
+ * its own far stricter policy and from neither document root on disk; that no
+ * route-missing URL spelling hands that document out under any other policy; and
+ * that the two CORS-ish headers an opaque origin needs are scoped to
  * `sandbox-assets/`. The E2E and a11y suites drive the Vite dev server, which
  * has neither helmet nor Nginx.
  *
@@ -115,13 +116,16 @@ import {
 } from './lib/vault-flow.mjs';
 import {
   SANDBOX_ASSET_HEADERS_EXPECTED,
+  SANDBOX_BYPASS_SPELLINGS,
   SANDBOX_CSP_EXPECTED,
   SANDBOX_DOCUMENT_CACHE_CONTROL,
   appAssetProblems,
   assetResponseProblems,
+  bypassUrl,
   cspProblems,
   sandboxAssetProblems,
   sandboxAssetUrls,
+  sandboxBypassProblems,
 } from './lib/sandbox-headers.mjs';
 
 /** (a) Everything about the drill's stack is namespaced away from a real one. */
@@ -726,6 +730,50 @@ try {
           ? `/sandbox.html comes back through the published port from Express, not off the Nginx disk and not as the SPA shell, with exactly one Content-Security-Policy matching all ${String(Object.keys(SANDBOX_CSP_EXPECTED).length)} directives`
           : `GET /sandbox.html returned ${String(sandbox.status)}; Cache-Control=${String(sandboxCache)}; is the sandbox document=${String(isSandboxDocument)}${sandboxCspDiff.length > 0 ? `; ${sandboxCspDiff.join('; ')}` : ''}`,
         { cspDiff: sandboxCspDiff },
+      );
+
+      // The spellings that miss the Express route, asked through the whole
+      // stack. Express 5 matches the RAW pathname while `send` decodes and
+      // normalises it, so each of these reached `express.static`; the document is
+      // now emitted outside every static root, so neither server has it to give.
+      //
+      // Through Nginx there is a SECOND question, and this is the only gate that
+      // can answer it: `try_files $uri @app` matches on the NORMALISED, decoded
+      // `$uri`, but `proxy_pass` with no URI part may forward either the raw
+      // request line or the rewritten one. The answer is observable rather than
+      // assumed — if Express receives the normalised `/sandbox.html` it answers
+      // from the ROUTE, document and full policy; if it receives the raw
+      // spelling it answers with the SPA shell. Both are correct outcomes; the
+      // one that is not is the document under any other policy, which is what
+      // `sandboxBypassProblems` judges. What reached Express is RECORDED, since
+      // it is a property of the proxy that nothing else here pins.
+      const bypassProblems = [];
+      const bypassSeen = [];
+      for (const spelling of SANDBOX_BYPASS_SPELLINGS) {
+        const probe = await fetch(bypassUrl(baseUrl, spelling));
+        const body = await probe.text();
+        bypassProblems.push(...sandboxBypassProblems(spelling, probe, body));
+        // Three outcomes, and each says something different about the proxy
+        // hop. The document means Nginx forwarded the NORMALISED `/sandbox.html`
+        // and Express answered from the route; the SPA shell means it forwarded
+        // the RAW spelling and Express fell through to the catch-all; anything
+        // else was refused before either — which is where Nginx's own handling
+        // of the traversal spelling shows up, since Express never sees that one
+        // as a refusal (`serve-static` falls through and the shell answers).
+        const reached = /<script[^>]+src="\/sandbox-assets\//.test(body)
+          ? 'normalised (Express saw /sandbox.html and served the document)'
+          : /<script[^>]+nonce="/i.test(body)
+            ? 'raw (Express saw the spelling and served the SPA shell)'
+            : `refused before either (${String(probe.status)})`;
+        bypassSeen.push(`${spelling} -> ${String(probe.status)}, ${reached}`);
+      }
+      record(
+        'sandbox-spellings',
+        bypassProblems.length === 0,
+        bypassProblems.length === 0
+          ? `none of the ${String(SANDBOX_BYPASS_SPELLINGS.length)} route-missing spellings hands out the isolated document through the published port — ${bypassSeen.join('; ')}`
+          : bypassProblems.join('; '),
+        { proxiedUri: bypassSeen },
       );
 
       // The two headers an opaque origin's fetches need, on the SCRIPT and on the

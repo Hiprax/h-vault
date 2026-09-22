@@ -1,17 +1,23 @@
 // @vitest-environment node
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_DEV_PORT,
   NAVIGATE_FALLBACK_DENYLIST,
   SANDBOX_ASSETS_DIR,
+  SANDBOX_DOCUMENT_OUT_DIR,
   SANDBOX_HTML,
   WORKBOX_GLOB_IGNORES,
   WORKBOX_GLOB_PATTERNS,
   manualChunks,
+  relocateSandboxDocument,
   resolveDevHost,
   resolveDevPort,
+  sandboxDocumentPlugin,
   sandboxManualChunks,
 } from '../vite.config.helpers';
 
@@ -406,14 +412,135 @@ describe('the document sandbox build', () => {
 
   it('carries no plugin from the application build', async () => {
     const mod = await import('../vite.config.sandbox');
-    const config = mod.default as { plugins?: unknown[] };
+    const config = mod.default as { plugins?: { name?: unknown }[] };
     // A second `VitePWA` would emit its own `sw.js` OVER the application's,
     // replacing the app's service worker with one that precaches a preview
     // document. React and Tailwind are absent for their own reasons (a smaller
     // parser surface, and the plain-CSS constraint the sandbox stylesheet
-    // inherits). Asserted as "no plugins at all" rather than "not VitePWA",
-    // because the next plugin added here would be added without thought.
-    expect(config.plugins ?? []).toEqual([]);
+    // inherits).
+    //
+    // This was `toEqual([])` — "no plugins at all", so the next plugin added
+    // here could not arrive without thought. It is now an exhaustive NAME list
+    // of exactly one, which keeps that property: a second entry fails this, and
+    // so does swapping the one that is here. The one plugin is first-party and
+    // moves the isolated document out of the static root, which is a security
+    // control rather than a build convenience — see `SANDBOX_DOCUMENT_OUT_DIR`.
+    expect((config.plugins ?? []).map((plugin) => plugin.name)).toEqual([
+      'hvault:sandbox-document-outside-static-root',
+    ]);
+  });
+
+  describe('the isolated document is emitted OUTSIDE the static root', () => {
+    // `dist/` becomes two document roots — `packages/server/public` behind
+    // `express.static`, and `/srv/hvault` behind Nginx — and the sandbox
+    // document's ENTIRE containment is the per-response Content-Security-Policy
+    // Express attaches to it. A copy either server can answer off disk carries
+    // the surrounding application's policy instead, and the isolation stops
+    // existing while every renderer keeps working.
+    //
+    // Ordering did not close it, which is why the layout has to. Express 5
+    // matches the RAW pathname while `send` decodes and normalises it, so
+    // `/sandbox%2Ehtml`, `//sandbox.html`, `/sandbox.htm%6C` and
+    // `/%73andbox.html` all missed the route registered ahead of the static
+    // mount and were answered off disk (measured). A server cannot serve a file
+    // it does not have.
+    const roots: string[] = [];
+    const stage = (): { root: string; outDir: string } => {
+      const root = mkdtempSync(path.join(tmpdir(), 'hvault-sandbox-emit-'));
+      roots.push(root);
+      const outDir = path.join(root, 'dist');
+      mkdirSync(outDir, { recursive: true });
+      return { root, outDir };
+    };
+
+    afterEach(() => {
+      for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    });
+
+    it('writes the document beside the build output, never inside it', () => {
+      const { root, outDir } = stage();
+
+      const written = relocateSandboxDocument(outDir, '<!doctype html><title>sandbox</title>');
+
+      expect(written).toBe(path.join(root, SANDBOX_DOCUMENT_OUT_DIR, SANDBOX_HTML));
+      expect(readFileSync(written, 'utf8')).toBe('<!doctype html><title>sandbox</title>');
+      // The negative that IS the control: nothing a static root would serve.
+      expect(existsSync(path.join(outDir, SANDBOX_HTML))).toBe(false);
+      expect(path.relative(outDir, written).startsWith(`..${path.sep}`)).toBe(true);
+    });
+
+    it('deletes a copy an earlier build left inside the static root', () => {
+      // NOT housekeeping. The sandbox build sets `emptyOutDir: false` (it must
+      // not delete the application it sits beside), so a `dist/sandbox.html`
+      // written by a tree built before this split survives every later build —
+      // and `express.static` keeps serving it. The defect would come back from
+      // an upgrade rather than from an edit, which is the kind nobody looks for.
+      const { outDir } = stage();
+      const stale = path.join(outDir, SANDBOX_HTML);
+      writeFileSync(stale, '<!doctype html><title>stale</title>');
+
+      relocateSandboxDocument(outDir, '<!doctype html><title>fresh</title>');
+
+      expect(existsSync(stale)).toBe(false);
+    });
+
+    it('lifts the document out of the bundle rather than moving the written file', () => {
+      // `generateBundle` DELETES the asset, so Vite never writes it into the
+      // static root at all — not even for the moment between `writeBundle` and a
+      // rename. The chunks and the stylesheet are untouched: they stay in
+      // `dist/sandbox-assets/`, which is where both servers hand them to the
+      // frame, with the ACAO and CORP headers an opaque origin needs.
+      const { root, outDir } = stage();
+      const plugin = sandboxDocumentPlugin();
+      const bundle: Record<string, unknown> = {
+        [SANDBOX_HTML]: { type: 'asset', source: '<!doctype html><title>sandbox</title>' },
+        'sandbox-assets/sandbox-abc123.js': { type: 'chunk', code: 'export {};' },
+      };
+
+      plugin.generateBundle({}, bundle);
+
+      expect(Object.keys(bundle)).toEqual(['sandbox-assets/sandbox-abc123.js']);
+
+      plugin.writeBundle({ dir: outDir });
+
+      expect(readFileSync(path.join(root, SANDBOX_DOCUMENT_OUT_DIR, SANDBOX_HTML), 'utf8')).toBe(
+        '<!doctype html><title>sandbox</title>',
+      );
+    });
+
+    it('fails the build when no document was emitted at all', () => {
+      // This build exists to produce exactly one file. A config change that
+      // stopped emitting it would otherwise leave a green build and a server
+      // that refuses to boot, one deploy later — `app.ts` reads the document at
+      // module scope and throws when it is absent.
+      const plugin = sandboxDocumentPlugin();
+
+      expect(() => {
+        plugin.generateBundle({}, { 'sandbox-assets/sandbox-abc123.js': { type: 'chunk' } });
+      }).toThrow(/emitted no sandbox\.html/);
+    });
+
+    it('refuses to place the document when the build gave it no outDir', () => {
+      // `writeBundle` is the first hook with a resolved, absolute `outDir`; with
+      // none there is no sibling to compute, and writing it relative to the
+      // process's working directory would put the document somewhere nobody
+      // copies from — a silently missing viewer rather than a failed build.
+      const plugin = sandboxDocumentPlugin();
+      plugin.generateBundle({}, { [SANDBOX_HTML]: { type: 'asset', source: '<!doctype html>' } });
+
+      expect(() => {
+        plugin.writeBundle({});
+      }).toThrow(/outside the static root/);
+    });
+
+    it('names a directory that is not the one the assets stay in', () => {
+      // The near miss: routing the document into `dist/sandbox-assets/` would
+      // satisfy "not beside index.html" while leaving it squarely inside the
+      // static root, where every spelling above still reaches it.
+      expect(SANDBOX_DOCUMENT_OUT_DIR).not.toBe(SANDBOX_ASSETS_DIR);
+      expect(SANDBOX_DOCUMENT_OUT_DIR.startsWith('dist/')).toBe(false);
+      expect(SANDBOX_DOCUMENT_OUT_DIR).toBe('dist-sandbox');
+    });
   });
 
   it('builds the application FIRST and the sandbox SECOND', async () => {

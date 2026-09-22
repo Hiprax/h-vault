@@ -25,9 +25,12 @@
  *     a naive version of this gate would copy the client bundle into
  *     `packages/server/public` — an untracked, un-ignored tree that the secret
  *     scan, the integrity scan and the format check would all then walk, and
- *     that a crashed run would leave behind. Staging `dist/` and `public/` as
- *     siblings under a temp directory reproduces the image's layout exactly and
- *     writes nothing into the repository. `node_modules` is SYMLINKED there
+ *     that a crashed run would leave behind. Staging `dist/`, `public/` and
+ *     `sandbox-document/` as siblings under a temp directory reproduces the
+ *     image's layout exactly and writes nothing into the repository. The third
+ *     one is the security-relevant one: the isolated render document is emitted
+ *     OUTSIDE the static root on purpose, and a gate that flattened the two
+ *     would be exercising a tree production never has. `node_modules` is SYMLINKED there
  *     (600 MB, and nothing writes to it), which also proves the emitted tree
  *     resolves its dependencies by ordinary Node resolution rather than by
  *     accident of location.
@@ -80,13 +83,16 @@ import { applyRseqTunable } from './lib/mongo-rseq.mjs';
  */
 import {
   SANDBOX_ASSET_HEADERS_EXPECTED,
+  SANDBOX_BYPASS_SPELLINGS,
   SANDBOX_CSP_EXPECTED,
   SANDBOX_DOCUMENT_CACHE_CONTROL,
   appAssetProblems,
   assetResponseProblems,
+  bypassUrl,
   cspProblems,
   sandboxAssetProblems,
   sandboxAssetUrls,
+  sandboxBypassProblems,
 } from './lib/sandbox-headers.mjs';
 
 /** (d) A production boot on a cold machine is seconds; 45 of them is a hang. */
@@ -138,9 +144,17 @@ console.log(color.bold('\n  smoke — the built artifact, in production mode\n')
 
 const serverDist = path.join(repoRoot, 'packages', 'server', 'dist');
 const clientDist = path.join(repoRoot, 'packages', 'client', 'dist');
+// The isolated render document is emitted OUTSIDE the client's `dist/`, because
+// `dist/` becomes the `express.static` root and the document's whole containment
+// is the per-response CSP Express attaches to it. Staged into its own sibling
+// here for the same reason the image copies it into its own directory: the
+// layout IS the control, so a gate that flattened the two would be testing a
+// tree production never has.
+const clientSandboxDist = path.join(repoRoot, 'packages', 'client', 'dist-sandbox');
 for (const [label, dir, file] of [
   ['server', serverDist, 'server.js'],
   ['client', clientDist, 'index.html'],
+  ['sandbox document', clientSandboxDist, 'sandbox.html'],
 ]) {
   if (!existsSync(path.join(dir, file))) {
     record(
@@ -159,8 +173,12 @@ const artifact = path.join(workspace, 'artifact');
 mkdirSync(artifact, { recursive: true });
 cpSync(serverDist, path.join(artifact, 'dist'), { recursive: true });
 cpSync(clientDist, path.join(artifact, 'public'), { recursive: true });
+// Beside `public/`, never inside it — the name matches
+// `packages/server/src/config/clientArtifacts.ts`, which is the one place the
+// server resolves either path.
+cpSync(clientSandboxDist, path.join(artifact, 'sandbox-document'), { recursive: true });
 symlinkSync(path.join(repoRoot, 'node_modules'), path.join(workspace, 'node_modules'), 'dir');
-record('stage', true, 'dist + public staged beside a linked dependency tree');
+record('stage', true, 'dist + public + sandbox-document staged beside a linked dependency tree');
 
 let mongo;
 let child;
@@ -323,6 +341,33 @@ try {
       sandboxOk
         ? `/sandbox.html is served by Express with exactly one Content-Security-Policy, matching all ${String(Object.keys(SANDBOX_CSP_EXPECTED).length)} directives`
         : `GET /sandbox.html returned ${String(sandbox.status)}; Cache-Control=${String(sandboxCache)}${cspDiff.length > 0 ? `; ${cspDiff.join('; ')}` : ''}`,
+    );
+
+    // The spellings that miss the route. Express 5 matches the RAW pathname and
+    // `send` decodes and normalises it, so each of these reached
+    // `express.static` — and while the document sat in the static root, each was
+    // answered off disk under helmet's APPLICATION policy while
+    // `sandbox-document` above stayed green. The document is now emitted outside
+    // every static root, so static has nothing to answer with; these probe that
+    // LAYOUT over the wire, which is the only place it is observable.
+    //
+    // Each spelling is reported individually rather than as a count, because
+    // "three of four" is a fact worth reading, and the four fail for four
+    // different normalisation reasons.
+    const bypassProblems = [];
+    const bypassSeen = [];
+    for (const spelling of SANDBOX_BYPASS_SPELLINGS) {
+      const probe = await fetch(bypassUrl(baseUrl, spelling));
+      const body = await probe.text();
+      bypassProblems.push(...sandboxBypassProblems(spelling, probe, body));
+      bypassSeen.push(`${spelling} -> ${String(probe.status)}`);
+    }
+    record(
+      'sandbox-spellings',
+      bypassProblems.length === 0,
+      bypassProblems.length === 0
+        ? `none of the ${String(SANDBOX_BYPASS_SPELLINGS.length)} route-missing spellings hands out the isolated document (${bypassSeen.join(', ')})`
+        : bypassProblems.join('; '),
     );
 
     // The asset headers. A module script is fetched in CORS mode

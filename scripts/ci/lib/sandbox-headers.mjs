@@ -274,3 +274,91 @@ export function sandboxAssetUrls(html) {
     stylesheet: /<link[^>]+href="(\/sandbox-assets\/[^"]+\.css)"/.exec(source)?.[1] ?? null,
   };
 }
+
+/**
+ * The four URL spellings that reach the isolated render document past the
+ * Express route registered to claim it.
+ *
+ * Express 5 matches the RAW, undecoded pathname; `send` (inside
+ * `express.static`) decodes and normalises before touching the filesystem. So
+ * while `sandbox.html` sat in the static root, each of these was answered off
+ * disk carrying helmet's APPLICATION policy — `connect-src 'self'`, a nonce'd
+ * script, `frame-src 'self'` — instead of the sandbox's own, which is the whole
+ * containment. Every renderer kept working; only the isolation stopped
+ * existing. The fix is the LAYOUT (the document is emitted outside every static
+ * root), so these probes are what proves the layout, not a filter.
+ *
+ * `/./sandbox.html` and `/foo/../sandbox.html` are deliberately absent: Express
+ * normalises dot segments before matching, so both reach the route and carry the
+ * full policy. Measured, both directions.
+ *
+ * Kept here rather than in either gate because BOTH must ask, and for different
+ * reasons: `test:smoke` asks Express directly, `test:deploy` asks through Nginx,
+ * whose `try_files $uri @app` normalises `$uri` before the proxy hop — so the
+ * pair also answers whether the raw or the normalised URI reaches the app.
+ */
+export const SANDBOX_BYPASS_SPELLINGS = Object.freeze([
+  '/sandbox%2Ehtml',
+  '//sandbox.html',
+  '/sandbox.htm%6C',
+  '/%73andbox.html',
+  // The fifth is not one of the four measured spellings; it is here because the
+  // FIX introduced the dependency it probes. The document now sits exactly one
+  // `..` outside the static root, so containment also leans on `send`'s
+  // traversal guard — it decodes the path first, then refuses any `..` segment
+  // with a 403, with or without a `root`. That is a library property this
+  // repository does not own, so it is asserted rather than assumed. The 403 is
+  // not what a client sees: `serve-static` runs with `fallthrough` on and turns
+  // any sub-500 stream error into a bare `next()`, so the SPA catch-all answers
+  // it 200 with the shell. The judgement below is on the BODY for exactly this
+  // reason — a status check would have to encode which of the two layers
+  // answered, and neither answer is wrong.
+  '/..%2fsandbox-document%2fsandbox.html',
+]);
+
+/**
+ * Join a bypass spelling onto a base URL WITHOUT letting the URL parser repair
+ * it.
+ *
+ * `new URL('//sandbox.html', 'http://127.0.0.1:5000')` is a protocol-relative
+ * reference and resolves to `http://sandbox.html/` — a different host, silently.
+ * The percent-encoded spellings survive `new URL` intact, but they are built the
+ * same way so no reader has to remember which of the four is the dangerous one.
+ *
+ * @param {string} baseUrl origin, with no trailing slash
+ * @param {string} spelling one of {@link SANDBOX_BYPASS_SPELLINGS}
+ * @returns {string}
+ */
+export function bypassUrl(baseUrl, spelling) {
+  return `${String(baseUrl).replace(/\/+$/, '')}${spelling}`;
+}
+
+/**
+ * Everything wrong with the answer to one bypass spelling.
+ *
+ * The judgement is stated the way the defect broke it, not as a fixed status:
+ * whatever answers, EITHER it is not the isolated document, OR it carries that
+ * document's complete policy. A 404 passes. The SPA shell passes — it is what
+ * every other unknown path gets, and it carries helmet's policy honestly. The
+ * document under helmet's policy is the only thing that fails.
+ *
+ * The document is recognised by the `sandbox-assets/` module script it names,
+ * which is the same marker `test:deploy` already uses to tell it from the shell.
+ * A body check rather than a status check, because under Express a miss is not a
+ * 404 at all: the SPA catch-all answers every non-`/api/` path with 200.
+ *
+ * @param {string} spelling the spelling probed, so a failure names it
+ * @param {{ headers: { get: (name: string) => string | null } }} res
+ * @param {string} body the response body, already read
+ * @returns {string[]}
+ */
+export function sandboxBypassProblems(spelling, res, body) {
+  if (!/<script[^>]+src="\/sandbox-assets\//.test(String(body ?? ''))) return [];
+  const diff = cspProblems(res.headers.get('content-security-policy'));
+  if (diff.length === 0) return [];
+  return [
+    `${spelling} served the isolated render document WITHOUT its own policy ` +
+      `(${diff.join('; ')}) — the containment is the policy, so this spelling is the ` +
+      'isolation not existing',
+  ];
+}

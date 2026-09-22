@@ -378,6 +378,16 @@ isolated document, embedded as
   together — that pair lets the framed document remove its own sandbox and is worth nothing. No
   other flag is granted: no popups, forms, modals, downloads or top-level navigation, and `allow=""`
   denies every delegated permission.
+- **It is served from outside every document root, so only that route can hand it out.** Its
+  containment IS the policy below, and a policy attached by a route is only as good as the route
+  being the one thing that answers. It is not, on its own: Express matches the raw URL while the
+  static file server underneath it decodes and normalises first, so `/sandbox%2Ehtml`,
+  `//sandbox.html`, `/sandbox.htm%6C` and `/%73andbox.html` each missed the route and were answered
+  off disk under the application's own, far more permissive policy — the viewer working perfectly
+  while the isolation was simply absent. The document is therefore built into a directory that is
+  neither the application's static root nor Nginx's document root, so no spelling of any URL can
+  reach a copy of it; those addresses now return the ordinary SPA shell, like any other unknown
+  path. Nginx has been handled the same way from the start, by deleting the file from its root.
 - **It carries its own, far stricter policy.** A document fetched from an `http(s)` URL does not
   inherit its embedder's CSP, so the route that serves it attaches one of its own:
   `default-src 'none'`, `connect-src 'none'`, `worker-src 'none'`, `object-src 'none'`,

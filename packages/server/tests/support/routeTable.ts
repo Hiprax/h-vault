@@ -168,11 +168,15 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     when: 'production',
     note:
       'The isolated document every stored file is rendered inside. Mounted only when ' +
-      'NODE_ENV === production, BEFORE express.static and the SPA fallback, because its ' +
-      'whole isolation is the per-response Content-Security-Policy the route attaches ' +
-      '(config/sandboxCsp.ts) — a copy answered off disk would carry helmet’s application ' +
-      'policy instead. It is unauthenticated by design: it holds no data, receives every ' +
-      'byte it renders over a MessagePort, and its own policy denies it any network access.',
+      'NODE_ENV === production. Its whole isolation is the per-response ' +
+      'Content-Security-Policy the route attaches (config/sandboxCsp.ts), so a copy ' +
+      'answered off disk would carry helmet’s application policy instead — which is why ' +
+      'the document is EMITTED OUTSIDE the express.static root (config/clientArtifacts.ts) ' +
+      'rather than merely routed ahead of it: Express 5 matches the raw pathname while ' +
+      'send decodes it, so /sandbox%2Ehtml, //sandbox.html, /sandbox.htm%6C and ' +
+      '/%73andbox.html all miss this route. It is unauthenticated by design: it holds no ' +
+      'data, receives every byte it renders over a MessagePort, and its own policy denies ' +
+      'it any network access.',
   },
   {
     method: 'get',

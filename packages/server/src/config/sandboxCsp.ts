@@ -242,13 +242,16 @@ export function createSandboxDocumentHandler(
  * the build again and hope".
  *
  * It takes a THUNK rather than a path, and that is not indirection for its own
- * sake. `eslint-plugin-security`'s `detect-non-literal-fs-filename` accepts
- * `path.join(variable, 'literal')` and refuses `path.join(variable, variable)`,
- * so a helper that joined the name itself would have to be silenced — and an
- * analyzer suppression is exactly what this project refuses to add. Leaving the
- * read at the call site, with its filename written out, keeps the check
- * meaningful and puts only the error mapping here, which is the part worth
- * sharing anyway.
+ * sake. `eslint-plugin-security`'s `detect-non-literal-fs-filename` accepts a
+ * filename only when it can trace the WHOLE expression to literals inside ONE
+ * module — it follows a local `const` to its initializer and understands
+ * `path.join`, `fileURLToPath` and `import.meta.url`, but an IMPORTED binding is
+ * none of those. A helper that took a directory and joined the name would
+ * therefore have to be silenced, and an analyzer suppression is exactly what this
+ * project refuses to add. So each read lives beside the chain that builds its
+ * path (`config/clientArtifacts.ts`, `readApplicationShell` and
+ * `readSandboxDocument`), where the analyzer can verify it end to end, and only
+ * the error mapping is shared here — which is the part worth sharing anyway.
  */
 export function requireBuildArtifact(read: () => string, missing: string): string {
   try {

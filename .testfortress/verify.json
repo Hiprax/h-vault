@@ -237,7 +237,7 @@
     "test:smoke": {
       "cmd": "npm run test:smoke",
       "tier": 1,
-      "gate": "the BUILT artifact boots in production mode against a real mongod, serves a deep-linked SPA route with a matching CSP nonce, and completes a register \u2192 sign-in \u2192 store \u2192 read-back journey whose ciphertext round-trips byte for byte",
+      "gate": "the BUILT artifact boots in production mode against a real mongod, serves a deep-linked SPA route with a matching CSP nonce, serves the isolated render document under its own tailored policy directive by directive while no route-missing URL spelling hands that document out at all, and completes a register \u2192 sign-in \u2192 store \u2192 read-back journey whose ciphertext round-trips byte for byte",
       "report": ["smoke.json", "smoke.log"],
       "requires": ["build:server", "build:client"]
     },

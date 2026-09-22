@@ -286,6 +286,20 @@ COPY --from=build-server /app/packages/server/dist ./packages/server/dist
 # own copy of this identical build; this one is both the SPA-shell source and a
 # complete standalone fallback if the app is ever run without Nginx in front.
 COPY --from=build-client /app/packages/client/dist ./packages/server/public
+# The isolated render document, and it lands OUTSIDE the directory above on
+# purpose. `packages/server/public` is the `express.static` root, and the
+# sandbox document's entire containment is the per-response
+# Content-Security-Policy Express attaches to it
+# (packages/server/src/config/sandboxCsp.ts). A copy inside the static root is
+# one `express.static` could answer off disk under helmet's APPLICATION policy
+# instead — measured: Express 5 matches the raw pathname while `send` decodes
+# and normalises it, so /sandbox%2Ehtml, //sandbox.html, /sandbox.htm%6C and
+# /%73andbox.html all miss the route that was supposed to claim the document.
+# The client build therefore emits it into its own `dist-sandbox/`, and this is
+# where that directory lands. `packages/server/src/config/clientArtifacts.ts`
+# is the one place the server names either path. Same argument as the `web-root`
+# stage below makes for Nginx, from the other side.
+COPY --from=build-client /app/packages/client/dist-sandbox ./packages/server/sandbox-document
 
 EXPOSE 5000
 
@@ -319,14 +333,23 @@ CMD ["node", "packages/server/dist/server.js"]
 # the app one URL away, so the file is removed here: Nginx cannot serve what it
 # does not have, no matter how a future `try_files` edit is worded.
 #
-# sandbox.html goes for the same reason and with a sharper consequence. It is the
-# isolated document every stored file is rendered inside, and its whole isolation
-# IS the per-response policy Express attaches to it (packages/server/src/config/
-# sandboxCsp.ts). Served off this disk it would instead carry the doc-root's
-# `default-src 'self'` and none of the sandbox's own directives — no
-# `connect-src 'none'`, no `worker-src 'none'`, no `sandbox allow-scripts` — which
-# is the one way this isolation quietly stops existing while every renderer keeps
-# working. With the file absent, `try_files` falls through to `@app`.
+# sandbox.html is removed for the same reason and with a sharper consequence. It
+# is the isolated document every stored file is rendered inside, and its whole
+# isolation IS the per-response policy Express attaches to it
+# (packages/server/src/config/sandboxCsp.ts). Served off this disk it would
+# instead carry the doc-root's `default-src 'self'` and none of the sandbox's own
+# directives — no `connect-src 'none'`, no `worker-src 'none'`, no `sandbox
+# allow-scripts` — which is the one way this isolation quietly stops existing
+# while every renderer keeps working. With the file absent, `try_files` falls
+# through to `@app`.
+#
+# That deletion is now DEFENCE IN DEPTH, and saying so is the point of this
+# paragraph: the client build no longer emits the document into `dist/` at all
+# (it writes `dist-sandbox/sandbox.html`, see the app stage above), so there is
+# normally nothing here to remove. It is kept because `emptyOutDir` is false for
+# that build — a stale copy from a tree built before the split survives every
+# later build — and because the whole class of defect is a file reappearing in a
+# document root where nothing would notice it.
 FROM build-client AS web-root
 RUN rm -f /app/packages/client/dist/index.html /app/packages/client/dist/sandbox.html
 

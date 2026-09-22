@@ -21,6 +21,8 @@
 # every package from source, and a stale host build sneaking in could shadow it.
 **/node_modules
 **/dist
+# The sandbox document's output directory, for the same reason as **/dist.
+**/dist-sandbox
 **/build
 **/coverage
 **/*.tsbuildinfo
