@@ -3036,7 +3036,7 @@ describe('Auth API', () => {
   // ── Vault Key Rotation Recovery ──────────────────────────────────────
 
   describe('Vault key rotation recovery on login', () => {
-    it('should clear rotationInProgress flag and pending fields on login', async () => {
+    it('should clear the rotationInProgress flag but keep the pending wrapper on login', async () => {
       const testUser = await createTestUser({ emailVerified: true });
 
       // Simulate interrupted rotation by setting the flags directly
@@ -3064,12 +3064,13 @@ describe('Auth API', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.accessToken).toBeDefined();
 
-      // Verify the rotation state was cleared
+      // The write fence is down, and ONLY the fence: the pending wrapper is the
+      // sole stored copy of the key the crashed rotation already sealed rows under.
       const user = await User.findById(testUser.id);
       expect(user!.rotationInProgress).toBe(false);
-      expect(user!.pendingEncryptedVaultKey).toBeUndefined();
-      expect(user!.pendingVaultKeyIv).toBeUndefined();
-      expect(user!.pendingVaultKeyTag).toBeUndefined();
+      expect(user!.pendingEncryptedVaultKey).toBe('pending-key');
+      expect(user!.pendingVaultKeyIv).toBe('pending-iv');
+      expect(user!.pendingVaultKeyTag).toBe('pending-tag');
     });
 
     it('should create a rotation_recovery audit log entry', async () => {

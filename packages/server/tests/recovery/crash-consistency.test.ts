@@ -490,9 +490,15 @@ describe('Crash consistency — sequential path (standalone mongod)', () => {
     expect(recovered.status).toBe(200);
     const user = await User.findById(account.userId).lean();
     expect(user!.rotationInProgress).toBe(false);
-    expect(user!.pendingEncryptedVaultKey).toBeUndefined();
-    expect(user!.pendingVaultKeyIv).toBeUndefined();
-    expect(user!.pendingVaultKeyTag).toBeUndefined();
+    // The FENCE is lowered; the pending wrapper is kept. On this scenario the
+    // crash landed before the first row was touched, so nothing is sealed under
+    // it — but the recovery cannot tell those two crashes apart and must not
+    // guess, because on the other one that wrapper is the only copy of the key
+    // the rows were rewritten with. It is cleared by the next COMMITTING
+    // rotation, which is the only event that makes it redundant.
+    expect(user!.pendingEncryptedVaultKey).toBe(account.newWrapped.encrypted);
+    expect(user!.pendingVaultKeyIv).toBe(account.newWrapped.iv);
+    expect(user!.pendingVaultKeyTag).toBe(account.newWrapped.tag);
 
     const audits = await AuditLog.find({
       userId: account.userId,
@@ -500,6 +506,7 @@ describe('Crash consistency — sequential path (standalone mongod)', () => {
     }).lean();
     expect(audits).toHaveLength(1);
     expect(JSON.stringify(audits[0]!.metadata)).toMatch(/interrupted vault key rotation/i);
+    expect((audits[0]!.metadata as Record<string, unknown>)['interruptedRotation']).toBe(true);
 
     // The vault is usable again, still under the key it always had.
     const write = await post(

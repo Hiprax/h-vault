@@ -217,10 +217,11 @@ describe('MEDIUM-9: rotation fallback cleanup', () => {
 
     expect(res.status).toBe(200);
 
-    // Verify rotation state was cleaned up
+    // The fence is lowered; the pending wrapper is deliberately NOT, because it is
+    // the only stored copy of the key the crashed rotation sealed rows under.
     const dbUser = await User.findById(testUser.id);
     expect(dbUser!.rotationInProgress).toBe(false);
-    expect(dbUser!.pendingEncryptedVaultKey).toBeUndefined();
+    expect(dbUser!.pendingEncryptedVaultKey).toBe('pending-key');
 
     // Verify audit log for rotation recovery
     const recoveryLogs = await AuditLog.find({ action: 'rotation_recovery' });

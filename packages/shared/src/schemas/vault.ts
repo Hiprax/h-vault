@@ -235,6 +235,22 @@ export const bulkReEncryptSchema = z
     newEncryptedVaultKey: z.string().min(1).max(200),
     newVaultKeyIv: z.string().min(1).max(24),
     newVaultKeyTag: z.string().min(1).max(32),
+    /**
+     * Abandon an interrupted rotation's stored key instead of finishing it.
+     *
+     * While `User.pendingEncryptedVaultKey` is set, the server accepts only a
+     * rotation that commits THAT wrapper — the crash left rows sealed under it and
+     * nothing else anywhere stores it, so a rotation to any other key would strand
+     * them for ever behind a 200. This flag is the explicit, opt-in way to say so
+     * deliberately, and exists because that wrapper can become unopenable: it is
+     * sealed under the MEK the rotation ran with, and a master-password change
+     * since replaces the MEK. Without an escape, such an account could never
+     * rotate its vault key again.
+     *
+     * Optional and absent-means-false, so an older client cannot discard a key by
+     * accident, and so adding it is not a breaking change on the wire.
+     */
+    discardPendingVaultKey: z.boolean().optional(),
   })
   /**
    * No leg may name the same row twice.

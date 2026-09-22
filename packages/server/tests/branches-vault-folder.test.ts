@@ -163,7 +163,12 @@ describe('vault + folder controllers — standalone branches', () => {
       expect(persistedUser!.encryptedVaultKey).toBe(ORIGINAL_VAULT_KEY);
       expect(persistedUser!.vaultKeyIv).toBe('test-vault-key-iv');
       expect(persistedUser!.rotationInProgress).toBe(false);
-      expect(persistedUser!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(persistedUser!.pendingEncryptedVaultKey).toBe('must-not-be-committed');
 
       // The item rollback (VaultItem writes are healthy) DID succeed.
       const persistedItem = await VaultItem.findById(item._id).lean();

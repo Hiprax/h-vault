@@ -91,27 +91,30 @@ const ALLOWED_UPDATE_FIELDS = new Set([
 ]);
 
 /**
- * Lifts the rotation fence and drops the crash-recovery markers.
+ * Lifts the rotation fence, and NOTHING ELSE.
  *
- * Every exit from a rotation that has already raised the fence must call this
- * (or fold the same `$set`/`$unset` into its own final write, as the sequential
- * success path does when it commits the new vault key atomically). A rotation
- * that dies before clearing leaves the flag set; `authController.login`'s
- * crash-recovery clears it on the user's next sign-in, so the account can never
- * be permanently wedged.
+ * Every exit from a rotation that has already raised the fence must call this. A
+ * rotation that dies before doing so leaves the flag set; `authController.login`'s
+ * crash-recovery lowers it on the user's next sign-in, so the account can never be
+ * permanently wedged.
+ *
+ * It deliberately does NOT drop the crash-recovery markers, and that is the whole
+ * reason this function is one line long. `pendingEncryptedVaultKey` and its IV/tag
+ * are the new vault key wrapped under the account's MEK, written by the sequential
+ * path before its first row write so that a crash mid-rotation is recoverable:
+ * rows the loop reached are sealed under that key and NOTHING ELSE ANYWHERE stores
+ * it. This function runs on every ABORT — the coverage 409, the missing-id abort,
+ * the unexpected-exception path — and an abort is precisely the case where a crash
+ * may have happened first and left those rows behind. Clearing the wrapper here
+ * destroyed them, silently, behind an error message that told the user to retry.
+ *
+ * The wrapper is dropped in exactly two places, both of them a COMMIT: the
+ * transactional path's final `User.updateOne` and the sequential path's. A commit
+ * is the only event that makes it redundant, because `bulkReEncrypt` refuses any
+ * rotation that neither adopts the pending wrapper nor explicitly discards it.
  */
-async function clearRotationState(userId: string): Promise<void> {
-  await User.updateOne(
-    { _id: userId },
-    {
-      $set: { rotationInProgress: false },
-      $unset: {
-        pendingEncryptedVaultKey: '',
-        pendingVaultKeyIv: '',
-        pendingVaultKeyTag: '',
-      },
-    },
-  );
+async function lowerRotationFence(userId: string): Promise<void> {
+  await User.updateOne({ _id: userId }, { $set: { rotationInProgress: false } });
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────
@@ -570,6 +573,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     newEncryptedVaultKey,
     newVaultKeyIv,
     newVaultKeyTag,
+    discardPendingVaultKey,
   } = req.body as BulkReEncryptInput;
 
   // Verify the user's password before allowing vault key rotation
@@ -688,6 +692,43 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     `The vault key was not changed. Please retry.`;
 
   try {
+    // ── The outstanding-rotation guard ───────────────────────────────
+    //
+    // While `pendingEncryptedVaultKey` is set, a crash has left rows sealed under
+    // the key it wraps and nothing else anywhere stores that key. A rotation to
+    // ANY OTHER key would therefore replace the vault key while leaving those rows
+    // behind for ever — and behind a 200, because the server cannot tell which
+    // rows the client could not read and the client reports them as "already
+    // unreadable". So the only rotation accepted here is one that ADOPTS that
+    // wrapper (finishing what the crash interrupted), unless the request says in
+    // so many words that it is abandoning it.
+    //
+    // Read under the rotation lock, not from the `user` document loaded before it:
+    // that read predates the lock and a rotation committing in between would make
+    // this refuse a request that is now correct.
+    //
+    // Placed after the authoritative idempotency check so a retransmission of a
+    // rotation that already committed is still answered as a success rather than
+    // refused for a wrapper its own commit removed.
+    const outstanding = await User.findById(userId).select('pendingEncryptedVaultKey').lean();
+    const pendingWrapper = outstanding?.pendingEncryptedVaultKey;
+    if (
+      pendingWrapper !== undefined &&
+      pendingWrapper !== newEncryptedVaultKey &&
+      discardPendingVaultKey !== true
+    ) {
+      logger.warn('Vault key rotation refused: an interrupted rotation is still outstanding', {
+        userId,
+      });
+      throw httpErrors.conflict(
+        'An interrupted vault key rotation is still outstanding on this account. Entries ' +
+          'already re-encrypted are sealed under the key it was moving to, and that key is ' +
+          'stored only as the wrapper this account holds, so rotating to a different one ' +
+          'would leave them unreadable for ever. Finish the interrupted rotation instead, or ' +
+          'resend this request with `discardPendingVaultKey` to abandon it deliberately.',
+      );
+    }
+
     // Helper: build the $set for a vault item during rotation
     const buildItemSet = (item: (typeof items)[number]): Record<string, unknown> => ({
       encryptedName: item.encryptedName,
@@ -880,9 +921,23 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           // rotation lock is taken, so a computed `$set` would be racy. The
           // counter is what an in-flight document upload's completion checks
           // itself against, so it must move exactly when the key it names does.
+          //
+          // The crash-recovery markers are dropped HERE, in the commit, rather
+          // than in the `finally` below — a commit is the only event that makes
+          // them redundant, and the `finally` also runs on every abort. The
+          // guard above has already established that a rotation reaching this
+          // point either adopts the pending wrapper or was told to discard it.
           await User.updateOne(
             { _id: userId },
-            { $set: userUpdate, $inc: { vaultKeyVersion: 1 } },
+            {
+              $set: userUpdate,
+              $inc: { vaultKeyVersion: 1 },
+              $unset: {
+                pendingEncryptedVaultKey: '',
+                pendingVaultKeyIv: '',
+                pendingVaultKeyTag: '',
+              },
+            },
             { session: txnSession },
           );
         });
@@ -894,9 +949,9 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         // ending the session throws; a failure to clear is logged rather than
         // masking the original error, and login crash-recovery is the backstop.
         try {
-          await clearRotationState(userId);
+          await lowerRotationFence(userId);
         } catch (clearErr) {
-          logger.error('Failed to clear rotation state after transactional rotation', {
+          logger.error('Failed to lower the rotation fence after a transactional rotation', {
             userId,
             error: clearErr instanceof Error ? clearErr.message : String(clearErr),
           });
@@ -1230,7 +1285,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
 
           // Clear rotation state so the user can retry. The vault key remains
           // as whatever was last successfully committed (i.e. unchanged).
-          await clearRotationState(userId);
+          await lowerRotationFence(userId);
 
           throw httpErrors.conflict(rotationFailureMessage());
         }
@@ -1275,7 +1330,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
             error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
           });
         }
-        await clearRotationState(userId);
+        await lowerRotationFence(userId);
         throw rotationErr;
       }
     }

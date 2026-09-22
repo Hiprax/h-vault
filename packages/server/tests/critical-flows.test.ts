@@ -588,10 +588,13 @@ describe('Rotation Recovery on Login (POST /api/v1/auth/login)', () => {
     const recoveredUser = await User.findById(user.id);
     expect(recoveredUser!.rotationInProgress).toBe(false);
 
-    // Verify pending fields are unset
-    expect(recoveredUser!.get('pendingEncryptedVaultKey')).toBeUndefined();
-    expect(recoveredUser!.get('pendingVaultKeyIv')).toBeUndefined();
-    expect(recoveredUser!.get('pendingVaultKeyTag')).toBeUndefined();
+    // Verify the pending wrapper SURVIVES: it is the only stored copy of the key
+    // the crashed rotation had already sealed rows under, and destroying it is the
+    // one irreversible act available here. `GET /user/profile` reports it as
+    // `interruptedRotation` so the account can finish the rotation.
+    expect(recoveredUser!.get('pendingEncryptedVaultKey')).toBe('pending-key-data');
+    expect(recoveredUser!.get('pendingVaultKeyIv')).toBe('pending-iv-data');
+    expect(recoveredUser!.get('pendingVaultKeyTag')).toBe('pending-tag-data');
 
     // Verify original vault key is preserved (not overwritten by pending data)
     expect(recoveredUser!.encryptedVaultKey).toBe('test-encrypted-vault-key');
@@ -664,10 +667,11 @@ describe('Rotation Recovery on Login (POST /api/v1/auth/login)', () => {
     expect(loginRes.body.data.twoFactorRequired).toBe(true);
     expect(loginRes.body.data.tempToken).toBeDefined();
 
-    // Verify rotation recovery happened even with 2FA
+    // Verify rotation recovery happened even with 2FA: the fence is lowered and
+    // the pending wrapper is kept, exactly as on the non-2FA path.
     const recoveredUser = await User.findById(user.id);
     expect(recoveredUser!.rotationInProgress).toBe(false);
-    expect(recoveredUser!.get('pendingEncryptedVaultKey')).toBeUndefined();
+    expect(recoveredUser!.get('pendingEncryptedVaultKey')).toBe('pending-key-2fa');
 
     // Verify audit log
     const auditEntry = await AuditLog.findOne({

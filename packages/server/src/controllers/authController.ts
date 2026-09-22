@@ -654,9 +654,26 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   }
 
   // Detect and recover from interrupted vault key rotation. If rotationInProgress
-  // is true, the server crashed mid-rotation. Clear the flag and pending fields so
-  // the user can log in normally. Items partially re-encrypted with the new key
-  // will be undecryptable, but the user can trigger a fresh rotation to fix it.
+  // is true, the server crashed mid-rotation; lowering the flag lets the account
+  // write again.
+  //
+  // The FLAG is all that is cleared, and that is the whole point. The sequential
+  // rotation path commits `rotationInProgress: true` in the same update as the new
+  // vault key wrapped under the account's MEK (`pendingEncryptedVaultKey` and its
+  // IV/tag), expressly so a crash is recoverable: rows written before the crash are
+  // sealed under THAT key and no other copy of it exists anywhere — not on the
+  // client, which minted it in memory and has long since navigated away, and not in
+  // a backup, which stores ciphertext rather than the key. Destroying the wrapper
+  // here, as this handler used to, is therefore the one irreversible act available
+  // at this point: a flag can be recomputed, a key cannot. It is kept, reported by
+  // `GET /user/profile` as `interruptedRotation`, and cleared by the next rotation
+  // that COMMITS (`clearRotationState` and the sequential commit both `$unset` it),
+  // which is the only event that makes it redundant.
+  //
+  // The transactional path never writes the wrapper at all: it rolls back atomically,
+  // so a crash there leaves nothing half-done to finish and nothing outstanding to
+  // report. Whether the wrapper is present is exactly the discriminator, which is
+  // why it is derived rather than stored as a second flag.
   //
   // `rotationInProgress` doubles as the LIVE write-fence read by
   // `assertVaultNotRotating`, raised at the start of `bulkReEncrypt` and cleared
@@ -672,27 +689,31 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // login clears the stuck flag; a live rotation clears it itself on
   // commit/abort, so nothing is left wedged either way.
   if (user.rotationInProgress && !(await isVaultRotationLockHeld(user._id.toString()))) {
-    logger.warn('Interrupted vault key rotation detected during login — clearing rotation state', {
+    // Read from the document this handler already loaded rather than re-reading:
+    // the fence is down only for a rotation with no live lock, so nothing can be
+    // writing this field concurrently.
+    const rotationOutstanding = Boolean(user.pendingEncryptedVaultKey);
+
+    logger.warn('Interrupted vault key rotation detected during login — lowering the write fence', {
       userId: user._id.toString(),
       email: maskEmail(email),
+      // The wrapper itself is never logged; only whether one is outstanding.
+      interruptedRotation: rotationOutstanding,
     });
 
-    await User.updateOne(
-      { _id: user._id },
-      {
-        $set: { rotationInProgress: false },
-        $unset: {
-          pendingEncryptedVaultKey: 1,
-          pendingVaultKeyIv: 1,
-          pendingVaultKeyTag: 1,
-        },
-      },
-    );
+    await User.updateOne({ _id: user._id }, { $set: { rotationInProgress: false } });
 
     await createAuditLog(
       user._id.toString(),
       'rotation_recovery',
-      { detail: 'Interrupted vault key rotation detected and cleared during login' },
+      {
+        detail: rotationOutstanding
+          ? 'Interrupted vault key rotation detected during login: the write fence was lowered and the pending vault key was retained so the rotation can be finished'
+          : 'Interrupted vault key rotation detected during login: the write fence was lowered; no pending vault key was stored, so nothing is outstanding',
+        // The same fact `GET /user/profile` reports, under the same name, so the
+        // audit trail and the profile can never be read as saying different things.
+        interruptedRotation: rotationOutstanding,
+      },
       ip,
       userAgent,
     );

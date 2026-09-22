@@ -643,6 +643,11 @@ export const swaggerSpec: JsonObject = {
             },
             maxItems: 10000,
           },
+          discardPendingVaultKey: {
+            type: 'boolean',
+            description:
+              'Abandon an interrupted rotation instead of finishing it. While the account holds a pending vault-key wrapper, the only rotation accepted is one whose newEncryptedVaultKey IS that wrapper, because entries re-encrypted before the interruption are sealed under it and it is stored nowhere else; any other rotation is refused with 409. Set this to true to rotate to a fresh key anyway, accepting that those entries become unreadable. Absent means false.',
+          },
           folders: {
             type: 'array',
             description:
@@ -748,6 +753,18 @@ export const swaggerSpec: JsonObject = {
           kdfAlgorithm: { type: 'string' },
           encryptionVersion: { type: 'integer' },
           vaultKeyVersion: { type: 'integer', minimum: 0 },
+          interruptedRotation: {
+            type: 'boolean',
+            description:
+              'True when a crashed vault key rotation is still outstanding: some rows are sealed under the pending key below and the rotation can be finished with it. Derived from the pending wrapper, not from the write fence.',
+          },
+          pendingEncryptedVaultKey: {
+            type: 'string',
+            description:
+              'The in-flight vault key of an interrupted rotation, wrapped under the account MEK (AES-256-GCM). Present only while interruptedRotation is true.',
+          },
+          pendingVaultKeyIv: { type: 'string' },
+          pendingVaultKeyTag: { type: 'string' },
           settings: { $ref: '#/components/schemas/UserSettings' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
@@ -2522,7 +2539,7 @@ export const swaggerSpec: JsonObject = {
           404: { $ref: '#/components/responses/NotFound' },
           409: {
             description:
-              'The rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, or the payload did not cover every row the account holds. Re-read the vault and retry.',
+              'The rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, or an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey. Re-read the vault and retry.',
           },
           429: { $ref: '#/components/responses/RateLimited' },
         },

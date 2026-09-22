@@ -286,7 +286,12 @@ describe('Vault key rotation — documents leg (sequential branch)', () => {
     expect(after!.encryptedVaultKey).toBe(ORIGINAL_KEY);
     expect(after!.vaultKeyVersion).toBe(0);
     expect(after!.rotationInProgress).toBe(false);
-    expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+    // The pending wrapper SURVIVES the abort, deliberately: it is the only
+    // stored copy of the key this rotation was moving to, and an abort is
+    // precisely where a crash may already have sealed rows under it. Only a
+    // COMMIT drops it. The next rotation must adopt it or discard it in so
+    // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+    expect(after!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
   });
 
   it('reports a document the write no longer matches, and rolls the rest back', async () => {
@@ -385,7 +390,12 @@ describe('Vault key rotation — documents leg (sequential branch)', () => {
     expect(after!.encryptedVaultKey).toBe(ORIGINAL_KEY);
     expect(after!.vaultKeyVersion).toBe(0);
     expect(after!.rotationInProgress).toBe(false);
-    expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+    // The pending wrapper SURVIVES the abort, deliberately: it is the only
+    // stored copy of the key this rotation was moving to, and an abort is
+    // precisely where a crash may already have sealed rows under it. Only a
+    // COMMIT drops it. The next rotation must adopt it or discard it in so
+    // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+    expect(after!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
   });
 
   it('rolls documents back when an ITEM write fails after they were rewrapped', async () => {

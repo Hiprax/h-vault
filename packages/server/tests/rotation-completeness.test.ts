@@ -404,7 +404,12 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
       // same footing as the one above, mirroring what the documents leg's twin
       // asserts (`rotation-documents.test.ts`).
       expect(after!.vaultKeyVersion).toBe(0);
-      expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(after!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
     } finally {
       vi.restoreAllMocks();
     }
@@ -471,7 +476,12 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
       // that cleared the fence for some legs and not others would show up only in
       // the leg it skipped.
       expect(after!.vaultKeyVersion).toBe(0);
-      expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(after!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
     } finally {
       vi.restoreAllMocks();
     }
@@ -703,14 +713,23 @@ describe('Rotation completeness — transactional (replica-set) branch', () => {
     // re-encrypt rows it can no longer read. The handler logs and carries on, and
     // the fence it could not lower is left for login's crash-recovery.
     //
-    // Only `clearRotationState`'s write is made to fail. It is told apart from the
-    // in-transaction key write by its `$unset` — that one uses `$set` + `$inc` and
-    // carries a session — so the rotation itself still commits for real.
+    // Only `lowerRotationFence`'s write is made to fail. It is told apart from the
+    // in-transaction key write by being the ONE update whose whole body is
+    // `$set: { rotationInProgress: false }` — the commit carries `$inc` and
+    // `$unset` beside its `$set`, and the fence RAISE sets the flag to `true` — so
+    // the rotation itself still commits for real. Matching on `$unset` alone, as
+    // this used to, now selects the commit instead: dropping the crash-recovery
+    // markers moved into it, because an abort must not destroy the only stored
+    // copy of the key a crashed rotation was moving to.
     const item = await seedItem(user.id);
     const realUpdateOne = User.updateOne.bind(User);
+    const isFenceLowering = (update: Record<string, unknown> | undefined): boolean => {
+      if (!update || Object.keys(update).length !== 1) return false;
+      const set = update.$set as Record<string, unknown> | undefined;
+      return set !== undefined && Object.keys(set).length === 1 && set.rotationInProgress === false;
+    };
     vi.spyOn(User, 'updateOne').mockImplementation((...args: Parameters<typeof User.updateOne>) => {
-      const update = args[1] as Record<string, unknown> | undefined;
-      if (update && '$unset' in update) {
+      if (isFenceLowering(args[1] as Record<string, unknown> | undefined)) {
         return Promise.reject(new Error('fence-clear failed')) as ReturnType<typeof User.updateOne>;
       }
       return realUpdateOne(...args);

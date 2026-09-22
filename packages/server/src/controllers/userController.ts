@@ -155,8 +155,55 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
   const backupSettings = user.settings.backup;
   const isConfigured = Boolean(backupSettings.encryptedBWK);
 
+  // Is a crashed vault key rotation still outstanding?
+  //
+  // DERIVED from the wrapper rather than from `rotationInProgress`, which answers a
+  // different question: that flag is the LIVE write fence, true only while a
+  // rotation is running (or until the next login lowers a crashed one), whereas the
+  // wrapper persists until a rotation COMMITS. So the flag says "do not write now"
+  // and this says "a rotation was left half-done and can be finished", and only the
+  // second is actionable by the account. The sequential path writes the wrapper
+  // beside the flag; the transactional path never writes it, because it rolls back
+  // atomically and leaves nothing to finish — see `authController.login`'s
+  // crash-recovery block.
+  const interruptedRotation = Boolean(user.pendingEncryptedVaultKey);
+
   const profile = {
     ...user,
+    /**
+     * Whether a crashed rotation left rows sealed under a key this account still
+     * stores but does not yet use. The client offers to finish it.
+     */
+    interruptedRotation,
+    // The pending wrapper, and ONLY when there is one to send.
+    //
+    // The spread above already carries these three whenever they exist — they are
+    // the one piece of vault-key material the User model does not mark
+    // `select: false` — so this block changes no byte of any response. It is here
+    // because what a client DEPENDS ON must be named: with the wrapper reaching the
+    // client only as a side effect of a model default, adding `select: false` to it
+    // later, or narrowing this projection, would withdraw it silently and the only
+    // symptom would be a Finish Rotation button that no longer works. Spelling it
+    // out makes that a deliberate edit to this line instead.
+    //
+    // It is safe to disclose for the same reason `encryptedVaultKey` beside it is:
+    // these are AES-256-GCM ciphertext under the MEK, which is derived from the
+    // master password and never leaves the device, so the server hands out
+    // something it cannot open and nobody else can either. Sending it is what lets
+    // a client unwrap the in-flight key with the MEK it already holds and finish
+    // the rotation, instead of minting a third key and stranding every row the
+    // crash had already re-sealed.
+    //
+    // The `select: false` fields (`authHash`, `twoFactorSecret`,
+    // `pendingTwoFactorSecret`, `pendingTwoFactorExpiry`, `backupCodes`) are absent
+    // from the `.lean()` read above and none of them is added back here.
+    ...(interruptedRotation
+      ? {
+          pendingEncryptedVaultKey: user.pendingEncryptedVaultKey,
+          pendingVaultKeyIv: user.pendingVaultKeyIv,
+          pendingVaultKeyTag: user.pendingVaultKeyTag,
+        }
+      : {}),
     settings: {
       ...withSettingsDefaults(user.settings),
       backup: {

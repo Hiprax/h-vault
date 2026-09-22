@@ -309,7 +309,12 @@ describe('Vault key rotation fence', () => {
 
       const afterAbort = await User.findById(user.id).lean();
       expect(afterAbort!.rotationInProgress).toBe(false);
-      expect(afterAbort!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(afterAbort!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
       // Vault key untouched, and the item's new ciphertext rolled back to the
       // ciphertext the untouched key can still decrypt.
       expect(afterAbort!.encryptedVaultKey).toBe('test-encrypted-vault-key');
@@ -395,9 +400,12 @@ describe('Vault key rotation fence', () => {
 
     const recovered = await User.findById(user.id).lean();
     expect(recovered!.rotationInProgress).toBe(false);
-    expect(recovered!.pendingEncryptedVaultKey).toBeUndefined();
-    expect(recovered!.pendingVaultKeyIv).toBeUndefined();
-    expect(recovered!.pendingVaultKeyTag).toBeUndefined();
+    // The FLAG is lowered and nothing else: the pending wrapper is the only stored
+    // copy of the key the crashed rotation had already sealed rows under, so it
+    // survives until a rotation commits. See `rotation-interrupted-recovery.test.ts`.
+    expect(recovered!.pendingEncryptedVaultKey).toBe('half-rotated-key');
+    expect(recovered!.pendingVaultKeyIv).toBe('half-rotated-iv');
+    expect(recovered!.pendingVaultKeyTag).toBe('half-rotated-tag');
 
     const unblocked = await mutate(
       'post',

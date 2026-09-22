@@ -465,6 +465,38 @@ in the meantime — so it is tracked separately rather than folded in here.
 If you would rather not rely on any of this, sign out of your other devices from the Sessions
 page before rotating.
 
+### A rotation stopped part way through
+
+A rotation re-encrypts every entry and then swaps the vault key, and on a database that cannot
+give it a transaction it does so one entry at a time. A crash, a lost connection or a restart in
+the middle therefore leaves entries on both sides of the swap: some sealed under the key the
+rotation was moving to, the rest under the key the account still uses.
+
+That key is kept. It is stored wrapped under your master password, exactly as the live one is, so
+the server holds something it cannot open and nobody else can either — and it is the only copy
+there is, because the browser that generated it is gone. Your account reports that an
+interrupted rotation is outstanding, and finishing it re-encrypts everything under that same key
+rather than generating a third one. Until a rotation commits, nothing removes the stored key: not
+signing in, and not a rotation that fails or is refused.
+
+Two consequences follow, and both are deliberate:
+
+- **While that key is outstanding, the server refuses a rotation to any other key.** It cannot see
+  which entries are sealed under the outstanding one, and neither can your browser, so a rotation
+  to a third key would leave them unreadable for ever behind an apparent success. Abandoning the
+  interrupted rotation is still possible, but it has to be asked for in so many words and the
+  interface says what it costs.
+- **Changing your master password while one is outstanding makes it unopenable.** The stored key
+  is wrapped under the password that was in force when the rotation ran, and changing the password
+  replaces that wrapping. Finish an interrupted rotation before changing your master password; if
+  it is already too late, abandoning it is what lets the account rotate again, and only a backup
+  can recover whatever was sealed under the key that was abandoned.
+
+An entry that cannot be decrypted at all — by the live key or by an outstanding one — no longer
+stops a rotation. Its stored ciphertext is carried across untouched and it is named in the result,
+because such an entry is already unreadable and letting one of them block every future rotation
+would leave the whole account unable to change its key.
+
 ### Deleting a document, and why it cannot be undone
 
 A stored document is two things: an entry in the database and a file of ciphertext in object
