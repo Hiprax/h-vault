@@ -23,7 +23,7 @@ import {
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
 } from '../constants/index.js';
-import { objectIdSchema } from './common.js';
+import { objectIdSchema, optionalVaultKeyVersionSchema } from './common.js';
 
 /**
  * How many characters of a class the generator must guarantee, counting only the
@@ -277,6 +277,12 @@ export const restoreBackupSchema = z.object({
   // backup row to this account's current vault key before sending, so restore is a
   // plain, unprivileged add of rows already under the account's key — no vault-key
   // adoption and no master-password re-auth are accepted here.
+  //
+  // Which is exactly why the generation matters here as much as on a create: the
+  // rows arrive sealed under whichever vault key the client re-encrypted them
+  // with, and a rotation that commits between that re-encryption and this request
+  // strands every one of them. See `optionalVaultKeyVersionSchema`.
+  vaultKeyVersion: optionalVaultKeyVersionSchema,
 });
 
 export const exportSchema = z.object({
@@ -411,6 +417,13 @@ export const importSchema = z
     conflictStrategy: z.enum(['skip', 'overwrite', 'keep_both']).optional().default('skip'),
     // Explicit inserts/updates the server validates and executes.
     operations: importOperationsSchema,
+    // The vault-key generation every ciphertext field in `operations` was sealed
+    // under. It sits on the REQUEST envelope rather than inside `operations`,
+    // beside `inserts` and `updates`, because it is a property of the request as a
+    // whole and not one of the work items — the same place
+    // `completeDocumentUploadSchema` puts it. See
+    // `optionalVaultKeyVersionSchema`.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   // The combined item count must be in range. There is no byte cap on the
   // structured shape: the real server-side byte bound is the global 2 MB body

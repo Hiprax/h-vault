@@ -3163,12 +3163,35 @@ describe('restoreBackupSchema', () => {
     expect(result.conflictStrategy).toBe('skip');
   });
 
-  it('defines only { conflictStrategy, data } — no vault-key-adoption / re-auth keys', () => {
+  it('defines only { conflictStrategy, data, vaultKeyVersion } — no vault-key-adoption / re-auth keys', () => {
     // Guards the regression the sibling test guards against, but non-vacuously:
     // asserting the schema's own key set fails the moment `adoptVaultKey` or
     // `authHash` is re-added, whereas a `not.toHaveProperty` on a parsed result
     // (which never supplied those keys) cannot.
-    expect(Object.keys(restoreBackupSchema.shape).sort()).toEqual(['conflictStrategy', 'data']);
+    //
+    // `vaultKeyVersion` joined the set deliberately, and it is the OPPOSITE of
+    // the thing this case forbids: it lets the caller NAME the vault key its
+    // rows were re-encrypted under so the server can refuse a superseded one.
+    // It carries no key material and grants no authority — the forbidden keys
+    // are the ones that would let a restore REPLACE the vault key or stand in
+    // for the master password.
+    expect(Object.keys(restoreBackupSchema.shape).sort()).toEqual([
+      'conflictStrategy',
+      'data',
+      'vaultKeyVersion',
+    ]);
+    // Named explicitly as well, so that widening the set above can never
+    // quietly re-admit one of them: the exact-set assertion is what fails today,
+    // and this is what still fails if somebody "fixes" it by listing the new key.
+    for (const forbidden of [
+      'adoptVaultKey',
+      'authHash',
+      'encryptedVaultKey',
+      'vaultKeyIv',
+      'vaultKeyTag',
+    ]) {
+      expect(Object.keys(restoreBackupSchema.shape)).not.toContain(forbidden);
+    }
   });
 });
 

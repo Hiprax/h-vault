@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ENCRYPTION_VERSION } from '../constants/index.js';
+import { optionalVaultKeyVersionSchema } from './common.js';
 
 export const emailSchema = z
   .email()
@@ -95,6 +96,14 @@ export const changePasswordSchema = z.object({
   newEncryptedVaultKey: z.string().min(1).max(200),
   newVaultKeyIv: z.string().min(1).max(24),
   newVaultKeyTag: z.string().min(1).max(32),
+  // The generation this new wrapper supersedes — the one the session believes
+  // the account is on. A change of master password rewraps the vault key ITSELF,
+  // so a wrapper built from a key a rotation has already replaced overwrites the
+  // only copy of the live one and costs the whole vault. `resetPasswordSchema`
+  // deliberately carries no version: a reset MINTS a fresh vault key and accepts
+  // that everything under the old one is gone, so there is no generation to
+  // supersede. See `optionalVaultKeyVersionSchema`.
+  vaultKeyVersion: optionalVaultKeyVersionSchema,
 });
 
 export const unlockAccountSchema = z.object({

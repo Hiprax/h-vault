@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Fixed
+
+- **The API reference now lists the conflict response that six write endpoints could already return.** Creating or updating a vault item or a folder, importing and restoring a backup are all refused while a vault-key rotation is being processed, and have been for as long as the rotation fence has existed — but the published API document never said so, so anyone writing against it had no reason to handle it. Each of those six operations now documents that refusal, alongside the duplicate-folder-name and concurrent-import conflicts that share the same status.
+
 ## [0.13.0] - 2026-09-21
 
 ### Added

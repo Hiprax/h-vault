@@ -178,6 +178,72 @@ const jsonEnvelope = (
   },
 });
 
+/**
+ * The vault-key generation a write CLAIMS it sealed its ciphertext under.
+ *
+ * Optional on every request that carries it, and that is a compatibility
+ * decision rather than a statement about how much it matters: requiring it would
+ * be a breaking request-schema change. The server closes the gap at the other
+ * end — a write that omits it is refused once the account has rotated at least
+ * once. A client with nothing to rewrap should send the version it was given
+ * with its wrapped vault key, never a guess and never zero.
+ */
+const VAULT_KEY_VERSION_PROPERTY = {
+  type: 'integer',
+  minimum: 0,
+  example: 0,
+  description:
+    "The generation of the vault key the ciphertext in this request was sealed under, as the client recorded it when it received its wrapped vault key. Refused with 409 — carrying the account's current generation in `data.vaultKeyVersion` — when it is not the current one, and also when it is ABSENT on an account that has rotated at least once, since a client that cannot name a generation may be holding a superseded key.",
+};
+
+/**
+ * The RECOVERABLE 409 every write derived from the vault key can answer with.
+ *
+ * It is the one refusal in this document whose body carries a NUMBER, and it is
+ * answered directly by the handler rather than through `httpErrors`, because the
+ * standard error envelope is flat (`{ success, message, statusCode, statusText }`)
+ * and has nowhere to put one. Without the number a client has to re-read its
+ * profile before it can rewrap and retry; with it, the retry costs one request.
+ *
+ * `extraCauses` is the OTHER things the same status means on that endpoint — a
+ * rotation already in progress, a duplicate folder name, a concurrent import —
+ * because 409 is one status key per operation and a reader needs every cause
+ * under it, not just this one. Those causes carry no `data`, which is what the
+ * `data` description says.
+ *
+ * `completeDocumentUpload` declares this shape inline. It is left as written:
+ * its wording is specific to a transfer that has already crossed the network in
+ * full, and rewriting a published response body to save four lines is a change
+ * to the contract's text for no gain to a consumer.
+ */
+const staleVaultKeyConflict = (extraCauses: string): Record<string, unknown> => ({
+  description:
+    'The vault key this request was sealed under is not the one the account is on, so nothing was ' +
+    'written. The current version is returned in `data.vaultKeyVersion`: the client re-derives the ' +
+    'live vault key, re-encrypts, and retries. A request that names NO version is refused the same ' +
+    'way once the account has rotated at least once, because a client that cannot say which key it ' +
+    'used may be holding a superseded one; an account that has never rotated is unaffected. ' +
+    extraCauses,
+  content: {
+    'application/json': {
+      schema: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean', example: false },
+          message: { type: 'string' },
+          data: {
+            type: 'object',
+            description: 'Present only for a refusal about the vault key version.',
+            properties: {
+              vaultKeyVersion: { type: 'integer', minimum: 0, example: 1 },
+            },
+          },
+        },
+      },
+    },
+  },
+});
+
 /** The paginated form of the same envelope, for every list endpoint in this document. */
 const pageEnvelope = (description: string, itemsRef: string): Record<string, unknown> =>
   jsonEnvelope(
@@ -493,6 +559,7 @@ export const swaggerSpec: JsonObject = {
           nameIv: { type: 'string', minLength: 1, maxLength: 24 },
           nameTag: { type: 'string', minLength: 1, maxLength: 32 },
           searchHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
       UpdateVaultItemRequest: {
@@ -521,6 +588,7 @@ export const swaggerSpec: JsonObject = {
             },
             maxItems: 10,
           },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
       BulkDeleteRequest: {
@@ -644,6 +712,7 @@ export const swaggerSpec: JsonObject = {
           icon: { type: 'string', maxLength: 50 },
           color: { type: 'string', maxLength: 20 },
           sortOrder: { type: 'integer', default: 0 },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
       UpdateFolderRequest: {
@@ -656,6 +725,7 @@ export const swaggerSpec: JsonObject = {
           icon: { type: 'string', maxLength: 50 },
           color: { type: 'string', maxLength: 20 },
           sortOrder: { type: 'integer' },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
       ReorderFolderRequest: {
@@ -746,6 +816,7 @@ export const swaggerSpec: JsonObject = {
           newEncryptedVaultKey: { type: 'string', minLength: 1, maxLength: 200 },
           newVaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
           newVaultKeyTag: { type: 'string', minLength: 1, maxLength: 32 },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
       Setup2faRequest: {
@@ -988,6 +1059,7 @@ export const swaggerSpec: JsonObject = {
             description:
               'Audit metadata only. The server performs NO matching: the match key for a login is its site and username, both of which live inside the encrypted blob, so conflict resolution happens client-side and arrives here already decided.',
           },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
 
@@ -1039,6 +1111,7 @@ export const swaggerSpec: JsonObject = {
             maxLength: 26214400,
             description: 'Backup file contents (max 25 MB)',
           },
+          vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
       BackupLogEntry: {
@@ -2284,6 +2357,9 @@ export const swaggerSpec: JsonObject = {
           201: jsonEnvelope('Item created', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          409: staleVaultKeyConflict(
+            'The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes.',
+          ),
         },
       },
     },
@@ -2486,6 +2562,9 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
           400: { $ref: '#/components/responses/ValidationError' },
+          409: staleVaultKeyConflict(
+            'The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes.',
+          ),
         },
       },
       delete: {
@@ -2594,6 +2673,9 @@ export const swaggerSpec: JsonObject = {
           201: jsonEnvelope('Folder created', { $ref: '#/components/schemas/FolderResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          409: staleVaultKeyConflict(
+            'The same status, carrying no `data`, also reports a vault-key rotation currently in progress and a folder whose name already exists on this account; neither is about the vault key version.',
+          ),
         },
       },
     },
@@ -2625,6 +2707,9 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
+          409: staleVaultKeyConflict(
+            'The same status, carrying no `data`, also reports a vault-key rotation currently in progress, a folder whose name already exists on this account, and a re-parent that lost a race with a concurrent move.',
+          ),
         },
       },
       delete: {
@@ -2744,6 +2829,9 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          409: staleVaultKeyConflict(
+            'This is the endpoint where the refusal matters most, and the only one where it is the sole cause of a 409: the new wrapper REPLACES the stored one, so accepting a wrapper built from a superseded vault key would overwrite the only copy of the live one and there is nothing anywhere that could decrypt the vault afterwards.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3199,10 +3287,9 @@ export const swaggerSpec: JsonObject = {
               'The body failed schema validation (a missing or malformed ciphertext field, `searchHash`, tag or `passwordHistory` entry rejects the whole request); an update names an item that does not exist, is in the trash, or is not yours; the same id appears twice; a field is over-length; or the import would exceed the per-account item cap. Nothing is written.',
           },
           401: { $ref: '#/components/responses/Unauthorized' },
-          409: {
-            description:
-              'A vault-key rotation is in flight, another import for this account is already running, or an item an update targeted was modified or removed mid-request. Under `skip` and `overwrite`, re-running the import is safe: the client re-resolves against the current vault and sends only what is left. Under `keep_both` nothing is ever matched, so a re-run inserts the rows that already landed a second time.',
-          },
+          409: staleVaultKeyConflict(
+            'The same status, carrying no `data`, also reports a vault-key rotation in flight, another import for this account already running, and an item an update targeted having been modified or removed mid-request. Under `skip` and `overwrite`, re-running the import is safe: the client re-resolves against the current vault and sends only what is left. Under `keep_both` nothing is ever matched, so a re-run inserts the rows that already landed a second time.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3400,6 +3487,9 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          409: staleVaultKeyConflict(
+            'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },

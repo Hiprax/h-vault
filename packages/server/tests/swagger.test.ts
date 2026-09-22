@@ -2,7 +2,18 @@ import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type winston from 'winston';
 import request from 'supertest';
-import { APP_VERSION } from '@hvault/shared';
+import { z } from 'zod';
+import * as sharedSchemas from '@hvault/shared';
+import {
+  APP_VERSION,
+  changePasswordSchema,
+  createFolderSchema,
+  createVaultItemSchema,
+  importSchema,
+  restoreBackupSchema,
+  updateFolderSchema,
+  updateVaultItemSchema,
+} from '@hvault/shared';
 import app from '../src/app.js';
 import { swaggerSpec } from '../src/config/swagger.js';
 import { warnIfSwaggerEnabledInProduction } from '../src/utils/swaggerWarning.js';
@@ -497,6 +508,199 @@ describe('API Documentation', () => {
         }
       }
       expect(bare).toEqual([]);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // The vault-key-version contract
+  // ──────────────────────────────────────────────────────────────────────────
+
+  describe('the writes guarded by a vault key version', () => {
+    /**
+     * Every write whose request body may name the vault-key generation it sealed
+     * its ciphertext under, mapped to the two places this document has to say so:
+     * the request component, and the operation's `409`.
+     *
+     * The table is checked in BOTH directions, never against a count. Direction
+     * one: each row's component declares the property and each row's operation
+     * declares the recoverable `409`. Direction two: any shared schema that grows
+     * an optional `vaultKeyVersion`, and any request component that documents
+     * one, must appear here — which is what turns "somebody guarded an eighth
+     * endpoint and forgot the document" from a silent omission into a red test.
+     *
+     * A count would pass on a row swapped for another, and a one-directional
+     * check would pass on the case that actually happens: the guard landing in a
+     * controller while the published contract still says the endpoint cannot
+     * answer 409.
+     */
+    const GUARDED_WRITES: {
+      schemaName: string;
+      schema: { shape: Record<string, z.ZodType> };
+      component: string;
+      route: string;
+      method: 'post' | 'put';
+    }[] = [
+      {
+        schemaName: 'changePasswordSchema',
+        schema: changePasswordSchema,
+        component: 'ChangePasswordRequest',
+        route: '/user/change-password',
+        method: 'put',
+      },
+      {
+        schemaName: 'createVaultItemSchema',
+        schema: createVaultItemSchema,
+        component: 'CreateVaultItemRequest',
+        route: '/vault/items',
+        method: 'post',
+      },
+      {
+        schemaName: 'updateVaultItemSchema',
+        schema: updateVaultItemSchema,
+        component: 'UpdateVaultItemRequest',
+        route: '/vault/items/{id}',
+        method: 'put',
+      },
+      {
+        schemaName: 'createFolderSchema',
+        schema: createFolderSchema,
+        component: 'CreateFolderRequest',
+        route: '/folders',
+        method: 'post',
+      },
+      {
+        schemaName: 'updateFolderSchema',
+        schema: updateFolderSchema,
+        component: 'UpdateFolderRequest',
+        route: '/folders/{id}',
+        method: 'put',
+      },
+      {
+        schemaName: 'importSchema',
+        schema: importSchema,
+        component: 'ImportRequest',
+        route: '/tools/import',
+        method: 'post',
+      },
+      {
+        schemaName: 'restoreBackupSchema',
+        schema: restoreBackupSchema,
+        component: 'RestoreBackupRequest',
+        route: '/backup/restore',
+        method: 'post',
+      },
+    ];
+
+    const components = swaggerSpec.components as {
+      schemas: Record<string, { properties?: Record<string, unknown>; required?: string[] }>;
+    };
+    const paths = swaggerSpec.paths as Record<
+      string,
+      Record<string, { responses?: Record<string, unknown> }>
+    >;
+
+    /** True when a shape entry accepts an absent value, i.e. it is `.optional()`. */
+    const isOptional = (schema: z.ZodType): boolean => schema.safeParse(undefined).success;
+
+    it.each(GUARDED_WRITES)(
+      '$schemaName accepts the generation, and $component documents it as OPTIONAL',
+      ({ schema, component }) => {
+        expect(isOptional(schema.shape.vaultKeyVersion!)).toBe(true);
+
+        const documented = components.schemas[component]?.properties?.vaultKeyVersion as
+          { type?: unknown; minimum?: unknown } | undefined;
+        expect(documented).toBeDefined();
+        expect(documented?.type).toBe('integer');
+        expect(documented?.minimum).toBe(0);
+
+        // The half that carries the compatibility argument. Listing it as
+        // required would be a breaking request-schema change, which is the whole
+        // reason the field is optional and the server fails closed instead.
+        expect(components.schemas[component]?.required ?? []).not.toContain('vaultKeyVersion');
+      },
+    );
+
+    it.each(GUARDED_WRITES)(
+      '$method $route documents the recoverable 409 with the number in `data`',
+      ({ route, method }) => {
+        const conflict = paths[route]?.[method]?.responses?.['409'] as
+          | {
+              description?: unknown;
+              content?: {
+                'application/json'?: {
+                  schema?: { properties?: { data?: { properties?: Record<string, unknown> } } };
+                };
+              };
+            }
+          | undefined;
+
+        expect(conflict).toBeDefined();
+        // A bare `409: { description }` is the shape that leaves the client with
+        // prose it cannot act on; the number is what makes the refusal cost one
+        // retried request instead of a profile round trip first.
+        expect(
+          conflict?.content?.['application/json']?.schema?.properties?.data?.properties,
+        ).toHaveProperty('vaultKeyVersion');
+        expect(String(conflict?.description)).toContain('data.vaultKeyVersion');
+      },
+    );
+
+    it('documents the generation on every request component that can carry one, and no other', () => {
+      // Direction two, swagger side: a component that advertises the field for an
+      // endpoint whose schema does not accept it tells a client to send something
+      // the server strips, and the client then believes it is protected.
+      //
+      // Scoped to the OPTIONAL carriers, mirroring the schema-side rule below.
+      // `CompleteDocumentUploadRequest` demands the generation outright — it is a
+      // newer contract with no compatibility debt — and is documented with the
+      // document-store operations, so its presence here would be a false match
+      // rather than a finding.
+      const expected = GUARDED_WRITES.map((write) => write.component).sort();
+      const documented = Object.entries(components.schemas)
+        .filter(
+          ([name, schema]) =>
+            name.endsWith('Request') &&
+            schema.properties?.vaultKeyVersion !== undefined &&
+            !(schema.required ?? []).includes('vaultKeyVersion'),
+        )
+        .map(([name]) => name)
+        .sort();
+
+      expect(documented).toEqual(expected);
+    });
+
+    it('still demands the generation outright on a document completion', () => {
+      // The companion half of the carve-out above: if that contract ever relaxed
+      // to optional, the exclusion would start hiding a real omission instead of
+      // a deliberate difference, and this is what says so.
+      const complete = components.schemas.CompleteDocumentUploadRequest;
+
+      expect(complete?.properties?.vaultKeyVersion).toBeDefined();
+      expect(complete?.required ?? []).toContain('vaultKeyVersion');
+    });
+
+    it('lists every shared write schema that carries an optional generation', () => {
+      // Direction two, schema side. This is the one that catches the omission
+      // that matters: a later change adds the field to an eighth write envelope,
+      // wires the guard, and the published contract still says that endpoint
+      // cannot answer 409. Enumerating the shared package rather than restating
+      // the list is what makes it unmissable.
+      //
+      // A REQUIRED `vaultKeyVersion` is deliberately not in scope here:
+      // `completeDocumentUploadSchema` demands one outright (a newer contract
+      // with no compatibility debt) and the document response schemas report one,
+      // and all three are documented with the document-store operations.
+      const carriers = Object.entries(sharedSchemas)
+        .filter(([, value]) => {
+          if (!(value instanceof z.ZodType) || !('shape' in value)) return false;
+          const { vaultKeyVersion } = (value as { shape: Record<string, z.ZodType | undefined> })
+            .shape;
+          return vaultKeyVersion !== undefined && isOptional(vaultKeyVersion);
+        })
+        .map(([name]) => name)
+        .sort();
+
+      expect(carriers).toEqual(GUARDED_WRITES.map((write) => write.schemaName).sort());
     });
   });
 

@@ -1,8 +1,11 @@
 import type { Request } from 'express';
-import { httpErrors } from '@hiprax/errors';
+import { ErrorHandler, httpErrors } from '@hiprax/errors';
 import { User } from '../models/User.js';
 import { Folder } from '../models/Folder.js';
 import { JobLock } from '../models/JobLock.js';
+import { createModuleLogger } from './logger.js';
+
+const logger = createModuleLogger('controller-helpers');
 
 /**
  * Maximum length, in characters, for any persisted `userAgent` value across
@@ -349,4 +352,230 @@ export function getRequestContext(req: Request): { ip: string; userAgent: string
  */
 export function vaultKeyVersionOf(user: { vaultKeyVersion?: number | undefined } | null): number {
   return user?.vaultKeyVersion ?? 0;
+}
+
+/**
+ * Why a write derived from the vault key was refused. Three answers, because
+ * they are three different faults and only one of them is a rotation.
+ */
+type StaleVaultKeyReason =
+  /** The caller named a generation BEHIND the account's: a rotation has committed. */
+  | 'rotated'
+  /** The caller named a generation AHEAD of the account's: bookkeeping fault or a forged body. */
+  | 'unreached'
+  /** The caller named no generation at all, on an account that has rotated at least once. */
+  | 'unnamed';
+
+const STALE_VAULT_KEY_MESSAGES: Record<StaleVaultKeyReason, (current: number) => string> = {
+  rotated: (current) =>
+    'The vault key was rotated elsewhere. Reload to pick up vault key version ' +
+    `${String(current)}, then retry this change.`,
+  unreached: (current) =>
+    'This request reported a vault key version this account has never had. Reload to pick up ' +
+    `vault key version ${String(current)}, then retry this change.`,
+  unnamed: (current) =>
+    'This request did not say which vault key it used, and this account is on vault key version ' +
+    `${String(current)}. Reload the application and retry: an out-of-date client may be holding ` +
+    'a superseded vault key.',
+};
+
+/**
+ * The recoverable 409 {@link assertVaultKeyVersion} throws: this account's
+ * CURRENT vault-key generation, attached to an error.
+ *
+ * ## Why this is a class and not `httpErrors.conflict()`
+ *
+ * The client needs the NUMBER. `@hiprax/errors`'s response envelope is flat —
+ * `createErrorMiddleware` builds `{ success, message, statusCode, statusText }`
+ * and discards every other property of the error it was handed — so a thrown
+ * `httpErrors.conflict('…')` can only ever put the generation in prose, and a
+ * client cannot act on prose. That is the same wall
+ * `documentController.completeUpload` hit, which is why its 409 is written with
+ * a bare `res.status(409).json(...)` rather than thrown; see the comment there.
+ *
+ * ## It fails SAFE when nobody catches it
+ *
+ * It extends `ErrorHandler` with `statusCode: 409`, and
+ * `handleCommonErrors`'s default branch preserves `err.statusCode`. So a
+ * handler that throws this and does NOT catch it still refuses the write with a
+ * 409 — it just loses the number, costing the client a profile re-read it could
+ * have been given. The failure mode of forgetting to catch is therefore a
+ * slower recovery, never an accepted stale-key write.
+ *
+ * ## Rendering it is the CALLER's job, deliberately
+ *
+ * A caller that wants the recoverable body catches this and answers
+ * `{ success: false, message: error.message, data: { vaultKeyVersion } }`,
+ * which is byte-for-byte the shape `completeUpload` already emits and the shape
+ * `swagger.ts` documents. It is not rendered here because the remedy sentence
+ * differs per endpoint (rewrap and retry one request, versus reload and
+ * re-drive a whole import), and because an error-rendering middleware keyed on
+ * this class would put a second, silent answer in front of the one the error
+ * middleware already gives.
+ */
+export class StaleVaultKeyError extends ErrorHandler {
+  /** The account's CURRENT generation — what the client must rewrap under. */
+  readonly vaultKeyVersion: number;
+
+  /** Which of the three faults this is. Do not branch on the message. */
+  readonly reason: StaleVaultKeyReason;
+
+  constructor(vaultKeyVersion: number, reason: StaleVaultKeyReason) {
+    super(STALE_VAULT_KEY_MESSAGES[reason](vaultKeyVersion), 409);
+    this.name = 'StaleVaultKeyError';
+    this.vaultKeyVersion = vaultKeyVersion;
+    this.reason = reason;
+  }
+}
+
+/**
+ * Refuses a write that seals NEW ciphertext under a vault key the account has
+ * already replaced, and returns the account's current generation.
+ *
+ * ## The defect this exists for
+ *
+ * {@link assertVaultNotRotating} catches a rotation that is IN PROGRESS: its
+ * flag is raised before `bulkReEncrypt` enumerates, so a row written inside
+ * that window is one the new key will not cover. It cannot catch a rotation
+ * that has already COMMITTED, because the flag is cleared by then — and a
+ * second session holding the superseded key is at its most dangerous precisely
+ * then, since it can still decrypt, still encrypt, and has no way to notice.
+ * `User.vaultKeyVersion` is `$inc`ed exactly once per completed rotation, so
+ * comparing the caller's claim against it closes the half of the window the
+ * fence cannot see. The two are peers and neither replaces the other; every
+ * guarded handler wants both.
+ *
+ * ## The four branches, and why the third one is the whole point
+ *
+ * | `supplied`            | account's `vaultKeyVersion` | outcome |
+ * | --------------------- | --------------------------- | ------- |
+ * | equal to current      | anything                    | allowed; returns current |
+ * | below current         | > 0                         | 409 `rotated` |
+ * | above current         | anything                    | 409 `unreached`, logged |
+ * | `undefined`           | **> 0**                     | 409 `unnamed` — FAIL CLOSED |
+ * | `undefined`           | 0                           | allowed; returns 0 |
+ *
+ * The field is OPTIONAL on the wire because making it required would be a
+ * breaking request-schema change that no MAJOR bump accounts for
+ * (`audit:openapi` runs `oasdiff breaking --fail-on WARN`). Optional on the
+ * wire is NOT optional in effect: a caller that cannot name a generation is a
+ * caller that may be holding a superseded key, so the omission is refused for
+ * every account that has ever rotated. What the compatibility branch still
+ * serves is exactly the set of accounts for which the defect is impossible — an
+ * account at generation 0 has never rotated, so there is no superseded key for
+ * anyone to be holding. Widening that branch to "allow whenever the field is
+ * absent" would reinstate the total-loss path for every rotated account, which
+ * is the one thing this helper is for.
+ *
+ * A generation ABOVE the current one is named separately even though the
+ * equality check below would refuse it anyway, for the reason
+ * `documentController.completeUpload` states at length: the number in a request
+ * body is the client's own record of which key it holds, never an echo of
+ * something this server said, and no honest client can hold a generation the
+ * account has never reached. It is answered with the same recoverable refusal
+ * rather than a 400 because what matters is that nothing was committed, and
+ * handing back the real number lets a confused client recover instead of
+ * wedging.
+ *
+ * ## What it deliberately does NOT do
+ *
+ * It is a guard, not an existence check. A `userId` with no row yields 0 —
+ * `vaultKeyVersionOf`'s documented answer for an absent value, and the same
+ * answer {@link assertVaultNotRotating} gives (`user?.rotationInProgress`
+ * passes for a missing user). Passport has already proved the account exists
+ * and is verified on every authenticated request, and the write that follows
+ * carries its own `_id` filter, so there is nothing here for a 404 to protect.
+ *
+ * It also does not make the check atomic with the write. The returned number is
+ * what a caller puts in the write's own filter, via
+ * {@link vaultKeyVersionFilter} — `User.updateOne({ _id, vaultKeyVersion:`
+ * `vaultKeyVersionFilter(resolved) }, …)` — so that a rotation committing
+ * between this read and that write matches nothing instead of clobbering. Use
+ * that helper and not a bare `vaultKeyVersion: resolved`; the reason is in its
+ * own docblock and it is not cosmetic. A caller whose write cannot carry such a
+ * filter takes {@link vaultRotationLockName} across the span instead.
+ *
+ * @param userId The authenticated caller, from {@link getUserId}.
+ * @param supplied The generation the caller claims, or `undefined` when the
+ *   request did not carry one.
+ * @returns The account's current `vaultKeyVersion`.
+ * @throws {StaleVaultKeyError} 409, carrying the current generation.
+ */
+export async function assertVaultKeyVersion(
+  userId: string,
+  supplied: number | undefined,
+): Promise<number> {
+  const user = await User.findById(userId).select('vaultKeyVersion').lean();
+  const current = vaultKeyVersionOf(user);
+
+  if (supplied === undefined) {
+    if (current > 0) {
+      // NOT logged, unlike `unreached` below, and the asymmetry is deliberate.
+      // This one is reached by an out-of-date but HONEST client on every write it
+      // attempts, so logging it would emit a line per keystroke-driven save for
+      // as long as that tab stays open; `unreached` cannot be produced by any
+      // honest client at all, which is why that one is worth saying out loud.
+      // The refusal itself is what tells the user, and it tells them to reload.
+      throw new StaleVaultKeyError(current, 'unnamed');
+    }
+    return current;
+  }
+
+  if (supplied > current) {
+    logger.warn('A write claimed a vault key version this account has never reached', {
+      userId,
+      claimed: supplied,
+      current,
+    });
+    throw new StaleVaultKeyError(current, 'unreached');
+  }
+
+  if (supplied !== current) {
+    throw new StaleVaultKeyError(current, 'rotated');
+  }
+
+  return current;
+}
+
+/**
+ * The `vaultKeyVersion` predicate a guarded write puts in its OWN filter, so the
+ * check {@link assertVaultKeyVersion} made cannot be undone by a rotation that
+ * commits in between.
+ *
+ * ## Why this is a function and not the number
+ *
+ * `User.vaultKeyVersion` is `default: 0` on the schema, so every account created
+ * through Mongoose has a 0 written for it — but there is no backfill migration
+ * (see the field's own comment in `models/User.ts`), so an account created
+ * before the column existed has NO value at all. Reading that is safe:
+ * {@link vaultKeyVersionOf} maps it to 0, and `$inc` treats it as 0, which is
+ * why the model comment can say a legacy account is indistinguishable from one
+ * that has never rotated.
+ *
+ * As a WRITE FILTER it stops being indistinguishable, because MongoDB equality
+ * on `0` does not match a missing field. Measured against a real mongod, on a
+ * row whose column was removed with `$unset`:
+ *
+ * ```
+ * { vaultKeyVersion: 0 }               matchedCount 0   <-- the whole account bricked
+ * { vaultKeyVersion: { $in: [0, null] } }  matchedCount 1
+ * ```
+ *
+ * A bare `vaultKeyVersion: resolved` therefore matches nothing on a legacy
+ * account, and a caller that reads `matchedCount === 0` as the recoverable 409
+ * tells that user to reload and retry — forever, because there is no newer
+ * generation for them to rewrap under. On `PUT /user/change-password` that is a
+ * master password which can never be changed again.
+ *
+ * `null` inside `$in` matches a null value AND a missing field, which is the
+ * same idiom `buildFolderAwareUpdate` relies on for an unfiled row. It is only
+ * needed at generation 0 — every later generation was written by an `$inc`, so
+ * the field provably exists — and it must NOT be widened to every generation,
+ * because `{ $in: [3, null] }` would match a legacy row as though it were at
+ * generation 3.
+ */
+export function vaultKeyVersionFilter(
+  vaultKeyVersion: number,
+): number | { $in: (number | null)[] } {
+  return vaultKeyVersion === 0 ? { $in: [0, null] } : vaultKeyVersion;
 }

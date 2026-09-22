@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { objectIdSchema, paginationSchema } from './common.js';
+import { objectIdSchema, optionalVaultKeyVersionSchema, paginationSchema } from './common.js';
 import { documentKeyRewrapSchema } from './document.js';
 import {
   ITEM_TYPES,
@@ -60,6 +60,9 @@ export const createVaultItemSchema = z.object({
     .string()
     .regex(/^[a-f0-9]{64}$/)
     .optional(),
+  // The vault-key generation the six ciphertext fields above were sealed under.
+  // See `optionalVaultKeyVersionSchema`.
+  vaultKeyVersion: optionalVaultKeyVersionSchema,
 });
 
 export const updateVaultItemSchema = z
@@ -89,6 +92,9 @@ export const updateVaultItemSchema = z
       )
       .max(PASSWORD_HISTORY_MAX)
       .optional(),
+    // The vault-key generation any ciphertext in this update was sealed under.
+    // See `optionalVaultKeyVersionSchema`.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   .refine(
     (data) => {

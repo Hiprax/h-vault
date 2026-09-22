@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { objectIdSchema } from './common.js';
+import { objectIdSchema, optionalVaultKeyVersionSchema } from './common.js';
 import { MAX_ENCRYPTED_NAME_LENGTH, MAX_SORT_ORDER } from '../constants/index.js';
 
 // NOTE: Folder nesting depth (MAX_FOLDER_NESTING_DEPTH) is enforced server-side
@@ -26,6 +26,9 @@ export const createFolderSchema = z.object({
     .regex(/^#[0-9a-fA-F]{6}$/, 'Color must be a valid hex color code (e.g. #ff0000)')
     .optional(),
   sortOrder: z.number().int().min(0).max(MAX_SORT_ORDER).default(0),
+  // The vault-key generation `encryptedName` was sealed under. See
+  // `optionalVaultKeyVersionSchema`.
+  vaultKeyVersion: optionalVaultKeyVersionSchema,
 });
 
 export const updateFolderSchema = z
@@ -51,6 +54,9 @@ export const updateFolderSchema = z
       .regex(/^#[0-9a-fA-F]{6}$/, 'Color must be a valid hex color code (e.g. #ff0000)')
       .optional(),
     sortOrder: z.number().int().min(0).max(MAX_SORT_ORDER).optional(),
+    // The vault-key generation any ciphertext in this update was sealed under.
+    // See `optionalVaultKeyVersionSchema`.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   .refine(
     (data) => {
