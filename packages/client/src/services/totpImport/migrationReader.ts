@@ -25,7 +25,7 @@
  *                        OtpType type = 6; int64 counter = 7 }
  *
  * ---------------------------------------------------------------------------
- * FIVE RULES THAT ARE NOT NEGOTIABLE
+ * SIX RULES THAT ARE NOT NEGOTIABLE
  * ---------------------------------------------------------------------------
  *
  *  1. AN UNKNOWN ENUM VALUE REJECTS THE ENTRY; IT NEVER FALLS BACK. Defaulting
@@ -49,6 +49,18 @@
  *     reader does not, because Google Authenticator never emits duplicates and a
  *     repeated `secret` is the classic shape of a parser-differential attack,
  *     where two readers of the same bytes disagree about what they say.
+ *  6. A TAG IS A 32-BIT VALUE, AND FIELD NUMBER 0 DOES NOT EXIST. Protobuf
+ *     encodes a tag as a uint32 varint, so field numbers run from 1 to 2^29 - 1.
+ *     A varint can be wider than that, and readers do not agree on what a wider
+ *     tag means: one that keeps its low 32 bits reads tag 2^32 + 10 as field 1,
+ *     `otp_parameters`, while one that does not sees a field number the format
+ *     does not allow. That is rule 5's differential again, and this reader
+ *     refuses. Field 0 is what any tag below 8 decodes to,
+ *     and no encoder emits it. The implementation-reserved range 19000-19999 is
+ *     NOT refused: it is reserved from .proto DECLARATIONS, so on the wire it is
+ *     an unknown field like any other, and it is skipped like one. A tag spelled
+ *     in more bytes than it needs is also read, not refused: its value is not in
+ *     doubt, so it cannot make two readers disagree about which field it is.
  */
 
 /** The longest `otpauth-migration://` URI this will consider. */
@@ -59,8 +71,20 @@ export const MAX_MIGRATION_PAYLOAD_BYTES = 4096;
 export const MAX_OTP_PARAMETERS = 64;
 /** Anti-spin: a payload made of thousands of empty unknown fields stops here. */
 const MAX_FIELDS_PER_MESSAGE = 256;
-/** A 64-bit varint is at most ten bytes. An eleventh is malformed. */
+/**
+ * A 64-bit varint is at most ten bytes. An eleventh is malformed, and so is a
+ * tenth carrying more than bit 63: ten bytes hold seventy bits, and the six
+ * above 64 are refused rather than kept, since one reader keeps them, another
+ * wraps them away and a third refuses.
+ */
 const MAX_VARINT_BYTES = 10;
+/** The most the tenth byte of a 64-bit varint may hold: bit 63, and nothing above. */
+const MAX_FINAL_VARINT_BYTE = 0x01;
+/**
+ * The largest tag protobuf can express: field 2^29 - 1, wire type 7. A tag is a
+ * uint32 on the wire, and anything above this is refused; see rule 6.
+ */
+const MAX_TAG = 0xffff_ffffn;
 const MIN_SECRET_BYTES = 1;
 /** 128 bytes bounds the base32 form at 205 characters. */
 export const MAX_SECRET_BYTES = 128;
@@ -168,14 +192,17 @@ class Cursor {
   varint(): bigint {
     let value = 0n;
     let shift = 0n;
-    for (let read = 0; read < MAX_VARINT_BYTES; read += 1) {
+    for (let read = 1; read < MAX_VARINT_BYTES; read += 1) {
       const byte = this.byte();
       value |= BigInt(byte & 0x7f) << shift;
       if ((byte & 0x80) === 0) return value;
       shift += 7n;
     }
-    // An eleventh continuation byte cannot describe a 64-bit value.
-    throw MALFORMED();
+    // The tenth byte may carry bit 63 and nothing else. That also refuses a
+    // continuation bit here, since an eleventh byte cannot describe 64 bits.
+    const last = this.byte();
+    if (last > MAX_FINAL_VARINT_BYTE) throw MALFORMED();
+    return value | (BigInt(last) << shift);
   }
 
   slice(length: number): Uint8Array {
@@ -227,7 +254,11 @@ function skipField(cursor: Cursor, wireType: number): void {
  *     for on a message whose own length says nothing about how many fields it
  *     holds.
  *  2. The tag decode. A wrong shift or mask here does not fail, it silently
- *     reads a different field than the one on the wire.
+ *     reads a different field than the one on the wire. So the tag is bounded
+ *     to 32 bits and split with `bigint` shifts, never with `>>>` and `&` on a
+ *     `number`: those coerce to 32 bits FIRST, which is precisely how tag
+ *     2^32 + 10 used to be read as field 1 (rule 6). Field 0 is refused here too,
+ *     so neither message can meet it.
  *  3. STRUCTURAL TERMINATION: every iteration must strictly advance the cursor.
  *     This is what makes the walk finite whatever `visit` did, including a
  *     `skipField` over an unknown field, and it holds without either caller
@@ -243,8 +274,11 @@ function eachField(cursor: Cursor, visit: (fieldNumber: number, wireType: number
   while (!cursor.done) {
     if ((fields += 1) > MAX_FIELDS_PER_MESSAGE) throw MALFORMED();
     const before = cursor.offset;
-    const tag = toSafeInt(cursor.varint());
-    visit(tag >>> 3, tag & 0x07);
+    const tag = cursor.varint();
+    if (tag > MAX_TAG) throw MALFORMED();
+    const fieldNumber = Number(tag >> 3n);
+    if (fieldNumber === 0) throw MALFORMED();
+    visit(fieldNumber, Number(tag & 0x07n));
     if (cursor.offset <= before) throw MALFORMED();
   }
 }

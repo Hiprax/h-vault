@@ -6,7 +6,14 @@ import {
   MigrationParseError,
   readMigrationPayload,
 } from '../../src/services/totpImport/migrationReader';
-import { encodeEntry, encodePayload, sampleSecret, tag, varint } from '../support/migrationEncoder';
+import {
+  bigTag,
+  encodeEntry,
+  encodePayload,
+  sampleSecret,
+  tag,
+  varint,
+} from '../support/migrationEncoder';
 
 /**
  * Every rejection here is a decision recorded in the reader's header, and each
@@ -190,6 +197,26 @@ describe('readMigrationPayload, refusals', () => {
     expect(reasonFor(eleven)).toBe('malformed');
   });
 
+  it('refuses a ten-byte varint wider than 64 bits instead of keeping the excess', () => {
+    // Ten bytes carry seventy bits, and only the lowest of the tenth byte's
+    // seven belongs to a 64-bit value. Kept, the rest made a counter no 64-bit
+    // reader could hold: one reader refuses it and another wraps it modulo
+    // 2^64, which is two readers disagreeing about the same account's key state.
+    const overflow = [...Array<number>(9).fill(0xff), 0x7f];
+    const body = [...encodeEntry({ secret: sampleSecret(), type: 1 }), ...tag(7, 0), ...overflow];
+    const bytes = Uint8Array.from([...tag(1, 2), ...varint(body.length), ...body]);
+    expect(reasonFor(bytes)).toBe('malformed');
+  });
+
+  it('still reads the widest 64-bit varint, whose tenth byte is 1', () => {
+    // The boundary on the other side: 2^64 - 1 is ten bytes ending in 0x01.
+    expect(varint(2n ** 64n - 1n).at(-1)).toBe(0x01);
+    const payload = readMigrationPayload(
+      encodePayload({ entries: [{ secret: sampleSecret(), type: 1, counter: 2n ** 64n - 1n }] }),
+    );
+    expect(payload.entries[0]?.counter).toBe('18446744073709551615');
+  });
+
   it('refuses a length that runs past the end of the message', () => {
     const bytes = Uint8Array.from([...tag(1, 2), ...varint(200), 1, 2, 3]);
     expect(reasonFor(bytes)).toBe('malformed');
@@ -295,12 +322,182 @@ describe('every modelled field is pinned to its wire type and to one occurrence'
     expect(reasonFor(bytes)).toBe('malformed');
   });
 
-  it('refuses a length or tag too large to be a safe integer', () => {
+  it('refuses a length too large to be a safe integer', () => {
     // A ten-byte varint is legal on the wire and cannot be a length this reader
-    // could act on.
-    const huge = Uint8Array.from([...tag(1, 2), ...Array<number>(9).fill(0xff), 0x7f]);
+    // could act on. 2^64 - 1, the widest value a 64-bit varint carries, so the
+    // refusal is the safe-integer bound's rather than the varint's own.
+    const huge = Uint8Array.from([...tag(1, 2), ...Array<number>(9).fill(0xff), 0x01]);
     expect(reasonFor(huge)).toBe('malformed');
   });
+});
+
+describe('a tag is a 32-bit value, and field number 0 does not exist', () => {
+  /**
+   * The one fixed sentence every malformed payload gets. Asserted verbatim, not
+   * merely by code: rule 4 of the reader's header is that no error carries any
+   * part of the input, and an assertion on the code alone would still pass if a
+   * refusal here started quoting the tag it refused.
+   */
+  const MALFORMED_MESSAGE = 'That code is not a readable Google Authenticator export.';
+
+  /** Protobuf's largest field number, 2^29 - 1: the one whose tags fill 32 bits. */
+  const MAX_FIELD_NUMBER = 2n ** 29n - 1n;
+
+  /**
+   * Field 2^29 + 1 on the wire, whose tag is 2^32 + ((1 << 3) | 2). A reader
+   * that takes the low 32 bits of the tag sees field 1, `otp_parameters`; the
+   * field on the wire is one no conforming reader models.
+   */
+  const ALIASES_FIELD_ONE = 2n ** 29n + 1n;
+
+  function refusal(bytes: Uint8Array): { code: string; message: string } {
+    try {
+      readMigrationPayload(bytes);
+    } catch (error) {
+      if (error instanceof MigrationParseError) return { code: error.code, message: error.message };
+      return { code: `unexpected:${String(error)}`, message: '' };
+    }
+    return { code: 'no-error', message: '' };
+  }
+
+  function wrapEntry(body: readonly number[]): number[] {
+    return [...tag(1, 2), ...varint(body.length), ...body];
+  }
+
+  const honestEntry = encodeEntry({ secret: sampleSecret(1), name: 'honest' });
+  const hiddenEntry = encodeEntry({ secret: sampleSecret(2), name: 'hidden' });
+
+  it('the fixtures below are well formed, so each refusal is about its tag alone', () => {
+    // The control for every case in this block: the same bytes under an honest
+    // tag read cleanly. Without it, a refusal could be blamed on the body.
+    const payload = readMigrationPayload(
+      Uint8Array.from([...wrapEntry(honestEntry), ...wrapEntry(hiddenEntry)]),
+    );
+    expect(payload.entries.map((entry) => entry.name)).toEqual(['honest', 'hidden']);
+  });
+
+  it('refuses a top-level tag above 2^32 instead of reading it as otp_parameters', () => {
+    const bytes = Uint8Array.from([
+      ...bigTag(ALIASES_FIELD_ONE, 2),
+      ...varint(hiddenEntry.length),
+      ...hiddenEntry,
+    ]);
+    // A reader that skipped it would say 'no-entries'; one that aliased it
+    // would import the account. Only a refusal of the whole payload is right.
+    expect(refusal(bytes)).toEqual({ code: 'malformed', message: MALFORMED_MESSAGE });
+  });
+
+  it('refuses the aliased entry even behind an honest one, so nothing is imported', () => {
+    // The shape an attack would take: a payload that looks ordinary to every
+    // reader except one, which also sees the hidden account.
+    const bytes = Uint8Array.from([
+      ...wrapEntry(honestEntry),
+      ...bigTag(ALIASES_FIELD_ONE, 2),
+      ...varint(hiddenEntry.length),
+      ...hiddenEntry,
+    ]);
+    expect(refusal(bytes)).toEqual({ code: 'malformed', message: MALFORMED_MESSAGE });
+  });
+
+  it('refuses the same aliasing inside an account, where it would supply the secret', () => {
+    // Field 2^29 + 1 inside OtpParameters aliases onto field 1, `secret`.
+    const secret = sampleSecret(3);
+    const body = [
+      ...bigTag(ALIASES_FIELD_ONE, 2),
+      ...varint(secret.length),
+      ...secret,
+      ...tag(2, 2),
+      ...varint(1),
+      0x61,
+    ];
+    expect(refusal(Uint8Array.from(wrapEntry(body)))).toEqual({
+      code: 'malformed',
+      message: MALFORMED_MESSAGE,
+    });
+  });
+
+  it.each([
+    ['length-delimited', 2, [...varint(3), 1, 2, 3]],
+    ['varint', 0, varint(7)],
+  ])('refuses field number 0 (%s) at the top level', (_label, wireType, body) => {
+    // Protobuf reserves field 0: no encoder emits it, so a message carrying one
+    // was not written by anything this reader should trust.
+    const bytes = Uint8Array.from([...wrapEntry(honestEntry), ...tag(0, wireType), ...body]);
+    expect(refusal(bytes)).toEqual({ code: 'malformed', message: MALFORMED_MESSAGE });
+  });
+
+  it.each([
+    ['length-delimited', 2, [...varint(3), 1, 2, 3]],
+    ['varint', 0, varint(7)],
+  ])('refuses field number 0 (%s) inside an account', (_label, wireType, body) => {
+    const entry = [...honestEntry, ...tag(0, wireType), ...body];
+    expect(refusal(Uint8Array.from(wrapEntry(entry)))).toEqual({
+      code: 'malformed',
+      message: MALFORMED_MESSAGE,
+    });
+  });
+
+  it.each([
+    ['field 2^29, whose varint tag is exactly 2^32', 2n ** 29n, 0],
+    ['field 2^32 + 1', 2n ** 32n + 1n, 2],
+    ['a tag just above the largest safe integer', 2n ** 50n, 0],
+    ['a tag near 2^64, the largest a ten-byte varint carries here', 2n ** 61n - 1n, 0],
+  ])('refuses %s', (_label, fieldNumber, wireType) => {
+    // A length-delimited body is a whole account, so a reader that aliased the
+    // tag onto field 1 would import it rather than stumble over the body.
+    const body = wireType === 2 ? [...varint(hiddenEntry.length), ...hiddenEntry] : varint(1);
+    const bytes = Uint8Array.from([
+      ...wrapEntry(honestEntry),
+      ...bigTag(fieldNumber, wireType),
+      ...body,
+    ]);
+    expect(refusal(bytes)).toEqual({ code: 'malformed', message: MALFORMED_MESSAGE });
+  });
+
+  it.each([
+    ['length-delimited', 2, [...varint(2), 9, 9]],
+    ['varint', 0, varint(1)],
+    ['fixed 32-bit', 5, [1, 2, 3, 4]],
+  ])('still skips the largest legal field number (%s), which fills all 32 bits', (_l, w, body) => {
+    // The boundary itself: 2^29 - 1 is a field protobuf allows, so refusing it
+    // would refuse an export that is merely newer than this reader.
+    const bytes = Uint8Array.from([
+      ...wrapEntry(honestEntry),
+      ...bigTag(MAX_FIELD_NUMBER, w),
+      ...body,
+    ]);
+    const payload = readMigrationPayload(bytes);
+    expect(payload.entries.map((entry) => entry.name)).toEqual(['honest']);
+  });
+
+  it('lets the largest 32-bit tag through the bound, to be judged on its wire type', () => {
+    // 0xFFFFFFFF is field 2^29 - 1 with wire type 7. It must pass the tag bound
+    // and be refused for the wire type, which does not exist: a bound one lower
+    // would call it malformed instead, and would refuse legal tags beside it.
+    const bytes = Uint8Array.from([...wrapEntry(honestEntry), ...bigTag(MAX_FIELD_NUMBER, 7)]);
+    expect(varint(0xffff_ffff)).toEqual(bigTag(MAX_FIELD_NUMBER, 7));
+    expect(reasonFor(bytes)).toBe('unsupported-field');
+  });
+
+  it.each([19_000n, 19_500n, 19_999n])(
+    'skips field %s from the implementation-reserved range like any unknown field',
+    (fieldNumber) => {
+      // 19,000-19,999 are reserved for DECLARATIONS: a .proto file may not use
+      // them. On the wire they are unknown fields, which every reader skips, so
+      // there is no disagreement between readers to refuse.
+      const entry = [...honestEntry, ...tag(Number(fieldNumber), 0), ...varint(5)];
+      const bytes = Uint8Array.from([
+        ...wrapEntry(entry),
+        ...tag(Number(fieldNumber), 2),
+        ...varint(2),
+        9,
+        9,
+      ]);
+      const payload = readMigrationPayload(bytes);
+      expect(payload.entries.map((read) => read.name)).toEqual(['honest']);
+      expect([...(payload.entries[0]?.secret ?? [])]).toEqual([...sampleSecret(1)]);
+    },
+  );
 });
 
 describe('label handling', () => {

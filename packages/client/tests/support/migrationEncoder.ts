@@ -39,8 +39,27 @@ export function varint(value: number | bigint): number[] {
   return out;
 }
 
+/**
+ * A tag for ANY field number, as the raw varint of `(fieldNumber << 3) | wireType`
+ * computed in `bigint`.
+ *
+ * The shapes this exists for are the ones a real encoder can never produce: a
+ * field number of zero, one above protobuf's 2^29 - 1 ceiling, or one so large
+ * its tag no longer fits in 32 bits. JavaScript's `<<` and `|` work on 32-bit
+ * integers, so computing such a tag with them quietly yields a DIFFERENT, small
+ * tag, which is exactly the aliasing a test here has to be able to express.
+ */
+export function bigTag(fieldNumber: bigint, wireType: number): number[] {
+  if (fieldNumber < 0n) throw new Error('bigTag: negative field number');
+  if (!Number.isInteger(wireType) || wireType < 0 || wireType > 7) {
+    throw new Error('bigTag: a wire type is three bits');
+  }
+  return varint((fieldNumber << 3n) | BigInt(wireType));
+}
+
+/** The tag of an ordinary field. Exact for every field number, via {@link bigTag}. */
 export function tag(fieldNumber: number, wireType: number): number[] {
-  return varint((fieldNumber << 3) | wireType);
+  return bigTag(BigInt(fieldNumber), wireType);
 }
 
 function lengthDelimited(fieldNumber: number, bytes: ArrayLike<number>): number[] {

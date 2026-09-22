@@ -6,7 +6,7 @@
  * the two: the bytes it reads ARE secret keys, and the thing it produces is
  * offered to the user as a key to attach to an account.
  *
- * Five clauses, each of which can fail on its own:
+ * Seven clauses, each of which can fail on its own:
  *
  *   1. **Nothing untyped escapes.** `readMigrationPayload` returns a payload or
  *      throws `MigrationParseError`. A `RangeError` from a `DataView` read past
@@ -25,7 +25,22 @@
  *      state, so this is the property that keeps a hostile issuer from bricking
  *      an item the user attaches it to.
  *   5. **A round trip is lossless.** Encoded by the independent test encoder and
- *      read back, every field survives.
+ *      read back, every field survives, and an unknown field anywhere changes
+ *      nothing.
+ *   6. **A field number protobuf cannot express is refused, never aliased or
+ *      skipped.** A tag is a 32-bit value and field number 0 does not exist. A
+ *      tag at or above 2^32 used to be squeezed into 32 bits, so field 2^29 + 1
+ *      was read as field 1 and an account a reader following the format would
+ *      skip was imported. Refused with the one fixed message, whatever wire type
+ *      the tag claims, at the top level and inside an account.
+ *   7. **A second copy of a modelled field is refused**, whether it arrives
+ *      under its own tag or under one that aliases onto it.
+ *
+ * Clauses 5 and 6 only mean something if the generators can REACH the boundary
+ * between them, so the field numbers below are drawn from bands on BOTH sides of
+ * the 2^29 - 1 ceiling, from the implementation-reserved range, and from the
+ * band that aliases onto every modelled field, rather than from a small range
+ * that could never produce a tag wider than one byte.
  */
 import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
@@ -38,12 +53,115 @@ import { parseMigrationUri } from '../../src/services/totpImport/migrationUri';
 import { buildOtpauthUri, encodeBase32 } from '../../src/lib/totp';
 import { PROPERTY_RUNS, propertyBanner, propertyRun } from '../../../../tests/harness/property';
 import {
+  bigTag,
+  encodeEntry,
   encodeMigrationUri,
   encodePayload,
   tag,
   varint,
   type EncodableEntry,
 } from '../support/migrationEncoder';
+
+/** The reader's one fixed refusal. Compared verbatim: no message may vary with its input. */
+const MALFORMED_MESSAGE = 'That code is not a readable Google Authenticator export.';
+
+/** Protobuf's largest field number, 2^29 - 1: the one whose tags fill all 32 bits. */
+const MAX_FIELD_NUMBER = 2n ** 29n - 1n;
+
+/**
+ * Field numbers protobuf allows and neither message models (the payload models
+ * 1-5, an account 1-7). Three bands: the ordinary one, the 19000-19999 range the
+ * implementation reserves from DECLARATIONS (on the wire it is just unknown), and
+ * the top of the legal range, whose tags sit just under 2^32.
+ */
+const unknownFieldNumber: fc.Arbitrary<bigint> = fc.oneof(
+  fc.bigInt({ min: 20n, max: 100n }),
+  fc.bigInt({ min: 19_000n, max: 19_999n }),
+  fc.bigInt({ min: MAX_FIELD_NUMBER - 64n, max: MAX_FIELD_NUMBER }),
+);
+
+/**
+ * Field numbers no conforming encoder can put on the wire. Zero; the band just
+ * past the ceiling, whose tags sit just over 2^32; field numbers either side of
+ * 2^32 itself; `k * 2^29 + m`, which a 32-bit reader reads as modelled field
+ * `m`, the exact shape of the defect this module once had; and anything up to
+ * the widest tag a ten-byte varint carries.
+ */
+const invalidFieldNumber: fc.Arbitrary<bigint> = fc.oneof(
+  fc.constant(0n),
+  fc.bigInt({ min: 2n ** 29n, max: 2n ** 29n + 64n }),
+  fc.bigInt({ min: 2n ** 32n - 64n, max: 2n ** 32n + 64n }),
+  fc
+    .tuple(fc.bigInt({ min: 1n, max: 2n ** 32n - 1n }), fc.bigInt({ min: 1n, max: 7n }))
+    .map(([k, modelled]) => k * 2n ** 29n + modelled),
+  fc.bigInt({ min: 2n ** 29n, max: 2n ** 61n - 1n }),
+);
+
+/** The four wire types a reader can skip. Groups and 6/7 are refused elsewhere. */
+const skippableWireType = fc.constantFrom(0, 1, 2, 5);
+
+/** Every three-bit wire type, including the four no field may be skipped over. */
+const anyWireType = fc.integer({ min: 0, max: 7 });
+
+/**
+ * A well-formed body for `wireType`. The length-delimited one is a whole encoded
+ * account, so a reader that aliased its tag onto `otp_parameters` would import it
+ * rather than stumble over the body and refuse for the wrong reason.
+ */
+function bodyFor(wireType: number, account: readonly number[]): number[] {
+  switch (wireType) {
+    case 0:
+      return varint(1);
+    case 1:
+      return [1, 2, 3, 4, 5, 6, 7, 8];
+    case 2:
+      return [...varint(account.length), ...account];
+    default:
+      return [1, 2, 3, 4];
+  }
+}
+
+/** One `otp_parameters` field around an already-encoded account. */
+function wrapEntry(body: readonly number[]): number[] {
+  return [...tag(1, 2), ...varint(body.length), ...body];
+}
+
+/**
+ * A payload with one extra field, either after the account at the top level or
+ * as the account's own last field.
+ */
+function withExtraField(
+  account: readonly number[],
+  field: readonly number[],
+  inside: boolean,
+): Uint8Array {
+  return Uint8Array.from(
+    inside ? wrapEntry([...account, ...field]) : [...wrapEntry(account), ...field],
+  );
+}
+
+/**
+ * A run of fields under arbitrary tags, legal and not, each followed by a few
+ * arbitrary bytes. The reader must survive this the way it survives random
+ * bytes, but random bytes almost never spell a five-byte tag.
+ */
+const hostileTagBytes: fc.Arbitrary<Uint8Array> = fc
+  .array(
+    fc.tuple(
+      fc.oneof(unknownFieldNumber, invalidFieldNumber, fc.bigInt({ min: 1n, max: 7n })),
+      anyWireType,
+      fc.uint8Array({ maxLength: 12 }),
+    ),
+    { maxLength: 24 },
+  )
+  .map((fields) =>
+    Uint8Array.from(
+      fields.flatMap(([fieldNumber, wireType, body]) => [
+        ...bigTag(fieldNumber, wireType),
+        ...body,
+      ]),
+    ),
+  );
 
 /** Read, and report what came back, without letting anything untyped escape. */
 function attempt(bytes: Uint8Array): { ok: boolean; error: MigrationParseError | null } {
@@ -91,6 +209,7 @@ describe('the export reader is total over arbitrary bytes', () => {
       fc.constant(Uint8Array.from(Array<number>(300).flatMap(() => [...tag(1, 2), ...varint(0)]))),
       fc.constant(Uint8Array.from(Array<number>(200).flatMap(() => [...tag(64, 0), 0x00]))),
       anyBytes,
+      hostileTagBytes,
     );
     fc.assert(
       fc.property(hostile, (bytes) => {
@@ -107,7 +226,7 @@ describe('the export reader is total over arbitrary bytes', () => {
 
   it('never puts any part of the input into an error message', () => {
     fc.assert(
-      fc.property(anyBytes, (bytes) => {
+      fc.property(fc.oneof(anyBytes, hostileTagBytes), (bytes) => {
         const result = attempt(bytes);
         if (result.error === null) return;
         const message = `${result.error.message} ${String(result.error)}`;
@@ -174,22 +293,107 @@ describe('a round trip through the independent encoder loses nothing', () => {
 
   it('is unaffected by an unknown field appearing anywhere in the message', () => {
     // Google has added fields before. Refusing one would break this feature on a
-    // future release of the app it reads.
+    // future release of the app it reads, so this holds across every legal band,
+    // at the top level and inside an account, for every skippable wire type.
     fc.assert(
-      fc.property(anyEntry, fc.integer({ min: 20, max: 100 }), (entry, fieldNumber) => {
-        const base = encodePayload({ entries: [entry], batchSize: 1 });
-        const withUnknown = Uint8Array.from([
-          ...base,
-          ...tag(fieldNumber, 2),
-          ...varint(3),
-          1,
-          2,
-          3,
-        ]);
-        const plain = attempt(base);
-        const injected = attempt(withUnknown);
-        expect(injected.ok, propertyBanner()).toBe(plain.ok);
-      }),
+      fc.property(
+        anyEntry,
+        unknownFieldNumber,
+        skippableWireType,
+        fc.boolean(),
+        (entry, fieldNumber, wireType, inside) => {
+          const account = encodeEntry(entry);
+          const plain = Uint8Array.from(wrapEntry(account));
+          const field = [...bigTag(fieldNumber, wireType), ...bodyFor(wireType, account)];
+          const injected = withExtraField(account, field, inside);
+          const read = readMigrationPayload(injected);
+          // The same single account, and nothing the extra field carried.
+          expect(read.entries.length, propertyBanner()).toBe(1);
+          expect([...(read.entries[0]?.secret ?? [])], propertyBanner()).toEqual([
+            ...readMigrationPayload(plain).entries.flatMap((e) => [...e.secret]),
+          ]);
+        },
+      ),
+      propertyRun({ numRuns: PROPERTY_RUNS }),
+    );
+  });
+});
+
+describe('a field number protobuf cannot express is refused, never aliased or skipped', () => {
+  it('refuses it wherever it appears, with the one fixed message', () => {
+    fc.assert(
+      fc.property(
+        anyEntry,
+        invalidFieldNumber,
+        anyWireType,
+        fc.boolean(),
+        (entry, fieldNumber, wireType, inside) => {
+          const account = encodeEntry(entry);
+          // The control: without the extra field the payload reads, so the
+          // refusal below is about the tag and nothing else. Wire types 3, 4, 6
+          // and 7 are drawn too: the tag is judged BEFORE its wire type, so they
+          // are 'malformed' here and never 'unsupported-field'.
+          expect(attempt(Uint8Array.from(wrapEntry(account))).ok, propertyBanner()).toBe(true);
+          const field = [...bigTag(fieldNumber, wireType), ...bodyFor(wireType, account)];
+          const result = attempt(withExtraField(account, field, inside));
+          expect(result.ok, propertyBanner()).toBe(false);
+          expect(result.error?.code, propertyBanner()).toBe('malformed');
+          expect(result.error?.message, propertyBanner()).toBe(MALFORMED_MESSAGE);
+        },
+      ),
+      propertyRun({ numRuns: PROPERTY_RUNS }),
+    );
+  });
+
+  it('refuses a second copy of any modelled field, under its own tag or an aliasing one', () => {
+    // Rule 5 and rule 6 together: a duplicate is refused under the honest tag,
+    // and one sent under an aliasing tag never lands either. That second branch
+    // held before rule 6 existed too, because the alias arrived as a duplicate;
+    // the property that pins rule 6 itself is the one above.
+    const fullEntry: fc.Arbitrary<EncodableEntry> = fc.record({
+      secret: fc.uint8Array({ minLength: 1, maxLength: 64 }),
+      name: fc.string({ maxLength: 20 }),
+      issuer: fc.string({ maxLength: 20 }),
+      algorithm: fc.constantFrom(0, 1, 2, 3),
+      digits: fc.constantFrom(0, 1, 2),
+      type: fc.constantFrom(0, 1, 2),
+      counter: fc.bigInt({ min: 0n, max: 2n ** 63n }),
+    });
+    /** Each modelled account field: its key, its field number and its wire type. */
+    const modelled = [
+      { key: 'secret', fieldNumber: 1n, wireType: 2 },
+      { key: 'name', fieldNumber: 2n, wireType: 2 },
+      { key: 'issuer', fieldNumber: 3n, wireType: 2 },
+      { key: 'algorithm', fieldNumber: 4n, wireType: 0 },
+      { key: 'digits', fieldNumber: 5n, wireType: 0 },
+      { key: 'type', fieldNumber: 6n, wireType: 0 },
+      { key: 'counter', fieldNumber: 7n, wireType: 0 },
+    ] as const;
+    fc.assert(
+      fc.property(
+        fullEntry,
+        fullEntry,
+        fc.constantFrom(...modelled),
+        fc.option(fc.bigInt({ min: 1n, max: 2n ** 32n - 1n }), { nil: null }),
+        (first, second, field, alias) => {
+          const account = encodeEntry(first);
+          // The control: the account alone reads, so the refusal is the copy's.
+          expect(attempt(Uint8Array.from(wrapEntry(account))).ok, propertyBanner()).toBe(true);
+          // One field encoded alone: a one-byte tag, since every modelled field
+          // number is below 16, then its body.
+          const alone = encodeEntry({ [field.key]: second[field.key] });
+          const again =
+            alias === null
+              ? alone
+              : [
+                  ...bigTag(alias * 2n ** 29n + field.fieldNumber, field.wireType),
+                  ...alone.slice(1),
+                ];
+          const result = attempt(Uint8Array.from(wrapEntry([...account, ...again])));
+          expect(result.error?.code, propertyBanner()).toBe('malformed');
+          expect(result.error?.message, propertyBanner()).toBe(MALFORMED_MESSAGE);
+        },
+      ),
       propertyRun({ numRuns: PROPERTY_RUNS }),
     );
   });
