@@ -21,6 +21,7 @@ import { endScanSession } from '../services/totpImport/scanSession.js';
 import { logger } from '../lib/logger.js';
 import { decodeJwtPayload } from '../lib/accessToken.js';
 import { useVaultStore } from './vaultStore.js';
+import { useUIStore } from './uiStore.js';
 import { useDocumentsStore } from './documentsStore.js';
 import { isAxiosError } from 'axios';
 import type { SuccessfulLoginResponse } from '@hvault/shared';
@@ -682,6 +683,18 @@ export const useAuthStore = create<AuthState>()(
 
         // Clear decrypted vault data from the vault store
         useVaultStore.getState().clearStore();
+
+        // And the superseded-vault-key notice, which is DERIVED from the number
+        // above and cannot clear itself across an account switch. It compares the
+        // generation the server last refused a write with against
+        // `vaultKeyVersion`, and that self-clears on a re-login to the SAME
+        // account — the two land on the same number. A logout followed by a
+        // sign-in to a DIFFERENT account does not: the reset above puts this at
+        // generation 0 while the recorded number is whatever the previous account
+        // was on, so an undismissable "reload to continue" would sit over a
+        // session in which every save works. `lock()` deliberately does NOT do
+        // this: a lock keeps the session, and its key is still the superseded one.
+        useUIStore.getState().setStaleVaultKeyVersion(null);
 
         // Then zero the actual key material using the captured references
         if (vaultKey) {

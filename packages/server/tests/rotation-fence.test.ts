@@ -30,6 +30,14 @@ import {
 // 409 for the six ciphertext-creating handlers, and leaves the metadata-only
 // handlers (move / delete / restore / reorder) untouched.
 //
+// The fence covers only the window in which the rotation is RUNNING. Its peer,
+// `assertVaultKeyVersion`, covers the window after it has COMMITTED, when the
+// flag is down and a second session can still hold the superseded key
+// indefinitely; that guard is pinned in `stale-vault-key-writes.test.ts`. Every
+// request in THIS file therefore names no generation and runs against an
+// account that has never rotated, which is the compatibility branch — except
+// where a case below rotates for real and says so.
+//
 // The default harness (tests/setup.ts) is a STANDALONE mongodb-memory-server,
 // so the rotation exercises the sequential fallback here; the transaction
 // branch's flag lifecycle is asserted in vault-rotation-transaction.test.ts.
@@ -281,13 +289,30 @@ describe('Vault key rotation fence', () => {
       expect(rotated!.pendingVaultKeyTag).toBeUndefined();
       expect(rotated!.encryptedVaultKey).toBe('rotated-vault-key');
 
-      // With the fence lowered again, writes flow immediately.
+      // With the fence lowered again, a write flows immediately — PROVIDED it
+      // names the generation the rotation just minted. The fence and the
+      // generation guard are peers covering the two halves of the same window,
+      // and this is where they are told apart: the fence is down, so whatever
+      // refuses the second request below is not the fence.
+      expect(rotated!.vaultKeyVersion).toBe(1);
       const afterRotation = await mutate(
         'post',
         '/api/v1/vault/items',
-        sampleVaultItem({ encryptedName: 'after-rotation' }),
+        sampleVaultItem({ encryptedName: 'after-rotation', vaultKeyVersion: 1 }),
       );
       expect(afterRotation.status).toBe(201);
+
+      // And a write still naming the superseded generation is refused, with the
+      // recoverable body the fence's own 409 does not carry. Before the
+      // generation guard existed this request succeeded and left a row sealed
+      // under a key the account had just replaced.
+      const stillStale = await mutate(
+        'post',
+        '/api/v1/vault/items',
+        sampleVaultItem({ encryptedName: 'sealed-under-the-old-key', vaultKeyVersion: 0 }),
+      );
+      expect(stillStale.status).toBe(409);
+      expect(stillStale.body.data).toEqual({ vaultKeyVersion: 1 });
     });
 
     it('lowers the fence when the rotation aborts mid-write', async () => {

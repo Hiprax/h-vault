@@ -16,7 +16,6 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AxiosError } from 'axios';
 
 const { mockGet, mockPost, mockPut, mockDelete } = vi.hoisted(() => ({
   mockGet: vi.fn(),
@@ -55,7 +54,6 @@ import {
   listDocumentsApi,
   purgeDocumentApi,
   restoreDocumentApi,
-  staleVaultKeyVersion,
   updateDocumentApi,
   uploadDocumentPartApi,
 } from '../src/services/api/documentsApi.js';
@@ -285,84 +283,5 @@ describe('documentsApi — one document', () => {
     // The negative: a trash is not a purge. Sending the plain DELETE for a
     // permanent delete would silently leave the object in the bucket.
     expect(mockDelete).toHaveBeenCalledTimes(2);
-  });
-});
-
-/**
- * `staleVaultKeyVersion` reads the one refusal in this surface that carries a
- * number. Getting it wrong is not a cosmetic failure: a `null` where a version
- * exists turns a recoverable conflict into a failed upload, and a wrong number
- * turns the retry into a second refusal.
- */
-describe('staleVaultKeyVersion', () => {
-  const conflict = (data: unknown): AxiosError =>
-    new AxiosError('conflict', 'ERR_BAD_REQUEST', undefined, undefined, {
-      status: 409,
-      statusText: 'Conflict',
-      headers: {},
-      config: { headers: {} } as never,
-      data,
-    });
-
-  it('reads the version out of a stale-key 409', () => {
-    expect(staleVaultKeyVersion(conflict({ success: false, data: { vaultKeyVersion: 4 } }))).toBe(
-      4,
-    );
-  });
-
-  it('reads a version of ZERO rather than treating it as absent', () => {
-    // The boundary that a truthiness check gets wrong: an account that has never
-    // rotated is at version 0, and answering `null` there would report the
-    // recoverable refusal as an unrecoverable one.
-    expect(staleVaultKeyVersion(conflict({ success: false, data: { vaultKeyVersion: 0 } }))).toBe(
-      0,
-    );
-  });
-
-  it('answers null for a 409 that carries no version', () => {
-    // The per-upload lock's "already being completed" conflict looks like this.
-    expect(
-      staleVaultKeyVersion(conflict({ success: false, message: 'already completing' })),
-    ).toBeNull();
-  });
-
-  it('answers null for a 409 whose payload is present but names no version', () => {
-    // The envelope carries a `data` key, so the first guard passes; the payload
-    // itself is what has nothing to read.
-    expect(staleVaultKeyVersion(conflict({ success: false, data: { other: 1 } }))).toBeNull();
-    expect(staleVaultKeyVersion(conflict({ success: false, data: 'not an object' }))).toBeNull();
-    expect(staleVaultKeyVersion(conflict({ success: false, data: null }))).toBeNull();
-  });
-
-  it('answers null for a 409 whose version is not a non-negative integer', () => {
-    expect(staleVaultKeyVersion(conflict({ data: { vaultKeyVersion: '4' } }))).toBeNull();
-    expect(staleVaultKeyVersion(conflict({ data: { vaultKeyVersion: -1 } }))).toBeNull();
-    expect(staleVaultKeyVersion(conflict({ data: { vaultKeyVersion: 1.5 } }))).toBeNull();
-    expect(staleVaultKeyVersion(conflict({ data: { vaultKeyVersion: null } }))).toBeNull();
-  });
-
-  it('answers null for a 409 whose body is not an object', () => {
-    expect(staleVaultKeyVersion(conflict('Conflict'))).toBeNull();
-    expect(staleVaultKeyVersion(conflict(undefined))).toBeNull();
-  });
-
-  it('answers null for any status other than 409, even one carrying a version', () => {
-    const badRequest = new AxiosError('nope', 'ERR_BAD_REQUEST', undefined, undefined, {
-      status: 400,
-      statusText: 'Bad Request',
-      headers: {},
-      config: { headers: {} } as never,
-      data: { data: { vaultKeyVersion: 9 } },
-    });
-
-    expect(staleVaultKeyVersion(badRequest)).toBeNull();
-  });
-
-  it('answers null for a rejection that is not an axios error at all', () => {
-    expect(staleVaultKeyVersion(new Error('offline'))).toBeNull();
-    expect(staleVaultKeyVersion(null)).toBeNull();
-    expect(
-      staleVaultKeyVersion({ response: { status: 409, data: { data: { vaultKeyVersion: 3 } } } }),
-    ).toBeNull();
   });
 });

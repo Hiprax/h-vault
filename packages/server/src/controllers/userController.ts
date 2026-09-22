@@ -16,7 +16,8 @@ import { supportsTransactions } from '../utils/transactionSupport.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
 import {
   StaleVaultKeyError,
-  assertVaultKeyVersion,
+  resolveVaultKeyVersion,
+  sendStaleVaultKey,
   assertVaultNotRotating,
   getRequestContext,
   getUserId,
@@ -320,23 +321,6 @@ class SupersededVaultKeyWrite extends Error {
   }
 }
 
-/**
- * Answers the recoverable 409 a stale vault-key generation earns.
- *
- * Written directly rather than thrown through `httpErrors`, for the reason
- * {@link StaleVaultKeyError}'s own docblock gives: the client needs the NUMBER,
- * and `@hiprax/errors`'s response envelope is flat and has nowhere to put one.
- * Byte-for-byte the shape `documentController.completeUpload` emits and
- * `swagger.ts` documents.
- */
-function sendStaleVaultKey(res: Response, error: StaleVaultKeyError): void {
-  res.status(409).json({
-    success: false,
-    message: error.message,
-    data: { vaultKeyVersion: error.vaultKeyVersion },
-  });
-}
-
 export const changePassword = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
   const body = req.body as ChangePasswordInput;
@@ -414,19 +398,11 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
   // outright; keeping the span down to two indexed reads and the revocations is
   // what is available here, and it removes both bcrypt costs from it.
   await assertVaultNotRotating(userId);
-  let resolvedVaultKeyVersion: number;
-  try {
-    resolvedVaultKeyVersion = await assertVaultKeyVersion(userId, body.vaultKeyVersion);
-  } catch (error) {
-    // Caught only to attach the number. Uncaught it would still refuse with a
-    // 409 (see `StaleVaultKeyError`), and the client would still recover — it
-    // would just have to re-read its profile to learn what to rewrap under.
-    if (error instanceof StaleVaultKeyError) {
-      sendStaleVaultKey(res, error);
-      return;
-    }
-    throw error;
-  }
+  // `null` means the recoverable 409 has already been answered — see the
+  // helper's docblock. Uncaught, the guard would still refuse with a 409; what
+  // the helper adds is the NUMBER the client rewraps under.
+  const resolvedVaultKeyVersion = await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion);
+  if (resolvedVaultKeyVersion === null) return;
 
   // The filter is what makes the guard above safe, not the read it performed:
   // a rotation committing between that read and this write matches nothing here

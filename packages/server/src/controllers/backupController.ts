@@ -16,6 +16,7 @@ import {
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  resolveVaultKeyVersion,
 } from '../utils/controllerHelpers.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import { collectDocumentSummary } from '../utils/documentSummary.js';
@@ -759,6 +760,19 @@ export const restoreBackup = catchAsync(async (req: Request, res: Response): Pro
       `Restore would exceed the per-user folder limit (${String(MAX_FOLDERS_PER_USER)}). You currently have ${String(existingFolderCount)} folders and this restore would add ${String(netNewFolders)}.`,
     );
   }
+
+  // The vault-key generation, checked HERE rather than beside the fence at the
+  // top of the handler, and this is the last statement before the first write.
+  // Between the two lie a multi-megabyte `JSON.parse`, the entry-count cap and
+  // four collection scans for the net-new counts — hundreds of milliseconds in
+  // which a rotation can commit and leave every row below sealed under a key
+  // the account has already replaced. `null` means the recoverable 409 carrying
+  // the current generation has already been answered.
+  //
+  // Unlike the import there is no transaction to abort and no lock to release,
+  // so the respond-and-return form is the correct one here; Phase 5 is what
+  // makes this span atomic rather than merely short.
+  if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
 
   let itemsRestored = 0;
   let itemsSkipped = 0;

@@ -89,6 +89,7 @@ import type {
   UpdateDocumentInput,
 } from '@hvault/shared';
 import type { EmptyDocumentTrashResult } from '../services/api/documentsApi.js';
+import { staleVaultKeyVersion } from '../services/api/staleVaultKey.js';
 import {
   DOCUMENT_PAGE_SIZE,
   MAX_DOCUMENT_PAGES,
@@ -103,7 +104,6 @@ import {
   listDocumentsApi,
   purgeDocumentApi,
   restoreDocumentApi,
-  staleVaultKeyVersion,
   updateDocumentApi,
   uploadDocumentPartApi,
 } from '../services/api/documentsApi.js';

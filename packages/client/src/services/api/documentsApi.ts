@@ -19,15 +19,16 @@
  *    503 exists for a direct API caller.
  *  - `POST /uploads/:id/complete` answers **409 with a body** when the vault key
  *    was rotated mid-upload — `{ success: false, message, data: { vaultKeyVersion } }`.
- *    That is deliberate and is the one refusal in this surface carrying a number
- *    the caller must read, which is why {@link staleVaultKeyVersion} exists.
+ *    That is deliberate, and the same refusal is now answered by every write
+ *    that seals new ciphertext under the vault key, so the parser for it lives
+ *    in `services/api/staleVaultKey.ts` rather than here.
  *
  * Segment indices are 0-based (the index is the counter inside the AEAD nonce)
  * while part numbers are 1-based (S3 part numbers are), so part `n` carries
  * segment `n - 1`. The two are never the same number and the names never blur.
  */
 
-import { isAxiosError, type AxiosProgressEvent, type AxiosResponse } from 'axios';
+import type { AxiosProgressEvent, AxiosResponse } from 'axios';
 import { MAX_DOCUMENTS_PER_ROTATION, PAGINATION_DEFAULTS } from '@hvault/shared';
 import type {
   ApiResponse,
@@ -288,32 +289,4 @@ export function restoreDocumentApi(
 
 export function purgeDocumentApi(id: string): Promise<AxiosResponse<ApiResponse<null>>> {
   return api.delete(`/documents/${id}/permanent`);
-}
-
-// ---------------------------------------------------------------------------
-// The one refusal that carries a number
-// ---------------------------------------------------------------------------
-
-/**
- * The vault key version a stale-completion 409 reports, or `null` when the
- * rejection is anything else.
- *
- * Completion sends the wrapped document key a second time precisely so this
- * refusal costs one request rather than the whole file: on a 409 the caller
- * rewraps the DEK it still holds in memory under the new vault key and retries
- * the completion alone. That recovery is only possible if the NUMBER survives
- * the trip, so this reads it defensively — a 409 whose body does not carry a
- * non-negative integer is treated as an ordinary conflict, never as version
- * zero.
- */
-export function staleVaultKeyVersion(error: unknown): number | null {
-  if (!isAxiosError(error) || error.response?.status !== 409) return null;
-  const data: unknown = error.response.data;
-  if (typeof data !== 'object' || data === null || !('data' in data)) return null;
-  const payload: unknown = data.data;
-  if (typeof payload !== 'object' || payload === null || !('vaultKeyVersion' in payload)) {
-    return null;
-  }
-  const version: unknown = payload.vaultKeyVersion;
-  return typeof version === 'number' && Number.isInteger(version) && version >= 0 ? version : null;
 }

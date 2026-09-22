@@ -1,4 +1,4 @@
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { ErrorHandler, httpErrors } from '@hiprax/errors';
 import { User } from '../models/User.js';
 import { Folder } from '../models/Folder.js';
@@ -578,4 +578,69 @@ export function vaultKeyVersionFilter(
   vaultKeyVersion: number,
 ): number | { $in: (number | null)[] } {
   return vaultKeyVersion === 0 ? { $in: [0, null] } : vaultKeyVersion;
+}
+
+/**
+ * Answers the recoverable 409 a stale vault-key generation earns.
+ *
+ * Written directly rather than thrown through `httpErrors`, for the reason
+ * {@link StaleVaultKeyError}'s own docblock gives: the client needs the NUMBER,
+ * and `@hiprax/errors`'s response envelope is flat and has nowhere to put one.
+ * Byte-for-byte the shape `documentController.completeUpload` emits and
+ * `swagger.ts` documents for every guarded write.
+ *
+ * ONE definition rather than one per controller: six handlers across four files
+ * answer this refusal, and a second copy is a second place for the envelope to
+ * drift from the published document.
+ */
+export function sendStaleVaultKey(res: Response, error: StaleVaultKeyError): void {
+  res.status(409).json({
+    success: false,
+    message: error.message,
+    data: { vaultKeyVersion: error.vaultKeyVersion },
+  });
+}
+
+/**
+ * {@link assertVaultKeyVersion} plus {@link sendStaleVaultKey}: the account's
+ * current generation, or `null` once the recoverable 409 has been ANSWERED.
+ *
+ * ```ts
+ * const vaultKeyVersion = await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion);
+ * if (vaultKeyVersion === null) return;
+ * ```
+ *
+ * The `null` arm means the response is already written, so the caller must
+ * return immediately; continuing would try to send a second answer. The pair is
+ * written here rather than as a try/catch at each of the six call sites because
+ * copying a catch-and-render block is how one of them ends up rendering a
+ * different envelope, and because the refusal has exactly one correct shape.
+ *
+ * ## Not for use inside a transaction callback
+ *
+ * A refusal has to ABORT a transaction, and answering plus returning normally
+ * would let it COMMIT. A guarded write that runs inside `withTransaction` calls
+ * {@link assertVaultKeyVersion} directly, lets the `StaleVaultKeyError` unwind
+ * the transaction, and renders it with {@link sendStaleVaultKey} outside —
+ * which is what `toolsController.executeImportOperations` does.
+ *
+ * Forgetting the `null` check is not silent: the write that follows still runs
+ * and Express reports the second response. Forgetting the guard ENTIRELY is the
+ * failure this returns a value to make visible, and every guarded endpoint pins
+ * its refusal in `tests/stale-vault-key-writes.test.ts`.
+ */
+export async function resolveVaultKeyVersion(
+  res: Response,
+  userId: string,
+  supplied: number | undefined,
+): Promise<number | null> {
+  try {
+    return await assertVaultKeyVersion(userId, supplied);
+  } catch (error) {
+    if (error instanceof StaleVaultKeyError) {
+      sendStaleVaultKey(res, error);
+      return null;
+    }
+    throw error;
+  }
 }

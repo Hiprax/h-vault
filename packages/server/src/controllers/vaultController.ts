@@ -16,6 +16,7 @@ import {
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  resolveVaultKeyVersion,
   vaultRotationLockName,
 } from '../utils/controllerHelpers.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
@@ -233,6 +234,15 @@ export const createItem = catchAsync(async (req: Request, res: Response): Promis
   // rotation commits the new key.
   await assertVaultNotRotating(userId);
 
+  // And reject it when the rotation has ALREADY committed. The fence above is
+  // blind to that case — its flag is lowered by then — yet a session still
+  // holding the superseded key can decrypt, can encrypt, and has no way to
+  // notice: every row it creates from that moment is sealed under a key the
+  // account has replaced, so it lands stranded and reads back as an undecodable
+  // placeholder for ever. `null` means the recoverable 409 carrying the current
+  // generation has already been answered.
+  if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
+
   // Enforce per-user vault item count limit
   const itemCount = await VaultItem.countDocuments({ userId });
   if (itemCount >= MAX_ITEMS_PER_USER) {
@@ -280,6 +290,15 @@ export const updateItem = catchAsync(async (req: Request, res: Response): Promis
   // Ciphertext-creating write (see assertVaultNotRotating): an update issued
   // during a rotation would overwrite a just-rotated row with old-key ciphertext.
   await assertVaultNotRotating(userId);
+
+  // The same write is just as destructive AFTER the rotation commits, and the
+  // fence cannot see that — see `createItem`. The guard belongs to the ENDPOINT
+  // and not to the shape of the body: a metadata-only update (the client's
+  // `updateItemMeta`) is refused too, because deciding it from which fields the
+  // caller happened to send would put the control behind a predicate the caller
+  // chooses. That costs a rotated account nothing, since every caller already
+  // holds the generation it was issued.
+  if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
 
   await assertFolderOwned(body.folderId, userId);
 

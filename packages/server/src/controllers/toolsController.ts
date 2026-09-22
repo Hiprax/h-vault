@@ -10,10 +10,13 @@ import { PwnedRangeCache } from '../models/PwnedRangeCache.js';
 import { createAuditLog } from '../services/auditService.js';
 import { config } from '../config/index.js';
 import {
+  StaleVaultKeyError,
+  assertVaultKeyVersion,
   assertVaultNotRotating,
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  sendStaleVaultKey,
   vaultImportLockName,
 } from '../utils/controllerHelpers.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
@@ -680,6 +683,8 @@ interface ImportOperationsParams {
   format: ImportInput['format'];
   conflictStrategy: ImportInput['conflictStrategy'];
   operations: ImportInput['operations'];
+  /** The vault-key generation every ciphertext field in `operations` was sealed under. */
+  vaultKeyVersion: number | undefined;
 }
 
 /**
@@ -707,7 +712,7 @@ interface ImportOperationsParams {
 async function executeImportOperations(
   req: Request,
   res: Response,
-  { userId, format, conflictStrategy, operations }: ImportOperationsParams,
+  { userId, format, conflictStrategy, operations, vaultKeyVersion }: ImportOperationsParams,
 ): Promise<void> {
   const { inserts, updates } = operations;
 
@@ -820,6 +825,21 @@ async function executeImportOperations(
         throw httpErrors.badRequest(importCapExceededMessage(liveItemCount, insertDocs.length));
       }
 
+      // The vault-key generation, checked HERE rather than at the top of the
+      // handler. Between the two lie the field-length checks, the folder
+      // lookups, the update-target lookups, `acquireJobLock` and the cap count
+      // — hundreds of milliseconds in which a rotation can commit and leave
+      // every row below sealed under a key the account has already replaced.
+      // Inside the callback rather than merely inside the lock because
+      // `withTransaction` may RE-RUN this after a transient error, and a guard
+      // outside would not be re-evaluated on that second attempt.
+      //
+      // It THROWS rather than answering the 409 here, and that is the whole
+      // reason `resolveVaultKeyVersion` is not used: answering and returning
+      // normally from inside this callback would let the transaction COMMIT.
+      // The refusal is rendered outside, where the transaction has unwound.
+      await assertVaultKeyVersion(userId, vaultKeyVersion);
+
       // Reset per attempt: `withTransaction` may re-run this callback after a
       // transient error, and the aborted attempt's rows no longer exist.
       insertedCount = 0;
@@ -904,12 +924,34 @@ async function executeImportOperations(
 
 export const importVault = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
-  const { format, conflictStrategy, operations } = req.body as ImportInput;
+  const { format, conflictStrategy, operations, vaultKeyVersion } = req.body as ImportInput;
 
   // Every imported row carries ciphertext encrypted with the caller's current
   // vault key — a rotation in flight would strand all of it. Fence before any
   // validation or writing, so the rejection is cheap.
   await assertVaultNotRotating(userId);
 
-  await executeImportOperations(req, res, { userId, format, conflictStrategy, operations });
+  try {
+    await executeImportOperations(req, res, {
+      userId,
+      format,
+      conflictStrategy,
+      operations,
+      vaultKeyVersion,
+    });
+  } catch (error) {
+    // The stale-generation refusal, rendered HERE rather than where it is
+    // raised. It is raised deep inside the transaction callback so that it
+    // aborts the transaction; by the time it reaches this frame the transaction
+    // has unwound, nothing has been written, and the per-user lock has already
+    // been released by `executeImportOperations`'s own `finally` — which keeps
+    // the release AHEAD of the response, the ordering that function's comment
+    // calls deliberate. Uncaught it would still refuse with a 409; catching it
+    // is what attaches the NUMBER the client re-seals under.
+    if (error instanceof StaleVaultKeyError) {
+      sendStaleVaultKey(res, error);
+      return;
+    }
+    throw error;
+  }
 });

@@ -137,6 +137,7 @@ vi.mock('zxcvbn', () => ({
 }));
 
 import { useAuthStore } from '../src/stores/authStore';
+import { useUIStore } from '../src/stores/uiStore';
 import { cryptoService } from '../src/services/crypto/cryptoService';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
 
@@ -274,7 +275,14 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
       encryptedVaultKeyData: null,
       twoFactorRequired: false,
       tempToken: null,
+      // Deliberately NOT zero: every restored row is re-encrypted to THIS key,
+      // and the request names the generation that goes with it. A base of zero
+      // would let a hardcoded default pass as the real number.
+      vaultKeyVersion: 7,
     });
+    // The notice is app-wide state that no mock reset clears, so it is reset
+    // here: a case that leaves it set would decide the next case's assertion.
+    useUIStore.setState({ staleVaultKeyVersion: null });
 
     mockGetProfileApi.mockResolvedValue(profileWith(CONFIGURED_BACKUP));
     mockApiGet.mockImplementation((url: string) => {
@@ -749,6 +757,51 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
       });
     });
     expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('names the generation every restored row was re-encrypted to', async () => {
+    // A restore never replaces the account's vault key: the client re-encrypts
+    // every backup row to the key it currently holds. Which is exactly why the
+    // generation matters here as much as on a create — a rotation that commits
+    // between that re-encryption and this request strands every row it sends.
+    await performRestore({ items: [SAMPLE_ITEM], folders: [] });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(restoreBody()).toMatchObject({ vaultKeyVersion: 7 });
+    // The negative this endpoint has always carried: no vault-key adoption and
+    // no master-password re-auth ride along with it.
+    expect(restoreBody()).not.toHaveProperty('adoptVaultKey');
+    expect(restoreBody()).not.toHaveProperty('authHash');
+  });
+
+  it('raises the reload notice when the restore is refused for a superseded key', async () => {
+    mockApiPost.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: {
+          success: false,
+          message: 'The vault key was rotated elsewhere.',
+          data: { vaultKeyVersion: 11 },
+        },
+      },
+    });
+
+    await performRestore({ items: [SAMPLE_ITEM], folders: [] });
+
+    await waitFor(() => {
+      expect(useUIStore.getState().staleVaultKeyVersion).toBe(11);
+    });
+    // The negatives: the failure is reported rather than swallowed, nothing is
+    // retried, and this session's generation is untouched — adopting the number
+    // the server named would move the whole session onto a key it chose.
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to restore backup' }),
+    );
+    expect(mockApiPost.mock.calls.filter((c) => c[0] === '/backup/restore')).toHaveLength(1);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(7);
   });
 
   it('falls back to the account profile encryption metadata when the file carries none', async () => {

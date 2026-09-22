@@ -19,6 +19,8 @@
  *   • (Phase 10) the per-user cap survives OVERLAPPING imports on this topology
  *     too — the standalone half of that guarantee is in
  *     `import-cap-concurrency.test.ts`
+ *   • a superseded vault-key generation aborts the transaction rather than
+ *     committing, which is the branch the standalone harness cannot reach
  */
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -26,6 +28,7 @@ import mongoose from 'mongoose';
 import { MAX_ITEMS_PER_USER } from '@hvault/shared';
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
+import { User } from '../src/models/User.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
 import { createTestUser, authHeader, sampleVaultItem, seedItem, getCsrf } from './helpers.js';
 import type { TestUser } from './helpers.js';
@@ -78,7 +81,10 @@ describe('Import operations — transaction (replica-set) branch', () => {
     vi.restoreAllMocks();
   });
 
-  async function postOperations(operations: Record<string, unknown>): Promise<request.Response> {
+  async function postOperations(
+    operations: Record<string, unknown>,
+    extra: Record<string, unknown> = {},
+  ): Promise<request.Response> {
     const agent = request.agent(app);
     const csrf = await getCsrf(agent);
 
@@ -87,7 +93,7 @@ describe('Import operations — transaction (replica-set) branch', () => {
       .set('Authorization', authHeader(user.accessToken))
       .set('x-csrf-token', csrf.token)
       .set('Cookie', csrf.cookie)
-      .send({ format: 'json', operations });
+      .send({ format: 'json', operations, ...extra });
   }
 
   it('commits inserts and updates together', async () => {
@@ -277,5 +283,47 @@ describe('Import operations — transaction (replica-set) branch', () => {
 
     expect(stored.length).toBeLessThanOrEqual(HEADROOM);
     expect(stored).toHaveLength(reported);
+  });
+
+  // ── The vault-key generation guard, on the branch that can COMMIT ────────
+
+  /**
+   * The generation is checked INSIDE this callback, and that placement is only
+   * safe because the refusal THROWS. A guard that answered the 409 and returned
+   * normally from inside `withTransaction` would let the transaction commit —
+   * the request would be refused and the rows written at the same time. The
+   * standalone harness every other stale-generation test runs on has no
+   * transaction at all, so this is the only place that distinction is
+   * observable.
+   *
+   * `stale-vault-key-writes.test.ts` owns the rest of the contract; what is
+   * pinned here is that the abort really aborts.
+   */
+  it('aborts the transaction on a superseded generation, committing nothing', async () => {
+    user = await createTestUser();
+    const existing = await seedItem(user.id, { encryptedData: 'original-data' });
+    // The number's provenance is covered where a real rotation drives it; here
+    // the account is simply placed on a later generation than the request names.
+    await User.updateOne({ _id: user.id }, { $set: { vaultKeyVersion: 5 } });
+
+    const res = await postOperations(
+      { inserts: [insertRow(1), insertRow(2)], updates: [updateRow(String(existing._id))] },
+      { vaultKeyVersion: 4 },
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.data).toEqual({ vaultKeyVersion: 5 });
+
+    // The discriminator: inserts run first inside the callback, so a guard that
+    // did not abort would leave them behind. Only the seeded row survives, with
+    // its original ciphertext.
+    const stored = await VaultItem.find({ userId: user.id }).lean();
+    expect(stored).toHaveLength(1);
+    expect(stored[0]!.encryptedData).toBe('original-data');
+
+    // And the per-user lock was released rather than held to its TTL: a request
+    // naming the right generation goes straight through.
+    const retried = await postOperations({ inserts: [insertRow(3)] }, { vaultKeyVersion: 5 });
+    expect(retried.status).toBe(201);
   });
 });

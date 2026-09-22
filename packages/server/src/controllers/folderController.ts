@@ -11,6 +11,7 @@ import {
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  resolveVaultKeyVersion,
 } from '../utils/controllerHelpers.js';
 import { getAncestorChain, hasCycle } from '../utils/folderGraph.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
@@ -133,6 +134,13 @@ export const createFolder = catchAsync(async (req: Request, res: Response): Prom
   // during a rotation would be stranded by the new key — fence it.
   await assertVaultNotRotating(userId);
 
+  // And refuse a name sealed under a generation the account has already left
+  // behind: the fence is blind once the rotation commits, and the folder would
+  // land with a name nothing can decrypt. `null` means the recoverable 409
+  // carrying the current generation has already been answered. The reasoning in
+  // full is in `vaultController.createItem`.
+  if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
+
   // Enforce per-user folder count limit
   const folderCount = await Folder.countDocuments({ userId });
   if (folderCount >= MAX_FOLDERS_PER_USER) {
@@ -198,6 +206,13 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
   // A rename rewrites `encryptedName` under the caller's (possibly about-to-be-
   // superseded) vault key — fence it for the rotation window.
   await assertVaultNotRotating(userId);
+
+  // And for the window the fence cannot see, after that rotation has committed.
+  // Endpoint-wide rather than body-dependent, exactly as in
+  // `vaultController.updateItem`: a re-parent that carries no name is refused
+  // too, because a control decided from the fields the caller chose to send is a
+  // control the caller can step around.
+  if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
 
   if (body.parentId) {
     if (body.parentId === id) {

@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, cleanup, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import React from 'react';
 import { CryptoError, CryptoErrorType } from '@hiprax/crypto';
@@ -1047,5 +1047,146 @@ describe('FileDecryptPanel — keyboard submit and error classification', () => 
           'The encryption engine could not start in this browser. Try a newer browser over HTTPS.',
       });
     });
+  });
+});
+
+/* ========================================================================== */
+/*  AppLayout — the superseded-vault-key notice                                */
+/* ========================================================================== */
+
+/**
+ * A vault-key rotation performed on another device revokes no session and
+ * refreshes no key, so this tab can keep a superseded key indefinitely: it can
+ * still decrypt everything it loaded and still encrypt, and every save it
+ * attempts is now refused by the server. Nothing used to say so — the save
+ * simply failed, and the next one failed the same way.
+ *
+ * Three properties are pinned here, and the third is the one that shapes the
+ * design:
+ *
+ *  - the notice appears when the generation the server reported differs from
+ *    the one this session holds;
+ *  - the only action is a RELOAD, because adopting the generation the server
+ *    named, or re-deriving the key to match it, would be taking a key the
+ *    server chose on a session whose loaded data was all decrypted under the
+ *    old one;
+ *  - it is DERIVED, not a flag. The moment the two generations agree — a fresh
+ *    login, or a rotation driven from this tab — it clears itself, so no write
+ *    path anywhere has to remember to reset it. A flag would have needed a
+ *    reset at every one of those points, and the one that got missed would
+ *    leave a permanent "reload" notice in front of a healthy session.
+ */
+describe('AppLayout — the superseded-vault-key notice', () => {
+  function setupLayout(vaultKeyVersion: number): void {
+    authState = {
+      user: { userId: 'u1', email: 'test@example.com' },
+      logout: vi.fn(),
+      lock: vi.fn(),
+      isLocked: false,
+      vaultKeyVersion,
+    };
+    vaultState = {
+      fetchItems: vi.fn().mockResolvedValue(undefined),
+      fetchFolders: vi.fn().mockResolvedValue(undefined),
+    };
+    installStores();
+    // The real UI store, so the notice is driven exactly as a refused write
+    // drives it.
+    useUIStore.setState({ staleVaultKeyVersion: null });
+  }
+
+  function renderLayout() {
+    return render(
+      <MemoryRouter initialEntries={['/vault']}>
+        <Routes>
+          <Route element={<AppLayout />}>
+            <Route path="/vault" element={<div>Vault Content</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  /** What a refused write records: the generation the SERVER reported. */
+  function serverReported(vaultKeyVersion: number | null): void {
+    act(() => {
+      useUIStore.setState({ staleVaultKeyVersion: vaultKeyVersion });
+    });
+  }
+
+  afterEach(() => {
+    // Inside `act`, for the reason the offline-cache block above records:
+    // `AppLayout` subscribes with no selector, so any write re-renders it.
+    act(() => {
+      useUIStore.setState({ staleVaultKeyVersion: null });
+    });
+  });
+
+  it('shows nothing while no write has been refused', () => {
+    setupLayout(3);
+    renderLayout();
+
+    expect(screen.queryByTestId('stale-vault-key-banner')).not.toBeInTheDocument();
+  });
+
+  it('names the condition and offers a reload once a write is refused', () => {
+    setupLayout(3);
+    renderLayout();
+
+    serverReported(4);
+
+    const banner = screen.getByTestId('stale-vault-key-banner');
+    expect(banner).toHaveTextContent(
+      'Your vault key was changed on another device, so changes from this tab can no longer be saved. Reload to continue.',
+    );
+    expect(banner).toHaveAttribute('role', 'alert');
+    expect(within(banner).getByRole('button', { name: /reload/i })).toBeInTheDocument();
+    // The negative that matters: there is no way to dismiss it. A session in
+    // which nothing can be saved and nothing says so is the state this exists to
+    // prevent, and a dismiss button restores it with one click.
+    expect(within(banner).queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument();
+  });
+
+  it('reloads the document when the action is taken', () => {
+    setupLayout(3);
+    renderLayout();
+    serverReported(4);
+    const reload = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, reload },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /reload/i }));
+
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays silent when the reported generation is the one this session holds', () => {
+    // The self-clearing half. A fresh sign-in to the same account moves this
+    // session onto the generation the server reported, the two numbers agree,
+    // and there is nothing left to warn about — which is why nothing has to
+    // remember to reset the recorded number. (An account SWITCH is the one
+    // transition this cannot see; `authStore.logout()` clears it explicitly, and
+    // that is pinned in `stale-vault-key-notice.test.ts`.)
+    setupLayout(4);
+    renderLayout();
+
+    serverReported(4);
+
+    expect(screen.queryByTestId('stale-vault-key-banner')).not.toBeInTheDocument();
+  });
+
+  it('treats generation zero as a real answer and not as "nothing reported"', () => {
+    // `0` means "this account has never rotated". It is falsy, so a truthiness
+    // check anywhere on this path would silence the notice for a session that
+    // somehow outlived a reset — the reason the state is `number | null` and the
+    // predicate compares against `null` explicitly.
+    setupLayout(2);
+    renderLayout();
+
+    serverReported(0);
+
+    expect(screen.getByTestId('stale-vault-key-banner')).toBeInTheDocument();
   });
 });

@@ -13,7 +13,7 @@ import { offlineCache, offlineCacheErrorType } from '../services/offlineCache.js
 import { clearScoreCache } from '../services/health/strengthCache.js';
 import { logger } from '../lib/logger.js';
 import { useAuthStore } from './authStore.js';
-import { useUIStore } from './uiStore.js';
+import { noteStaleVaultKey, useUIStore } from './uiStore.js';
 // Folders are ONE collection shared by vault items and documents, so deleting a
 // folder has to reach both stores. The cycle this closes (`documentsStore`
 // imports `mapWithConcurrency` from here) is the shape `authStore` already has
@@ -514,13 +514,65 @@ function assertEncryptedSizes(
   }
 }
 
-function getVaultKey(): CryptoKey {
-  const { vaultKey } = useAuthStore.getState();
+/**
+ * The unlocked vault key together with the generation it belongs to, read from
+ * ONE `getState()`.
+ *
+ * One read and not two, for the reason `documentsStore.requireVaultKey` gives:
+ * the number is what the server matches the ciphertext against, so a key taken
+ * from one snapshot and a generation from another could name a pair that never
+ * existed at the same instant.
+ *
+ * The generation needs no vault key of its own, which is why
+ * {@link vaultKeyGeneration} exists beside this for the metadata-only path.
+ */
+function requireVaultKey(): { vaultKey: CryptoKey; vaultKeyVersion: number } {
+  const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
   if (!vaultKey) {
     throw new Error('Vault is locked. Unlock it before performing vault operations.');
   }
   // CryptoKey is an opaque handle — no need to copy (unlike ArrayBuffer).
-  return vaultKey;
+  return { vaultKey, vaultKeyVersion };
+}
+
+/** The unlocked vault key alone, for callers that seal nothing to a generation. */
+function getVaultKey(): CryptoKey {
+  return requireVaultKey().vaultKey;
+}
+
+/**
+ * This session's vault-key generation, WITHOUT requiring the key itself.
+ *
+ * `updateItemMeta` encrypts nothing and deliberately holds no key, yet it posts
+ * to the same endpoint as a full update — and that endpoint is guarded as a
+ * whole, because a server that decided from which fields the body happened to
+ * carry would be deciding a security control from a value the caller chooses.
+ * So the metadata path carries the generation too, and this is how it reads one
+ * without acquiring a key it has no use for.
+ */
+function vaultKeyGeneration(): number {
+  return useAuthStore.getState().vaultKeyVersion;
+}
+
+/**
+ * Runs a write that seals ciphertext under the vault key, recording the
+ * superseded-key refusal for the application chrome before re-throwing.
+ *
+ * Every rejection is RE-THROWN, including this one. The caller's own error
+ * handling is what tells the user their change did not land; this only raises
+ * the app-wide notice that explains WHY nothing from this tab will save until
+ * it is reloaded. Swallowing it would report a save that was refused.
+ *
+ * It never retries and never adopts the generation the server reported — see
+ * `noteStaleVaultKey`, where that rule and its reason live.
+ */
+async function withStaleVaultKeyNotice<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    noteStaleVaultKey(error);
+    throw error;
+  }
 }
 
 async function decryptItem(
@@ -1089,7 +1141,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     data: Record<string, unknown>,
     options?: { folderId?: string; tags?: string[]; favorite?: boolean },
   ): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
     // Pre-flight schema check, BEFORE encryption: a payload the shared schema
@@ -1105,19 +1157,26 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     assertEncryptedSizes(encryptedName, encryptedData);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
-    const response = await createItemApi({
-      itemType,
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      encryptedData: encryptedData.encrypted,
-      dataIv: encryptedData.iv,
-      dataTag: encryptedData.tag,
-      searchHash,
-      ...(options?.folderId != null ? { folderId: options.folderId } : {}),
-      tags: options?.tags ?? [],
-      favorite: options?.favorite ?? false,
-    });
+    // `vaultKeyVersion` names the generation the six ciphertext fields above
+    // were sealed under. The server refuses the row rather than storing one
+    // nothing can ever decrypt, and on that refusal the notice tells the user to
+    // reload — this store never re-derives a key the server named.
+    const response = await withStaleVaultKeyNotice(() =>
+      createItemApi({
+        itemType,
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        encryptedData: encryptedData.encrypted,
+        dataIv: encryptedData.iv,
+        dataTag: encryptedData.tag,
+        searchHash,
+        ...(options?.folderId != null ? { folderId: options.folderId } : {}),
+        tags: options?.tags ?? [],
+        favorite: options?.favorite ?? false,
+        vaultKeyVersion,
+      }),
+    );
 
     const createResult = response.data;
     if (createResult.success) {
@@ -1145,7 +1204,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
       favorite?: boolean;
     },
   ): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
     // Pre-flight schema check, BEFORE encryption: same rationale as createItem, and
@@ -1179,19 +1238,26 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
           })
         : undefined;
 
-    const response = await updateItemApi(id, {
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      encryptedData: encryptedData.encrypted,
-      dataIv: encryptedData.iv,
-      dataTag: encryptedData.tag,
-      searchHash,
-      ...(options?.folderId !== undefined ? { folderId: options.folderId } : {}),
-      ...(options?.tags !== undefined ? { tags: options.tags } : {}),
-      ...(options?.favorite !== undefined ? { favorite: options.favorite } : {}),
-      ...(passwordHistoryPayload !== undefined ? { passwordHistory: passwordHistoryPayload } : {}),
-    });
+    // The generation every ciphertext field here was sealed under — including
+    // the password-history entries, which are encrypted under the same key.
+    const response = await withStaleVaultKeyNotice(() =>
+      updateItemApi(id, {
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        encryptedData: encryptedData.encrypted,
+        dataIv: encryptedData.iv,
+        dataTag: encryptedData.tag,
+        searchHash,
+        ...(options?.folderId !== undefined ? { folderId: options.folderId } : {}),
+        ...(options?.tags !== undefined ? { tags: options.tags } : {}),
+        ...(options?.favorite !== undefined ? { favorite: options.favorite } : {}),
+        ...(passwordHistoryPayload !== undefined
+          ? { passwordHistory: passwordHistoryPayload }
+          : {}),
+        vaultKeyVersion,
+      }),
+    );
 
     const updateResult = response.data;
     if (updateResult.success) {
@@ -1238,9 +1304,18 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
       ...(meta.tags !== undefined ? { tags: meta.tags } : {}),
     };
     // Nothing to change: skip the round-trip rather than send an empty update.
+    // Counted BEFORE the generation is added, so an update carrying nothing but
+    // a generation is still recognised as empty and never sent.
     if (Object.keys(payload).length === 0) return;
 
-    const response = await updateItemApi(id, payload);
+    // This path encrypts nothing, yet it still names the generation: it posts to
+    // the same endpoint as a full update, and that endpoint is guarded as a
+    // whole rather than by inspecting which fields the body happens to carry.
+    // Reading the number needs no vault key, which is what lets this path keep
+    // its promise never to hold one.
+    const response = await withStaleVaultKeyNotice(() =>
+      updateItemApi(id, { ...payload, vaultKeyVersion: vaultKeyGeneration() }),
+    );
     const metaResult = response.data;
     if (!metaResult.success) return;
 
@@ -1291,19 +1366,24 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
   // just fail again and throw away a write that has already succeeded.
   // -----------------------------------------------------------------------
   renameItem: async (id: string, name: string): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
     const encryptedName = await cryptoService.encryptData(name, vaultKey);
     assertEncryptedNameSize(encryptedName);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
-    const response = await updateItemApi(id, {
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      searchHash,
-    });
+    // Name-only, but still ciphertext: a rename sealed under a superseded key
+    // strands the one field this path exists to repair.
+    const response = await withStaleVaultKeyNotice(() =>
+      updateItemApi(id, {
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        searchHash,
+        vaultKeyVersion,
+      }),
+    );
 
     const renameResult = response.data;
     if (!renameResult.success) return;
@@ -1469,7 +1549,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     name: string,
     options?: { parentId?: string; icon?: string; color?: string },
   ): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
     const encryptedName = await cryptoService.encryptData(name, vaultKey);
@@ -1478,15 +1558,18 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const existingFolders = get().folders;
     const maxSortOrder = existingFolders.reduce((max, f) => Math.max(max, f.sortOrder), -1);
 
-    const response = await createFolderApi({
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      sortOrder: maxSortOrder + 1,
-      ...(options?.parentId != null ? { parentId: options.parentId } : {}),
-      ...(options?.icon != null ? { icon: options.icon } : {}),
-      ...(options?.color != null ? { color: options.color } : {}),
-    });
+    const response = await withStaleVaultKeyNotice(() =>
+      createFolderApi({
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        sortOrder: maxSortOrder + 1,
+        ...(options?.parentId != null ? { parentId: options.parentId } : {}),
+        ...(options?.icon != null ? { icon: options.icon } : {}),
+        ...(options?.color != null ? { color: options.color } : {}),
+        vaultKeyVersion,
+      }),
+    );
 
     const createFolderResult = response.data;
     if (createFolderResult.success) {
@@ -1504,18 +1587,21 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     name: string,
     options?: { color?: string; sortOrder?: number },
   ): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
     const encryptedName = await cryptoService.encryptData(name, vaultKey);
 
-    const response = await updateFolderApi(id, {
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      ...(options?.color !== undefined ? { color: options.color } : {}),
-      ...(options?.sortOrder !== undefined ? { sortOrder: options.sortOrder } : {}),
-    });
+    const response = await withStaleVaultKeyNotice(() =>
+      updateFolderApi(id, {
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        ...(options?.color !== undefined ? { color: options.color } : {}),
+        ...(options?.sortOrder !== undefined ? { sortOrder: options.sortOrder } : {}),
+        vaultKeyVersion,
+      }),
+    );
 
     const updateFolderResult = response.data;
     if (updateFolderResult.success) {

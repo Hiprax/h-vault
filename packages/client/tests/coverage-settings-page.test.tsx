@@ -670,7 +670,9 @@ describe('SettingsPage — error paths and branches', () => {
       // WITH its key, and a base of 0 would let an off-by-one pass as a default.
       vaultKeyVersion: 4,
     } as never);
-    useUIStore.setState({ theme: 'dark', setTheme: mockSetTheme });
+    // `staleVaultKeyVersion` is app-wide state that no mock reset clears, so it
+    // is reset here: a case that leaves it set would decide the next one's.
+    useUIStore.setState({ theme: 'dark', setTheme: mockSetTheme, staleVaultKeyVersion: null });
 
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -2399,6 +2401,59 @@ describe('SettingsPage — error paths and branches', () => {
       expect(mockToast).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
     });
     expect(screen.getByPlaceholderText('Paste exported data here...')).toBeInTheDocument();
+  });
+
+  it('names the generation every batch was sealed under', async () => {
+    // Without it the server cannot tell a row sealed under the live key from one
+    // sealed under a key it replaced days ago, and the second kind lands
+    // stranded: the rotation enumerated the vault before the row existed, and no
+    // later rotation can decrypt it either.
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: [nativeItem] }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Import'));
+    });
+
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    // 4 is what this session holds (see the auth harness above), NOT zero and
+    // NOT the number any response carries.
+    expect(mockImportVaultApi).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultKeyVersion: 4 }),
+    );
+  });
+
+  it('raises the reload notice when a batch is refused for a superseded key', async () => {
+    // The same refusal shape the master-password change recovers from, reused
+    // here deliberately: it is ONE server-side renderer, so a divergence between
+    // what these two tests expect would be a divergence in the fixture, not in
+    // the product.
+    mockImportVaultApi.mockRejectedValue(staleGenerationRefusal(9));
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: [nativeItem] }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Import'));
+    });
+
+    await waitFor(() => {
+      expect(useUIStore.getState().staleVaultKeyVersion).toBe(9);
+    });
+    // The negatives: the refusal is reported rather than swallowed, it is not
+    // retried, and this session's own generation is untouched — adopting the
+    // number the server named would move the whole session onto a key it chose.
+    expect(mockToast).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
+    expect(mockImportVaultApi).toHaveBeenCalledTimes(1);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(4);
   });
 
   it('collapses byte-identical rows in one file and reports the full accounting', async () => {

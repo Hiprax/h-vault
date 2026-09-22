@@ -40,7 +40,7 @@ import {
 } from '../components/ui/Dialog';
 import { useToast } from '../components/ui/Toast';
 import { useAuthStore } from '../stores/authStore';
-import { useUIStore } from '../stores/uiStore';
+import { noteStaleVaultKey, useUIStore } from '../stores/uiStore';
 import { cryptoService } from '../services/crypto/cryptoService';
 import { api } from '../services/api/client';
 import {
@@ -85,13 +85,11 @@ import {
   MAX_DOCUMENT_PAGES,
   listDocumentTrashApi,
   listDocumentsApi,
-  // The ONE reader of the refusal that carries a number, wherever that refusal
-  // is answered. It lives beside the document routes because those were the
-  // first to answer it; it is not document-specific, and a second copy here
-  // would be a second place for "a 409 whose body has no non-negative integer
-  // is an ordinary conflict" to drift.
-  staleVaultKeyVersion,
 } from '../services/api/documentsApi';
+// The ONE reader of the refusal that carries a number, wherever that refusal is
+// answered. A second copy here would be a second place for "a 409 whose body
+// has no non-negative integer is an ordinary conflict" to drift.
+import { staleVaultKeyVersion } from '../services/api/staleVaultKey';
 import { readDocumentsConfigFresh } from '../services/api/configApi';
 import {
   deriveWrapKey,
@@ -1187,7 +1185,10 @@ export default function SettingsPage() {
   const handleImport = useCallback(async () => {
     if (!importData.trim()) return;
 
-    const vaultKey = useAuthStore.getState().vaultKey;
+    // Key and generation from ONE read: the generation names the key the rows
+    // below are sealed with, and a pair taken from two snapshots could name a
+    // combination that never existed at the same instant.
+    const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
     if (!vaultKey) {
       toast({ title: 'Unlock your vault before importing', type: 'error' });
       return;
@@ -1382,6 +1383,11 @@ export default function SettingsPage() {
             format: importFormat,
             conflictStrategy,
             operations: batch,
+            // Every ciphertext field in this batch was sealed under `vaultKey`,
+            // captured above. The server checks this immediately before its
+            // first write, so a rotation that commits mid-migration refuses the
+            // remaining batches rather than inserting rows nothing can open.
+            vaultKeyVersion,
           });
           const body = res.data;
           if (!body.success) throw new Error('Failed to import vault data');
@@ -1390,6 +1396,14 @@ export default function SettingsPage() {
           sentBatches++;
         }
       } catch (batchErr) {
+        // A vault-key rotation committed elsewhere mid-import. Raise the app-wide
+        // notice, then fall through to the ordinary partial-result reporting
+        // below: the batches that landed DID land, and saying so is what lets the
+        // user finish the job after reloading. Nothing is retried and no key is
+        // re-derived — reloading is the remedy this application offers, because
+        // adopting a generation the server named is a decision about the whole
+        // session rather than about one import.
+        noteStaleVaultKey(batchErr);
         // A later batch failed; earlier batches are already committed. Report the
         // partial result honestly and refresh so committed rows appear. Under
         // `skip`/`overwrite` re-running is safe: it re-resolves against the

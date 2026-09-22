@@ -28,6 +28,7 @@ import { getBackupHistoryApi } from '../services/api/backupApi';
 import { Pagination } from '../components/ui/Pagination';
 import { cryptoService } from '../services/crypto/cryptoService';
 import { useAuthStore } from '../stores/authStore';
+import { noteStaleVaultKey } from '../stores/uiStore';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
 import type { IBackupLogEntry } from '@hvault/shared';
 
@@ -534,8 +535,14 @@ export default function BackupSettingsPage() {
         // not present in the backup) permanently undecryptable. Re-encryption
         // touches only the backup rows, so existing data is never endangered and
         // no privileged key-replacement / master-password re-auth is required.
-        const mek = useAuthStore.getState().mek;
-        const currentVaultKey = useAuthStore.getState().vaultKey;
+        // ONE read for all three: the generation names the key the rows below
+        // are re-encrypted to, and a pair taken from two snapshots could name a
+        // combination that never existed at the same instant.
+        const {
+          mek,
+          vaultKey: currentVaultKey,
+          vaultKeyVersion: currentVaultKeyVersion,
+        } = useAuthStore.getState();
         // Whether the backup rows must be re-encrypted: true when the backup's
         // key differs from the current key (cross-account, or a same-account
         // backup taken before a vault-key rotation). When the keys match the
@@ -751,6 +758,12 @@ export default function BackupSettingsPage() {
         }>('/backup/restore', {
           conflictStrategy: restoreConflictStrategy,
           data: JSON.stringify(backupData),
+          // Every row above was re-encrypted to `currentVaultKey`, captured at
+          // the top of this handler. The server checks this immediately before
+          // its first write, so a rotation that commits while a large backup is
+          // being re-encrypted refuses the restore instead of storing rows
+          // sealed under a key the account has already replaced.
+          vaultKeyVersion: currentVaultKeyVersion,
         });
 
         const trashedAutoRestoredCount = (restoreResponse.data.data.itemSkipReasons ?? []).filter(
@@ -805,6 +818,12 @@ export default function BackupSettingsPage() {
         if (backupVaultKey) await cryptoService.clearCryptoKey(backupVaultKey);
       }
     } catch (err) {
+      // A vault-key rotation committed elsewhere while this restore was being
+      // prepared. Raise the app-wide notice, then report the failure as usual:
+      // nothing was restored, nothing is retried, and no key is re-derived —
+      // reloading is the remedy, because adopting a generation the server named
+      // is a decision about the whole session rather than about one restore.
+      noteStaleVaultKey(err);
       // Surface the server's specific error (e.g. an incorrect backup password
       // caught client-side, or a persistence-layer rejection) instead of a
       // generic failure toast.

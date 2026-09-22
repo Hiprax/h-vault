@@ -765,3 +765,79 @@ describe('the import lock is released before the response is written', () => {
     expect(order).toEqual(['lock-released', 'response-received']);
   });
 });
+
+describe('the vault-key generation is checked inside the lock, not at the top', () => {
+  let user: TestUser;
+
+  beforeEach(async () => {
+    user = await createTestUser({ email: 'stale-generation-order@example.com' });
+    // The number's PROVENANCE is covered in `stale-vault-key-writes.test.ts`,
+    // which drives a real `POST /vault/items/bulk-reencrypt` so the generation is
+    // moved by the product's own `$inc`. What is under test HERE is the order the
+    // handler evaluates its guards in, so the account is simply placed on a later
+    // generation than anything this request will name.
+    await User.updateOne({ _id: user.id }, { $set: { vaultKeyVersion: 5 } });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('lets the pre-lock update-target check answer first, with 400 and not 409', async () => {
+    // An id that is well-formed, unknown, and therefore rejected by step 3 of
+    // `executeImportOperations` — a handler-level check that runs before
+    // `acquireJobLock`. A field-length violation would NOT discriminate here:
+    // `assertImportFieldLengths` is defence-in-depth behind the Zod bounds, so
+    // over-length ciphertext never reaches the handler at all.
+    const res = await postOperations(
+      user.accessToken,
+      { updates: [updateRow('507f1f77bcf86cd799439011')] },
+      { vaultKeyVersion: 4 },
+    );
+
+    // 409 here would mean the generation was checked at the top of the handler,
+    // hundreds of milliseconds and several round-trips before the first write —
+    // exactly the span this phase exists to close.
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/update target/i);
+    expect(res.body.data).toBeUndefined();
+    expect(await rawItems(user.id)).toHaveLength(0);
+  });
+
+  it('lets the lock answer first when another import already holds it', async () => {
+    const lockName = vaultImportLockName(user.id);
+    const heldBy = await acquireJobLock(lockName, 60_000);
+    expect(heldBy).not.toBeNull();
+
+    try {
+      const res = await postOperations(
+        user.accessToken,
+        { inserts: [insertRow(1)] },
+        { vaultKeyVersion: 4 },
+      );
+
+      // Both refusals are 409, so the status alone proves nothing: the MESSAGE
+      // and the absent `data` are what say the lock was reached first, and
+      // therefore that the generation is checked INSIDE it.
+      expect(res.status).toBe(409);
+      expect(res.body.message).toMatch(/import is already in progress/i);
+      expect(res.body.data).toBeUndefined();
+      expect(await rawItems(user.id)).toHaveLength(0);
+    } finally {
+      await releaseJobLock(lockName, heldBy!);
+    }
+  });
+
+  it('refuses a well-formed request that names a superseded generation', async () => {
+    const res = await postOperations(
+      user.accessToken,
+      { inserts: [insertRow(1)] },
+      { vaultKeyVersion: 4 },
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.data).toEqual({ vaultKeyVersion: 5 });
+    expect(await rawItems(user.id)).toHaveLength(0);
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'import' })).toBe(0);
+  });
+});

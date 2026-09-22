@@ -20,7 +20,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
-import { useUIStore } from '../../stores/uiStore';
+import { isHoldingSupersededVaultKey, useUIStore } from '../../stores/uiStore';
 import { useVaultStore } from '../../stores/vaultStore';
 import { useToast } from '../ui/Toast';
 import { cn } from '../../lib/utils';
@@ -150,12 +150,13 @@ export function AppLayout() {
   // "your browser is blocking this", which is a different remedy.
   const [dismissedOfflineCacheError, setDismissedOfflineCacheError] =
     useState<OfflineCacheErrorType | null>(null);
-  const { user, logout, lock, isLocked } = useAuthStore();
+  const { user, logout, lock, isLocked, vaultKeyVersion } = useAuthStore();
   // `null` until the server has answered, and the entry is rendered only for an
   // explicit `true`: an entry that appeared and then vanished would be worse than
   // one that appeared a beat late.
   const documentsConfig = useDocumentsConfig();
-  const { sidebarCollapsed, toggleSidebarCollapsed, offlineCacheError } = useUIStore();
+  const { sidebarCollapsed, toggleSidebarCollapsed, offlineCacheError, staleVaultKeyVersion } =
+    useUIStore();
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
   const navigate = useNavigate();
@@ -173,6 +174,17 @@ export function AppLayout() {
     offlineCacheError !== null && offlineCacheError !== dismissedOfflineCacheError
       ? offlineCacheError
       : null;
+
+  // Whether this session is still holding a vault key the account has replaced.
+  // DERIVED from the generation the server last refused a write with and the one
+  // this session believes it holds, so it clears itself the moment those agree —
+  // see `isHoldingSupersededVaultKey`. No write anywhere has to remember to
+  // reset it, which is what stops a missed reset leaving a permanent notice in
+  // front of a healthy session.
+  const holdingSupersededVaultKey = isHoldingSupersededVaultKey(
+    staleVaultKeyVersion,
+    vaultKeyVersion,
+  );
 
   // Whether the sidebar should visually appear expanded
   const expanded = !sidebarCollapsed || hovered;
@@ -515,6 +527,46 @@ export function AppLayout() {
             </div>
           )}
         </div>
+
+        {/* The session is holding a vault key the account has replaced.
+
+            `role="alert"` rather than the `status` region above, and rendered
+            conditionally rather than as an always-mounted live region: this is
+            an interrupting condition — every save from this tab is being
+            refused — and `alert` is the role whose announcement survives being
+            inserted along with its message.
+
+            The only action offered is a reload, and that is the whole point of
+            the phase this belongs to. The server has told this session which
+            generation it is on; ADOPTING that number, or re-deriving the vault
+            key to match it, would be taking a key the server chose on a session
+            whose in-memory data was all decrypted under the old one. A reload
+            re-reads everything from one consistent starting point instead. It
+            is not dismissible for the same reason: dismissing it would leave a
+            session in which nothing can be saved and nothing says so. */}
+        {holdingSupersededVaultKey && (
+          <div
+            role="alert"
+            data-testid="stale-vault-key-banner"
+            className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 dark:border-red-700 dark:bg-red-900/20 dark:text-red-300 lg:mx-6"
+          >
+            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+            <span className="flex-1">
+              Your vault key was changed on another device, so changes from this tab can no longer
+              be saved. Reload to continue.
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                window.location.reload();
+              }}
+              className="inline-flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-800/30"
+            >
+              <RefreshCw className="h-3 w-3" />
+              Reload
+            </button>
+          </div>
+        )}
 
         {/* Decryption failure warning */}
         {decryptionFailureCount > 0 && (

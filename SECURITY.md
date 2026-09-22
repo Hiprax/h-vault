@@ -433,8 +433,30 @@ Everything encrypted under the vault key is re-encrypted by the rotation itself,
 session only matters when it writes something new. Each sign-in is therefore told which
 generation of the vault key it received, and a write that seals anything under that key says
 which one it used; if that is no longer the current one the write is refused and the browser is
-handed the current generation so it can recover rather than guess. Two writes are that case, and
-the second is the more serious of the two.
+handed the current generation so it can recover rather than guess.
+
+Every such write is that case: creating or editing an item, creating or renaming a folder,
+importing, restoring a backup, uploading a document, and changing your master password. The
+check fails closed — a request that names no generation at all is refused too, on any account
+that has rotated at least once, because a client that cannot say which key it used may be
+holding the superseded one. An account that has never rotated has no superseded key for anyone
+to hold and is unaffected. Operations with an endpoint of their own that seal nothing are
+deliberately left alone, because a rotation neither reads nor rewrites what they touch: moving
+several entries at once, trashing, restoring from the trash, reordering folders and deleting a
+folder all continue to work. Changing one entry's folder, favourite or tags is not among them —
+it is sent to the same address as changing that entry's contents, and is refused with the rest.
+The check belongs to the address rather than to which fields a request happens to carry, because
+a check decided from the sender's own choice of fields is one the sender can step around. For an
+import and for a restore the check is made immediately before the first entry is written rather
+than when the request arrives, because both spend a noticeable time being validated first and a
+rotation can commit inside that gap.
+
+Without it, such a write was stranded the instant it landed rather than refused: the rotation had
+listed the account's entries before that one existed, so no key the account holds can open it and
+no later rotation can repair it. It read back afterwards as an entry whose content could not be
+recovered, and nothing at the time said so.
+
+Two of those writes are worth naming separately, because their remedy differs from the rest.
 
 Uploading a document is the first, because a document's own key is wrapped in the browser under
 the vault key the browser holds. A refused upload is retried after the browser fetches the
@@ -448,12 +470,9 @@ result becomes the account's only stored copy. A wrapper is opaque to the server
 built from a superseded vault key is indistinguishable from a correct one by inspection: stored,
 it destroys the only copy of the live key and every item, folder, note and document in the
 account becomes permanently undecryptable, with no recovery anywhere. The generation check is
-what makes that refusable, and it fails closed — a request that names no generation at all is
-refused too, on any account that has rotated at least once, because a client that cannot say
-which key it used may be holding the superseded one. An account that has never rotated has no
-superseded key for anyone to hold and is unaffected. A change attempted while a rotation is
-still being processed is refused as well, and the two controls in the interface hold each other
-back so neither can be started while the other runs.
+what makes that refusable. A change attempted while a rotation is still being processed is
+refused as well, and the two controls in the interface hold each other back so neither can be
+started while the other runs.
 
 One narrow window remains open and is stated here rather than left to be found: a rotation that
 begins after the check and commits after the write can still overwrite a committed password
@@ -461,6 +480,14 @@ change, because the rotation's own final write is not itself conditional. Closin
 two operations to take the same per-user lock, which is a change with its own cost — a rotation
 interrupted by a crash holds that lock until its timeout lapses, blocking every password change
 in the meantime — so it is tracked separately rather than folded in here.
+
+For every other write the remedy is deliberately blunter. The refusal carries the generation the
+account is on, but the application does not use it to fetch the current key and carry on: the
+entries already on screen were read with the key this session holds, so adopting a different one
+partway through a session would leave it working with two. It says instead that your vault key
+was changed on another device, and offers to reload — which starts again from a single consistent
+state. That notice cannot be dismissed, because a session in which nothing can be saved and
+nothing says so is the state it exists to prevent.
 
 If you would rather not rely on any of this, sign out of your other devices from the Sessions
 page before rotating.

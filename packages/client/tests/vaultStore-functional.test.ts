@@ -233,6 +233,10 @@ const vaultInitialState = {
 
 const authInitialState = {
   accessToken: null,
+  // Present so the reset is COMPLETE: `setState` merges, so a field left out of
+  // this snapshot would carry over from whichever test ran last — and every
+  // ciphertext write now sends this number.
+  vaultKeyVersion: 0,
   user: null,
   isAuthenticated: false,
   isLocked: false,
@@ -327,6 +331,9 @@ describe('vaultStore – CRUD actions', () => {
         searchHash: 'mock-search-hash',
         tags: [],
         favorite: false,
+        // The generation the six ciphertext fields above were sealed under.
+        // Zero is this account's: it has never rotated.
+        vaultKeyVersion: 0,
       });
 
       // Verify the item was added to state
@@ -773,6 +780,7 @@ describe('vaultStore – CRUD actions', () => {
         nameIv: 'fn-iv',
         nameTag: 'fn-tag',
         sortOrder: 0,
+        vaultKeyVersion: 0,
       });
 
       // Verify state
@@ -960,6 +968,7 @@ describe('vaultStore – CRUD actions', () => {
         encryptedName: 'enc-new-name',
         nameIv: 'new-iv',
         nameTag: 'new-tag',
+        vaultKeyVersion: 0,
       });
 
       // Verify state replacement
@@ -999,6 +1008,7 @@ describe('vaultStore – CRUD actions', () => {
         nameTag: 'tag',
         color: '#0000ff',
         sortOrder: 10,
+        vaultKeyVersion: 0,
       });
     });
 
@@ -1807,6 +1817,8 @@ describe('vaultStore – renameItem', () => {
       // Refreshed, not omitted: it is an HMAC of the NAME, and the server uses it
       // for duplicate detection.
       searchHash: 'a'.repeat(64),
+      // A rename is still a ciphertext write, so it names its generation too.
+      vaultKeyVersion: 0,
     });
     // The decisive assertion: the item's real ciphertext was never in the request.
     for (const field of DATA_CIPHERTEXT_FIELDS) expect(payload).not.toHaveProperty(field);
