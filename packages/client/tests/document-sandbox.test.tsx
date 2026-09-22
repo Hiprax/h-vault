@@ -907,17 +907,26 @@ describe('the frame’s program', () => {
   });
 
   it('answers a scan request from the decoder, echoing the request id', async () => {
-    // The image here is neither an `ImageBitmap` nor a `Blob`, so the decoder
-    // refuses it; what this pins is the DISPATCH — that a third request kind
-    // reaches its own handler and its reply comes back on the port rather than
-    // being answered by the render path as "the preview request was not
-    // understood".
+    // Two things at once, and the second is the one that matters.
+    //
+    // DISPATCH: a third request kind reaches its own handler and its reply comes
+    // back on the port, rather than being answered by the render path as "the
+    // preview request was not understood".
+    //
+    // SHAPE: the request itself parses — it names request 12 — and it is the
+    // IMAGE the decoder refuses, being neither an `ImageBitmap` nor a `Blob`. So
+    // the reply must be `qrFailed`, NAMING that request, and must NOT be the
+    // unattributable `failed` of the case above, which ends the session. Getting
+    // this the other way round is what let one unreadable image stop a running
+    // camera, so the two cases sit next to each other deliberately: the same
+    // sentence, two different kinds, decided by whether a `requestId` was known.
     const { host } = await bootFrame();
     const reply = nextReply(host);
     host.postMessage({ kind: 'qrScan', requestId: 12, image: { not: 'an image' } });
 
     await expect(reply).resolves.toEqual({
-      kind: 'failed',
+      kind: 'qrFailed',
+      requestId: 12,
       reason: 'The scan request was not understood.',
     });
   });

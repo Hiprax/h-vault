@@ -369,7 +369,11 @@ flowchart LR
 ```
 
 The backup file also carries an HMAC-SHA256 signature computed under a key separated from the
-BWK by HKDF, so tampering is detected at restore time rather than discovered later.
+BWK by HKDF, so tampering is detected at restore time rather than discovered later. Restore
+offers that signature to **your account's own** wrapping key first, and to the copy carried
+inside the file only after your own key has disagreed. A file this account cannot authenticate —
+one carrying no signature, or one only the file's own copy of the key accepts, which is what a
+backup from another account looks like — is restored only after you confirm it explicitly.
 
 ### Document encryption
 

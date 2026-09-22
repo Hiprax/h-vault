@@ -119,9 +119,36 @@ security posture, not a disclaimer.
   cannot read behaves **exactly as an absent one**, everywhere: not as a server error, and not as a
   distinguishable rejection that would confirm the probe was understood.
 - **Backup theft.** Emailed and downloaded backups are encrypted under a _separate_
-  backup password and carry an HMAC-SHA256 integrity signature that is verified on restore.
-- **Tampered backup files.** Restore validates the signature, rejects dangling and
-  self-referential folder links, and breaks any folder cycle a malicious file plants.
+  backup password and carry an HMAC-SHA256 integrity signature, computed under a key
+  separated from the backup wrapping key by HKDF.
+- **Tampered backup files.** Restore rejects dangling and self-referential folder links,
+  and breaks any folder cycle a malicious file plants. It also checks the integrity
+  signature before anything is sent — but the sentence that matters is **which key it is
+  checked against**, because a signature is only evidence if the key that verifies it is
+  one the file did not supply. A backup file carries a copy of the wrapping-key block it
+  was written with, and restore genuinely needs that copy — a backup from another account
+  seals its vault key under it and nothing else can open that — so both are unwrapped
+  wherever the entered password opens them, and **the order the signature is offered to
+  them is the control**: the account's own stored key first, and the copy carried inside
+  the file only after the account's key has disagreed. That gives three outcomes, and only
+  the first is silent.
+  A signature that verifies under the account's own key restores unremarked. A file
+  carrying **no** signature, and a file whose signature verifies **only** under key
+  material the file itself carried — a backup from another account, or one taken before
+  the backup password was changed — are both restored only after an **explicit
+  confirmation** that names which of the two it is; until that is answered, nothing is
+  sent. A signature that no available key agrees with is refused outright, and the refusal
+  deliberately does not claim tampering, because a file signed under a backup password
+  other than the one entered fails in exactly the same way and nothing in the browser can
+  tell those two apart. Two limits, stated rather than implied. The account's key anchors
+  this only because the **file** cannot influence it: it reaches the browser from the
+  server over an authenticated session, so a server that is itself hostile is outside what
+  this defends — see the first bullet under "What it cannot protect against". And the whole
+  control is **client-side** by necessity, because the restore request carries only a
+  conflict strategy, the rows and the vault-key generation, and a server that cannot see
+  your backup password cannot verify a signature keyed from it. What it protects is a file
+  you were handed; what it does not protect is an account whose credentials someone else is
+  already driving the API with.
 - **Irreversible loss of your own data through the app itself.** This is an availability
   property, and zero knowledge is precisely what makes it a security concern: because the
   server holds no plaintext, a decrypted blob the client overwrites incorrectly is gone —
@@ -155,6 +182,20 @@ security posture, not a disclaimer.
   the master password or the vault key at the moment they are in memory. This is inherent
   to every browser-based zero-knowledge application, H-Vault included. Self-host it, pin
   the version you deploy, and treat the served bundle as security-critical.
+- **A hostile server rearranging your vault items, as distinct from reading them.** A vault
+  item's contents and its name are each sealed with AES-256-GCM, and the authentication tag
+  proves the bytes came back exactly as they went in — but nothing inside the sealed bytes
+  says _which_ item or _which_ field they belong to. So a server holding your ciphertext can
+  put a superseded copy of a row back (you see the breached password you already replaced,
+  under a modification date that looks right) or move one row's sealed bytes onto another
+  (you copy what the screen calls the forum password and paste the bank one), and both
+  decrypt cleanly, because they are genuine ciphertext under your own key merely sitting in
+  the wrong place. Neither reveals anything the server did not already hold; both make the
+  vault say something untrue. This is exactly the property claimed for **documents** above,
+  where the document's id is inside every key derivation and a segment's position is inside
+  its nonce — vault items do not have it yet. Binding each item's ciphertext to its own id
+  and field is planned; until it ships, treat an item that changed without you changing it
+  as something to check against a backup rather than something to trust.
 - **A weak master password.** It is the root of the entire key hierarchy. PBKDF2 at
   600,000 iterations raises the cost of an offline attack against a stolen auth hash; it
   does not rescue a guessable password.

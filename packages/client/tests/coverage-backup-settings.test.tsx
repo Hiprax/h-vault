@@ -206,6 +206,49 @@ const SAMPLE_FOLDER = {
   nameTag: 'ft',
 };
 
+/**
+ * DISTINGUISHABLE stand-ins for the two unwrapped backup wrapping keys, keyed on
+ * the wrapper ciphertext — the only field that differs between the account's
+ * block and the file's.
+ *
+ * Load-bearing, and the reason is a defect this suite could not previously see.
+ * Restore unwraps BOTH wrappers and hands them to different consumers: the
+ * account's decides the integrity verdict, the file's opens the file's own
+ * BWK-wrapped vault key. A `decryptBWK` that resolved one buffer for every input
+ * — which is what this file used to mock — passes whichever key the page plumbs
+ * wherever, so the cross-account plumbing could be wrong and still green.
+ *
+ * ASSERT ON THESE BY IDENTITY (`toBe`), NEVER WITH `toHaveBeenCalledWith` OR
+ * `toEqual`. Measured: Vitest's structural equality reports two same-length
+ * `ArrayBuffer`s as equal whatever bytes they hold, so
+ * `toHaveBeenCalledWith(…, ACCOUNT_BWK)` passes when the FILE's key was used —
+ * which is precisely the defect these two constants exist to catch. Read the key
+ * out of `mock.calls` and compare it with `toBe`.
+ */
+const ACCOUNT_BWK = new Uint8Array([0xa0, 0xa1]).buffer;
+const FILE_BWK = new Uint8Array([0xf0, 0xf1]).buffer;
+
+/**
+ * Every buffer handed to `cryptoService.clearKey`, BY REFERENCE.
+ *
+ * Returned as a raw array rather than asserted with `toHaveBeenCalledWith`, for
+ * the reason in the note above: `ArrayBuffer`s compare equal to each other under
+ * Vitest's structural equality, so only `toContain`/`toBe` — which use identity
+ * — can say WHICH key was zeroed. The mocked salt goes through here too, which
+ * is exactly why counting calls would prove nothing.
+ */
+function zeroedKeys(): unknown[] {
+  return vi.mocked(cryptoService.clearKey).mock.calls.map(([buffer]) => buffer);
+}
+
+function bwkFor(encryptedBWK: unknown): ArrayBuffer {
+  if (encryptedBWK === CONFIGURED_BACKUP.encryptedBWK) return ACCOUNT_BWK;
+  if (encryptedBWK === FILE_ENCRYPTION_META.encryptedBWK) return FILE_BWK;
+  // A wrapper this file did not name: still its own buffer, so an unexpected
+  // third key cannot be mistaken for either of the two above.
+  return new Uint8Array([0x99]).buffer;
+}
+
 async function renderBackup() {
   const { default: BackupSettingsPage } = await import('../src/pages/BackupSettingsPage');
   let result: ReturnType<typeof render>;
@@ -237,10 +280,25 @@ function restoredPayload(): {
   };
 }
 
-/** Opens the restore form, attaches `fileData` as the backup file and submits. */
+/** The label of the control that carries an unverifiable restore past the prompt. */
+const CONFIRM_UNVERIFIED = 'Restore Unverified Backup';
+const CANCEL_UNVERIFIED = 'Cancel Restore';
+
+/**
+ * Opens the restore form, attaches `fileData` as the backup file and submits.
+ *
+ * A file whose signature this account cannot verify — which, since the policy
+ * changed, is every unsigned file and every foreign one — stops at a prompt, and
+ * this helper ANSWERS IT AFFIRMATIVELY by default. That is deliberate: the cases
+ * below are about re-encryption, row filtering and the notices, not about the
+ * gate, and a gate answered in the helper keeps them saying what they were
+ * written to say. The gate itself is pinned by its own cases further down, which
+ * pass `unverified: 'cancel'` or `'leave'` and assert the negative, so a
+ * regression that stopped raising the prompt at all still fails there.
+ */
 async function performRestore(
   fileData: Record<string, unknown>,
-  opts: { sizeOverride?: number } = {},
+  opts: { sizeOverride?: number; unverified?: 'confirm' | 'cancel' | 'leave' } = {},
 ) {
   const { container } = await renderBackup();
   await waitFor(() => screen.getByText('Restore from File'));
@@ -258,6 +316,15 @@ async function performRestore(
   await act(async () => {
     fireEvent.click(screen.getByText('Restore'));
   });
+
+  const answer = opts.unverified ?? 'confirm';
+  if (answer === 'leave') return;
+  const control = screen.queryByText(answer === 'confirm' ? CONFIRM_UNVERIFIED : CANCEL_UNVERIFIED);
+  if (control) {
+    await act(async () => {
+      fireEvent.click(control);
+    });
+  }
 }
 
 /**
@@ -334,7 +401,9 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     vi.mocked(cryptoService.deriveBEK).mockResolvedValue(
       new Uint8Array(32) as unknown as CryptoKey,
     );
-    vi.mocked(cryptoService.decryptBWK).mockResolvedValue(new Uint8Array(32).buffer);
+    vi.mocked(cryptoService.decryptBWK).mockImplementation((encryptedBWK: string) =>
+      Promise.resolve(bwkFor(encryptedBWK)),
+    );
     vi.mocked(cryptoService.verifyBackupHmac).mockResolvedValue(true);
     vi.mocked(cryptoService.computeBackupHmac).mockResolvedValue('hmac-signature');
     vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new Uint8Array(32).buffer);
@@ -844,6 +913,39 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     );
   });
 
+  it('treats a wrapper missing any one of its four fields as no wrapper at all', async () => {
+    // A partial block is not a usable key, and the completeness test has to be
+    // all-or-nothing on every field individually — a wrapper accepted without
+    // its tag or its salt would be carried to a derivation that cannot work.
+    // Driven one dropped field at a time, so no single field can stop being
+    // checked without this failing.
+    for (const dropped of ['encryptedBWK', 'bwkIv', 'bwkTag', 'bwkSalt'] as const) {
+      vi.clearAllMocks();
+      mockGetProfileApi.mockResolvedValue(
+        profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
+      );
+      // Rebuilt without the field rather than deleted from a copy: a dynamic
+      // `delete` is a lint error here, and omission is what a real partial
+      // block looks like anyway.
+      const partial = Object.fromEntries(
+        Object.entries(FILE_ENCRYPTION_META).filter(([field]) => field !== dropped),
+      );
+
+      await performRestore({ items: [SAMPLE_ITEM], folders: [], backupEncryption: partial });
+
+      await waitFor(() => {
+        expect(mockToast, `dropped ${dropped}`).toHaveBeenCalledWith({
+          title: 'Backup encryption is not configured and backup file has no encryption metadata',
+          type: 'error',
+        });
+      });
+      // Never carried to a derivation, and never sent.
+      expect(cryptoService.deriveBEK, `dropped ${dropped}`).not.toHaveBeenCalled();
+      expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+      cleanup();
+    }
+  });
+
   it('aborts the restore when neither the file nor the account has encryption metadata', async () => {
     mockGetProfileApi.mockResolvedValue(
       profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
@@ -907,23 +1009,365 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
   it('rejects a tampered backup whose integrity signature does not verify', async () => {
     vi.mocked(cryptoService.verifyBackupHmac).mockResolvedValue(false);
 
+    // `unverified: 'leave'` so the helper does not answer a prompt on the way
+    // out: without it, "the prompt is absent" below could equally mean "the
+    // prompt appeared for a misclassified verdict and the helper clicked it
+    // away", which is the one thing this case must be able to tell apart.
+    await performRestore(
+      {
+        items: [SAMPLE_ITEM],
+        folders: [],
+        backupEncryption: FILE_ENCRYPTION_META,
+        integrity: 'forged',
+      },
+      { unverified: 'leave' },
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'This backup’s integrity signature does not match its contents.',
+          type: 'error',
+        }),
+      );
+    });
+    // BOTH available keys were asked, so the refusal means "nothing here agrees
+    // with it" rather than "the first key I tried disagreed".
+    expect(cryptoService.verifyBackupHmac).toHaveBeenCalledTimes(2);
+    // A refusal is not a question: the prompt must not be offered as a way past it.
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('does not accuse a signature no key agrees with of being tampered with', async () => {
+    // The old copy asserted tampering as fact. It cannot be known here: a file
+    // signed under a backup password other than the one entered fails in exactly
+    // the same way, and telling a user their own file was tampered with is a lie
+    // they have no way to check.
+    vi.mocked(cryptoService.verifyBackupHmac).mockResolvedValue(false);
+
     await performRestore({
       items: [SAMPLE_ITEM],
       folders: [],
       backupEncryption: FILE_ENCRYPTION_META,
-      integrity: 'forged',
+      integrity: 'signed-under-another-password',
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: expect.stringContaining(
+            'signed under a different backup password',
+          ) as string,
+        }),
+      );
+    });
+    const refusal = mockToast.mock.calls.find(
+      (call) =>
+        (call[0] as { title?: string }).title ===
+        'This backup’s integrity signature does not match its contents.',
+    );
+    expect(String((refusal?.[0] as { description?: string }).description)).not.toContain(
+      'tampered',
+    );
+  });
+
+  // ---- The restore-signature gate -----------------------------------------
+  //
+  // These cases replace one that asserted the opposite: an unsigned backup used
+  // to raise a warning toast and RESTORE ANYWAY, and that test pinned the
+  // fall-through as intended behaviour. `SECURITY.md` documented the opposite,
+  // and a notice the reader does not have to answer is not a control, so the
+  // expectation is what changed rather than the code being bent to fit it.
+
+  it('does not restore an unsigned backup while the prompt is still unanswered', async () => {
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+
+    // The prompt is up, and names the reason it is up.
+    expect(screen.getByText(CONFIRM_UNVERIFIED)).toBeInTheDocument();
+    expect(screen.getByText(/carries no integrity signature at all/)).toBeInTheDocument();
+    // Nothing was verified, because there was nothing to verify...
+    expect(cryptoService.verifyBackupHmac).not.toHaveBeenCalled();
+    // ...and, the whole point, nothing was sent.
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+    // The passive notice this replaced is gone; one event, one notice.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining('no integrity signature') }),
+    );
+  });
+
+  it('sends nothing when an unsigned restore is cancelled, and says nothing was changed', async () => {
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'cancel' },
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Restore cancelled. Nothing was changed.',
+        type: 'info',
+      });
+    });
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+  });
+
+  it('restores an unsigned backup once the prompt is answered, and only then', async () => {
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      backupEncryption: FILE_ENCRYPTION_META,
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+  });
+
+  it('dismissing the prompt with Escape cancels the restore', async () => {
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' });
     });
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith({
-        title: 'Backup integrity check failed. The file may have been tampered with.',
-        type: 'error',
+        title: 'Restore cancelled. Nothing was changed.',
+        type: 'info',
       });
     });
     expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
   });
 
-  it('warns when an old backup carries no integrity signature but still restores it', async () => {
+  it('zeroes the wrapping keys when the page is unmounted with the prompt still open', async () => {
+    // An auto-lock unmounts this route. The assertion that matters is NOT "no
+    // request was sent" — that passes whether or not the resolver exists, since
+    // a promise nobody settles sends nothing either. What the resolver actually
+    // buys is that `handleRestore` REACHES ITS `finally`, so the unwrapped
+    // wrapping keys are zeroed instead of being held for the life of the tab.
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+    expect(screen.getByText(CONFIRM_UNVERIFIED)).toBeInTheDocument();
+    // Still held while the question stands.
+    expect(zeroedKeys()).not.toContain(FILE_BWK);
+
+    await act(async () => {
+      cleanup();
+    });
+
+    expect(zeroedKeys()).toContain(FILE_BWK);
+    expect(zeroedKeys()).toContain(ACCOUNT_BWK);
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('zeroes the wrapping keys when the page is unmounted BEFORE the prompt is raised', async () => {
+    // The window the resolver ref cannot see. Registration happens late — after
+    // a profile read and up to two 600k-iteration derivations — so an auto-lock
+    // landing inside it unmounts the page while the ref is still null. The
+    // cleanup then has nothing to settle, and a resolver registered a moment
+    // later is one nothing can ever reach: the promise never settles, the
+    // `finally` never runs, and both wrapping keys stay in memory with no
+    // outcome reported. Held open here by stalling the profile read, then
+    // unmounting, then letting it through.
+    let releaseProfile: (() => void) | undefined;
+    mockGetProfileApi.mockResolvedValueOnce(profileWith(CONFIGURED_BACKUP)).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseProfile = () => resolve(profileWith(CONFIGURED_BACKUP));
+        }),
+    );
+
+    const { container } = await renderBackup();
+    await waitFor(() => screen.getByText('Restore from File'));
+    fireEvent.click(screen.getByText('Restore from File'));
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: {
+        files: [
+          new File(
+            [
+              JSON.stringify({
+                items: [SAMPLE_ITEM],
+                folders: [],
+                backupEncryption: FILE_ENCRYPTION_META,
+              }),
+            ],
+            'backup.enc',
+            { type: 'application/json' },
+          ),
+        ],
+      },
+    });
+    fireEvent.change(container.querySelector('#restore-password') as HTMLInputElement, {
+      target: { value: 'BackupPass!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Restore'));
+    });
+
+    // Unmounted while the restore is still inside the profile read.
+    await act(async () => {
+      cleanup();
+    });
+    await act(async () => {
+      releaseProfile?.();
+      await Promise.resolve();
+    });
+
+    // No prompt was ever raised, and the restore still finished and cleaned up.
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+    await waitFor(() => expect(zeroedKeys()).toContain(FILE_BWK));
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('restores a backup signed under the ACCOUNT’s key with no prompt at all', async () => {
+    // What a same-account restore looks like: the server copies the account's own
+    // block into every download, so the file's wrapper and the account's are the
+    // same wrapper and the signature verifies under key material the file did not
+    // supply. This is the only arrangement that restores unremarked.
+    await performRestore(
+      {
+        items: [SAMPLE_ITEM],
+        folders: [],
+        backupEncryption: {
+          encryptedBWK: CONFIGURED_BACKUP.encryptedBWK,
+          bwkIv: CONFIGURED_BACKUP.bwkIv,
+          bwkTag: CONFIGURED_BACKUP.bwkTag,
+          bwkSalt: CONFIGURED_BACKUP.bwkSalt,
+        },
+        integrity: 'sig-from-download',
+      },
+      { unverified: 'leave' },
+    );
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+    // Identical wrappers are one key, derived once: the common path did not pay
+    // for a second 600k-iteration derivation.
+    expect(cryptoService.deriveBEK).toHaveBeenCalledTimes(1);
+    expect(cryptoService.verifyBackupHmac).toHaveBeenCalledTimes(1);
+    const [signedPayload, signature, keyUsed] = vi.mocked(cryptoService.verifyBackupHmac).mock
+      .calls[0]!;
+    expect(signature).toBe('sig-from-download');
+    expect(signedPayload).not.toContain('integrity');
+    expect(keyUsed).toBe(ACCOUNT_BWK);
+  });
+
+  it('checks a signature against the ACCOUNT’s key before the file’s own, never after', async () => {
+    // The finding: preferring the file's own block let anyone handing you a file
+    // plus "its" backup password supply the message AND the key that
+    // authenticates it. The order is the control, so it is asserted directly.
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      backupEncryption: FILE_ENCRYPTION_META,
+      integrity: 'sig',
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    const firstKeyTried = vi.mocked(cryptoService.verifyBackupHmac).mock.calls[0]?.[2];
+    expect(firstKeyTried).toBe(ACCOUNT_BWK);
+    expect(firstKeyTried).not.toBe(FILE_BWK);
+  });
+
+  it('asks before restoring a file whose signature only its OWN key could check', async () => {
+    // A foreign backup: the account's key disagrees, the file's own agrees. The
+    // signature is real and proves only that the file agrees with itself, so the
+    // restore is offered rather than refused — and offered, not performed.
+    vi.mocked(cryptoService.verifyBackupHmac).mockImplementation((_data, _hmac, bwk) =>
+      Promise.resolve(bwk === FILE_BWK),
+    );
+
+    await performRestore(
+      {
+        items: [SAMPLE_ITEM],
+        folders: [],
+        backupEncryption: FILE_ENCRYPTION_META,
+        integrity: 'signed-by-the-other-account',
+      },
+      { unverified: 'leave' },
+    );
+
+    expect(screen.getByText(CONFIRM_UNVERIFIED)).toBeInTheDocument();
+    expect(
+      screen.getByText(/could only be checked against key material the file itself/),
+    ).toBeInTheDocument();
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('opens the file’s own wrapped vault key with the FILE’s key, not the account’s', async () => {
+    // The two unwrapped keys have different jobs. `bwkEncryptedVaultKey` lives in
+    // the file and is sealed under the FILE's key by construction, so plumbing
+    // the account's key here would fail to recover the backup's vault key and
+    // drop every row of a legitimate cross-account restore behind a warning.
+    vi.mocked(cryptoService.decryptVaultKey).mockRejectedValue(new Error('MEK mismatch'));
+    vi.mocked(cryptoService.vaultKeyEqualsRaw).mockResolvedValue(false);
+
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      encryptedVaultKey: 'evk',
+      vaultKeyIv: 'vkiv',
+      vaultKeyTag: 'vktag',
+      backupEncryption: FILE_ENCRYPTION_META,
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(cryptoService.decryptVaultKeyWithBWK).toHaveBeenCalledTimes(1);
+    const [wrapped, wrappedIv, wrappedTag, keyUsed] = vi.mocked(
+      cryptoService.decryptVaultKeyWithBWK,
+    ).mock.calls[0]!;
+    expect([wrapped, wrappedIv, wrappedTag]).toEqual(['file-bevk', 'file-bvkiv', 'file-bvktag']);
+    // Identity, not equality: the two stand-ins are the same length and Vitest
+    // would call them equal. See the note beside their declarations.
+    expect(keyUsed).toBe(FILE_BWK);
+    expect(keyUsed).not.toBe(ACCOUNT_BWK);
+    // ...and the rows survived, which is what the wrong key would have cost.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining('Could not recover') }),
+    );
+  });
+
+  it('still offers the restore when the profile cannot be read but the file carries a wrapper', async () => {
+    // The profile read is the TRUST ANCHOR and is unconditional now. A profile
+    // that will not load costs the restore its anchor — answered by the prompt —
+    // and must not cost it the restore itself, which it did not before.
+    mockGetProfileApi
+      .mockResolvedValueOnce(profileWith(CONFIGURED_BACKUP))
+      .mockRejectedValueOnce(new Error('network down'));
+
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+
+    expect(screen.getByText(CONFIRM_UNVERIFIED)).toBeInTheDocument();
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to restore backup' }),
+    );
+  });
+
+  it('reports a key-derivation failure as a failure, never as a wrong backup password', async () => {
+    // `deriveBEK` throwing is Web Crypto refusing, or a hostile file's
+    // unparseable salt. Only a wrapper that will not OPEN means a wrong password,
+    // and conflating the two would tell a user to retype a correct password.
+    vi.mocked(cryptoService.deriveBEK).mockRejectedValue(new Error('SubtleCrypto unavailable'));
+
     await performRestore({
       items: [SAMPLE_ITEM],
       folders: [],
@@ -931,13 +1375,62 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     });
 
     await waitFor(() => {
-      expect(mockToast).toHaveBeenCalledWith({
-        title: 'This backup has no integrity signature. It may be an older backup.',
-        type: 'warning',
-      });
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to restore backup' }),
+      );
     });
-    expect(cryptoService.verifyBackupHmac).not.toHaveBeenCalled();
-    expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Incorrect backup password' }),
+    );
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('abandons a confirmed restore whose vault key changed while the prompt was open', async () => {
+    // The answer has no time limit. A rotation in another tab does not unmount
+    // this page, and every row below would be re-encrypted to the key captured
+    // AFTER the answer — so the key is re-read rather than assumed.
+    const rotatedKey = new Uint8Array(32) as unknown as CryptoKey;
+    const { container } = await renderBackup();
+    await waitFor(() => screen.getByText('Restore from File'));
+    fireEvent.click(screen.getByText('Restore from File'));
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(
+            [
+              JSON.stringify({
+                items: [SAMPLE_ITEM],
+                folders: [],
+                backupEncryption: FILE_ENCRYPTION_META,
+              }),
+            ],
+            'backup.enc',
+            { type: 'application/json' },
+          ),
+        ],
+      },
+    });
+    fireEvent.change(container.querySelector('#restore-password') as HTMLInputElement, {
+      target: { value: 'BackupPass!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Restore'));
+    });
+
+    useAuthStore.setState({ vaultKey: rotatedKey });
+    await act(async () => {
+      fireEvent.click(screen.getByText(CONFIRM_UNVERIFIED));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Your vault key changed while the restore was waiting to be confirmed.',
+        }),
+      );
+    });
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
   });
 
   it('recovers a cross-account vault key from the BWK-wrapped copy and re-encrypts the rows', async () => {

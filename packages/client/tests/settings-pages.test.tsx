@@ -2889,6 +2889,15 @@ describe('BackupSettingsPage', () => {
     backupEncryption: backupFileWithVaultKey.backupEncryption,
   };
 
+  /**
+   * These fixtures carry no `integrity` signature, so each one stops at the
+   * unverified-restore prompt before anything is sent. The prompt is answered
+   * here rather than in each case: what this block is about is re-encryption,
+   * verbatim `_id` forwarding and the server's error surfacing, none of which the
+   * gate changes. The gate itself is pinned in
+   * `coverage-backup-settings.test.tsx`, which asserts the negative — that
+   * nothing is sent while the prompt stands.
+   */
   async function performRestore(fileData: Record<string, unknown> = backupFileWithVaultKey) {
     const { container } = await renderBackup();
     await waitFor(() => screen.getByText('Restore from File'));
@@ -2905,6 +2914,13 @@ describe('BackupSettingsPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('Restore'));
     });
+
+    const confirmUnverified = screen.queryByText('Restore Unverified Backup');
+    if (confirmUnverified) {
+      await act(async () => {
+        fireEvent.click(confirmUnverified);
+      });
+    }
   }
 
   function restoreBody() {

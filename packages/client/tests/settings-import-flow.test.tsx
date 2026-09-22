@@ -16,7 +16,7 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import {
   PASSWORD_HISTORY_MAX,
@@ -305,6 +305,49 @@ describe('SettingsPage import flow', () => {
       fireEvent.click(screen.getByText('Cancel Import'));
     });
 
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Import cancelled. Nothing was changed.' }),
+      ),
+    );
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+  });
+
+  it('reports an outcome when the page is unmounted BEFORE the confirmation is raised', async () => {
+    // The window a resolver ref cannot see. The confirmation is registered LATE
+    // — after the whole vault has been loaded and resolved — so an auto-lock
+    // landing inside that load unmounts the page while the ref is still null.
+    // The unmount cleanup then has nothing to settle, and a resolver registered
+    // a moment later is one nothing can ever reach: the promise never settles,
+    // the accounting below it never runs, and the user is told NOTHING about an
+    // import they started. Held open here by stalling the vault load, then
+    // unmounting, then letting it through.
+    let releaseVault: (() => void) | undefined;
+    mockListItemsApi.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseVault = () => resolve(itemsPage([existingGithubItem()]));
+        }),
+    );
+
+    await renderSettings();
+    startFirefoxImport();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    // Unmounted while the import is still inside the vault load.
+    await act(async () => {
+      cleanup();
+    });
+    await act(async () => {
+      releaseVault?.();
+      await Promise.resolve();
+    });
+
+    // No summary was ever shown, and the import still said what happened.
+    expect(screen.queryByText('Confirm import changes')).toBeNull();
     await waitFor(() =>
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({ title: 'Import cancelled. Nothing was changed.' }),

@@ -2764,12 +2764,18 @@ describe('SettingsPage — error paths and branches', () => {
 
     await act(async () => {
       fireEvent.change(fileInput, { target: { files: [file] } });
-      await new Promise((r) => setTimeout(r, 50));
     });
 
-    expect(
-      (screen.getByPlaceholderText('Paste exported data here...') as HTMLTextAreaElement).value,
-    ).toBe(content);
+    // Waited on the OBSERVABLE RESULT, not on a fixed delay. A `FileReader`
+    // resolves on its own schedule, and the 50 ms sleep this replaces was enough
+    // on an idle machine and not enough inside a full parallel run — which is a
+    // race reported as a mystery, not a slow test. The condition is the same
+    // assertion either way, so nothing here is weaker than it was.
+    await waitFor(() =>
+      expect(
+        (screen.getByPlaceholderText('Paste exported data here...') as HTMLTextAreaElement).value,
+      ).toBe(content),
+    );
     expect(screen.getByDisplayValue(JSON_FORMAT_LABEL)).toBeInTheDocument();
   });
 

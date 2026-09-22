@@ -647,13 +647,29 @@ export default function SettingsPage() {
   // the outcome, and the answer decides only whether it is executed.
   const [importConfirm, setImportConfirm] = useState<ImportConfirmSummary | null>(null);
   const importConfirmResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  /**
+   * Whether this page is still on screen.
+   *
+   * The resolver ref alone is not enough, and the gap is not theoretical: the
+   * cleanup below can only settle a resolver that has ALREADY been registered,
+   * while the import registers one late — after parsing, decrypting and
+   * resolving every row. An auto-lock landing inside that window unmounts the
+   * page while the ref is still null, and the import then registers a resolver
+   * nothing can reach: the promise never settles, the flow never reaches its
+   * accounting, and the user is told nothing at all. That is the same silent
+   * disappearance the cleanup exists to prevent, arriving a few milliseconds
+   * earlier.
+   */
+  const mountedRef = useRef(true);
 
   const requestImportConfirmation = useCallback(
-    (summary: ImportConfirmSummary): Promise<boolean> =>
-      new Promise<boolean>((resolve) => {
+    (summary: ImportConfirmSummary): Promise<boolean> => {
+      if (!mountedRef.current) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
         importConfirmResolverRef.current = resolve;
         setImportConfirm(summary);
-      }),
+      });
+    },
     [],
   );
 
@@ -670,14 +686,19 @@ export default function SettingsPage() {
   // all, which is exactly the silent disappearance the accounting exists to
   // prevent. The state setter is skipped here (nothing left to render); the
   // toast still reaches the user because the toast provider outlives the route.
-  useEffect(
-    () => () => {
+  // The flag is lowered in the SAME cleanup, so a confirmation asked for after
+  // this point is declined immediately rather than registering a resolver into
+  // the void. Two halves of one guarantee: this settles the answer already
+  // pending, the flag settles every answer asked for from now on.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
       const resolve = importConfirmResolverRef.current;
       importConfirmResolverRef.current = null;
       resolve?.(false);
-    },
-    [],
-  );
+    };
+  }, []);
 
   const importFileRef = useRef<HTMLInputElement>(null);
 
