@@ -103,6 +103,13 @@ function requestKind(data: unknown): 'transform' | 'qrScan' | 'render' {
 async function qrScanRequest(port: MessagePort, data: unknown): Promise<void> {
   const request = parseQrScanRequest(data);
   if (!request) {
+    // BOTH failures here stay `failed` rather than `qrFailed`, and both are
+    // meant to end the session. A request this frame cannot parse names no
+    // `requestId` to answer with, and a decoder chunk that will not load will
+    // not load for the next image either — so there is nothing for the host to
+    // retry, and pretending otherwise would leave a camera running against a
+    // frame that can never answer. Everything that IS about one image is
+    // answered by `scanImage` with a `qrFailed` that says which.
     port.postMessage(frameMessage.failed('The scan request was not understood.'));
     return;
   }

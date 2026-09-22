@@ -17,7 +17,8 @@ vi.mock('../../src/lib/sandboxHandshake', () => ({
   connectSandbox: (options: unknown) => connectSandbox(options),
 }));
 
-const { openQrScanner } = await import('../../src/services/totpImport/qrSandbox');
+const { openQrScanner, QrImageRefusedError } =
+  await import('../../src/services/totpImport/qrSandbox');
 
 type PostFn = (message: unknown, transfer?: Transferable[]) => void;
 type FailFn = (reason: string) => void;
@@ -30,36 +31,63 @@ interface Captured {
   close: ReturnType<typeof vi.fn<() => void>>;
 }
 
-function openWithStub(): {
+/**
+ * Stand the driver up against a stubbed handshake.
+ *
+ * `handshake: 'deferred'` withholds `onOpen`, which is the state a REAL frame is
+ * in for its first tens of milliseconds: created, attached, and not yet able to
+ * carry anything. Call the returned `openChannel()` to complete it. The default
+ * opens immediately, because most of what this file pins is reply handling.
+ */
+function openWithStub(options: { handshake?: 'immediate' | 'deferred' } = {}): {
   captured: Captured;
   unavailable: string[];
   scanner: ReturnType<typeof openQrScanner>;
+  openChannel: () => void;
 } {
   const post = vi.fn<PostFn>();
   const fail = vi.fn<FailFn>();
   const close = vi.fn<() => void>();
   let captured: Captured | null = null;
+  let openChannel = (): void => {
+    throw new Error('the handshake was already completed');
+  };
 
-  connectSandbox.mockImplementation((options: Record<string, never>) => {
-    const opts = options as unknown as {
+  connectSandbox.mockImplementation((options_: Record<string, never>) => {
+    const opts = options_ as unknown as {
       onOpen: (c: unknown) => void;
       onMessage: Captured['onMessage'];
       onUnavailable: (reason: string) => void;
     };
     const connection = { post, fail };
     captured = { onMessage: opts.onMessage, onUnavailable: opts.onUnavailable, post, fail, close };
-    opts.onOpen(connection);
+    if (options.handshake === 'deferred') {
+      openChannel = () => opts.onOpen(connection);
+    } else {
+      opts.onOpen(connection);
+    }
     return { close };
   });
 
   const unavailable: string[] = [];
   const scanner = openQrScanner((reason) => unavailable.push(reason));
   if (captured === null) throw new Error('connectSandbox was not called');
-  return { captured, unavailable, scanner };
+  return { captured, unavailable, scanner, openChannel: () => openChannel() };
 }
 
-/** A stand-in for the transferable image; the driver never inspects it. */
+/**
+ * A stand-in for a camera frame.
+ *
+ * jsdom has no `ImageBitmap`, so this is an object the driver never inspects.
+ * What matters is that it is NOT a `Blob`, because that is the discriminator the
+ * driver uses to decide whether the image may be named in a transfer list.
+ */
 const image = {} as ImageBitmap;
+
+/** A stand-in for an uploaded photo. A `File` IS a `Blob`, which is the point. */
+function photo(): Blob {
+  return new File([new Uint8Array([1, 2, 3, 4])], 'export.png', { type: 'image/png' });
+}
 
 beforeEach(() => {
   connectSandbox.mockReset();
@@ -72,19 +100,159 @@ afterEach(() => {
 });
 
 describe('openQrScanner', () => {
-  it('transfers the image rather than copying it', async () => {
+  it('transfers a camera frame rather than copying it', async () => {
     const { captured, scanner } = openWithStub();
     const pending = scanner.scan(image);
 
     const [message, transfer] = captured.post.mock.calls[0] ?? [];
     expect((message as { kind: string }).kind).toBe('qrScan');
     // Copying would move megabytes per camera frame across what is, in
-    // Chromium, a separate process.
-    expect(transfer).toEqual([image]);
+    // Chromium, a separate process. Asserted by IDENTITY: `image` is an empty
+    // stand-in, so a structural compare would accept any other empty object and
+    // could not tell "the image was transferred" from "something was".
+    expect(transfer).toHaveLength(1);
+    expect(transfer?.[0]).toBe(image);
 
     const requestId = (message as { requestId: number }).requestId;
     captured.onMessage({ kind: 'qrMiss', requestId }, { post: captured.post, fail: captured.fail });
     await expect(pending).resolves.toBeNull();
+  });
+
+  it('names NO transfer list for an uploaded photo, because a Blob cannot be transferred', () => {
+    // THE DEFECT THIS REPLACES. This assertion used to read
+    // `expect(transfer).toEqual([image])` for a single stand-in object, which
+    // said nothing about the input TYPE and so passed happily against a driver
+    // that named a `Blob` in a transfer list — the shape that throws
+    // `DataCloneError` on every real upload. What is pinned now is the decision
+    // itself: the list is present for one type and absent for the other, and
+    // neither half can be deleted without the other failing.
+    const { captured, scanner } = openWithStub();
+    void scanner.scan(photo());
+
+    const [message, transfer] = captured.post.mock.calls[0] ?? [];
+    // The image still travels; it is the TRANSFER LIST that must be absent, so
+    // the structured clone carries the Blob instead.
+    expect((message as { image: unknown }).image).toBeInstanceOf(Blob);
+    expect(transfer).toBeUndefined();
+  });
+
+  it('rejects one scan, and keeps the session, when the post itself throws', async () => {
+    // A refused image is one lost frame, not a dead channel: the port was never
+    // touched, so the next frame is 120 ms away rather than never.
+    const { captured, scanner } = openWithStub();
+    captured.post.mockImplementationOnce(() => {
+      throw new DOMException('Found invalid value in transferList.', 'DataCloneError');
+    });
+
+    await expect(scanner.scan(image)).rejects.toThrow(/could not be handed to the scanner/);
+    expect(captured.fail).not.toHaveBeenCalled();
+
+    // The session still answers, which is the whole claim.
+    const second = scanner.scan(image);
+    const requestId = (captured.post.mock.calls[1]?.[0] as { requestId: number }).requestId;
+    captured.onMessage({ kind: 'qrMiss', requestId }, { post: captured.post, fail: captured.fail });
+    await expect(second).resolves.toBeNull();
+  });
+
+  it('registers NOTHING for a request whose post threw', async () => {
+    // The ordering rule, made observable rather than merely asserted: the id of
+    // a request that never went out is not outstanding, so a reply carrying it
+    // is a reply to a request that was never made. Register before posting and
+    // that entry survives with a live 4 s timer that nothing can ever clear, and
+    // this same reply is silently accepted instead of refused.
+    const { captured, scanner } = openWithStub();
+    captured.post.mockImplementationOnce(() => {
+      throw new DOMException('Found invalid value in transferList.', 'DataCloneError');
+    });
+
+    await expect(scanner.scan(image)).rejects.toThrow(/could not be handed to the scanner/);
+    const failedId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+    captured.onMessage(
+      { kind: 'qrMiss', requestId: failedId },
+      { post: captured.post, fail: captured.fail },
+    );
+    expect(captured.fail).toHaveBeenCalledWith(expect.stringContaining('not made'));
+  });
+
+  it('PARKS a scan asked for before the handshake, rather than refusing it', async () => {
+    // THE SECOND DEFECT ON THE UPLOAD PATH, and the one that survived the
+    // transfer-list fix. A channel is not open the instant it is asked for. The
+    // camera survives that because it is a loop and retries 120 ms later; an
+    // upload stands a scanner up and scans ONCE, so refusing here reported
+    // "That image could not be read." for every photograph ever uploaded.
+    const { captured, scanner, openChannel } = openWithStub({ handshake: 'deferred' });
+    const pending = scanner.scan(photo());
+
+    // Nothing has gone out, and nothing has been refused either.
+    expect(captured.post).not.toHaveBeenCalled();
+
+    openChannel();
+
+    const [message, transfer] = captured.post.mock.calls[0] ?? [];
+    expect((message as { kind: string }).kind).toBe('qrScan');
+    expect(transfer).toBeUndefined();
+
+    const requestId = (message as { requestId: number }).requestId;
+    captured.onMessage(
+      { kind: 'qrFound', requestId, text: 'otpauth-migration://offline?data=AA' },
+      { post: captured.post, fail: captured.fail },
+    );
+    await expect(pending).resolves.toBe('otpauth-migration://offline?data=AA');
+  });
+
+  it('sends parked scans in the order they were asked for', async () => {
+    const { captured, scanner, openChannel } = openWithStub({ handshake: 'deferred' });
+    const first = scanner.scan(image);
+    const second = scanner.scan(photo());
+    openChannel();
+
+    const calls = captured.post.mock.calls;
+    expect(calls).toHaveLength(2);
+    // The camera frame keeps its transfer list and the photo still has none, so
+    // parking does not quietly change how either one travels.
+    expect(calls[0]?.[1]?.[0]).toBe(image);
+    expect(calls[1]?.[1]).toBeUndefined();
+
+    const ids = calls.map((call) => (call[0] as { requestId: number }).requestId);
+    expect(ids[1]).toBeGreaterThan(ids[0] ?? 0);
+
+    captured.onMessage(
+      { kind: 'qrFound', requestId: ids[0], text: 'otpauth://totp/a?secret=AA' },
+      { post: captured.post, fail: captured.fail },
+    );
+    captured.onMessage(
+      { kind: 'qrMiss', requestId: ids[1] },
+      {
+        post: captured.post,
+        fail: captured.fail,
+      },
+    );
+    await expect(first).resolves.toContain('/a?');
+    await expect(second).resolves.toBeNull();
+  });
+
+  it('refuses a parked scan with the same sentence when the frame never arrives', async () => {
+    // A parked request must not outlive the handshake it is waiting for. The
+    // caller gets the wording that names the remedy, exactly as it would have
+    // for a request that did go out.
+    const { captured, scanner } = openWithStub({ handshake: 'deferred' });
+    const pending = scanner.scan(photo());
+
+    captured.onUnavailable('The scanner could not start. Paste your export link instead.');
+
+    await expect(pending).rejects.toThrow(/Paste your export link/);
+    expect(captured.post).not.toHaveBeenCalled();
+  });
+
+  it('answers a parked scan as a miss when the caller closes deliberately', async () => {
+    const { captured, scanner } = openWithStub({ handshake: 'deferred' });
+    const pending = scanner.scan(photo());
+
+    scanner.close();
+
+    await expect(pending).resolves.toBeNull();
+    expect(captured.post).not.toHaveBeenCalled();
   });
 
   it('resolves a found code with its text', async () => {
@@ -178,6 +346,107 @@ describe('openQrScanner', () => {
     expect(captured.fail).not.toHaveBeenCalled();
   });
 
+  it('IGNORES a reply that arrives after its deadline, rather than killing the camera', async () => {
+    // The session's central rule is that a reply matching no outstanding request
+    // tears everything down. A frame that answers at 4.1 s for a request
+    // abandoned at 4.0 s used to hit exactly that rule and stop the camera dead,
+    // with nothing on screen to explain it. A slow frame is not a hostile one.
+    const { captured, scanner } = openWithStub();
+    const pending = scanner.scan(image);
+    const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+    vi.advanceTimersByTime(5000);
+    await expect(pending).resolves.toBeNull();
+
+    captured.onMessage(
+      { kind: 'qrFound', requestId, text: 'otpauth://totp/a?secret=AA' },
+      { post: captured.post, fail: captured.fail },
+    );
+
+    expect(captured.fail).not.toHaveBeenCalled();
+    // And the session is genuinely still usable, not merely un-failed.
+    const next = scanner.scan(image);
+    const nextId = (captured.post.mock.calls[1]?.[0] as { requestId: number }).requestId;
+    captured.onMessage(
+      { kind: 'qrMiss', requestId: nextId },
+      {
+        post: captured.post,
+        fail: captured.fail,
+      },
+    );
+    await expect(next).resolves.toBeNull();
+  });
+
+  it('forgives a timed-out id EXACTLY ONCE, so a second reply still tears down', async () => {
+    // Forgiveness that did not consume the id would hand the frame a permanent
+    // licence to send whatever it liked under that number.
+    const { captured, scanner } = openWithStub();
+    const pending = scanner.scan(image);
+    const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+    const connection = { post: captured.post, fail: captured.fail };
+
+    vi.advanceTimersByTime(5000);
+    await expect(pending).resolves.toBeNull();
+
+    captured.onMessage({ kind: 'qrMiss', requestId }, connection);
+    expect(captured.fail).not.toHaveBeenCalled();
+
+    captured.onMessage({ kind: 'qrMiss', requestId }, connection);
+    expect(captured.fail).toHaveBeenCalledWith(expect.stringContaining('not made'));
+  });
+
+  it('still forgives the OLDEST id the memory is meant to hold', async () => {
+    // The n-1 side of the bound, and the half that a one-sided test leaves
+    // unguarded: with only the "too old" case pinned, narrowing the memory by
+    // one (`>` to `>=`, the standard equality mutant) still evicts the stale id
+    // by the seventeenth push and nothing goes red. Sixteen abandoned requests
+    // is exactly what the constant promises to remember.
+    const { captured, scanner } = openWithStub();
+    const first = scanner.scan(image);
+    const oldestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+    vi.advanceTimersByTime(5000);
+    await expect(first).resolves.toBeNull();
+
+    for (let i = 0; i < 15; i += 1) {
+      const later = scanner.scan(image);
+      vi.advanceTimersByTime(5000);
+      await expect(later).resolves.toBeNull();
+    }
+
+    captured.onMessage(
+      { kind: 'qrMiss', requestId: oldestId },
+      {
+        post: captured.post,
+        fail: captured.fail,
+      },
+    );
+    expect(captured.fail).not.toHaveBeenCalled();
+  });
+
+  it('still tears down for an id that timed out too long ago to be remembered', async () => {
+    // The memory is bounded, and the bound is what stops it growing for the life
+    // of a session. Past it, a late reply is indistinguishable from an invented
+    // one and is treated as one — which is the fail-closed direction.
+    const { captured, scanner } = openWithStub();
+    const first = scanner.scan(image);
+    const staleId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+    const connection = { post: captured.post, fail: captured.fail };
+
+    vi.advanceTimersByTime(5000);
+    await expect(first).resolves.toBeNull();
+
+    // Sixteen more abandoned requests, which is exactly the remembered depth.
+    for (let i = 0; i < 16; i += 1) {
+      const later = scanner.scan(image);
+      vi.advanceTimersByTime(5000);
+      await expect(later).resolves.toBeNull();
+    }
+
+    captured.onMessage({ kind: 'qrMiss', requestId: staleId }, connection);
+    expect(captured.fail).toHaveBeenCalledWith(expect.stringContaining('not made'));
+  });
+
   it('rejects every outstanding scan when the session dies, rather than hanging them', async () => {
     const { captured, scanner } = openWithStub();
     const first = scanner.scan(image);
@@ -196,6 +465,81 @@ describe('openQrScanner', () => {
     const pending = scanner.scan(image);
     scanner.close();
     await expect(pending).resolves.toBeNull();
+  });
+
+  it('refuses ONE image on a qrFailed, and keeps the session alive', async () => {
+    // The distinction the reply's SHAPE carries. A `failed` names no request and
+    // ends everything; a `qrFailed` names one and ends only that image. Before
+    // the frame could say which, one oversized photograph stopped a running
+    // camera mid-aim and said nothing about why.
+    const { captured, scanner } = openWithStub();
+    const pending = scanner.scan(photo());
+    const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+    captured.onMessage(
+      { kind: 'qrFailed', requestId, reason: 'That image is too large to read.' },
+      { post: captured.post, fail: captured.fail },
+    );
+
+    await expect(pending).rejects.toThrow(/too large to read/);
+    await expect(pending).rejects.toBeInstanceOf(QrImageRefusedError);
+    // The whole point: the channel was never touched.
+    expect(captured.fail).not.toHaveBeenCalled();
+
+    const next = scanner.scan(image);
+    const nextId = (captured.post.mock.calls[1]?.[0] as { requestId: number }).requestId;
+    captured.onMessage(
+      { kind: 'qrMiss', requestId: nextId },
+      {
+        post: captured.post,
+        fail: captured.fail,
+      },
+    );
+    await expect(next).resolves.toBeNull();
+  });
+
+  it('falls back to its own wording when a qrFailed carries no usable reason', async () => {
+    const { captured, scanner } = openWithStub();
+    const pending = scanner.scan(photo());
+    const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+    captured.onMessage(
+      { kind: 'qrFailed', requestId },
+      {
+        post: captured.post,
+        fail: captured.fail,
+      },
+    );
+
+    await expect(pending).rejects.toThrow('That image could not be read.');
+    expect(captured.fail).not.toHaveBeenCalled();
+  });
+
+  it('refuses to repeat an unreasonably long sentence from the frame', async () => {
+    // Every `reason` is the untrusted side's own words. It is rendered as text,
+    // so the risk is not injection but a message long enough to bury the page;
+    // the document viewer bounds its own for exactly this.
+    const { captured, scanner } = openWithStub();
+    const pending = scanner.scan(photo());
+    const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+    captured.onMessage(
+      { kind: 'qrFailed', requestId, reason: 'x'.repeat(201) },
+      { post: captured.post, fail: captured.fail },
+    );
+
+    await expect(pending).rejects.toThrow('That image could not be read.');
+  });
+
+  it('still tears the session down on a qrFailed naming no outstanding request', () => {
+    // A per-image failure is not a licence to name any id at all: the rule that
+    // an unsolicited reply ends the session covers this kind too.
+    const { captured } = openWithStub();
+    captured.onMessage(
+      { kind: 'qrFailed', requestId: 999, reason: 'nope' },
+      { post: captured.post, fail: captured.fail },
+    );
+    expect(captured.fail).toHaveBeenCalledWith(expect.stringContaining('not made'));
   });
 
   it('ends the session on a failure the frame reported for itself', async () => {

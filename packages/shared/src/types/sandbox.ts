@@ -255,11 +255,15 @@ export type SandboxTransformReply =
  *
  * TWO DEPARTURES from the render contract above, both deliberate:
  *
- *  1. The image is TRANSFERRED, where `SandboxRenderRequest.bytes` is copied.
- *     The render request is copied because its buffer is a prop the host was
- *     lent and must still own afterwards. Here the host mints the image for this
- *     one request and never looks at it again, so transferring is free and
- *     avoids moving megabytes per frame across a process boundary.
+ *  1. A CAMERA FRAME is TRANSFERRED, where `SandboxRenderRequest.bytes` is
+ *     copied. The render request is copied because its buffer is a prop the host
+ *     was lent and must still own afterwards. A camera frame is a bitmap the
+ *     host mints for this one request and never looks at again, so transferring
+ *     is free and avoids moving megabytes per frame across a process boundary.
+ *     AN UPLOADED PHOTO IS COPIED INSTEAD, and the host has no choice: a `Blob`
+ *     is serializable but NOT transferable, so naming one in a transfer list
+ *     throws `DataCloneError` before the message is queued. The frame cannot
+ *     tell the two apart and does not need to.
  *  2. One frame answers MANY requests, where a render frame answers one. A
  *     scanning session is a stream of camera frames, and standing a new
  *     document up per frame would cost a handshake each time. `requestId` is
@@ -295,13 +299,49 @@ export interface SandboxQrMissMessage {
 }
 
 /**
+ * Frame to host: THIS ONE IMAGE could not be read, and why.
+ *
+ * It exists for the same reason `SandboxTransformFailedMessage` does, and the
+ * distinction it draws is the load-bearing part. `SandboxFailedMessage` answers
+ * a request the frame could not even parse, or a decoder that will never load:
+ * states that belong to the PROTOCOL, that the next image cannot improve, and
+ * that therefore end the session. This one answers a particular image the frame
+ * looked at and refused — too many bytes, too many pixels, a format the engine
+ * cannot decode — and carries the `requestId` that says which.
+ *
+ * MEASURED CONSEQUENCE OF NOT HAVING IT. Every one of those refusals used to
+ * arrive as an unattributable `failed`, so the host had no honest choice but to
+ * treat it as the session dying: picking one 8000 x 6000 photograph, or one HEIC
+ * a non-Safari engine cannot decode, stopped a running camera mid-aim and said
+ * nothing about why. With a `requestId` the host rejects that one scan, shows
+ * the frame's own sentence for it, and keeps scanning.
+ *
+ * `reason` is displayed by the application's chrome, so it is treated as
+ * untrusted text: shown, never interpreted, never used to build markup, and
+ * bounded by the host before it is shown.
+ */
+export interface SandboxQrFailedMessage {
+  readonly kind: 'qrFailed';
+  readonly requestId: number;
+  readonly reason: string;
+}
+
+/**
  * Everything the frame may say IN ANSWER TO A SCAN REQUEST.
  *
  * Disjoint from the render and transform replies, like those two are from each
  * other. A frame answering a scan with a `rendered` message is a frame that has
  * gone wrong, and the host tears it down rather than guessing.
+ *
+ * THREE of the four members name a request and one does not, and that is the
+ * whole design: `SandboxFailedMessage` is a member of this union and of the
+ * other two for the same reason it is a member of theirs — it is the answer to a
+ * request the frame could not even parse, which belongs to the protocol rather
+ * than to any one image, and the host ends the session on it. Everything that IS
+ * about one image carries its `requestId`.
  */
-export type SandboxQrReply = SandboxQrFoundMessage | SandboxQrMissMessage | SandboxFailedMessage;
+export type SandboxQrReply =
+  SandboxQrFoundMessage | SandboxQrMissMessage | SandboxQrFailedMessage | SandboxFailedMessage;
 
 /** The longest decoded string the frame will hand back. */
 export const MAX_SANDBOX_QR_TEXT_LENGTH = 8192;

@@ -1,5 +1,11 @@
 import { test, expect, type Page } from '@playwright/test';
-import { registerAndSignInViaUI, gotoTotpImportTool, readSampleExport } from './helpers';
+import {
+  AUTHENTICATOR_EXPORT_QR,
+  documentFixture,
+  gotoTotpImportTool,
+  readSampleExport,
+  registerAndSignInViaUI,
+} from './helpers';
 
 /**
  * Importing authenticator codes, end to end, through the real UI.
@@ -18,6 +24,15 @@ import { registerAndSignInViaUI, gotoTotpImportTool, readSampleExport } from './
  * The decoder itself is covered where it can be measured honestly, by a Vitest
  * round trip that encodes with `qrcode` and decodes with `qr`, two independent
  * implementations.
+ *
+ * ONE case does drive the decoder, and it is here because nothing smaller could
+ * have caught what it caught. Uploading a photo hands the frame a `Blob`, and a
+ * `Blob` is serializable but NOT transferable: the host named it in a
+ * `postMessage` transfer list, which throws `DataCloneError` before the message
+ * is queued, so that path failed on every attempt it ever had. No unit test
+ * noticed, because jsdom's structured clone flattens a `Blob` to `{}` and the
+ * suite's stand-in image was an untyped `{}` either way. A real engine, a real
+ * PNG and the real sandbox is the level at which "upload a photo" is a claim.
  *
  * The sample export is a RECORDED value built by an independent encoder, so this
  * walk reads bytes the reader did not produce.
@@ -63,6 +78,35 @@ test.describe('Import from Authenticator', () => {
     await expect(page.getByLabel('Copy TOTP code').nth(1)).toHaveText(/\d{4}\s\d{4}/);
 
     // Nothing has been written to the vault.
+    await page.getByRole('link', { name: 'Vault', exact: true }).click();
+    await expect(page).toHaveURL(/\/vault$/);
+    await expect(page.getByTestId('vault-item-name')).toHaveCount(0);
+  });
+
+  test('reads an export from an uploaded photo, decoded inside the sandbox', async ({ page }) => {
+    await registerAndSignInViaUI(page);
+    await gotoTotpImportTool(page);
+
+    // No camera is started, so the panel stands a frame of its own up for this
+    // one decode, and is responsible for taking it down again.
+    await page.locator('#totp-photo-input').setInputFiles(documentFixture(AUTHENTICATOR_EXPORT_QR));
+
+    // Both accounts came back out of the image, which means the Blob crossed the
+    // boundary, the third-party decoder read it, and the first-party protobuf
+    // reader parsed what it returned.
+    await expect(page.getByText('Acme', { exact: true })).toBeVisible();
+    await expect(page.getByText('alice@example.com')).toBeVisible();
+    await expect(page.getByText('Globex', { exact: true })).toBeVisible();
+
+    // The two failures this path used to be able to produce, and did.
+    await expect(page.getByText('That image could not be read.')).toHaveCount(0);
+    await expect(page.getByText(/No code was found in that image/)).toHaveCount(0);
+
+    // And the frame it created is gone. A scan that threw used to skip the close
+    // entirely, leaving one hidden opaque-origin document attached per attempt.
+    await expect(page.locator('iframe')).toHaveCount(0);
+
+    // Still nothing written to the vault: a decode is not an import.
     await page.getByRole('link', { name: 'Vault', exact: true }).click();
     await expect(page).toHaveURL(/\/vault$/);
     await expect(page.getByTestId('vault-item-name')).toHaveCount(0);

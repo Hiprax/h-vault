@@ -98,7 +98,17 @@ export async function scanImage(
   try {
     pixels = await toImageData(image);
   } catch (error) {
-    return { kind: 'failed', reason: error instanceof Error ? error.message : 'Unreadable image.' };
+    // `qrFailed`, NOT `failed`, and the difference is the whole point of the
+    // two kinds. Everything `toImageData` refuses is a property of THIS image —
+    // too many bytes, too many pixels, a format this engine cannot decode — and
+    // the next image may well be fine. Answering with the unattributable
+    // `failed` told the host the session had died, which stopped a running
+    // camera because somebody picked one oversized photograph.
+    return {
+      kind: 'qrFailed',
+      requestId,
+      reason: error instanceof Error ? error.message : 'Unreadable image.',
+    };
   }
 
   let text: string;

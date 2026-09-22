@@ -109,19 +109,53 @@ describe('what the frame refuses to decode at all', () => {
     const huge = new Blob([new Uint8Array(10)]);
     Object.defineProperty(huge, 'size', { value: MAX_SANDBOX_QR_IMAGE_BYTES + 1 });
     const reply = await scanImage(1, huge, 2, 120);
-    expect(reply.kind).toBe('failed');
+    // `qrFailed`, NOT `failed`, and carrying the request it answers. The host
+    // cannot attribute a bare `failed` to one image, so it has to read it as the
+    // session dying — which stopped a running camera because somebody picked one
+    // oversized photograph. Saying WHICH request lets it refuse just that image.
+    expect(reply).toEqual({
+      kind: 'qrFailed',
+      requestId: 1,
+      reason: expect.stringContaining('too large'),
+    });
     expect(globalThis.createImageBitmap).not.toHaveBeenCalled();
   });
 
   it('refuses an image whose decoded dimensions are enormous', async () => {
     // A small file can still declare a huge canvas, which is why the check
     // happens on both sides of the decode.
-    const reply = await scanImage(1, bitmap(MAX_SANDBOX_QR_IMAGE_SIDE + 1, 10), 2, 120);
-    expect(reply.kind).toBe('failed');
+    const reply = await scanImage(7, bitmap(MAX_SANDBOX_QR_IMAGE_SIDE + 1, 10), 2, 120);
+    // The case that makes the byte bound insufficient on its own: a 48 MP
+    // photograph is 8000 x 6000 and routinely UNDER twelve mebibytes, so it
+    // reaches the frame and is refused here. Attributable, so it costs one
+    // image rather than the session.
+    expect(reply).toEqual({
+      kind: 'qrFailed',
+      requestId: 7,
+      reason: expect.stringContaining('too large'),
+    });
   });
 
   it('refuses something that is not an image at all', async () => {
-    expect((await scanImage(1, { nope: true }, 2, 120)).kind).toBe('failed');
+    expect(await scanImage(4, { nope: true }, 2, 120)).toEqual({
+      kind: 'qrFailed',
+      requestId: 4,
+      reason: expect.any(String),
+    });
+  });
+
+  it('answers a photo the engine cannot decode per-REQUEST, not per-session', async () => {
+    // A HEIC on a non-Safari engine, or a corrupt PNG: `accept="image/*"` admits
+    // both, and `createImageBitmap` rejects. This is the trigger the host-side
+    // byte bound cannot see at all, and the one that used to stop the camera.
+    vi.mocked(globalThis.createImageBitmap).mockRejectedValueOnce(
+      new Error('The source image could not be decoded.'),
+    );
+    expect(await scanImage(9, new Blob([new Uint8Array(4)]), 2, 120)).toEqual({
+      kind: 'qrFailed',
+      requestId: 9,
+      reason: 'The source image could not be decoded.',
+    });
   });
 
   it('decodes an uploaded file by way of the browser, in the frame', async () => {

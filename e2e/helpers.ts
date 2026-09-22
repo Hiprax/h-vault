@@ -574,6 +574,30 @@ export async function gotoTotpImportTool(page: Page): Promise<void> {
   });
 }
 
+/**
+ * A photograph of that same export, as a QR code.
+ *
+ * RECORDED, like every other file in `e2e/fixtures`, and never regenerated from
+ * the code under test. Provenance, so it can be rebuilt if it ever has to be:
+ * it is `SAMPLE_AUTHENTICATOR_EXPORT_URI` encoded by `qrcode` (soldair) at
+ * error-correction level M, `scale: 8`, `margin: 4` — a 53-module version-9
+ * symbol rendered 488 x 488. The decoder inside the sandbox is `qr`
+ * (paulmillr), which shares no code with the encoder, so reading it back is a
+ * round trip across two independent implementations rather than one library
+ * agreeing with itself.
+ *
+ * MEASURED against the sandbox's OWN budget (`effort: 2`, `timeLimit: 120`, the
+ * settings tuned for a live camera rather than a still): it decodes in 32 ms, so
+ * the margin is not marginal.
+ *
+ * Why a committed file rather than a buffer minted in the test: `knip` runs with
+ * no `ignoreDependencies`, so importing an encoder here would have to be paid
+ * for with a root dependency that ships nothing. The drift risk a recorded
+ * artefact carries is answered by the test itself, which asserts the accounts
+ * the paste path produces from the constant above.
+ */
+export const AUTHENTICATOR_EXPORT_QR = 'authenticator-export.png';
+
 export async function readSampleExport(page: Page): Promise<void> {
   await page.getByText(/Paste an export link instead/i).click();
   await page.locator('#totp-paste').fill(SAMPLE_AUTHENTICATOR_EXPORT_URI);
