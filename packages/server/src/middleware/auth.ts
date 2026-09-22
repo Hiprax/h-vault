@@ -6,6 +6,7 @@ import { httpErrors } from '@hiprax/errors';
 import { createModuleLogger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { User } from '../models/User.js';
+import { evaluateAccountStatus } from '../utils/accountStatus.js';
 
 const logger = createModuleLogger('auth-middleware');
 
@@ -50,7 +51,24 @@ passport.use(
           return;
         }
 
-        if (!dbUser.emailVerified) {
+        // The two account-level refusals this strategy enforces, through the
+        // shared predicates in `utils/accountStatus.ts` so `login`, `login2fa`,
+        // the refresh handler and this site cannot drift apart again — `login`
+        // used to be the one door with no `deletionPending` check.
+        //
+        // The fields are passed EXPLICITLY, and the third condition is absent on
+        // purpose: `lockoutUntil` is not projected above and a lockout is not a
+        // JWT-rejection reason here. An access token lives fifteen minutes and the
+        // refresh handler is where a lockout ends the session; tearing down a live
+        // session mid-request would be a different policy, not a stricter spelling
+        // of this one. Passing only what is projected keeps that visible at the
+        // call site instead of hiding it behind a field that reads as `undefined`.
+        const status = evaluateAccountStatus({
+          emailVerified: dbUser.emailVerified,
+          deletionPending: dbUser.deletionPending,
+        });
+
+        if (status.emailUnverified) {
           done(null, false);
           return;
         }
@@ -62,7 +80,7 @@ passport.use(
         // continue to hit any authenticated endpoint until the access
         // token expires (or until cascade-cleanup races them to the
         // database). Mirror the emailVerified rejection style.
-        if (dbUser.deletionPending === true) {
+        if (status.deletionPending) {
           logger.warn('JWT rejected: user is pending deletion', {
             userId: payload.userId,
           });

@@ -3,6 +3,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
+import crypto from 'node:crypto';
 import { MAX_TRUSTED_DEVICES } from '@hvault/shared';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
@@ -1626,33 +1627,47 @@ describe('Auth API', () => {
   // ── Unlock Account ──────────────────────────────────────────────────
 
   describe('POST /auth/unlock-account', () => {
-    it('should unlock a locked account with a valid token', async () => {
-      const testUser = await createTestUser({ emailVerified: true });
-
-      // Lock the account by setting failedLoginAttempts and lockoutUntil
+    /**
+     * Seeds a locked account and returns the link the server would have mailed
+     * for its episode. The token binds to `lockoutEpisodeId`, NOT to
+     * `lockoutUntil`: the deadline is rewritten by every re-lock, so a token
+     * bound to it died on the victim's next failed attempt while the mail guard
+     * refused to send a replacement — a permanent lockout anyone could impose by
+     * knowing an email address.
+     */
+    async function lockAccount(
+      userId: string,
+    ): Promise<{ unlockToken: string; lockoutUntil: Date; episode: string }> {
       const lockoutUntil = new Date(Date.now() + 30 * 60 * 1000);
-      await User.findByIdAndUpdate(testUser.id, {
+      const episode = crypto.randomUUID();
+      await User.findByIdAndUpdate(userId, {
         $set: {
           failedLoginAttempts: 10,
           lockoutUntil,
+          lockoutEpisodeId: episode,
+          lockoutNotifiedAt: new Date(),
         },
       });
+      const unlockToken = jwt.sign(
+        {
+          userId,
+          purpose: 'account_unlock',
+          stateHash: generateStateHash(episode),
+        },
+        deriveTestPurposeKey('account_unlock'),
+        { expiresIn: '1h' },
+      );
+      return { unlockToken, lockoutUntil, episode };
+    }
+
+    it('should unlock a locked account with a valid token', async () => {
+      const testUser = await createTestUser({ emailVerified: true });
+      const { unlockToken } = await lockAccount(testUser.id);
 
       // Verify account is locked
       const lockedUser = await User.findById(testUser.id);
       expect(lockedUser!.failedLoginAttempts).toBe(10);
       expect(lockedUser!.lockoutUntil).toBeDefined();
-
-      // Create a valid unlock token (bound to lockoutUntil timestamp)
-      const unlockToken = jwt.sign(
-        {
-          userId: testUser.id,
-          purpose: 'account_unlock',
-          stateHash: generateStateHash(lockoutUntil.toISOString()),
-        },
-        deriveTestPurposeKey('account_unlock'),
-        { expiresIn: '1h' },
-      );
 
       const res = await withCsrf(
         agent.post(`${API}/auth/unlock-account`).send({ token: unlockToken }),
@@ -1715,33 +1730,17 @@ describe('Auth API', () => {
 
     it('should unlock account even after subsequent failed login attempts', async () => {
       const testUser = await createTestUser({ emailVerified: true });
+      const { unlockToken } = await lockAccount(testUser.id);
 
-      // Lock the account
-      const lockoutUntil = new Date(Date.now() + 30 * 60 * 1000);
+      // Simulate additional failed login attempts after the lockout began: the
+      // counter climbs and the deadline is pushed out, exactly as a grinding
+      // attack does it.
       await User.findByIdAndUpdate(testUser.id, {
-        $set: {
-          failedLoginAttempts: 10,
-          lockoutUntil,
-        },
+        $set: { failedLoginAttempts: 12, lockoutUntil: new Date(Date.now() + 30 * 60 * 1000) },
       });
 
-      // Create unlock token bound to lockoutUntil
-      const unlockToken = jwt.sign(
-        {
-          userId: testUser.id,
-          purpose: 'account_unlock',
-          stateHash: generateStateHash(lockoutUntil.toISOString()),
-        },
-        deriveTestPurposeKey('account_unlock'),
-        { expiresIn: '1h' },
-      );
-
-      // Simulate additional failed login attempts after lockout (increments failedLoginAttempts)
-      await User.findByIdAndUpdate(testUser.id, {
-        $set: { failedLoginAttempts: 12 },
-      });
-
-      // The unlock token should still work because stateHash is based on lockoutUntil, not failedLoginAttempts
+      // The token still works: it names the EPISODE, which a re-lock extends
+      // rather than replaces.
       const res = await withCsrf(
         agent.post(`${API}/auth/unlock-account`).send({ token: unlockToken }),
         csrf,
@@ -1759,26 +1758,7 @@ describe('Auth API', () => {
 
     it('should reject unlock token after account is already unlocked', async () => {
       const testUser = await createTestUser({ emailVerified: true });
-
-      // Lock the account
-      const lockoutUntil = new Date(Date.now() + 30 * 60 * 1000);
-      await User.findByIdAndUpdate(testUser.id, {
-        $set: {
-          failedLoginAttempts: 10,
-          lockoutUntil,
-        },
-      });
-
-      // Create unlock token bound to lockoutUntil
-      const unlockToken = jwt.sign(
-        {
-          userId: testUser.id,
-          purpose: 'account_unlock',
-          stateHash: generateStateHash(lockoutUntil.toISOString()),
-        },
-        deriveTestPurposeKey('account_unlock'),
-        { expiresIn: '1h' },
-      );
+      const { unlockToken } = await lockAccount(testUser.id);
 
       // Unlock the account first
       const res1 = await withCsrf(
@@ -1787,7 +1767,8 @@ describe('Auth API', () => {
       );
       expect(res1.status).toBe(200);
 
-      // Try to use the same token again — should fail because lockoutUntil is now cleared
+      // Try to use the same token again — the discharge cleared the episode, so
+      // the link is single-use exactly as it was when it was bound to the deadline.
       const res2 = await withCsrf(
         agent.post(`${API}/auth/unlock-account`).send({ token: unlockToken }),
         csrf,
@@ -1796,61 +1777,68 @@ describe('Auth API', () => {
       expect(res2.body.success).toBe(false);
     });
 
-    it('should reject unlock token with stateHash based on failedLoginAttempts instead of lockoutUntil', async () => {
+    it.each([
+      ['the failed-attempt count', () => String(10)],
+      ['the lockout deadline', (ctx: { lockoutUntil: Date }) => ctx.lockoutUntil.toISOString()],
+    ])(
+      'should reject an unlock token bound to %s rather than the episode',
+      async (_label, bind) => {
+        const testUser = await createTestUser({ emailVerified: true });
+        const { lockoutUntil } = await lockAccount(testUser.id);
+
+        const wrongToken = jwt.sign(
+          {
+            userId: testUser.id,
+            purpose: 'account_unlock',
+            stateHash: generateStateHash(bind({ lockoutUntil })),
+          },
+          deriveTestPurposeKey('account_unlock'),
+          { expiresIn: '1h' },
+        );
+
+        const res = await withCsrf(
+          agent.post(`${API}/auth/unlock-account`).send({ token: wrongToken }),
+          csrf,
+        );
+
+        expect(res.status).toBe(400);
+        expect(res.body.success).toBe(false);
+
+        // Still locked: a token naming the wrong thing must not discharge anything.
+        const after = await User.findById(testUser.id);
+        expect(after!.failedLoginAttempts).toBe(10);
+        expect(after!.lockoutUntil).toBeDefined();
+      },
+    );
+
+    it('should reject an unlock token for an account that is not locked', async () => {
+      // No episode is running, so there is nothing to unlock. Without this the
+      // comparison would fall back to the hash of the empty string, which every
+      // account with no episode would match.
       const testUser = await createTestUser({ emailVerified: true });
 
-      // Lock the account
-      const lockoutUntil = new Date(Date.now() + 30 * 60 * 1000);
-      await User.findByIdAndUpdate(testUser.id, {
-        $set: {
-          failedLoginAttempts: 10,
-          lockoutUntil,
-        },
-      });
-
-      // Create a token using the OLD approach (failedLoginAttempts count) — this should NOT work
-      const wrongToken = jwt.sign(
+      const token = jwt.sign(
         {
           userId: testUser.id,
           purpose: 'account_unlock',
-          stateHash: generateStateHash(String(10)),
+          stateHash: generateStateHash(''),
         },
         deriveTestPurposeKey('account_unlock'),
         { expiresIn: '1h' },
       );
 
-      const res = await withCsrf(
-        agent.post(`${API}/auth/unlock-account`).send({ token: wrongToken }),
-        csrf,
-      );
+      const res = await withCsrf(agent.post(`${API}/auth/unlock-account`).send({ token }), csrf);
 
-      // Should be rejected because stateHash is based on failedLoginAttempts, not lockoutUntil
       expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe('TOKEN_INVALID');
+      expect(await AuditLog.countDocuments({ userId: testUser.id, action: 'account_unlock' })).toBe(
+        0,
+      );
     });
 
     it('should create audit log on account unlock', async () => {
       const testUser = await createTestUser({ emailVerified: true });
-
-      // Lock the account
-      const lockoutUntil = new Date(Date.now() + 30 * 60 * 1000);
-      await User.findByIdAndUpdate(testUser.id, {
-        $set: {
-          failedLoginAttempts: 10,
-          lockoutUntil,
-        },
-      });
-
-      // Create a valid unlock token (bound to lockoutUntil timestamp)
-      const unlockToken = jwt.sign(
-        {
-          userId: testUser.id,
-          purpose: 'account_unlock',
-          stateHash: generateStateHash(lockoutUntil.toISOString()),
-        },
-        deriveTestPurposeKey('account_unlock'),
-        { expiresIn: '1h' },
-      );
+      const { unlockToken } = await lockAccount(testUser.id);
 
       await withCsrf(
         agent.post(`${API}/auth/unlock-account`).send({ token: unlockToken }),
@@ -1868,10 +1856,15 @@ describe('Auth API', () => {
       expect(unlocks[0]?.metadata).toEqual({ method: 'email_link' });
       expect(JSON.stringify(unlocks[0])).not.toContain(unlockToken);
 
-      // ...and the account is genuinely unlocked.
-      const unlocked = await User.findById(testUser.id).lean();
+      // ...and the account is genuinely unlocked, episode and all — a surviving
+      // `lockoutEpisodeId` would keep the spent link alive.
+      const unlocked = await User.findById(testUser.id)
+        .select('+lockoutEpisodeId +lockoutNotifiedAt')
+        .lean();
       expect(unlocked?.lockoutUntil).toBeUndefined();
       expect(unlocked?.failedLoginAttempts).toBe(0);
+      expect(unlocked?.lockoutEpisodeId).toBeUndefined();
+      expect(unlocked?.lockoutNotifiedAt).toBeUndefined();
     });
   });
 

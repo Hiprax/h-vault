@@ -75,7 +75,18 @@ security posture, not a disclaimer.
   it is discharged only by a sign-in that actually **completes** — never merely by a correct
   password, which would let anyone already holding one reset the second factor's only brake
   between batches of guesses. A lockout that has genuinely been waited out is the single
-  exception, and reaching it costs the full lockout duration. The credential budget is kept
+  exception, and reaching it costs the full lockout duration. **A lockout is itself a
+  denial-of-service anyone who knows an address can impose**, so its own bound is part of the
+  design and not an afterthought: it expires on its own, and the emailed unlock link is tied to
+  the **lock episode** rather than to the moment the lockout is due to end. Extending a lockout
+  extends the episode, so the link already sent keeps working however long an attacker grinds,
+  and a fresh one is sent only when the outstanding link would expire before the lockout it
+  covers — at most one new link per lockout, which is what stops that guarantee from becoming a
+  mail-flood vector of its own. The link a replacement supersedes stays valid until its own hour
+  is up, so two can verify at once; that is harmless, because links naming one episode are one
+  capability, and spending either ends the episode and kills the rest. This matters
+  more here than it would elsewhere, because resetting the master password mints a new vault key,
+  so "just reset it" is not a recovery path but total data loss. The credential budget is kept
   separate from the budgets for token refresh and vault unlock, so that ordinary use of the app
   can never spend the allowance you need in order to sign in. A caller-supplied value (a
   header, a cookie, a rotating token) appears in a rate-limit key only where an IP-keyed tier
@@ -582,6 +593,14 @@ orders look interchangeable and are not:
   as complete in that case — it is — and the failure is logged for the operator, with the
   remainder reclaimed by the scheduled clean-up. On a deployment with no document store
   configured the sweep does nothing at all.
+
+An account whose erasure did not finish keeps the marker that says so, and that marker is the
+only durable record that its data still needs removing — which is why nothing clears it before
+the erasure it guards is done. For as long as it stands, **the account cannot be served**: an
+existing session is refused, a token refresh is refused, and signing in afresh is refused too,
+with the same answer a wrong password gets so that nothing new is revealed about the address.
+Nothing is written under it either, not a session row and not an audit row, because the scheduled
+clean-up must find the record exactly as the failed erasure left it.
 
 Neither deletion is recoverable, and neither is undone by restoring a backup. The same fact
 has an operational consequence that belongs to whoever runs the server rather than to whoever

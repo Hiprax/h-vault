@@ -75,6 +75,35 @@ export interface IUser {
   backupCodes?: string[] | undefined;
   failedLoginAttempts: number;
   lockoutUntil?: Date | undefined;
+  /**
+   * Identifies the LOCK EPISODE a `lockoutUntil` belongs to.
+   *
+   * Minted when a lockout begins, carried UNCHANGED through every re-lock, and
+   * cleared only when the lockout is genuinely discharged (the emailed link is
+   * used, an authentication completes, a served lockout is spent, the password is
+   * reset). The emailed unlock token's `stateHash` binds to this value.
+   *
+   * It exists because binding that token to `lockoutUntil` made it die on the
+   * next failed attempt: `failedLoginAttempts` is cleared only where an
+   * authentication COMPLETES, so an abandoned lockout sits at the threshold for
+   * ever and every later wrong password re-wrote the deadline, invalidating the
+   * one recovery link the owner had been sent while the `=== MAX_FAILED_ATTEMPTS`
+   * mail guard suppressed a replacement. Anyone who knew an email address could
+   * hold an account locked indefinitely, and this product's password reset mints a
+   * fresh vault key, so the remaining "recovery" was total data loss.
+   *
+   * Opaque and server-minted. Several tokens can name the same episode; they are
+   * the same capability, and the first one used clears this field and kills them
+   * all at once.
+   */
+  lockoutEpisodeId?: string | undefined;
+  /**
+   * When the unlock link currently outstanding for {@link lockoutEpisodeId} was
+   * minted. Read only to decide whether a re-lock needs to mail a replacement,
+   * which it does exactly when the outstanding token would expire before the new
+   * lockout ends. Cleared with the rest of the episode.
+   */
+  lockoutNotifiedAt?: Date | undefined;
   lastRotationKey?: string | undefined;
   lastRotationAt?: Date | undefined;
   rotationInProgress: boolean;
@@ -258,6 +287,25 @@ const userSchema = new Schema<IUser>(
     backupCodes: { type: [String], select: false },
     failedLoginAttempts: { type: Number, default: 0 },
     lockoutUntil: { type: Date },
+    // Both default to `undefined` rather than to a value, because their ABSENCE is
+    // the state "no lock episode is running" that the start-or-extend write in
+    // `authController` relies on: its `$ifNull` mints an identity only when the
+    // field is missing or null, which is what makes exactly one of N concurrent
+    // failed attempts the one that starts the episode.
+    //
+    // `select: false` on both, unlike `lockoutUntil` beside them, because
+    // `getProfile` answers with a `.lean()` spread of the whole document minus two
+    // named fields — so anything not hidden at the schema is on the wire. Neither
+    // of these is a credential (the unlock link is a signed JWT; knowing the
+    // episode identity forges nothing) and only the account's own session could
+    // read them, but they are internal bookkeeping with no client that wants them,
+    // and an opt-out projection is the wrong place to decide that. The two readers
+    // that DO want `lockoutEpisodeId` ask for it by name, and both are covered by
+    // tests that go red the moment one stops: `registerFailedAuthAttempt`'s
+    // read-back would mail no link at all, and `unlockAccount` would reject every
+    // link there is.
+    lockoutEpisodeId: { type: String, select: false, default: undefined },
+    lockoutNotifiedAt: { type: Date, select: false, default: undefined },
     lastRotationKey: { type: String, default: undefined },
     lastRotationAt: { type: Date, default: undefined },
     rotationInProgress: { type: Boolean, default: false },

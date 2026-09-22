@@ -246,11 +246,16 @@ describe('Password Reset Flow', () => {
     it('should clear failed login attempts and lockout after reset', async () => {
       const user = await createTestUser();
 
-      // Simulate a locked-out user
+      // Simulate a locked-out user, WHOLE: a lockout is four fields, and the
+      // episode identity is the one the emailed unlock link is bound to. Leaving
+      // it behind would keep that link working against an account whose password
+      // has since been changed by somebody else.
       await User.findByIdAndUpdate(user.id, {
         $set: {
           failedLoginAttempts: 10,
           lockoutUntil: new Date(Date.now() + 30 * 60 * 1000),
+          lockoutEpisodeId: 'seeded-lock-episode',
+          lockoutNotifiedAt: new Date(),
         },
       });
 
@@ -278,9 +283,13 @@ describe('Password Reset Flow', () => {
         });
       expect(res.status).toBe(200);
 
-      const updatedUser = await User.findById(user.id);
+      const updatedUser = await User.findById(user.id).select(
+        '+lockoutEpisodeId +lockoutNotifiedAt',
+      );
       expect(updatedUser!.failedLoginAttempts).toBe(0);
       expect(updatedUser!.lockoutUntil).toBeUndefined();
+      expect(updatedUser!.lockoutEpisodeId).toBeUndefined();
+      expect(updatedUser!.lockoutNotifiedAt).toBeUndefined();
     });
   });
 
