@@ -430,13 +430,40 @@ elsewhere goes on holding the key it was given when it signed in, and nothing te
 account has moved past that key.
 
 Everything encrypted under the vault key is re-encrypted by the rotation itself, so an older
-session only matters when it writes something new. Uploading a document is that case, because a
-document's own key is wrapped in the browser under the vault key the browser holds. Each sign-in
-is therefore told which generation of the vault key it received, and an upload says which one it
-used; if that is no longer the current one the upload is refused, the browser fetches the current
-key, re-wraps the document's key and finishes — without re-sending the file. A document is never
-stored under a key the account no longer has. If you would rather not rely on that at all, sign
-out of your other devices from the Sessions page before rotating.
+session only matters when it writes something new. Each sign-in is therefore told which
+generation of the vault key it received, and a write that seals anything under that key says
+which one it used; if that is no longer the current one the write is refused and the browser is
+handed the current generation so it can recover rather than guess. Two writes are that case, and
+the second is the more serious of the two.
+
+Uploading a document is the first, because a document's own key is wrapped in the browser under
+the vault key the browser holds. A refused upload is retried after the browser fetches the
+current key and re-wraps the document's key — without re-sending the file. A document is never
+stored under a key the account no longer has.
+
+**Changing your master password is the second, and it is the one that could cost the whole
+vault.** That operation does not create a wrapper beside the existing one; it replaces it. It
+re-wraps the vault key the browser is holding under a key derived from the new password, and the
+result becomes the account's only stored copy. A wrapper is opaque to the server, so a wrapper
+built from a superseded vault key is indistinguishable from a correct one by inspection: stored,
+it destroys the only copy of the live key and every item, folder, note and document in the
+account becomes permanently undecryptable, with no recovery anywhere. The generation check is
+what makes that refusable, and it fails closed — a request that names no generation at all is
+refused too, on any account that has rotated at least once, because a client that cannot say
+which key it used may be holding the superseded one. An account that has never rotated has no
+superseded key for anyone to hold and is unaffected. A change attempted while a rotation is
+still being processed is refused as well, and the two controls in the interface hold each other
+back so neither can be started while the other runs.
+
+One narrow window remains open and is stated here rather than left to be found: a rotation that
+begins after the check and commits after the write can still overwrite a committed password
+change, because the rotation's own final write is not itself conditional. Closing it requires the
+two operations to take the same per-user lock, which is a change with its own cost — a rotation
+interrupted by a crash holds that lock until its timeout lapses, blocking every password change
+in the meantime — so it is tracked separately rather than folded in here.
+
+If you would rather not rely on any of this, sign out of your other devices from the Sessions
+page before rotating.
 
 ### Deleting a document, and why it cannot be undone
 

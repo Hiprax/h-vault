@@ -45,6 +45,44 @@ import {
 import type { ItemType } from '../constants/index.js';
 import { normalizeUri } from '../utils/index.js';
 
+/**
+ * The blind index of an item's name: an HMAC of the name under a key derived
+ * from the vault key, so the server can enforce uniqueness and the client can
+ * look a name up without either of them learning it.
+ *
+ * ONE definition, shared by every WRITE envelope that carries one
+ * (`createVaultItemSchema`, `updateVaultItemSchema`, and the items leg of
+ * `bulkReEncryptSchema`). The response schemas below deliberately do NOT use it:
+ * they validate a raw server response before decryption, where the rule is
+ * "shaped like a string" rather than "produced by this client", and tightening
+ * them here would make an older row unreadable rather than merely unverified.
+ */
+const searchHashSchema = z
+  .string()
+  .regex(/^[a-f0-9]{64}$/)
+  .optional();
+
+/**
+ * The retained previous passwords of one item, as a write envelope carries them.
+ *
+ * ONE definition, for the same reason and with the same response-side carve-out
+ * as {@link searchHashSchema}: `updateVaultItemSchema` and the items leg of
+ * `bulkReEncryptSchema` are the same payload, and a second copy is a second
+ * place for `PASSWORD_HISTORY_MAX` or a ciphertext bound to drift.
+ */
+const passwordHistoryWriteSchema = z
+  .array(
+    z.object({
+      encryptedPassword: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
+      iv: z.string().min(1).max(24),
+      tag: z.string().min(1).max(32),
+      // Accept both UTC (Z) and timezone offsets (+05:00) for consistency with expiresAt
+      changedAt: z.iso.datetime({ offset: true }),
+    }),
+  )
+  .max(PASSWORD_HISTORY_MAX)
+  .optional();
+
 export const createVaultItemSchema = z.object({
   itemType: z.enum(ITEM_TYPES),
   folderId: objectIdSchema.optional(),
@@ -56,10 +94,7 @@ export const createVaultItemSchema = z.object({
   encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
   nameIv: z.string().min(1).max(24),
   nameTag: z.string().min(1).max(32),
-  searchHash: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .optional(),
+  searchHash: searchHashSchema,
   // The vault-key generation the six ciphertext fields above were sealed under.
   // See `optionalVaultKeyVersionSchema`.
   vaultKeyVersion: optionalVaultKeyVersionSchema,
@@ -76,22 +111,8 @@ export const updateVaultItemSchema = z
     encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH).optional(),
     nameIv: z.string().min(1).max(24).optional(),
     nameTag: z.string().min(1).max(32).optional(),
-    searchHash: z
-      .string()
-      .regex(/^[a-f0-9]{64}$/)
-      .optional(),
-    passwordHistory: z
-      .array(
-        z.object({
-          encryptedPassword: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
-          iv: z.string().min(1).max(24),
-          tag: z.string().min(1).max(32),
-          // Accept both UTC (Z) and timezone offsets (+05:00) for consistency with expiresAt
-          changedAt: z.iso.datetime({ offset: true }),
-        }),
-      )
-      .max(PASSWORD_HISTORY_MAX)
-      .optional(),
+    searchHash: searchHashSchema,
+    passwordHistory: passwordHistoryWriteSchema,
     // The vault-key generation any ciphertext in this update was sealed under.
     // See `optionalVaultKeyVersionSchema`.
     vaultKeyVersion: optionalVaultKeyVersionSchema,
@@ -171,21 +192,8 @@ export const bulkReEncryptSchema = z
           encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
           dataIv: z.string().min(1).max(24),
           dataTag: z.string().min(1).max(32),
-          searchHash: z
-            .string()
-            .regex(/^[a-f0-9]{64}$/)
-            .optional(),
-          passwordHistory: z
-            .array(
-              z.object({
-                encryptedPassword: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
-                iv: z.string().min(1).max(24),
-                tag: z.string().min(1).max(32),
-                changedAt: z.iso.datetime({ offset: true }),
-              }),
-            )
-            .max(PASSWORD_HISTORY_MAX)
-            .optional(),
+          searchHash: searchHashSchema,
+          passwordHistory: passwordHistoryWriteSchema,
         }),
       )
       .min(0)

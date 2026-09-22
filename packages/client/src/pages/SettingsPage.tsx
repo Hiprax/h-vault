@@ -83,6 +83,12 @@ import {
   MAX_DOCUMENT_PAGES,
   listDocumentTrashApi,
   listDocumentsApi,
+  // The ONE reader of the refusal that carries a number, wherever that refusal
+  // is answered. It lives beside the document routes because those were the
+  // first to answer it; it is not document-specific, and a second copy here
+  // would be a second place for "a 409 whose body has no non-negative integer
+  // is an ordinary conflict" to drift.
+  staleVaultKeyVersion,
 } from '../services/api/documentsApi';
 import { readDocumentsConfigFresh } from '../services/api/configApi';
 import {
@@ -654,6 +660,7 @@ export default function SettingsPage() {
     }
     setChangingPassword(true);
     let newMek: CryptoKey | undefined;
+    let recoveredVaultKey: CryptoKey | undefined;
     try {
       // Derive old keys
       const { authKey: currentAuthKey } = await cryptoService.deriveKeys(
@@ -680,13 +687,76 @@ export default function SettingsPage() {
       }
       const newEncrypted = await cryptoService.encryptVaultKey(vaultKey, newMek);
 
-      await changePasswordApi({
-        currentAuthHash,
-        newAuthHash,
-        newEncryptedVaultKey: newEncrypted.encrypted,
-        newVaultKeyIv: newEncrypted.iv,
-        newVaultKeyTag: newEncrypted.tag,
-      });
+      try {
+        await changePasswordApi({
+          currentAuthHash,
+          newAuthHash,
+          newEncryptedVaultKey: newEncrypted.encrypted,
+          newVaultKeyIv: newEncrypted.iv,
+          newVaultKeyTag: newEncrypted.tag,
+          // WHICH vault key the wrapper above was built from. This request
+          // REPLACES the stored wrapper, so a wrapper built from a key a
+          // rotation elsewhere has already superseded would destroy the only
+          // copy of the live one and cost the whole vault. Sending the
+          // generation is what lets the server refuse instead.
+          vaultKeyVersion: useAuthStore.getState().vaultKeyVersion,
+        });
+      } catch (err) {
+        // ONE retry, and only for the refusal that carried a NUMBER.
+        //
+        // Keyed on the number rather than on `status === 409`, because this
+        // endpoint answers 409 for two different things: a superseded
+        // generation, which carries `data.vaultKeyVersion` and is recovered from
+        // here, and a rotation still in progress, which carries nothing and
+        // whose only remedy is to wait. Retrying the second would spend this
+        // one retry on a request that cannot yet succeed.
+        const refusedVersion = staleVaultKeyVersion(err);
+        if (refusedVersion === null) throw err;
+
+        // The live wrapper, from the server rather than from this session's own
+        // record: `encryptedVaultKeyData` in the store moves WITH the key this
+        // session holds, so on a session holding a superseded key it is exactly
+        // as stale as the wrapper that was just refused.
+        const profileRes = await getProfileApi();
+        const profile = profileRes.data;
+        if (!profile.success) throw err;
+
+        // The SAME MEK opens it: a rotation re-wraps the new vault key under the
+        // account's existing MEK, and the master password has not changed (this
+        // request was refused). A missing MEK means the vault locked underneath
+        // us, which is not something a retry fixes.
+        const mek = useAuthStore.getState().mek;
+        if (!mek) throw err;
+        const rawLiveVaultKey = await cryptoService.decryptVaultKey(
+          profile.data.encryptedVaultKey,
+          profile.data.vaultKeyIv,
+          profile.data.vaultKeyTag,
+          mek,
+        );
+        // `finally`, not a following statement: these are the 32 plaintext bytes
+        // of the account's LIVE vault key, and an `importVaultKey` that rejected
+        // would otherwise leave them in the heap until the collector got to them.
+        // Same shape as `documentsStore`'s own recovery of this exact value.
+        try {
+          recoveredVaultKey = await cryptoService.importVaultKey(rawLiveVaultKey);
+        } finally {
+          cryptoService.clearKey(rawLiveVaultKey);
+        }
+        const rewrapped = await cryptoService.encryptVaultKey(recoveredVaultKey, newMek);
+
+        await changePasswordApi({
+          currentAuthHash,
+          newAuthHash,
+          newEncryptedVaultKey: rewrapped.encrypted,
+          newVaultKeyIv: rewrapped.iv,
+          newVaultKeyTag: rewrapped.tag,
+          // The generation the profile itself reports, which is the one that
+          // names the wrapper just unwrapped — not the number the refusal
+          // carried, which is older by however long the profile read took. An
+          // account with no stored generation has never rotated, so `0`.
+          vaultKeyVersion: profile.data.vaultKeyVersion ?? 0,
+        });
+      }
 
       // Clean up the new MEK before logout clears everything
       await cryptoService.clearCryptoKey(newMek);
@@ -703,10 +773,28 @@ export default function SettingsPage() {
       });
       await logout();
       void navigate('/login', { replace: true });
-    } catch {
-      toast({ title: 'Failed to change password', type: 'error' });
+    } catch (err) {
+      // A 4xx message is shown VERBATIM, and only a 4xx — the same rule the
+      // rotation driver below states at length. `app.ts` redacts a 5xx to its
+      // status text in production and leaves 4xx alone, so a 4xx sentence was
+      // written for this user. The one that matters here is the vault-key
+      // refusal that survived the retry: it names the generation to reload to,
+      // and collapsing it into a flat "Failed to change password" would leave
+      // someone retrying for ever with no way to learn that the answer is to
+      // reload the application.
+      const status = isAxiosError(err) ? err.response?.status : undefined;
+      const title =
+        status !== undefined && status >= 400 && status < 500
+          ? getApiErrorMessage(err, 'Failed to change password')
+          : 'Failed to change password';
+      toast({ title, type: 'error' });
     } finally {
       if (newMek) await cryptoService.clearCryptoKey(newMek);
+      // The live vault key recovered for the retry is plaintext-capable material
+      // this handler minted, so it is zeroed on every path — including the
+      // success path, where `logout()` clears the STORE's copy but has never
+      // heard of this one.
+      if (recoveredVaultKey) await cryptoService.clearCryptoKey(recoveredVaultKey);
       setChangingPassword(false);
     }
   }, [currentPassword, newPassword, confirmPassword, user?.email, toast, logout, navigate]);
@@ -1769,7 +1857,19 @@ export default function SettingsPage() {
                     type="button"
                     onClick={() => void handleChangePassword()}
                     disabled={
-                      changingPassword || !currentPassword || !newPassword || !confirmPassword
+                      changingPassword ||
+                      // Both halves of the same-tab race are closed at the
+                      // control, not just one: a password change started during
+                      // a rotation uploads a wrapper for the key the rotation is
+                      // replacing, and a rotation started during a password
+                      // change replaces the key whose wrapper is in flight.
+                      // Either way the server now refuses, but a refusal the
+                      // user can be stopped from earning is better than one they
+                      // have to read.
+                      rotatingVaultKey ||
+                      !currentPassword ||
+                      !newPassword ||
+                      !confirmPassword
                     }
                     className="rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
                   >
@@ -2246,7 +2346,7 @@ export default function SettingsPage() {
               <button
                 type="button"
                 onClick={() => setShowRotateConfirm(true)}
-                disabled={rotatingVaultKey}
+                disabled={rotatingVaultKey || changingPassword}
                 className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-3 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-colors disabled:opacity-50"
               >
                 {rotatingVaultKey ? (
@@ -2358,7 +2458,7 @@ export default function SettingsPage() {
                 <button
                   type="button"
                   onClick={() => void handleRotateVaultKey()}
-                  disabled={rotatingVaultKey || !rotationPassword}
+                  disabled={rotatingVaultKey || changingPassword || !rotationPassword}
                   className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
                 >
                   {rotatingVaultKey && <Loader2 className="h-4 w-4 animate-spin" />}

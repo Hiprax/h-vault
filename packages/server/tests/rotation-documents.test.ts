@@ -547,6 +547,15 @@ describe('changePassword must not move vaultKeyVersion', () => {
         newEncryptedVaultKey: 'rewrapped-under-the-new-mek',
         newVaultKeyIv: 'rewrapped-iv',
         newVaultKeyTag: 'rewrapped-tag',
+        // Names the generation the wrapper was built from, which this endpoint
+        // now requires of any account that has rotated: a request that cannot
+        // say which vault key it used may be holding the superseded one, and
+        // this request REPLACES the stored wrapper. Omitting it here is exactly
+        // the out-of-date client the guard exists to refuse, so the payload is
+        // corrected rather than the guard relaxed. The refusal itself, and the
+        // fact that an omission earns it, is pinned in
+        // `change-password-stale-key.test.ts`.
+        vaultKeyVersion: 1,
       });
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);

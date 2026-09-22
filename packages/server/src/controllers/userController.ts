@@ -14,7 +14,15 @@ import { createAuditLog } from '../services/auditService.js';
 import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
-import { getRequestContext, getUserId } from '../utils/controllerHelpers.js';
+import {
+  StaleVaultKeyError,
+  assertVaultKeyVersion,
+  assertVaultNotRotating,
+  getRequestContext,
+  getUserId,
+  vaultKeyVersionFilter,
+  vaultKeyVersionOf,
+} from '../utils/controllerHelpers.js';
 import { readStringCookie } from '../utils/cookies.js';
 import { cryptoManager } from '../utils/cryptoManager.js';
 import { config, isProduction, twoFactorEncryptionKey } from '../config/index.js';
@@ -244,6 +252,44 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
   });
 });
 
+/**
+ * Thrown inside the transactional branch of {@link changePassword} to ABORT it
+ * when the conditional vault-key write matched nothing.
+ *
+ * It exists because the refusal has to roll the transaction back rather than
+ * return through it: the session revocation that ran a few lines earlier is in
+ * the same transaction, and a change that did not happen must not sign the user
+ * out of every device. `withTransaction` aborts on any throw and rethrows, so
+ * this is caught immediately outside and turned into the recoverable 409.
+ *
+ * Deliberately NOT a `StaleVaultKeyError`: the number that refusal has to carry
+ * is the account's CURRENT generation, and the only way to learn it is a read
+ * taken after the transaction has ended.
+ */
+class SupersededVaultKeyWrite extends Error {
+  constructor() {
+    super('the vault key generation moved between the guard and the write');
+    this.name = 'SupersededVaultKeyWrite';
+  }
+}
+
+/**
+ * Answers the recoverable 409 a stale vault-key generation earns.
+ *
+ * Written directly rather than thrown through `httpErrors`, for the reason
+ * {@link StaleVaultKeyError}'s own docblock gives: the client needs the NUMBER,
+ * and `@hiprax/errors`'s response envelope is flat and has nowhere to put one.
+ * Byte-for-byte the shape `documentController.completeUpload` emits and
+ * `swagger.ts` documents.
+ */
+function sendStaleVaultKey(res: Response, error: StaleVaultKeyError): void {
+  res.status(409).json({
+    success: false,
+    message: error.message,
+    data: { vaultKeyVersion: error.vaultKeyVersion },
+  });
+}
+
 export const changePassword = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
   const body = req.body as ChangePasswordInput;
@@ -268,8 +314,97 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     throw httpErrors.unauthorized('Current password is incorrect');
   }
 
+  // Minted BEFORE the guards below, even though a refused request throws both
+  // away. `bcrypt.hash` has no side effects, so moving it up costs a refusal
+  // nothing that matters (the limiter has already spent the caller's slot on
+  // arrival) and takes its ~250-500 ms out of the one window neither guard
+  // covers — see the guard pair's own note on that window.
   const newHash = await bcrypt.hash(body.newAuthHash, config.BCRYPT_ROUNDS);
   const passwordChangedAt = new Date();
+
+  // ── The vault-key guard pair ───────────────────────────────────────────────
+  //
+  // This endpoint is the one write that REPLACES `encryptedVaultKey` instead of
+  // adding a row beside it: it re-wraps the vault key the calling session holds
+  // under a MEK derived from the new password and stores that as the account's
+  // only copy. A rotation performed in another session revokes no session and
+  // refreshes no key, so a second session can hold the SUPERSEDED vault key
+  // indefinitely with no way to notice — it can still decrypt everything it
+  // loaded and still encrypt. A wrapper is opaque ciphertext, so without these
+  // two checks the write lands, the live key's only stored copy is gone, and the
+  // whole account is permanently undecryptable. No race is required; a tab left
+  // open is enough.
+  //
+  // The two are peers and neither replaces the other. The fence catches a
+  // rotation still PROCESSING (its flag is raised before it enumerates, so the
+  // account is still on the old generation and the version alone would wave this
+  // through); the version catches one that has already COMMITTED, which the fence
+  // cannot see because the flag is cleared by then. The fence runs first so a
+  // caller mid-rotation is told to wait rather than handed a "rotated elsewhere"
+  // diagnosis of a rotation that has not finished.
+  //
+  // They run AFTER the password proof above, not at the top of the handler, and
+  // that placement is load-bearing in two ways. A wrong current password must
+  // keep earning its 401 and its `password_verification_failed` audit row — the
+  // row that records a wrong password against this account — rather than being
+  // answered 409 for the duration of every rotation. And a 409 names a condition
+  // of the account, so it is handed only to a caller that has proved it holds the
+  // current credential: the same decision `authController.login` documents for
+  // `ACCOUNT_LOCKED`, which it deliberately surfaces only to a caller that
+  // supplied the correct password.
+  //
+  // They also run as LATE as the work allows, which is `completeUpload`'s own
+  // written doctrine and the plan's prescription for the bulk writers ("the span
+  // is the point"). What the span buys here is not the interleaving the filter
+  // below already handles, but the one NEITHER guard covers: a rotation that
+  // STARTS after the fence read. Its flag goes up, it enumerates, and the
+  // account is still on generation N — so the filtered write below matches and
+  // commits the new `authHash` together with a wrapper sealed under the new MEK,
+  // and then the rotation's own final write, which is unconditional, replaces
+  // that wrapper with one sealed under the OLD MEK and bumps the generation. The
+  // account is left with the new password and a wrapper nothing can open. Only
+  // holding the per-user rotation lock across this span closes that window
+  // outright; keeping the span down to two indexed reads and the revocations is
+  // what is available here, and it removes both bcrypt costs from it.
+  await assertVaultNotRotating(userId);
+  let resolvedVaultKeyVersion: number;
+  try {
+    resolvedVaultKeyVersion = await assertVaultKeyVersion(userId, body.vaultKeyVersion);
+  } catch (error) {
+    // Caught only to attach the number. Uncaught it would still refuse with a
+    // 409 (see `StaleVaultKeyError`), and the client would still recover — it
+    // would just have to re-read its profile to learn what to rewrap under.
+    if (error instanceof StaleVaultKeyError) {
+      sendStaleVaultKey(res, error);
+      return;
+    }
+    throw error;
+  }
+
+  // The filter is what makes the guard above safe, not the read it performed:
+  // a rotation committing between that read and this write matches nothing here
+  // instead of clobbering. `vaultKeyVersionFilter` and NOT a bare
+  // `vaultKeyVersion: resolvedVaultKeyVersion` — the field has no backfill
+  // migration, MongoDB equality on `0` does not match a missing one, and a bare
+  // filter would therefore refuse every legacy account for ever, which on THIS
+  // endpoint is a master password that can never be changed again. The reason in
+  // full, with the measurement, is in that helper's docblock.
+  const vaultKeyWriteFilter = {
+    _id: userId,
+    vaultKeyVersion: vaultKeyVersionFilter(resolvedVaultKeyVersion),
+  };
+  // `vaultKeyVersion` is deliberately absent from the update: this flow re-wraps
+  // the SAME vault key under a new MEK, so the generation names the same key
+  // afterwards and must not move (see the field's docblock on `IUser`).
+  const vaultKeyWrite = {
+    $set: {
+      authHash: newHash,
+      encryptedVaultKey: body.newEncryptedVaultKey,
+      vaultKeyIv: body.newVaultKeyIv,
+      vaultKeyTag: body.newVaultKeyTag,
+      passwordChangedAt,
+    },
+  };
 
   // Use a transaction (if supported by the MongoDB topology) so that both the
   // refresh-token revocation and the user password update are committed atomically.
@@ -285,6 +420,7 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
   // question every multi-collection writer has to answer the same way (see
   // `tests/topology-predicate.test.ts`).
   const useTransaction = supportsTransactions(mongoose.connection);
+  let supersededMidWrite = false;
 
   if (useTransaction) {
     const session = await mongoose.startSession();
@@ -296,38 +432,55 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
         // (§1.5 site 2). Runs in the same transaction so it commits atomically
         // with the password update.
         await revokeTrustedDevices(userId, session);
-        await User.updateOne(
-          { _id: userId },
-          {
-            $set: {
-              authHash: newHash,
-              encryptedVaultKey: body.newEncryptedVaultKey,
-              vaultKeyIv: body.newVaultKeyIv,
-              vaultKeyTag: body.newVaultKeyTag,
-              passwordChangedAt,
-            },
-          },
-          { session },
-        );
+        const result = await User.updateOne(vaultKeyWriteFilter, vaultKeyWrite, { session });
+        if (result.matchedCount === 0) {
+          throw new SupersededVaultKeyWrite();
+        }
       });
+    } catch (error) {
+      if (!(error instanceof SupersededVaultKeyWrite)) throw error;
+      supersededMidWrite = true;
     } finally {
       await session.endSession();
     }
   } else {
     // Standalone MongoDB — revoke refresh tokens BEFORE updating the password.
-    // If the subsequent save fails, the user simply has to log in again with
+    // If the subsequent write fails, the user simply has to log in again with
     // their existing password. The reverse order would leave stale tokens valid
     // for a user whose password has changed.
     await RefreshToken.deleteMany({ userId });
     // Same revocation as the transactional branch (§1.5 site 2): drop trusted
     // devices so none skips 2FA under the new password.
     await revokeTrustedDevices(userId);
-    user.authHash = newHash;
-    user.encryptedVaultKey = body.newEncryptedVaultKey;
-    user.vaultKeyIv = body.newVaultKeyIv;
-    user.vaultKeyTag = body.newVaultKeyTag;
-    user.passwordChangedAt = passwordChangedAt;
-    await user.save();
+    // A conditional `updateOne` rather than the `user.save()` this branch used
+    // to perform, because a hydrated save cannot carry a filter — it writes the
+    // document it holds, which is exactly how a superseded wrapper used to land.
+    // It also stops this branch backfilling `vaultKeyVersion: 0` onto a legacy
+    // row as a side effect of hydration, which the transactional branch never
+    // did; the two branches now write the same four fields and nothing else.
+    // Validators are not requested, matching the transactional branch: the four
+    // written fields' Zod bounds (100 / 200 / 24 / 32) are exactly the model's,
+    // and `authHash` stores a 60-character bcrypt digest.
+    const result = await User.updateOne(vaultKeyWriteFilter, vaultKeyWrite);
+    supersededMidWrite = result.matchedCount === 0;
+  }
+
+  if (supersededMidWrite) {
+    // The narrow interleaving the guard's read cannot see: a rotation committed
+    // between it and the write. Nothing about the password or the vault key was
+    // written. The revocation above HAS committed on the sequential branch (it
+    // has no transaction to abort), so the caller is signed out of every device
+    // over a change that did not happen — the same cost that branch's ordering
+    // already accepts for a crash between its two steps, and the reason the
+    // transactional branch aborts instead.
+    const current = vaultKeyVersionOf(await User.findById(userId).select('vaultKeyVersion').lean());
+    logger.warn('A master-password change was refused: the vault key was rotated mid-request', {
+      userId,
+      guarded: resolvedVaultKeyVersion,
+      current,
+    });
+    sendStaleVaultKey(res, new StaleVaultKeyError(current, 'rotated'));
+    return;
   }
 
   const pwCtx = getRequestContext(req);

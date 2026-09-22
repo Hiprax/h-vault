@@ -375,6 +375,13 @@ const mockBulkReEncrypt = bulkReEncryptApi as unknown as Mock;
 /** Sentinel objects standing in for opaque CryptoKeys. */
 const OLD_VAULT_KEY = { key: 'old-vault-key' } as unknown as CryptoKey;
 const NEW_VAULT_KEY = { key: 'new-vault-key' } as unknown as CryptoKey;
+/**
+ * The key a session holding a SUPERSEDED one recovers from the profile after a
+ * stale-generation refusal. Distinct from all three above, so "the retry
+ * re-wrapped the LIVE key" is assertable rather than merely "something was
+ * re-wrapped".
+ */
+const LIVE_VAULT_KEY = { key: 'live-vault-key' } as unknown as CryptoKey;
 const MEK = { key: 'mek' } as unknown as CryptoKey;
 
 /**
@@ -413,13 +420,51 @@ function installCryptoStubs() {
     tag: 'bwkVKTag',
   });
   cs.base64ToArrayBuffer.mockReturnValue(new Uint8Array(16));
-  cs.importVaultKey.mockResolvedValue(NEW_VAULT_KEY);
+  // The wrapped-key round trip the stale-generation retry performs. `decryptVaultKey`
+  // names the wrapper AND the MEK it opened it with, and `importVaultKey` refuses
+  // anything else, so a retry that unwrapped the session's own stale wrapper — or
+  // unwrapped the live one under the wrong MEK — fails here rather than passing with
+  // a plausible-looking payload.
+  cs.decryptVaultKey.mockImplementation(
+    (encrypted: string, _iv: string, _tag: string, mek: { key: string }) =>
+      Promise.resolve(`raw:${encrypted}:under:${mek.key}`),
+  );
+  cs.importVaultKey.mockImplementation((raw: string) =>
+    raw === `raw:${LIVE_PROFILE_WRAPPER.encryptedVaultKey}:under:mek`
+      ? Promise.resolve(LIVE_VAULT_KEY)
+      : Promise.reject(new Error(`unexpected raw vault key: ${String(raw)}`)),
+  );
 }
+
+/**
+ * The account's LIVE wrapped vault key, as `GET /user/profile` reports it.
+ *
+ * Deliberately different from anything this session holds: the store's
+ * `encryptedVaultKeyData` moves with the key the session has, so on a session
+ * holding a superseded key it is exactly as stale as the wrapper that was just
+ * refused — which is why the retry has to re-read the profile rather than reuse it.
+ */
+const LIVE_PROFILE_WRAPPER = {
+  encryptedVaultKey: 'live-wrapped-vault-key',
+  vaultKeyIv: 'live-vk-iv',
+  vaultKeyTag: 'live-vk-tag',
+  // DELIBERATELY not the number the refusal below carries. The profile read
+  // happens after the refusal, so a further rotation can have landed in between,
+  // and the retry must name the generation that goes with the wrapper it actually
+  // unwrapped. With the two equal, a retry that echoed the refusal's number would
+  // be indistinguishable from one that read the profile's.
+  vaultKeyVersion: 6,
+} as const;
 
 const defaultProfile = {
   email: 'test@example.com',
   emailVerified: true,
   twoFactorEnabled: false,
+  // Present because the real response carries them: they are required on
+  // `IUserProfile` and are how a cold-start resume — and the stale-generation
+  // retry below — recover the live wrapped vault key.
+  ...LIVE_PROFILE_WRAPPER,
+  kdfIterations: 600_000,
   settings: {
     autoLockTimeout: 15,
     // Mirrors the real profile response, which carries both hidden-tab lock
@@ -641,10 +686,311 @@ describe('SettingsPage — error paths and branches', () => {
         newEncryptedVaultKey: 'vk-wrapped-with:NewMasterPassword1!',
         newVaultKeyIv: 'vkIv',
         newVaultKeyTag: 'vkTag',
+        // WHICH vault key that wrapper was built from. This request REPLACES the
+        // stored wrapper, so without the generation the server cannot tell a
+        // wrapper for the live key from one for a key a rotation elsewhere has
+        // already superseded — and storing the latter costs the whole vault.
+        // Asserted as the store's own value (4, set in `beforeEach`), not zero,
+        // so a hard-coded or defaulted number fails here.
+        vaultKeyVersion: 4,
       });
     });
     // The existing vault key (not a freshly generated one) is re-wrapped.
     expect(cs.encryptVaultKey).toHaveBeenCalledWith(OLD_VAULT_KEY, { mek: 'NewMasterPassword1!' });
+  });
+
+  // ── The stale-generation refusal, and the one retry it earns ────────────
+
+  /**
+   * The recoverable refusal, exactly as the server renders it: a 409 whose body
+   * carries the account's CURRENT generation in `data`.
+   */
+  function staleGenerationRefusal(current: number): unknown {
+    return {
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: {
+          success: false,
+          message: `The vault key was rotated elsewhere. Reload to pick up vault key version ${String(current)}, then retry this change.`,
+          data: { vaultKeyVersion: current },
+        },
+      },
+    };
+  }
+
+  it('recovers from a stale-generation refusal by re-wrapping the LIVE key, once', async () => {
+    // The whole point of sending the generation: the refusal is recoverable
+    // without the user retyping anything. The session is holding a superseded
+    // vault key, so the retry must fetch the live wrapper, open it with the MEK
+    // it already has, re-wrap THAT under the new MEK, and name the generation the
+    // profile reports.
+    mockChangePasswordApi
+      .mockRejectedValueOnce(staleGenerationRefusal(5))
+      .mockResolvedValueOnce({ data: { success: true } });
+    await renderSettings();
+    const profileReadsBeforeSubmit = mockGetProfileApi.mock.calls.length;
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockChangePasswordApi).toHaveBeenCalledTimes(2);
+    });
+    // Exactly ONE profile re-read, driven by the refusal — not a poll and not a
+    // second attempt's worth.
+    expect(mockGetProfileApi.mock.calls.length - profileReadsBeforeSubmit).toBe(1);
+    expect(cs.decryptVaultKey).toHaveBeenCalledWith(
+      LIVE_PROFILE_WRAPPER.encryptedVaultKey,
+      LIVE_PROFILE_WRAPPER.vaultKeyIv,
+      LIVE_PROFILE_WRAPPER.vaultKeyTag,
+      MEK,
+    );
+    expect(cs.encryptVaultKey).toHaveBeenLastCalledWith(LIVE_VAULT_KEY, {
+      mek: 'NewMasterPassword1!',
+    });
+    expect(mockChangePasswordApi).toHaveBeenLastCalledWith({
+      currentAuthHash: 'hash:OldMasterPassword1!',
+      newAuthHash: 'hash:NewMasterPassword1!',
+      newEncryptedVaultKey: 'vk-wrapped-with:NewMasterPassword1!',
+      newVaultKeyIv: 'vkIv',
+      newVaultKeyTag: 'vkTag',
+      // The generation the PROFILE reports, which names the wrapper just
+      // unwrapped — not the number the refusal carried, which is older by
+      // however long the profile read took.
+      vaultKeyVersion: LIVE_PROFILE_WRAPPER.vaultKeyVersion,
+    });
+    // The recovered key is plaintext-capable material this handler minted, so it
+    // does not outlive the handler.
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(LIVE_VAULT_KEY);
+    // And the change really went through: the session is torn down.
+    await waitFor(() => {
+      expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    });
+  });
+
+  it('stops after the one retry, surfacing the server sentence and logging nobody out', async () => {
+    // A second refusal means the account moved again, or this session cannot
+    // reach the live key at all. There is nothing further to try, and the 4xx
+    // sentence is the one written for this user: it names the generation to
+    // reload to, which a flat "Failed to change password" would throw away.
+    mockChangePasswordApi
+      .mockRejectedValueOnce(staleGenerationRefusal(5))
+      .mockRejectedValueOnce(staleGenerationRefusal(7));
+    await renderSettings();
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('vault key version 7') as unknown as string,
+          type: 'error',
+        }),
+      );
+    });
+    // NO third attempt, and no logout: the password did not change, so tearing
+    // the session down would strand a user who is still on the old one.
+    expect(mockChangePasswordApi).toHaveBeenCalledTimes(2);
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+  });
+
+  it('gives up when the profile re-read cannot supply the live key', async () => {
+    // The retry has two prerequisites it does not control: a profile response it
+    // can read, and the MEK still in memory. Either missing means there is no
+    // live key to re-wrap, and the honest outcome is the refusal itself rather
+    // than a second attempt with the same stale wrapper.
+    mockChangePasswordApi.mockRejectedValueOnce(staleGenerationRefusal(5));
+    await renderSettings();
+    // Queued AFTER the render, because the page reads the profile on mount and a
+    // one-shot queued before it would be spent there instead of on the retry.
+    mockGetProfileApi.mockResolvedValueOnce({ data: { success: false } });
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('vault key version 5') as unknown as string,
+          type: 'error',
+        }),
+      );
+    });
+    expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+    expect(cs.decryptVaultKey).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+  });
+
+  it('gives up when the vault locked itself while the refusal was in flight', async () => {
+    // A locked vault has no MEK, and nothing about a retry unlocks it.
+    mockChangePasswordApi.mockRejectedValueOnce(staleGenerationRefusal(5));
+    await renderSettings();
+    mockGetProfileApi.mockImplementationOnce(() => {
+      useAuthStore.setState({ mek: null });
+      return Promise.resolve({ data: { success: true, data: { ...defaultProfile } } });
+    });
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('vault key version 5') as unknown as string,
+          type: 'error',
+        }),
+      );
+    });
+    expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+    expect(cs.decryptVaultKey).not.toHaveBeenCalled();
+  });
+
+  it('zeroes the raw live vault key even when importing it fails', async () => {
+    // The 32 plaintext bytes of the account's LIVE vault key exist between the
+    // unwrap and the import. If the import throws, a `clearKey` placed after it
+    // never runs and those bytes sit in the heap until the collector gets to
+    // them — so it is in a `finally`, and this is what says so.
+    mockChangePasswordApi.mockRejectedValueOnce(staleGenerationRefusal(5));
+    await renderSettings();
+    cs.importVaultKey.mockRejectedValueOnce(new Error('not a 32-byte key'));
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(cs.clearKey).toHaveBeenCalledWith(
+        `raw:${LIVE_PROFILE_WRAPPER.encryptedVaultKey}:under:mek`,
+      );
+    });
+    // And the failure is still a failure: no second attempt, no logout.
+    expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+  });
+
+  it('names generation 0 on the retry when the account has no stored generation', async () => {
+    // An account created before the generation column existed reports none at
+    // all. It has therefore never rotated, so zero is the right claim — and it
+    // must be an explicit zero rather than an omitted field, which the server
+    // refuses outright on any account that HAS rotated.
+    mockChangePasswordApi
+      .mockRejectedValueOnce(staleGenerationRefusal(5))
+      .mockResolvedValueOnce({ data: { success: true } });
+    const { vaultKeyVersion: _omitted, ...legacyProfile } = defaultProfile;
+    mockGetProfileApi.mockResolvedValue({ data: { success: true, data: legacyProfile } });
+    await renderSettings();
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockChangePasswordApi).toHaveBeenCalledTimes(2);
+    });
+    expect(mockChangePasswordApi).toHaveBeenLastCalledWith(
+      expect.objectContaining({ vaultKeyVersion: 0 }),
+    );
+  });
+
+  it('shows the generic message for a failure that carried no 4xx sentence', async () => {
+    // The other arm of the message rule. A 5xx body is redacted to its status
+    // text in production, and a transport failure has no body at all, so quoting
+    // either would put "Internal Server Error" or "Network Error" in front of
+    // someone as though it were advice.
+    mockChangePasswordApi.mockRejectedValue(new Error('Network Error'));
+    await renderSettings();
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to change password', type: 'error' }),
+      );
+    });
+    expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+  });
+
+  it('does not spend the retry on a rotation-in-progress 409', async () => {
+    // The same status for a different fault. A rotation still running carries no
+    // number, and no amount of re-wrapping helps until it finishes — so this one
+    // is reported, not retried. Keyed on the NUMBER rather than on the status,
+    // which is what makes the two distinguishable.
+    mockChangePasswordApi.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: {
+          success: false,
+          message: 'Vault key rotation is in progress. Please wait and retry.',
+          statusCode: 409,
+          statusText: 'Conflict',
+        },
+      },
+    });
+    await renderSettings();
+
+    await openChangePassword('OldMasterPassword1!', 'NewMasterPassword1!');
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Vault key rotation is in progress. Please wait and retry.',
+          type: 'error',
+        }),
+      );
+    });
+    expect(mockChangePasswordApi).toHaveBeenCalledTimes(1);
+    expect(cs.decryptVaultKey).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+  });
+
+  it('disables the Change Password control while a rotation is running', async () => {
+    // The same-tab half of the race, closed before the user can earn a refusal:
+    // a password change started during a rotation uploads a wrapper for the very
+    // key the rotation is replacing.
+    await renderSettings();
+    fireEvent.click(screen.getByText('Change'));
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'OldMasterPassword1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('New master password'), {
+      target: { value: 'NewMasterPassword1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Confirm new password'), {
+      target: { value: 'NewMasterPassword1!' },
+    });
+
+    // The negative first: with every field filled and no rotation running the
+    // control is live, so the assertion below is about the rotation and not about
+    // some unrelated guard.
+    expect(screen.getByText('Change Password')).not.toBeDisabled();
+
+    // A REAL rotation, held mid-flight by an item page that never resolves,
+    // rather than a poked state flag: `rotatingVaultKey` is local component state
+    // and the only honest way to observe it true is to have one running.
+    let releaseRotation: () => void = () => {};
+    mockListItems.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseRotation = () =>
+          resolve({ data: { success: true, data: [], pagination: { totalPages: 1 } } });
+      }),
+    );
+    fireEvent.click(screen.getByText('Rotate Key'));
+    await waitFor(() => screen.getByPlaceholderText('Master password'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Rotation'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Change Password')).toBeDisabled();
+    });
+    // And the other direction, so neither control can start while the other runs.
+    expect(screen.getByText(/^Rotating\.\.\./)).toBeDisabled();
+
+    // Released so the rotation does not outlive the test and leave an unhandled
+    // promise for whichever file runs next in this worker.
+    await act(async () => {
+      releaseRotation();
+    });
   });
 
   it('logs the session out after a successful master-password change', async () => {

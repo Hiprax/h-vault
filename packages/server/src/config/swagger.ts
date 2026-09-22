@@ -2808,7 +2808,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Change master password',
         description:
-          'Changes the master password. Requires current auth hash for verification. Rate limited: 3 req/IP per 15 min.',
+          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token and every trusted device granted under the old password is revoked. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -2830,7 +2830,7 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'This is the endpoint where the refusal matters most, and the only one where it is the sole cause of a 409: the new wrapper REPLACES the stored one, so accepting a wrapper built from a superseded vault key would overwrite the only copy of the live one and there is nothing anywhere that could decrypt the vault afterwards.',
+            'This is the endpoint where the refusal matters most: the new wrapper REPLACES the stored one, so accepting a wrapper built from a superseded vault key would overwrite the only copy of the live one and there is nothing anywhere that could decrypt the vault afterwards. The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },

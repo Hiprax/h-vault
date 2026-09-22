@@ -404,6 +404,10 @@ describe('SettingsPage', () => {
       vaultKey: new Uint8Array(32) as unknown as CryptoKey,
       mek: new Uint8Array(32) as unknown as CryptoKey,
       encryptedVaultKeyData: null,
+      // Deliberately NOT zero: the generation a write claims has to be the one
+      // this session recorded with its key, and a base of 0 would let a
+      // hard-coded or defaulted number pass as correct.
+      vaultKeyVersion: 2,
       twoFactorRequired: false,
       tempToken: null,
     });
@@ -574,6 +578,11 @@ describe('SettingsPage', () => {
       newEncryptedVaultKey: 'enc-mek-new',
       newVaultKeyIv: 'new-iv',
       newVaultKeyTag: 'new-tag',
+      // And it MUST say which vault key that wrapper was built from. Without it
+      // the server cannot tell a wrapper for the live key from one for a key a
+      // rotation elsewhere has already replaced, and storing the latter destroys
+      // the only copy of the live one.
+      vaultKeyVersion: 2,
     });
   });
 
