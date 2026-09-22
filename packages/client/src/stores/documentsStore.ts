@@ -1616,8 +1616,18 @@ function classifyPartFailure(error: unknown): PartVerdict {
   // stays resumable, which is the outcome those seven seconds were going to reach.
   if (status === 429) return 'fail';
 
-  // 5xx, including the 503 of a storage engine that is briefly unreachable.
+  // 5xx, including the 503 of a storage engine that is briefly unreachable and the
+  // 503 of an account that already has its share of part uploads in flight.
   if (status >= 500) return 'retry';
+
+  // The server gave up waiting for this body: a stalled uplink, a laptop that
+  // slept mid-part, a deadline the transfer missed. Retried rather than failed,
+  // and deliberately on the SAME footing as a dropped socket — that is the same
+  // server-side event, and which of the two a browser reports depends only on
+  // whether it read the response before the connection went. Classifying them
+  // differently would make one stall resumable and the other fatal for a
+  // difference the user cannot see.
+  if (status === 408) return 'retry';
 
   // Everything else is the server refusing this exact request on its merits: a
   // missing length (411), a body over the parser's limit (413) or of the wrong

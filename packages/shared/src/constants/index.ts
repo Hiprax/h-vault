@@ -376,6 +376,42 @@ export const MAX_DOCUMENTS_PER_ROTATION =
 // so its ceiling is 64 MiB across the pair. Raising this raises that product, so
 // it is a memory budget before it is a throughput knob.
 export const MAX_IN_FLIGHT_PART_UPLOADS = 4;
+// ONE IDENTITY's share of the budget above, and the reason it exists is not
+// fairness in the abstract: the slot is taken BEFORE the body parser runs, so a
+// request that declares a Content-Length and then sends nothing holds one without
+// spending a byte, a valid upload id or a single unit of quota. Without a share,
+// MAX_IN_FLIGHT_PART_UPLOADS such requests from ONE account hold the whole
+// process budget for as long as the server will wait for a body, and every other
+// account's part uploads queue behind them.
+//
+// Three, because that is what a CONFORMING client can have in flight at once and
+// not one more: a transfer sends its parts sequentially, and
+// MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER is how many transfers the server lets
+// one account hold open. So the refusal is unreachable for the browser this
+// application ships, and reachable only by a client doing something it was never
+// able to do.
+//
+// It must stay strictly BELOW MAX_IN_FLIGHT_PART_UPLOADS, which is what makes the
+// guarantee "one identity can never take every slot" true rather than aspirational
+// — raising MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER therefore means raising the
+// process budget too, and that product is memory (see above).
+export const MAX_IN_FLIGHT_PART_UPLOADS_PER_USER = 3;
+
+// The slowest sustained uplink this deployment stands behind, in bytes per second
+// (128 KiB/s is about 1 Mbit/s). It is not a throttle and nothing measures against
+// it: it is the DIVISOR that turns a byte budget into a deadline, and it is named
+// once because two deadlines are derived from it and they must not drift apart.
+//
+//   * the server's whole-request receive deadline, from the largest body any route
+//     accepts (30 MB, the backup-restore and key-rotation parser): 240 seconds;
+//   * the part route's own body deadline, from one sealed segment
+//     (DOCUMENT_CIPHERTEXT_CHUNK_BYTES): 64 seconds.
+//
+// The second is the tighter one on purpose. A part upload holds one of
+// MAX_IN_FLIGHT_PART_UPLOADS slots from before its body is read, so the time the
+// server is prepared to wait for THAT body is the time one account can deny a slot
+// to everybody else; a restore body holds no such resource, only its own socket.
+export const MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND = 128 * 1024;
 
 // Plaintext metadata bounds. These live inside the ENCRYPTED metadata blob, so
 // they are enforced by a shared schema that runs in both directions (on the

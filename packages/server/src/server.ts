@@ -14,6 +14,7 @@ import { closeRateLimitStore } from './middleware/rateLimiter.js';
 import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
 import { createGracefulShutdown } from './utils/gracefulShutdown.js';
+import { createTimedServer } from './utils/httpTimeouts.js';
 import { runStoragePreflight } from './utils/storageHealth.js';
 
 const logger = createModuleLogger('server');
@@ -54,8 +55,16 @@ async function startServer(): Promise<void> {
       );
     }
 
-    // Start HTTP server
-    const server = app.listen(config.PORT, () => {
+    // Start HTTP server.
+    //
+    // `createTimedServer` rather than `app.listen`, because the receive deadlines
+    // have to be part of the server from the moment it exists: Node reads
+    // `connectionsCheckingInterval` when it starts listening, and that sweep is
+    // what enforces `requestTimeout`. `app.listen` is `http.createServer(app)`
+    // followed by `listen`, with no seam between them to put these in.
+    const server = createTimedServer(app);
+
+    server.listen(config.PORT, () => {
       logger.info(
         `${config.APP_NAME} server running on port ${String(config.PORT)} in ${config.NODE_ENV} mode`,
       );

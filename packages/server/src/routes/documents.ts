@@ -121,6 +121,10 @@ router.delete('/uploads/:id', documentUploadLimiter, validateObjectId(), abortUp
 //     Express runs a route's parser before its handler, so a slot taken in the
 //     handler is taken after 8 MiB has already been buffered and bounds nothing.
 //     It is held across the storage call and released when the response closes.
+//     It also charges this account's SHARE of that budget, refusing with 503 past
+//     it so one identity cannot hold every slot, and arms the deadline by which
+//     this part's body must have arrived — the part route is the one place where
+//     waiting for a client costs every other account something.
 //   * `parsePartUploadBody` is mounted HERE, at route level, and must never move to
 //     `app.ts`: the Mongo-injection sanitizer there rewrites any object body key by
 //     key, and a Buffer is an object — mounted app-level, the parser would run

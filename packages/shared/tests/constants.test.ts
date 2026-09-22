@@ -95,6 +95,8 @@ import {
   MAX_DOCUMENT_CHUNK_COUNT,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
   MAX_IN_FLIGHT_PART_UPLOADS,
+  MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
+  MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
   MAX_DOCUMENT_NAME_LENGTH,
   MAX_DOCUMENT_MIME_LENGTH,
   MAX_DOCUMENT_EXT_LENGTH,
@@ -412,6 +414,8 @@ describe('Document-store constants', () => {
     ['MAX_DOCUMENT_CHUNK_COUNT', MAX_DOCUMENT_CHUNK_COUNT, 10_000],
     ['MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER', MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER, 3],
     ['MAX_IN_FLIGHT_PART_UPLOADS', MAX_IN_FLIGHT_PART_UPLOADS, 4],
+    ['MAX_IN_FLIGHT_PART_UPLOADS_PER_USER', MAX_IN_FLIGHT_PART_UPLOADS_PER_USER, 3],
+    ['MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND', MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND, 131_072],
     ['MAX_DOCUMENT_NAME_LENGTH', MAX_DOCUMENT_NAME_LENGTH, 255],
     ['MAX_DOCUMENT_MIME_LENGTH', MAX_DOCUMENT_MIME_LENGTH, 255],
     ['MAX_DOCUMENT_EXT_LENGTH', MAX_DOCUMENT_EXT_LENGTH, 32],
@@ -460,6 +464,23 @@ describe('Document-store constants', () => {
       1024 * 1024 * 1024,
     );
     expect(MAX_DOCUMENT_CHUNK_COUNT).toBe(10_000);
+  });
+
+  it('shares the in-flight part budget so one account can never hold all of it, or be refused early', () => {
+    // THE TWO RELATIONS, neither of which is either literal above.
+    //
+    // Strictly BELOW the process budget, because "one identity cannot wedge the
+    // process" is what the share is for: set the two equal and the share is inert
+    // while every test that mentions it still passes.
+    expect(MAX_IN_FLIGHT_PART_UPLOADS_PER_USER).toBeLessThan(MAX_IN_FLIGHT_PART_UPLOADS);
+    // …and at least what a CONFORMING client presents: a transfer sends its parts
+    // one at a time, so an account can have one part in flight per transfer the
+    // server let it open. Below this, the server refuses what its own init cap
+    // authorised — and the client's retry ladder is three steps long, so the third
+    // transfer would exhaust it and fail rather than merely wait.
+    expect(MAX_IN_FLIGHT_PART_UPLOADS_PER_USER).toBeGreaterThanOrEqual(
+      MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
+    );
   });
 
   it('lets a rotation name every row an account can actually hold, not just the advertised limit', () => {

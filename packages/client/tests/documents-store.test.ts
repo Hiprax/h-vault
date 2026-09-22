@@ -1239,6 +1239,36 @@ describe('documentsStore — uploading', () => {
     expect(partRequests()).toHaveLength(4);
   });
 
+  it('retries a part the server timed out waiting for, exactly as it retries a dropped socket', async () => {
+    // `timers: 'timeouts'` and NOT `'all'`: these tests drive the backoff deadline
+    // forward while awaiting a WebAssembly instantiation, Web Crypto and
+    // `Blob.arrayBuffer()` in the same test, and a faked `setImmediate` /
+    // `queueMicrotask` makes those awaits hang rather than run late.
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    // 408 is what the server answers when it gave up waiting for this body — a
+    // stalled uplink, a laptop that slept mid-part. It is the SAME server-side
+    // event as the dropped socket above, and which of the two the browser sees
+    // depends only on whether it read the response before the connection went; so
+    // classifying them differently would make one stall resumable and the other
+    // fatal for no reason the user could ever observe.
+    partOutcomes = [408, null];
+
+    await settleWithBackoff(
+      useDocumentsStore.getState().startUpload({
+        source: source(),
+        name: 'a.txt',
+        mime: 'text/plain',
+      }),
+    );
+
+    expect(partRequests()).toHaveLength(2);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+    // THE NEGATIVE: the transfer did not end up in the failed set, which is where
+    // a 408 classified as "re-sending cannot help" would have put it.
+    expect(useDocumentsStore.getState().uploads[ID_A]).toBeUndefined();
+  });
+
   it('fails a rate-limited part at once rather than spending three more slots', async () => {
     // `timers: 'timeouts'` and NOT `'all'`: these tests drive the backoff deadline
     // forward while awaiting a WebAssembly instantiation, Web Crypto and

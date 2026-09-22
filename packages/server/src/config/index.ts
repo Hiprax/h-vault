@@ -115,6 +115,34 @@ const envSchema = z
     PORT: z.coerce.number().int().min(1).max(65535).default(5000),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 
+    // How long the server will spend RECEIVING one request, and how long it will
+    // spend on that request's headers alone. Both are applied to the HTTP server
+    // by `utils/httpTimeouts.ts`, and both are set EXPLICITLY rather than left to
+    // Node's defaults (300_000 and 60_000 on the pinned runtime) because Node's
+    // own documentation says they "must be set to a non-zero value (e.g. 120
+    // seconds) to protect against potential Denial-of-Service attacks in case the
+    // server is deployed without a reverse proxy in front" — and because a
+    // default is a number this deployment would silently inherit a change to.
+    //
+    // 240 seconds is the LARGEST BODY ANY ROUTE ACCEPTS divided by
+    // MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND: 30 MB (the backup-restore and
+    // key-rotation parser) at 128 KiB/s. It is deliberately NOT sized to a
+    // document part, even though the part route is the one holding a scarce
+    // resource while it waits, because this setting is SERVER-WIDE — Node has no
+    // per-route form of it — and a value that suited the part route would refuse a
+    // legitimate restore from anyone on a slower link. The part route carries its
+    // own, much tighter deadline instead (`middleware/documentPartBody.ts`), which
+    // is what actually bounds how long one account can hold an upload slot.
+    //
+    // NEITHER MAY BE ZERO, so there is deliberately no way to turn the protection
+    // off from configuration; the floor below is what enforces that. Note what
+    // these do NOT bound: the timeout is on RECEIPT, so a request whose body has
+    // arrived is not interrupted while its controller runs (measured — a handler
+    // sleeping past its server's requestTimeout still answered), which is what
+    // keeps a minutes-long rotation, restore or trash purge unaffected.
+    HTTP_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(600_000).default(240_000),
+    HTTP_HEADERS_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(60_000),
+
     // Database
     MONGODB_URI: z.string().min(1).default('mongodb://localhost:27017/hvault'),
     MONGO_MAX_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
@@ -425,6 +453,16 @@ const envSchema = z
     // and only fails at MongoDB connect time, masked behind the retry loop.
     message: 'MONGO_MIN_POOL_SIZE cannot be greater than MONGO_MAX_POOL_SIZE',
     path: ['MONGO_MIN_POOL_SIZE'],
+  })
+  .refine((data) => data.HTTP_HEADERS_TIMEOUT_MS <= data.HTTP_REQUEST_TIMEOUT_MS, {
+    // NOT a tidiness rule. Node SWAPS the two when the headers timeout is the
+    // larger (`ConnectionsList::Expired` does it in C++, silently), so a
+    // configuration with a 60 s request timeout and a 120 s headers timeout gets a
+    // 120 s REQUEST timeout — the opposite of what the operator wrote, with
+    // nothing logged. Measured on the pinned runtime: request 2 s with headers
+    // 4 s killed a dribbling body at 4 s.
+    message: 'HTTP_HEADERS_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS',
+    path: ['HTTP_HEADERS_TIMEOUT_MS'],
   })
   .refine((data) => data.REFRESH_TOKEN_REMEMBER_DAYS >= data.REFRESH_TOKEN_DAYS, {
     // "Remember me" must never shorten a session relative to a normal login.

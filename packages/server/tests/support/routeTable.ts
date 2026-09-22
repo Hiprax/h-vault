@@ -813,9 +813,12 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     // The ONLY route in this application whose body is not JSON. It carries a
     // route-level `express.raw` for `application/octet-stream`, and two
     // middlewares ahead of it that are not limiters and so do not appear in the
-    // column: a 411 guard, and the process-wide part semaphore — which has to be
-    // AHEAD of the parser, because a slot taken after the body is buffered bounds
-    // no memory at all.
+    // column: a 411 guard, and the slot holder — which has to be AHEAD of the
+    // parser, because a slot taken after the body is buffered bounds no memory at
+    // all. The slot holder is THREE controls in one, and only the first is a
+    // budget over time: it charges this account's share of the process-wide
+    // in-flight budget (503 past it), takes one of `MAX_IN_FLIGHT_PART_UPLOADS`
+    // slots, and arms the deadline by which this part's body must have arrived.
     limiters: ['documentPartLimiter'],
     owned: { param: 'id', resource: 'documentUpload' },
     when: 'always',

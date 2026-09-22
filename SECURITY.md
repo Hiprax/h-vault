@@ -183,6 +183,28 @@ security posture, not a disclaimer.
   deliberately do not inspect its format, because they must carry through content this
   version may not understand. And none of it substitutes for the encrypted backups
   described above — keep them.
+- **One account denying the file store to every other account.** An upload is sent in 8 MiB
+  pieces, and the server buffers only a small fixed number of them at a time, because that
+  product is the memory a single process spends on uploads and it has to fit the container it
+  runs in. The slot is taken **before** the piece is read, which is the only order in which
+  the bound means anything — a slot taken after 8 MiB has been buffered bounds nothing — and
+  it was also what made the budget cheap to exhaust: a request that declared a length and
+  then sent nothing held a slot without a file, an upload, a byte of storage or a unit of
+  quota, and enough of them from one account made every other account's uploads wait. Two
+  bounds now stand in the way, and they are different in kind. **A share**: one account may
+  hold at most three of the four slots, so it can never be every other account's reason for
+  waiting; anything past its share is refused at once with a retry-in-a-second rather than
+  queued, because queueing a caller past its own share is how one account turns a refusal it
+  earned into a pile of sockets. That share is the number of transfers the server lets one
+  account open, and a transfer sends its pieces one at a time, so the app can never reach it.
+  **And a deadline**: a piece whose bytes stop arriving is dropped after sixty-four seconds —
+  one piece at the slowest upload speed this deployment stands behind — rather than being
+  waited on for the runtime's five-minute default. The deadline covers only the **arrival**
+  of the data; a piece already delivered is never interrupted while it is being stored, so a
+  slow storage service costs throughput rather than transfers. Neither bound is a substitute
+  for the reverse proxy in front of the application, and neither is a defence against a
+  distributed flood: what they bound is what **one authenticated account** can cost everyone
+  else.
 
 ### What it cannot protect against
 

@@ -655,6 +655,14 @@ describe('the in-flight budget', () => {
     // 0 and the wait below would time out. Reaching 1 is the proof that the slot is
     // taken first — and the 413 arriving only AFTER a slot frees is the proof that
     // it is held across the storage call rather than released at `next()`.
+    //
+    // ONE IDENTITY PER REQUEST, which is not decoration either: the process budget
+    // is shared out per account (`MAX_IN_FLIGHT_PART_UPLOADS_PER_USER`), so one
+    // account filling every slot is a state the server now refuses to enter. The
+    // property under test here is the PROCESS-wide one — a slot taken before the
+    // parser and held across storage — and filling the budget from distinct
+    // accounts is what reaches that state without tripping the per-account share.
+    // `part-upload-fairness.test.ts` owns the share itself.
     const base = storageRef.current!;
     const blocked: (() => void)[] = [];
     storageRef.current = {
@@ -674,8 +682,11 @@ describe('the in-flight budget', () => {
     // regression that presents as a timeout is a regression nobody can read.
     try {
       for (let i = 0; i < MAX_IN_FLIGHT_PART_UPLOADS; i += 1) {
-        const seeded = await seedUpload(user, { chunks: 1 });
-        occupying.push(putPart(user, seeded.id, 1, { body: pattern(512 + i) }));
+        const holder = await createTestUser({
+          email: `document-parts-slot-${String(i)}@example.com`,
+        });
+        const seeded = await seedUpload(holder, { chunks: 1 });
+        occupying.push(putPart(holder, seeded.id, 1, { body: pattern(512 + i) }));
       }
       await vi.waitFor(
         () => {
