@@ -366,7 +366,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: null,
     when: 'always',
     note: 'Takes an owned folderId in the BODY; covered by phase7-cross-user-edge-cases.test.ts.',
@@ -376,7 +376,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: { param: 'id', resource: 'vaultItem' },
     when: 'always',
     note: 'Also takes an owned folderId in the BODY, which the matrix does not model; covered by cross-user-isolation.test.ts.',
@@ -386,7 +386,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: { param: 'id', resource: 'vaultItem' },
     when: 'always',
   },
@@ -395,7 +395,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/:id/permanent',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: { param: 'id', resource: 'trashedVaultItem' },
     when: 'always',
   },
@@ -404,7 +404,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/restore/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: { param: 'id', resource: 'trashedVaultItem' },
     when: 'always',
   },
@@ -472,7 +472,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/folders/',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['folderWriteLimiter'],
     owned: null,
     when: 'always',
     note: 'Takes an owned parentId in the BODY; covered by phase7-cross-user-edge-cases.test.ts.',
@@ -482,7 +482,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/folders/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['folderWriteLimiter'],
     owned: { param: 'id', resource: 'folder' },
     when: 'always',
   },
@@ -491,7 +491,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/folders/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['folderWriteLimiter'],
     owned: { param: 'id', resource: 'folder' },
     when: 'always',
   },
@@ -500,7 +500,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/folders/:id/sort',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['folderWriteLimiter'],
     owned: { param: 'id', resource: 'folder' },
     when: 'always',
   },
@@ -547,7 +547,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/user/2fa/verify',
     auth: 'required',
     csrf: 'required',
-    limiters: ['tokenVerifyLimiter'],
+    limiters: ['twoFactorVerifyLimiter'],
     owned: null,
     when: 'always',
   },
@@ -668,7 +668,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     // `importLimiter`, deliberately NOT `heavyOpLimiter`: a migration is sent
-    // as several batches and would exhaust the shared 10/IP heavy-op budget.
+    // as several batches and would exhaust the shared 10-per-user heavy-op budget.
     limiters: ['importLimiter'],
     owned: null,
     when: 'always',
@@ -793,7 +793,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     // should: it is one genuinely unbounded operation, up to
     // MAX_DOCUMENTS_PER_USER rows each with an object delete. Every per-row
     // document route deliberately carries `generalAuthLimiter` instead, because
-    // this IP-keyed budget of 10 per 15 minutes is shared with export, backup
+    // this per-user budget of 10 per 15 minutes is shared with export, backup
     // download and every bulk vault operation.
     limiters: ['heavyOpLimiter'],
     owned: null,
@@ -814,7 +814,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     // `documentUploadLimiter`, deliberately NOT `heavyOpLimiter`: init, complete
-    // and abort are three requests per transfer, and the IP-keyed heavy-op budget
+    // and abort are three requests per transfer, and the per-user heavy-op budget
     // of 10 per 15 minutes is shared with export, backup and every bulk vault
     // operation.
     limiters: ['documentUploadLimiter'],
@@ -921,7 +921,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     // `generalAuthLimiter`, NOT `heavyOpLimiter`: this is a per-row route, and
-    // that IP-keyed budget of 10 per 15 minutes would 429 a user who purged
+    // that per-user budget of 10 per 15 minutes would 429 a user who purged
     // eleven documents and then lock them out of emptying their vault trash.
     limiters: ['generalAuthLimiter'],
     owned: { param: 'id', resource: 'trashedDocument' },

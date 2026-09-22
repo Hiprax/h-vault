@@ -101,9 +101,15 @@ security posture, not a disclaimer.
   can never spend the allowance you need in order to sign in. A caller-supplied value (a
   header, a cookie, a rotating token) appears in a rate-limit key only where an IP-keyed tier
   bounds the same route regardless — the per-account tier keys on the submitted email for that
-  reason, and the refresh tier, which has no such companion, keys on the address alone. Getting
-  either wrong turns a limiter into a lockout of the legitimate user, an open door for the
-  attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
+  reason, and the refresh tier, which has no such companion, keys on the address alone. Every tier
+  on an authenticated route keys on the account instead, because the account id comes from a
+  verified token: neighbours behind one address never spend each other's budget, and an attacker
+  holding a session cannot buy a fresh budget by moving to another address. That covers the
+  heavy-operation tier and the confirmation of a new 2FA setup. It also covers every vault-item
+  and folder write: each one leaves an audit row that is kept for a year, so each is bounded per
+  account, at a ceiling sized for the app's own one-request-per-item bulk actions. Getting the
+  key wrong on any of these tiers turns a limiter into a lockout of the legitimate user, an open
+  door for the attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
   the individual address, because a single routed IPv6 allocation hands one attacker 18
   quintillion addresses: keyed on the full `/128`, an IP-keyed limiter is not a limiter at all,
   it is a counter that never reaches two. That aggregation happens inside the library that

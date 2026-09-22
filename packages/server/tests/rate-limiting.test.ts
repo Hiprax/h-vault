@@ -13,6 +13,7 @@ import {
   healthLimiter,
   generalAuthLimiter,
   unlockLimiter,
+  twoFactorVerifyLimiter,
 } from '../src/middleware/rateLimiter.js';
 import { createTestUser, authHeader, sampleVaultItem, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
@@ -482,14 +483,14 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
     });
   });
 
-  // ── MISSING-4 — POST /user/2fa/verify has tokenVerifyLimiter ────
+  // ── MISSING-4 — POST /user/2fa/verify has twoFactorVerifyLimiter ────
 
-  describe('MISSING-4 — POST /api/v1/user/2fa/verify (tokenVerifyLimiter)', () => {
+  describe('MISSING-4 — POST /api/v1/user/2fa/verify (twoFactorVerifyLimiter)', () => {
     it('should accept 2FA verify requests through rate limiter middleware', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
       // 2FA is not set up for the test user, so the controller returns 409.
-      // This verifies the middleware chain (tokenVerifyLimiter) does not block.
+      // This verifies the middleware chain (twoFactorVerifyLimiter) does not block.
       const res = await agent
         .post('/api/v1/user/2fa/verify')
         .set('Authorization', authHeader(user.accessToken))
@@ -644,7 +645,12 @@ describe('Rate limiter route wiring (structural)', () => {
     ['heavyOpLimiter on GET /backup/download', 'get', '/download', heavyOpLimiter],
     ['passwordVerifyLimiter on POST /backup/setup', 'post', '/setup', passwordVerifyLimiter],
     ['passwordVerifyLimiter on POST /backup/restore', 'post', '/restore', passwordVerifyLimiter],
-    ['tokenVerifyLimiter on POST /user/2fa/verify', 'post', '/2fa/verify', tokenVerifyLimiter],
+    [
+      'twoFactorVerifyLimiter on POST /user/2fa/verify',
+      'post',
+      '/2fa/verify',
+      twoFactorVerifyLimiter,
+    ],
     ['passwordVerifyLimiter on DELETE /user/2fa', 'delete', '/2fa', passwordVerifyLimiter],
     // Audit-writing DELETE endpoints must carry generalAuthLimiter, matching
     // their GET siblings — a missing one here is the exact regression a

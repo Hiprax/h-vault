@@ -590,7 +590,7 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
 
     it('counts the request against the per-user import budget, not the shared heavy-op one', async () => {
       // A migration arrives as several sequential batches. Sharing
-      // `heavyOpLimiter`'s 10-per-IP budget would stall it (or a prior export
+      // `heavyOpLimiter`'s 10-per-user budget would stall it (or a prior export
       // would burn a slot), so `/tools/import` owns a userId-keyed counter.
       const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
         format: 'json',

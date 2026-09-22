@@ -2284,11 +2284,12 @@ export const restoreDocument = catchAsync(async (req: Request, res: Response): P
  *
  * ## Why `generalAuthLimiter` and not `heavyOpLimiter`
  *
- * `heavyOpLimiter` is IP-keyed at 10 per 15 minutes and is shared with export,
+ * `heavyOpLimiter` allows a user 10 per 15 minutes and is shared with export,
  * backup download, bulk delete, bulk move and empty-trash. On a PER-ROW route it
  * would 429 a user who purged eleven documents and then lock them out of emptying
- * their vault trash for a quarter of an hour. The per-item equivalent carries no
- * limiter at all; this one carries the ordinary authenticated budget.
+ * their vault trash for a quarter of an hour. The per-item equivalent carries
+ * `vaultItemWriteLimiter`, sized for the client's one-request-per-row trash purge;
+ * this one carries the ordinary authenticated budget.
  */
 export const purgeDocument = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);

@@ -7,6 +7,7 @@ import { config, isProduction } from '../config/index.js';
 import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
+  MAX_FOLDERS_PER_USER,
   MAX_ITEMS_PER_USER,
   HIBP_BATCH_MAX_PREFIXES,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
@@ -115,9 +116,8 @@ function createStore(windowMs: number): Store | undefined {
  * arbitrary-length `X-Forwarded-For` rotation. Express returns the full
  * attacker-controlled string verbatim from `req.ip`; without the slice each
  * unique value lands in a distinct MongoDB bucket and IP-keyed limiters
- * (`authLimiter`, `csrfLimiter`, `tokenVerifyLimiter`, `heavyOpLimiter`,
- * `healthLimiter`, `metricsLimiter`) degrade to "no rate limit" for the
- * attacker.
+ * (`authLimiter`, `csrfLimiter`, `tokenVerifyLimiter`, `refreshLimiter`,
+ * `healthLimiter`, `metricsLimiter`) degrade to "no rate limit" for the attacker.
  */
 function normalizeIp(ip: string): string {
   const keyed = ipKeyGenerator(ip, IPV6_RATE_LIMIT_SUBNET);
@@ -664,34 +664,30 @@ export const generalAuthLimiter =
     }),
   );
 
+/** Requests one user may spend on heavy operations per 15-minute window. */
+export const HEAVY_OP_RATE_LIMIT_MAX = 10;
+
 /**
  * Heavy operation rate limiter (empty trash, backup download, etc.).
- * Allows **10 requests per 15-minute window** per IP address.
+ * Allows **10 requests per 15-minute window** per authenticated user.
  *
  * These endpoints can trigger significant database load (unbounded deletes,
  * full data collection), so a tighter limit prevents abuse.
+ *
+ * Keyed by userId, not IP. Every route it guards (export, backup trigger and
+ * download, bulk delete, bulk move, and both trash-empty routes) sits behind
+ * `authenticate`, so the id comes from a verified JWT. Keyed by IP, two accounts
+ * behind one egress address (a household, an office, a VPN) shared ten requests
+ * between them, and an attacker with one account bought a fresh ten per address.
  */
-const heavyOpStore = createStore(FIFTEEN_MINUTES_MS);
 export const heavyOpLimiter =
   noopIfNonProduction() ??
-  withClientKeyGuard(
+  createUserKeyedLimiter(
     'heavyOpLimiter',
-    rateLimit({
-      windowMs: FIFTEEN_MINUTES_MS,
-      limit: 10,
-      standardHeaders: true,
-      legacyHeaders: false,
-      validate: { singleCount: false },
-      keyGenerator: prefixedKeyGenerator('heavy:'),
-      ...(heavyOpStore ? { store: heavyOpStore } : {}),
-      handler: (_req, _res, next, options) => {
-        logger.warn('Heavy operation rate limit exceeded', {
-          windowMs: options.windowMs,
-          limit: options.limit,
-        });
-        next(httpErrors.tooManyRequests('Too many requests, please try again later'));
-      },
-    }),
+    'heavy:',
+    HEAVY_OP_RATE_LIMIT_MAX,
+    FIFTEEN_MINUTES_MS,
+    'Too many requests, please try again later',
   );
 
 /**
@@ -701,7 +697,7 @@ export const heavyOpLimiter =
  * Import is a zero-knowledge bulk operation: the client parses and encrypts every
  * item locally, then sends the encrypted rows in several sequential requests
  * (see the client's `chunkBySize`), so a large migration needs a higher,
- * DEDICATED budget. Sharing `heavyOpLimiter`'s 10-req/IP budget with export /
+ * DEDICATED budget. Sharing `heavyOpLimiter`'s 10-per-user budget with export /
  * backup / bulk operations would let a multi-batch import stall mid-migration (or
  * a prior export burn a slot). Keyed by userId, not IP, so IP rotation cannot
  * bypass it and a shared IP does not conflate distinct users' imports; per-user
@@ -752,12 +748,14 @@ export const importLimiter =
 // ---------------------------------------------------------------------------
 
 /**
- * One user-keyed limiter, built once and used by all three document limiters.
+ * One user-keyed limiter, built once and used by every limiter from
+ * `heavyOpLimiter` onwards: the three document limiters, the two vault-write
+ * limiters and the 2FA-setup verification limiter.
  *
- * Every limiter above it in this file is a near-identical block, and three more
- * copies would have raised `duplication.clones` and `duplication.duplicatedLines`,
- * both of which `.testfortress/baseline.json` ratchets DOWNWARD. Factoring is the
- * answer that costs nothing, because the three differ only in their name, their
+ * Every limiter above it in this file is a near-identical block, and more copies
+ * would have raised `duplication.clones` and `duplication.duplicatedLines`, both
+ * of which `.testfortress/baseline.json` ratchets DOWNWARD. Factoring is the
+ * answer that costs nothing, because they differ only in their name, their
  * counter prefix, their ceiling, their window and the sentence a 429 carries.
  *
  * TWO PROPERTIES OF THE CALL SITES ARE LOAD-BEARING, and neither is expressible
@@ -766,15 +764,15 @@ export const importLimiter =
  *   1. Each export must still call {@link noopIfNonProduction} ITSELF. That
  *      function returns a FRESH pass-through closure per call, and outside
  *      production that closure is the whole export — so hoisting the call into
- *      this factory (or into a shared constant) would make all three exports the
+ *      this factory (or into a shared constant) would make every export the
  *      same object. `tests/support/routeTable.ts` reads the limiter column by
  *      FUNCTION IDENTITY through `LIMITER_NAMES`, a `Map` keyed by the function,
- *      so three identical objects collapse to one entry and every document route
+ *      so identical objects collapse to one entry and every route they guard
  *      would report one arbitrary limiter name. `route-table.test.ts` asserts
  *      `LIMITER_NAMES.size` equals the number of exported functions precisely to
  *      catch that.
- *   2. The key is `req.user?._id`, which exists because every document route sits
- *      behind `authenticate`: it comes from a verified JWT, so nothing
+ *   2. The key is `req.user?._id`, which exists because every route these guard
+ *      sits behind `authenticate`: it comes from a verified JWT, so nothing
  *      caller-controlled enters a rate-limit key. The `resolveClientKey` fallback
  *      is the same one every user-keyed limiter here carries, for a request that
  *      somehow reached the limiter unauthenticated.
@@ -927,6 +925,102 @@ export const documentReadLimiter =
     DOCUMENT_READ_RATE_LIMIT_MAX,
     DOCUMENT_RATE_LIMIT_WINDOW_MS,
     'Too many document read requests, please try again later',
+  );
+
+// ---------------------------------------------------------------------------
+// Vault item and folder writes
+// ---------------------------------------------------------------------------
+
+/** Window both vault-write budgets are spent over. */
+export const VAULT_WRITE_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
+
+/**
+ * Whole-collection passes one user may make in a window: a bulk tag of every
+ * item followed by a purge of the whole trash, say.
+ *
+ * The client sends ONE request per row for its bulk actions (a bulk tag through
+ * `PUT /vault/items/:id`, a trash purge through
+ * `DELETE /vault/items/:id/permanent`, a folder drag through one
+ * `PUT /folders/:id/sort` per moved sibling), with no retry on a 429. A budget
+ * below one full pass refuses a legitimate action PARTWAY THROUGH and leaves the
+ * selection half-changed, which is the failure `BREACH_BATCH_RATE_LIMIT_MAX`
+ * exists to prevent. Two passes leave room for a second action without making
+ * the budget an open-ended audit-log writer.
+ */
+export const VAULT_WRITE_PASSES_PER_WINDOW = 2;
+
+/**
+ * Item mutations one user may make per window. `MAX_ITEMS_PER_USER` counts active
+ * and trashed rows together, so it is the most one bulk pass can touch.
+ */
+export const VAULT_ITEM_WRITE_RATE_LIMIT_MAX = MAX_ITEMS_PER_USER * VAULT_WRITE_PASSES_PER_WINDOW;
+
+/**
+ * Folder mutations one user may make per window. A drag re-sorts at most every
+ * sibling, and a user holds at most `MAX_FOLDERS_PER_USER` folders.
+ */
+export const FOLDER_WRITE_RATE_LIMIT_MAX = MAX_FOLDERS_PER_USER * VAULT_WRITE_PASSES_PER_WINDOW;
+
+/**
+ * Item create, update, delete, restore and purge. Each writes an `AuditLog` row
+ * that is kept for 365 days, so an unlimited route let a valid session flood the
+ * audit log.
+ *
+ * NOT `generalAuthLimiter`: that is 60 a minute in ONE `general:` bucket shared
+ * with the profile, the folder list and logout, so a 61-item bulk tag would have
+ * been refused partway and would then have refused the logout after it. Keyed by
+ * user, and separate from the folder budget, so a whole-vault bulk action cannot
+ * refuse a folder drag either.
+ */
+export const vaultItemWriteLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'vaultItemWriteLimiter',
+    'vaultWrite:',
+    VAULT_ITEM_WRITE_RATE_LIMIT_MAX,
+    VAULT_WRITE_RATE_LIMIT_WINDOW_MS,
+    'Too many vault changes, please try again later',
+  );
+
+/** Folder create, rename, delete and re-sort, for the reasons above. */
+export const folderWriteLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'folderWriteLimiter',
+    'folderWrite:',
+    FOLDER_WRITE_RATE_LIMIT_MAX,
+    VAULT_WRITE_RATE_LIMIT_WINDOW_MS,
+    'Too many folder changes, please try again later',
+  );
+
+/**
+ * Attempts one user may spend confirming a 2FA setup code per window: the same
+ * number `tokenVerifyLimiter` allowed, now counted per account.
+ */
+export const TWO_FACTOR_VERIFY_RATE_LIMIT_MAX = 20;
+
+/**
+ * `POST /user/2fa/verify`, the one authenticated route that used to sit on the
+ * IP-keyed `tokenVerifyLimiter`.
+ *
+ * A caller holding a session could guess the six-digit code against a pending
+ * setup from as many addresses as they had, and a correct guess enables 2FA and
+ * returns the backup codes. Each attempt also costs the server a full key
+ * derivation before the code is checked. Keyed by user, the budget bounds the
+ * account, and the setup no longer shares a bucket with the public verify-email,
+ * reset-password and unlock-account links of everyone behind the same address.
+ *
+ * NOT `passwordVerifyLimiter` (the setup itself spends that, so four wrong codes
+ * would block restarting setup), and NOT `unlockLimiter` (session maintenance).
+ */
+export const twoFactorVerifyLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'twoFactorVerifyLimiter',
+    'twoFactorVerify:',
+    TWO_FACTOR_VERIFY_RATE_LIMIT_MAX,
+    FIFTEEN_MINUTES_MS,
+    'Too many verification attempts, please try again later',
   );
 
 /**

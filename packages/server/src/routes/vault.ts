@@ -2,7 +2,11 @@ import { Router } from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
-import { heavyOpLimiter, passwordVerifyLimiter } from '../middleware/rateLimiter.js';
+import {
+  heavyOpLimiter,
+  passwordVerifyLimiter,
+  vaultItemWriteLimiter,
+} from '../middleware/rateLimiter.js';
 import {
   LARGE_JSON_BODY_LIMIT_BYTES,
   holdLargeBodySlot,
@@ -54,14 +58,23 @@ router.use(authenticate);
 router.get('/items', validate(listVaultItemsSchema, 'query'), listItems);
 router.get('/items/trash', validate(listTrashSchema, 'query'), listTrash);
 router.get('/items/:id', validateObjectId(), getItem);
-router.post('/items', validate(createVaultItemSchema, 'body'), createItem);
-router.put('/items/:id', validateObjectId(), validate(updateVaultItemSchema, 'body'), updateItem);
-router.delete('/items/:id', validateObjectId(), deleteItem);
-router.delete('/items/:id/permanent', validateObjectId(), permanentDelete);
+// Every item mutation writes an audit row that is kept for 365 days, so each one
+// carries `vaultItemWriteLimiter` (per user; see its docblock for why it is not
+// `generalAuthLimiter`: the client's bulk actions send one of these per row).
+router.post('/items', vaultItemWriteLimiter, validate(createVaultItemSchema, 'body'), createItem);
+router.put(
+  '/items/:id',
+  vaultItemWriteLimiter,
+  validateObjectId(),
+  validate(updateVaultItemSchema, 'body'),
+  updateItem,
+);
+router.delete('/items/:id', vaultItemWriteLimiter, validateObjectId(), deleteItem);
+router.delete('/items/:id/permanent', vaultItemWriteLimiter, validateObjectId(), permanentDelete);
 
 // ── Restore ──────────────────────────────────────────────────────────
 
-router.post('/items/restore/:id', validateObjectId(), restoreItem);
+router.post('/items/restore/:id', vaultItemWriteLimiter, validateObjectId(), restoreItem);
 
 // ── Bulk operations ──────────────────────────────────────────────────
 

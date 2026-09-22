@@ -81,7 +81,7 @@ router.get('/usage', generalAuthLimiter, getUsage);
 // `heavyOpLimiter`, the only route in this file that carries it, and the only one
 // that deserves it: this is one genuinely unbounded operation (up to
 // `MAX_DOCUMENTS_PER_USER` rows, each with an object delete), which is exactly
-// what that IP-keyed budget of 10 per 15 minutes exists for. Every per-row
+// what that per-user budget of 10 per 15 minutes exists for. Every per-row
 // document route deliberately avoids it — see `purgeDocument`.
 router.delete('/trash/empty', heavyOpLimiter, emptyDocumentTrash);
 
@@ -182,7 +182,7 @@ router.put(
 // The trash lifecycle: in, out, and gone.
 //
 // All three carry `generalAuthLimiter` rather than `heavyOpLimiter`, including
-// the permanent delete. That limiter is IP-keyed at 10 per 15 minutes and is
+// the permanent delete. That limiter allows a user 10 per 15 minutes and is
 // shared with export, backup download and every bulk vault operation, so on a
 // per-row route it would 429 a user who purged eleven documents and then lock
 // them out of emptying their vault trash. It stays on `/trash/empty` above,

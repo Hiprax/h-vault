@@ -7,8 +7,10 @@ const logger = createModuleLogger('rate-limit-store');
 /**
  * The single collection every MongoDB-backed rate-limit counter lives in.
  * Limiters disambiguate themselves with a key prefix (`auth:`, `account:`,
- * `token:`, `refresh:`, `unlock:`, `breach:`, `general:`, `pwverify:`, `heavy:`,
- * `csrf:`), so one collection with one TTL index serves all of them.
+ * `token:`, `refresh:`, `unlock:`, `breach:`, `breachBatch:`, `general:`,
+ * `pwverify:`, `heavy:`, `import:`, `csrf:`, `docUpload:`, `docPart:`,
+ * `docRead:`, `vaultWrite:`, `folderWrite:`, `twoFactorVerify:`), so one
+ * collection with one TTL index serves all of them.
  *
  * The `health:` and `metrics:` counters are deliberately NOT here. Those two
  * limiters guard the diagnostic endpoints that have to keep answering while
@@ -40,7 +42,7 @@ interface RateLimitRecord {
  * would never fire — every rate-limited request hung until the client gave up.
  * Its only working mode is to connect a driver-3 MongoClient of its own from a
  * URI, which would mean an end-of-life driver and a separate connection pool for
- * each of the dozen limiters in this file.
+ * each of the limiters in this file.
  *
  * This store instead issues its counters over `mongoose.connection`, so it adds
  * no connection, no pool and no dependency, and it is closed by the same

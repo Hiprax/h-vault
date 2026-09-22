@@ -409,7 +409,7 @@ describe('resolveClientKey IP-length truncation (F2)', () => {
 });
 
 describe('resolveClientKey IPv6 /64 subnet aggregation (Finding Q)', () => {
-  // The IP-keyed limiters (auth/token/csrf/heavy/health/metrics) key on
+  // The IP-keyed limiters (auth/token/csrf/health/metrics) key on
   // resolveClientKey. Routing the IP through express-rate-limit's ipKeyGenerator
   // collapses an entire IPv6 /64 into one bucket, so an attacker on a routed
   // allocation cannot rotate the host bits to fragment the limiter into many

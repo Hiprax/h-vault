@@ -2382,7 +2382,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'createVaultItem',
         tags: ['Vault'],
         summary: 'Create vault item',
-        description: 'Creates a new encrypted vault item.',
+        description:
+          'Creates a new encrypted vault item. Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -2395,6 +2396,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           201: jsonEnvelope('Item created', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
             'The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes.',
@@ -2442,6 +2444,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -2479,6 +2482,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           400: { $ref: '#/components/responses/ValidationError' },
         },
       },
@@ -2517,6 +2521,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
           400: { $ref: '#/components/responses/ValidationError' },
         },
@@ -2585,7 +2590,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'updateVaultItem',
         tags: ['Vault'],
         summary: 'Update vault item',
-        description: 'Updates an existing vault item.',
+        description:
+          'Updates an existing vault item. Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
@@ -2599,6 +2605,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: jsonEnvelope('Item updated', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
@@ -2610,7 +2617,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'deleteVaultItem',
         tags: ['Vault'],
         summary: 'Soft-delete vault item',
-        description: 'Moves a vault item to the trash (soft delete).',
+        description:
+          'Moves a vault item to the trash (soft delete). Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
@@ -2623,6 +2631,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
         },
       },
@@ -2632,7 +2641,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'purgeVaultItem',
         tags: ['Vault'],
         summary: 'Permanently delete vault item',
-        description: 'Permanently deletes a trashed vault item. Cannot be undone.',
+        description:
+          'Permanently deletes a trashed vault item. Cannot be undone. Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
@@ -2645,6 +2655,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
         },
       },
@@ -2654,12 +2665,14 @@ export const swaggerSpec: JsonObject = {
         operationId: 'restoreVaultItem',
         tags: ['Vault'],
         summary: 'Restore trashed item',
-        description: 'Restores a soft-deleted vault item from the trash.',
+        description:
+          'Restores a soft-deleted vault item from the trash. Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           200: jsonEnvelope('Item restored', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
         },
       },
@@ -2698,7 +2711,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'createFolder',
         tags: ['Folders'],
         summary: 'Create folder',
-        description: 'Creates a new folder for organizing vault items.',
+        description:
+          'Creates a new folder for organizing vault items. Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -2711,6 +2725,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           201: jsonEnvelope('Folder created', { $ref: '#/components/schemas/FolderResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
             'The same status, carrying no `data`, also reports a vault-key rotation currently in progress and a folder whose name already exists on this account; neither is about the vault key version.',
@@ -2723,7 +2738,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'updateFolder',
         tags: ['Folders'],
         summary: 'Update folder',
-        description: 'Updates folder properties. Validates against circular parent references.',
+        description:
+          'Updates folder properties. Validates against circular parent references. Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
@@ -2745,6 +2761,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
           409: staleVaultKeyConflict(
             'The same status, carrying no `data`, also reports a vault-key rotation currently in progress, a folder whose name already exists on this account, and a re-parent that lost a race with a concurrent move.',
@@ -2756,7 +2773,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Folders'],
         summary: 'Delete folder',
         description:
-          "Deletes a folder. Its members are the vault items AND the documents inside it, and both are treated the same way: `action=move` (default) re-parents them to the folder's parent, or to the root when it has none, while `action=delete` moves them to the trash alongside the folder. Trashing a document does not delete its stored bytes; the scheduled trash purge does that once it is `TRASH_AUTO_PURGE_DAYS` old.",
+          "Deletes a folder. Its members are the vault items AND the documents inside it, and both are treated the same way: `action=move` (default) re-parents them to the folder's parent, or to the root when it has none, while `action=delete` moves them to the trash alongside the folder. Trashing a document does not delete its stored bytes; the scheduled trash purge does that once it is `TRASH_AUTO_PURGE_DAYS` old. Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.",
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [
           { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
@@ -2776,6 +2793,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
         },
       },
@@ -2785,7 +2803,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'reorderFolder',
         tags: ['Folders'],
         summary: 'Reorder folder',
-        description: 'Updates the sort order of a folder.',
+        description:
+          'Updates the sort order of a folder. Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
@@ -2799,6 +2818,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: jsonEnvelope('Folder reordered', { $ref: '#/components/schemas/FolderResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
         },
       },
@@ -2924,7 +2944,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Complete 2FA setup',
         description:
-          'Verifies a TOTP code to finalize 2FA setup. Returns backup codes. Rate limited: 20 req/IP per 15 min.',
+          'Verifies a TOTP code to finalize 2FA setup. Returns backup codes. Rate limited: 20 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3232,7 +3252,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Tools'],
         summary: 'Export vault',
         description:
-          'Exports all vault items as JSON. Rate limited: 10 req/IP per 15 min + 5 req/user per 15 min.',
+          'Exports all vault items as JSON. Rate limited: 10 req/user per 15 min + 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3413,7 +3433,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Trigger backup now',
         description:
-          'Creates and emails an encrypted backup immediately. Rate limited: 10 req/IP per 15 min.',
+          'Creates and emails an encrypted backup immediately. Rate limited: 10 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           200: {
@@ -3435,7 +3455,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Download backup',
         description:
-          'Downloads the latest encrypted backup as a file stream. Rate limited: 10 req/IP per 15 min.',
+          'Downloads the latest encrypted backup as a file stream. Rate limited: 10 req/user per 15 min.',
         security: [{ bearerAuth: [] }],
         responses: {
           200: {

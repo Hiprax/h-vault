@@ -45,8 +45,7 @@ export const MAX_USER_AGENT_LENGTH = 512;
  *      — by sending a single oversized header.
  *   2. Rate-limit buckets fragment per-spoofed-IP, letting an attacker rotate
  *      arbitrary-length `X-Forwarded-For` values to evade `authLimiter`,
- *      `csrfLimiter`, `tokenVerifyLimiter`, `heavyOpLimiter`, and
- *      `healthLimiter`.
+ *      `csrfLimiter`, `tokenVerifyLimiter`, `refreshLimiter`, and `healthLimiter`.
  *
  * The model-level `maxlength` validators remain as defense-in-depth.
  */
