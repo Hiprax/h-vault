@@ -15,12 +15,16 @@ import { cryptoService } from '../src/services/crypto/cryptoService';
  * "not transient, not session-gone" and the test would pass through the default
  * branch regardless of what the code does.
  */
-function axiosStatusError(status: number, headers: Record<string, string> = {}): AxiosError {
+function axiosStatusError(
+  status: number,
+  headers: Record<string, string> = {},
+  data: unknown = {},
+): AxiosError {
   const err = new AxiosError('Request failed with status code ' + String(status));
   err.response = {
     status,
     statusText: '',
-    data: {},
+    data,
     headers: new AxiosHeaders(headers),
     config: { headers: new AxiosHeaders() },
   };
@@ -476,6 +480,38 @@ describe('unlock — transient failures must not cost the user their session', (
       expect(screen.getByText(/temporarily unavailable/i)).toBeInTheDocument();
     });
     expect(mockLogout).not.toHaveBeenCalled();
+  });
+
+  it('a LOCKED account on the REFRESH keeps the session and explains itself', async () => {
+    // The one authoritative refusal that is not a dead session. The refresh
+    // handler evaluates the account before it claims the presented token, so the
+    // refresh cookie is untouched and the lockout lifts by its own deadline or by
+    // the emailed unlock link. `endSession()` here would call `POST /auth/logout`
+    // and delete that row — the client finishing the destruction the server was
+    // careful to avoid.
+    vi.mocked(performTokenRefresh).mockRejectedValueOnce(
+      axiosStatusError(403, {}, { success: false, message: 'ACCOUNT_LOCKED' }),
+    );
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit();
+
+    await waitFor(() => {
+      expect(screen.getByText(/temporarily locked/i)).toBeInTheDocument();
+    });
+
+    expect(mockLogout).not.toHaveBeenCalled();
+    // Still on the unlock screen, ready to retry once the lockout lifts.
+    expect(screen.getByRole('button', { name: /unlock vault/i })).toBeInTheDocument();
+    // And it did not burn an attempt: the master password was never checked, so
+    // charging the local backoff for it would lock the user out twice over.
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+    // Not shown as a network problem, which is what the generic fallback says.
+    expect(screen.queryByText(/could not reach the server/i)).not.toBeInTheDocument();
   });
 
   it('a 401 from the REFRESH does end the session — that one really is gone', async () => {

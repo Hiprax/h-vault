@@ -449,13 +449,19 @@ api.interceptors.response.use(
       // Flush the queue with the error so waiting requests fail immediately.
       onRefreshFailure(refreshError);
 
-      // Log out ONLY when the server authoritatively rejected the refresh token
-      // (401/403). A 429, a 5xx or an offline blip means the session is fine and
-      // we simply could not reach it — and logging out here is not a local
-      // teardown, it calls `POST /auth/logout` and deletes a refresh token that
-      // still had days left. That turned a momentary rate limit into a permanently
-      // destroyed session. Anything transient now propagates to the caller with
-      // the session intact, so the next request retries normally.
+      // Log out ONLY when the server authoritatively rejected the refresh TOKEN.
+      // A 429, a 5xx or an offline blip means the session is fine and we simply
+      // could not reach it — and logging out here is not a local teardown, it
+      // calls `POST /auth/logout` and deletes a refresh token that still had days
+      // left. That turned a momentary rate limit into a permanently destroyed
+      // session. Anything transient now propagates to the caller with the session
+      // intact, so the next request retries normally.
+      //
+      // A 403 `ACCOUNT_LOCKED` is deliberately NOT a logout either, even though it
+      // is authoritative: the refusal is about the account, not the token, and the
+      // refresh handler evaluates it BEFORE the claim precisely so the cookie
+      // survives the lockout. `isSessionGone` encodes that exclusion; logging out
+      // here would finish destroying the session the server just protected.
       if (isSessionGone(refreshError)) {
         await useAuthStore.getState().logout();
       }

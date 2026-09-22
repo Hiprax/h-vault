@@ -108,7 +108,12 @@ let advertisedVaultKeyVersion = 0;
 let ledgerParts: number[] = [];
 
 /** How each part attempt is answered: `null` succeeds, a number fails with that status. */
-let partOutcomes: (number | null)[] = [];
+/**
+ * How each part attempt is answered: `null` succeeds, `-1` is offline, a number is
+ * that status with a generic body, and the object form carries a body — which is
+ * what the classifier needs, since a 403 is routed by its `message`.
+ */
+let partOutcomes: (number | null | { status: number; data: unknown })[] = [];
 let partAttempt = 0;
 
 /** How each completion attempt is answered. */
@@ -220,6 +225,9 @@ const adapter: AxiosAdapter = (config) => {
     const outcome = partOutcomes[partAttempt] ?? null;
     partAttempt += 1;
     if (outcome === -1) return offline(config);
+    if (typeof outcome === 'object' && outcome !== null) {
+      return fail(outcome.status, config, outcome.data);
+    }
     if (outcome !== null) return fail(outcome, config);
     const bytes = (config.data as ArrayBuffer).byteLength;
     // Real transports report progress while a body is on the wire, and the store's
@@ -1279,6 +1287,42 @@ describe('documentsStore — uploading', () => {
 
     expect(partRequests()).toHaveLength(1);
     expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+  });
+
+  it('leaves a transfer resumable when the refresh behind it was refused for a lockout', async () => {
+    // `timers: 'timeouts'` and NOT `'all'`: these tests drive the backoff deadline
+    // forward while awaiting a WebAssembly instantiation, Web Crypto and
+    // `Blob.arrayBuffer()` in the same test, and a faked `setImmediate` /
+    // `queueMicrotask` makes those awaits hang rather than run late.
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    // What the interceptor re-rejects when a part's 401 drove a refresh and that
+    // refresh was refused because the ACCOUNT is locked. It is the one 403 that
+    // does NOT mean the session is over: the refresh handler evaluates the account
+    // before it claims the presented token, so the cookie behind this transfer is
+    // untouched and the lockout lifts by its own deadline or by the emailed link.
+    partOutcomes = [{ status: 403, data: { success: false, message: 'ACCOUNT_LOCKED' } }];
+    const before = captured32.length;
+
+    await expect(
+      settleWithBackoff(
+        useDocumentsStore.getState().startUpload({
+          source: source(),
+          name: 'a.txt',
+          mime: 'text/plain',
+        }),
+      ),
+    ).rejects.toThrow();
+
+    // Stopped at once, like every deterministic refusal — a Retry inside the
+    // lockout could only fail the same way.
+    expect(partRequests()).toHaveLength(1);
+    // But RESUMABLE, which is the whole difference from the 403 above: the session
+    // survived, so the parts already stored are still worth something.
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+    // And the negative that proves it: the document key was NOT zeroed, because
+    // zeroing it is what makes a transfer unresumable.
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(0);
   });
 
   it('abandons the transfer when the staging row is gone, zeroing the key', async () => {

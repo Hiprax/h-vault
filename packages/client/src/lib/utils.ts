@@ -1,6 +1,7 @@
 import { type ClassValue, clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { isAxiosError } from 'axios';
+import { ACCOUNT_LOCKED_MESSAGE, isAccountLocked } from '../services/auth/sessionFailure';
 
 /**
  * Merges class names using clsx and tailwind-merge.
@@ -41,11 +42,23 @@ const MAX_ERROR_MESSAGE_LENGTH = 200;
  * For Axios errors the server-provided `message` field is preferred over the
  * generic Axios "Request failed with status code …" message.
  * Messages are truncated to {@link MAX_ERROR_MESSAGE_LENGTH} characters.
+ *
+ * **One refusal is translated rather than quoted.** The server's error envelope is
+ * flat and its `message` is sometimes an `ERROR_CODES` constant rather than a
+ * sentence, and `ACCOUNT_LOCKED` is the one that now reaches ordinary callers: a
+ * refresh refused for a lockout no longer ends the session, so the rejection
+ * propagates to whatever made the request instead of being swallowed by a logout.
+ * Every one of the twenty-five call sites here would otherwise put the bare string
+ * `ACCOUNT_LOCKED` in a toast. The other codes are left alone deliberately — they
+ * accompany a refusal the caller already handles, and translating them all would
+ * be a rewrite of every error surface rather than a fix for this one.
  */
 export function getApiErrorMessage(
   error: unknown,
   fallback = 'Something went wrong. Please try again.',
 ): string {
+  if (isAccountLocked(error)) return ACCOUNT_LOCKED_MESSAGE;
+
   let message = fallback;
 
   if (isAxiosError(error)) {

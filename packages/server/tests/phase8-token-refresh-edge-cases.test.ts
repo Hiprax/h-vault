@@ -17,6 +17,7 @@ import { createTestUser, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser, CsrfPair } from './helpers.js';
 import { config } from '../src/config/index.js';
 import { resolveRefreshLifetime } from '../src/controllers/authController.js';
+import { LOCKOUT_DURATION_MINUTES, MAX_LOGIN_ATTEMPTS } from '@hvault/shared';
 
 const API = '/api/v1';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -552,6 +553,205 @@ describe('Token refresh — absolute family deadline (standalone)', () => {
     // Guards backward compatibility: the standard seeded session behaves exactly
     // as before this phase.
     const res = await refreshOnce(user.refreshToken);
+    expect(res.status).toBe(200);
+    expect(res.body.data.accessToken).toBeTruthy();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Account status is decided BEFORE the token is claimed (standalone path).
+//
+// A lockout is a THIRTY MINUTE condition and a remembered refresh family is a
+// THIRTY DAY one, so the cheap refusal must not destroy the expensive thing.
+// The handler used to claim-and-rotate first and evaluate the account second:
+// the presented row was marked `usedAt`, a successor row was written, and only
+// then did the 403 fire — so the successor's raw value died in the unsent
+// response and the presented cookie was already spent. Both halves of the
+// session were gone, permanently, thirty minutes before the account was usable
+// again, and the next presentation of the old cookie was a *reuse* event that
+// revoked the whole family.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Token refresh — account status is evaluated before the claim', () => {
+  let user: TestUser;
+
+  beforeEach(async () => {
+    user = await createTestUser();
+  });
+
+  async function refreshWith(rawToken: string): Promise<request.Response> {
+    const agent = request(app);
+    const csrf = await getCsrfBase(agent, `refreshToken=${rawToken}`);
+    return withCsrf(agent.post(`${API}/auth/refresh`), csrf, undefined, `refreshToken=${rawToken}`);
+  }
+
+  /** Marks the account locked for the standard `LOCKOUT_DURATION_MINUTES`. */
+  async function lockAccount(
+    untilMs: number = Date.now() + LOCKOUT_DURATION_MINUTES * 60 * 1000,
+  ): Promise<void> {
+    await User.updateOne(
+      { _id: user.id },
+      { $set: { lockoutUntil: new Date(untilMs), failedLoginAttempts: MAX_LOGIN_ATTEMPTS } },
+    );
+  }
+
+  /** Turns the seeded session into a remembered (absolute-deadline) family. */
+  async function makeRemembered(): Promise<Date> {
+    const absolute = new Date(Date.now() + config.REFRESH_TOKEN_REMEMBER_DAYS * DAY_MS);
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { absoluteExpiresAt: absolute, expiresAt: absolute } },
+    );
+    return absolute;
+  }
+
+  it('refuses a locked account with 403 ACCOUNT_LOCKED without spending the presented token', async () => {
+    const absolute = await makeRemembered();
+    await lockAccount();
+
+    const res = await refreshWith(user.refreshToken);
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe('ACCOUNT_LOCKED');
+    expect(res.body.data).toBeUndefined();
+
+    // The presented row is untouched: still unclaimed, still carrying the
+    // remembered family's absolute deadline.
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(1);
+    const presented = rows[0]!;
+    expect(presented.tokenHash).toBe(hashToken(user.refreshToken));
+    expect(presented.usedAt == null).toBe(true);
+    expect(presented.absoluteExpiresAt).toBeInstanceOf(Date);
+    expect(Math.abs(presented.absoluteExpiresAt!.getTime() - absolute.getTime())).toBeLessThan(
+      1000,
+    );
+  });
+
+  it('keeps the refresh cookie on ACCOUNT_LOCKED so the remembered session survives the lockout', async () => {
+    await makeRemembered();
+    await lockAccount();
+
+    const res = await refreshWith(user.refreshToken);
+    expect(res.status).toBe(403);
+
+    // The negative that matters: NOTHING clears or replaces the cookie. A clear
+    // directive would delete a thirty-day session from the browser over a
+    // thirty-minute condition, and a replacement would hand out a successor the
+    // refusal never committed.
+    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+    expect(setCookie.some((c) => c.startsWith('refreshToken='))).toBe(false);
+
+    // And the session really does survive: once the deadline passes, the SAME
+    // cookie still refreshes. This is the whole point of the phase.
+    await User.updateOne({ _id: user.id }, { $set: { lockoutUntil: new Date(Date.now() - 1000) } });
+
+    const after = await refreshWith(user.refreshToken);
+    expect(after.status).toBe(200);
+    expect(after.body.data.accessToken).toBeTruthy();
+    expect(extractRefreshToken(after.headers['set-cookie'])).not.toBeNull();
+  });
+
+  it('does not revoke the family or the trusted devices when the account is merely locked', async () => {
+    await TrustedDevice.create({
+      userId: new mongoose.Types.ObjectId(user.id),
+      tokenHash: hashToken(crypto.randomBytes(32).toString('hex')),
+      deviceInfo: { userAgent: 'ua', ip: '127.0.0.1', fingerprint: 'fp' },
+      expiresAt: new Date(Date.now() + 30 * DAY_MS),
+    });
+    await lockAccount();
+
+    const res = await refreshWith(user.refreshToken);
+    expect(res.status).toBe(403);
+
+    // A lockout is not a compromise signal. Neither the family nor the
+    // second-factor grants may be touched — that treatment belongs to reuse
+    // detection alone.
+    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(1);
+    expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(1);
+  });
+
+  it('still answers 401 TOKEN_INVALID and clears the cookie for an account mid-erasure', async () => {
+    await User.updateOne({ _id: user.id }, { $set: { deletionPending: true } });
+
+    const res = await refreshWith(user.refreshToken);
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_INVALID');
+    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+    expect(setCookie.some((c) => /^refreshToken=;/.test(c))).toBe(true);
+    // No successor was minted for a session that is over.
+    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(1);
+  });
+
+  it('still answers 401 TOKEN_INVALID and clears the cookie for an unverified address', async () => {
+    await User.updateOne({ _id: user.id }, { $set: { emailVerified: false } });
+
+    const res = await refreshWith(user.refreshToken);
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_INVALID');
+    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+    expect(setCookie.some((c) => /^refreshToken=;/.test(c))).toBe(true);
+  });
+
+  it('still answers 401 TOKEN_INVALID when the user record itself is gone', async () => {
+    // The third arm of the refusal: no user at all. The row outlives a user whose
+    // cascade delete removed the account but not its sessions, and it must not be
+    // spent on the way to a refusal that ends the session anyway.
+    await User.deleteOne({ _id: user.id });
+
+    const res = await refreshWith(user.refreshToken);
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_INVALID');
+    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+    expect(setCookie.some((c) => /^refreshToken=;/.test(c))).toBe(true);
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.usedAt == null).toBe(true);
+  });
+
+  it('a lockout never pre-empts reuse detection: a replayed token still revokes the family', async () => {
+    // Order matters. The status gate reads the row with the CLAIM's own filter
+    // (`usedAt: null`, unexpired), so a row that is already spent never reaches
+    // it — otherwise a locked account would be the one state in which a stolen,
+    // replayed cookie escaped family revocation.
+    const first = await refreshWith(user.refreshToken);
+    expect(first.status).toBe(200);
+    const successor = extractRefreshToken(first.headers['set-cookie']);
+    expect(successor).not.toBeNull();
+
+    await lockAccount();
+
+    const replay = await refreshWith(user.refreshToken);
+    expect(replay.status).toBe(401);
+    expect(replay.body.message).toBe('TOKEN_REUSE_DETECTED');
+    // The whole family, successor included, is gone.
+    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(0);
+  });
+
+  it('a lockout never pre-empts the expired-token branch', async () => {
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { expiresAt: new Date(Date.now() - 1000) } },
+    );
+    await lockAccount();
+
+    const res = await refreshWith(user.refreshToken);
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_EXPIRED');
+    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(0);
+  });
+
+  it('a lockout whose deadline has already passed does not refuse the refresh', async () => {
+    // `evaluateAccountStatus` treats an arrived deadline as SERVED. The gate
+    // must inherit that boundary rather than re-deciding it, so a stale
+    // `lockoutUntil` left on the record cannot strand a session for ever.
+    await lockAccount(Date.now() - 1);
+
+    const res = await refreshWith(user.refreshToken);
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeTruthy();
   });

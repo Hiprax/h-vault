@@ -2124,7 +2124,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Refresh access token',
         description:
-          'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection.',
+          'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection. The account is evaluated BEFORE the presented token is claimed, so a refusal costs nothing: a temporarily locked account is answered without spending the token or touching the cookie, and the same cookie works again once the lockout is discharged.',
         responses: {
           200: {
             description: 'Token refreshed',
@@ -2135,6 +2135,15 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: {
+            description:
+              'The account is temporarily locked. The presented refresh token is NOT spent and the cookie is NOT cleared, so the same session resumes once the lockout is discharged.',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/ErrorResponse' },
+              },
+            },
+          },
         },
       },
     },

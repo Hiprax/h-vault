@@ -15,6 +15,7 @@ import { describe, it, expect } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
 import {
   isSessionGone,
+  isAccountLocked,
   isCsrfRejection,
   isRateLimited,
   retryAfterSeconds,
@@ -82,10 +83,59 @@ describe('isSessionGone', () => {
     expect(isSessionGone(axiosError(403, { message: 'invalid csrf token' }))).toBe(false);
   });
 
-  it('is TRUE for a 403 the handler raised on its merits', () => {
-    // The control for the case above: `/auth/refresh` answers 403 ACCOUNT_LOCKED,
-    // and that one really does end the session.
-    expect(isSessionGone(axiosError(403, { message: 'ACCOUNT_LOCKED' }))).toBe(true);
+  it('is FALSE for a locked account, whose session the server deliberately kept', () => {
+    // `/auth/refresh` evaluates the account BEFORE it claims the presented token,
+    // so a lockout leaves the refresh row unspent and sends no cookie directive at
+    // all. Calling it a dead session made the client `POST /auth/logout` and delete
+    // the row the server had just gone out of its way not to touch — a thirty-day
+    // remembered session destroyed to answer a thirty-minute condition.
+    expect(isSessionGone(axiosError(403, { message: 'ACCOUNT_LOCKED' }))).toBe(false);
+  });
+
+  it.each([
+    ['a forbidden resource', 'FORBIDDEN'],
+    ['a refused token', 'TOKEN_INVALID'],
+    ['an unverified address', 'EMAIL_NOT_VERIFIED'],
+    ['a message that merely quotes the code', 'Account ACCOUNT_LOCKED was refused'],
+  ])('is TRUE for %s — only the exact lockout code is excluded', (_label, message) => {
+    // The control for the case above. The exclusion is one constant matched
+    // exactly, not "403s we feel hopeful about": widening it would silently turn
+    // every future 403 into a session the client refuses to end.
+    expect(isSessionGone(axiosError(403, { message }))).toBe(true);
+  });
+});
+
+describe('isAccountLocked', () => {
+  it('recognises the exact code the server emits', () => {
+    expect(isAccountLocked(axiosError(403, { message: 'ACCOUNT_LOCKED' }))).toBe(true);
+  });
+
+  it.each([
+    ['a 401 carrying the same message', 401],
+    ['a 429', 429],
+    ['a 500', 500],
+  ])('is FALSE for %s — the status is part of the signal', (_label, status) => {
+    expect(isAccountLocked(axiosError(status, { message: 'ACCOUNT_LOCKED' }))).toBe(false);
+  });
+
+  it.each([
+    ['a CSRF complaint', { message: 'invalid csrf token' }],
+    ['another error code', { message: 'FORBIDDEN' }],
+    ['the code in lower case', { message: 'account_locked' }],
+    ['the code as a substring', { message: 'reason: ACCOUNT_LOCKED' }],
+    ['no message at all', {}],
+    ['a non-string message', { message: { code: 'ACCOUNT_LOCKED' } }],
+    ['a null body', null],
+  ])('is FALSE for %s', (_label, data) => {
+    expect(isAccountLocked(axiosError(403, data))).toBe(false);
+  });
+
+  it('is FALSE for a network error and for a non-Axios throw', () => {
+    expect(isAccountLocked(axiosError())).toBe(false);
+    expect(isAccountLocked(new Error('ACCOUNT_LOCKED'))).toBe(false);
+    expect(
+      isAccountLocked({ response: { status: 403, data: { message: 'ACCOUNT_LOCKED' } } }),
+    ).toBe(false);
   });
 });
 
@@ -177,6 +227,25 @@ describe('retryAfterSeconds', () => {
 });
 
 describe('describeTransientFailure', () => {
+  it('speaks for a locked account instead of rendering the raw code', () => {
+    // Without this branch the 403 falls through to `getApiErrorMessage`, which
+    // shows the user the string `ACCOUNT_LOCKED`. The sentence has to name the
+    // two ways out, because waiting is not the only one.
+    const message = describeTransientFailure(axiosError(403, { message: 'ACCOUNT_LOCKED' }));
+    expect(message).toMatch(/temporarily locked/i);
+    expect(message).toMatch(/unlock link/i);
+    // And it must not read as a network problem, which is what the generic
+    // fallbacks say.
+    expect(message).not.toMatch(/could not reach|temporarily unavailable/i);
+  });
+
+  it('stays silent on a 403 that is not a lockout', () => {
+    // The negative: this function returning a string is what makes a caller treat
+    // a failure as recoverable, so it must not speak for refusals it does not own.
+    expect(describeTransientFailure(axiosError(403, { message: 'FORBIDDEN' }))).toBeNull();
+    expect(describeTransientFailure(axiosError(403, { message: 'invalid csrf token' }))).toBeNull();
+  });
+
   it('quotes the wait for a 429 that carries one', () => {
     expect(describeTransientFailure(axiosError(429, {}, { 'retry-after': '45' }))).toMatch(
       /try again in 45 seconds/i,
@@ -218,7 +287,7 @@ describe('describeTransientFailure', () => {
 
   it.each([
     ['a 401', axiosError(401)],
-    ['a 403', axiosError(403, { message: 'ACCOUNT_LOCKED' })],
+    ['a 403', axiosError(403, { message: 'FORBIDDEN' })],
     ['a 400', axiosError(400)],
     ['a 404', axiosError(404)],
     ['a plain Error', new Error('boom')],
@@ -226,6 +295,13 @@ describe('describeTransientFailure', () => {
     // Returning a sentence here would mask a genuine credential rejection behind
     // "please try again in a moment", which is how a wrong password and a dead
     // session became indistinguishable in the first place.
+    //
+    // The 403 row used to be `ACCOUNT_LOCKED`, and it moved for a reason, not for
+    // convenience: that code is no longer a credential rejection to be left
+    // alone. `/auth/refresh` refuses a lockout WITHOUT spending the presented
+    // token, so it names a temporary account condition this function is now the
+    // right place to describe — see the lockout case at the top of this block.
+    // The rule the table guards is untouched, and the row still exercises a 403.
     expect(describeTransientFailure(err)).toBeNull();
   });
 });

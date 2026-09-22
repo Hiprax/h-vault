@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
 
 import { cn, getApiErrorMessage, isSafeUrl } from '../src/lib/utils';
+import { ACCOUNT_LOCKED_MESSAGE } from '../src/services/auth/sessionFailure';
 
 // ---------------------------------------------------------------------------
 // cn() — class name merging via clsx + tailwind-merge
@@ -111,6 +112,33 @@ describe('getApiErrorMessage', () => {
     // so the function falls through to `error instanceof Error`.
     const err = makeAxiosError({ message: '' });
     expect(getApiErrorMessage(err)).toBe('Request failed with status code 400');
+  });
+
+  it('translates the ACCOUNT_LOCKED code rather than putting it in a toast', () => {
+    // The refresh handler answers a locked account with the machine constant as
+    // its `message`, and a lockout no longer ends the session — so that rejection
+    // now reaches whatever made the original request instead of being swallowed
+    // by a logout. Quoted verbatim it would read `ACCOUNT_LOCKED` in a toast.
+    const err = makeAxiosError({ message: 'ACCOUNT_LOCKED' }, 403);
+    const message = getApiErrorMessage(err);
+    expect(message).toBe(ACCOUNT_LOCKED_MESSAGE);
+    expect(message).not.toBe('ACCOUNT_LOCKED');
+    expect(message).toMatch(/unlock link/i);
+  });
+
+  it('leaves every other error code quoted, including one that only mentions the lockout', () => {
+    // The narrowness is the point: this is a fix for the one code that newly
+    // escapes, not a rewrite of every error surface. A 401 carrying the same
+    // string, and any other 403, still reach the caller as the server wrote them.
+    expect(getApiErrorMessage(makeAxiosError({ message: 'ACCOUNT_LOCKED' }, 401))).toBe(
+      'ACCOUNT_LOCKED',
+    );
+    expect(getApiErrorMessage(makeAxiosError({ message: 'TOKEN_INVALID' }, 403))).toBe(
+      'TOKEN_INVALID',
+    );
+    expect(getApiErrorMessage(makeAxiosError({ message: 'reason: ACCOUNT_LOCKED' }, 403))).toBe(
+      'reason: ACCOUNT_LOCKED',
+    );
   });
 
   it('returns Error.message for a non-Axios Error instance', () => {

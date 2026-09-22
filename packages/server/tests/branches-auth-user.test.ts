@@ -58,7 +58,7 @@ import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
-import { BACKUP_CODES_COUNT } from '@hvault/shared';
+import { BACKUP_CODES_COUNT, LOCKOUT_DURATION_MINUTES } from '@hvault/shared';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
@@ -964,6 +964,144 @@ describe('transactional (replica-set) auth branches', () => {
     // No replacement minted; the expired row was removed.
     const rows = await RefreshToken.find({ userId: user.id });
     expect(rows).toHaveLength(0);
+  });
+
+  it('aborts the claim AND the successor when the account is locked, keeping the cookie', async () => {
+    // The production topology is a replica set, so this is the path that
+    // actually runs in production. Here the account gate lives INSIDE the
+    // transaction: a refusal throws from the callback, `withTransaction` aborts,
+    // and the claim is rolled back with the successor that never shipped.
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const user = await createTestUser({ emailVerified: true });
+    const absolute = new Date(Date.now() + config.REFRESH_TOKEN_REMEMBER_DAYS * DAY_MS);
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { absoluteExpiresAt: absolute, expiresAt: absolute } },
+    );
+    await User.updateOne(
+      { _id: user.id },
+      { $set: { lockoutUntil: new Date(Date.now() + LOCKOUT_DURATION_MINUTES * 60 * 1000) } },
+    );
+
+    const sessionSpy = vi.spyOn(mongoose, 'startSession');
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe('ACCOUNT_LOCKED');
+    // Proves the branch: the sequential fallback never opens a session.
+    expect(sessionSpy).toHaveBeenCalled();
+
+    // The abort undid the claim: one row, unspent, deadline intact.
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tokenHash).toBe(hashToken(user.refreshToken));
+    expect(rows[0]!.usedAt == null).toBe(true);
+    expect(Math.abs(rows[0]!.absoluteExpiresAt!.getTime() - absolute.getTime())).toBeLessThan(1000);
+
+    // And the browser keeps the cookie — no clear directive, no replacement.
+    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+    expect(setCookie.some((c) => c.startsWith('refreshToken='))).toBe(false);
+  });
+
+  it('aborts the claim for an account mid-erasure, answering 401 and clearing the cookie', async () => {
+    const user = await createTestUser({ emailVerified: true });
+    await User.updateOne({ _id: user.id }, { $set: { deletionPending: true } });
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_INVALID');
+
+    // A dead session's cookie IS cleared — the opposite treatment to the lockout
+    // above, and the whole reason the two refusals are kept apart.
+    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+    expect(setCookie.some((c) => /^refreshToken=;/.test(c))).toBe(true);
+
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.usedAt == null).toBe(true);
+  });
+
+  it('transactional reuse detection still outranks a lockout', async () => {
+    const user = await createTestUser({ emailVerified: true });
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const first = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+    expect(first.status).toBe(200);
+
+    await User.updateOne(
+      { _id: user.id },
+      { $set: { lockoutUntil: new Date(Date.now() + LOCKOUT_DURATION_MINUTES * 60 * 1000) } },
+    );
+
+    const agent2 = request.agent(app);
+    const csrf2 = await getCsrf(agent2, `refreshToken=${user.refreshToken}`);
+    const replay = await agent2
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf2.token)
+      .set('Cookie', `${csrf2.cookie}; refreshToken=${user.refreshToken}`);
+
+    // The spent row never reaches the gate, so the compromise signal still wins
+    // and the family still goes — a lockout must not be a place to hide a replay.
+    expect(replay.status).toBe(401);
+    expect(replay.body.message).toBe('TOKEN_REUSE_DETECTED');
+    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(0);
+  });
+
+  it('lets a non-refusal failure out of the transaction with the claim rolled back', async () => {
+    // The other exit from the new `catch`: an error that is NOT a refusal is
+    // re-thrown unchanged, so a genuine fault still becomes a 500 rather than
+    // being mistaken for an account refusal. On this path the transaction aborts
+    // too, which is the transactional branch's whole advantage over the
+    // sequential one — the presented token is NOT left spent with no successor.
+    const user = await createTestUser({ emailVerified: true });
+    const createSpy = vi
+      .spyOn(RefreshToken, 'create')
+      .mockRejectedValueOnce(new Error('transient mongo failure') as never);
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+
+    expect(createSpy).toHaveBeenCalled();
+    expect(res.status).toBe(500);
+    expect(res.body.success).toBe(false);
+    // NOT an account refusal: neither refusal's message may be borrowed by a fault.
+    expect(res.body.message).not.toBe('ACCOUNT_LOCKED');
+    expect(res.body.message).not.toBe('TOKEN_INVALID');
+
+    createSpy.mockRestore();
+    // The abort undid the claim, so the session is still usable — retrying with
+    // the same cookie succeeds instead of reading as a replay.
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.usedAt == null).toBe(true);
+
+    const agent2 = request.agent(app);
+    const csrf2 = await getCsrf(agent2, `refreshToken=${user.refreshToken}`);
+    const retry = await agent2
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf2.token)
+      .set('Cookie', `${csrf2.cookie}; refreshToken=${user.refreshToken}`);
+    expect(retry.status).toBe(200);
   });
 
   it('commits the password change and the session revocation together', async () => {

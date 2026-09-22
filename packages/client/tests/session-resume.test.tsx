@@ -112,14 +112,18 @@ import { useAuthStore, REMEMBER_HINT_KEY } from '../src/stores/authStore';
 
 interface FakeAxiosError extends Error {
   isAxiosError: true;
-  response?: { status: number };
+  response?: { status: number; data?: unknown };
 }
 
-/** A response-less error mimics a network failure; a status mimics an HTTP error. */
-function axiosError(status?: number): FakeAxiosError {
+/**
+ * A response-less error mimics a network failure; a status mimics an HTTP error.
+ * `data` carries the flat envelope, which is what routes a 403 — the server sends
+ * no code field, so the message IS the code.
+ */
+function axiosError(status?: number, data?: unknown): FakeAxiosError {
   const err = new Error(status ? `HTTP ${status}` : 'Network Error') as FakeAxiosError;
   err.isAxiosError = true;
-  if (status !== undefined) err.response = { status };
+  if (status !== undefined) err.response = data === undefined ? { status } : { status, data };
   return err;
 }
 
@@ -306,6 +310,32 @@ describe('resumeSession', () => {
     expect(result).toBe(false);
     expect(getHint()).toBeNull();
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  it('KEEPS the hint when the refresh is refused because the account is locked', async () => {
+    // A lockout is not a dead session: the refresh handler refuses it BEFORE it
+    // claims the presented token, so the cookie the hint stands for is still live
+    // and still worth trying on the next boot. Clearing the hint here would make
+    // the app forget a session the server had deliberately preserved, and the user
+    // would be asked for their email again for a condition that expires by itself.
+    setHint();
+    mockRefreshTokenApi.mockRejectedValue(axiosError(403, { message: 'ACCOUNT_LOCKED' }));
+
+    const result = await resumeSession();
+
+    expect(result).toBe(false);
+    expect(getHint()).toBe('1');
+    // And nothing was half-set: a refused resume leaves the store signed out.
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  it('CLEARS the hint on any other 403 from refresh', async () => {
+    // The control: only the exact lockout code is spared.
+    setHint();
+    mockRefreshTokenApi.mockRejectedValue(axiosError(403, { message: 'FORBIDDEN' }));
+
+    expect(await resumeSession()).toBe(false);
+    expect(getHint()).toBeNull();
   });
 
   it('KEEPS the hint on a network error (offline cold boot)', async () => {

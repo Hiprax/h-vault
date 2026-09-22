@@ -31,8 +31,10 @@
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { handleCommonErrors } from '@hiprax/errors';
+import type { Response } from 'express';
 import {
   assertVaultKeyVersion,
+  resolveVaultKeyVersion,
   StaleVaultKeyError,
   vaultKeyVersionFilter,
   vaultKeyVersionOf,
@@ -382,6 +384,71 @@ describe('assertVaultKeyVersion', () => {
       expect(error.message).not.toContain(user.id);
       expect(error.message).not.toContain('test-encrypted-vault-key');
       expect(error.message).not.toContain('test-vault-key-tag');
+    });
+  });
+
+  describe('resolveVaultKeyVersion — the catch-and-render wrapper', () => {
+    /** The two `Response` methods the wrapper can reach, and nothing else. */
+    function fakeRes(): {
+      res: Response;
+      statuses: number[];
+      bodies: unknown[];
+    } {
+      const statuses: number[] = [];
+      const bodies: unknown[] = [];
+      const res = {
+        status(code: number) {
+          statuses.push(code);
+          return this;
+        },
+        json(body: unknown) {
+          bodies.push(body);
+          return this;
+        },
+      } as unknown as Response;
+      return { res, statuses, bodies };
+    }
+
+    it('renders the refusal and returns null, so the caller knows not to write', async () => {
+      await User.updateOne({ _id: user.id }, { $set: { vaultKeyVersion: 3 } });
+      const { res, statuses, bodies } = fakeRes();
+
+      await expect(resolveVaultKeyVersion(res, user.id, 1)).resolves.toBeNull();
+
+      expect(statuses).toEqual([409]);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).toMatchObject({ success: false, data: { vaultKeyVersion: 3 } });
+    });
+
+    it('returns the generation and writes NOTHING when the caller is current', async () => {
+      await User.updateOne({ _id: user.id }, { $set: { vaultKeyVersion: 3 } });
+      const { res, statuses, bodies } = fakeRes();
+
+      await expect(resolveVaultKeyVersion(res, user.id, 3)).resolves.toBe(3);
+
+      // The negative that matters: rendering here would be a second response on
+      // top of the one the caller is about to write.
+      expect(statuses).toEqual([]);
+      expect(bodies).toEqual([]);
+    });
+
+    it('re-throws anything that is not a stale-key refusal, without answering', async () => {
+      // The branch this pins is the one that keeps a real fault a real fault. If
+      // the `instanceof` check were dropped — or widened to `catch (e) { render }`
+      // — a dropped connection to Mongo would be reported to the client as "your
+      // vault key changed on another device, reload", which is advice that cannot
+      // work and which hides an outage behind a 409.
+      const boom = new Error('connection reset while reading the account');
+      const findSpy = vi.spyOn(User, 'findById').mockImplementationOnce(() => {
+        throw boom;
+      });
+      const { res, statuses, bodies } = fakeRes();
+
+      await expect(resolveVaultKeyVersion(res, user.id, 0)).rejects.toBe(boom);
+
+      expect(findSpy).toHaveBeenCalledTimes(1);
+      expect(statuses).toEqual([]);
+      expect(bodies).toEqual([]);
     });
   });
 });

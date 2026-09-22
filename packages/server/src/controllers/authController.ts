@@ -1440,6 +1440,90 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
 
 // ─── Refresh ─────────────────────────────────────────────────────────────────
 
+/**
+ * Which of the two account-level refusals a refresh hit.
+ *
+ * They are kept apart because their COOKIE treatment is opposite, and that is the
+ * whole point of the distinction:
+ *
+ *  - `invalid` — the account is gone, mid-erasure, or never verified. Nothing will
+ *    ever make this cookie work again, so the browser should stop carrying it: the
+ *    refusal clears it.
+ *  - `locked` — a `LOCKOUT_DURATION_MINUTES` (30) condition on an account that is
+ *    otherwise perfectly healthy, and one the owner can discharge right now with
+ *    the emailed unlock link. The cookie may be the only copy of a remembered
+ *    family with `REFRESH_TOKEN_REMEMBER_DAYS` (30) on it, so clearing it would
+ *    spend a month of session to answer half an hour of lockout. It is KEPT.
+ */
+type RefreshRefusal = 'invalid' | 'locked';
+
+/**
+ * The account-level policy for a refresh, as a value: the refusal it earns, or
+ * `null` when the account may be served.
+ *
+ * ## Why the caller runs this BEFORE the claim
+ *
+ * The refresh handler's claim is destructive by design: it marks the presented row
+ * `usedAt` and commits a successor whose raw value exists only in the response
+ * about to be written. Evaluating the account AFTER that — which is what this
+ * handler used to do — meant the refusal threw between the commit and
+ * `setRefreshCookie`, so the presented cookie was spent, its successor was
+ * unreachable, and the session was gone. For `ACCOUNT_LOCKED` that traded a
+ * thirty-minute condition for a thirty-day remembered session, irreversibly, and
+ * the user's natural next move — retrying with the cookie they still hold — was a
+ * *reuse* event that revoked the whole family and every trusted device with it.
+ *
+ * @param session binds the read to an open transaction, so a caller inside one
+ *   reads what that transaction sees.
+ */
+async function accountRefreshRefusal(
+  userId: mongoose.Types.ObjectId,
+  session?: mongoose.ClientSession,
+): Promise<RefreshRefusal | null> {
+  const user = await User.findById(userId, null, session ? { session } : {});
+  const status = user && evaluateAccountStatus(user);
+
+  // Collapsed into one refusal on purpose: a refresh cookie is not a credential
+  // the caller chose, so distinguishing "no such account" from "mid-erasure" from
+  // "never verified" tells a holder of a stolen cookie something it should not.
+  if (!status || status.deletionPending || status.emailUnverified) return 'invalid';
+  if (status.lockedOut) return 'locked';
+  return null;
+}
+
+/**
+ * {@link accountRefreshRefusal} carried by an exception, which exists for exactly
+ * one caller: the transactional branch, where a throw is the only thing that
+ * ABORTS the claim it has already made. The standalone branch reads the value
+ * directly instead, because a gate that runs before the claim has nothing to undo.
+ *
+ * The exception carries the refusal rather than an HTTP error so that nothing
+ * writes to `res` from inside the transaction callback — `withTransaction` is free
+ * to re-run that callback, and a `Set-Cookie` header appended twice is a header
+ * sent twice.
+ */
+class RefreshRefusedError extends Error {
+  constructor(readonly refusal: RefreshRefusal) {
+    super(`refresh refused: ${refusal}`);
+    this.name = 'RefreshRefusedError';
+  }
+}
+
+/**
+ * Renders a {@link RefreshRefusal} as its HTTP refusal, from ONE place, so the two
+ * topology branches cannot drift on which refusal clears the cookie. Never returns.
+ */
+function throwRefreshRefusal(res: Response, refusal: RefreshRefusal): never {
+  if (refusal === 'locked') {
+    // Deliberately no `clearRefreshCookie`: see {@link RefreshRefusal}. The CSRF
+    // cookie is left alone too — it is an HMAC over the refresh token that was NOT
+    // rotated here, so it is still the right one when the lockout ends.
+    throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
+  }
+  clearRefreshCookie(res);
+  throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
+}
+
 export const refresh = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const token = readStringCookie(req, REFRESH_COOKIE_NAME);
 
@@ -1482,6 +1566,15 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
+        // Reset FIRST, every attempt. `withTransaction` re-runs this callback on a
+        // transient error, and an aborted attempt's writes are gone while this
+        // variable's assignment is not: an attempt that claimed, then lost its
+        // commit, then found nothing to claim on the retry (a sibling tab got
+        // there first) would leave `claimed` pointing at a successor row that was
+        // never committed — and the handler would answer 200 and set a cookie for
+        // a token that does not exist, costing the session on the next refresh.
+        claimed = null;
+
         const storedToken = await RefreshToken.findOneAndUpdate(
           { tokenHash, usedAt: null, expiresAt: { $gt: new Date() } },
           { $set: { usedAt: new Date() } },
@@ -1492,6 +1585,13 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
           // Leave claimed=null; handled after the transaction completes.
           return;
         }
+
+        // The account gate, inside the transaction and on its session. A refusal
+        // THROWS here rather than returning, because that is what makes
+        // `withTransaction` abort: the claim above is undone together with the
+        // successor below, so a refused refresh spends nothing at all.
+        const refusal = await accountRefreshRefusal(storedToken.userId, session);
+        if (refusal) throw new RefreshRefusedError(refusal);
 
         // Rotation carries any absolute family deadline forward unchanged; a row
         // without one slides to now + REFRESH_TOKEN_DAYS (today's behaviour).
@@ -1522,6 +1622,10 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
           maxAgeMs: lifetime.maxAgeMs,
         };
       });
+    } catch (err) {
+      // Converted OUT here, after the abort and before anything touches `res`.
+      if (err instanceof RefreshRefusedError) throwRefreshRefusal(res, err.refusal);
+      throw err;
     } finally {
       await session.endSession();
     }
@@ -1531,6 +1635,24 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
     // a crash between the two leaves the user having to log in again. This
     // is a mild inconvenience, not a security issue: the old token is
     // already invalidated and cannot be reused.
+    // There is no transaction to join, so the gate takes the only other position
+    // that cannot burn the token: ahead of the claim, with nothing yet to undo.
+    // The read carries the claim's OWN filter, and that is load-bearing — a row
+    // that is already spent or expired must fall straight through to the reuse and
+    // expiry branches below, or a locked account would be the one state in which a
+    // replayed cookie escaped family revocation.
+    const claimable = await RefreshToken.findOne({
+      tokenHash,
+      usedAt: null,
+      expiresAt: { $gt: new Date() },
+    })
+      .select('userId')
+      .lean();
+    if (claimable) {
+      const refusal = await accountRefreshRefusal(claimable.userId);
+      if (refusal) throwRefreshRefusal(res, refusal);
+    }
+
     const storedToken = await RefreshToken.findOneAndUpdate(
       { tokenHash, usedAt: null, expiresAt: { $gt: new Date() } },
       { $set: { usedAt: new Date() } },
@@ -1608,19 +1730,13 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
 
   const claimedMeta: ClaimedTokenMeta = claimed;
 
-  // Look up user for new access token and verify account status
-  const user = await User.findById(claimedMeta.userId);
-  const status = user && evaluateAccountStatus(user);
-  if (!status || status.deletionPending || status.emailUnverified) {
-    clearRefreshCookie(res);
-    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
-  }
-  if (status.lockedOut) {
-    clearRefreshCookie(res);
-    throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
-  }
-
-  const accessToken = generateAccessToken(user._id.toString());
+  // No account check here, and no second `User` read to make it with: the gate ran
+  // BEFORE the claim (and, on the transactional path, inside the very transaction
+  // that committed it), so reaching this line already means the account may be
+  // served. Re-checking here is precisely what was removed — a refusal at this
+  // point arrives after the presented token has been spent and its successor
+  // committed, which is how a thirty-minute lockout destroyed a thirty-day session.
+  const accessToken = generateAccessToken(claimedMeta.userId.toString());
 
   setRefreshCookie(res, newRefreshTokenRaw, claimedMeta.maxAgeMs);
   clearCsrfCookie(res);

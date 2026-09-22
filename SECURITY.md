@@ -84,7 +84,12 @@ security posture, not a disclaimer.
   covers — at most one new link per lockout, which is what stops that guarantee from becoming a
   mail-flood vector of its own. The link a replacement supersedes stays valid until its own hour
   is up, so two can verify at once; that is harmless, because links naming one episode are one
-  capability, and spending either ends the episode and kills the rest. This matters
+  capability, and spending either ends the episode and kills the rest. A lockout also costs
+  nothing but the wait: refreshing a session while one stands is refused **before** the
+  presented refresh token is spent, so the sessions the account already had are all still
+  there when it lifts, and the browser keeps the cookie it arrived with. A thirty-minute
+  condition anyone who knows an address can impose must not be able to end a thirty-day one.
+  This matters
   more here than it would elsewhere, because resetting the master password mints a new vault key,
   so "just reset it" is not a recovery path but total data loss. The credential budget is kept
   separate from the budgets for token refresh and vault unlock, so that ordinary use of the app
