@@ -8,6 +8,7 @@ import {
 } from '@hvault/shared';
 import { createModuleLogger } from '../utils/logger.js';
 import { partUploadSemaphore, partUploadUserQuota } from '../utils/partSemaphore.js';
+import { admitWithinBudget } from './admission.js';
 
 const logger = createModuleLogger('document-part-body');
 
@@ -86,9 +87,12 @@ const PART_SLOT_RETRY_AFTER_SECONDS = '1';
  * numbers. It is far tighter than `HTTP_REQUEST_TIMEOUT_MS`, and it has to be,
  * because the two bound different things. The server-wide deadline is sized to the
  * largest body ANY route accepts (a 30 MB restore), since Node has no per-route
- * form of it; this one is sized to the largest body THIS route accepts — and this
- * is the only route where waiting costs more than a socket, because the slot was
- * taken before the body was read and every other account's parts queue behind it.
+ * form of it; this one is sized to the largest body THIS route accepts — and here
+ * waiting costs more than a socket, because the slot was taken before the body was
+ * read and every other account's parts queue behind it. (The two 30 MB routes hold
+ * a slot from before their body is read too, but their body IS the one the
+ * server-wide deadline was derived from, so a tighter copy of it would be a
+ * different number for the same body; see `middleware/largeBodyAdmission.ts`.)
  *
  * ARMED WHEN THE SLOT IS GRANTED AND CLEARED WHEN THE BODY ARRIVES, which is what
  * keeps it a deadline on RECEIPT rather than on the request. Time spent queued for
@@ -151,6 +155,10 @@ function partUploadIdentity(req: Request): string {
  * `acquire`, not a take-then-hand-back: a slot handed to a dead request is a slot
  * taken from the live one waiting behind it.
  *
+ * Those mechanics live ONCE, in `middleware/admission.ts` (`admitWithinBudget`),
+ * shared with the large-body slot holder; what is part-specific here is the 503
+ * refusal, the body deadline, and releasing on `close` without waiting for anything.
+ *
  * Built by a FACTORY over `bodyDeadlineMs` rather than reading
  * {@link PART_UPLOAD_BODY_DEADLINE_MS} directly, so the deadline can be exercised
  * at a tenth of a second by a test that drives a real socket through the real
@@ -159,70 +167,57 @@ function partUploadIdentity(req: Request): string {
  */
 export function createPartSlotHolder(bodyDeadlineMs: number): RequestHandler {
   return function holdPartUploadSlot(req: Request, res: Response, next: NextFunction): void {
-    if (res.destroyed) return;
-
-    const releaseShare = partUploadUserQuota.charge(partUploadIdentity(req));
-    if (releaseShare === null) {
-      // Logged, because on the wire this refusal is indistinguishable from the 503
-      // an unreachable storage engine produces (both are redacted to their status
-      // text in production), and those two call for opposite operator responses.
-      // The identity is deliberately NOT logged, exactly as the rate limiters'
-      // handlers omit their key.
-      logger.warn('Document part refused: the account is at its in-flight share', {
-        limit: MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
-      });
-      res.setHeader('Retry-After', PART_SLOT_RETRY_AFTER_SECONDS);
-      next(
-        httpErrors.serviceUnavailable(
-          'Too many document part uploads are already in flight for this account',
-        ),
-      );
-      return;
-    }
-
-    let release: (() => void) | undefined;
     let deadline: NodeJS.Timeout | undefined;
-    let closed = false;
 
-    res.once('close', () => {
-      closed = true;
-      if (deadline !== undefined) clearTimeout(deadline);
-      releaseShare();
-      release?.();
-    });
-
-    partUploadSemaphore.acquire((grantedRelease) => {
-      release = grantedRelease;
-      if (closed) {
-        // The response ended while this request was queued. Hand the slot straight
-        // back and do NOT continue down the chain: there is nobody to answer. The
-        // share was already handed back by the `close` listener above.
-        grantedRelease();
-        return;
-      }
-
-      // The body deadline, armed at the moment this request starts costing the
-      // process memory. The socket is DESTROYED rather than answered: the parser
-      // below is mid-stream by then, so writing a response would race a body that
-      // is still arriving — and the client treats a reset on a part exactly as it
-      // treats the 408 the server-wide deadline produces, as a transfer to retry.
-      deadline = setTimeout(() => {
-        logger.warn('Document part destroyed: its body did not arrive inside the deadline', {
-          deadlineMs: bodyDeadlineMs,
+    admitWithinBudget(res, next, {
+      semaphore: partUploadSemaphore,
+      quota: partUploadUserQuota,
+      identity: partUploadIdentity(req),
+      refuse(refused, refuse) {
+        // Logged, because on the wire this refusal is indistinguishable from the 503
+        // an unreachable storage engine produces (both are redacted to their status
+        // text in production), and those two call for opposite operator responses.
+        // The identity is deliberately NOT logged, exactly as the rate limiters'
+        // handlers omit their key.
+        logger.warn('Document part refused: the account is at its in-flight share', {
+          limit: MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
         });
-        res.destroy();
-      }, bodyDeadlineMs);
-      // Never a reason to keep the process alive: a shutdown that is draining
-      // connections does not need to wait for this to fire.
-      deadline.unref();
-      // `end` fires when the parser has consumed the whole body, which is the
-      // moment this stops being a deadline the client can miss. Without it the
-      // timer would still be armed across the storage call and would destroy a
-      // healthy upload whose engine was merely slow.
-      req.once('end', () => {
+        refused.setHeader('Retry-After', PART_SLOT_RETRY_AFTER_SECONDS);
+        refuse(
+          httpErrors.serviceUnavailable(
+            'Too many document part uploads are already in flight for this account',
+          ),
+        );
+      },
+      granted() {
+        // The body deadline, armed at the moment this request starts costing the
+        // process memory. The socket is DESTROYED rather than answered: the parser
+        // below is mid-stream by then, so writing a response would race a body that
+        // is still arriving — and the client treats a reset on a part exactly as it
+        // treats the 408 the server-wide deadline produces, as a transfer to retry.
+        deadline = setTimeout(() => {
+          logger.warn('Document part destroyed: its body did not arrive inside the deadline', {
+            deadlineMs: bodyDeadlineMs,
+          });
+          res.destroy();
+        }, bodyDeadlineMs);
+        // Never a reason to keep the process alive: a shutdown that is draining
+        // connections does not need to wait for this to fire.
+        deadline.unref();
+        // `end` fires when the parser has consumed the whole body, which is the
+        // moment this stops being a deadline the client can miss. Without it the
+        // timer would still be armed across the storage call and would destroy a
+        // healthy upload whose engine was merely slow.
+        req.once('end', () => {
+          if (deadline !== undefined) clearTimeout(deadline);
+        });
+      },
+      closed(release) {
+        // A part holds its slot across the storage call and no further: once the
+        // response has closed there is nothing left of it in memory to account for.
         if (deadline !== undefined) clearTimeout(deadline);
-      });
-      next();
+        release();
+      },
     });
   };
 }

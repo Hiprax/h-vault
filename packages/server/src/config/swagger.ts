@@ -1992,7 +1992,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Get CSRF token',
         description:
-          'Returns a double-submit CSRF token. Include this token in the `x-csrf-token` header for all state-changing requests (POST, PUT, DELETE). Rate limited by csrfLimiter (30 req/IP per 15 min) in production.',
+          'Returns a double-submit CSRF token. Include this token in the `x-csrf-token` header for all state-changing requests (POST, PUT, DELETE). Rate limited by csrfLimiter (100 req/IP per 15 min) in production.',
         responses: {
           200: {
             description: 'CSRF token',
@@ -2025,7 +2025,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Register a new account',
         description:
-          'Creates a new user account. Returns a generic success response for all attempts (prevents email enumeration). Existing accounts receive a notification email instead of an error. Rate limited: 5 req/IP per 15 min.',
+          'Creates a new user account. Returns a generic success response for all attempts (prevents email enumeration). Existing accounts receive a notification email instead of an error. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints.',
         requestBody: {
           required: true,
           content: {
@@ -2054,7 +2054,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Login with credentials',
         description:
-          'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step — UNLESS the request carries a valid `trustedDevice` cookie for this account, in which case the 2FA step is skipped and the login completes directly (the cookie is checked strictly after the password comparison, so a wrong password never consumes it). A recognized trusted-device cookie is consumed and rotated, carrying its original expiry forward; an unknown/expired/foreign cookie is cleared and the login falls back to the normal 2FA prompt. Rate limited: 10 req/IP + 20 req/email per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
+          'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step — UNLESS the request carries a valid `trustedDevice` cookie for this account, in which case the 2FA step is skipped and the login completes directly (the cookie is checked strictly after the password comparison, so a wrong password never consumes it). A recognized trusted-device cookie is consumed and rotated, carrying its original expiry forward; an unknown/expired/foreign cookie is cleared and the login falls back to the normal 2FA prompt. Rate limited: 20 req/IP + 20 req/email per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
         requestBody: {
           required: true,
           content: {
@@ -2096,7 +2096,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Complete 2FA verification',
         description:
-          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 5 req/IP + 3 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body) AND the code submitted was a TOTP code, a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires. A **backup code** never sets that cookie, whatever the remember-me setting: it is a single-use recovery credential, so it completes this login (and still opens the longer remembered session) without registering the device as trusted.',
+          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints, plus the token-verification budget of 20 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body) AND the code submitted was a TOTP code, a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires. A **backup code** never sets that cookie, whatever the remember-me setting: it is a single-use recovery credential, so it completes this login (and still opens the longer remembered session) without registering the device as trusted.',
         requestBody: {
           required: true,
           content: {
@@ -2202,7 +2202,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Verify email address',
         description:
-          'Verifies the email address using a token from the verification email. Rate limited: 3 req/IP per 15 min.',
+          'Verifies the email address using a token from the verification email. Rate limited: 20 req/IP per 15 min.',
         requestBody: {
           required: true,
           content: {
@@ -2230,7 +2230,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'resendVerification',
         tags: ['Auth'],
         summary: 'Resend email verification',
-        description: 'Resends the email verification link. Rate limited: 5 req/IP per 15 min.',
+        description:
+          'Resends the email verification link. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints.',
         requestBody: {
           required: true,
           content: {
@@ -2257,7 +2258,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'forgotPassword',
         tags: ['Auth'],
         summary: 'Request password reset',
-        description: 'Sends a password reset email. Rate limited: 5 req/IP per 15 min.',
+        description:
+          'Sends a password reset email. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints.',
         requestBody: {
           required: true,
           content: {
@@ -2285,7 +2287,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Reset password with token',
         description:
-          'Resets the master password using a valid reset token. Rate limited: 3 req/IP per 15 min.',
+          'Resets the master password using a valid reset token. Rate limited: 20 req/IP per 15 min.',
         requestBody: {
           required: true,
           content: {
@@ -2314,7 +2316,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Unlock locked account',
         description:
-          'Unlocks an account that was locked after too many failed login attempts. Rate limited: 3 req/IP per 15 min.',
+          'Unlocks an account that was locked after too many failed login attempts. Rate limited: 20 req/IP per 15 min.',
         requestBody: {
           required: true,
           content: {
@@ -2526,7 +2528,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Vault'],
         summary: 'Bulk re-encrypt vault items',
         description:
-          'Re-encrypts an account onto a new vault key after a master password change: every item, every folder and every document key, in one request. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 3 req/IP per 15 min.',
+          'Re-encrypts an account onto a new vault key after a master password change: every item, every folder and every document key, in one request. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 5 requests per account per 15 min, counted before the body is read. At most one restore or key rotation per account is admitted at a time, and a few per server process; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -2559,7 +2561,7 @@ export const swaggerSpec: JsonObject = {
           404: { $ref: '#/components/responses/NotFound' },
           409: {
             description:
-              'The rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, or an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey. Re-read the vault and retry.',
+              'The rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, or an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey. Re-read the vault and retry. The same status, carrying no `data`, is returned before the body is read when this account already has a restore or key rotation in flight.',
           },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2879,7 +2881,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Start 2FA setup',
         description:
-          'Initiates two-factor authentication setup. Returns a TOTP secret and QR code. Rate limited: 3 req/IP per 15 min.',
+          'Initiates two-factor authentication setup. Returns a TOTP secret and QR code. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -2922,7 +2924,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Complete 2FA setup',
         description:
-          'Verifies a TOTP code to finalize 2FA setup. Returns backup codes. Rate limited: 3 req/IP per 15 min.',
+          'Verifies a TOTP code to finalize 2FA setup. Returns backup codes. Rate limited: 20 req/IP per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -2966,7 +2968,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Disable 2FA',
         description:
-          'Disables two-factor authentication. Requires a valid TOTP or backup code. Rate limited: 3 req/IP per 15 min.',
+          'Disables two-factor authentication. Requires a valid TOTP or backup code. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3229,7 +3231,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'exportVault',
         tags: ['Tools'],
         summary: 'Export vault',
-        description: 'Exports all vault items as JSON. Rate limited: 3 req/IP per 15 min.',
+        description:
+          'Exports all vault items as JSON. Rate limited: 10 req/IP per 15 min + 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3339,7 +3342,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Setup backup encryption',
         description:
-          'Configures the backup encryption key (BWK). The client generates and encrypts the BWK before sending. Rate limited: 3 req/IP per 15 min.',
+          'Configures the backup encryption key (BWK). The client generates and encrypts the BWK before sending. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3410,7 +3413,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Trigger backup now',
         description:
-          'Creates and emails an encrypted backup immediately. Rate limited: 3 req/IP per 15 min.',
+          'Creates and emails an encrypted backup immediately. Rate limited: 10 req/IP per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           200: {
@@ -3432,7 +3435,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Download backup',
         description:
-          'Downloads the latest encrypted backup as a file stream. Rate limited: 3 req/IP per 15 min.',
+          'Downloads the latest encrypted backup as a file stream. Rate limited: 10 req/IP per 15 min.',
         security: [{ bearerAuth: [] }],
         responses: {
           200: {
@@ -3468,7 +3471,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Change backup password',
         description:
-          'Re-encrypts the BWK with a new backup password. Rate limited: 3 req/IP per 15 min.',
+          'Re-encrypts the BWK with a new backup password. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3504,7 +3507,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Restore from backup',
         description:
-          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. Rate limited: 3 req/IP per 15 min.',
+          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. Rate limited: 5 requests per account per 15 min, counted before the body is read. At most one restore or key rotation per account is admitted at a time, and a few per server process; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3537,7 +3540,7 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress.',
+            'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress, and, before the body is read, a restore or key rotation this account already has in flight.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },

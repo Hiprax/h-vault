@@ -397,6 +397,41 @@ export const MAX_IN_FLIGHT_PART_UPLOADS = 4;
 // process budget too, and that product is memory (see above).
 export const MAX_IN_FLIGHT_PART_UPLOADS_PER_USER = 3;
 
+// Requests the SERVER admits concurrently, PER WORKER PROCESS, across all users,
+// to the two routes that accept a 30 MB JSON body: POST /backup/restore and POST
+// /vault/items/bulk-reencrypt. The slot is taken before that body is read and held
+// until the handler has finished with it, so this is the number of whole large
+// operations resident at once. Like MAX_IN_FLIGHT_PART_UPLOADS it is a MEMORY
+// budget before it is a throughput knob, and the two figures it is sized against
+// are recorded in docker-compose.yml beside the app's `mem_limit: 1g`:
+//
+//   * the V8 HEAP ceiling Node picks under that limit is 560 MB, and parsing a
+//     full 25 MiB restore payload measures 57 MB of heap, on top of the ~30 MB body
+//     string it was parsed from: roughly 90-110 MB of heap per operation;
+//   * the whole-process RSS growth of one 26 MB restore measures 111-143 MB and a
+//     10,000-item rotation 67-126 MB (scripts/ci/lib/resource-budgets.mjs), and
+//     RSS is what counts against the 1 GB cgroup limit.
+//
+// Two is therefore ~220 MB of heap against 560 and ~290 MB of RSS against 1 GB,
+// leaving room for the process's own baseline, the HIBP range cache, the parts
+// above and ordinary traffic. Three would put ~330 MB of heap in these alone.
+// Two is also the floor, not only the ceiling: with the per-user share below at
+// one, a budget of one would let a single account hold all of it.
+export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS = 2;
+// ONE IDENTITY's share of the budget above: a second concurrent large-body request
+// from an account that already has one in flight is REFUSED, not queued. Without
+// it, two requests that declare a Content-Length and then send nothing hold every
+// slot for as long as the server will wait for a body, and every other account's
+// restore and key rotation waits behind them.
+//
+// One, because a conforming client can never have two: both handlers take the
+// per-account vault-rotation lock, so the second of two concurrent requests was
+// already refused with 409 after its 30 MB had been parsed. The share refuses the
+// same request with the same status before a byte of it is read. It must stay
+// strictly BELOW MAX_IN_FLIGHT_LARGE_BODY_REQUESTS, for the same reason the part
+// share must.
+export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER = 1;
+
 // The slowest sustained uplink this deployment stands behind, in bytes per second
 // (128 KiB/s is about 1 Mbit/s). It is not a throttle and nothing measures against
 // it: it is the DIVISOR that turns a byte budget into a deadline, and it is named
@@ -410,7 +445,11 @@ export const MAX_IN_FLIGHT_PART_UPLOADS_PER_USER = 3;
 // The second is the tighter one on purpose. A part upload holds one of
 // MAX_IN_FLIGHT_PART_UPLOADS slots from before its body is read, so the time the
 // server is prepared to wait for THAT body is the time one account can deny a slot
-// to everybody else; a restore body holds no such resource, only its own socket.
+// to everybody else. A restore or rotation body also holds a slot from before it is
+// read (MAX_IN_FLIGHT_LARGE_BODY_REQUESTS), but the deadline for it IS the
+// whole-request one: that deadline was derived from exactly this body, so a
+// route-scoped copy would restate the same number. What bounds one account's hold
+// there is its share of one slot, not a tighter clock.
 export const MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND = 128 * 1024;
 
 // Plaintext metadata bounds. These live inside the ENCRYPTED metadata blob, so

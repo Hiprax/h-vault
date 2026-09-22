@@ -16,7 +16,12 @@
  *   3. A limiter column that has stopped describing the middleware actually
  *      mounted. Read by function identity, so it cannot be satisfied by a
  *      similarly-named export.
- *   4. A conditionally-mounted route appearing unconditionally. `/api/v1/metrics`
+ *   4. An admission chain in the wrong ORDER: a body parser ahead of a limiter or
+ *      of its slot holder. Membership cannot see this — both 30 MB routes carried
+ *      the right limiter, after a parser that had already buffered the body — so
+ *      it is checked twice: against each row's declared chain, and as a rule over
+ *      the real stack that no row can excuse.
+ *   5. A conditionally-mounted route appearing unconditionally. `/api/v1/metrics`
  *      lives inside `if (config.METRICS_TOKEN)`; with no token set it must not
  *      exist at all, and this is what notices if that guard is dropped.
  *
@@ -26,8 +31,12 @@ import { describe, it, expect } from 'vitest';
 import app from '../src/app.js';
 import * as rateLimiters from '../src/middleware/rateLimiter.js';
 import {
+  LARGE_BODY_HANDLER,
   LIMITER_NAMES,
   ROUTE_TABLE,
+  SLOT_HOLDERS,
+  UNNAMED_PARSER_PREFIX,
+  isBodyParser,
   ROUTER_MOUNTS,
   collectAppRoutes,
   isMountedUnderTest,
@@ -40,6 +49,7 @@ const observedKeys = observed.routes.map(rowKey).sort();
 const declaredUnderTest = ROUTE_TABLE.filter(isMountedUnderTest);
 const declaredKeys = declaredUnderTest.map(rowKey).sort();
 const observedByKey = new Map(observed.routes.map((route) => [rowKey(route), route]));
+const LIMITER_NAMES_SET = new Set(LIMITER_NAMES.values());
 
 /** Routes declared in `src/routes/*.ts`, i.e. everything under a router mount. */
 const ROUTER_FILE_ROUTES = 73;
@@ -115,6 +125,61 @@ describe('the route table matches the real Express router stack', () => {
       ).not.toContain(rowKey(row));
       expect(row.note, `${rowKey(row)} must say why it is conditional`).toBeTruthy();
     }
+  });
+
+  it('declares every admission middleware each route carries, in order', () => {
+    // `toEqual` on the ordered chain, parsers included. A row that declares no
+    // chain is asserted to carry nothing but its limiters, so admission middleware
+    // cannot be added to a route without the table saying where it sits.
+    for (const row of declaredUnderTest) {
+      const route = observedByKey.get(rowKey(row));
+      expect(route, `${rowKey(row)} is not mounted`).toBeDefined();
+      expect(route!.chain, `admission chain on ${rowKey(row)}`).toEqual(row.chain ?? row.limiters);
+    }
+  });
+
+  it('runs every limiter and a slot holder before any route-level body parser', () => {
+    // THE RULE, over the real stack and independent of the rows. A route whose
+    // table row was edited to match a wrong chain still fails here.
+    const violations: string[] = [];
+    for (const route of observed.routes) {
+      const { chain } = route;
+      const key = rowKey(route);
+      const lastLimiter = chain.reduce(
+        (last, name, index) => (LIMITER_NAMES_SET.has(name) ? index : last),
+        -1,
+      );
+      chain.forEach((name, index) => {
+        if (name.startsWith(UNNAMED_PARSER_PREFIX)) {
+          violations.push(`${key}: ${name} is a body parser no admission module accounts for`);
+        }
+        if (!isBodyParser(name)) return;
+        if (index < lastLimiter) violations.push(`${key}: ${name} runs before a limiter`);
+        const holder = chain.findIndex((entry) => SLOT_HOLDERS.has(entry));
+        if (holder === -1 || holder > index) {
+          violations.push(`${key}: ${name} runs with no slot holder in front of it`);
+        }
+        if (holder !== -1 && holder < lastLimiter) {
+          violations.push(`${key}: its slot holder runs before a limiter`);
+        }
+      });
+      const holdsLargeBody = chain.includes('holdLargeBodySlot');
+      const wrapped = chain.at(-1) === LARGE_BODY_HANDLER;
+      if (holdsLargeBody !== wrapped) {
+        violations.push(
+          `${key}: holdLargeBodySlot and the ${LARGE_BODY_HANDLER} wrapper must come as a pair, the wrapper last`,
+        );
+      }
+    }
+    expect(violations).toEqual([]);
+    // Vacuity guard: the rule examined the three routes that carry a parser.
+    expect(observed.routes.filter((route) => route.chain.some(isBodyParser))).toHaveLength(3);
+  });
+
+  it('mounts no body parser at router level', () => {
+    // `router.use(express.json())` would run ahead of every route's limiter in that
+    // router, and no route row would ever show it.
+    expect(observed.routerLevelParsers).toEqual([]);
   });
 
   it('declares the limiters each route actually carries, in order', () => {

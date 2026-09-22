@@ -96,6 +96,8 @@ import {
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
   MAX_IN_FLIGHT_PART_UPLOADS,
   MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
+  MAX_IN_FLIGHT_LARGE_BODY_REQUESTS,
+  MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER,
   MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
   MAX_DOCUMENT_NAME_LENGTH,
   MAX_DOCUMENT_MIME_LENGTH,
@@ -415,6 +417,8 @@ describe('Document-store constants', () => {
     ['MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER', MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER, 3],
     ['MAX_IN_FLIGHT_PART_UPLOADS', MAX_IN_FLIGHT_PART_UPLOADS, 4],
     ['MAX_IN_FLIGHT_PART_UPLOADS_PER_USER', MAX_IN_FLIGHT_PART_UPLOADS_PER_USER, 3],
+    ['MAX_IN_FLIGHT_LARGE_BODY_REQUESTS', MAX_IN_FLIGHT_LARGE_BODY_REQUESTS, 2],
+    ['MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER', MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER, 1],
     ['MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND', MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND, 131_072],
     ['MAX_DOCUMENT_NAME_LENGTH', MAX_DOCUMENT_NAME_LENGTH, 255],
     ['MAX_DOCUMENT_MIME_LENGTH', MAX_DOCUMENT_MIME_LENGTH, 255],
@@ -481,6 +485,16 @@ describe('Document-store constants', () => {
     expect(MAX_IN_FLIGHT_PART_UPLOADS_PER_USER).toBeGreaterThanOrEqual(
       MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
     );
+  });
+
+  it('shares the in-flight large-body budget so one account can never hold all of it', () => {
+    // The same relation as the part share, and for the same reason: equal, the
+    // share is inert and one account's two stalled restores hold every slot.
+    expect(MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER).toBeLessThan(
+      MAX_IN_FLIGHT_LARGE_BODY_REQUESTS,
+    );
+    // …and at least one, or no account could ever restore or rotate at all.
+    expect(MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER).toBeGreaterThanOrEqual(1);
   });
 
   it('lets a rotation name every row an account can actually hold, not just the advertised limit', () => {

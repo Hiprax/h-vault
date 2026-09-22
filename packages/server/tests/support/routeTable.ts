@@ -51,6 +51,12 @@
  */
 import type { Express } from 'express';
 import * as rateLimiters from '../../src/middleware/rateLimiter.js';
+import {
+  holdPartUploadSlot,
+  parsePartUploadBody,
+  requirePartContentLength,
+} from '../../src/middleware/documentPartBody.js';
+import { holdLargeBodySlot, parseLargeJsonBody } from '../../src/middleware/largeBodyAdmission.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
 
@@ -90,6 +96,18 @@ export interface RouteRow {
   readonly csrf: 'required' | 'exempt';
   /** Rate limiters mounted on this route, in the order they run. */
   readonly limiters: readonly string[];
+  /**
+   * EVERY named middleware in front of the handler, in the order it runs: the
+   * limiters, plus the body-admission middlewares (length guard, slot holder,
+   * route-level body parser, the large-body handler wrapper). Declared only on a
+   * route that carries admission middleware; absent, it is `limiters`, and
+   * `route-table.test.ts` asserts that such a route carries none.
+   *
+   * It exists because `limiters` cannot see a parser. The shipped defect it pins
+   * is ORDER, not membership: both 30 MB routes carried the right limiter AFTER
+   * their parser, so every assertion that the limiter was present stayed green.
+   */
+  readonly chain?: readonly string[];
   /** Non-null when the path carries an id whose owner the server must check. */
   readonly owned: { readonly param: string; readonly resource: OwnedResource } | null;
   readonly when: Registration;
@@ -415,9 +433,12 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['passwordVerifyLimiter'],
+    // The limiter and the slot BEFORE the 30 MB parser, and the handler wrapped so
+    // the slot outlives an aborted response.
+    chain: ['passwordVerifyLimiter', 'holdLargeBodySlot', 'parseLargeJsonBody', 'largeBodyHandler'],
     owned: null,
     when: 'always',
-    note: 'Takes owned ids in the BODY; covered by phase7-cross-user-edge-cases.test.ts. The 30 MB body parser ahead of the limiter is not one.',
+    note: 'Takes owned ids in the BODY; covered by phase7-cross-user-edge-cases.test.ts. Admission is pinned by large-body-admission.test.ts.',
   },
   {
     method: 'delete',
@@ -708,9 +729,10 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['passwordVerifyLimiter'],
+    chain: ['passwordVerifyLimiter', 'holdLargeBodySlot', 'parseLargeJsonBody', 'largeBodyHandler'],
     owned: null,
     when: 'always',
-    note: 'The 30 MB body parser ahead of the limiter is not a limiter.',
+    note: 'Admission (limiter, slot, then the 30 MB parser) is pinned by large-body-admission.test.ts.',
   },
 
   // ── /api/v1/documents (router-level `authenticate`, then `requireStorage`) ──
@@ -820,6 +842,12 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     // in-flight budget (503 past it), takes one of `MAX_IN_FLIGHT_PART_UPLOADS`
     // slots, and arms the deadline by which this part's body must have arrived.
     limiters: ['documentPartLimiter'],
+    chain: [
+      'documentPartLimiter',
+      'requirePartContentLength',
+      'holdPartUploadSlot',
+      'parsePartUploadBody',
+    ],
     owned: { param: 'id', resource: 'documentUpload' },
     when: 'always',
     note: 'Takes a second path parameter, :partNumber, which authz-matrix.test.ts supplies through its scenario.',
@@ -955,6 +983,8 @@ interface ObservedRoute {
   readonly method: HttpMethod;
   readonly path: string;
   readonly limiters: readonly string[];
+  /** Every limiter and admission middleware on the route, in stack order. */
+  readonly chain: readonly string[];
   /** The router prefix this route came from, or `null` when `app.ts` mounts it directly. */
   readonly mount: string | null;
 }
@@ -969,6 +999,11 @@ export interface CollectedRoutes {
   readonly unknownMounts: readonly string[];
   /** Layers this reader cannot classify (a router nested inside a router). */
   readonly unsupported: readonly string[];
+  /**
+   * Body parsers mounted at ROUTER level (`router.use(express.json())`). One of
+   * those runs before every route's limiter in that router, so none may exist.
+   */
+  readonly routerLevelParsers: readonly string[];
 }
 
 /** The private shape of an Express 5 / router@2 layer, as far as this reader needs it. */
@@ -1026,6 +1061,70 @@ const limitersOf = (route: NonNullable<RouterLayer['route']>): string[] =>
     .filter((name): name is string => name !== undefined);
 
 /**
+ * The body-admission middlewares, by FUNCTION IDENTITY, exactly as the limiters
+ * are named: each is a module-level export, so the one mounted is the one named.
+ */
+export const ADMISSION_NAMES = new Map<unknown, string>([
+  [requirePartContentLength, 'requirePartContentLength'],
+  [holdPartUploadSlot, 'holdPartUploadSlot'],
+  [parsePartUploadBody, 'parsePartUploadBody'],
+  [holdLargeBodySlot, 'holdLargeBodySlot'],
+  [parseLargeJsonBody, 'parseLargeJsonBody'],
+]);
+
+/** The route-level parsers named above. */
+export const NAMED_BODY_PARSERS: ReadonlySet<string> = new Set([
+  'parsePartUploadBody',
+  'parseLargeJsonBody',
+]);
+
+/** The slot holders named above: what must stand between the limiters and a parser. */
+export const SLOT_HOLDERS: ReadonlySet<string> = new Set([
+  'holdPartUploadSlot',
+  'holdLargeBodySlot',
+]);
+
+/**
+ * The function names `body-parser` 2.x gives the middleware it returns
+ * (`lib/types/{json,raw,text,urlencoded}.js`). Matched BY NAME, as the fallback
+ * for a parser that is not one of the exports above: a fresh `express.json()`
+ * written inline on a route has no identity to look up, and it is exactly the
+ * mount that would reintroduce the defect. The limit of it, stated: a parser
+ * wrapped in another function carries that function's name and escapes this.
+ */
+export const BODY_PARSER_FUNCTION_NAMES: ReadonlySet<string> = new Set([
+  'jsonParser',
+  'rawParser',
+  'textParser',
+  'urlencodedParser',
+]);
+
+/** The prefix an un-exported body parser is reported under. */
+export const UNNAMED_PARSER_PREFIX = 'unnamedBodyParser:';
+
+/** The name `holdingLargeBodySlot` gives the handler it wraps. */
+export const LARGE_BODY_HANDLER = 'largeBodyHandler';
+
+/** The chain name of one stack entry, or `undefined` for anything else (validators, handlers). */
+function chainNameOf(handle: unknown): string | undefined {
+  const named = LIMITER_NAMES.get(handle) ?? ADMISSION_NAMES.get(handle);
+  if (named !== undefined) return named;
+  if (typeof handle !== 'function') return undefined;
+  if (BODY_PARSER_FUNCTION_NAMES.has(handle.name)) return `${UNNAMED_PARSER_PREFIX}${handle.name}`;
+  if (handle.name === LARGE_BODY_HANDLER) return LARGE_BODY_HANDLER;
+  return undefined;
+}
+
+/** Whether a chain name is a body parser, named or not. */
+export const isBodyParser = (name: string): boolean =>
+  NAMED_BODY_PARSERS.has(name) || name.startsWith(UNNAMED_PARSER_PREFIX);
+
+const chainOf = (route: NonNullable<RouterLayer['route']>): string[] =>
+  (route.stack ?? [])
+    .map((entry) => chainNameOf(entry.handle))
+    .filter((name): name is string => name !== undefined);
+
+/**
  * Walks the real Express app and reports every route it would answer, with the
  * limiters mounted on each.
  *
@@ -1037,6 +1136,7 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
   const routes: ObservedRoute[] = [];
   const unknownMounts: string[] = [];
   const unsupported: string[] = [];
+  const routerLevelParsers: string[] = [];
 
   const stack = (app as unknown as { router: { stack: unknown[] } }).router.stack;
 
@@ -1049,6 +1149,7 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
           method,
           path: String(layer.route.path),
           limiters: limitersOf(layer.route),
+          chain: chainOf(layer.route),
           mount: null,
         });
       }
@@ -1082,6 +1183,7 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
             method,
             path: `${mount}${suffix}`,
             limiters: limitersOf(child.route),
+            chain: chainOf(child.route),
             mount,
           });
         }
@@ -1092,9 +1194,14 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
       // resolve its mount — so it is reported rather than dropped.
       if (Array.isArray(child.handle?.stack)) {
         unsupported.push(`${mount} → nested router (${child.name})`);
+        continue;
+      }
+      const name = chainNameOf(child.handle);
+      if (name !== undefined && isBodyParser(name)) {
+        routerLevelParsers.push(`${mount} → router-level ${name}`);
       }
     }
   }
 
-  return { routes, unknownMounts, unsupported };
+  return { routes, unknownMounts, unsupported, routerLevelParsers };
 }

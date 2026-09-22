@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import express from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import {
@@ -7,6 +6,11 @@ import {
   passwordVerifyLimiter,
   generalAuthLimiter,
 } from '../middleware/rateLimiter.js';
+import {
+  holdLargeBodySlot,
+  holdingLargeBodySlot,
+  parseLargeJsonBody,
+} from '../middleware/largeBodyAdmission.js';
 import {
   backupSetupSchema,
   backupSettingsSchema,
@@ -28,22 +32,6 @@ const router = Router();
 
 // All backup routes require authentication
 router.use(authenticate);
-
-// Route-specific body parser for backup restore. This overrides the global 2 MB
-// limit so that large backup files can be restored.
-//
-// The 30 MB figure is NOT `MAX_RESTORE_DATA_LENGTH` (25 MiB) rounded up. The
-// client posts `{ conflictStrategy, data: JSON.stringify(backupData) }`, so the
-// backup document travels as a JSON *string* value and every `"` inside it is
-// escaped to `\"` on the wire. A quote-dense backup (thousands of small items,
-// each carrying a full password history) is ~6-7% quotes, which inflates a body
-// whose inner `data` is still within the 25 MiB schema cap to well over 26 MB —
-// a 413 from the parser before Zod ever sees it, i.e. a backup the app produced
-// but could not restore. 30 MB keeps ~20% headroom over the 25 MiB inner cap and
-// still sits below nginx's `client_max_body_size 32m`, so a genuinely oversized
-// payload is rejected by the app with a structured JSON error rather than by the
-// proxy with an opaque one.
-const restoreBodyParser = express.json({ limit: '30mb' });
 
 router.post('/setup', passwordVerifyLimiter, validate(backupSetupSchema, 'body'), setupBackup);
 // `generalAuthLimiter` (60/user/min) on the two endpoints that previously carried
@@ -70,12 +58,16 @@ router.put(
   validate(backupChangePasswordSchema, 'body'),
   changeBackupPassword,
 );
+// Restore accepts a 30 MB body, so the ORDER in front of its parser is the control
+// (see `middleware/largeBodyAdmission.ts`): the limiter and the admission slot run
+// BEFORE the body is read, or they bound nothing.
 router.post(
   '/restore',
-  restoreBodyParser,
   passwordVerifyLimiter,
+  holdLargeBodySlot,
+  parseLargeJsonBody,
   validate(restoreBackupSchema, 'body'),
-  restoreBackup,
+  holdingLargeBodySlot(restoreBackup),
 );
 
 export default router;

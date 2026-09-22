@@ -1,9 +1,14 @@
 import { Router } from 'express';
-import express from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 import { heavyOpLimiter, passwordVerifyLimiter } from '../middleware/rateLimiter.js';
+import {
+  LARGE_JSON_BODY_LIMIT_BYTES,
+  holdLargeBodySlot,
+  holdingLargeBodySlot,
+  parseLargeJsonBody,
+} from '../middleware/largeBodyAdmission.js';
 import {
   listVaultItemsSchema,
   listTrashSchema,
@@ -30,20 +35,15 @@ import {
 
 const router = Router();
 
-// Route-specific body parser for vault key rotation (bulk re-encrypt). A full
-// rotation re-encrypts every vault item + folder and ships them in one request,
-// so the payload is comparable in size to a full backup. This 30 MB limit
-// mirrors POST /backup/restore (see routes/backup.ts for why 30 and not 26) and
-// overrides the global 2 MB parser so a large-vault rotation is not rejected
-// with HTTP 413 before validation runs. The matching path is exempted from the
-// global parser in app.ts (CUSTOM_BODY_LIMIT_PATHS).
+// A full rotation re-encrypts every vault item, folder and document key and ships
+// them in one request, so the payload is comparable in size to a full backup and
+// shares restore's 30 MB parser (`middleware/largeBodyAdmission.ts`).
 //
 // Exported as a number of BYTES because `tests/rotation-payload-budget.test.ts`
 // derives the worst-case rotation body from the shared constants and asserts it
 // fits inside this value. A limit written only as a string here would leave that
 // test restating the number, and a restated bound is the copy that drifts.
-export const BULK_REENCRYPT_BODY_LIMIT_BYTES = 30 * 1024 * 1024;
-const bulkReEncryptBodyParser = express.json({ limit: BULK_REENCRYPT_BODY_LIMIT_BYTES });
+export const BULK_REENCRYPT_BODY_LIMIT_BYTES = LARGE_JSON_BODY_LIMIT_BYTES;
 
 // All vault routes require authentication
 router.use(authenticate);
@@ -66,12 +66,15 @@ router.post('/items/restore/:id', validateObjectId(), restoreItem);
 
 router.post('/items/bulk-delete', heavyOpLimiter, validate(bulkDeleteSchema, 'body'), bulkDelete);
 router.post('/items/bulk-move', heavyOpLimiter, validate(bulkMoveSchema, 'body'), bulkMove);
+// The limiter and the admission slot run BEFORE the 30 MB body is read, or they
+// bound nothing (see `middleware/largeBodyAdmission.ts`).
 router.post(
   '/items/bulk-reencrypt',
-  bulkReEncryptBodyParser,
   passwordVerifyLimiter,
+  holdLargeBodySlot,
+  parseLargeJsonBody,
   validate(bulkReEncryptSchema, 'body'),
-  bulkReEncrypt,
+  holdingLargeBodySlot(bulkReEncrypt),
 );
 
 // ── Trash ────────────────────────────────────────────────────────────

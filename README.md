@@ -1234,7 +1234,7 @@ Seventeen tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-key
 an IPv6 address to its `/64` prefix, so rotating the source address inside one allocation does not
 buy an attacker a fresh bucket.
 
-Two rules govern where a limiter goes, and both were learned the hard way:
+Three rules govern where a limiter goes, and all three were learned the hard way:
 
 - **A budget for credential attempts is never shared with session maintenance.** The auth tier counts
   what a person deliberately submits — a password, or a request for an email link. Token refresh and
@@ -1247,6 +1247,12 @@ Two rules govern where a limiter goes, and both were learned the hard way:
   on the submitted email — the only way to bound one account across many addresses — and that is safe
   precisely because the auth tier bounds the IP on the same route regardless. The refresh tier has no
   such companion, so it keys on the address alone.
+- **A limiter runs before the body it protects is read.** Backup restore and vault-key rotation accept
+  up to 30 MB each, and their limiter once sat behind the parser, so a request past the budget was
+  refused only after the whole body had been received and parsed. The limiter now runs first, then a
+  slot in a small process-wide budget (two at a time, one per account), then the parser. The route
+  table test reads the real router stack and fails on any body parser that runs ahead of a limiter or
+  of its slot, because checking that a limiter is merely present on a route cannot see this.
 
 | Tier            | Limit      | Window | Applied to                                                                                                                                                                                                                                                                                               |
 | --------------- | ---------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

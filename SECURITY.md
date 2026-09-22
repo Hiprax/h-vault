@@ -205,6 +205,19 @@ security posture, not a disclaimer.
   for the reverse proxy in front of the application, and neither is a defence against a
   distributed flood: what they bound is what **one authenticated account** can cost everyone
   else.
+- **One account exhausting the server's memory through the two large uploads.** A backup
+  restore and a vault-key rotation each accept a body of up to 30 MB, which the server must
+  hold and parse whole. Both were rate limited to five attempts per account per fifteen
+  minutes, but the limit ran **after** the body had been read, so it bounded how many were
+  answered rather than how many were buffered. The limit now runs first, and the process
+  admits only **two** of these requests at a time, sized against the container's measured
+  memory, with the rest waiting before their body is read. **One account may hold one** of
+  those two, so a request that declares a length and sends nothing cannot keep every other
+  account from restoring or rotating; a second one from the same account is refused at once,
+  which is the answer the per-account rotation lock already gave it after the fact. A slot is
+  given back only when the operation has **finished**, not when the connection closes: the
+  server keeps working on a request whose client has gone away, and releasing its slot at
+  that point would let one account keep many of them in memory at once by disconnecting.
 
 ### What it cannot protect against
 

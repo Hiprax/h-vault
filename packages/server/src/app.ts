@@ -142,8 +142,9 @@ app.use(
 // Body parsing — 2 MB default limit. Routes that need larger payloads (e.g., backup
 // restore, vault key rotation) apply a route-specific body parser with a higher
 // limit. The global parser skips those routes so the route-level parser can handle
-// them instead. Keep this set in sync with the route-level parsers that own each path
-// (see routes/backup.ts and routes/vault.ts).
+// them instead. Keep this set in sync with the route-level parser that owns each path
+// (`parseLargeJsonBody` in middleware/largeBodyAdmission.ts, mounted by routes/backup.ts
+// and routes/vault.ts behind their limiter and admission slot).
 const CUSTOM_BODY_LIMIT_PATHS = new Set<string>([
   '/api/v1/backup/restore',
   '/api/v1/vault/items/bulk-reencrypt',
