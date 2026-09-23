@@ -4,6 +4,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import mongoose from 'mongoose';
+import { MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH } from '@hvault/shared';
 
 /**
  * Mongoose 9 deprecated `Document.prototype.validateSync()` (removed in v10) in
@@ -506,12 +507,12 @@ describe('VaultItem passwordHistory maxlength validation', () => {
     nameTag: 'test-tag',
   };
 
-  it('should reject passwordHistory entry with encryptedPassword exceeding 5,000 characters', async () => {
+  it('should reject passwordHistory entry with encryptedPassword one past MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH', async () => {
     const item = new VaultItem({
       ...validItemData,
       passwordHistory: [
         {
-          encryptedPassword: 'a'.repeat(5_001),
+          encryptedPassword: 'a'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH + 1),
           iv: 'test-iv',
           tag: 'test-tag',
           changedAt: new Date(),
@@ -522,12 +523,12 @@ describe('VaultItem passwordHistory maxlength validation', () => {
     expect(err).toBeDefined();
   });
 
-  it('should accept passwordHistory entry with encryptedPassword at 5,000 characters', async () => {
+  it('should accept passwordHistory entry with encryptedPassword at MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH', async () => {
     const item = new VaultItem({
       ...validItemData,
       passwordHistory: [
         {
-          encryptedPassword: 'a'.repeat(5_000),
+          encryptedPassword: 'a'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH),
           iv: 'test-iv',
           tag: 'test-tag',
           changedAt: new Date(),

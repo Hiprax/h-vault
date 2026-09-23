@@ -125,6 +125,10 @@ import {
   DOCUMENT_STREAM_INFO_PREFIX,
   DOCUMENT_META_INFO_PREFIX,
   DOCUMENT_DEK_WRAP_INFO_PREFIX,
+  VAULT_FIELD_AAD_PREFIX,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
+  VAULT_FIELD_ROLES,
+  VAULT_FIELD_V2_IV_MARKER,
 } from '../src/constants/index.js';
 import {
   cardDataSchema,
@@ -592,6 +596,46 @@ describe('Document-store constants', () => {
       // hex characters of an ObjectId, so the last one is unambiguous.
       expect(prefix.indexOf('|')).toBe(prefix.length - 1);
     }
+  });
+
+  it('pins the vault-field v2 format constants, which no stored bound field may outlive', () => {
+    // FORMAT constants, exactly like the document prefixes above: a rename makes
+    // every v2 field already stored undecryptable, so it has to be a visible edit
+    // here as well as in the client's committed known-answer vector.
+    expect(VAULT_FIELD_AAD_PREFIX).toBe('hvault/vault-field/v2|');
+    expect(VAULT_FIELD_V2_IV_MARKER).toBe('v2:');
+    expect(VAULT_FIELD_ROLES).toEqual([
+      'item.name',
+      'item.data',
+      'item.password-history',
+      'folder.name',
+    ]);
+    // One separator, at the end, as for the document prefixes: a second `|` inside
+    // the prefix would let two different (role, id) pairs meet in the same bytes.
+    expect(VAULT_FIELD_AAD_PREFIX.indexOf('|')).toBe(VAULT_FIELD_AAD_PREFIX.length - 1);
+    // Every token a binding joins with `|` must be unable to hold one; the row id
+    // is hex, so these two closed lists are the only other place one could hide.
+    for (const token of [...VAULT_FIELD_ROLES, ...ITEM_TYPES]) {
+      expect(token, token).not.toContain('|');
+    }
+    // A role is never a prefix of another, so `item.data|login|…` can only be read
+    // one way even before the fixed-width id is considered.
+    for (const a of VAULT_FIELD_ROLES) {
+      for (const b of VAULT_FIELD_ROLES) {
+        if (a !== b) expect(`${b}|`.startsWith(`${a}|`), `${a} vs ${b}`).toBe(false);
+      }
+    }
+  });
+
+  it('marks a v2 IV with a prefix no base64 string can begin with', () => {
+    // The whole dispatch rests on this: a v1 IV is standard base64 by
+    // construction, so a marker that could be the start of one would send a
+    // legacy row down the bound path and it would never open again. The marker
+    // need not be foreign from its first character, only somewhere in it.
+    expect(/^[A-Za-z0-9+/=]*$/.test(VAULT_FIELD_V2_IV_MARKER)).toBe(false);
+    // And it fits: a 12-byte IV is 16 base64 characters, every IV bound on the
+    // wire and in both models is 24, so the marker costs no bound anywhere.
+    expect(16 + VAULT_FIELD_V2_IV_MARKER.length).toBeLessThanOrEqual(24);
   });
 
   it('does not restate either chunk size as an inline decimal literal in any source file', () => {
@@ -1483,5 +1527,20 @@ describe('TRANSFORM_SYNTAXES, transformSyntaxForName and canRepairSyntax', () =>
     expect(MAX_PREVIEW_TABLE_CELLS).toBeLessThan(
       MAX_PREVIEW_TEXT_LINES * MAX_PREVIEW_TABLE_COLUMNS,
     );
+  });
+});
+
+describe('Vault item bounds', () => {
+  it('sizes a retained previous password for the largest password a login can hold', () => {
+    // The worst case measured, not asserted: three UTF-8 bytes per UTF-16 code
+    // unit, then base64. A cap below this made changing such a password fail,
+    // because the old one is kept in the history.
+    const worstPassword = '\u20ac'.repeat(MAX_LOGIN_PASSWORD_LENGTH);
+    const bytes = new TextEncoder().encode(worstPassword);
+    expect(bytes.length).toBe(MAX_LOGIN_PASSWORD_LENGTH * 3);
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    expect(btoa(binary).length).toBe(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH);
+    expect(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH).toBe(40_000);
   });
 });

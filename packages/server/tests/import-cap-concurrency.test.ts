@@ -302,7 +302,8 @@ describe('Phase 10 — the import cap holds under overlapping requests (standalo
     //     everything and DOES roughly double — but that is the strategy
     //     deliberately duplicating, not a recovery path anyone retries into.
     //   • 170 B/entry is a typical password, not the schema ceiling: the wire
-    //     bound on `encryptedPassword` is 5,000 chars, and a vault of 10,000
+    //     bound on `encryptedPassword` is MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH
+    //     (40,000 chars, the longest login password's ciphertext), and a vault of 10,000
     //     items each holding ten 500-char history passwords would need ~100
     //     batches and would 429 part-way. That vault is not a realistic artifact,
     //     and the outcome is a rate-limit message plus an idempotent retry rather

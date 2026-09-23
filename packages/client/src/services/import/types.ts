@@ -38,7 +38,9 @@ export interface ParseResult {
  * Such a row is decrypted only to compute its identity and to resolve it
  * against the vault; the original ciphertext is then re-sent verbatim rather
  * than decrypt-and-re-encrypted, so a re-import cannot perturb bytes it had no
- * reason to touch.
+ * reason to touch. A format-v2 row is the one exception: it is bound to the id it
+ * was exported from, and an insert gets a fresh one, so extraction re-seals it as
+ * v1 and THAT is what this holds (see `unbindNativeCiphertext` in `SettingsPage`).
  */
 export interface NativeCiphertext {
   encryptedName: string;

@@ -19,6 +19,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import {
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   PASSWORD_HISTORY_MAX,
   importInsertItemSchema,
   importUpdateItemSchema,
@@ -38,12 +39,32 @@ const seal = (plain: string): string => `enc:${Buffer.from(plain, 'utf8').toStri
 const open = (encrypted: string): string =>
   Buffer.from(encrypted.replace(/^enc:/, ''), 'base64').toString('utf8');
 
+/**
+ * The same reversible stand-in for a format-v2 field, which carries the additional
+ * data it was sealed with, so the mocked open below can REFUSE a field presented
+ * under any other binding, the one property of AES-GCM these cases depend on.
+ */
+const sealBound = (plain: string, aad: string): string =>
+  `benc:${Buffer.from(JSON.stringify([aad, plain]), 'utf8').toString('base64')}`;
+const openBound = (encrypted: string, aad: Uint8Array): Promise<string> => {
+  const [sealedAad, plain] = JSON.parse(
+    Buffer.from(encrypted.replace(/^benc:/, ''), 'base64').toString('utf8'),
+  ) as [string, string];
+  return sealedAad === new TextDecoder().decode(aad)
+    ? Promise.resolve(plain)
+    : Promise.reject(new Error('OperationError'));
+};
+
 vi.mock('../src/services/crypto/cryptoService', () => ({
   cryptoService: {
     encryptData: vi.fn((plain: string) =>
       Promise.resolve({ encrypted: seal(plain), iv: 'iv', tag: 'tag' }),
     ),
     decryptData: vi.fn((encrypted: string) => Promise.resolve(open(encrypted))),
+    decryptDataWithAad: vi.fn(
+      (encrypted: string, _iv: string, _tag: string, _key: CryptoKey, aad: Uint8Array) =>
+        openBound(encrypted, aad),
+    ),
     generateSearchHash: vi.fn(() => Promise.resolve('a'.repeat(64))),
     deriveKeys: vi.fn(),
     getAuthHash: vi.fn(),
@@ -576,6 +597,111 @@ describe('SettingsPage import flow', () => {
     expect(importInsertItemSchema.safeParse(insert).success).toBe(true);
   });
 
+  it('re-seals a native row’s format-v2 fields as v1, because an insert gets a fresh id', async () => {
+    // A bound field is sealed to the row it was exported from. An import sends
+    // the row as an INSERT and the server mints a new id, so a bound field sent
+    // verbatim would be stored where it can never open again. Each one is opened
+    // against the row's OWN recorded id and re-sealed as v1; a v1 field still
+    // travels verbatim; a field bound to another row is refused like any other
+    // field that will not open.
+    const ROW_ID = '66c0f1a2b3c4d5e6f7a8b9c0';
+    const OTHER_ID = '66c0f1a2b3c4d5e6f7a8b9c1';
+    const aad = (role: string, id = ROW_ID) => `hvault/vault-field/v2|${role}|${id}`;
+    const data = JSON.stringify({ username: 'octocat', password: 'current', uris: [] });
+    const boundRow = {
+      _id: ROW_ID,
+      itemType: 'login',
+      encryptedName: sealBound('Bound GitHub', aad('item.name')),
+      nameIv: 'v2:iv',
+      nameTag: 'tag',
+      encryptedData: sealBound(data, aad('item.data|login')),
+      dataIv: 'v2:iv',
+      dataTag: 'tag',
+      passwordHistory: [
+        {
+          encryptedPassword: sealBound('bound-older', aad('item.password-history')),
+          iv: 'v2:iv',
+          tag: 'tag',
+          changedAt: '2026-01-02T03:04:05.000Z',
+        },
+        {
+          encryptedPassword: sealBound('moved-here', aad('item.password-history', OTHER_ID)),
+          iv: 'v2:iv',
+          tag: 'tag',
+          changedAt: '2026-01-03T03:04:05.000Z',
+        },
+        {
+          encryptedPassword: seal('legacy-older'),
+          iv: 'iv',
+          tag: 'tag',
+          changedAt: '2026-01-04T03:04:05.000Z',
+        },
+      ],
+    };
+    // Its data triple was bound to ANOTHER row: it must not import at all.
+    const movedRow = {
+      _id: ROW_ID,
+      itemType: 'login',
+      encryptedName: seal('Moved'),
+      nameIv: 'iv',
+      nameTag: 'tag',
+      encryptedData: sealBound(data, aad('item.data|login', OTHER_ID)),
+      dataIv: 'v2:iv',
+      dataTag: 'tag',
+    };
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
+    });
+
+    await renderSettings();
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: [boundRow, movedRow] }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    const inserts = lastImportBody().operations.inserts as {
+      encryptedName: string;
+      nameIv: string;
+      encryptedData: string;
+      dataIv: string;
+      passwordHistory?: { encryptedPassword: string; iv: string; changedAt: string }[];
+    }[];
+
+    expect(inserts).toHaveLength(1);
+    const [insert] = inserts;
+    // Re-sealed as v1, of exactly the plaintext the vault stored.
+    expect(insert!.nameIv).toBe('iv');
+    expect(insert!.dataIv).toBe('iv');
+    expect(open(insert!.encryptedName)).toBe('Bound GitHub');
+    expect(open(insert!.encryptedData)).toBe(data);
+    // The bound entry re-sealed, the foreign one dropped, the v1 one verbatim.
+    expect(insert!.passwordHistory).toEqual([
+      {
+        encryptedPassword: seal('bound-older'),
+        iv: 'iv',
+        tag: 'tag',
+        changedAt: '2026-01-02T03:04:05.000Z',
+      },
+      {
+        encryptedPassword: seal('legacy-older'),
+        iv: 'iv',
+        tag: 'tag',
+        changedAt: '2026-01-04T03:04:05.000Z',
+      },
+    ]);
+    // Nothing bound, and nothing of the moved row, reaches the wire.
+    const wire = JSON.stringify(lastImportBody());
+    expect(wire).not.toContain('v2:');
+    expect(wire).not.toContain('benc:');
+    expect(wire).not.toContain(seal('Moved'));
+    expect(importInsertItemSchema.safeParse(insert).success).toBe(true);
+  });
+
   it('keeps at most PASSWORD_HISTORY_MAX entries from a native export', async () => {
     const nativeRow = {
       itemType: 'login',
@@ -613,6 +739,52 @@ describe('SettingsPage import flow', () => {
     // Truncated to the cap the wire schema enforces, so an over-full export
     // cannot 400 the whole batch it rides in.
     expect(insert.passwordHistory).toHaveLength(PASSWORD_HISTORY_MAX);
+    expect(importInsertItemSchema.safeParse(insert).success).toBe(true);
+  });
+
+  it('keeps a native history entry exactly at the stored bound and drops one past it', async () => {
+    // The bound is what the server stores for one retained password; an entry
+    // past it would 400 the whole batch, so extraction drops that ENTRY alone.
+    const entry = (length: number, changedAt: string) => ({
+      encryptedPassword: 'x'.repeat(length),
+      iv: 'iv',
+      tag: 'tag',
+      changedAt,
+    });
+    const nativeRow = {
+      itemType: 'login',
+      encryptedName: seal('Long history'),
+      nameIv: 'iv',
+      nameTag: 'tag',
+      encryptedData: seal(JSON.stringify({ username: 'u', password: 'p', uris: [] })),
+      dataIv: 'iv',
+      dataTag: 'tag',
+      passwordHistory: [
+        entry(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH, '2026-01-02T03:04:05.000Z'),
+        entry(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH + 1, '2026-01-03T03:04:05.000Z'),
+      ],
+    };
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
+    });
+
+    await renderSettings();
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: [nativeRow] }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
+    const insert = lastImportBody().operations.inserts[0] as {
+      passwordHistory?: { encryptedPassword: string; changedAt: string }[];
+    };
+    expect(insert.passwordHistory?.map((e) => [e.encryptedPassword.length, e.changedAt])).toEqual([
+      [MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH, '2026-01-02T03:04:05.000Z'],
+    ]);
     expect(importInsertItemSchema.safeParse(insert).success).toBe(true);
   });
 

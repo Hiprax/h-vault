@@ -25,6 +25,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import {
   MAX_ENCRYPTED_NAME_LENGTH,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   MAX_ITEMS_PER_USER,
   PASSWORD_HISTORY_MAX,
 } from '@hvault/shared';
@@ -403,13 +404,39 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(stored[0]!.passwordHistory).toBeUndefined();
   });
 
+  it('accepts a passwordHistory entry exactly at the bound, and stores it whole', async () => {
+    // The bound is the ciphertext of the longest password a login can hold, so a
+    // re-import carrying one must land; the +1 case below is the other half.
+    const existing = await seedItem(user.id, { encryptedData: 'original-data' });
+    const atBound = 'x'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH);
+
+    const res = await postOperations(user.accessToken, {
+      updates: [
+        updateRow(String(existing._id), {
+          passwordHistory: [historyEntry({ encryptedPassword: atBound })],
+        }),
+      ],
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+    const stored = await rawItems(user.id);
+    const history = stored[0]!.passwordHistory as { encryptedPassword: string }[];
+    expect(history.map((entry) => entry.encryptedPassword)).toEqual([atBound]);
+    expect(stored[0]!.encryptedData).not.toBe('original-data');
+  });
+
   it('rejects an over-length passwordHistory entry', async () => {
     const existing = await seedItem(user.id, { encryptedData: 'original-data' });
 
     const res = await postOperations(user.accessToken, {
       updates: [
         updateRow(String(existing._id), {
-          passwordHistory: [historyEntry({ encryptedPassword: 'x'.repeat(5_001) })],
+          passwordHistory: [
+            historyEntry({
+              encryptedPassword: 'x'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH + 1),
+            }),
+          ],
         }),
       ],
     });

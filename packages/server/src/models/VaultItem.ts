@@ -1,6 +1,7 @@
 import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import {
   ITEM_TYPES,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   MAX_TAGS_PER_ITEM,
   MAX_TAG_LENGTH,
   PASSWORD_HISTORY_MAX,
@@ -50,7 +51,13 @@ export interface IVaultItem {
 
 const passwordHistoryEntrySchema = new Schema<IPasswordHistoryEntry>(
   {
-    encryptedPassword: { type: String, required: true, maxlength: 5_000 },
+    // The ciphertext of the largest password a login can hold; a lower cap made
+    // changing such a password fail outright, since its old value is kept here.
+    encryptedPassword: {
+      type: String,
+      required: true,
+      maxlength: MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
+    },
     iv: { type: String, required: true, maxlength: 24 },
     tag: { type: String, required: true, maxlength: 32 },
     changedAt: { type: Date, required: true, default: Date.now },

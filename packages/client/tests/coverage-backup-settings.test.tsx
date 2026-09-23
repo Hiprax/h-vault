@@ -71,6 +71,7 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     vaultKeyEqualsRaw: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
+    decryptDataWithAad: vi.fn(),
     generateSearchHash: vi.fn().mockResolvedValue('hash'),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
@@ -1501,6 +1502,116 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     const raw = restoreBody().data as string;
     expect(raw).not.toContain('encryptedVaultKey');
     expect(raw).not.toContain('backupEncryption');
+  });
+
+  it('re-seals every format-v2 field of a same-key restore, and leaves v1 rows verbatim', async () => {
+    // Same account, same key: v1 rows travel verbatim, as they always have. A
+    // bound field cannot, because the server decides the restored row's id (a row
+    // this account no longer owns, or a `keep_both` copy, gets a fresh one) and
+    // the field would be stored under an id it can never open under. So it is
+    // opened against the row it was backed up from and re-sealed first.
+    const ITEM_ID = 'cccccccccccccccccccccccc';
+    const FOLDER_ID = 'dddddddddddddddddddddddd';
+    const boundItem = {
+      _id: ITEM_ID,
+      itemType: 'login',
+      encryptedData: 'bd',
+      dataIv: 'v2:bdi',
+      dataTag: 'bdt',
+      encryptedName: 'bn',
+      nameIv: 'v2:bni',
+      nameTag: 'bnt',
+      passwordHistory: [
+        {
+          encryptedPassword: 'bp',
+          iv: 'v2:bpi',
+          tag: 'bpt',
+          changedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+    // v1 name and data, with ONE bound history entry: that alone makes it bound.
+    const historyOnlyItem = {
+      ...SAMPLE_ITEM,
+      _id: 'eeeeeeeeeeeeeeeeeeeeeeee',
+      itemType: 'note',
+      passwordHistory: [
+        {
+          encryptedPassword: 'hp',
+          iv: 'v2:hpi',
+          tag: 'hpt',
+          changedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+    const boundFolder = { _id: FOLDER_ID, encryptedName: 'bfn', nameIv: 'v2:bfi', nameTag: 'bft' };
+    vi.mocked(cryptoService.decryptDataWithAad).mockResolvedValue('bound-plaintext');
+
+    await performRestore({
+      items: [boundItem, SAMPLE_ITEM, historyOnlyItem],
+      folders: [boundFolder, SAMPLE_FOLDER],
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    const payload = restoredPayload();
+    expect(payload.items?.[0]).toMatchObject({
+      _id: ITEM_ID,
+      encryptedData: 'reenc',
+      dataIv: 'reiv',
+      encryptedName: 'reenc',
+      nameIv: 'reiv',
+      passwordHistory: [{ encryptedPassword: 'reenc', iv: 'reiv', tag: 'retag' }],
+    });
+    // The v1 row is untouched, byte for byte.
+    expect(payload.items?.[1]).toEqual(SAMPLE_ITEM);
+    expect(payload.items?.[2]).toMatchObject({
+      _id: 'eeeeeeeeeeeeeeeeeeeeeeee',
+      dataIv: 'reiv',
+      passwordHistory: [{ encryptedPassword: 'reenc', iv: 'reiv' }],
+    });
+    expect(payload.folders?.[0]).toMatchObject({
+      _id: FOLDER_ID,
+      encryptedName: 'reenc',
+      nameIv: 'reiv',
+    });
+    expect(payload.folders?.[1]).toEqual(SAMPLE_FOLDER);
+    // Nothing bound reaches the server.
+    expect(String(restoreBody().data)).not.toContain('v2:');
+
+    // Each bound field was opened against the ROW it was backed up from.
+    const bindings = vi
+      .mocked(cryptoService.decryptDataWithAad)
+      .mock.calls.map(([enc, iv, , , aad]) => [enc, iv, new TextDecoder().decode(aad)]);
+    expect(bindings).toEqual([
+      ['bd', 'bdi', `hvault/vault-field/v2|item.data|login|${ITEM_ID}`],
+      ['bn', 'bni', `hvault/vault-field/v2|item.name|${ITEM_ID}`],
+      ['bp', 'bpi', `hvault/vault-field/v2|item.password-history|${ITEM_ID}`],
+      ['hp', 'hpi', 'hvault/vault-field/v2|item.password-history|eeeeeeeeeeeeeeeeeeeeeeee'],
+      ['bfn', 'bfi', `hvault/vault-field/v2|folder.name|${FOLDER_ID}`],
+    ]);
+  });
+
+  it('drops only the restored row whose format-v2 field will not open', async () => {
+    // A server that moved a bound field between two rows of a backup gets the
+    // same answer the live vault gives: that row does not restore.
+    vi.mocked(cryptoService.decryptDataWithAad).mockRejectedValue(
+      Object.assign(new Error('The operation failed'), { name: 'OperationError' }),
+    );
+
+    await performRestore({
+      items: [
+        { ...SAMPLE_ITEM, itemType: 'login', dataIv: 'v2:di' },
+        { ...SAMPLE_ITEM, _id: 'ffffffffffffffffffffffff' },
+      ],
+      folders: [],
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(restoredPayload().items?.map((item) => item._id)).toEqual(['ffffffffffffffffffffffff']);
   });
 
   it('re-encrypts a restored row without altering one byte of its plaintext', async () => {

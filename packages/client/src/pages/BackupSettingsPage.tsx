@@ -35,11 +35,29 @@ import { api } from '../services/api/client';
 import { getBackupHistoryApi } from '../services/api/backupApi';
 import { Pagination } from '../components/ui/Pagination';
 import { cryptoService } from '../services/crypto/cryptoService';
+import { decryptVaultField, isBoundField } from '../services/crypto/vaultField';
 import { useAuthStore } from '../stores/authStore';
 import { noteStaleVaultKey } from '../stores/uiStore';
 import { resolveBackupSignature, type BackupSignatureVerdict } from '../lib/backupSignature';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
-import type { IBackupLogEntry } from '@hvault/shared';
+import type { IBackupLogEntry, ItemType } from '@hvault/shared';
+
+/**
+ * Whether a backup row's retained previous passwords include a format-v2 entry.
+ *
+ * A bound field is sealed to the id of the row it was backed up from, and the
+ * server decides the restored row's id (a row this account does not own, or a
+ * `keep_both` copy, gets a fresh one). So a row with ANY bound field, this or its
+ * name or its data, is re-sealed before it is sent, even when the backup's key IS
+ * this account's key. The entries are unvalidated file content, hence the checks.
+ */
+function historyCarriesBoundEntry(history: unknown): boolean {
+  if (!Array.isArray(history)) return false;
+  return (history as unknown[]).some((entry) => {
+    const iv = typeof entry === 'object' && entry !== null ? (entry as { iv?: unknown }).iv : null;
+    return typeof iv === 'string' && isBoundField(iv);
+  });
+}
 
 const MIN_BACKUP_PASSWORD_SCORE = 3;
 
@@ -833,10 +851,30 @@ export default function BackupSettingsPage() {
               filteredCount++;
               continue;
             }
+            // The row's OWN recorded id and type: a bound field was sealed to the
+            // row it was backed up from, whichever account that was.
+            const rowId = typeof item._id === 'string' ? item._id : '';
             try {
-              const data = await cryptoService.decryptData(enc, iv, tag, decryptKey);
-              const name = await cryptoService.decryptData(encName, nameIv, nameTag, decryptKey);
-              if (needsReEncryption && currentVaultKey) {
+              const data = await decryptVaultField(
+                { encrypted: enc, iv, tag },
+                { role: 'item.data', rowId, itemType: item.itemType as ItemType },
+                decryptKey,
+              );
+              const name = await decryptVaultField(
+                { encrypted: encName, iv: nameIv, tag: nameTag },
+                { role: 'item.name', rowId },
+                decryptKey,
+              );
+              // Re-sealed under this account's key when the keys differ, AND
+              // whenever the row carries a format-v2 field: the server may store
+              // a restored row under a fresh id (a row this account does not own,
+              // or `keep_both`), and a bound field sent verbatim would be kept
+              // under an id it can never open under again.
+              const bound =
+                isBoundField(nameIv) ||
+                isBoundField(iv) ||
+                historyCarriesBoundEntry(item.passwordHistory);
+              if ((needsReEncryption || bound) && currentVaultKey) {
                 const reData = await cryptoService.encryptData(data, currentVaultKey);
                 const reName = await cryptoService.encryptData(name, currentVaultKey);
                 item.encryptedData = reData.encrypted;
@@ -864,10 +902,9 @@ export default function BackupSettingsPage() {
                       continue;
                     }
                     try {
-                      const plain = await cryptoService.decryptData(
-                        entry.encryptedPassword,
-                        entry.iv,
-                        entry.tag,
+                      const plain = await decryptVaultField(
+                        { encrypted: entry.encryptedPassword, iv: entry.iv, tag: entry.tag },
+                        { role: 'item.password-history', rowId },
                         decryptKey,
                       );
                       const reEnc = await cryptoService.encryptData(plain, currentVaultKey);
@@ -909,8 +946,14 @@ export default function BackupSettingsPage() {
               continue;
             }
             try {
-              const name = await cryptoService.decryptData(encName, nameIv, nameTag, decryptKey);
-              if (needsReEncryption && currentVaultKey) {
+              const name = await decryptVaultField(
+                { encrypted: encName, iv: nameIv, tag: nameTag },
+                { role: 'folder.name', rowId: typeof folder._id === 'string' ? folder._id : '' },
+                decryptKey,
+              );
+              // Same rule as the items: a bound name is re-sealed, because a
+              // restored folder can land under a fresh id.
+              if ((needsReEncryption || isBoundField(nameIv)) && currentVaultKey) {
                 const reName = await cryptoService.encryptData(name, currentVaultKey);
                 folder.encryptedName = reName.encrypted;
                 folder.nameIv = reName.iv;

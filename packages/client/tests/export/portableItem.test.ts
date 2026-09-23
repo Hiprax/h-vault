@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { ItemType, IPasswordHistoryEntry, IVaultItemResponse } from '@hvault/shared';
 import { cryptoService } from '../../src/services/crypto/cryptoService';
+import { sealV2, specAad } from '../support/vaultFieldSealer';
 import type { DecryptedVaultItem, DecryptedFolder } from '../../src/stores/vaultStore';
 import {
   toPortableItems,
@@ -452,6 +453,43 @@ describe('toPortableItems — password history', () => {
     expect(portable[0]?.passwordHistory).toEqual([
       { password: 'goodpass', changedAt: '2024-06-01T00:00:00.000Z' },
     ]);
+  });
+
+  it('decrypts a format-v2 entry against its own item and drops one bound to another', async () => {
+    const itemId = '66c0f1a2b3c4d5e6f7a8b9c0';
+    const own = await sealV2(vaultKey, 'bound-older', specAad('item.password-history', itemId));
+    const moved = await sealV2(
+      vaultKey,
+      'another-items-password',
+      specAad('item.password-history', '66c0f1a2b3c4d5e6f7a8b9c1'),
+    );
+    const item = mkItem(
+      'login',
+      { username: 'a', password: 'new' },
+      {
+        id: itemId,
+        passwordHistory: [
+          {
+            encryptedPassword: own.encrypted,
+            iv: own.iv,
+            tag: own.tag,
+            changedAt: '2024-06-01T00:00:00.000Z',
+          },
+          {
+            encryptedPassword: moved.encrypted,
+            iv: moved.iv,
+            tag: moved.tag,
+            changedAt: '2024-07-01T00:00:00.000Z',
+          },
+        ],
+      },
+    );
+    const { portable, skipped } = await run([item]);
+    expect(skipped).toHaveLength(0);
+    expect(portable[0]?.passwordHistory).toEqual([
+      { password: 'bound-older', changedAt: '2024-06-01T00:00:00.000Z' },
+    ]);
+    expect(JSON.stringify(portable)).not.toContain('another-items-password');
   });
 
   it('sets no passwordHistory when the item has none', async () => {

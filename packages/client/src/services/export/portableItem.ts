@@ -35,7 +35,7 @@ import type {
   IAddress,
   IIdentityAddress,
 } from '@hvault/shared';
-import { cryptoService } from '../crypto/cryptoService.js';
+import { decryptVaultField } from '../crypto/vaultField.js';
 import { isUndecodableData } from '../../lib/vaultData.js';
 import { logger } from '../../lib/logger.js';
 import type { DecryptedVaultItem, DecryptedFolder } from '../../stores/vaultStore.js';
@@ -235,10 +235,9 @@ async function decryptPasswordHistory(
   const entries: PortablePasswordHistoryEntry[] = [];
   for (const entry of raw) {
     try {
-      const password = await cryptoService.decryptData(
-        entry.encryptedPassword,
-        entry.iv,
-        entry.tag,
+      const password = await decryptVaultField(
+        { encrypted: entry.encryptedPassword, iv: entry.iv, tag: entry.tag },
+        { role: 'item.password-history', rowId: item.id },
         vaultKey,
       );
       entries.push({ password, changedAt: entry.changedAt });

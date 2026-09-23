@@ -6,6 +6,7 @@ import {
   HIBP_BATCH_MAX_PREFIXES,
   MAX_DOCUMENTS_PER_ROTATION,
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   MAX_PASSWORD_CLASS_MINIMUM,
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
@@ -1083,7 +1084,11 @@ export const swaggerSpec: JsonObject = {
         type: 'object',
         required: ['encryptedPassword', 'iv', 'tag', 'changedAt'],
         properties: {
-          encryptedPassword: { type: 'string', minLength: 1, maxLength: 5000 },
+          encryptedPassword: {
+            type: 'string',
+            minLength: 1,
+            maxLength: MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
+          },
           iv: { type: 'string', minLength: 1, maxLength: 24 },
           tag: { type: 'string', minLength: 1, maxLength: 32 },
           changedAt: { type: 'string', format: 'date-time' },

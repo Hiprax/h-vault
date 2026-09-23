@@ -16,6 +16,9 @@
  * A native H-Vault row is already encrypted under the CURRENT vault key, so its
  * ciphertext is re-sent verbatim rather than decrypt-and-re-encrypted; only the
  * deterministic search hash is recomputed (an older export may not carry one).
+ * The exception is decided before this module runs: a format-v2 field is bound to
+ * the row it was exported from, so extraction (`SettingsPage`'s
+ * `unbindNativeCiphertext`) hands this module a v1 re-seal of it instead.
  *
  * Nothing here matches, re-orders or drops silently: a row that cannot be sealed
  * is returned as a counted failure with a human-readable reason, so the caller's

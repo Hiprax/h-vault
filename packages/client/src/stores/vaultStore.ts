@@ -9,6 +9,7 @@
 import { create } from 'zustand';
 import { cryptoService } from '../services/crypto/cryptoService.js';
 import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
+import { decryptVaultField } from '../services/crypto/vaultField.js';
 import { offlineCache, offlineCacheErrorType } from '../services/offlineCache.js';
 import { clearScoreCache } from '../services/health/strengthCache.js';
 import { logger } from '../lib/logger.js';
@@ -587,17 +588,18 @@ async function decryptItem(
     throw new Error(`Invalid vault item response for item ${raw._id}`);
   }
 
-  const name = await cryptoService.decryptData(
-    raw.encryptedName,
-    raw.nameIv,
-    raw.nameTag,
+  // Each field is opened against the row it was served as, so a format-v2 field
+  // the server moved from another row, another slot or another item type is
+  // refused here (see `vaultField.ts`). A v1 field opens exactly as before.
+  const name = await decryptVaultField(
+    { encrypted: raw.encryptedName, iv: raw.nameIv, tag: raw.nameTag },
+    { role: 'item.name', rowId: raw._id },
     vaultKey,
   );
 
-  const dataJson = await cryptoService.decryptData(
-    raw.encryptedData,
-    raw.dataIv,
-    raw.dataTag,
+  const dataJson = await decryptVaultField(
+    { encrypted: raw.encryptedData, iv: raw.dataIv, tag: raw.dataTag },
+    { role: 'item.data', rowId: raw._id, itemType: raw.itemType },
     vaultKey,
   );
 
@@ -641,10 +643,9 @@ async function decryptFolder(raw: IFolderResponse, vaultKey: CryptoKey): Promise
     throw new Error(`Invalid folder response for folder ${raw._id}`);
   }
 
-  const name = await cryptoService.decryptData(
-    raw.encryptedName,
-    raw.nameIv,
-    raw.nameTag,
+  const name = await decryptVaultField(
+    { encrypted: raw.encryptedName, iv: raw.nameIv, tag: raw.nameTag },
+    { role: 'folder.name', rowId: raw._id },
     vaultKey,
   );
 

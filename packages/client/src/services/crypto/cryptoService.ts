@@ -339,12 +339,50 @@ export class CryptoService {
    * Decrypt an AES-256-GCM encrypted string back to UTF-8 plaintext.
    *
    * The vault key CryptoKey is used directly — no per-call import needed.
+   *
+   * This is the format-v1 primitive: it authenticates the bytes and nothing
+   * about where they were stored. A vault ROW's field is opened through
+   * `decryptVaultField` (`vaultField.ts`), which routes an unmarked field here
+   * unchanged and a bound one to {@link decryptDataWithAad}.
    */
   async decryptData(
     encrypted: string,
     iv: string,
     tag: string,
     vaultKey: CryptoKey,
+  ): Promise<string> {
+    return this.openAesGcm(encrypted, iv, tag, vaultKey, undefined);
+  }
+
+  /**
+   * {@link decryptData} with AES-GCM additional data, which must equal the bytes
+   * the field was sealed with or the tag check fails.
+   *
+   * Takes the additional data ready-made rather than building it, so that the
+   * binding's byte layout has ONE definition (`vaultFieldAad`) and this stays a
+   * primitive that knows nothing about rows.
+   */
+  async decryptDataWithAad(
+    encrypted: string,
+    iv: string,
+    tag: string,
+    vaultKey: CryptoKey,
+    additionalData: Uint8Array<ArrayBuffer>,
+  ): Promise<string> {
+    return this.openAesGcm(encrypted, iv, tag, vaultKey, additionalData);
+  }
+
+  /**
+   * The one AES-GCM open both decrypts share. With `additionalData` undefined the
+   * parameter object carries no `additionalData` key at all, which is exactly the
+   * call format v1 has always made.
+   */
+  private async openAesGcm(
+    encrypted: string,
+    iv: string,
+    tag: string,
+    vaultKey: CryptoKey,
+    additionalData: Uint8Array<ArrayBuffer> | undefined,
   ): Promise<string> {
     const ciphertext = new Uint8Array(this.base64ToArrayBuffer(encrypted));
     const ivBytes = new Uint8Array(this.base64ToArrayBuffer(iv));
@@ -356,7 +394,12 @@ export class CryptoService {
     combined.set(tagBytes, ciphertext.length);
 
     const decrypted = await this.subtle.decrypt(
-      { name: 'AES-GCM', iv: ivBytes, tagLength: TAG_BYTES * 8 },
+      {
+        name: 'AES-GCM',
+        iv: ivBytes,
+        tagLength: TAG_BYTES * 8,
+        ...(additionalData === undefined ? {} : { additionalData }),
+      },
       vaultKey,
       combined.buffer,
     );

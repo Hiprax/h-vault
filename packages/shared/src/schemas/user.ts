@@ -12,6 +12,7 @@ import {
   MAX_TAGS_PER_ITEM,
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_ENCRYPTED_DATA_LENGTH,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   PASSWORD_HISTORY_MAX,
   ITEM_TYPES,
   HIBP_BATCH_MAX_PREFIXES,
@@ -332,10 +333,11 @@ export const exportSchema = z.object({
  * (not just by the model validators, which fire only under `runValidators`)
  * because `assertImportFieldLengths` walks only top-level string fields and would
  * not catch an oversized nested history array. The per-entry caps mirror
- * `models/VaultItem.ts` (`encryptedPassword` maxlength 5_000, iv 24, tag 32).
+ * `models/VaultItem.ts` (`encryptedPassword` maxlength
+ * `MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH`, iv 24, tag 32).
  */
 export const importPasswordHistoryEntrySchema = z.object({
-  encryptedPassword: z.string().min(1).max(5_000),
+  encryptedPassword: z.string().min(1).max(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH),
   iv: z.string().min(1).max(24),
   tag: z.string().min(1).max(32),
   // Accept both UTC (Z) and timezone offsets (+05:00), matching vault.ts.

@@ -266,9 +266,16 @@ security posture, not a disclaimer.
   the wrong place. Neither reveals anything the server did not already hold; both make the
   vault say something untrue. This is exactly the property claimed for **documents** above,
   where the document's id is inside every key derivation and a segment's position is inside
-  its nonce — vault items do not have it yet. Binding each item's ciphertext to its own id
-  and field is planned; until it ships, treat an item that changed without you changing it
-  as something to check against a backup rather than something to trust.
+  its nonce; vault items do not have it yet. This release can already READ an entry sealed
+  to its own row and field (and an item's contents to its type), but nothing writes one yet, so every entry you have is
+  still in the unbound form. Two limits will remain once entries are written that way, and
+  they are stated now so the binding is not taken for more than it is. It refuses an entry
+  moved to another row or field; it does not refuse a superseded copy of the same field put
+  back on the same row, because every version of that field is bound to the same place.
+  And an unbound entry keeps opening wherever it is placed for as long as unbound entries
+  are read at all, including copies a server kept from before an entry was rewritten.
+  Either way, treat an item that changed without you changing it as something to check
+  against a backup rather than something to trust.
 - **A weak master password.** It is the root of the entire key hierarchy. PBKDF2 at
   600,000 iterations raises the cost of an offline attack against a stolen auth hash; it
   does not rescue a guessable password.

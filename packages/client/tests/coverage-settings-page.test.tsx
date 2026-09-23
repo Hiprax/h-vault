@@ -117,6 +117,7 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     importVaultKey: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
+    decryptDataWithAad: vi.fn(),
     generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn(),
@@ -1520,6 +1521,83 @@ describe('SettingsPage — error paths and branches', () => {
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Vault key rotated successfully', type: 'success' }),
     );
+  });
+
+  it('opens a format-v2 row against its own row and field, and rotates it like any other', async () => {
+    // The rotation re-encrypts every row; a bound row it could not open would
+    // fail every candidate key and be passed through under the key the commit
+    // retires, which is a row lost for good. So it must be opened exactly as the
+    // store opens it: under its own id, its own field, and for the data its type.
+    const id = '66c0f1a2b3c4d5e6f7a8b9c0';
+    const folderId = '66c0f1a2b3c4d5e6f7a8b9c1';
+    const bound = {
+      _id: id,
+      itemType: 'login',
+      encryptedName: 'b-name',
+      nameIv: 'v2:b-nameIv',
+      nameTag: 'b-nameTag',
+      encryptedData: 'b-data',
+      dataIv: 'v2:b-dataIv',
+      dataTag: 'b-dataTag',
+      passwordHistory: [
+        {
+          encryptedPassword: 'b-pw',
+          iv: 'v2:b-pwIv',
+          tag: 'b-pwTag',
+          changedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+    mockListItems.mockResolvedValueOnce({
+      data: { success: true, data: [bound], pagination: { totalPages: 1 } },
+    });
+    mockListTrash.mockResolvedValue({
+      data: { success: true, data: [], pagination: { totalPages: 1 } },
+    });
+    mockListFolders.mockResolvedValue({
+      data: {
+        success: true,
+        data: [{ _id: folderId, encryptedName: 'bf-name', nameIv: 'v2:bf-iv', nameTag: 'bf-tag' }],
+      },
+    });
+    cs.decryptDataWithAad.mockImplementation((enc: string) => Promise.resolve(`plain:${enc}`));
+
+    await renderSettings();
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    const payload = mockBulkReEncrypt.mock.calls[0]![0] as {
+      items: Record<string, unknown>[];
+      folders: Record<string, unknown>[];
+    };
+    // Rotated, not passed through: every field is the NEW key's ciphertext.
+    expect(payload.items).toEqual([
+      expect.objectContaining({
+        id,
+        encryptedName: 'enc:plain:b-name',
+        encryptedData: 'enc:plain:b-data',
+        passwordHistory: [expect.objectContaining({ encryptedPassword: 'enc:plain:b-pw' })],
+      }),
+    ]);
+    expect(payload.folders).toEqual([
+      expect.objectContaining({ id: folderId, encryptedName: 'enc:plain:bf-name' }),
+    ]);
+
+    // Each field was opened with ITS binding, the marker stripped from its IV.
+    const opened = cs.decryptDataWithAad.mock.calls.map((call: unknown[]) => {
+      const [enc, iv, , key, aad] = call as [string, string, string, CryptoKey, Uint8Array];
+      return [enc, iv, key, new TextDecoder().decode(aad)];
+    });
+    expect(opened).toEqual([
+      ['b-name', 'b-nameIv', OLD_VAULT_KEY, `hvault/vault-field/v2|item.name|${id}`],
+      ['b-data', 'b-dataIv', OLD_VAULT_KEY, `hvault/vault-field/v2|item.data|login|${id}`],
+      ['b-pw', 'b-pwIv', OLD_VAULT_KEY, `hvault/vault-field/v2|item.password-history|${id}`],
+      ['bf-name', 'bf-iv', OLD_VAULT_KEY, `hvault/vault-field/v2|folder.name|${folderId}`],
+    ]);
+    // And never down the unbound path, which cannot open them.
+    expect(cs.decryptData).not.toHaveBeenCalled();
   });
 
   it('skips and reports an item that will not decrypt, and rotates every other row', async () => {

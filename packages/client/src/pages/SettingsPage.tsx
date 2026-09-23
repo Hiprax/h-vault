@@ -66,6 +66,7 @@ import {
   ITEM_TYPES,
   MAX_IMPORT_FILE_SIZE_BYTES,
   MAX_ITEMS_PER_USER,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   MAX_TAG_LENGTH,
   MAX_TAGS_PER_ITEM,
   PASSWORD_HISTORY_MAX,
@@ -102,6 +103,7 @@ import { clearSettingsCache } from '../hooks/useUserSettings';
 import { copySecretToClipboard } from '../services/clipboard/clipboardService';
 import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
 import { passwordDidChange } from '../services/crypto/passwordHistory';
+import { decryptVaultField, isBoundField } from '../services/crypto/vaultField';
 import { parseCsv } from '../services/import/csv';
 import {
   IMPORT_FORMATS,
@@ -154,8 +156,6 @@ function parseCSV(text: string): { headers: string[]; rows: string[][] } {
 // ---------------------------------------------------------------------------
 
 const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
-/** Mirrors the `encryptedPassword` maxlength on the VaultItem model. */
-const MAX_HISTORY_PASSWORD_LENGTH = 5_000;
 
 interface NativeExtraction {
   /** Rows that decrypted cleanly, ready for conflict resolution. */
@@ -237,7 +237,7 @@ function sanitizeNativePasswordHistory(value: unknown): IPasswordHistoryEntry[] 
     if (
       typeof encryptedPassword !== 'string' ||
       encryptedPassword.length === 0 ||
-      encryptedPassword.length > MAX_HISTORY_PASSWORD_LENGTH ||
+      encryptedPassword.length > MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH ||
       typeof iv !== 'string' ||
       iv.length === 0 ||
       iv.length > 24 ||
@@ -262,6 +262,72 @@ function sanitizeNativePasswordHistory(value: unknown): IPasswordHistoryEntry[] 
 }
 
 /**
+ * The row's ciphertext as it may be RE-SENT: verbatim when it is format v1, and
+ * re-sealed as v1 from the plaintext just opened when any of it is format v2.
+ *
+ * A re-import sends its rows as INSERTS, and the server gives every insert a
+ * fresh id. A v2 field is bound to the id it was exported from, so sent verbatim
+ * it would be stored under an id it can never open under again: a row that
+ * imports cleanly and is unreadable for good. This release writes v1 everywhere,
+ * so the re-seal is v1 as well, of exactly the plaintext the vault stored.
+ */
+async function unbindNativeCiphertext(
+  cipher: NativeCiphertext,
+  name: string,
+  dataJson: string,
+  vaultKey: CryptoKey,
+): Promise<NativeCiphertext> {
+  if (!isBoundField(cipher.nameIv) && !isBoundField(cipher.dataIv)) return cipher;
+  const sealedName = await cryptoService.encryptData(name, vaultKey);
+  const sealedData = await cryptoService.encryptData(dataJson, vaultKey);
+  return {
+    encryptedName: sealedName.encrypted,
+    nameIv: sealedName.iv,
+    nameTag: sealedName.tag,
+    encryptedData: sealedData.encrypted,
+    dataIv: sealedData.iv,
+    dataTag: sealedData.tag,
+  };
+}
+
+/**
+ * The same rule for the retained previous passwords: a v1 entry is carried
+ * verbatim, a v2 entry is opened against its exported row and re-sealed as v1,
+ * and one that will not open is dropped like any other unusable ENTRY, never
+ * failing the row that still carries a good current password.
+ */
+async function unbindNativePasswordHistory(
+  entries: IPasswordHistoryEntry[],
+  rowId: string,
+  vaultKey: CryptoKey,
+): Promise<IPasswordHistoryEntry[]> {
+  const carried: IPasswordHistoryEntry[] = [];
+  for (const entry of entries) {
+    if (!isBoundField(entry.iv)) {
+      carried.push(entry);
+      continue;
+    }
+    try {
+      const password = await decryptVaultField(
+        { encrypted: entry.encryptedPassword, iv: entry.iv, tag: entry.tag },
+        { role: 'item.password-history', rowId },
+        vaultKey,
+      );
+      const sealed = await cryptoService.encryptData(password, vaultKey);
+      carried.push({
+        encryptedPassword: sealed.encrypted,
+        iv: sealed.iv,
+        tag: sealed.tag,
+        changedAt: entry.changedAt,
+      });
+    } catch {
+      continue;
+    }
+  }
+  return carried;
+}
+
+/**
  * Unwrap a native H-Vault export into rows the resolver can work with.
  *
  * These rows are ALREADY encrypted under the current vault key, so they take the
@@ -269,6 +335,8 @@ function sanitizeNativePasswordHistory(value: unknown): IPasswordHistoryEntry[] 
  * validated when it was first stored (no clamping, no re-validation), and the
  * ciphertext this decrypts is what gets re-sent — the decryption here exists
  * only to prove readability and to give the resolver an identity to match on.
+ * The one exception is a format-v2 field, which is bound to the row it was
+ * exported from and is re-sealed as v1 instead (see `unbindNativeCiphertext`).
  * A row that cannot be decrypted is counted and dropped, as before.
  */
 async function extractNativeItems(raw: string, vaultKey: CryptoKey): Promise<NativeExtraction> {
@@ -308,19 +376,20 @@ async function extractNativeItems(raw: string, vaultKey: CryptoKey): Promise<Nat
       continue;
     }
 
+    // The row's OWN recorded id: a bound field was sealed to the row it was
+    // exported from. A missing id costs nothing for a v1 row, which never reads it.
+    const rowId = typeof row._id === 'string' ? row._id : '';
     let dataJson: string;
     let name: string;
     try {
-      dataJson = await cryptoService.decryptData(
-        cipher.encryptedData,
-        cipher.dataIv,
-        cipher.dataTag,
+      dataJson = await decryptVaultField(
+        { encrypted: cipher.encryptedData, iv: cipher.dataIv, tag: cipher.dataTag },
+        { role: 'item.data', rowId, itemType: itemType as ItemType },
         vaultKey,
       );
-      name = await cryptoService.decryptData(
-        cipher.encryptedName,
-        cipher.nameIv,
-        cipher.nameTag,
+      name = await decryptVaultField(
+        { encrypted: cipher.encryptedName, iv: cipher.nameIv, tag: cipher.nameTag },
+        { role: 'item.name', rowId },
         vaultKey,
       );
     } catch {
@@ -329,14 +398,18 @@ async function extractNativeItems(raw: string, vaultKey: CryptoKey): Promise<Nat
     }
 
     const folderId = row.folderId;
-    const passwordHistory = sanitizeNativePasswordHistory(row.passwordHistory);
+    const passwordHistory = await unbindNativePasswordHistory(
+      sanitizeNativePasswordHistory(row.passwordHistory),
+      rowId,
+      vaultKey,
+    );
     items.push({
       itemType: itemType as ItemType,
       name,
       data: parseNativeData(dataJson),
       tags: sanitizeNativeTags(row.tags),
       favorite: row.favorite === true,
-      cipher,
+      cipher: await unbindNativeCiphertext(cipher, name, dataJson, vaultKey),
       // A folder id from another account is stripped server-side; a malformed
       // one would fail the whole batch's schema, so it never leaves here.
       ...(typeof folderId === 'string' && OBJECT_ID_RE.test(folderId) ? { folderId } : {}),
@@ -448,25 +521,26 @@ async function decryptItemUnderAnyKey(
 ): Promise<ItemPlaintext | null> {
   for (const key of keys) {
     try {
-      const name = await cryptoService.decryptData(
-        item.encryptedName,
-        item.nameIv,
-        item.nameTag,
+      // Opened against the row the rotation is about to rewrite, exactly as the
+      // store reads it, so a format-v2 field is carried across under its own
+      // binding rather than failing every candidate and being passed through
+      // under a key the commit retires.
+      const name = await decryptVaultField(
+        { encrypted: item.encryptedName, iv: item.nameIv, tag: item.nameTag },
+        { role: 'item.name', rowId: item._id },
         key,
       );
-      const data = await cryptoService.decryptData(
-        item.encryptedData,
-        item.dataIv,
-        item.dataTag,
+      const data = await decryptVaultField(
+        { encrypted: item.encryptedData, iv: item.dataIv, tag: item.dataTag },
+        { role: 'item.data', rowId: item._id, itemType: item.itemType },
         key,
       );
       const history: ItemPlaintext['history'] = [];
       for (const entry of item.passwordHistory ?? []) {
         history.push({
-          password: await cryptoService.decryptData(
-            entry.encryptedPassword,
-            entry.iv,
-            entry.tag,
+          password: await decryptVaultField(
+            { encrypted: entry.encryptedPassword, iv: entry.iv, tag: entry.tag },
+            { role: 'item.password-history', rowId: item._id },
             key,
           ),
           changedAt: entry.changedAt,
@@ -490,10 +564,9 @@ async function decryptFolderNameUnderAnyKey(
 ): Promise<string | null> {
   for (const key of keys) {
     try {
-      return await cryptoService.decryptData(
-        folder.encryptedName,
-        folder.nameIv,
-        folder.nameTag,
+      return await decryptVaultField(
+        { encrypted: folder.encryptedName, iv: folder.nameIv, tag: folder.nameTag },
+        { role: 'folder.name', rowId: folder._id },
         key,
       );
     } catch {

@@ -161,6 +161,13 @@ export const MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH = 20_000;
 export const MAX_LOGIN_USERNAME_LENGTH = 500;
 export const MAX_LOGIN_PASSWORD_LENGTH = 10_000;
 export const MAX_LOGIN_TOTP_LENGTH = 500;
+// The stored ciphertext of ONE retained previous password: the base64 length of
+// the largest password a login can hold, at the worst case of three UTF-8 bytes
+// per UTF-16 code unit (AES-GCM ciphertext is as long as its plaintext; the tag
+// is stored apart). Derived, never restated, so a raised password bound raises
+// this with it: a history cap below it refuses the password change itself.
+export const MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH =
+  4 * Math.ceil((MAX_LOGIN_PASSWORD_LENGTH * 3) / 3);
 // Measured POST-transform, on the value that is actually STORED: `uriEntrySchema`
 // prepends a scheme to a bare domain and only then applies this bound, through the
 // exported `isValidUriLength` that `VaultItemForm` calls too. It used to be measured
@@ -668,6 +675,36 @@ export const PRETTIER_VERSION = '3.9.8';
 export const DOCUMENT_STREAM_INFO_PREFIX = 'hvault/doc/stream/v1|';
 export const DOCUMENT_META_INFO_PREFIX = 'hvault/doc/meta/v1|';
 export const DOCUMENT_DEK_WRAP_INFO_PREFIX = 'hvault/doc/dek-wrap/v1|';
+
+// Vault-field ciphertext format v2: an item's name, its data, each of its
+// password-history entries and a folder's name, sealed under the vault key with
+// AES-GCM additional data that names WHICH row and WHICH field the bytes belong
+// to. Format v1 (every field written before v2 existed) carries no additional
+// data, so a v1 triple opens wherever a server chooses to place it.
+//
+// The additional data is `VAULT_FIELD_AAD_PREFIX + role + '|' + rowId`, and for
+// `item.data` only, `VAULT_FIELD_AAD_PREFIX + 'item.data|' + itemType + '|' +
+// rowId`. The role and the item type come from closed lists without a `|`, and
+// the row id is 24 hex characters, so no two bindings concatenate to the same
+// bytes. The item type is bound into the data and nowhere else because it
+// decides which schema the data is read under, and it is immutable after create.
+//
+// The marker prefixes the stored IV STRING, never the ciphertext. `:` is outside
+// the base64 alphabet, so no v1 IV can start with it; and the IV is the one
+// field with room for it: every IV bound is 24 characters against a 16-character
+// value, while the ciphertext bounds are exact and v1 rows already sit on them.
+//
+// FORMAT constants: changing one makes every v2 field already stored
+// undecryptable, which is why a committed known-answer vector pins them.
+export const VAULT_FIELD_AAD_PREFIX = 'hvault/vault-field/v2|';
+export const VAULT_FIELD_V2_IV_MARKER = 'v2:';
+export const VAULT_FIELD_ROLES = [
+  'item.name',
+  'item.data',
+  'item.password-history',
+  'folder.name',
+] as const;
+export type VaultFieldRole = (typeof VAULT_FIELD_ROLES)[number];
 
 // ---------------------------------------------------------------------------
 // DOCUMENT PREVIEW

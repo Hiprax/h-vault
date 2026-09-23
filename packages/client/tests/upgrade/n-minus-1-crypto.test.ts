@@ -27,13 +27,16 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ItemType } from '@hvault/shared';
 import { cryptoService } from '../../src/services/crypto/cryptoService';
+import { decryptVaultField } from '../../src/services/crypto/vaultField';
 
 /** Anchored on this module's own URL, never `process.cwd()`. */
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 interface FixtureItem {
   id: string;
+  itemType: ItemType;
   name: string;
   plaintext: string;
   encryptedName: string;
@@ -148,6 +151,34 @@ describe("the current client opens the previous release's vault", () => {
       // `generateSearchHash`: every stored hash would be orphaned, and the only
       // symptom would be duplicate detection quietly ceasing to detect.
       expect(await cryptoService.generateSearchHash(item.name, vaultKey)).toBe(item.searchHash);
+    },
+    60_000,
+  );
+
+  it.each(items.map((item) => [item.id, item] as const))(
+    'opens %s through the dual-read path the vault reads every row with',
+    async (id, item) => {
+      // `decryptItem` no longer calls `decryptData`: every row field goes through
+      // `decryptVaultField`, which must route a 0.7.0 field (no marker, no
+      // additional data) down the unchanged v1 path. The fixture's ids are labels,
+      // not ObjectIds, so no v2 binding could even be built from them: a reader
+      // that consulted the binding for an unmarked field would refuse all of
+      // these, which is exactly the regression this case exists to catch.
+      expect(item.dataIv.startsWith('v2:')).toBe(false);
+      expect(
+        await decryptVaultField(
+          { encrypted: item.encryptedData, iv: item.dataIv, tag: item.dataTag },
+          { role: 'item.data', rowId: id, itemType: item.itemType },
+          vaultKey,
+        ),
+      ).toBe(item.plaintext);
+      expect(
+        await decryptVaultField(
+          { encrypted: item.encryptedName, iv: item.nameIv, tag: item.nameTag },
+          { role: 'item.name', rowId: id },
+          vaultKey,
+        ),
+      ).toBe(item.name);
     },
     60_000,
   );
