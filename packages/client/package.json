@@ -17,7 +17,7 @@
     "type-check": "tsc --noEmit --incremental --tsBuildInfoFile ../../.cache/tsbuildinfo/client.src.tsbuildinfo && tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@hiprax/crypto": "^1.5.0",
+    "@hiprax/crypto": "^1.9.0",
     "@hookform/resolvers": "^5.9.1",
     "axios": "^1.20.0",
     "class-variance-authority": "^0.7.1",

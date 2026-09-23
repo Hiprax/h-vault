@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { CryptoError, CryptoErrorType } from '@hiprax/crypto';
+import { CryptoError, CryptoErrorType, CryptoManager } from '@hiprax/crypto';
 
 const { mockToast, mockDecryptFile, mockGetMaxBytes } = vi.hoisted(() => ({
   mockToast: vi.fn(),
@@ -201,6 +201,55 @@ describe('FileDecryptPanel', () => {
           }),
         );
       });
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('names a foreign container whose KDF cost exceeds the browser budget, end to end', async () => {
+    // Real bytes through the REAL decryptFile: sealed at t=11, one pass over the
+    // default browser manager's `maxTimeCost`, so the refusal is the library's
+    // pre-derivation budget check and the sentence is the one the user sees.
+    const actual = await vi.importActual<
+      typeof import('../../src/services/crypto/fileCryptoService')
+    >('../../src/services/crypto/fileCryptoService');
+    mockDecryptFile.mockImplementation(actual.decryptFile);
+    const password = 'Correct-Horse-Battery-Staple-9!';
+    const container = await new CryptoManager({ memoryCost: 8192, timeCost: 11 }).encryptContainer(
+      new Uint8Array([1, 2, 3]),
+      password,
+      { filename: 'foreign.txt' },
+    );
+    const createObjectURL = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    try {
+      render(<FileDecryptPanel />);
+      fireEvent.change(screen.getByLabelText('Encrypted file'), {
+        target: {
+          files: [new File([container as Uint8Array<ArrayBuffer>], 'foreign.txt.enc')],
+        },
+      });
+      typePassword(password);
+      fireEvent.click(screen.getByRole('button', { name: /decrypt & download/i }));
+
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'error',
+            title:
+              'This file was encrypted with key-derivation settings this browser will not run, so it cannot be opened here. Files encrypted with H-Vault are not affected.',
+          }),
+        );
+      });
+      expect(mockToast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Something went wrong. Please try again.' }),
+      );
+      // Nothing was produced: no download was offered.
+      expect(createObjectURL).not.toHaveBeenCalled();
+      expect(clickSpy).not.toHaveBeenCalled();
     } finally {
       vi.restoreAllMocks();
       vi.unstubAllGlobals();

@@ -32,6 +32,13 @@ npm run dev                                   # http://localhost:5173
 `packages/shared` is a build-time dependency of both other packages. If the server or
 client fails to resolve `@hvault/shared`, you skipped `npm run build:shared`.
 
+Dependency install scripts have a recorded review policy: the root `package.json` `allowScripts`
+field approves each one pinned to the version that was reviewed, and denies the rest. When a
+dependency bump moves one of the approved packages to a new version, `npm install` names it as
+not yet covered; read what its script does, then record the decision with
+`npm approve-scripts <pkg>` or `npm deny-scripts <pkg>` rather than editing the field by hand.
+`npm approve-scripts --allow-scripts-pending` lists anything still outstanding.
+
 The dev stack also brings up the object storage the document store writes to, on
 `127.0.0.1:3900` with fixed development credentials. A host-run `npm run dev` does not pick
 those up on its own — the document store stays off until you add them to `.env`, which is

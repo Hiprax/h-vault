@@ -824,6 +824,55 @@ moment of use and not kept. Auto-lock is deliberately not suspended while the pa
 long import can be interrupted by the lock, and the page says so rather than holding the vault
 open for convenience.
 
+### The file encryption tool
+
+The file encryption tool turns any file and a password into a self-contained `.enc` file, and
+back, entirely in your browser: neither the file nor the password is sent anywhere, and neither
+touches your vault key. It works signed in or signed out, and a file it produces opens with the
+same password on any machine.
+
+**What an encrypted file controls before its password is checked.** An `.enc` file records the
+key-derivation settings that sealed it (how much memory and how many passes the password
+stretching used), and those bytes have to be read before the password can be tried, so at that
+moment nothing has authenticated them. Until the cryptography library this project uses added a
+bound, a crafted file of a few hundred bytes could demand far more memory-hard work than any
+legitimate file needs, enough to freeze a browser tab for a very long time, and the only way to
+find out was to start. The server's stored two-factor secrets record their iteration count the
+same way; the server only ever reads rows it wrote itself, so its bound is defence in depth
+against a tampered database rather than a path an outsider can feed.
+
+**Both of H-Vault's decryption paths are now bounded before any key derivation starts.** The
+file tool and the server's encrypted two-factor secrets each check the recorded settings against
+a fixed budget first, and refuse anything above it without deriving a key. The browser budget is
+deliberately tighter than the server's, because in the browser the memory-hard derivation runs on
+the page's own thread: a file over budget would not merely be slow, it would freeze the tab until
+the derivation finished. A named refusal is the better outcome, so a foreign `.enc` sealed above
+the browser budget is refused with a message saying so, rather than a "try again" that can never
+succeed. H-Vault's own settings sit comfortably inside both budgets, and every budget widens to
+cover whatever the reading side itself would use to write, so **no file this tool has produced,
+and no two-factor secret this server has stored, is affected**. Files made elsewhere with
+unusually heavy settings are the only ones refused; a file sealed with the library's default Node
+profile still opens.
+
+The budgets are the library's defaults and H-Vault does not configure them in either direction.
+Widening one would trade the refusal for a frozen tab. Narrowing one toward H-Vault's own cost
+would refuse files that other runtimes legitimately produce, which would break exactly the
+cross-machine use the tool exists for.
+
+**A minimum must never be configured on the server's two-factor decryption.** The library also
+supports a floor, refusing ciphertext sealed more cheaply than a set cost (on this path the
+iteration floor is the one that binds; the memory-work floor is excluded as well, so that the
+rule stays one rule), and from its 1.9.0
+release that floor applies to ciphertext with no recorded settings as well. Two-factor secrets
+stored by releases before the header format existed have no recorded settings and decrypt at a
+fixed fallback cost, so a floor above that cost makes every one of them unreadable and locks the
+accounts that hold them out of two-factor sign-in, and a floor above the lower count current releases
+write does the same to every secret stored at that count. Raising the fallback cost to meet the floor
+does not help: it changes the derived key, so the old secrets then fail their authentication tag
+instead. Nothing in the running code prevents a floor from being added; the project's tests pin
+both floors at zero next to a genuine pre-header ciphertext, and this paragraph exists so the
+reason is not rediscovered the hard way.
+
 ### Your password generator settings are stored in the clear
 
 The length, character types and minimum counts the generator uses are saved on your account as
@@ -941,6 +990,14 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   loopback-bound port; the database has no published port and no route to the internet.
 - Secrets are validated at boot: the app refuses to start in production with a
   placeholder secret, a non-HTTPS origin, or a partial mail configuration.
+- Dependency install scripts are reviewed rather than trusted by default: the root
+  `package.json` `allowScripts` list approves the two the tooling needs, each pinned to the
+  reviewed version, and denies the rest, including an install-telemetry script, which
+  `scarfSettings` also opts out of. Be precise about its strength: current npm releases treat
+  the list as advisory, still running every install script, denied ones included, and only
+  reporting the ones it does not cover; a later npm release enforces it. That is why the
+  telemetry opt-out is set separately. The production images install with scripts disabled
+  either way.
 
 ## Hardening your own deployment
 

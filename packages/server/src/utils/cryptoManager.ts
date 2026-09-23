@@ -26,12 +26,15 @@ import { CryptoManager } from '@hiprax/crypto';
  * asserts the KDF id it expects, and under the default `legacyMode: 'auto'` the
  * resulting mismatch is swallowed by the v0 retry and surfaces as a generic
  * `DECRYPTION_FAILED`, so every stored 2FA secret would become unreadable with
- * an error that looks like a wrong key. And do not pair this with a
- * `decryptKdfLimits` minimum (`minPbkdf2Iterations`/`minWork`) once the library
- * offers one (it does not in 1.5.0): a floor above this count refuses every
- * secret written with it, and from 1.9.0 a floor also binds headerless v0 input,
- * which decrypts at 100,000, so a floor above that locks out every account still
- * holding a v0 secret.
+ * an error that looks like a wrong key. And never configure a
+ * `decryptKdfLimits` minimum on this manager. `minPbkdf2Iterations` is the one
+ * that binds this PBKDF2 path (`minWork` is Argon2id-only and inert here today,
+ * and is banned anyway so the rule stays one rule): above this count it refuses
+ * every secret written with it, and since 1.9.0 it also binds headerless v0
+ * input, which decrypts at `legacyPbkdf2Iterations` (100,000), so a floor above
+ * that locks out every account still holding a v0 secret. Raising `legacyPbkdf2Iterations` to meet
+ * the floor does not rescue them: it changes the derived key, and the v0 row
+ * then fails its tag instead. `crypto-manager.test.ts` pins both floors at 0.
  */
 export const TWO_FACTOR_SECRET_PBKDF2_ITERATIONS = 10_000;
 

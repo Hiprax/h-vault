@@ -41,7 +41,13 @@ export const CHUNK_BUDGETS_KB = {
   'passwordStrength.worker': 850,
   /** React and the router. Measured at ~218 KiB. */
   'vendor-react': 280,
-  /** The `@hiprax/crypto` browser build's ESM entry. Measured at ~210 KiB. */
+  /**
+   * hash-wasm's `dist/index.esm.js`, the Argon2id/BLAKE2b engine the file tool
+   * loads lazily. Measured at ~210 KiB. NOT the `@hiprax/crypto` browser build,
+   * which is ~1.7 KiB of entry and lands in `fileCryptoService` (no entry here, so
+   * the default budget applies): the container-format code is found in that chunk,
+   * and only hash-wasm's markers in this one.
+   */
   'index.esm': 280,
   /** The item form, the largest single component. Measured at ~171 KiB. */
   VaultItemForm: 230,

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
-import { CryptoManager, CryptoError } from '@hiprax/crypto';
+import { CryptoManager, CryptoError, CryptoErrorType } from '@hiprax/crypto';
 import { argon2id, sha256 } from 'hash-wasm';
 import {
   encryptFile,
@@ -61,6 +61,25 @@ describe('fileCryptoService — browser build resolution', () => {
     expect(manager.getParameters().argon2Options.memoryCost).toBe(2 ** 15);
     // The Node build would report 2 ** 17 (128 MiB) here.
     expect(manager.getParameters().argon2Options.memoryCost).not.toBe(2 ** 17);
+  });
+
+  it('configures no decrypt KDF floor on the default browser manager', async () => {
+    // The file tool builds its manager exactly like this (no options). A floor
+    // would refuse foreign containers sealed CHEAPER than it, which is not a
+    // decision this module makes; the ceilings alone bound what a file can cost.
+    expect(new CryptoManager().getDecryptKdfLimits()).toMatchObject({
+      minWork: 0,
+      minPbkdf2Iterations: 0,
+    });
+    // And through the module's OWN manager (no managerOptions): a container sealed
+    // at a quarter of this tool's cost still opens, so no floor slipped in there.
+    const bytes = randomBytes(32);
+    const cheap = await new CryptoManager(FAST_OPTS.managerOptions).encryptContainer(
+      bytes,
+      PASSWORD,
+    );
+    const { blob } = await decryptFile(fileOf(cheap, 'cheap.bin.enc'), PASSWORD);
+    expect(await bytesOf(blob)).toEqual(bytes);
   });
 
   it('exposes the Node-only file method as a throwing browser stub', () => {
@@ -453,5 +472,87 @@ describe('fileCryptoService — negative paths', () => {
     expect(describeFileCryptoError(new CryptoError('x', undefined, 'SOME_NEW_CODE')).kind).toBe(
       'unknown',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-authentication KDF budget — a foreign container that costs too much
+// ---------------------------------------------------------------------------
+
+const KDF_REFUSED_MESSAGE =
+  'This file was encrypted with key-derivation settings this browser will not run, so it cannot be opened here. Files encrypted with H-Vault are not affected.';
+
+describe('fileCryptoService — KDF cost refusals', () => {
+  // `timeCost` is the cheapest dimension to breach: at 8 MiB the default browser
+  // ceiling is `maxTimeCost: 10`, so t=10 is the last accepted pass count and
+  // t=11 the first refused one, while the total work stays far under `maxWork`.
+  async function foreignContainer(timeCost: number, bytes: Uint8Array): Promise<File> {
+    const sealer = new CryptoManager({ memoryCost: 8192, timeCost });
+    const container = await sealer.encryptContainer(bytes, PASSWORD, {
+      filename: 'foreign.bin',
+      mime: 'application/octet-stream',
+    });
+    return fileOf(container, 'foreign.bin.enc');
+  }
+
+  it('decrypts a foreign container at the pass-count ceiling with the default manager', async () => {
+    const bytes = randomBytes(64);
+    // No managerOptions: this is the production manager's budget.
+    const { blob, filename } = await decryptFile(await foreignContainer(10, bytes), PASSWORD);
+    expect(filename).toBe('foreign.bin');
+    expect(await bytesOf(blob)).toEqual(bytes);
+  });
+
+  it('refuses one pass over the ceiling with its own kind and sentence, never "unknown"', async () => {
+    const err = await decryptFile(await foreignContainer(11, randomBytes(64)), PASSWORD).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CryptoError);
+    expect((err as CryptoError).code).toBe('CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS');
+    const described = describeFileCryptoError(err);
+    expect(described).toEqual({ kind: 'kdf-cost-refused', message: KDF_REFUSED_MESSAGE });
+    // Neither the retry advice nor the file-size advice: both would be wrong.
+    expect(described.message).not.toBe(describeFileCryptoError(new Error('x')).message);
+    expect(described.message).not.toMatch(/too large/i);
+  });
+
+  // Every KDF-policy code a decrypt can raise shares `.type === INVALID_INPUT`
+  // with the not-a-file codes, so only `.code` can tell them apart.
+  const KDF_POLICY_CODES = [
+    'CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+    'CONTAINER_KDF_COST_BELOW_DECRYPT_MINIMUM',
+    'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM',
+    'KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+    'KDF_COST_BELOW_DECRYPT_MINIMUM',
+  ] as const;
+
+  for (const code of KDF_POLICY_CODES) {
+    it(`maps ${code} to kdf-cost-refused`, () => {
+      const err = new CryptoError('x', CryptoErrorType.INVALID_INPUT, code);
+      expect(describeFileCryptoError(err)).toEqual({
+        kind: 'kdf-cost-refused',
+        message: KDF_REFUSED_MESSAGE,
+      });
+    });
+  }
+
+  for (const code of ['CONTAINER_DATA_TOO_LARGE', 'DATA_TOO_LARGE_FOR_GCM'] as const) {
+    it(`maps ${code} to too-large, the same sentence the size guard shows`, () => {
+      const err = new CryptoError('x', CryptoErrorType.INVALID_INPUT, code);
+      expect(describeFileCryptoError(err)).toEqual(
+        describeFileCryptoError(new FileTooLargeError(2, 1)),
+      );
+      expect(describeFileCryptoError(err).kind).toBe('too-large');
+    });
+  }
+
+  it('leaves the construction-time limit codes as unknown (a caller bug, not a file problem)', () => {
+    // Raised only when a manager is BUILT with malformed `decryptKdfLimits`, which
+    // this module never passes. No sentence about the user's file would be true.
+    for (const code of ['DECRYPT_KDF_LIMIT_TOO_LARGE', 'INVALID_DECRYPT_KDF_LIMITS']) {
+      const err = new CryptoError('x', CryptoErrorType.INVALID_INPUT, code);
+      expect(describeFileCryptoError(err).kind).toBe('unknown');
+    }
   });
 });
