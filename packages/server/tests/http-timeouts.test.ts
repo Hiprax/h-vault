@@ -188,6 +188,17 @@ function dribblingPart(
 }
 
 /**
+ * The size of a part body as the route handed it over. The part parser yields a
+ * `Buffer` and nothing else; anything else here (a string, an array, a parsed
+ * object) means the chain under test is not the one production mounts, so it
+ * fails the test rather than being measured.
+ */
+function receivedBytes(body: unknown): number {
+  if (!Buffer.isBuffer(body)) throw new Error('the part body did not arrive as raw bytes');
+  return body.byteLength;
+}
+
+/**
  * The real part-upload chain — length guard, slot holder, body parser — mounted on
  * a bare Express app at a deadline short enough to observe.
  *
@@ -379,7 +390,7 @@ describe("the part route's own body deadline", () => {
     // the only thing that can end this request is the route's own.
     server = createTimedServer(
       partChainApp(300, (req, res) => {
-        reached.push((req.body as Buffer).length);
+        reached.push(receivedBytes(req.body));
         res.json({ ok: true });
       }),
     );
@@ -436,7 +447,7 @@ describe("the part route's own body deadline", () => {
     let finish: (() => void) | undefined;
     server = createTimedServer(
       partChainApp(200, (req, res) => {
-        finish = () => res.json({ bytes: (req.body as Buffer).length });
+        finish = () => res.json({ bytes: receivedBytes(req.body) });
       }),
     );
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

@@ -718,7 +718,13 @@ describe('AppLayout — the offline-cache warning', () => {
   }
 
   function setCause(
-    cause: 'quota_exceeded' | 'permission_denied' | 'unavailable' | 'unknown' | null,
+    cause:
+      | 'quota_exceeded'
+      | 'permission_denied'
+      | 'version_conflict'
+      | 'unavailable'
+      | 'unknown'
+      | null,
   ): void {
     act(() => {
       useUIStore.setState({ offlineCacheError: cause });
@@ -769,6 +775,28 @@ describe('AppLayout — the offline-cache warning', () => {
       'Offline access is unavailable: your browser is blocking offline storage. Allow site data for this site, or leave private browsing, then reload.',
     );
     expect(banner).not.toHaveTextContent(/storage is full/);
+  });
+
+  it('names the remedy when another tab is on a different version', () => {
+    // Raised when this tab's upgrade is held up by a tab on an older bundle, or
+    // when a newer bundle has already upgraded the database under this one. The
+    // remedy covers both sides: bring every tab onto one version.
+    setupLayout();
+    renderLayout();
+    setCause('version_conflict');
+
+    const region = screen.getByTestId('offline-cache-region');
+    const banner = screen.getByTestId('offline-cache-banner');
+    expect(region).toContainElement(banner);
+    expect(banner).toHaveTextContent(
+      'Offline access is unavailable: H-Vault is open in another tab or window on a different version. Reload or close your other H-Vault tabs and windows, then reload this one.',
+    );
+    // Neither of the other remedies, and not the "not working in this browser"
+    // that this condition used to be reported as.
+    expect(banner).not.toHaveTextContent(
+      /Free up browser storage|Allow site data|not working in this browser/,
+    );
+    expect(screen.getByLabelText('Dismiss offline storage warning')).toBeInTheDocument();
   });
 
   it.each(['unavailable', 'unknown'] as const)(

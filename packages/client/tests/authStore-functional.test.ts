@@ -166,7 +166,7 @@ import {
   lockApi,
   logoutApi,
 } from '../src/services/api/authApi.js';
-import { offlineCache } from '../src/services/offlineCache.js';
+import { offlineCache, OfflineCacheError } from '../src/services/offlineCache.js';
 import { clearCsrfToken } from '../src/services/api/client';
 import { clearSettingsCache } from '../src/hooks/useUserSettings';
 import {
@@ -1516,6 +1516,39 @@ describe('logout clears the encrypted Vault Health snapshot (lock does not)', ()
     expect(clearSettingsCache).toHaveBeenCalled();
     expect(clearCsrfToken).toHaveBeenCalled();
     expect(localStorage.getItem('__hv_logout_event')).not.toBeNull();
+  });
+
+  it('logout() still resets the offline cache scope when clearing the cache fails', async () => {
+    // A refused clear is a realistic outcome (another tab on a different version
+    // holding the database is refused as a `version_conflict`), and the reset
+    // used to sit in the same `try` as the clear: one refusal left the module
+    // pointing at the signed-out account's database for whatever ran next.
+    const refusal = new OfflineCacheError('held by another tab', 'version_conflict');
+    vi.mocked(offlineCache.clear).mockRejectedValueOnce(refusal);
+    useAuthStore.setState({
+      isAuthenticated: true,
+      isLocked: false,
+      user: { userId: 'user-123', email: 'user@example.com' },
+      vaultKey: {} as CryptoKey,
+      mek: {} as CryptoKey,
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      'Failed to clear offline cache during logout',
+      refusal,
+    );
+    expect(offlineCache.setUser).toHaveBeenCalledTimes(1);
+    expect(offlineCache.setUser).toHaveBeenCalledWith(null);
+    // The reset follows the clear attempt, never precedes it: reset first, and the
+    // clear would empty the unscoped database instead of this account's.
+    expect(vi.mocked(offlineCache.clear).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(offlineCache.setUser).mock.invocationCallOrder[0]!,
+    );
+    // And the rest of the teardown still ran.
+    expect(mockClearHealthResults).toHaveBeenCalledWith('user-123');
+    expect(clearCsrfToken).toHaveBeenCalled();
   });
 });
 

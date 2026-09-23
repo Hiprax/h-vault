@@ -1089,7 +1089,7 @@ export const BODY_SANITIZER = 'sanitizeRequestBody';
  * reason the parsers do: WHERE it sits is the control (straight after a route's own
  * parser), and a chain that could not show it could not pin that.
  */
-export const ADMISSION_NAMES = new Map<unknown, string>([
+const ADMISSION_NAMES = new Map<unknown, string>([
   [requirePartContentLength, 'requirePartContentLength'],
   [holdPartUploadSlot, 'holdPartUploadSlot'],
   [parsePartUploadBody, 'parsePartUploadBody'],
@@ -1099,7 +1099,7 @@ export const ADMISSION_NAMES = new Map<unknown, string>([
 ]);
 
 /** The route-level parsers named above. */
-export const NAMED_BODY_PARSERS: ReadonlySet<string> = new Set([
+const NAMED_BODY_PARSERS: ReadonlySet<string> = new Set([
   'parsePartUploadBody',
   'parseLargeJsonBody',
 ]);
@@ -1118,7 +1118,7 @@ export const SLOT_HOLDERS: ReadonlySet<string> = new Set([
  * mount that would reintroduce the defect. The limit of it, stated: a parser
  * wrapped in another function carries that function's name and escapes this.
  */
-export const BODY_PARSER_FUNCTION_NAMES: ReadonlySet<string> = new Set([
+const BODY_PARSER_FUNCTION_NAMES: ReadonlySet<string> = new Set([
   'jsonParser',
   'rawParser',
   'textParser',
@@ -1135,7 +1135,7 @@ export const BODY_PARSER_FUNCTION_NAMES: ReadonlySet<string> = new Set([
  * `Buffer` as an object would replace the ciphertext with a map of its indices. An
  * unnamed `jsonParser`/`urlencodedParser` is covered by {@link isStructuredBodyParser}.
  */
-export const STRUCTURED_BODY_PARSERS: ReadonlySet<string> = new Set(['parseLargeJsonBody']);
+const STRUCTURED_BODY_PARSERS: ReadonlySet<string> = new Set(['parseLargeJsonBody']);
 
 /** The prefix an un-exported body parser is reported under. */
 export const UNNAMED_PARSER_PREFIX = 'unnamedBodyParser:';
@@ -1169,7 +1169,7 @@ const chainOf = (route: NonNullable<RouterLayer['route']>): string[] =>
     .filter((name): name is string => name !== undefined);
 
 /** The name every unclassified handler is reported under in {@link ObservedRoute.stack}. */
-export const OTHER_HANDLER = '<other>';
+const OTHER_HANDLER = '<other>';
 
 const stackOf = (route: NonNullable<RouterLayer['route']>): string[] =>
   (route.stack ?? []).map((entry) => chainNameOf(entry.handle) ?? OTHER_HANDLER);

@@ -10,8 +10,9 @@
  * the record that survived, and the work that still got done afterwards.
  *
  * Two branches here are deliberately left uncovered rather than covered with a
- * substituted request: the `?? new Error(<fallback>)` arms in `openDb` and
- * `getStoredRecord`. A real failing request always populates `error`, so only a
+ * substituted request: the `?? new Error(<fallback>)` arms in the shared
+ * `openVersionedDatabase` (in `offlineCache`, which `openDb` delegates to) and
+ * in `getStoredRecord`. A real failing request always populates `error`, so only a
  * double reaches them — and a double proves nothing, because the rejection value
  * is swallowed either way. Measured: replacing both with a bare
  * `reject(request.error)` leaves this whole file green, which is the definition
@@ -20,7 +21,7 @@
  * uncovered because nothing can assert it.
  *
  * The sharpest of these is `clearHealthResults`. `authStore.logout` AWAITS it
- * (`authStore.ts:699`) and three teardown steps run after that await, so a clear
+ * and three teardown steps run after that await, so a clear
  * that rejected — or hung — would leave the session half torn down. "A failed
  * clear never blocks logout" is the property, and it is asserted from both ends:
  * here, that the clear resolves rather than rejecting; and in
@@ -29,16 +30,24 @@
  */
 
 import 'fake-indexeddb/auto';
-import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { cryptoService } from '../src/services/crypto/cryptoService';
-import { deriveUserHash } from '../src/services/offlineCache';
+import { BLOCKED_OPEN_GRACE_MS, deriveUserHash } from '../src/services/offlineCache';
 import {
   loadHealthResults,
   saveBreachResults,
   saveStrengthScores,
   clearHealthResults,
 } from '../src/services/health/healthResultsStore';
-import { createDoomedRequestFactory, openRawDatabase } from './indexeddbFailures.js';
+import {
+  createDoomedRequestFactory,
+  expectToSettle,
+  openRawDatabase,
+  outlastGracePeriod,
+  replaceIndexedDB,
+  watchBlockedOpens,
+  type BlockWatch,
+} from './indexeddbFailures.js';
 
 const HEALTH_DB_PREFIX = 'hvault-health';
 const SCRATCH_DB = 'health-results-error-scratch';
@@ -136,6 +145,44 @@ describe('healthResultsStore — a read request that fails', () => {
     expect(recovered?.perItem.a).toEqual({ v: 'v1', breach: 7 });
     expect(recovered?.scanCompletedAt).toBe(42);
   });
+
+  it.each([
+    [
+      'a strength save',
+      (userId: string, key: CryptoKey) =>
+        saveStrengthScores(userId, key, [{ id: 'b', v: 'v1', strength: 2 }]),
+    ],
+    [
+      'a breach save',
+      (userId: string, key: CryptoKey) =>
+        saveBreachResults(userId, key, [{ id: 'b', v: 'v1', breach: 1 }], 0, 99),
+    ],
+  ])(
+    'makes %s whose read FAILS write nothing, rather than replace the snapshot it never saw',
+    async (_name, save) => {
+      // Both savers read, merge and write the whole record. A read that could not
+      // be done is not an empty snapshot: merging into "nothing" and writing the
+      // result destroys every datum the read would have returned. Only the READ
+      // is failed here, so the write that follows would succeed if attempted.
+      const userId = nextUser();
+      const key = await makeKey();
+      // A breach datum AND a strength score: a breach save replaces the breach
+      // portion by design, but carries every strength score over, and a strength
+      // save carries every breach datum over. Each saver has something to lose.
+      await saveBreachResults(userId, key, [{ id: 'a', v: 'v1', breach: 7 }], 0, 42);
+      await saveStrengthScores(userId, key, [{ id: 'a', v: 'v1', strength: 3 }]);
+
+      vi.spyOn(IDBObjectStore.prototype, 'get').mockImplementationOnce(
+        () => doomedRequest() as IDBRequest<unknown>,
+      );
+      await expect(save(userId, key)).resolves.toBeUndefined();
+      vi.restoreAllMocks();
+
+      const kept = await loadHealthResults(userId, key);
+      expect(kept?.perItem).toEqual({ a: { v: 'v1', breach: 7, strength: 3 } });
+      expect(kept?.scanCompletedAt).toBe(42);
+    },
+  );
 });
 
 describe('healthResultsStore — a write transaction that fails', () => {
@@ -277,5 +324,135 @@ describe('healthResultsStore — a clear that fails', () => {
     await expect(Promise.all([save, clear])).resolves.toEqual([undefined, undefined]);
 
     expect(await loadHealthResults(userId, key)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An upgrade another tab is holding up
+//
+// The first schema bump opens this database one version up while a tab on an
+// older bundle may still hold a connection at the current one, with no
+// `versionchange` handler. The engine then reports `blocked` and waits for that
+// connection, with no timeout of its own. Every operation here is chained
+// through ONE write queue and `logout` awaits the clear at its end, so an open
+// left pending does not lose one snapshot: it stops every later save for the
+// tab's life and logout never returns. The shared open refuses after its grace
+// period; these pin what this module makes of that refusal.
+// ---------------------------------------------------------------------------
+
+describe('healthResultsStore — an upgrade another tab is holding up', () => {
+  /** The real engine, captured before the stand-in is installed over it. */
+  const engine = indexedDB;
+  let watch: BlockWatch;
+  let restore: () => void;
+  let olderTab: IDBDatabase | undefined;
+  /** The raw record `seededAndHeld` left on disk, as the older tab reads it. */
+  let seededRecord: unknown;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    watch = watchBlockedOpens(engine, { versionsAhead: 1 });
+    restore = replaceIndexedDB(watch.factory);
+  });
+  afterEach(() => {
+    restore();
+    vi.useRealTimers();
+    olderTab?.close();
+    olderTab = undefined;
+  });
+
+  /** Seed a snapshot at the current version, then hold that version open as an older tab. */
+  async function seededAndHeld(userId: string, key: CryptoKey): Promise<void> {
+    const seeding = replaceIndexedDB(engine);
+    try {
+      await saveBreachResults(userId, key, [{ id: 'a', v: 'v1', breach: 5 }], 0, 42);
+      olderTab = await openRawDatabase(await healthDbName(userId), 1, [], engine);
+      seededRecord = await new Promise<unknown>((resolve, reject) => {
+        const request = olderTab!.transaction('results').objectStore('results').get('v1');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error ?? new Error('read failed'));
+      });
+      expect(seededRecord).toBeDefined();
+    } finally {
+      seeding();
+    }
+  }
+
+  it('resolves a clear once the grace period runs out, so logout is never held by it', async () => {
+    const userId = nextUser();
+    const key = await makeKey();
+    await seededAndHeld(userId, key);
+
+    const clear = clearHealthResults(userId);
+    const settled = expectToSettle(clear, 'the clear');
+    await outlastGracePeriod(watch, BLOCKED_OPEN_GRACE_MS);
+    await settled;
+    await expect(clear).resolves.toBeUndefined();
+    expect(watch.blocked).toBe(1);
+
+    // It resolved by giving up, not by clearing underneath the other tab: that
+    // tab still sees the snapshot.
+    const kept = await new Promise<unknown>((resolve, reject) => {
+      const request = olderTab!.transaction('results').objectStore('results').get('v1');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error('read failed'));
+    });
+    expect(kept).toBeDefined();
+  });
+
+  it('loads as a clean cache miss rather than hanging', async () => {
+    const userId = nextUser();
+    const key = await makeKey();
+    await seededAndHeld(userId, key);
+
+    const load = loadHealthResults(userId, key);
+    const settled = expectToSettle(load, 'the load');
+    await outlastGracePeriod(watch, BLOCKED_OPEN_GRACE_MS);
+    await settled;
+    await expect(load).resolves.toBeNull();
+  });
+
+  it('keeps the write queue moving: a save queued behind a blocked one lands once the tab lets go', async () => {
+    const userId = nextUser();
+    const key = await makeKey();
+    await seededAndHeld(userId, key);
+
+    // The first save waits out one grace period on its read, which is then
+    // refused, so it writes nothing at all (a saver that cannot read the record
+    // does not replace it). It costs exactly one grace period.
+    const blockedSave = saveStrengthScores(userId, key, [{ id: 'a', v: 'v1', strength: 1 }]);
+    const settled = expectToSettle(blockedSave, 'the blocked save');
+    await outlastGracePeriod(watch, BLOCKED_OPEN_GRACE_MS);
+    await settled;
+    await expect(blockedSave).resolves.toBeUndefined();
+    expect(watch.blocked).toBe(1);
+    // Nothing was written: the older tab still reads the seeded record, unchanged.
+    const stored = await new Promise<unknown>((resolve, reject) => {
+      const request = olderTab!.transaction('results').objectStore('results').get('v1');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error('read failed'));
+    });
+    expect(stored).toEqual(seededRecord);
+
+    // The older tab goes away. The queue must not have been wedged by the save
+    // that gave up: the next one runs, and its result is what a load now sees.
+    olderTab?.close();
+    olderTab = undefined;
+    // `vi.waitFor` advances the fake clock on every check, which is harmless
+    // here: no grace timer is armed once the older tab has gone, and nothing
+    // below measures time. It retries until the abandoned open has finished and
+    // the queue's next save can read, merge and write.
+    await vi.waitFor(
+      async () => {
+        await saveStrengthScores(userId, key, [{ id: 'a', v: 'v1', strength: 4 }]);
+        expect((await loadHealthResults(userId, key))?.perItem.a).toEqual({
+          v: 'v1',
+          strength: 4,
+          breach: 5,
+        });
+      },
+      { timeout: 3_000, interval: 10 },
+    );
+    expect(watch.blocked).toBe(1);
   });
 });

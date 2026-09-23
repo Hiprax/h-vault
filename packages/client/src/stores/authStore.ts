@@ -705,10 +705,16 @@ export const useAuthStore = create<AuthState>()(
         // reset user scope so the next login starts fresh.
         try {
           await offlineCache.clear();
-          await offlineCache.setUser(null);
         } catch (err) {
           logger.warn('Failed to clear offline cache during logout', err);
         }
+        // Reset the scope whether or not that clear worked. It used to sit in the
+        // same `try`, so a clear the engine refused (a realistic outcome: another
+        // tab on a different version holding the database is refused as a
+        // `version_conflict`) left the module pointing at the signed-out
+        // account's database for whatever ran next. `setUser(null)` touches no
+        // storage and cannot fail.
+        await offlineCache.setUser(null);
 
         // Clear the per-user encrypted Vault Health snapshot (breach + strength).
         // Logout ONLY — NOT lock: the snapshot is encrypted at rest under the

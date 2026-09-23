@@ -115,10 +115,20 @@ const DOCUMENTS_NAV_ITEM: NavItem = { label: 'Documents', to: '/documents', icon
  * recover from. The notice is raised while the user is still ONLINE and able to
  * act.
  *
- * The four classified causes collapse to three messages because only two of them
- * have a remedy the user owns. `unavailable` (no IndexedDB at all) and `unknown`
- * share one honest, non-prescriptive sentence rather than inviting the user to
- * distinguish situations they cannot act on differently.
+ * The five classified causes collapse to four messages because only three of
+ * them have a remedy the user owns. `unavailable` (no IndexedDB at all) and
+ * `unknown` share one honest, non-prescriptive sentence rather than inviting the
+ * user to distinguish situations they cannot act on differently.
+ *
+ * `version_conflict` covers two views of one condition, and its remedy has to
+ * work from either: this tab's upgrade is held up by a tab on an older bundle
+ * (reloading or closing that tab frees the database), or a newer bundle already
+ * upgraded it underneath this one (reloading this tab picks the newer bundle
+ * up). Hence both halves of the sentence. The one case it does not fit is a
+ * server rolled back to an OLDER bundle than the one that upgraded this
+ * browser's database: no tab is on the other version, and no reload helps
+ * until the server is upgraded again. That is an operator's condition, not a
+ * user's, and is deliberately not given a sentence of its own.
  *
  * Canned copy, keyed on the discriminant — never the underlying `message`, which
  * is engine-specific text this project has not reviewed.
@@ -131,6 +141,8 @@ const OFFLINE_CACHE_NOTICES: Record<OfflineCacheErrorType, string> = {
     'Offline access is unavailable: offline storage is full. Free up browser storage, then reload.',
   permission_denied:
     'Offline access is unavailable: your browser is blocking offline storage. Allow site data for this site, or leave private browsing, then reload.',
+  version_conflict:
+    'Offline access is unavailable: H-Vault is open in another tab or window on a different version. Reload or close your other H-Vault tabs and windows, then reload this one.',
   unavailable: OFFLINE_CACHE_UNAVAILABLE,
   unknown: OFFLINE_CACHE_UNAVAILABLE,
 };
