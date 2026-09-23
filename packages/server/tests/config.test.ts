@@ -59,6 +59,55 @@ describe('Server Config Validation', () => {
   }
 
   // ---------------------------------------------------------------------------
+  // How the .env file is loaded
+  // ---------------------------------------------------------------------------
+
+  describe('the .env load', () => {
+    const PINNED = { override: false, encoding: 'utf8', fast: false };
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** Loads config with `existsSync` answering `rootExists` for the root .env. */
+    async function loadWithRootEnv(rootExists: boolean) {
+      const fs = (await import('node:fs')).default;
+      const rootEnvPath = path.join(repoRoot, '.env');
+      const realExistsSync = fs.existsSync.bind(fs);
+      vi.spyOn(fs, 'existsSync').mockImplementation((candidate) =>
+        candidate === rootEnvPath ? rootExists : realExistsSync(candidate),
+      );
+      // The hoisted mock outlives `vi.resetModules()`, so earlier loads in this
+      // file have already called it: count only this load.
+      const config = vi.mocked((await import('dotenv')).default.config);
+      config.mockClear();
+      await loadConfigWithEnv();
+      return { rootEnvPath, config };
+    }
+
+    it('reads the root .env, once, with every option that decides what is loaded pinned', async () => {
+      const { rootEnvPath, config } = await loadWithRootEnv(true);
+
+      expect(config).toHaveBeenCalledTimes(1);
+      expect(config).toHaveBeenCalledWith({ ...PINNED, path: rootEnvPath });
+    });
+
+    it('falls back to the working directory .env, named explicitly, with the same pins', async () => {
+      const { rootEnvPath, config } = await loadWithRootEnv(false);
+      // The negative below means something only while the two paths differ,
+      // which holds because the suite runs from the package directory.
+      expect(path.resolve(process.cwd(), '.env')).not.toBe(rootEnvPath);
+
+      expect(config).toHaveBeenCalledTimes(1);
+      expect(config).toHaveBeenCalledWith({
+        ...PINNED,
+        path: path.resolve(process.cwd(), '.env'),
+      });
+      expect(config).not.toHaveBeenCalledWith(expect.objectContaining({ path: rootEnvPath }));
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Default values
   // ---------------------------------------------------------------------------
 

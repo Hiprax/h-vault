@@ -30,10 +30,11 @@
  * is not set", and for what the probe deliberately does not cover.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOOT_FAST_MS, TIMEOUT_EXIT, bootWithEnvFile } from './bootProbe.js';
+import { createTestTempDir } from '../tempDir.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -257,4 +258,149 @@ describe('a required variable that is absent fails clearly, quickly and by name'
       expect(boot.config?.[key]).toEqual(expect.any(String));
     }
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The .env is read the way the operator wrote it
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The file is parsed by the dotenv loader, not by this application, so an
+// upgrade of the loader is an upgrade of how every operator's `.env` is read.
+// These cases pin the three things an operator relies on without thinking about
+// them: quoting and comments, values that span lines, and the real environment
+// winning over the file. Each one boots a real process against a real file it
+// wrote, for the reason `bootProbe.ts` gives: only a child process at a temporary
+// root controls which file is read and what the environment already holds.
+describe('the .env is read the way the operator wrote it', () => {
+  /** A multi-line edit of the fixture: removes each key, then appends `lines`. */
+  function withLines(envFile: string, keys: readonly string[], lines: readonly string[]): string {
+    const kept = keys.reduce((file, key) => withoutKey(file, key), envFile);
+    return `${kept}\n${lines.join('\n')}\n`;
+  }
+
+  it('keeps quoted text whole, strips an unquoted trailing comment, and honours `export`', async () => {
+    const envFile = withLines(
+      N_MINUS_ONE_ENV,
+      [
+        'APP_NAME',
+        'SMTP_HOST',
+        'SMTP_USER',
+        'SMTP_PASS',
+        'SMTP_FROM',
+        'MONGODB_URI',
+        'CORS_ORIGIN',
+      ],
+      [
+        'APP_NAME="H-Vault # not a comment"',
+        'SMTP_HOST=smtp.example.com # the relay',
+        'SMTP_USER=`mailer@example.com`',
+        'SMTP_PASS="  padded  "',
+        "SMTP_FROM='Vault Team <vault@example.com>'",
+        'MONGODB_URI=mongodb://db.example:27017/hvault?replicaSet=rs0&w=majority',
+        'export CORS_ORIGIN=https://vault.example.org',
+      ],
+    );
+
+    const boot = await bootWithEnvFile(envFile);
+
+    expect(boot.exitCode, boot.output).toBe(0);
+    expect(boot.config).toMatchObject({
+      APP_NAME: 'H-Vault # not a comment',
+      SMTP_HOST: 'smtp.example.com',
+      SMTP_USER: 'mailer@example.com',
+      SMTP_PASS: '  padded  ',
+      SMTP_FROM: 'Vault Team <vault@example.com>',
+      MONGODB_URI: 'mongodb://db.example:27017/hvault?replicaSet=rs0&w=majority',
+      CORS_ORIGIN: 'https://vault.example.org',
+    });
+  });
+
+  it('expands `\\n` only inside double quotes and joins a double-quoted value across lines', async () => {
+    const envFile = withLines(
+      N_MINUS_ONE_ENV,
+      ['APP_NAME', 'SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'],
+      [
+        'SMTP_HOST=smtp.example.com',
+        'SMTP_USER=mailer@example.com',
+        'SMTP_PASS="line one\\nline two"',
+        "APP_NAME='literal\\nescape'",
+        'SMTP_FROM="first line',
+        'second line"',
+      ],
+    );
+
+    const boot = await bootWithEnvFile(envFile);
+
+    expect(boot.exitCode, boot.output).toBe(0);
+    expect(boot.config).toMatchObject({
+      SMTP_PASS: 'line one\nline two',
+      APP_NAME: 'literal\\nescape',
+      SMTP_FROM: 'first line\nsecond line',
+    });
+  });
+
+  it('lets a variable the environment already holds win over the same key in the file', async () => {
+    const envFile = withKey(N_MINUS_ONE_ENV, 'APP_NAME', 'FromTheFile');
+
+    const boot = await bootWithEnvFile(envFile, { APP_NAME: 'FromTheEnvironment' });
+
+    expect(boot.exitCode, boot.output).toBe(0);
+    expect(boot.config?.['APP_NAME']).toBe('FromTheEnvironment');
+    // The file was still read: a key only it supplies is applied in the same boot.
+    expect(boot.config?.['APP_URL']).toBe('https://vault.example.com');
+  });
+
+  // The loader reads its own options from the environment as well as from the
+  // call, under two spellings: `DOTENV_<OPTION>`, and `DOTENV_CONFIG_<OPTION>`
+  // as its fallback. Each spelling is tried on its own, since a case setting both
+  // would only ever exercise the first.
+  const SPELLINGS = ['DOTENV_', 'DOTENV_CONFIG_'] as const;
+
+  it.each(SPELLINGS)(
+    'keeps the environment winning when an ambient %sOVERRIDE asks the file to override it',
+    async (prefix) => {
+      const boot = await bootWithEnvFile(N_MINUS_ONE_ENV, {
+        SMTP_FROM: 'environment@example.com',
+        [`${prefix}OVERRIDE`]: 'true',
+      });
+
+      expect(boot.exitCode, boot.output).toBe(0);
+      // The fixture's own `SMTP_FROM=noreply@hvault.local` must not replace it.
+      expect(boot.config?.['SMTP_FROM']).toBe('environment@example.com');
+      expect(boot.config?.['APP_URL']).toBe('https://vault.example.com');
+    },
+  );
+
+  it.each(SPELLINGS)(
+    'reads the repository .env even when an ambient %sPATH names another file',
+    async (prefix) => {
+      const elsewhere = path.join(createTestTempDir('hv-dotenv-elsewhere-'), 'other.env');
+      writeFileSync(
+        elsewhere,
+        'APP_NAME=FromTheOtherFile\nAPP_URL=https://elsewhere.example\n',
+        'utf-8',
+      );
+      const envFile = withKey(N_MINUS_ONE_ENV, 'APP_NAME', 'FromTheFile');
+
+      const boot = await bootWithEnvFile(envFile, { [`${prefix}PATH`]: elsewhere });
+
+      expect(boot.exitCode, boot.output).toBe(0);
+      expect(boot.config?.['APP_NAME']).toBe('FromTheFile');
+      // Nothing from the other file leaked in alongside it.
+      expect(boot.config?.['APP_URL']).toBe('https://vault.example.com');
+    },
+  );
+
+  it.each(SPELLINGS)(
+    'reads the file as UTF-8 even when an ambient %sENCODING names another encoding',
+    async (prefix) => {
+      const envFile = withKey(N_MINUS_ONE_ENV, 'APP_NAME', 'Tresor ✓');
+
+      const boot = await bootWithEnvFile(envFile, { [`${prefix}ENCODING`]: 'latin1' });
+
+      expect(boot.exitCode, boot.output).toBe(0);
+      // Not re-decoded into mojibake ("Tresor âœ“").
+      expect(boot.config?.['APP_NAME']).toBe('Tresor ✓');
+    },
+  );
 });

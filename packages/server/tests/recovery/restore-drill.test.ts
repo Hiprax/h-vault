@@ -85,6 +85,7 @@ import {
   signBackup,
   splitSignedBackup,
   verifyBackup,
+  type Bytes,
   type Sealed,
 } from './vaultFormat.js';
 
@@ -143,10 +144,10 @@ interface SourceAccount {
   userId: string;
   token: string;
   /** The raw vault key bytes the SOURCE account sealed everything with. */
-  rawVaultKey: Uint8Array;
+  rawVaultKey: Bytes;
   vaultKey: Awaited<ReturnType<typeof generateKey>>['key'];
   /** The raw backup wrapping key, i.e. what the backup password recovers. */
-  rawBwk: Uint8Array;
+  rawBwk: Bytes;
   itemIds: string[];
   folderId: string;
 }
@@ -332,7 +333,7 @@ describe('Backup restore drill (two mongod instances, two databases)', () => {
   async function registerRecoveryAccount(): Promise<{
     userId: string;
     token: string;
-    rawVaultKey: Uint8Array;
+    rawVaultKey: Bytes;
     vaultKey: Awaited<ReturnType<typeof generateKey>>['key'];
   }> {
     const { raw: rawVaultKey, key: vaultKey } = await generateKey();
@@ -380,7 +381,7 @@ describe('Backup restore drill (two mongod instances, two databases)', () => {
     file: BackupFile,
     encryptionKey: Awaited<ReturnType<typeof deriveBackupEncryptionKey>>,
   ): Promise<{
-    rawBwk: Uint8Array;
+    rawBwk: Bytes;
     sourceVaultKey: Awaited<ReturnType<typeof generateKey>>['key'];
   }> {
     // The file has to CARRY what a recovery needs, and each field is named in

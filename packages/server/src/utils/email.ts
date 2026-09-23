@@ -150,8 +150,7 @@ export async function sendEmail(
   await verifyTransporterOnce(mailer);
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const result: { accepted?: readonly unknown[] } = await mailer.sendMail({
+    const result = await mailer.sendMail({
       from: getFromAddress(),
       to,
       subject,

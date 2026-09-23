@@ -83,6 +83,7 @@ import {
   seal,
   sealText,
   searchHashOf,
+  type Bytes,
   type Sealed,
 } from './vaultFormat.js';
 
@@ -102,7 +103,7 @@ interface CrashAccount {
   token: string;
   /** The account's live vault key, before the rotation that never finished. */
   oldKey: Awaited<ReturnType<typeof generateKey>>['key'];
-  oldRawKey: Uint8Array;
+  oldRawKey: Bytes;
   /** How the old vault key is wrapped on the user document. */
   oldWrapped: Sealed;
   /** The key the interrupted rotation was moving to. */

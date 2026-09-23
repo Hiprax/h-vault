@@ -165,19 +165,6 @@
       "approvedBy": ["judge:readonly"]
     },
     {
-      "id": "SUP-0014",
-      "rule": "LINT-SUPPRESS",
-      "kind": "lint-suppression",
-      "file": "packages/server/src/utils/email.ts",
-      "symbol": "no-unsafe-assignment",
-      "maxHits": 1,
-      "reason": "Nodemailer types `sendMail`'s result as `any`; the assignment immediately narrows it to `{ accepted?: readonly unknown[] }`, which is the only field this code reads.",
-      "owner": "maintainer",
-      "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
       "id": "SUP-0015",
       "rule": "LINT-SUPPRESS",
       "kind": "lint-suppression",

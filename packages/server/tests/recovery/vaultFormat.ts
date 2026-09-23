@@ -76,17 +76,25 @@ export interface Sealed {
   tag: string;
 }
 
+/**
+ * Bytes backed by a plain `ArrayBuffer`, which is what Web Crypto accepts: a view
+ * over a `SharedArrayBuffer` is not a `BufferSource`. Every value this module
+ * hands out is one (`new Uint8Array(n)`, a copy out of a `Buffer`, or the result
+ * of a `subtle` call), so the type says so instead of the looser default.
+ */
+export type Bytes = Uint8Array<ArrayBuffer>;
+
 const toBase64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
-const fromBase64 = (value: string): Uint8Array => new Uint8Array(Buffer.from(value, 'base64'));
+const fromBase64 = (value: string): Bytes => new Uint8Array(Buffer.from(value, 'base64'));
 const toHex = (bytes: Uint8Array): string =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 
 /** Cryptographically random bytes, for keys and salts. */
-export function randomBytes(length: number): Uint8Array {
+export function randomBytes(length: number): Bytes {
   return globalThis.crypto.getRandomValues(new Uint8Array(length));
 }
 
-async function importAesKey(raw: Uint8Array): Promise<webcrypto.CryptoKey> {
+async function importAesKey(raw: Bytes): Promise<webcrypto.CryptoKey> {
   return subtle.importKey('raw', raw, { name: 'AES-GCM', length: 256 }, false, [
     'encrypt',
     'decrypt',
@@ -154,7 +162,7 @@ export async function deriveBackupEncryptionKey(
 }
 
 /** A fresh 256-bit key, returned both as raw bytes and as an AES-GCM key. */
-export async function generateKey(): Promise<{ raw: Uint8Array; key: webcrypto.CryptoKey }> {
+export async function generateKey(): Promise<{ raw: Bytes; key: webcrypto.CryptoKey }> {
   const raw = randomBytes(KEY_BYTES);
   return { raw, key: await importAesKey(raw) };
 }
@@ -163,7 +171,7 @@ export async function generateKey(): Promise<{ raw: Uint8Array; key: webcrypto.C
  * AES-256-GCM seal with the tag held SEPARATELY from the ciphertext, which is
  * the shape every stored triple in this application has.
  */
-export async function seal(plaintext: Uint8Array, key: webcrypto.CryptoKey): Promise<Sealed> {
+export async function seal(plaintext: Bytes, key: webcrypto.CryptoKey): Promise<Sealed> {
   const iv = randomBytes(IV_BYTES);
   const combined = new Uint8Array(
     await subtle.encrypt({ name: 'AES-GCM', iv, tagLength: TAG_BYTES * 8 }, key, plaintext),
@@ -184,7 +192,7 @@ export async function sealText(plaintext: string, key: webcrypto.CryptoKey): Pro
  * AES-256-GCM open. Rejects when the tag does not verify, which is what makes a
  * successful open in this suite an assertion rather than a coincidence.
  */
-export async function open(sealed: Sealed, key: webcrypto.CryptoKey): Promise<Uint8Array> {
+export async function open(sealed: Sealed, key: webcrypto.CryptoKey): Promise<Bytes> {
   const ciphertext = fromBase64(sealed.encrypted);
   const tag = fromBase64(sealed.tag);
   const combined = new Uint8Array(ciphertext.length + tag.length);
@@ -211,7 +219,7 @@ export async function openText(sealed: Sealed, key: webcrypto.CryptoKey): Promis
  * Keyed on the RAW vault key (not an HKDF subkey), over the trimmed, lowercased
  * name — the server uses it for duplicate detection and never learns the name.
  */
-export async function searchHashOf(name: string, rawVaultKey: Uint8Array): Promise<string> {
+export async function searchHashOf(name: string, rawVaultKey: Bytes): Promise<string> {
   const key = await subtle.importKey('raw', rawVaultKey, { name: 'HMAC', hash: 'SHA-256' }, false, [
     'sign',
   ]);
@@ -221,7 +229,7 @@ export async function searchHashOf(name: string, rawVaultKey: Uint8Array): Promi
 }
 
 /** The HKDF-SHA256 subkey the backup file's `integrity` field is MACed under. */
-async function backupMacKey(rawBwk: Uint8Array): Promise<webcrypto.CryptoKey> {
+async function backupMacKey(rawBwk: Bytes): Promise<webcrypto.CryptoKey> {
   const hkdfKey = await subtle.importKey('raw', rawBwk, 'HKDF', false, ['deriveBits']);
   const subkey = await subtle.deriveBits(
     {
@@ -240,7 +248,7 @@ async function backupMacKey(rawBwk: Uint8Array): Promise<webcrypto.CryptoKey> {
 }
 
 /** Signs a backup document body, returning the hex string stored as `integrity`. */
-export async function signBackup(body: string, rawBwk: Uint8Array): Promise<string> {
+export async function signBackup(body: string, rawBwk: Bytes): Promise<string> {
   const key = await backupMacKey(rawBwk);
   return toHex(new Uint8Array(await subtle.sign('HMAC', key, encoder.encode(body))));
 }
@@ -256,7 +264,7 @@ export async function signBackup(body: string, rawBwk: Uint8Array): Promise<stri
 export async function verifyBackup(
   body: string,
   integrityHex: string,
-  rawBwk: Uint8Array,
+  rawBwk: Bytes,
 ): Promise<boolean> {
   const pairs = integrityHex.match(/[0-9a-f]{2}/g);
   if (pairs?.length !== KEY_BYTES || pairs.join('') !== integrityHex) return false;

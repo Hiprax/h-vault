@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **The format-and-repair step for uploads now uses Prettier 3.9.8 (was 3.9.6).** A document formatted from now on records `prettier 3.9.8` as the tool that formatted it. JSON and YAML come out exactly as before; Markdown differs only in corner cases where the 3.9 releases had regressed (some since 3.9.0) and the new release restores the earlier output: a single-tilde subscript such as `H~2~O` is kept rather than rewritten as strikethrough, and block quotes, headings inside block quotes, task lists, indented code inside list items and Liquid tags are formatted as they were before. Documents already stored are not touched.
 
+- **The server now reads `.env` with dotenv 18 (was 17), and the environment still wins over the file.** The file is parsed exactly as before: quoting, comments, `export`, values spanning lines and `\n` inside double quotes are unchanged. dotenv 18 also takes its own options from `DOTENV_*` and `DOTENV_CONFIG_*` environment variables, so the server now pins how the file is read, and such a variable still cannot make `.env` replace a setting the environment already holds, have the file read in another encoding, or point the server at another file. The start-up line that reports how many settings were loaded from `.env` is now written to standard error instead of standard output, without the rotating tip.
+
+### Removed
+
+- **Encrypted `.env.vault` files are no longer read.** H-Vault never documented them; the server's `.env` loader, dotenv 18, dropped them, together with the `DOTENV_KEY` variable that unlocked them. A plain `.env` is read exactly as before.
+
 ### Fixed
 
 - **Starting an upload at the moment another one finishes can no longer take an account past its storage quota.** A new upload is checked against two totals, the files already stored and the uploads still in progress, and the two were read at the same time. An upload finishing in between moved out of the second total before it appeared in the first, so neither counted it and the new upload was admitted as if that space were free. The totals are now read in an order where a finishing upload can only be counted twice, which at worst asks you to try again. On a deployment whose database connection prefers reading from replicas, these totals and the two upload limits are now always read from the primary, which has seen the previous upload's entry.
@@ -132,6 +138,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Decrypting no longer lets an encrypted file or a stored two-factor secret dictate how much work the decryption does.** Both formats record their key-derivation settings in bytes that are read before the password can be checked, so a tiny crafted `.enc` file could previously demand enough work to freeze a browser tab for a very long time. The cryptography library is now `@hiprax/crypto` 1.9.0, which checks those settings against a fixed budget before deriving any key, on the file tool and on the server's two-factor secrets alike; every file and secret H-Vault itself has written sits well inside that budget and still opens. The upgrade changes no stored byte: existing files and secrets are read exactly as before.
 
 - **Dependency install scripts now have a recorded review policy.** The root `package.json` records an `allowScripts` policy that approves the two install scripts the tooling needs, each pinned to the reviewed version, and denies the rest, including an install-telemetry script that `scarfSettings` now also opts out of. Current npm releases treat the policy as advisory and later ones enforce it; production images already installed with scripts disabled.
+
+- **Outgoing email now goes through Nodemailer 10 (was 9).** Every email the server sends now goes through Nodemailer 10.0.10: the verification, password-reset, unlock and registration-attempt messages, and the backup emails that carry your encrypted backup file. It parses recipient addresses and mail-server replies in linear time and keeps line breaks and control characters out of the boundaries of a message with an attachment. What is sent, how it is addressed and the email settings in `.env` are unchanged, and a send that fails is still reported, never raised.
 
 ## [0.13.0] - 2026-09-21
 
