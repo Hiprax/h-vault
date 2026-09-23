@@ -1,4 +1,5 @@
-import type { NextFunction, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import { httpErrors } from '@hiprax/errors';
 import type { KeyedQuota, Semaphore } from '../utils/partSemaphore.js';
 
 /**
@@ -32,6 +33,9 @@ import type { KeyedQuota, Semaphore } from '../utils/partSemaphore.js';
  * The quota and the semaphore are read through `admission` at CALL time rather than
  * captured, so the module-level instances each holder passes stay the live objects
  * a test can observe.
+ *
+ * WHEN a slot comes back is the other half, and both holders need the same answer:
+ * see {@link createHandlerSettledRelease}.
  */
 export interface SlotAdmission {
   readonly semaphore: Semaphore;
@@ -85,4 +89,85 @@ export function admitWithinBudget(
     admission.granted();
     next();
   });
+}
+
+/**
+ * What a slot holder and its handler wrapper share for one request: whether the
+ * handler is running, and the release a `close` during it had to defer.
+ */
+interface SlotTicket {
+  inHandler: boolean;
+  releaseWhenSettled: (() => void) | null;
+}
+
+/** The shape `catchAsync` hands back, which is what every wrapped route mounts. */
+export type SlotHandler = (req: Request, res: Response, next: NextFunction) => unknown;
+
+/**
+ * A slot is handed back once the response has closed AND the handler has SETTLED,
+ * never on `close` alone. One of these per holder: its `granted` hook calls
+ * `admit`, its `closed` hook calls `closed`, and the route's handler is mounted
+ * through `run`, last in the chain.
+ *
+ * WHY `close` ALONE IS NOT THE END. A client that aborts mid-request closes the
+ * response while the handler is still running, and Express does not cancel a
+ * handler: it keeps the body it was handed, and whatever it allocates from it, until
+ * its own work returns. Released on `close`, the slot would let one account send a
+ * whole body, drop the connection, and send the next, with every one of them
+ * resident at once; the budget would bound connections, not memory. So a `close`
+ * that arrives while the handler runs DEFERS the release to the moment it settles,
+ * and a `close` before the handler was reached (a refusal from the parser, a request
+ * that waited in the queue) releases at once.
+ *
+ * Keyed by the response in a `WeakMap`, so a ticket lives exactly as long as its
+ * request.
+ */
+export interface HandlerSettledRelease {
+  /** From the holder's `granted` hook: this response now holds a slot its handler may keep. */
+  readonly admit: (res: Response) => void;
+  /** From the holder's `closed` hook: release now, or when this response's handler settles. */
+  readonly closed: (res: Response, release: () => void) => void;
+  /**
+   * Wraps a route's handler. A handler reached with no ticket means the chain in
+   * front of it is wrong (the holder is missing, or sits after this), and it is
+   * refused with 500 carrying `unadmittedMessage` rather than run: running it would
+   * be running an operation that no budget counted. `tests/route-table.test.ts` is
+   * what keeps the chain right; this is what makes a wrong one fail CLOSED rather
+   * than silently unbounded.
+   */
+  readonly run: (
+    handler: SlotHandler,
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    unadmittedMessage: string,
+  ) => Promise<void>;
+}
+
+export function createHandlerSettledRelease(): HandlerSettledRelease {
+  const tickets = new WeakMap<Response, SlotTicket>();
+  return {
+    admit(res) {
+      tickets.set(res, { inHandler: false, releaseWhenSettled: null });
+    },
+    closed(res, release) {
+      const ticket = tickets.get(res);
+      if (ticket?.inHandler === true) ticket.releaseWhenSettled = release;
+      else release();
+    },
+    async run(handler, req, res, next, unadmittedMessage) {
+      const ticket = tickets.get(res);
+      if (ticket === undefined) {
+        next(httpErrors.internalServerError(unadmittedMessage));
+        return;
+      }
+      ticket.inHandler = true;
+      try {
+        await handler(req, res, next);
+      } finally {
+        ticket.inHandler = false;
+        ticket.releaseWhenSettled?.();
+      }
+    },
+  };
 }

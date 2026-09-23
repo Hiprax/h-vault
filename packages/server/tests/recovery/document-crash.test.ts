@@ -201,15 +201,15 @@ let user: TestUser;
 
 async function post(path: string, body: Record<string, unknown>): Promise<request.Response> {
   const agent = request.agent(app);
-  const pending = agent.post(path).set('Authorization', authHeader(user.accessToken));
   const csrf = await getCsrf(agent);
+  const pending = agent.post(path).set('Authorization', authHeader(user.accessToken));
   return pending.set('Cookie', csrf.cookie).set('x-csrf-token', csrf.token).send(body);
 }
 
 async function del(path: string): Promise<request.Response> {
   const agent = request.agent(app);
-  const pending = agent.delete(path).set('Authorization', authHeader(user.accessToken));
   const csrf = await getCsrf(agent);
+  const pending = agent.delete(path).set('Authorization', authHeader(user.accessToken));
   return pending.set('Cookie', csrf.cookie).set('x-csrf-token', csrf.token);
 }
 
@@ -232,10 +232,10 @@ async function initTransfer(declaredChunkCount: number): Promise<string> {
 /** Sends one part through the real part route, from the PARENT. */
 async function putPart(uploadId: string, partNumber: number, body: Buffer): Promise<void> {
   const agent = request.agent(app);
+  const csrf = await getCsrf(agent);
   const pending = agent
     .put(`/api/v1/documents/uploads/${uploadId}/parts/${String(partNumber)}`)
     .set('Authorization', authHeader(user.accessToken));
-  const csrf = await getCsrf(agent);
   const response = await pending
     .set('Cookie', csrf.cookie)
     .set('x-csrf-token', csrf.token)

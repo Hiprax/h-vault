@@ -8,7 +8,8 @@ import {
 import { createModuleLogger } from '../utils/logger.js';
 import { createKeyedQuota, createSemaphore } from '../utils/partSemaphore.js';
 import type { KeyedQuota, Semaphore } from '../utils/partSemaphore.js';
-import { admitWithinBudget } from './admission.js';
+import { admitWithinBudget, createHandlerSettledRelease } from './admission.js';
+import type { SlotHandler } from './admission.js';
 
 const logger = createModuleLogger('large-body-admission');
 
@@ -89,7 +90,9 @@ export const largeBodySemaphore: Semaphore = createSemaphore(MAX_IN_FLIGHT_LARGE
  * One account's share of {@link largeBodySemaphore}: a request past it is refused
  * at once, holding nothing. Without the share, two requests from one account that
  * declare a `Content-Length` and then send nothing hold every slot in the process
- * for as long as the server will wait for a body.
+ * for as long as the server will wait for a body. The share bounds ONE account, not
+ * a pair: two accounts can still hold both slots that way, each for up to
+ * `HTTP_REQUEST_TIMEOUT_MS`, which is the ceiling on that residual.
  */
 export const largeBodyUserQuota: KeyedQuota = createKeyedQuota(
   MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER,
@@ -111,17 +114,8 @@ export const largeBodyUserQuota: KeyedQuota = createKeyedQuota(
 export const LARGE_BODY_BUSY_MESSAGE =
   'Wait for the restore or vault key rotation already in progress on this account to finish, then try again.';
 
-/**
- * What the slot holder and the handler wrapper share for one request: whether the
- * handler is running, and the release a `close` during it had to defer.
- */
-interface SlotTicket {
-  inHandler: boolean;
-  releaseWhenSettled: (() => void) | null;
-}
-
-/** Keyed by the response, so a ticket lives exactly as long as its request. */
-const tickets = new WeakMap<Response, SlotTicket>();
+/** When a large-body slot comes back: once the response closed AND the handler settled. */
+const settledRelease = createHandlerSettledRelease();
 
 /**
  * The identity a large-body request is charged to. `authenticate` is mounted at
@@ -136,68 +130,50 @@ function largeBodyIdentity(req: Request): string {
  * Charges this account's share, then holds one {@link largeBodySemaphore} slot from
  * before the body is read until the response has closed AND the handler has
  * settled. The admission mechanics (the destroyed check, charging before queueing,
- * registering `close` before `acquire`) are `admitWithinBudget`'s.
+ * registering `close` before `acquire`) are `admitWithinBudget`'s, and the deferred
+ * release is `createHandlerSettledRelease`'s, both in `middleware/admission.ts`.
  *
- * WHY `close` ALONE IS NOT THE END. A client that aborts mid-request closes the
- * response while the handler is still running, and Express does not cancel a
- * handler: a restore keeps its parsed body, parses the backup inside it and writes
- * up to 10,000 rows for another twenty seconds. Released on `close`, that slot
- * would let one account send a full body, drop the connection, and send the next,
- * with every one of them resident at once — the budget would bound connections,
- * not memory. So a `close` that arrives while the handler runs DEFERS the release to
- * {@link holdingLargeBodySlot}, and a `close` before the handler was reached (a 400,
- * a 413, a request that waited in the queue) releases at once.
+ * On these routes the deferral is what the budget is FOR. A client that aborts
+ * mid-request closes the response while the handler is still running, and a restore
+ * keeps its parsed body, parses the backup inside it and writes up to 10,000 rows
+ * for another twenty seconds. Released on `close`, that slot would let one account
+ * send a full body, drop the connection, and send the next, with every one of them
+ * resident at once.
  */
 export function holdLargeBodySlot(req: Request, res: Response, next: NextFunction): void {
-  const ticket: SlotTicket = { inHandler: false, releaseWhenSettled: null };
-
   admitWithinBudget(res, next, {
     semaphore: largeBodySemaphore,
     quota: largeBodyUserQuota,
     identity: largeBodyIdentity(req),
-    refuse(_refused, refuse) {
+    refuse(_refused, fail) {
       // The identity is deliberately NOT logged, as the rate limiters omit their key.
       logger.warn('Large-body request refused: the account already has one in flight', {
         limit: MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER,
       });
-      refuse(httpErrors.conflict(LARGE_BODY_BUSY_MESSAGE));
+      fail(httpErrors.conflict(LARGE_BODY_BUSY_MESSAGE));
     },
     granted() {
-      tickets.set(res, ticket);
+      settledRelease.admit(res);
     },
     closed(release) {
-      if (ticket.inHandler) ticket.releaseWhenSettled = release;
-      else release();
+      settledRelease.closed(res, release);
     },
   });
 }
 
-/** The shape `catchAsync` hands back, which is what both routes mount. */
-type LargeBodyHandler = (req: Request, res: Response, next: NextFunction) => unknown;
-
 /**
  * Wraps the handler of a large-body route so the slot {@link holdLargeBodySlot}
  * took is held until the handler has SETTLED, not merely until the response closed.
- *
- * A handler reached with no ticket means the chain in front of it is wrong — the
- * holder is missing, or sits after this — and it is refused with 500 rather than
- * run, because running it would be running a 30 MB operation that no budget
- * counted. `tests/route-table.test.ts` is what keeps the chain right; this is what
- * makes a wrong one fail closed rather than silently unbounded.
+ * A handler reached with no slot is refused with 500 rather than run.
  */
-export function holdingLargeBodySlot(handler: LargeBodyHandler): RequestHandler {
+export function holdingLargeBodySlot(handler: SlotHandler): RequestHandler {
   return async function largeBodyHandler(req, res, next): Promise<void> {
-    const ticket = tickets.get(res);
-    if (ticket === undefined) {
-      next(httpErrors.internalServerError('Large-body handler reached without an admission slot'));
-      return;
-    }
-    ticket.inHandler = true;
-    try {
-      await handler(req, res, next);
-    } finally {
-      ticket.inHandler = false;
-      ticket.releaseWhenSettled?.();
-    }
+    await settledRelease.run(
+      handler,
+      req,
+      res,
+      next,
+      'Large-body handler reached without an admission slot',
+    );
   };
 }

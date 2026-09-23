@@ -3,7 +3,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 import dotenv from 'dotenv';
 import { z } from 'zod';
-import { MAX_DOCUMENT_EXT_LENGTH } from '@hvault/shared';
+import {
+  DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
+  MAX_DOCUMENT_EXT_LENGTH,
+  MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
+} from '@hvault/shared';
 import { createModuleLogger } from '../utils/logger.js';
 
 // Resolve .env from the monorepo root (4 levels up from packages/server/src/config/).
@@ -110,6 +114,15 @@ function isProductionStorageEndpoint(endpoint: string): boolean {
   return isLocalOrPrivateStorageHost(hostname);
 }
 
+/**
+ * The document part route's body deadline when `DOCUMENT_PART_BODY_TIMEOUT_MS` is
+ * not set: one sealed segment at the slowest sustained uplink this deployment
+ * stands behind, which is 64 seconds at today's numbers. Derived rather than
+ * written down, so a change to either constant moves it.
+ */
+export const DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS =
+  (DOCUMENT_CIPHERTEXT_CHUNK_BYTES / MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND) * 1_000;
+
 const envSchema = z
   .object({
     PORT: z.coerce.number().int().min(1).max(65535).default(5000),
@@ -142,6 +155,23 @@ const envSchema = z
     // keeps a minutes-long rotation, restore or trash purge unaffected.
     HTTP_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(600_000).default(240_000),
     HTTP_HEADERS_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(60_000),
+
+    // How long ONE document part may take to arrive once it holds an upload slot:
+    // the route's own body deadline (`middleware/documentPartBody.ts`). The
+    // default is one sealed segment at the slowest uplink supported, 64 s, and that
+    // is a floor on upload speed PER TRANSFER: a user running several uploads at
+    // once shares one uplink between them, so each gets a fraction of it. Raise it
+    // for users on slow links. What that costs is stated plainly: it is also how
+    // long one account can hold one of the process's part-upload slots with a body
+    // it never sends. It may not exceed HTTP_REQUEST_TIMEOUT_MS (refused below),
+    // because the server-wide deadline would end the request first and this one
+    // would mean nothing. Like the pair above it cannot be zero.
+    DOCUMENT_PART_BODY_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(5_000)
+      .max(600_000)
+      .default(DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS),
 
     // Database
     MONGODB_URI: z.string().min(1).default('mongodb://localhost:27017/hvault'),
@@ -463,6 +493,12 @@ const envSchema = z
     // 4 s killed a dribbling body at 4 s.
     message: 'HTTP_HEADERS_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS',
     path: ['HTTP_HEADERS_TIMEOUT_MS'],
+  })
+  .refine((data) => data.DOCUMENT_PART_BODY_TIMEOUT_MS <= data.HTTP_REQUEST_TIMEOUT_MS, {
+    // A part deadline past the server-wide one never fires: the request is ended
+    // with a 408 first. Refused rather than quietly meaning nothing.
+    message: 'DOCUMENT_PART_BODY_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS',
+    path: ['DOCUMENT_PART_BODY_TIMEOUT_MS'],
   })
   .refine((data) => data.REFRESH_TOKEN_REMEMBER_DAYS >= data.REFRESH_TOKEN_DAYS, {
     // "Remember me" must never shorten a session relative to a normal login.

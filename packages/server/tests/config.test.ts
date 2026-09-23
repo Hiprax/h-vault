@@ -1438,6 +1438,121 @@ describe('Server Config Validation', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // HTTP receive deadlines: the server-wide pair and the part route's own
+  // ---------------------------------------------------------------------------
+
+  describe('HTTP receive deadlines', () => {
+    const DEADLINE_KEYS = {
+      HTTP_REQUEST_TIMEOUT_MS: undefined,
+      HTTP_HEADERS_TIMEOUT_MS: undefined,
+      DOCUMENT_PART_BODY_TIMEOUT_MS: undefined,
+    } as const;
+
+    it('derives each default from the body it bounds at the slowest uplink supported', async () => {
+      const { config, DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS } = await loadConfigWithEnv({
+        ...DEADLINE_KEYS,
+      });
+      const { LARGE_JSON_BODY_LIMIT_BYTES } =
+        await import('../src/middleware/largeBodyAdmission.js');
+      const { DOCUMENT_CIPHERTEXT_CHUNK_BYTES, MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND } =
+        await import('@hvault/shared');
+      // The largest body any route accepts, and one sealed document segment, each
+      // at the one divisor both deadlines share. A literal default that drifted
+      // from either would still pass a test that only read the number back.
+      expect(config.HTTP_REQUEST_TIMEOUT_MS).toBe(
+        (LARGE_JSON_BODY_LIMIT_BYTES / MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND) * 1_000,
+      );
+      expect(config.HTTP_REQUEST_TIMEOUT_MS).toBe(240_000);
+      expect(DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS).toBe(
+        (DOCUMENT_CIPHERTEXT_CHUNK_BYTES / MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND) * 1_000,
+      );
+      expect(config.DOCUMENT_PART_BODY_TIMEOUT_MS).toBe(64_000);
+      expect(config.HTTP_HEADERS_TIMEOUT_MS).toBe(60_000);
+    });
+
+    it.each([
+      ['HTTP_REQUEST_TIMEOUT_MS', '4999'],
+      ['HTTP_REQUEST_TIMEOUT_MS', '600001'],
+      ['HTTP_HEADERS_TIMEOUT_MS', '999'],
+      ['HTTP_HEADERS_TIMEOUT_MS', '600001'],
+      ['DOCUMENT_PART_BODY_TIMEOUT_MS', '4999'],
+      ['DOCUMENT_PART_BODY_TIMEOUT_MS', '600001'],
+      // Zero is the value that would switch the protection off; it is below
+      // every floor, so no configuration can.
+      ['HTTP_REQUEST_TIMEOUT_MS', '0'],
+      ['DOCUMENT_PART_BODY_TIMEOUT_MS', '0'],
+    ])('refuses %s=%s, one past its bound', async (key, value) => {
+      // The other two sit where no ordering rule can fire, so the refusal can
+      // only be this key's own bound: the ordering messages name
+      // HTTP_REQUEST_TIMEOUT_MS too, and matching the key alone would let one of
+      // them stand in for a missing bound.
+      await expect(
+        loadConfigWithEnv({
+          HTTP_REQUEST_TIMEOUT_MS: '600000',
+          HTTP_HEADERS_TIMEOUT_MS: '1000',
+          DOCUMENT_PART_BODY_TIMEOUT_MS: '5000',
+          [key]: value,
+        }),
+      ).rejects.toThrow(new RegExp(`${key}: Too (small|big)`));
+    });
+
+    // One load per test: the config module is re-imported only between tests.
+    it('accepts every deadline at its lower bound', async () => {
+      const { config } = await loadConfigWithEnv({
+        HTTP_REQUEST_TIMEOUT_MS: '5000',
+        HTTP_HEADERS_TIMEOUT_MS: '1000',
+        DOCUMENT_PART_BODY_TIMEOUT_MS: '5000',
+      });
+      expect(config.HTTP_REQUEST_TIMEOUT_MS).toBe(5_000);
+      expect(config.HTTP_HEADERS_TIMEOUT_MS).toBe(1_000);
+      expect(config.DOCUMENT_PART_BODY_TIMEOUT_MS).toBe(5_000);
+    });
+
+    it('accepts every deadline at its upper bound', async () => {
+      const { config } = await loadConfigWithEnv({
+        HTTP_REQUEST_TIMEOUT_MS: '600000',
+        HTTP_HEADERS_TIMEOUT_MS: '600000',
+        DOCUMENT_PART_BODY_TIMEOUT_MS: '600000',
+      });
+      expect(config.HTTP_REQUEST_TIMEOUT_MS).toBe(600_000);
+      expect(config.HTTP_HEADERS_TIMEOUT_MS).toBe(600_000);
+      expect(config.DOCUMENT_PART_BODY_TIMEOUT_MS).toBe(600_000);
+    });
+
+    it('refuses a headers deadline longer than the request deadline, which Node would swap', async () => {
+      await expect(
+        loadConfigWithEnv({
+          ...DEADLINE_KEYS,
+          HTTP_REQUEST_TIMEOUT_MS: '60000',
+          HTTP_HEADERS_TIMEOUT_MS: '60001',
+        }),
+      ).rejects.toThrow('HTTP_HEADERS_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS');
+    });
+
+    it('refuses a part deadline longer than the request deadline, which would end the part first', async () => {
+      await expect(
+        loadConfigWithEnv({
+          ...DEADLINE_KEYS,
+          HTTP_REQUEST_TIMEOUT_MS: '60000',
+          DOCUMENT_PART_BODY_TIMEOUT_MS: '60001',
+        }),
+      ).rejects.toThrow(
+        'DOCUMENT_PART_BODY_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS',
+      );
+    });
+
+    it('accepts either deadline EQUAL to the request deadline', async () => {
+      const { config } = await loadConfigWithEnv({
+        HTTP_REQUEST_TIMEOUT_MS: '60000',
+        HTTP_HEADERS_TIMEOUT_MS: '60000',
+        DOCUMENT_PART_BODY_TIMEOUT_MS: '60000',
+      });
+      expect(config.HTTP_HEADERS_TIMEOUT_MS).toBe(60_000);
+      expect(config.DOCUMENT_PART_BODY_TIMEOUT_MS).toBe(60_000);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Session lifetimes (integer day counts) + cross-field ordering refines
   // ---------------------------------------------------------------------------
 

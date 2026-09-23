@@ -99,16 +99,6 @@ const REMAINING_NAV_ITEMS: NavItem[] = [
 const DOCUMENTS_NAV_ITEM: NavItem = { label: 'Documents', to: '/documents', icon: Files };
 
 /**
- * The navigation, with the document store's entry spliced in when this server
- * offers it.
- *
- * Two explicit lists rather than one list filtered by a predicate, because the
- * predicate would have to be evaluated for every entry in order to hide exactly
- * one of them, and a `hidden` flag on `NavItem` would be a field five entries
- * carry for the sake of the sixth. Exported so the entry's presence and its
- * position can be pinned without rendering the whole layout.
- */
-/**
  * What the user is told when the encrypted offline copy of their vault cannot be
  * written. Offline read access is a shipped feature, so a silent write failure
  * is discovered at the worst possible moment: an empty vault with no network to
@@ -147,6 +137,16 @@ const OFFLINE_CACHE_NOTICES: Record<OfflineCacheErrorType, string> = {
   unknown: OFFLINE_CACHE_UNAVAILABLE,
 };
 
+/**
+ * The navigation, with the document store's entry spliced in when this server
+ * offers it.
+ *
+ * Two explicit lists rather than one list filtered by a predicate, because the
+ * predicate would have to be evaluated for every entry in order to hide exactly
+ * one of them, and a `hidden` flag on `NavItem` would be a field five entries
+ * carry for the sake of the sixth. Exported so the entry's presence and its
+ * position can be pinned without rendering the whole layout.
+ */
 export function navItemsFor(documentsEnabled: boolean): NavItem[] {
   if (!documentsEnabled) return [VAULT_NAV_ITEM, ...REMAINING_NAV_ITEMS];
   return [VAULT_NAV_ITEM, DOCUMENTS_NAV_ITEM, ...REMAINING_NAV_ITEMS];

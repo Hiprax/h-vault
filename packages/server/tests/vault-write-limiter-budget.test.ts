@@ -48,8 +48,11 @@ describe('vaultItemWriteLimiter budget', () => {
 
 describe('folderWriteLimiter budget', () => {
   it('covers two worst-case drags in a row', () => {
-    // A drag re-sorts at most every OTHER sibling, one request each.
-    const worstDrag = MAX_FOLDERS_PER_USER - 1;
+    // A drag rewrites the sort order of EVERY sibling whose position changed, the
+    // dragged folder included (`FolderRail`'s reorder sends one request per row
+    // whose `sortOrder` differs from its new index). At worst that is every folder
+    // the account may hold, all siblings under one parent.
+    const worstDrag = MAX_FOLDERS_PER_USER;
     expect(FOLDER_WRITE_RATE_LIMIT_MAX).toBeGreaterThanOrEqual(worstDrag * 2);
   });
 

@@ -22,9 +22,9 @@
  * with no `versionchange` handler, the way an older tab holds it. What is mocked
  * is the network, the key derivation (a real 600,000-iteration PBKDF2 per case
  * would dominate the file and is pinned elsewhere) and the modules whose
- * teardown is asserted as a side effect. Only `setTimeout` is faked, so the
- * grace period can be run out without waiting for it; the engine runs on
- * `setImmediate` and keeps real time.
+ * teardown is asserted as a side effect. Only `setTimeout` and `clearTimeout`
+ * are faked, so the grace period can be run out without waiting for it; the
+ * engine runs on `setImmediate` and keeps real time.
  */
 
 import 'fake-indexeddb/auto';

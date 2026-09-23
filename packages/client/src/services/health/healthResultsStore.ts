@@ -46,15 +46,23 @@
  *   for the same reason, is `offlineCache`'s three readers.
  * - The database is opened through `offlineCache`'s `openVersionedDatabase`, the
  *   one shared open, so the OPEN always settles as well: an upgrade another tab
- *   on an older bundle is holding up is refused after a grace period rather than
- *   left pending, which for this module would wedge the write queue above for
- *   the tab's life. And a saver whose READ is refused writes nothing (see
+ *   on an older bundle is holding up is refused after a grace period, and an open
+ *   the engine never answers at all (one queued behind another tab's upgrade) is
+ *   given up after `OPEN_RESPONSE_DEADLINE_MS`, rather than either being left
+ *   pending, which for this module would wedge the write queue above for the
+ *   tab's life. And a saver whose READ is refused writes nothing (see
  *   {@link snapshotToMerge}), since both write the whole record.
  */
 import { cryptoService } from '../crypto/cryptoService';
 import { deriveUserHash, openVersionedDatabase, transactionFailureError } from '../offlineCache';
 
 const DB_NAME_PREFIX = 'hvault-health';
+/**
+ * Bumping this runs an upgrade in every tab that opens the database afterwards.
+ * Keep whatever that upgrade does FAR inside `OPEN_RESPONSE_DEADLINE_MS`
+ * (`services/offlineCache.ts`): a tab whose open is queued behind another tab's
+ * upgrade hears nothing until it ends, and gives up once that deadline passes.
+ */
 const DB_VERSION = 1;
 const RESULTS_STORE = 'results';
 /** Single-record key: the whole health snapshot lives in one encrypted blob. */

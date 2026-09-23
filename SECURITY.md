@@ -107,9 +107,12 @@ security posture, not a disclaimer.
   holding a session cannot buy a fresh budget by moving to another address. That covers the
   heavy-operation tier and the confirmation of a new 2FA setup. It also covers every vault-item
   and folder write: each one leaves an audit row that is kept for a year, so each is bounded per
-  account, at a ceiling sized for the app's own one-request-per-item bulk actions. Getting the
-  key wrong on any of these tiers turns a limiter into a lockout of the legitimate user, an open
-  door for the attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
+  account, at a ceiling sized for the app's own one-request-per-item bulk actions. That bounds how
+  fast one account can grow the log, not how large it gets: at the two ceilings it is 21,000 rows
+  per quarter hour, about two million a day, each kept for the year. Ceilings much lower than that
+  need the bulk actions to become single requests first. Getting the key wrong on any of these
+  tiers turns a limiter into a lockout of the legitimate user, an open door for the attacker, or
+  both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
   the individual address, because a single routed IPv6 allocation hands one attacker 18
   quintillion addresses: keyed on the full `/128`, an IP-keyed limiter is not a limiter at all,
   it is a counter that never reaches two. That aggregation happens inside the library that
@@ -203,14 +206,21 @@ security posture, not a disclaimer.
   queued, because queueing a caller past its own share is how one account turns a refusal it
   earned into a pile of sockets. That share is the number of transfers the server lets one
   account open, and a transfer sends its pieces one at a time, so the app can never reach it.
-  **And a deadline**: a piece whose bytes stop arriving is dropped after sixty-four seconds —
-  one piece at the slowest upload speed this deployment stands behind — rather than being
-  waited on for the runtime's five-minute default. The deadline covers only the **arrival**
-  of the data; a piece already delivered is never interrupted while it is being stored, so a
-  slow storage service costs throughput rather than transfers. Neither bound is a substitute
-  for the reverse proxy in front of the application, and neither is a defence against a
-  distributed flood: what they bound is what **one authenticated account** can cost everyone
-  else.
+  **And a deadline**: a piece whose bytes have not all arrived within sixty-four seconds by
+  default is dropped (one piece at the slowest upload speed this deployment stands behind;
+  operators can raise it with `DOCUMENT_PART_BODY_TIMEOUT_MS`, never past the server-wide
+  receive deadline) rather than being waited on for the runtime's five-minute default. The
+  deadline covers only the **arrival** of the data; a piece already delivered is never
+  interrupted while it is being stored, so a slow storage service costs throughput rather than
+  transfers. A piece's slot is given back only when the server has **finished** with it, not
+  when the connection closes: a piece whose sender disconnects while it is being stored is
+  still in memory until the storage call returns, and releasing its slot at that point would
+  let one account keep more pieces in memory than its share by disconnecting. The share is per
+  account, so it does not stop **two accounts acting together**: at three slots each they can
+  hold all four between them, one piece after another for as long as their rate limits allow.
+  Neither bound is a substitute for the reverse proxy in front of the application, and neither
+  is a defence against a distributed flood: what they bound is what **one authenticated
+  account** can cost everyone else.
 - **One account exhausting the server's memory through the two large uploads.** A backup
   restore and a vault-key rotation each accept a body of up to 30 MB, which the server must
   hold and parse whole. Both were rate limited to five attempts per account per fifteen
@@ -218,9 +228,12 @@ security posture, not a disclaimer.
   answered rather than how many were buffered. The limit now runs first, and the process
   admits only **two** of these requests at a time, sized against the container's measured
   memory, with the rest waiting before their body is read. **One account may hold one** of
-  those two, so a request that declares a length and sends nothing cannot keep every other
-  account from restoring or rotating; a second one from the same account is refused at once,
-  which is the answer the per-account rotation lock already gave it after the fact. A slot is
+  those two, so one account's request that declares a length and sends nothing cannot keep
+  every other account from restoring or rotating. **Two accounts acting together can**: each
+  holding one slot with a body it never finishes sending, they keep everyone else waiting for
+  as long as the server-wide receive deadline allows, four minutes by default. A second
+  request from the same account is refused at once, with the same status the per-account
+  rotation lock gave it after the fact. A slot is
   given back only when the operation has **finished**, not when the connection closes: the
   server keeps working on a request whose client has gone away, and releasing its slot at
   that point would let one account keep many of them in memory at once by disconnecting.
@@ -408,7 +421,12 @@ packages/server`, or inside the production image (which has no `npm`) with
   Vault Health page are cached in the browser (IndexedDB) **encrypted with your vault key**,
   so they survive a page refresh or browser close without forcing a re-scan. They stay
   encrypted at rest across a lock — exactly as safe as the wrapped vault key already
-  persisted for unlock — and are erased on logout.
+  persisted for unlock — and are erased on logout when the browser allows it. They are
+  not erased when the browser refuses or cannot complete the clear, for example when
+  another tab is holding the database up or the browser never answers: logout then
+  finishes without erasing them rather than hanging, and the encrypted results stay
+  until a later logout clears them. The same holds for the encrypted offline copy of
+  the vault. Neither is readable without the vault key, which logout discards.
 
 ### Portable plaintext export ("Leave H-Vault")
 

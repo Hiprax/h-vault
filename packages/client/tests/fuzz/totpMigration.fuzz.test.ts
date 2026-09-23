@@ -6,7 +6,7 @@
  * the two: the bytes it reads ARE secret keys, and the thing it produces is
  * offered to the user as a key to attach to an account.
  *
- * Seven clauses, each of which can fail on its own:
+ * Eight clauses, each of which can fail on its own:
  *
  *   1. **Nothing untyped escapes.** `readMigrationPayload` returns a payload or
  *      throws `MigrationParseError`. A `RangeError` from a `DataView` read past
@@ -30,17 +30,29 @@
  *   6. **A field number protobuf cannot express is refused, never aliased or
  *      skipped.** A tag is a 32-bit value and field number 0 does not exist. A
  *      tag at or above 2^32 used to be squeezed into 32 bits, so field 2^29 + 1
- *      was read as field 1 and an account a reader following the format would
- *      skip was imported. Refused with the one fixed message, whatever wire type
- *      the tag claims, at the top level and inside an account.
+ *      was read as field 1. Other readers disagree about such a tag (some also
+ *      read it as field 1, others refuse the whole message), so the account this
+ *      reader imported depended on which program read the code. Refused with
+ *      the one fixed message, whatever wire type the tag claims, at the top
+ *      level and inside an account.
  *   7. **A second copy of a modelled field is refused**, whether it arrives
  *      under its own tag or under one that aliases onto it.
+ *   8. **A number is read only in a spelling every reader agrees on.** A tag or
+ *      a length in at most five bytes, an int32 in at most five or as the
+ *      ten-byte sign extension of a negative value; any wider spelling, which
+ *      some readers skip past unread and others refuse, is refused with the one
+ *      fixed message.
  *
  * Clauses 5 and 6 only mean something if the generators can REACH the boundary
  * between them, so the field numbers below are drawn from bands on BOTH sides of
  * the 2^29 - 1 ceiling, from the implementation-reserved range, and from the
  * band that aliases onto every modelled field, rather than from a small range
  * that could never produce a tag wider than one byte.
+ *
+ * The generated-case count is nine properties × `PROPERTY_RUNS` (100 when this
+ * was written, so 900 cases per run). NOTHING ENFORCES THAT NUMBER: no ratchet
+ * field records it, and lowering `PROPERTY_RUNS` or passing a smaller `numRuns`
+ * here would go unnoticed by every gate. Treat both as a denominator anyway.
  */
 import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
@@ -57,6 +69,8 @@ import {
   encodeEntry,
   encodeMigrationUri,
   encodePayload,
+  int32Varint,
+  paddedVarint,
   tag,
   varint,
   type EncodableEntry,
@@ -279,14 +293,21 @@ describe('everything the reader accepts can actually be stored', () => {
 describe('a round trip through the independent encoder loses nothing', () => {
   it('reads back every field it was given', () => {
     fc.assert(
-      fc.property(fc.array(anyEntry, { minLength: 1, maxLength: 6 }), (entries) => {
-        const payload = parseMigrationUri(encodeMigrationUri({ entries, batchSize: 1 }));
-        expect(payload.entries.length, propertyBanner()).toBe(entries.length);
-        payload.entries.forEach((read, index) => {
-          const written = entries[index];
-          expect([...read.secret], propertyBanner()).toEqual([...(written?.secret ?? [])]);
-        });
-      }),
+      fc.property(
+        fc.array(anyEntry, { minLength: 1, maxLength: 6 }),
+        // The whole int32 range: a negative batch number is sign-extended to ten
+        // bytes, and Google Authenticator writes negative ones.
+        fc.integer({ min: -(2 ** 31), max: 2 ** 31 - 1 }),
+        (entries, batchId) => {
+          const payload = parseMigrationUri(encodeMigrationUri({ entries, batchSize: 1, batchId }));
+          expect(payload.entries.length, propertyBanner()).toBe(entries.length);
+          expect(payload.batchId, propertyBanner()).toBe(batchId);
+          payload.entries.forEach((read, index) => {
+            const written = entries[index];
+            expect([...read.secret], propertyBanner()).toEqual([...(written?.secret ?? [])]);
+          });
+        },
+      ),
       propertyRun({ numRuns: PROPERTY_RUNS }),
     );
   });
@@ -312,6 +333,68 @@ describe('a round trip through the independent encoder loses nothing', () => {
           expect([...(read.entries[0]?.secret ?? [])], propertyBanner()).toEqual([
             ...readMigrationPayload(plain).entries.flatMap((e) => [...e.secret]),
           ]);
+        },
+      ),
+      propertyRun({ numRuns: PROPERTY_RUNS }),
+    );
+  });
+});
+
+describe('a number is read only in a spelling every reader agrees on', () => {
+  it('accepts a tag, a length or an int32 exactly when it is spelled the way protobuf writes it', () => {
+    // One varint of an honest export is re-spelled at a drawn width. Readers
+    // agree on a tag or a length in at most five bytes, and on an int32 in at most
+    // five bytes or as the ten-byte sign extension of a negative value; past
+    // that, one reader skips bytes it never read and another refuses, so the
+    // same export would mean different things to each. Refused, with the fixed
+    // message, exactly then.
+    fc.assert(
+      fc.property(
+        anyEntry,
+        fc.constantFrom('tag', 'length', 'int32'),
+        fc.integer({ min: 1, max: 10 }),
+        fc.integer({ min: -(2 ** 31), max: 2 ** 31 - 1 }),
+        (entry, respelled, drawnWidth, batchId) => {
+          const account = encodeEntry(entry);
+          const widthFor = (value: number | bigint): number =>
+            Math.max(drawnWidth, varint(value).length);
+          const tagBytes = respelled === 'tag' ? paddedVarint(0x0a, widthFor(0x0a)) : tag(1, 2);
+          const lengthBytes =
+            respelled === 'length'
+              ? paddedVarint(account.length, widthFor(account.length))
+              : varint(account.length);
+          // A negative int32 has one spelling only, ten bytes; a non-negative one
+          // can be padded like anything else.
+          const idBytes =
+            respelled === 'int32' && batchId >= 0
+              ? paddedVarint(batchId, widthFor(batchId))
+              : int32Varint(batchId);
+          const bytes = Uint8Array.from([
+            ...tagBytes,
+            ...lengthBytes,
+            ...account,
+            ...tag(5, 0),
+            ...idBytes,
+          ]);
+
+          const spelledWidth =
+            respelled === 'tag'
+              ? tagBytes.length
+              : respelled === 'length'
+                ? lengthBytes.length
+                : idBytes.length;
+          const canonical = spelledWidth <= 5 || (respelled === 'int32' && batchId < 0);
+          const result = attempt(bytes);
+          if (canonical) {
+            expect(result.ok, propertyBanner()).toBe(true);
+            const read = readMigrationPayload(bytes);
+            expect(read.batchId, propertyBanner()).toBe(batchId);
+            expect([...(read.entries[0]?.secret ?? [])], propertyBanner()).toEqual([
+              ...(entry.secret ?? []),
+            ]);
+          } else {
+            expect(result.error?.message, propertyBanner()).toBe(MALFORMED_MESSAGE);
+          }
         },
       ),
       propertyRun({ numRuns: PROPERTY_RUNS }),

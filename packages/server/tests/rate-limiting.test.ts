@@ -489,8 +489,8 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
     it('should accept 2FA verify requests through rate limiter middleware', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      // 2FA is not set up for the test user, so the controller returns 409.
-      // This verifies the middleware chain (twoFactorVerifyLimiter) does not block.
+      // 2FA has not been started for the test user, so the controller refuses with
+      // 400. This verifies the middleware chain (twoFactorVerifyLimiter) does not block.
       const res = await agent
         .post('/api/v1/user/2fa/verify')
         .set('Authorization', authHeader(user.accessToken))
@@ -498,8 +498,11 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
         .set('Cookie', csrfCookie)
         .send({ code: '123456', secret: 'some-secret' });
 
-      // Reaches controller — returns 400 or 409 (no pending 2FA setup / already enabled)
-      expect([400, 409]).toContain(res.status);
+      // Reached the controller: its own refusal, not the limiter's.
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe(
+        'No pending 2FA setup found. Please start the setup process first.',
+      );
     });
 
     it('should still enforce auth before rate limiter on 2FA verify', async () => {

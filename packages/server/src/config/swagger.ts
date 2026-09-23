@@ -252,6 +252,69 @@ const pageEnvelope = (description: string, itemsRef: string): Record<string, unk
     { pagination: { $ref: '#/components/schemas/Pagination' } },
   );
 
+// ---------------------------------------------------------------------------
+// Building blocks every other operation shares
+// ---------------------------------------------------------------------------
+//
+// The same move as the document-route blocks above, for the shapes the rest of
+// the document had written out by hand dozens of times: a request body that is
+// one component schema, an acknowledgement, one repeated set of answers, the
+// bare `{id}` parameter and the two derived write budgets. The served document
+// stays byte-for-byte identical for the same reasons, and these stay plain
+// values rather than `$ref`s for the same reason too.
+
+/** A required JSON request body that is exactly one component schema. */
+const jsonRequestBody = (schemaName: string): Record<string, unknown> => ({
+  required: true,
+  content: {
+    'application/json': {
+      schema: { $ref: `#/components/schemas/${schemaName}` },
+    },
+  },
+});
+
+/** A response whose body is the plain `SuccessResponse` acknowledgement. */
+const successResponse = (description: string): Record<string, unknown> => ({
+  description,
+  content: {
+    'application/json': {
+      schema: { $ref: '#/components/schemas/SuccessResponse' },
+    },
+  },
+});
+
+/**
+ * The answers of a request that re-checks the caller's own credentials and then
+ * only acknowledges: verifying an unlock and deleting the account. The 404 is the
+ * account having been deleted in the meantime ("User not found").
+ */
+const ACKNOWLEDGED_REAUTH_RESPONSES = {
+  200: { $ref: '#/components/responses/Acknowledged' },
+  400: { $ref: '#/components/responses/ValidationError' },
+  401: { $ref: '#/components/responses/Unauthorized' },
+  404: { $ref: '#/components/responses/NotFound' },
+  429: { $ref: '#/components/responses/RateLimited' },
+};
+
+/** The `{id}` of a vault item, folder, session or trusted device, as those routes declare it. */
+const ID_PATH_PARAM = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
+
+/**
+ * The vault-item and folder write budgets, as every mutation that spends one quotes it.
+ *
+ * Both numbers are DERIVED in `middleware/rateLimiter.ts` (two passes over the most
+ * rows an account may hold) and are written out here rather than imported:
+ * importing that module evaluates the server configuration and constructs every
+ * limiter, while this one imports nothing but `@hvault/shared`, which is what lets
+ * `scripts/ci/emit-openapi.mjs` build it with no side effects. `docs-sync.test.ts`
+ * compares every description quoting either sentence with the constants, so a cap
+ * that moves without this text fails there.
+ */
+const ITEM_WRITE_BUDGET =
+  'Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).';
+const FOLDER_WRITE_BUDGET =
+  'Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.';
+
 /**
  * OpenAPI 3.0.3 specification for the H-Vault REST API.
  *
@@ -322,6 +385,13 @@ export const swaggerSpec: JsonObject = {
         name: 'x-csrf-token',
         description:
           'HMAC-SHA256 double-submit CSRF token. Fetch from GET /csrf-token before state-changing requests.',
+      },
+      metricsToken: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'x-metrics-token',
+        description:
+          'The operator-configured METRICS_TOKEN. GET /metrics exists only when it is set, and compares it in constant time.',
       },
     },
 
@@ -864,6 +934,70 @@ export const swaggerSpec: JsonObject = {
         required: ['code'],
         properties: {
           code: { type: 'string', minLength: 6, maxLength: 16 },
+          password: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 500,
+            description:
+              'The account password. The server REQUIRES it (a request without it is refused with 400); it is listed as optional here only until the next major version, since marking a request field required is a breaking change to this document.',
+          },
+        },
+      },
+      VerifyUnlockRequest: {
+        type: 'object',
+        required: ['authHash'],
+        properties: {
+          authHash: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 100,
+            description:
+              'The auth hash derived from the master password, never the password itself.',
+          },
+        },
+      },
+      ReauthenticateWithCodeRequest: {
+        type: 'object',
+        required: ['password'],
+        properties: {
+          password: { type: 'string', minLength: 1, maxLength: 500 },
+          code: {
+            type: 'string',
+            minLength: 6,
+            maxLength: 16,
+            pattern: '^[a-zA-Z0-9]+$',
+            description:
+              'A current TOTP or unused backup code. Optional in the schema; required by the handler whenever two-factor authentication is enabled.',
+          },
+        },
+      },
+      PublicConfig: {
+        type: 'object',
+        required: ['fileEncryption'],
+        properties: {
+          fileEncryption: {
+            type: 'object',
+            required: ['maxSizeMB'],
+            properties: { maxSizeMB: { type: 'integer' } },
+          },
+          documents: {
+            type: 'object',
+            description:
+              'Absent from a server older than the document store; `enabled: false` when no object storage is configured; otherwise the limits the browser enforces before it encrypts.',
+            required: ['enabled'],
+            properties: {
+              enabled: { type: 'boolean' },
+              maxSizeMB: { type: 'integer' },
+              chunkPlaintextBytes: { type: 'integer' },
+              maxDocuments: { type: 'integer' },
+              quotaMB: { type: 'integer' },
+              allowedExtensions: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Advisory: the server receives ciphertext and never sees a filename.',
+              },
+            },
+          },
         },
       },
       SessionInfo: {
@@ -1495,14 +1629,9 @@ export const swaggerSpec: JsonObject = {
           },
         },
       },
-      Acknowledged: {
-        description: 'The operation succeeded and returns no payload beyond the acknowledgement',
-        content: {
-          'application/json': {
-            schema: { $ref: '#/components/schemas/SuccessResponse' },
-          },
-        },
-      },
+      Acknowledged: successResponse(
+        'The operation succeeded and returns no payload beyond the acknowledgement',
+      ),
       StorageUnavailable: {
         description:
           'The document store is not available on this deployment because no object storage is configured. In production the body is redacted to its status text, so a client determines availability from GET /config rather than from this response.',
@@ -1634,14 +1763,7 @@ export const swaggerSpec: JsonObject = {
         description:
           'Reserves an upload id, records the wrapped document key and the framing, and opens an engine-side multipart upload when more than one segment is declared. The id it returns is the future document id: the browser binds its key derivation to it before sealing the first byte, so it can never be reassigned without re-encrypting the file. Refused with 400 when the declared size exceeds the operator cap, the document count or concurrent-transfer cap is reached, or the storage quota would be exceeded, and with 409 while a vault-key rotation is running or while another transfer is already being opened for the same account. Those per-account budgets are decided under a per-user lock, so an account can never hold more than the concurrent-transfer cap allows however many opens arrive at once.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/InitDocumentUploadRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('InitDocumentUploadRequest'),
         responses: {
           201: jsonEnvelope('Transfer opened', {
             $ref: '#/components/schemas/InitDocumentUploadResponse',
@@ -1680,7 +1802,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Cancel a transfer',
         description:
-          'Releases what the transfer holds in the storage engine and deletes the staging row. A multipart transfer has its engine-side upload aborted first and its row deleted second, so a crash between the two leaves a row that still names the upload rather than an upload nothing names. A single-segment transfer has its row claimed first and then its stored object deleted, so the bytes are reclaimed at once instead of waiting a day for the collector; the claim is what decides a race with a completion of the same transfer, so a cancel that loses it answers 404 and leaves the committed document intact. No document is created and no committed document is affected.',
+          'Releases what the transfer holds in the storage engine and deletes the staging row. A multipart transfer has its engine-side upload aborted first and its row deleted second, so a crash between the two leaves a row that still names the upload rather than an upload nothing names. A single-segment transfer has its row claimed first and then its stored object deleted, so the bytes are reclaimed at once instead of waiting a day for the collector; the claim is what decides a race with a completion of the same transfer, so a cancel that loses it answers 404 and leaves the committed document intact. A multipart cancel that arrives after a completion has already assembled the object finds the engine-side upload gone, treats that as cancelled and answers 200 while the completed document remains: the answer cannot tell a cancelled transfer from one that finished first. A cancel never creates, deletes or changes a document.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [UPLOAD_ID_PARAM],
         responses: {
@@ -1779,14 +1901,7 @@ export const swaggerSpec: JsonObject = {
           "Verifies every part against the storage engine's own ledger, DERIVES the document's chunk count and its ciphertext and plaintext sizes from that ledger rather than from this request, re-checks the storage quota against the bytes actually received, and commits the document row. Nothing the client says about the size of its own file is believed. Refused with 400 when a part is missing, when the engine and the server disagree about a part, or when the parts cannot frame a document (a final segment holding only its authentication tag is the case that looks valid and is not); with 409 while a vault-key rotation is running, when the wrapped key was produced under a superseded vault key, or when another completion for the same account is already in flight. Completions of one account are decided one at a time, so the quota is measured against every document committed before this one and is not overshot by several finishing together. A repeat completion returns the document the first one committed, so a client that retried after a timeout cannot tell whether its first attempt landed.",
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [UPLOAD_ID_PARAM],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/CompleteDocumentUploadRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('CompleteDocumentUploadRequest'),
         responses: {
           201: jsonEnvelope('The document, committed', DOCUMENT_RESPONSE_REF),
           ...DOCUMENT_ITEM_WRITE_ERRORS,
@@ -1838,14 +1953,7 @@ export const swaggerSpec: JsonObject = {
           'Re-seals the metadata blob (a rename, a retag, an edited note) and sets the favorite flag and the folder. It cannot change a single byte of the stored content or of the framing that describes it, and it cannot touch the wrapped document key or the storage key: content is immutable after upload, so replacing bytes means uploading a new document. Sending folderId as null removes the document from its folder; the field is then ABSENT from the response rather than present and null. Unlike every other write that produces ciphertext, this endpoint is NOT refused while a vault-key rotation is running, because the metadata blob is sealed under a key derived from the document key and a rotation only rewraps that key.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [DOCUMENT_ID_PARAM],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/UpdateDocumentRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('UpdateDocumentRequest'),
         responses: {
           200: jsonEnvelope('The updated document', DOCUMENT_RESPONSE_REF),
           ...DOCUMENT_ITEM_WRITE_ERRORS,
@@ -1981,6 +2089,58 @@ export const swaggerSpec: JsonObject = {
           'Returns server health status including database connectivity, uptime, and version.',
         responses: {
           200: jsonEnvelope('Server is healthy', { $ref: '#/components/schemas/HealthResponse' }),
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/config': {
+      get: {
+        operationId: 'getPublicConfig',
+        tags: ['Health'],
+        summary: 'Public client configuration',
+        description:
+          'Returns the operator-tunable limits the browser needs before or without signing in: the File Encryption size cap, and whether the document store is enabled with its limits. Unauthenticated, and nothing in it names the storage engine. Rate limited: 60 req/IP per minute, counted in memory per process.',
+        responses: {
+          200: jsonEnvelope('Public configuration', { $ref: '#/components/schemas/PublicConfig' }),
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/metrics': {
+      get: {
+        operationId: 'getMetrics',
+        tags: ['Health'],
+        summary: 'Operator metrics',
+        description:
+          'Process uptime, memory, database connection state and the object-storage gauge from the boot preflight. Mounted only when METRICS_TOKEN is configured: without it the path does not exist and answers 404. Rate limited: 60 req/IP per minute, counted in memory per process.',
+        security: [{ metricsToken: [] }],
+        responses: {
+          200: jsonEnvelope('Metrics', {
+            type: 'object',
+            properties: {
+              uptime: { type: 'number' },
+              memory: {
+                type: 'object',
+                properties: {
+                  rss: { type: 'integer' },
+                  heapTotal: { type: 'integer' },
+                  heapUsed: { type: 'integer' },
+                  external: { type: 'integer' },
+                },
+              },
+              database: {
+                type: 'object',
+                properties: {
+                  state: { type: 'string', enum: ['connected', 'disconnected'] },
+                  readyState: { type: 'integer' },
+                },
+              },
+              storage: { type: 'object' },
+            },
+          }),
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -2026,23 +2186,9 @@ export const swaggerSpec: JsonObject = {
         summary: 'Register a new account',
         description:
           'Creates a new user account. Returns a generic success response for all attempts (prevents email enumeration). Existing accounts receive a notification email instead of an error. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/RegisterRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('RegisterRequest'),
         responses: {
-          201: {
-            description: 'Registration initiated (check email for verification link)',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          201: successResponse('Registration initiated (check email for verification link)'),
           400: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2055,14 +2201,7 @@ export const swaggerSpec: JsonObject = {
         summary: 'Login with credentials',
         description:
           'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step — UNLESS the request carries a valid `trustedDevice` cookie for this account, in which case the 2FA step is skipped and the login completes directly (the cookie is checked strictly after the password comparison, so a wrong password never consumes it). A recognized trusted-device cookie is consumed and rotated, carrying its original expiry forward; an unknown/expired/foreign cookie is cleared and the login falls back to the normal 2FA prompt. Rate limited: 20 req/IP + 20 req/email per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/LoginRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('LoginRequest'),
         responses: {
           200: {
             description: 'Login successful or 2FA required',
@@ -2097,14 +2236,7 @@ export const swaggerSpec: JsonObject = {
         summary: 'Complete 2FA verification',
         description:
           'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints, plus the token-verification budget of 20 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body) AND the code submitted was a TOTP code, a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires. A **backup code** never sets that cookie, whatever the remember-me setting: it is a single-use recovery credential, so it completes this login (and still opens the longer remembered session) without registering the device as trusted.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/Login2faRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('Login2faRequest'),
         responses: {
           200: {
             description:
@@ -2153,6 +2285,7 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -2164,16 +2297,37 @@ export const swaggerSpec: JsonObject = {
         description: 'Revokes the current refresh token and clears the cookie.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
-          200: {
-            description: 'Logged out',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Logged out'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
+      },
+    },
+    '/auth/lock': {
+      post: {
+        operationId: 'lockVault',
+        tags: ['Auth'],
+        summary: 'Record a vault lock',
+        description:
+          'Records that this session locked its vault, in the audit log. The session itself stays signed in; the keys are discarded in the browser. Rate limited: 60 req/user per minute.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        responses: {
+          200: { $ref: '#/components/responses/Acknowledged' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/auth/verify-unlock': {
+      post: {
+        operationId: 'verifyUnlock',
+        tags: ['Auth'],
+        summary: 'Verify a vault unlock',
+        description:
+          'Checks the auth hash derived from the master password, records the unlock (or the failed attempt) in the audit log, and clears the CSRF cookie so the next state-changing request fetches a fresh token. Rate limited: 5 req/user per 5 min.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: jsonRequestBody('VerifyUnlockRequest'),
+        responses: ACKNOWLEDGED_REAUTH_RESPONSES,
       },
     },
     '/auth/logout-all': {
@@ -2184,15 +2338,9 @@ export const swaggerSpec: JsonObject = {
         description: 'Revokes all refresh tokens except the current session.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
-          200: {
-            description: 'All other sessions revoked',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('All other sessions revoked'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -2203,23 +2351,9 @@ export const swaggerSpec: JsonObject = {
         summary: 'Verify email address',
         description:
           'Verifies the email address using a token from the verification email. Rate limited: 20 req/IP per 15 min.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/VerifyEmailRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('VerifyEmailRequest'),
         responses: {
-          200: {
-            description: 'Email verified',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Email verified'),
           400: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2232,23 +2366,9 @@ export const swaggerSpec: JsonObject = {
         summary: 'Resend email verification',
         description:
           'Resends the email verification link. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/ResendVerificationRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('ResendVerificationRequest'),
         responses: {
-          200: {
-            description: 'Verification email sent (generic response for all inputs)',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Verification email sent (generic response for all inputs)'),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2260,23 +2380,9 @@ export const swaggerSpec: JsonObject = {
         summary: 'Request password reset',
         description:
           'Sends a password reset email. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/ForgotPasswordRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('ForgotPasswordRequest'),
         responses: {
-          200: {
-            description: 'Reset email sent (generic response for all inputs)',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Reset email sent (generic response for all inputs)'),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2288,23 +2394,9 @@ export const swaggerSpec: JsonObject = {
         summary: 'Reset password with token',
         description:
           'Resets the master password using a valid reset token. Rate limited: 20 req/IP per 15 min.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/ResetPasswordRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('ResetPasswordRequest'),
         responses: {
-          200: {
-            description: 'Password reset successful',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Password reset successful'),
           400: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2317,23 +2409,9 @@ export const swaggerSpec: JsonObject = {
         summary: 'Unlock locked account',
         description:
           'Unlocks an account that was locked after too many failed login attempts. Rate limited: 20 req/IP per 15 min.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/UnlockAccountRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('UnlockAccountRequest'),
         responses: {
-          200: {
-            description: 'Account unlocked',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Account unlocked'),
           400: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2382,17 +2460,9 @@ export const swaggerSpec: JsonObject = {
         operationId: 'createVaultItem',
         tags: ['Vault'],
         summary: 'Create vault item',
-        description:
-          'Creates a new encrypted vault item. Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
+        description: 'Creates a new encrypted vault item. ' + ITEM_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/CreateVaultItemRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('CreateVaultItemRequest'),
         responses: {
           201: jsonEnvelope('Item created', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
@@ -2455,14 +2525,7 @@ export const swaggerSpec: JsonObject = {
         summary: 'Bulk soft-delete items',
         description: 'Soft-deletes up to 100 vault items at once.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/BulkDeleteRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('BulkDeleteRequest'),
         responses: {
           200: {
             description: 'Items soft-deleted',
@@ -2494,14 +2557,7 @@ export const swaggerSpec: JsonObject = {
         summary: 'Bulk move items to folder',
         description: 'Moves up to 100 vault items to a folder (or root if folderId is null).',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/BulkMoveRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('BulkMoveRequest'),
         responses: {
           200: {
             description: 'Items moved',
@@ -2533,16 +2589,9 @@ export const swaggerSpec: JsonObject = {
         tags: ['Vault'],
         summary: 'Bulk re-encrypt vault items',
         description:
-          'Re-encrypts an account onto a new vault key after a master password change: every item, every folder and every document key, in one request. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 5 requests per account per 15 min, counted before the body is read. At most one restore or key rotation per account is admitted at a time, and a few per server process; a request past the process budget waits for a slot before its body is read.',
+          'Re-encrypts an account onto a new vault key after a master password change: every item, every folder and every document key, in one request. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 5 requests per account per 15 min, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/BulkReEncryptRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('BulkReEncryptRequest'),
         responses: {
           200: {
             description: 'Items re-encrypted',
@@ -2579,7 +2628,7 @@ export const swaggerSpec: JsonObject = {
         summary: 'Get vault item',
         description: 'Returns a single vault item by ID.',
         security: [{ bearerAuth: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [ID_PATH_PARAM],
         responses: {
           200: jsonEnvelope('Vault item', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
@@ -2590,18 +2639,10 @@ export const swaggerSpec: JsonObject = {
         operationId: 'updateVaultItem',
         tags: ['Vault'],
         summary: 'Update vault item',
-        description:
-          'Updates an existing vault item. Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
+        description: 'Updates an existing vault item. ' + ITEM_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/UpdateVaultItemRequest' },
-            },
-          },
-        },
+        parameters: [ID_PATH_PARAM],
+        requestBody: jsonRequestBody('UpdateVaultItemRequest'),
         responses: {
           200: jsonEnvelope('Item updated', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
@@ -2617,19 +2658,11 @@ export const swaggerSpec: JsonObject = {
         operationId: 'deleteVaultItem',
         tags: ['Vault'],
         summary: 'Soft-delete vault item',
-        description:
-          'Moves a vault item to the trash (soft delete). Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
+        description: 'Moves a vault item to the trash (soft delete). ' + ITEM_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [ID_PATH_PARAM],
         responses: {
-          200: {
-            description: 'Item soft-deleted',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Item soft-deleted'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
@@ -2642,18 +2675,11 @@ export const swaggerSpec: JsonObject = {
         tags: ['Vault'],
         summary: 'Permanently delete vault item',
         description:
-          'Permanently deletes a trashed vault item. Cannot be undone. Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
+          'Permanently deletes a trashed vault item. Cannot be undone. ' + ITEM_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [ID_PATH_PARAM],
         responses: {
-          200: {
-            description: 'Item permanently deleted',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Item permanently deleted'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
@@ -2665,10 +2691,9 @@ export const swaggerSpec: JsonObject = {
         operationId: 'restoreVaultItem',
         tags: ['Vault'],
         summary: 'Restore trashed item',
-        description:
-          'Restores a soft-deleted vault item from the trash. Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).',
+        description: 'Restores a soft-deleted vault item from the trash. ' + ITEM_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [ID_PATH_PARAM],
         responses: {
           200: jsonEnvelope('Item restored', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
@@ -2705,23 +2730,16 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
       post: {
         operationId: 'createFolder',
         tags: ['Folders'],
         summary: 'Create folder',
-        description:
-          'Creates a new folder for organizing vault items. Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.',
+        description: 'Creates a new folder for organizing vault items. ' + FOLDER_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/CreateFolderRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('CreateFolderRequest'),
         responses: {
           201: jsonEnvelope('Folder created', { $ref: '#/components/schemas/FolderResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
@@ -2739,17 +2757,11 @@ export const swaggerSpec: JsonObject = {
         tags: ['Folders'],
         summary: 'Update folder',
         description:
-          'Updates folder properties. Validates against circular parent references. Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.',
+          'Updates folder properties. Validates against circular parent references. ' +
+          FOLDER_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/UpdateFolderRequest' },
-            },
-          },
-        },
+        parameters: [ID_PATH_PARAM],
+        requestBody: jsonRequestBody('UpdateFolderRequest'),
         responses: {
           200: jsonEnvelope('Folder updated', { $ref: '#/components/schemas/FolderResponse' }),
           400: {
@@ -2773,7 +2785,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['Folders'],
         summary: 'Delete folder',
         description:
-          "Deletes a folder. Its members are the vault items AND the documents inside it, and both are treated the same way: `action=move` (default) re-parents them to the folder's parent, or to the root when it has none, while `action=delete` moves them to the trash alongside the folder. Trashing a document does not delete its stored bytes; the scheduled trash purge does that once it is `TRASH_AUTO_PURGE_DAYS` old. Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.",
+          "Deletes a folder. Its members are the vault items AND the documents inside it, and both are treated the same way: `action=move` (default) re-parents them to the folder's parent, or to the root when it has none, while `action=delete` moves them to the trash alongside the folder. Trashing a document does not delete its stored bytes; the scheduled trash purge does that once it is `TRASH_AUTO_PURGE_DAYS` old. " +
+          FOLDER_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [
           { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
@@ -2784,14 +2797,7 @@ export const swaggerSpec: JsonObject = {
           },
         ],
         responses: {
-          200: {
-            description: 'Folder deleted',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Folder deleted'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
@@ -2803,18 +2809,10 @@ export const swaggerSpec: JsonObject = {
         operationId: 'reorderFolder',
         tags: ['Folders'],
         summary: 'Reorder folder',
-        description:
-          'Updates the sort order of a folder. Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.',
+        description: 'Updates the sort order of a folder. ' + FOLDER_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/ReorderFolderRequest' },
-            },
-          },
-        },
+        parameters: [ID_PATH_PARAM],
+        requestBody: jsonRequestBody('ReorderFolderRequest'),
         responses: {
           200: jsonEnvelope('Folder reordered', { $ref: '#/components/schemas/FolderResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
@@ -2825,6 +2823,18 @@ export const swaggerSpec: JsonObject = {
     },
 
     // -- User --
+    '/user': {
+      delete: {
+        operationId: 'deleteAccount',
+        tags: ['User'],
+        summary: 'Delete the account',
+        description:
+          'Permanently deletes the account and everything it owns: vault items, folders, documents and their stored objects, uploads in progress, sessions, trusted devices, and its own audit and backup logs. Requires the password, and a current TOTP or backup code when two-factor authentication is enabled. Cannot be undone. Rate limited: 5 req/user per 15 min.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: jsonRequestBody('ReauthenticateWithCodeRequest'),
+        responses: ACKNOWLEDGED_REAUTH_RESPONSES,
+      },
+    },
     '/user/profile': {
       get: {
         operationId: 'getProfile',
@@ -2835,6 +2845,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: jsonEnvelope('User profile', { $ref: '#/components/schemas/UserProfile' }),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -2846,18 +2857,12 @@ export const swaggerSpec: JsonObject = {
         description:
           'Updates user preferences such as theme, auto-lock timeout, and password generation defaults.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/UserSettings' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('UserSettings'),
         responses: {
           200: jsonEnvelope('Settings updated', { $ref: '#/components/schemas/UserProfile' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -2869,23 +2874,9 @@ export const swaggerSpec: JsonObject = {
         description:
           'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token and every trusted device granted under the old password is revoked. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/ChangePasswordRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('ChangePasswordRequest'),
         responses: {
-          200: {
-            description: 'Password changed',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Password changed'),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
@@ -2903,14 +2894,7 @@ export const swaggerSpec: JsonObject = {
         description:
           'Initiates two-factor authentication setup. Returns a TOTP secret and QR code. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/Setup2faRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('Setup2faRequest'),
         responses: {
           200: {
             description: '2FA setup data',
@@ -2946,14 +2930,7 @@ export const swaggerSpec: JsonObject = {
         description:
           'Verifies a TOTP code to finalize 2FA setup. Returns backup codes. Rate limited: 20 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/Verify2faRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('Verify2faRequest'),
         responses: {
           200: {
             description: '2FA enabled with backup codes',
@@ -2990,24 +2967,35 @@ export const swaggerSpec: JsonObject = {
         description:
           'Disables two-factor authentication. Requires a valid TOTP or backup code. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/Disable2faRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('Disable2faRequest'),
         responses: {
-          200: {
-            description: '2FA disabled',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('2FA disabled'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/user/2fa/regenerate-backup-codes': {
+      post: {
+        operationId: 'regenerateBackupCodes',
+        tags: ['User'],
+        summary: 'Regenerate 2FA backup codes',
+        description:
+          'Replaces every backup code with a fresh set, returned once. Requires the password and a current TOTP or backup code, and two-factor authentication must be enabled. Rate limited: 5 req/user per 15 min.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: jsonRequestBody('ReauthenticateWithCodeRequest'),
+        responses: {
+          200: jsonEnvelope(
+            'The new backup codes',
+            {
+              type: 'object',
+              properties: { backupCodes: { type: 'array', items: { type: 'string' } } },
+            },
+            { message: { type: 'string', example: 'Backup codes regenerated' } },
+          ),
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3038,6 +3026,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3048,18 +3037,12 @@ export const swaggerSpec: JsonObject = {
         summary: 'Revoke session',
         description: 'Revokes a specific active session by its refresh token ID.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [ID_PATH_PARAM],
         responses: {
-          200: {
-            description: 'Session revoked',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Session revoked'),
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3090,6 +3073,7 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
       delete: {
@@ -3100,15 +3084,9 @@ export const swaggerSpec: JsonObject = {
           'Revokes every trusted device for the authenticated user. Each device must complete 2FA again on its next login.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
-          200: {
-            description: 'All trusted devices revoked',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('All trusted devices revoked'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3120,18 +3098,12 @@ export const swaggerSpec: JsonObject = {
         description:
           'Revokes a specific trusted device by its id. The device must complete 2FA again on its next login.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [ID_PATH_PARAM],
         responses: {
-          200: {
-            description: 'Trusted device revoked',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Trusted device revoked'),
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3153,6 +3125,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: pageEnvelope('Audit log entries', '#/components/schemas/AuditLogEntry'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3166,14 +3139,7 @@ export const swaggerSpec: JsonObject = {
         description:
           'Checks if a password hash prefix has been found in data breaches using the Have I Been Pwned k-anonymity API.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/CheckBreachRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('CheckBreachRequest'),
         responses: {
           200: {
             description: 'Breach check result',
@@ -3197,6 +3163,7 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3208,14 +3175,7 @@ export const swaggerSpec: JsonObject = {
         description:
           'Checks several password hash prefixes against Have I Been Pwned in one request, preserving k-anonymity (only the first 5 hex chars of each SHA-1 hash are sent; the client deduplicates its passwords first). The server serves warm results from its per-process cache and fans the rest out to HIBP with bounded concurrency. The response maps each resolved prefix to its HIBP range text and reports any prefixes whose lookup failed under `errors`, so the client can mark those passwords as not-checked rather than not-breached.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/CheckBreachBatchRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('CheckBreachBatchRequest'),
         responses: {
           200: {
             description: 'Batched breach check result',
@@ -3312,14 +3272,7 @@ export const swaggerSpec: JsonObject = {
         description:
           'Executes already-decided import operations. The client parses the source export (Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, generic CSV, or a native H-Vault export), resolves conflicts against its own decrypted vault, and encrypts every item locally before calling this endpoint; the server never sees plaintext, never parses the source format, and performs no matching of its own. Identity is computed in the browser from decrypted content — a login matches on its site and username, every other type on its exact content — and is neither transmitted nor stored, so `conflictStrategy` arrives already applied. The server validates ownership, field lengths and the per-account item cap, then applies exactly the `inserts` and `updates` it was given, under a per-user lock and (where the topology supports it) one transaction. Max 10,000 operations per request (large imports are split into several sequential requests by the client, which cannot change the outcome). Rate limited by `importLimiter`: 60 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/ImportRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('ImportRequest'),
         responses: {
           201: {
             description: 'Import result',
@@ -3364,23 +3317,9 @@ export const swaggerSpec: JsonObject = {
         description:
           'Configures the backup encryption key (BWK). The client generates and encrypts the BWK before sending. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/BackupSetupRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('BackupSetupRequest'),
         responses: {
-          200: {
-            description: 'Backup configured',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Backup configured'),
           401: { $ref: '#/components/responses/Unauthorized' },
           409: staleVaultKeyConflict(
             "The wrapper this request stores is the account's vault key sealed under the backup " +
@@ -3399,14 +3338,7 @@ export const swaggerSpec: JsonObject = {
         summary: 'Update backup settings',
         description: 'Updates backup schedule and email settings.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/BackupSettingsRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('BackupSettingsRequest'),
         responses: {
           200: {
             description: 'Backup settings updated',
@@ -3424,6 +3356,7 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3436,14 +3369,7 @@ export const swaggerSpec: JsonObject = {
           'Creates and emails an encrypted backup immediately. Rate limited: 10 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
-          200: {
-            description: 'Backup triggered',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Backup triggered'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -3482,6 +3408,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: pageEnvelope('Backup log entries', '#/components/schemas/BackupLogEntry'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3493,23 +3420,9 @@ export const swaggerSpec: JsonObject = {
         description:
           'Re-encrypts the BWK with a new backup password. Rate limited: 5 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/BackupChangePasswordRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('BackupChangePasswordRequest'),
         responses: {
-          200: {
-            description: 'Backup password changed',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/SuccessResponse' },
-              },
-            },
-          },
+          200: successResponse('Backup password changed'),
           401: { $ref: '#/components/responses/Unauthorized' },
           409: staleVaultKeyConflict(
             "Re-keying backup encryption re-seals the account's vault key under a new backup " +
@@ -3527,16 +3440,9 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Restore from backup',
         description:
-          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. Rate limited: 5 requests per account per 15 min, counted before the body is read. At most one restore or key rotation per account is admitted at a time, and a few per server process; a request past the process budget waits for a slot before its body is read.',
+          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. Rate limited: 5 requests per account per 15 min, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/RestoreBackupRequest' },
-            },
-          },
-        },
+        requestBody: jsonRequestBody('RestoreBackupRequest'),
         responses: {
           200: {
             description: 'Backup restored',

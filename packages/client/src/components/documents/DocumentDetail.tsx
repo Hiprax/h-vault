@@ -28,7 +28,13 @@ import {
   previewModeForName,
 } from '@hvault/shared';
 import type { DocumentMeta, PreviewMode } from '@hvault/shared';
-import { cn, getApiErrorMessage, isSafeUrl } from '../../lib/utils';
+import {
+  cn,
+  getApiErrorMessage,
+  isSafeUrl,
+  parseDocumentLink,
+  type DocumentLink,
+} from '../../lib/utils';
 import { useToast } from '../ui/Toast';
 import {
   Dialog,
@@ -436,23 +442,18 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
 }
 
 /**
- * The origin of a destination, for the confirmation dialog's prominent line.
- *
- * `mailto:` has no origin — `new URL('mailto:a@b').origin` is the string
- * `"null"` — so it is answered with the address itself, which is the part a
- * reader would check. Anything that will not parse falls back to the raw value
- * rather than to an empty line: `isSafeUrl` has already admitted it, and showing
- * nothing where the destination should be is the one outcome a confirmation
- * dialog must never have.
+ * The longest the full address of a document's link is shown in the confirmation
+ * dialog. The destination above it (the origin, or the mail address) is what the
+ * reader checks; a longer address is cut rather than given the room to become a
+ * paragraph of its own in the application's dialog.
  */
-function linkOrigin(href: string | null): string {
-  if (href === null) return '';
-  try {
-    const url = new URL(href);
-    return url.protocol === 'mailto:' ? href : url.origin;
-  } catch {
-    return href;
-  }
+const MAX_LINK_ADDRESS_DISPLAY_LENGTH = 200;
+
+/** A link's full address, cut to {@link MAX_LINK_ADDRESS_DISPLAY_LENGTH}. */
+function linkAddressForDisplay(href: string): string {
+  return href.length <= MAX_LINK_ADDRESS_DISPLAY_LENGTH
+    ? href
+    : `${href.slice(0, MAX_LINK_ADDRESS_DISPLAY_LENGTH - 1)}\u2026`;
 }
 
 /** A timestamp in the reader's own locale, the way the vault detail renders one. */
@@ -494,7 +495,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
   const [favoriteLoading, setFavoriteLoading] = useState(false);
   const [previewBytes, setPreviewBytes] = useState<ArrayBuffer | null>(null);
   const [previewUnavailable, setPreviewUnavailable] = useState<string | null>(null);
-  const [pendingLink, setPendingLink] = useState<string | null>(null);
+  const [pendingLink, setPendingLink] = useState<DocumentLink | null>(null);
   const [previewExpanded, setPreviewExpanded] = useState(false);
 
   const meta = doc.meta;
@@ -636,13 +637,18 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
   );
 
   const handleLink = useCallback((href: string) => {
-    if (!isSafeUrl(href)) return;
-    setPendingLink(href);
+    // Parsed again rather than trusted: the sandbox hands over only links that
+    // already passed `parseDocumentLink`, but this is where the destination the
+    // dialog shows is derived, and a caller that skipped the boundary check must
+    // still get nothing opened rather than a dialog built from raw text.
+    const link = parseDocumentLink(href);
+    if (link === null) return;
+    setPendingLink(link);
   }, []);
 
   const handleOpenLink = useCallback(() => {
-    if (pendingLink === null || !isSafeUrl(pendingLink)) return;
-    window.open(pendingLink, '_blank', 'noopener,noreferrer');
+    if (pendingLink === null || !isSafeUrl(pendingLink.href)) return;
+    window.open(pendingLink.href, '_blank', 'noopener,noreferrer');
     setPendingLink(null);
   }, [pendingLink]);
 
@@ -1143,12 +1149,15 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
       </Dialog>
 
       {/* The link-confirmation dialog, on the APPLICATION side.
-          The href reaching here has already passed `isSafeUrl` at the message
-          boundary in `DocumentSandbox`, and passes it again in `handleOpenLink`
-          before anything is opened. What this dialog adds is the part a scheme
-          check cannot: the reader gets to see WHERE they are about to go, with
-          the ORIGIN shown on its own line, because a link in a document someone
-          else wrote is a link someone else chose. */}
+          The href reaching here has already passed `parseDocumentLink` at the
+          message boundary in `DocumentSandbox`, is parsed again in `handleLink`,
+          and passes `isSafeUrl` in `handleOpenLink` before anything is opened.
+          What this dialog adds is the part a scheme check cannot: the reader gets
+          to see WHERE they are about to go, with the destination taken from the
+          PARSED URL and shown on its own line, because a link in a document
+          someone else wrote is a link someone else chose. Nothing here is the
+          string the frame sent: the address below is the parser's own
+          serialisation, cut to a bounded length. */}
       <Dialog
         open={pendingLink !== null}
         onOpenChange={(open) => {
@@ -1173,10 +1182,13 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
               data-testid="document-link-origin"
               className="break-all font-mono text-sm font-semibold text-[hsl(var(--foreground))]"
             >
-              {linkOrigin(pendingLink)}
+              {pendingLink?.destination}
             </p>
-            <p className="break-all font-mono text-xs text-[hsl(var(--muted-foreground))]">
-              {pendingLink}
+            <p
+              data-testid="document-link-address"
+              className="break-all font-mono text-xs text-[hsl(var(--muted-foreground))]"
+            >
+              {pendingLink === null ? '' : linkAddressForDisplay(pendingLink.href)}
             </p>
           </div>
           <DialogFooter>

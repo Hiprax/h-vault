@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { MAX_SANDBOX_CODE_LENGTH, type PreviewMode, type SandboxTheme } from '@hvault/shared';
-import { isSafeUrl } from '../../lib/utils';
+import { parseDocumentLink } from '../../lib/utils';
 import { connectSandbox } from '../../lib/sandboxHandshake';
 import { describeRenderFailure } from '../../lib/sandboxRefusals';
 
@@ -77,7 +77,8 @@ export interface DocumentSandboxProps {
   readonly ext: string;
   readonly theme: SandboxTheme;
   /**
-   * Called with an href whose scheme has ALREADY passed `isSafeUrl`.
+   * Called with an href that has ALREADY passed `parseDocumentLink`: an http,
+   * https or single-address mailto URL, re-serialised by the URL parser.
    *
    * Validation happens here, at the message boundary, and not in whatever
    * renders the confirmation dialog. An arrangement where this host forwarded a
@@ -213,12 +214,17 @@ export function DocumentSandbox({
         }
         if (message.kind === 'link') {
           // AT THE MESSAGE BOUNDARY, before any dialog and before this reaches
-          // any presentation code. `isSafeUrl` admits http, https and mailto
-          // only; a `javascript:`, `data:` or `blob:` href opens nothing and
-          // shows nothing, silently, because there is no user intent worth
-          // confirming for a scheme the application will never open.
-          if (!isSafeUrl(message.href)) return;
-          onLinkRef.current(message.href);
+          // any presentation code. `parseDocumentLink` admits http, https and
+          // mailto only; a `javascript:`, `data:` or `blob:` href opens nothing
+          // and shows nothing, silently, because there is no user intent worth
+          // confirming for a scheme the application will never open. It also
+          // refuses a string that does not parse, or a `mailto:` that is not one
+          // plain address, and hands on the RE-SERIALISED URL: the href is the
+          // one piece of this message the application displays, so a frame must
+          // not be able to put prose, spaces or bidi controls in it.
+          const link = parseDocumentLink(message.href);
+          if (link === null) return;
+          onLinkRef.current(link.href);
         }
         // 'rendered' needs no action: the frame is visible either way, and the
         // host draws no "loading" state a renderer could keep hostage.

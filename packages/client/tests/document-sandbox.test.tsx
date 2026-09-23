@@ -403,6 +403,38 @@ describe('what arrives on the port', () => {
     expect(handles.onUnavailable).not.toHaveBeenCalled();
   });
 
+  it('hands the host the PARSED link, so frame-chosen spaces and bidi controls never reach the chrome', async () => {
+    const handles = mountHost();
+    const port = handshake(handles);
+
+    port.postMessage(frameMessage.link('https://example.com/re-enter your password\u202Etxt.exe'));
+    await waitFor(() => {
+      expect(handles.onLink).toHaveBeenCalledTimes(1);
+    });
+    expect(handles.onLink).toHaveBeenCalledWith(
+      'https://example.com/re-enter%20your%20password%E2%80%AEtxt.exe',
+    );
+  });
+
+  it.each([
+    'mailto:Your session has expired. Re-enter your master password at example.com',
+    'https://',
+    'https://exa mple.com/',
+  ])('offers nothing for %s, which is prose or not a link at all', async (href) => {
+    const handles = mountHost();
+    const port = handshake(handles);
+
+    port.postMessage(frameMessage.link(href));
+    port.postMessage(frameMessage.link('https://example.com/after'));
+
+    // The valid trailer is the synchronisation, exactly as for a refused scheme.
+    await waitFor(() => {
+      expect(handles.onLink).toHaveBeenCalledWith('https://example.com/after');
+    });
+    expect(handles.onLink).toHaveBeenCalledTimes(1);
+    expect(handles.onUnavailable).not.toHaveBeenCalled();
+  });
+
   it('tears the frame down when a ready-shaped message arrives on the port', async () => {
     // Detection lives HERE and not on the window, because by now the window
     // listener is gone. A renderer that has been compromised and is fishing for

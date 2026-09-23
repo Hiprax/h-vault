@@ -32,9 +32,9 @@ import app from '../src/app.js';
 import * as rateLimiters from '../src/middleware/rateLimiter.js';
 import {
   BODY_SANITIZER,
-  LARGE_BODY_HANDLER,
   LIMITER_NAMES,
   ROUTE_TABLE,
+  SLOT_HANDLERS,
   SLOT_HOLDERS,
   UNNAMED_PARSER_PREFIX,
   isBodyParser,
@@ -165,15 +165,25 @@ describe('the route table matches the real Express router stack', () => {
           violations.push(`${key}: its slot holder runs before a limiter`);
         }
       });
-      const holdsLargeBody = chain.includes('holdLargeBodySlot');
-      const wrapped = chain.at(-1) === LARGE_BODY_HANDLER;
-      if (holdsLargeBody !== wrapped) {
-        violations.push(
-          `${key}: holdLargeBodySlot and the ${LARGE_BODY_HANDLER} wrapper must come as a pair, the wrapper last`,
-        );
+      for (const [holder, wrapper] of SLOT_HANDLERS) {
+        const holds = chain.includes(holder);
+        const wrapped = chain.at(-1) === wrapper;
+        const wrapperElsewhere = chain.slice(0, -1).includes(wrapper);
+        if (holds !== wrapped || wrapperElsewhere) {
+          violations.push(
+            `${key}: ${holder} and the ${wrapper} wrapper must come as a pair, the wrapper last`,
+          );
+        }
       }
     }
     expect(violations).toEqual([]);
+    // Vacuity guard: each pair was actually observed, on the routes that need it.
+    for (const [holder, wrapper] of SLOT_HANDLERS) {
+      const paired = observed.routes.filter(
+        (route) => route.chain.includes(holder) && route.chain.at(-1) === wrapper,
+      );
+      expect(paired.length, `${holder} paired with ${wrapper}`).toBeGreaterThan(0);
+    }
     // Vacuity guard: the rule examined the three routes that carry a parser.
     expect(observed.routes.filter((route) => route.chain.some(isBodyParser))).toHaveLength(3);
   });

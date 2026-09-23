@@ -222,10 +222,10 @@ async function complete(
   body: Record<string, unknown> = completionBody(),
 ): Promise<request.Response> {
   const agent = request.agent(app);
+  const pair = await getCsrf(agent);
   const pending = agent
     .post(completePath(uploadId))
     .set('Authorization', authHeader(user.accessToken));
-  const pair = await getCsrf(agent);
   return pending.set('Cookie', pair.cookie).set('x-csrf-token', pair.token).send(body);
 }
 

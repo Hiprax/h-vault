@@ -36,7 +36,9 @@
  */
 import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import express from 'express';
 import request from 'supertest';
+import { createErrorMiddleware } from '@hiprax/errors';
 import mongoose from 'mongoose';
 import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
@@ -70,7 +72,8 @@ vi.mock('../src/services/storage/index.js', async (importOriginal) => {
 import app from '../src/app.js';
 import { DocumentUpload } from '../src/models/DocumentUpload.js';
 import { PART_DIGEST_HEADER } from '../src/controllers/documentController.js';
-import { partUploadSemaphore } from '../src/utils/partSemaphore.js';
+import { holdingPartUploadSlot } from '../src/middleware/documentPartBody.js';
+import { partUploadSemaphore, partUploadUserQuota } from '../src/utils/partSemaphore.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
 import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
 import { authHeader, createTestUser, getCsrf, type TestUser } from './helpers.js';
@@ -114,10 +117,10 @@ async function seedUpload(user: TestUser): Promise<string> {
 async function putPart(user: TestUser, uploadId: string, seed = 0): Promise<request.Response> {
   const body = pattern(DOCUMENT_TAG_BYTES + 32, seed);
   const agent = request.agent(app);
+  const pair = await getCsrf(agent);
   const pending = agent
     .put(`/api/v1/documents/uploads/${uploadId}/parts/1`)
     .set('Authorization', authHeader(user.accessToken));
-  const pair = await getCsrf(agent);
   return pending
     .set('Cookie', pair.cookie)
     .set('x-csrf-token', pair.token)
@@ -282,10 +285,12 @@ describe('the per-identity share of the in-flight part budget', () => {
     await waitForBudget(MAX_IN_FLIGHT_PART_UPLOADS, 0);
   });
 
-  it('re-admits the identity as soon as one of its own parts completes', async () => {
+  it('re-admits the identity as soon as ONE of its own parts completes', async () => {
     // A share that is charged and never handed back is a share that degrades into
     // a permanent refusal after the first burst — the leak this asserts against is
-    // the same shape as the slot leak the semaphore's own docblock records.
+    // the same shape as the slot leak the semaphore's own docblock records. And it
+    // is handed back PART BY PART: the account is re-admitted while its other two
+    // parts are still in flight, not only once all of them have finished.
     const storage = blockStorage();
     const held: Promise<request.Response>[] = [];
     for (let i = 0; i < MAX_IN_FLIGHT_PART_UPLOADS_PER_USER; i += 1) {
@@ -298,12 +303,54 @@ describe('the per-identity share of the in-flight part budget', () => {
       { timeout: 10_000, interval: 10 },
     );
 
-    storage.release();
-    for (const settled of await Promise.all(held)) expect(settled.status).toBe(200);
-    await waitForBudget(MAX_IN_FLIGHT_PART_UPLOADS, 0);
+    // At the share: one more is refused.
+    const refused = await putPart(alice, await seedUpload(alice), 41);
+    expect(refused.status).toBe(503);
 
-    // The same account, immediately afterwards, is served normally.
-    const again = await putPart(alice, await seedUpload(alice), 42);
-    expect(again.status, JSON.stringify(again.body)).toBe(200);
+    // ONE of the three finishes; the other two stay parked in storage. Which one
+    // reached storage first is the server's business, so the race says which.
+    storage.blocked[0]!();
+    const first = await Promise.race(held);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    await waitForBudget(MAX_IN_FLIGHT_PART_UPLOADS - (MAX_IN_FLIGHT_PART_UPLOADS_PER_USER - 1), 0);
+    expect(partUploadUserQuota.heldBy(alice.id)).toBe(MAX_IN_FLIGHT_PART_UPLOADS_PER_USER - 1);
+
+    // The same account is admitted again at once: its next part gets as far as
+    // storage (it parks there beside the two still held) rather than a 503.
+    const again = putPart(alice, await seedUpload(alice), 42);
+    await vi.waitFor(
+      () => {
+        expect(storage.blocked).toHaveLength(MAX_IN_FLIGHT_PART_UPLOADS_PER_USER + 1);
+      },
+      { timeout: 10_000, interval: 10 },
+    );
+
+    storage.release();
+    for (const settled of await Promise.all([...held, again])) {
+      expect(settled.status, JSON.stringify(settled.body)).toBe(200);
+    }
+    await waitForBudget(MAX_IN_FLIGHT_PART_UPLOADS, 0);
+    expect(partUploadUserQuota.keys).toBe(0);
+  });
+});
+
+describe('the part handler wrapper', () => {
+  it('refuses to run a wrapped part handler that no slot holder admitted', async () => {
+    // The wrapper mounted without the holder in front of it: a misassembled chain.
+    // It must fail closed rather than buffer and forward a part no budget counted,
+    // and a refusal must not touch the budget either way.
+    const handler = vi.fn((_req: express.Request, res: express.Response) => {
+      res.json({ ran: true });
+    });
+    const bare = express();
+    bare.put('/bare', holdingPartUploadSlot(handler));
+    bare.use(createErrorMiddleware({ exposeServerErrors: true }));
+
+    const res = await request(bare).put('/bare').send(Buffer.alloc(0));
+    expect(res.status).toBe(500);
+    expect(res.body.message).toBe('Part upload handler reached without an admission slot');
+    expect(handler).not.toHaveBeenCalled();
+    expect(partUploadSemaphore.available).toBe(MAX_IN_FLIGHT_PART_UPLOADS);
+    expect(partUploadUserQuota.keys).toBe(0);
   });
 });

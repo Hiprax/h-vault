@@ -46,7 +46,13 @@ import {
 
 vi.mock('../src/config/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/config/index.js')>();
-  return { ...actual, storageConfigured: true };
+  return {
+    ...actual,
+    storageConfigured: true,
+    // Deliberately NOT the default (64000), so a holder mounted with a literal
+    // instead of the setting is told apart from one that reads it.
+    config: { ...actual.config, DOCUMENT_PART_BODY_TIMEOUT_MS: 7_000 },
+  };
 });
 
 const { storageRef } = vi.hoisted(() => ({
@@ -67,7 +73,7 @@ vi.mock('../src/services/storage/index.js', async (importOriginal) => {
 });
 
 import app from '../src/app.js';
-import { config } from '../src/config/index.js';
+import { config, DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS } from '../src/config/index.js';
 import { DocumentUpload } from '../src/models/DocumentUpload.js';
 import { PART_DIGEST_HEADER } from '../src/controllers/documentController.js';
 import {
@@ -78,6 +84,7 @@ import {
 import {
   PART_UPLOAD_BODY_DEADLINE_MS,
   createPartSlotHolder,
+  holdPartUploadSlot,
   parsePartUploadBody,
   requirePartContentLength,
 } from '../src/middleware/documentPartBody.js';
@@ -199,17 +206,20 @@ function receivedBytes(body: unknown): number {
 }
 
 /**
- * The real part-upload chain — length guard, slot holder, body parser — mounted on
- * a bare Express app at a deadline short enough to observe.
+ * The part-upload middlewares in front of the handler (length guard, slot holder,
+ * body parser), mounted on a bare Express app, with the slot holder built at a
+ * deadline short enough to observe or, given one, the mounted holder itself.
  *
  * Nothing here is a double: `createPartSlotHolder` is the factory the shipped
  * `holdPartUploadSlot` is built from, and the other two middlewares are imported
  * as they are. What the bare mount removes is the authentication, CSRF and storage
- * the deadline has nothing to do with; the identity the share is charged to is
- * supplied directly, because that is all the chain reads.
+ * the deadline has nothing to do with, and the `holdingPartUploadSlot` wrapper,
+ * so `handler` runs bare and the slot comes back when the response closes; the
+ * identity the share is charged to is supplied directly, because that is all the
+ * chain reads.
  */
 function partChainApp(
-  deadlineMs: number,
+  deadline: number | express.RequestHandler,
   handler: (req: express.Request, res: express.Response) => void,
 ): express.Express {
   const local = express();
@@ -220,7 +230,7 @@ function partChainApp(
       next();
     },
     requirePartContentLength,
-    createPartSlotHolder(deadlineMs),
+    typeof deadline === 'number' ? createPartSlotHolder(deadline) : deadline,
     parsePartUploadBody,
     handler,
   );
@@ -276,13 +286,20 @@ describe('createTimedServer', () => {
     // it was configured with — measured: request 2 s beside headers 4 s killed a
     // dribbling body at 4 s. Going through the constructor is what turns that into
     // a refusal, and this is the case that pins the choice of path.
-    expect(() =>
+    let refusal: unknown;
+    try {
       createTimedServer(app, {
         requestTimeoutMs: 2_000,
         headersTimeoutMs: 4_000,
         connectionsCheckingIntervalMs: 100,
-      }),
-    ).toThrow(RangeError);
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    // Node's own range check, by its code: a RangeError from anywhere else in the
+    // factory would not be the refusal this case pins.
+    expect(refusal).toBeInstanceOf(RangeError);
+    expect((refusal as NodeJS.ErrnoException).code).toBe('ERR_OUT_OF_RANGE');
   });
 });
 
@@ -347,10 +364,10 @@ describe('a part upload that stops sending its body', () => {
     const body = pattern(DOCUMENT_TAG_BYTES + 32, 3);
     const reused = await seedUpload(user);
     const agent = request.agent(server);
+    const pair = await getCsrf(agent);
     const pending = agent
       .put(`/api/v1/documents/uploads/${reused}/parts/1`)
       .set('Authorization', authHeader(user.accessToken));
-    const pair = await getCsrf(agent);
     const response = await pending
       .set('Cookie', pair.cookie)
       .set('x-csrf-token', pair.token)
@@ -370,19 +387,207 @@ describe('a part upload that stops sending its body', () => {
   }, 30_000);
 });
 
+describe('a part whose client disconnects while its storage call is still running', () => {
+  it('keeps the slot and the share until the handler settles, not merely until the socket closes', async () => {
+    // Express does not cancel a handler whose client went away: the part's 8 MiB
+    // buffer stays resident until the storage call returns. Handing the slot back
+    // on `close` would let one account send a whole part, drop the connection and
+    // send the next, with every one of them in memory at once; the budget would
+    // bound connections, not memory.
+    const base = storageRef.current!;
+    const parked: (() => void)[] = [];
+    storageRef.current = {
+      ...base,
+      putObject: async (key: string, body: Uint8Array) => {
+        await new Promise<void>((resolve) => parked.push(resolve));
+        await base.putObject(key, body);
+      },
+    };
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    const uploadId = await seedUpload(user);
+    const csrf = await getCsrf(request.agent(server));
+    const body = pattern(DOCUMENT_TAG_BYTES + 32, 13);
+    const socket = net.connect(port, '127.0.0.1');
+    socket.on('error', () => undefined);
+    await new Promise<void>((resolve) => socket.on('connect', resolve));
+    const head = Object.entries({
+      Host: `127.0.0.1:${String(port)}`,
+      'Content-Length': String(body.length),
+      'Content-Type': 'application/octet-stream',
+      Authorization: authHeader(user.accessToken),
+      Cookie: csrf.cookie,
+      'x-csrf-token': csrf.token,
+      [PART_DIGEST_HEADER]: digestOf(body),
+    })
+      .map(([name, value]) => `${name}: ${value}\r\n`)
+      .join('');
+    socket.write(`PUT /api/v1/documents/uploads/${uploadId}/parts/1 HTTP/1.1\r\n${head}\r\n`);
+    socket.write(body);
+
+    const until = async (done: () => boolean | Promise<boolean>, what: string): Promise<void> => {
+      const started = performance.now();
+      while (!(await done())) {
+        if (performance.now() - started > 10_000) throw new Error(`${what} never happened`);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    };
+    const connections = (): Promise<number> =>
+      new Promise((resolve, reject) =>
+        server.getConnections((error, count) => (error ? reject(error) : resolve(count))),
+      );
+
+    // The whole body has arrived and the handler is parked in storage.
+    await until(() => parked.length === 1, 'the part reaching storage');
+    expect(partUploadSemaphore.available).toBe(MAX_IN_FLIGHT_PART_UPLOADS - 1);
+    expect(partUploadUserQuota.heldBy(user.id)).toBe(1);
+
+    // The client goes away, and the server has seen it go.
+    socket.destroy();
+    await until(async () => (await connections()) === 0, 'the server seeing the disconnect');
+    for (let turn = 0; turn < 5; turn += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    // THE PROPERTY: the part is still in memory, so it still holds its slot and
+    // its share of the account's budget.
+    expect(partUploadSemaphore.available).toBe(MAX_IN_FLIGHT_PART_UPLOADS - 1);
+    expect(partUploadUserQuota.heldBy(user.id)).toBe(1);
+
+    // The storage call returns; the handler settles; both are handed back.
+    parked[0]!();
+    await until(
+      () =>
+        partUploadSemaphore.available === MAX_IN_FLIGHT_PART_UPLOADS &&
+        partUploadUserQuota.keys === 0,
+      'the slot and the share coming back',
+    );
+    // The handler finished its work although nobody was listening for the answer.
+    const row = await DocumentUpload.findById(uploadId).lean();
+    expect(row!.parts).toHaveLength(1);
+  }, 30_000);
+});
+
 describe("the part route's own body deadline", () => {
-  it('is one sealed segment at the slowest uplink this deployment stands behind', () => {
-    // DERIVED, so that changing the segment size or the uplink floor moves the
-    // deadline with it rather than leaving a stale literal behind. The value is
-    // stated here as well, because the operator-facing documentation quotes it.
-    expect(PART_UPLOAD_BODY_DEADLINE_MS).toBe(
+  it('is the configured DOCUMENT_PART_BODY_TIMEOUT_MS, by default one sealed segment at the slowest uplink supported', () => {
+    // The mounted holder reads the SETTING, so an operator who raises it for slow
+    // uplinks gets what they configured. Its default is DERIVED, so that changing
+    // the segment size or the uplink floor moves the deadline with it rather than
+    // leaving a stale literal behind; the value is stated as well, because the
+    // operator-facing documentation quotes it. (`config.test.ts` pins the bounds.)
+    expect(PART_UPLOAD_BODY_DEADLINE_MS).toBe(config.DOCUMENT_PART_BODY_TIMEOUT_MS);
+    expect(DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS).toBe(
       (DOCUMENT_CIPHERTEXT_CHUNK_BYTES / MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND) * 1_000,
     );
-    expect(PART_UPLOAD_BODY_DEADLINE_MS).toBe(64_000);
-    // …and it is far tighter than the server-wide deadline, which is the whole
-    // point of it existing: this route is the one where waiting costs a slot.
-    expect(PART_UPLOAD_BODY_DEADLINE_MS).toBeLessThan(config.HTTP_REQUEST_TIMEOUT_MS);
+    expect(DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS).toBe(64_000);
+    // …and by default it is far tighter than the server-wide deadline, which is
+    // the whole point of it existing: this route is the one where waiting costs a
+    // slot.
+    expect(DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS).toBeLessThan(config.HTTP_REQUEST_TIMEOUT_MS);
   });
+
+  it('destroys a stalled part on the MOUNTED holder exactly at the configured deadline', async () => {
+    // The mounted holder, not the factory: this is what proves the route reads the
+    // setting. This file configures 7000, which is not the default, so a holder
+    // built from a literal (or from the default) is caught here.
+    expect(config.DOCUMENT_PART_BODY_TIMEOUT_MS).toBe(7_000);
+    server = createTimedServer(
+      partChainApp(holdPartUploadSlot, (_req, res) => {
+        res.json({ ok: true });
+      }),
+    );
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const dribble = dribblingPart(port, '/parts/1', {});
+    try {
+      const outcome = { closed: false };
+      void dribble.closed.then(() => {
+        outcome.closed = true;
+      });
+      const started = performance.now();
+      while (partUploadSemaphore.available !== MAX_IN_FLIGHT_PART_UPLOADS - 1) {
+        if (performance.now() - started > 5_000) throw new Error('the part never took a slot');
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+
+      await vi.advanceTimersByTimeAsync(config.DOCUMENT_PART_BODY_TIMEOUT_MS - 1);
+      for (let turn = 0; turn < 5; turn += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(outcome.closed).toBe(false);
+      expect(partUploadSemaphore.available).toBe(MAX_IN_FLIGHT_PART_UPLOADS - 1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const fired = performance.now();
+      while (!outcome.closed && performance.now() - fired < 5_000) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(outcome.closed, 'the part was not destroyed at the configured deadline').toBe(true);
+      const back = performance.now();
+      while (partUploadSemaphore.available !== MAX_IN_FLIGHT_PART_UPLOADS) {
+        if (performance.now() - back > 5_000) throw new Error('the slot never came back');
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    } finally {
+      dribble.abandon();
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
+  it('starts the deadline when the slot is GRANTED, never while the part waits in the queue', async () => {
+    // Time spent queued behind other parts is not the client's fault. Were the
+    // deadline armed on ARRIVAL, this part, whose whole body was sent at once,
+    // would be destroyed for time it spent waiting for a slot somebody else held.
+    const reached: number[] = [];
+    server = createTimedServer(
+      partChainApp(300, (req, res) => {
+        reached.push(receivedBytes(req.body));
+        res.json({ ok: true });
+      }),
+    );
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+    // Every slot in the process is taken, so the part below can only queue.
+    const held: (() => void)[] = [];
+    for (let i = 0; i < MAX_IN_FLIGHT_PART_UPLOADS; i += 1) {
+      partUploadSemaphore.acquire((release) => held.push(release));
+    }
+    // Only these two are faked: the server's own sweep and the socket run on
+    // their own timers, and a frozen one would stop the request arriving at all.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const body = pattern(64, 11);
+      const pending = request(server)
+        .put('/parts/1')
+        .type('application/octet-stream')
+        .send(body)
+        .then((response) => response);
+      const guarded = pending.catch(() => undefined);
+
+      // The request is in the queue: charged to its identity, waiting for a slot.
+      const started = performance.now();
+      while (partUploadSemaphore.waiting !== 1) {
+        if (performance.now() - started > 5_000) throw new Error('the part never queued');
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      // Ten deadlines pass while it waits. Nothing may fire: nothing is armed yet.
+      await vi.advanceTimersByTimeAsync(300 * 10);
+      expect(reached).toEqual([]);
+
+      // A slot comes free, the part is granted it, and its body is already there.
+      held.shift()!();
+      await guarded;
+      const response = await pending;
+      expect(response.status).toBe(200);
+      expect(reached).toEqual([body.length]);
+    } finally {
+      vi.useRealTimers();
+      for (const release of held) release();
+    }
+  }, 30_000);
 
   it('destroys a part whose body stalls, and hands back the slot for the next one', async () => {
     const reached: number[] = [];

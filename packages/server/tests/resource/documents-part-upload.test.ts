@@ -158,10 +158,10 @@ describe('a document at the configured maximum size, part by part', () => {
     user = await createTestUser({ email: 'documents-part-upload@example.com' });
 
     const agent = request.agent(app);
+    const csrf = await getCsrf(agent);
     const pending = agent
       .post('/api/v1/documents/uploads')
       .set('Authorization', authHeader(user.accessToken));
-    const csrf = await getCsrf(agent);
     const init = await pending
       .set('Cookie', csrf.cookie)
       .set('x-csrf-token', csrf.token)

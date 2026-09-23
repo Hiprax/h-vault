@@ -234,6 +234,14 @@ export function vaultRotationLockName(userId: string): string {
  * restore writing up to `MAX_IMPORT_ITEMS` rows one at a time — with room to
  * spare, and it is the number `bulkReEncrypt` has always used.
  *
+ * A document completion is the one span whose length is not this server's own:
+ * it holds the lock across the storage engine's `completeMultipartUpload`, which
+ * S3 documents as able to take several minutes for a large object. A completion
+ * that outlives the TTL loses BOTH things this lock gives it, silently: a second
+ * completion of the same account can read a quota total that does not include it
+ * and commit past the quota, and a rotation can run beside it and leave its row
+ * wrapped under the superseded key.
+ *
  * What a crashed holder blocks for those five minutes is a rotation, an import,
  * a restore, a document completion and a master-password change. On the
  * master-password change specifically that is not a new cost: a crashed rotation

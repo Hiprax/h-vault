@@ -249,7 +249,14 @@ describe.each(LARGE_BODY_ROUTES)('$label admits a request in the right order', (
     held.push(anonymous);
 
     expect(await anonymous.answered).toBe('HTTP/1.1 401 Unauthorized');
-    expect(await passwordVerifyCounter(user)).toBeNull();
+    // No counter of this limiter AT ALL: an anonymous request that reached it would
+    // be keyed on something other than this user, so looking only for this user's
+    // key could never fail.
+    expect(
+      await mongoose.connection
+        .collection(RATE_LIMIT_COLLECTION)
+        .countDocuments({ _id: { $regex: '^pwverify:' } } as never),
+    ).toBe(0);
   });
 });
 

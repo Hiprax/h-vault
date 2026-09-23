@@ -1465,14 +1465,33 @@ describe('FolderRail - additional edge cases', () => {
 
     renderWithRouter(<VaultRail />);
 
+    // The second request is still in flight when the first is refused.
+    let releaseSecond!: () => void;
+    mockReorderFolderApi.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (releaseSecond = resolve)),
+    );
+
     const secondBtn = screen.getByText('Second').closest('button')!;
     fireEvent.keyDown(secondBtn, { key: 'ArrowUp', ctrlKey: true });
+
+    // Nothing is read back while a request can still change the server's order.
+    await waitFor(() => {
+      expect(mockReorderFolderApi).toHaveBeenCalledTimes(2);
+    });
+    expect(fetchFolders).not.toHaveBeenCalled();
+    releaseSecond();
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({ title: 'Failed to reorder', type: 'error' }),
       );
     });
+    // Half the swap may have landed, so the rail re-reads the order rather than
+    // showing one the server does not have; and it never claims success.
+    expect(fetchFolders).toHaveBeenCalledTimes(1);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Folder reordered' }),
+    );
   });
 
   it('handles drag-and-drop reorder error gracefully', async () => {
@@ -1501,6 +1520,92 @@ describe('FolderRail - additional edge cases', () => {
       getData: vi.fn(),
     };
 
+    let releaseSecond!: () => void;
+    mockReorderFolderApi.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (releaseSecond = resolve)),
+    );
+
+    fireEvent.dragStart(firstBtn, { dataTransfer });
+    fireEvent.dragOver(secondBtn, { dataTransfer });
+    fireEvent.drop(secondBtn, { dataTransfer });
+
+    await waitFor(() => {
+      expect(mockReorderFolderApi).toHaveBeenCalledTimes(2);
+    });
+    expect(fetchFolders).not.toHaveBeenCalled();
+    releaseSecond();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to reorder', type: 'error' }),
+      );
+    });
+    // A drag refused part-way through (the folder-write budget, a lost
+    // connection) leaves the server's order half-applied: re-read it.
+    expect(fetchFolders).toHaveBeenCalledTimes(1);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Folder reordered' }),
+    );
+  });
+
+  it('reports a reorder whose read-back fails as ONE failure, never as a success', async () => {
+    const mockToast = vi.fn();
+    vi.mocked(useToast).mockReturnValue({ toast: mockToast, dismiss: vi.fn(), update: vi.fn() });
+    // Both re-sort requests are accepted; only re-reading the order fails.
+    const fetchFolders = vi.fn().mockRejectedValue(new Error('offline'));
+
+    useVaultStore.setState({
+      folders: [
+        makeFolder({ id: 'f1', name: 'First', sortOrder: 0 }),
+        makeFolder({ id: 'f2', name: 'Second', sortOrder: 1 }),
+      ] as never[],
+      fetchFolders,
+    });
+
+    renderWithRouter(<VaultRail />);
+
+    const secondBtn = screen.getByText('Second').closest('button')!;
+    fireEvent.keyDown(secondBtn, { key: 'ArrowUp', ctrlKey: true });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to reorder', type: 'error' }),
+      );
+    });
+    expect(mockReorderFolderApi).toHaveBeenCalledTimes(2);
+    expect(fetchFolders).toHaveBeenCalledTimes(1);
+    // The rail cannot show the order it just asked for, so it does not claim it.
+    const reorderToasts = mockToast.mock.calls.filter(([options]) =>
+      /reorder/i.test((options as { title: string }).title),
+    );
+    expect(reorderToasts).toHaveLength(1);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Folder reordered' }),
+    );
+  });
+
+  it('reports a drag whose requests cannot even be issued as a failure', async () => {
+    mockReorderFolderApi.mockImplementationOnce(() => {
+      throw new Error('request could not be built');
+    });
+    const mockToast = vi.fn();
+    vi.mocked(useToast).mockReturnValue({ toast: mockToast, dismiss: vi.fn(), update: vi.fn() });
+    const fetchFolders = vi.fn().mockResolvedValue(undefined);
+
+    useVaultStore.setState({
+      folders: [
+        makeFolder({ id: 'f1', name: 'First', sortOrder: 0 }),
+        makeFolder({ id: 'f2', name: 'Second', sortOrder: 1 }),
+      ] as never[],
+      fetchFolders,
+    });
+
+    renderWithRouter(<VaultRail />);
+
+    const firstBtn = screen.getByText('First').closest('button')!;
+    const secondBtn = screen.getByText('Second').closest('button')!;
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn(), getData: vi.fn() };
+
     fireEvent.dragStart(firstBtn, { dataTransfer });
     fireEvent.dragOver(secondBtn, { dataTransfer });
     fireEvent.drop(secondBtn, { dataTransfer });
@@ -1510,6 +1615,9 @@ describe('FolderRail - additional edge cases', () => {
         expect.objectContaining({ title: 'Failed to reorder', type: 'error' }),
       );
     });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Folder reordered' }),
+    );
   });
 
   it('handles color change error gracefully', async () => {

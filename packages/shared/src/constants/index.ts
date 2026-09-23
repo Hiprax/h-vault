@@ -422,11 +422,13 @@ export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS = 2;
 // from an account that already has one in flight is REFUSED, not queued. Without
 // it, two requests that declare a Content-Length and then send nothing hold every
 // slot for as long as the server will wait for a body, and every other account's
-// restore and key rotation waits behind them.
+// restore and key rotation waits behind them. It bounds ONE account: two accounts
+// can still hold both slots that way, each for up to the server's whole-request
+// receive deadline.
 //
-// One, because a conforming client can never have two: both handlers take the
-// per-account vault-rotation lock, so the second of two concurrent requests was
-// already refused with 409 after its 30 MB had been parsed. The share refuses the
+// One, because two can never both proceed: both handlers take the per-account
+// vault-rotation lock, so the second of two concurrent requests (two tabs, say)
+// was already refused with 409, after its 30 MB had been parsed. The share refuses the
 // same request with the same status before a byte of it is read. It must stay
 // strictly BELOW MAX_IN_FLIGHT_LARGE_BODY_REQUESTS, for the same reason the part
 // share must.
@@ -440,7 +442,10 @@ export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER = 1;
 //   * the server's whole-request receive deadline, from the largest body any route
 //     accepts (30 MB, the backup-restore and key-rotation parser): 240 seconds;
 //   * the part route's own body deadline, from one sealed segment
-//     (DOCUMENT_CIPHERTEXT_CHUNK_BYTES): 64 seconds.
+//     (DOCUMENT_CIPHERTEXT_CHUNK_BYTES): 64 seconds. That one is only the DEFAULT
+//     of the server's `DOCUMENT_PART_BODY_TIMEOUT_MS` setting, which an operator
+//     whose users upload over slow links may raise (never past the whole-request
+//     deadline), so the derivation lives in the server's config beside it.
 //
 // The second is the tighter one on purpose. A part upload holds one of
 // MAX_IN_FLIGHT_PART_UPLOADS slots from before its body is read, so the time the

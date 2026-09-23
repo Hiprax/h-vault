@@ -169,8 +169,8 @@ async function call(
   body?: Record<string, unknown>,
 ): Promise<request.Response> {
   const agent = request.agent(app);
-  const pending = agent[method](path).set('Authorization', authHeader(user.accessToken));
   const pair = await getCsrf(agent);
+  const pending = agent[method](path).set('Authorization', authHeader(user.accessToken));
   pending.set('Cookie', pair.cookie).set('x-csrf-token', pair.token);
   if (body !== undefined) pending.send(body);
   return pending;
@@ -416,6 +416,39 @@ describe('POST /documents/uploads refuses without leaving anything behind', () =
     expect(String(res.body.message)).toMatch(/quota/i);
     // The seeded row survives and no second one joined it.
     expect(await DocumentUpload.countDocuments({})).toBe(1);
+    expect(await engineState()).toEqual({ keys: [], uploads: 0 });
+  });
+
+  it('leaves no gap between its two reads for a completion to fall through', async () => {
+    // A completion holds a different lock from init, so it can land between the
+    // read of live transfers and the read of committed documents: it deletes the
+    // staging row and inserts the document. Read documents FIRST and the landing
+    // is missed by both reads, since the row is gone and the document not yet
+    // counted, so a transfer past the quota was admitted. Read live transfers
+    // first and the landing can only be counted twice, which fails safe.
+    const landed = await seedUpload(user, { declaredPlaintextBytes: QUOTA_BYTES });
+    const readLiveTransfers = DocumentUpload.aggregate.bind(DocumentUpload);
+    vi.spyOn(DocumentUpload, 'aggregate').mockImplementationOnce(((pipeline: never) => {
+      // The completion lands as this read is issued, before it runs.
+      const land = (async () => {
+        await DocumentUpload.deleteOne({ _id: landed });
+        await seedDocument(user, QUOTA_BYTES);
+      })();
+      const query = {
+        read: () => query,
+        then: (resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) =>
+          land.then(() => readLiveTransfers(pipeline)).then(resolve, reject),
+      };
+      return query;
+    }) as never);
+
+    const res = await call('post', UPLOADS_PATH, user, initBody(1));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(String(res.body.message)).toMatch(/quota/i);
+    // The landing happened, and no transfer was opened on top of it.
+    expect(await Document.countDocuments({ userId: user.id })).toBe(1);
+    expect(await DocumentUpload.countDocuments({})).toBe(0);
     expect(await engineState()).toEqual({ keys: [], uploads: 0 });
   });
 
@@ -812,9 +845,10 @@ describe('DELETE /documents/uploads/:id abandons a transfer', () => {
 
     it('wins when it claims first: the completion is refused and no document names a deleted object', async () => {
       // The completion is parked after it read the engine's account of the object
-      // and BEFORE its own claim, which is the window in which an abort that
-      // deleted the object without first claiming the row would have let the
-      // completion commit a document whose bytes were already gone.
+      // and BEFORE its own claim. An abort that deleted the object first and the
+      // row second would leave a gap in which this completion claims the row and
+      // commits a document whose bytes are already gone; an abort that claims the
+      // row first leaves the completion nothing to claim, so it is refused.
       const { id, objectKey } = await seedFinished();
       const engine = storageRef.current!;
       const realHead = engine.headObject.bind(engine);

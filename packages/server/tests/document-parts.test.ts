@@ -64,6 +64,10 @@ vi.mock('../src/services/storage/index.js', async (importOriginal) => {
 
 import app from '../src/app.js';
 import { DocumentUpload } from '../src/models/DocumentUpload.js';
+import { Document } from '../src/models/Document.js';
+import { JobLock } from '../src/models/JobLock.js';
+import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
+import { documentCompleteLockName } from '../src/utils/controllerHelpers.js';
 import { PART_DIGEST_HEADER, uploadPart } from '../src/controllers/documentController.js';
 import { PART_BODY_LIMIT_BYTES } from '../src/middleware/documentPartBody.js';
 import { partUploadSemaphore } from '../src/utils/partSemaphore.js';
@@ -163,10 +167,10 @@ async function putPart(
 ): Promise<request.Response> {
   const body = options.body ?? Buffer.alloc(DOCUMENT_TAG_BYTES, 1);
   const agent = request.agent(app);
+  const pair = await getCsrf(agent);
   const pending = agent
     .put(partPath(uploadId, partNumber))
     .set('Authorization', authHeader(user.accessToken));
-  const pair = await getCsrf(agent);
   pending.set('Cookie', pair.cookie).set('x-csrf-token', pair.token);
 
   const digest = options.digest === undefined ? digestOf(body) : options.digest;
@@ -582,28 +586,115 @@ describe('refusing a part', () => {
     expect(await stateOf(seeded)).toEqual(UNTOUCHED);
   });
 
-  it('does not resurrect a staging row that disappeared while the part was being stored', async () => {
-    // A real race: the row's TTL fires, or the caller cancels from another tab,
-    // between the lookup and the ledger write. The update must not upsert — a
-    // recreated row would hold quota nothing can release and would be listed as a
-    // transfer that can never complete. The bytes already written are LEFT for the
-    // collector's orphan sweep rather than deleted here, because a completion
-    // committing the very same key may be in flight.
+  /**
+   * A single-segment part whose staging row disappears while `putObject` runs:
+   * `before` runs inside the storage call, AFTER the row lookup and BEFORE the
+   * object is written, which is exactly where a cancel's claim-then-delete lands.
+   */
+  async function partWhoseRowVanishes(
+    before: (seeded: Seeded) => Promise<void>,
+  ): Promise<{ seeded: Seeded; res: request.Response }> {
     const seeded = await seedUpload(user, { chunks: 1 });
     const base = storageRef.current!;
     storageRef.current = {
       ...base,
       putObject: async (key: string, body: Uint8Array) => {
         await DocumentUpload.deleteOne({ _id: seeded.id });
+        await before(seeded);
         await base.putObject(key, body);
       },
     };
-
     const res = await putPart(user, seeded.id, 1, { body: pattern(1024) });
+    storageRef.current = base;
+    return { seeded, res };
+  }
+
+  it('does not resurrect a staging row that disappeared while the part was being stored', async () => {
+    // A real race: the row's TTL fires, or the caller cancels from another tab,
+    // between the lookup and the ledger write. The update must not upsert — a
+    // recreated row would hold quota nothing can release and would be listed as a
+    // transfer that can never complete.
+    const { seeded, res } = await partWhoseRowVanishes(async () => undefined);
 
     expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.message).toBe('Upload not found');
     expect(await DocumentUpload.findById(seeded.id).lean()).toBeNull();
     expect(await DocumentUpload.countDocuments({ userId: user.id })).toBe(0);
+  });
+
+  it('deletes the object a single-segment part stored after its row was gone, when no document owns it', async () => {
+    // A cancel claims the row and deletes the object while this part is still
+    // inside `putObject`; the part then writes the object again. Left alone, those
+    // bytes sat in the bucket for the orphan sweep's 25 hours, charged to nobody.
+    const { seeded, res } = await partWhoseRowVanishes(async () => undefined);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(storageRef.current!.storedKeys()).not.toContain(seeded.objectKey);
+    expect(storageRef.current!.storedKeys()).toEqual([]);
+    // The completion lock it took to decide is handed back.
+    expect(
+      await JobLock.countDocuments({ jobName: documentCompleteLockName(user.id, seeded.id) }),
+    ).toBe(0);
+  });
+
+  it('still answers 404, and releases the lock, when deleting that object fails', async () => {
+    // Best-effort, like every delete that follows a vanished row: nothing is left
+    // to retry against, so the failure is logged, the object is left for the
+    // collector's orphan sweep, and the lock the decision was made under is
+    // handed back rather than held until its TTL.
+    const deletes: string[] = [];
+    const { seeded, res } = await partWhoseRowVanishes(async () => {
+      storageRef.current!.deleteObject = async (key: string) => {
+        deletes.push(key);
+        throw new Error('storage engine unavailable');
+      };
+    });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.message).toBe('Upload not found');
+    expect(deletes).toEqual([seeded.objectKey]);
+    expect(storageRef.current!.storedKeys()).toEqual([seeded.objectKey]);
+    expect(
+      await JobLock.countDocuments({ jobName: documentCompleteLockName(user.id, seeded.id) }),
+    ).toBe(0);
+  });
+
+  it('keeps that object when a document already names it, in any state', async () => {
+    // A completion claims the row the same way and commits a `documents` row naming
+    // this very key. A TRASHED, purge-pending document still owns its object: the
+    // purge deletes it, and deleting it here would leave a row that never opens.
+    const { seeded, res } = await partWhoseRowVanishes(async (s) => {
+      await Document.collection.insertOne({
+        _id: new mongoose.Types.ObjectId(s.id),
+        userId: new mongoose.Types.ObjectId(user.id),
+        objectKey: s.objectKey,
+        deletedAt: new Date(),
+        purgePending: true,
+      });
+    });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(storageRef.current!.storedKeys()).toEqual([seeded.objectKey]);
+    expect(await Document.countDocuments({ objectKey: seeded.objectKey })).toBe(1);
+  });
+
+  it('keeps that object while a completion of the upload holds its lock', async () => {
+    // A completion between its claim and its insert holds this lock, and no
+    // document exists yet. Deleting then would destroy the bytes it is committing,
+    // so the part leaves them; if that completion fails, it deletes them itself.
+    let lockId: string | null = null;
+    const { seeded, res } = await partWhoseRowVanishes(async (s) => {
+      lockId = await acquireJobLock(documentCompleteLockName(user.id, s.id), 60_000);
+    });
+
+    expect(lockId).not.toBeNull();
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(storageRef.current!.storedKeys()).toEqual([seeded.objectKey]);
+    // The part did not take over, or release, a lock it never held.
+    expect(
+      await JobLock.countDocuments({ jobName: documentCompleteLockName(user.id, seeded.id) }),
+    ).toBe(1);
+    await releaseJobLock(documentCompleteLockName(user.id, seeded.id), lockId!);
   });
 
   it('refuses a body whose length disagrees with its declared Content-Length', async () => {

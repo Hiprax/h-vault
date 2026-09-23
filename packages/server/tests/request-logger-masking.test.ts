@@ -343,6 +343,8 @@ interface ZodDef {
   items?: unknown[];
   rest?: unknown;
   values?: unknown[];
+  /** A Zod 4 enum's members, keyed by name. (`values` is a LITERAL's.) */
+  entries?: Record<string, unknown>;
 }
 
 const defOf = (schema: unknown): ZodDef => (schema as { _zod: { def: ZodDef } })._zod.def;
@@ -445,7 +447,10 @@ function sampleBody(
   }
   if (def.type === 'array') return [sampleBody(def.element, path, sentinels)];
   const children = childrenOf(schema, path.join('.'));
-  if (children === null) return def.values?.[0] ?? 1;
+  if (children === null) {
+    // A leaf: a literal's value, an enum's first member, else a number.
+    return def.values?.[0] ?? Object.values(def.entries ?? {})[0] ?? 1;
+  }
   // A wrapper, a pipe (its input side), a union (its first option) and so on.
   return sampleBody(children[0], path, sentinels);
 }

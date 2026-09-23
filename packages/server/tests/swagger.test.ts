@@ -804,3 +804,40 @@ describe('API Documentation', () => {
     });
   });
 });
+
+describe('the documented rate limits', () => {
+  const paths = swaggerSpec.paths as Record<
+    string,
+    Record<string, { responses?: Record<string, unknown> } | undefined>
+  >;
+
+  /** `ROUTE_TABLE`'s Express path as the spec spells it, relative to its `/api/v1` server. */
+  const specPathOf = (path: string): string =>
+    path
+      .slice('/api/v1'.length)
+      .replace(/:([A-Za-z0-9_]+)/g, '{$1}')
+      .replace(/(.)\/$/, '$1');
+
+  const limited = ROUTE_TABLE.filter(
+    (row) => row.path.startsWith('/api/v1/') && row.limiters.length > 0,
+  );
+
+  it('documents every rate-limited route, and declares its 429', () => {
+    // A client reading the spec has no other way to learn that an endpoint can
+    // answer 429. Derived from the route table, so a limited route that is left
+    // out of the spec, or documented without its 429, fails here.
+    const undocumented = limited
+      .filter((row) => paths[specPathOf(row.path)]?.[row.method] === undefined)
+      .map((row) => `${row.method.toUpperCase()} ${specPathOf(row.path)}`);
+    const missing429 = limited
+      .filter((row) => {
+        const operation = paths[specPathOf(row.path)]?.[row.method];
+        return operation !== undefined && !('429' in (operation.responses ?? {}));
+      })
+      .map((row) => `${row.method.toUpperCase()} ${specPathOf(row.path)}`);
+    expect(undocumented).toEqual([]);
+    expect(missing429).toEqual([]);
+    // Vacuity guard: the route table really does carry limited routes.
+    expect(limited.length).toBeGreaterThan(40);
+  });
+});

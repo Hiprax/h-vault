@@ -186,12 +186,10 @@ async function send({
   headers,
 }: SendOptions): Promise<request.Response> {
   const agent: Agent = request.agent(app);
+  const pair = csrf ? await getCsrf(agent) : undefined;
   const pending = agent[method](path);
   if (bearer !== undefined) pending.set('Authorization', authHeader(bearer));
-  if (csrf) {
-    const pair = await getCsrf(agent);
-    pending.set('Cookie', pair.cookie).set('x-csrf-token', pair.token);
-  }
+  if (pair) pending.set('Cookie', pair.cookie).set('x-csrf-token', pair.token);
   for (const [name, value] of Object.entries(headers ?? {})) pending.set(name, value);
   // A raw body wins over the JSON one. The `auth`/`csrf` block below calls every
   // row with `body: {}` and no scenario, and both of those refusals happen before

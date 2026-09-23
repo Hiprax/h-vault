@@ -138,8 +138,16 @@ describe('vault and folder mutations are budgeted per user', () => {
     expect(counted.get(`vaultWrite:${user.id}`)).toBe(6);
     expect([...counted.keys()]).toEqual([`vaultWrite:${user.id}`]);
     // The positive control: these routes really do write the audit rows the
-    // budget exists to bound.
-    expect(await AuditLog.countDocuments({ userId: user.id })).toBeGreaterThanOrEqual(6);
+    // budget exists to bound, one per request and nothing else.
+    const audited = await AuditLog.find({ userId: user.id }).sort({ timestamp: 1, _id: 1 }).lean();
+    expect(audited.map((row) => row.action)).toEqual([
+      'item_create',
+      'item_update',
+      'item_delete',
+      'item_restore',
+      'item_delete',
+      'item_delete',
+    ]);
   });
 
   it('counts every folder mutation against folderWrite:<user>, and never against vaultWrite:', async () => {

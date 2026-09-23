@@ -152,9 +152,20 @@ const CUSTOM_BODY_LIMIT_PATHS = new Set<string>([
   '/api/v1/vault/items/bulk-reencrypt',
 ]);
 const globalJsonParser = express.json({ limit: '2mb' });
+/**
+ * `req.path` the way the router MATCHES it: case-insensitively, with one optional
+ * trailing slash, which is how an Express router matches unless told otherwise.
+ * Compared raw, `/api/v1/Backup/Restore/` reaches the restore handler while missing
+ * the set above, and its body is parsed here, before authentication and the route's
+ * own limiter.
+ */
+function routedPath(path: string): string {
+  const lower = path.toLowerCase();
+  return lower.length > 1 && lower.endsWith('/') ? lower.slice(0, -1) : lower;
+}
 app.use((req: Request, res: Response, next: NextFunction) => {
   // Skip global body parsing for routes with custom body size limits
-  if (CUSTOM_BODY_LIMIT_PATHS.has(req.path)) {
+  if (CUSTOM_BODY_LIMIT_PATHS.has(routedPath(req.path))) {
     next();
     return;
   }
@@ -233,7 +244,10 @@ app.use(
       // A restore's entire backup file, as ONE JSON string. It carries
       // `encryptedVaultKey`, `encryptedBWK` and `bwkEncryptedVaultKey` inside it,
       // near the start, where key-by-key masking cannot reach: the string is masked
-      // whole.
+      // whole. Today that is a second line of defence, not the first: the logger
+      // takes `req.body` when the request ARRIVES, and the restore body is parsed
+      // later, by its own route-level parser, so no restore body is captured at all.
+      // The mask is what keeps that true if the parser ever moves ahead of it.
       'data',
     ],
     skip: (req) => {

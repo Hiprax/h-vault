@@ -473,10 +473,10 @@ describe('the server in front of that engine', () => {
     body: Buffer,
   ): Promise<request.Response> {
     const agent = request.agent(app);
+    const pair = await getCsrf(agent);
     const pending = agent
       .put(`/api/v1/documents/uploads/${uploadId}/parts/${String(partNumber)}`)
       .set('Authorization', authHeader(user.accessToken));
-    const pair = await getCsrf(agent);
     return pending
       .set('Cookie', pair.cookie)
       .set('x-csrf-token', pair.token)
@@ -594,8 +594,8 @@ describe('the server in front of that engine', () => {
     body?: Record<string, unknown>,
   ): Promise<request.Response> {
     const agent = request.agent(app);
-    const pending = agent[method](path).set('Authorization', authHeader(user.accessToken));
     const pair = await getCsrf(agent);
+    const pending = agent[method](path).set('Authorization', authHeader(user.accessToken));
     return pending
       .set('Cookie', pair.cookie)
       .set('x-csrf-token', pair.token)

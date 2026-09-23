@@ -550,6 +550,46 @@ describe('offlineCache — a failing read request', () => {
 // ---------------------------------------------------------------------------
 
 const BLOCKED_MESSAGE = 'IndexedDB upgrade blocked by a connection another tab holds open';
+const NO_ANSWER_MESSAGE = 'IndexedDB did not answer a request to open the database';
+
+/**
+ * Another tab's upgrade of `name` to `version`, left BLOCKED by the older-tab
+ * connection {@link holdAsOlderTab} holds: it is issued straight to the engine,
+ * as another tab's would be, so this tab's bookkeeping never sees it. Resolves
+ * once the engine has reported it blocked; its connection is closed whenever it
+ * is finally granted.
+ */
+function otherTabUpgradeBlocked(name: string, version: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = ENGINE.open(name, version);
+    request.onblocked = () => resolve();
+    request.onsuccess = () => request.result.close();
+    request.onerror = () => reject(request.error ?? new Error('other-tab open failed'));
+  });
+}
+
+/**
+ * Like {@link otherTabUpgradeBlocked}, but the other tab KEEPS the connection it
+ * is finally granted, with no `versionchange` handler: once its upgrade lands, it
+ * is the connection that blocks the next one. Registered for `afterEach` to close.
+ */
+function otherTabUpgradeHeld(
+  name: string,
+  version: number,
+): { blocked: Promise<void>; granted: Promise<IDBDatabase> } {
+  const request = ENGINE.open(name, version);
+  const blocked = new Promise<void>((resolve) => {
+    request.onblocked = () => resolve();
+  });
+  const granted = new Promise<IDBDatabase>((resolve, reject) => {
+    request.onsuccess = () => {
+      olderTabConnections.push(request.result);
+      resolve(request.result);
+    };
+    request.onerror = () => reject(request.error ?? new Error('other-tab open failed'));
+  });
+  return { blocked, granted };
+}
 
 let blockedDbSeq = 0;
 function uniqueDbName(): string {
@@ -721,6 +761,184 @@ describe('openVersionedDatabase — an upgrade another connection is holding up'
     expect(firstErr?.type).toBe('version_conflict');
     expect(secondErr?.type).toBe('version_conflict');
     expect(secondErr?.message).toBe(BLOCKED_MESSAGE);
+  });
+
+  it('still refuses as `version_conflict` once the queued open’s own deadline has run out too', async () => {
+    // The grace period abandons the blocked open A and the open B queued behind it.
+    // B heard nothing from the engine, so its own deadline, armed when it was
+    // issued, runs out later as well. That must not relabel A, which the engine DID
+    // answer: a later open is refused with the cause of the first abandoned record,
+    // and a relabelled A would send the user to the "offline storage is not
+    // working" banner instead of the one naming the other tab.
+    const mod = await freshImport();
+    const name = uniqueDbName();
+    await holdAsOlderTab(name);
+    const both = Promise.all([
+      settledRejection(mod.openVersionedDatabase(name, 2, vi.fn()), 'the blocked open'),
+      settledRejection(mod.openVersionedDatabase(name, 2, vi.fn()), 'the open queued behind it'),
+    ]);
+    await outlastGracePeriod(watch(), mod.BLOCKED_OPEN_GRACE_MS);
+    await both;
+    await vi.advanceTimersByTimeAsync(mod.OPEN_RESPONSE_DEADLINE_MS);
+    expect(vi.getTimerCount()).toBe(0);
+
+    const engineOpen = vi.spyOn(indexedDB, 'open');
+    const later = asCacheError(
+      mod,
+      await settledRejection(mod.openVersionedDatabase(name, 2, vi.fn()), 'the later open'),
+    );
+    expect(later.type).toBe('version_conflict');
+    expect(later.message).toBe(BLOCKED_MESSAGE);
+    expect(engineOpen).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A and B queue silently behind another tab's blocked upgrade, so both arm the
+   * no-answer deadline. At 14.5 s that upgrade lands and the other tab KEEPS its
+   * connection: A reaches the head, is reported `blocked`, and starts its grace
+   * period, which B's deadline, at 15 s, falls inside. Returns once B's deadline
+   * has run out, with the engine requests (A first) and the other tab's connection.
+   */
+  async function lateBlockedPair(mod: Awaited<ReturnType<typeof freshImport>>, name: string) {
+    const older = await holdAsOlderTab(name);
+    const otherTab = otherTabUpgradeHeld(name, 2);
+    await otherTab.blocked;
+
+    const requests: IDBOpenDBRequest[] = [];
+    const watched = indexedDB;
+    const restore = replaceIndexedDB({
+      open: (dbName: string, version?: number) => {
+        const request = watched.open(dbName, version);
+        requests.push(request);
+        return request;
+      },
+    });
+    const settled: string[] = [];
+    const track = (label: string, promise: Promise<unknown>): Promise<unknown> =>
+      promise.then(
+        () => settled.push(`${label}:opened`),
+        (error: unknown) => {
+          settled.push(`${label}:${asCacheError(mod, error).type}`);
+        },
+      );
+    const both = Promise.all([
+      track('A', mod.openVersionedDatabase(name, 3, vi.fn())),
+      track('B', mod.openVersionedDatabase(name, 3, vi.fn())),
+    ]);
+    restore();
+
+    await vi.advanceTimersByTimeAsync(mod.OPEN_RESPONSE_DEADLINE_MS - 500);
+    expect(settled).toEqual([]);
+    older.close();
+    const holder = await otherTab.granted;
+    const started = performance.now();
+    while (watch().blocked === 0) {
+      if (performance.now() - started > 3_000) throw new Error('A was never reported blocked');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await vi.advanceTimersByTimeAsync(500);
+    await Promise.resolve();
+    return { settled, both, requests, holder };
+  }
+
+  it('lets an open the engine has answered finish its grace period, whatever a quieter open’s deadline says', async () => {
+    // B heard nothing, so its deadline abandons it; A HAS heard from the engine and
+    // is not waiting blind, so it keeps its grace period and is refused for the
+    // reason it was actually held up.
+    const mod = await freshImport();
+    const { settled, both } = await lateBlockedPair(mod, uniqueDbName());
+    expect(settled).toEqual(['B:unknown']);
+
+    await vi.advanceTimersByTimeAsync(mod.BLOCKED_OPEN_GRACE_MS);
+    await both;
+    expect(settled).toEqual(['B:unknown', 'A:version_conflict']);
+  });
+
+  it('refuses a later open with the cause the remaining abandoned request’s own caller was given', async () => {
+    // A's grace period abandons B a SECOND time, as a version conflict, after B's
+    // caller was already told the engine did not answer. Once A leaves the engine,
+    // B is the first abandoned record left, and a later open is refused with B's
+    // record: that must be what B's caller heard, not the later relabel.
+    const mod = await freshImport();
+    const name = uniqueDbName();
+    const { both, requests, holder } = await lateBlockedPair(mod, name);
+    await vi.advanceTimersByTimeAsync(mod.BLOCKED_OPEN_GRACE_MS);
+    await both;
+
+    // One microtask after A's `success`, which is after the WHOLE dispatch (the
+    // engine calls `addEventListener` listeners before the `onsuccess` property,
+    // so a bare listener would run before the module removes A), and before the
+    // engine's next turn, where it reaches B: A has left the table, B has not.
+    const later = new Promise<unknown>((resolve) => {
+      requests[0]!.addEventListener('success', () => {
+        queueMicrotask(() => {
+          resolve(
+            mod.openVersionedDatabase(name, 3, vi.fn()).then(
+              () => 'opened',
+              (e: unknown) => e,
+            ),
+          );
+        });
+      });
+    });
+    const engineOpen = vi.spyOn(indexedDB, 'open');
+    holder.close();
+
+    const err = asCacheError(mod, await later);
+    expect(err.type).toBe('unknown');
+    expect(err.message).toBe(NO_ANSWER_MESSAGE);
+    expect(engineOpen).not.toHaveBeenCalled();
+  });
+
+  it('gives up on an open queued behind ANOTHER TAB’S blocked upgrade, which tells this tab nothing', async () => {
+    // The engine's queue of opens is per origin and database, shared by every
+    // tab, so a request waiting behind another tab's blocked upgrade receives
+    // no event at all and this tab's own bookkeeping never learns of the hold.
+    // Only a deadline armed when the request is ISSUED can end the wait.
+    const mod = await freshImport();
+    const name = uniqueDbName();
+    await holdAsOlderTab(name);
+    await otherTabUpgradeBlocked(name, 2);
+
+    const open = mod.openVersionedDatabase(name, 2, vi.fn());
+    const outcome = { settled: false };
+    open
+      .catch(() => undefined)
+      .finally(() => {
+        outcome.settled = true;
+      });
+
+    // Nothing reached this request: no `blocked`, so no grace period was armed.
+    await vi.advanceTimersByTimeAsync(mod.OPEN_RESPONSE_DEADLINE_MS - 1);
+    expect(outcome.settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(outcome.settled).toBe(true);
+    const err = asCacheError(mod, await rejection(open));
+    // NOT `version_conflict`: a silent engine cannot tell another tab from a slow
+    // one, and that banner would prescribe a remedy that may not apply.
+    expect(err.type).toBe('unknown');
+    expect(err.message).toBe(NO_ANSWER_MESSAGE);
+
+    // A later open is refused at once for the SAME reason, never queued behind
+    // the request this module has already given up on.
+    const engineOpen = vi.spyOn(indexedDB, 'open');
+    const later = asCacheError(
+      mod,
+      await settledRejection(mod.openVersionedDatabase(name, 2, vi.fn()), 'the later open'),
+    );
+    expect(later.type).toBe('unknown');
+    expect(later.message).toBe(NO_ANSWER_MESSAGE);
+    expect(engineOpen).not.toHaveBeenCalled();
+  });
+
+  it('leaves no deadline behind once an ordinary open has been answered', async () => {
+    const mod = await freshImport();
+    const db = await mod.openVersionedDatabase(uniqueDbName(), 1, (created) =>
+      created.createObjectStore('rows', { keyPath: '_id' }),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    db.close();
   });
 
   it('refuses a later open AT ONCE while an abandoned request still waits, never queueing it', async () => {

@@ -17,6 +17,68 @@ export function isSafeUrl(url: string): boolean {
   return /^https?:\/\//i.test(url) || /^mailto:/i.test(url);
 }
 
+/** A link a document carries, as the application offers it to the reader. */
+export interface DocumentLink {
+  /** The URL as the URL parser serialises it: printable ASCII, host in punycode. */
+  readonly href: string;
+  /** What the reader checks before opening it: the origin, or the mail address. */
+  readonly destination: string;
+}
+
+/** The characters a mail address's local part may use; no space, comma or second `@`. */
+const MAIL_LOCAL_PART = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$/;
+/** One label of a mail domain. */
+const MAIL_DOMAIN_LABEL = /^[A-Za-z0-9-]{1,63}$/;
+
+/** A single, plain mail address, as `mailto:` carries it. Built without a nested quantifier. */
+function isPlainMailAddress(value: string): boolean {
+  const at = value.indexOf('@');
+  if (at < 1 || at !== value.lastIndexOf('@')) return false;
+  const labels = value.slice(at + 1).split('.');
+  return (
+    MAIL_LOCAL_PART.test(value.slice(0, at)) &&
+    labels.length >= 2 &&
+    labels.every((label) => MAIL_DOMAIN_LABEL.test(label))
+  );
+}
+
+/**
+ * A link the isolated document reported, or `null` when there is nothing to
+ * offer.
+ *
+ * The href was chosen by whoever wrote the file, and a compromised renderer can
+ * send any string at all, so it is never shown as it arrived: it is parsed and
+ * RE-SERIALISED, which percent-encodes every space, control and non-ASCII code
+ * point (a bidirectional override included) and writes the host in punycode, and
+ * the destination the reader is asked to check is taken from the PARSED URL. A
+ * string that does not parse, or a `mailto:` that is not one plain address, is
+ * prose rather than a link and is refused, because the alternative is displaying
+ * it inside the application's own dialog.
+ *
+ * A known limitation: a mail address whose domain is written in Unicode
+ * (`user@bücher.de`) is refused too. `mailto:` is an opaque URL, so the parser
+ * percent-encodes that domain instead of converting it to punycode, and an
+ * encoded label is not a plain one. The same address written in punycode
+ * (`user@xn--bcher-kva.de`) is offered normally.
+ */
+export function parseDocumentLink(href: string): DocumentLink | null {
+  if (!isSafeUrl(href)) return null;
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+  if (url.protocol === 'mailto:') {
+    // `mailto:` has no origin (`url.origin` is the string "null"), so the
+    // address is what the reader checks.
+    return isPlainMailAddress(url.pathname)
+      ? { href: url.href, destination: `mailto:${url.pathname}` }
+      : null;
+  }
+  return { href: url.href, destination: url.origin };
+}
+
 /**
  * Checks that an email's domain has a TLD-like dot with non-empty labels.
  * Defends against typo lockout for zero-knowledge users (master-password salt

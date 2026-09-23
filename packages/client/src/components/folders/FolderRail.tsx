@@ -122,6 +122,43 @@ const FOLDER_COLORS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Helper: apply a reorder
+// ---------------------------------------------------------------------------
+
+/**
+ * Sends one reorder, waits for every re-sort request in it to SETTLE, re-reads
+ * the folders whatever happened, and reports the outcome in one toast.
+ *
+ * A reorder is one request per folder whose position moved, and any of them can
+ * be refused on its own: the folder-write budget running out part-way through a
+ * large drag, or a dropped connection. `Promise.all` would reject on the first
+ * refusal while the rest were still in flight, and the order read back then
+ * could still be changing; so every request is waited out first. The server's
+ * order may then be HALF applied, which is why it is re-read on failure as well
+ * as on success: otherwise the rail keeps showing an order the server does not
+ * have.
+ *
+ * `sendUpdates` issues the requests rather than being handed them, so a request
+ * that cannot even be issued is reported like one the server refused.
+ */
+async function applyFolderReorder(
+  sendUpdates: () => readonly Promise<unknown>[],
+  toast: ReturnType<typeof useToast>['toast'],
+): Promise<void> {
+  try {
+    const results = await Promise.allSettled(sendUpdates());
+    await useVaultStore.getState().fetchFolders();
+    toast(
+      results.every((result) => result.status === 'fulfilled')
+        ? { title: 'Folder reordered', type: 'success' }
+        : { title: 'Failed to reorder', type: 'error' },
+    );
+  } catch {
+    toast({ title: 'Failed to reorder', type: 'error' });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helper: build tree
 // ---------------------------------------------------------------------------
 
@@ -559,7 +596,7 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
       const insertIndex = isDraggingDown ? newTargetIndex + 1 : newTargetIndex;
       reordered.splice(insertIndex, 0, sourceFolder);
 
-      try {
+      await applyFolderReorder(() => {
         // Update sortOrder for all folders whose position changed
         const updates: Promise<unknown>[] = [];
         for (let i = 0; i < reordered.length; i++) {
@@ -568,12 +605,8 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
             updates.push(reorderFolderApi(folder.id, i));
           }
         }
-        await Promise.all(updates);
-        await useVaultStore.getState().fetchFolders();
-        toast({ title: 'Folder reordered', type: 'success' });
-      } catch {
-        toast({ title: 'Failed to reorder', type: 'error' });
-      }
+        return updates;
+      }, toast);
     },
     [folders, toast],
   );
@@ -603,17 +636,14 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
       const swapFolder = siblings[swapIndex];
       if (!swapFolder) return;
 
-      try {
-        // Swap sortOrder values
-        await Promise.all([
+      // Swap sortOrder values
+      await applyFolderReorder(
+        () => [
           reorderFolderApi(folderId, swapFolder.sortOrder),
           reorderFolderApi(swapFolder.id, folder.sortOrder),
-        ]);
-        await useVaultStore.getState().fetchFolders();
-        toast({ title: 'Folder reordered', type: 'success' });
-      } catch {
-        toast({ title: 'Failed to reorder', type: 'error' });
-      }
+        ],
+        toast,
+      );
     },
     [folders, toast],
   );

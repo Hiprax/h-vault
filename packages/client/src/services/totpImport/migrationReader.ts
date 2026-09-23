@@ -25,7 +25,7 @@
  *                        OtpType type = 6; int64 counter = 7 }
  *
  * ---------------------------------------------------------------------------
- * SIX RULES THAT ARE NOT NEGOTIABLE
+ * SEVEN RULES THAT ARE NOT NEGOTIABLE
  * ---------------------------------------------------------------------------
  *
  *  1. AN UNKNOWN ENUM VALUE REJECTS THE ENTRY; IT NEVER FALLS BACK. Defaulting
@@ -58,9 +58,22 @@
  *     refuses. Field 0 is what any tag below 8 decodes to,
  *     and no encoder emits it. The implementation-reserved range 19000-19999 is
  *     NOT refused: it is reserved from .proto DECLARATIONS, so on the wire it is
- *     an unknown field like any other, and it is skipped like one. A tag spelled
- *     in more bytes than it needs is also read, not refused: its value is not in
- *     doubt, so it cannot make two readers disagree about which field it is.
+ *     an unknown field like any other, and it is skipped like one.
+ *  7. A NUMBER IS READ ONLY IN A SPELLING EVERY READER AGREES ON. A varint can
+ *     spell a small value in more bytes than it needs, and readers split three
+ *     ways over that: protobufjs 7.x reads five bytes of a 32-bit value and then
+ *     skips five more without looking at them, landing inside the next field;
+ *     Google's C++ reader refuses a tag or a length longer than five bytes; Go
+ *     reads the value. So a TAG and a LENGTH PREFIX are a `uint32` in at most five
+ *     bytes, and a longer spelling is refused. An `int32` field (the payload's
+ *     four numbers and the three enums) is read in exactly the two spellings
+ *     protobuf writes: a non-negative value in at most five bytes, or a NEGATIVE
+ *     one sign-extended to ten, which is how a negative `batch_id` arrives. Any
+ *     other spelling (a value from 2^31 up in five bytes, or ten bytes that are
+ *     not a sign extension) is refused too: no encoder writes one, and what every
+ *     reader keeps of it, its low 32 bits, is not the number the bytes spell. The
+ *     int64 `counter`, and an unknown varint being skipped, keep the full ten
+ *     bytes: every reader measures those alike.
  */
 
 /** The longest `otpauth-migration://` URI this will consider. */
@@ -81,10 +94,16 @@ const MAX_VARINT_BYTES = 10;
 /** The most the tenth byte of a 64-bit varint may hold: bit 63, and nothing above. */
 const MAX_FINAL_VARINT_BYTE = 0x01;
 /**
- * The largest tag protobuf can express: field 2^29 - 1, wire type 7. A tag is a
- * uint32 on the wire, and anything above this is refused; see rule 6.
+ * The largest `uint32`, and so the largest tag protobuf can express: field
+ * 2^29 - 1, wire type 7. Anything above it is refused; see rule 6.
  */
-const MAX_TAG = 0xffff_ffffn;
+const MAX_UINT32 = 2n ** 32n - 1n;
+/** The widest spelling of a tag, a length or a non-negative `int32`; see rule 7. */
+const MAX_UINT32_VARINT_BYTES = 5;
+/** The largest `int32`. */
+const MAX_INT32 = 2n ** 31n - 1n;
+/** The smallest `int32`, -2^31, as the 64-bit sign extension protobuf writes it. */
+const MIN_SIGN_EXTENDED_INT32 = 2n ** 64n - 2n ** 31n;
 const MIN_SECRET_BYTES = 1;
 /** 128 bytes bounds the base32 form at 205 characters. */
 export const MAX_SECRET_BYTES = 128;
@@ -136,6 +155,10 @@ export interface MigrationPayload {
   readonly version: number;
   readonly batchSize: number;
   readonly batchIndex: number;
+  /**
+   * Identifies the export a code belongs to, and is compared, never counted. A
+   * random `int32` in Google Authenticator's exports, so it can be NEGATIVE.
+   */
   readonly batchId: number;
 }
 
@@ -190,19 +213,53 @@ class Cursor {
 
   /** A varint as a `bigint`, so a 64-bit counter is never rounded. */
   varint(): bigint {
+    return this.spelledVarint().value;
+  }
+
+  /**
+   * A `uint32`: a TAG or a LENGTH PREFIX. At most five bytes, and no more than
+   * 32 bits; see rule 7 in the header for why a longer spelling is refused
+   * rather than read.
+   */
+  uint32(): bigint {
+    const { value, width } = this.spelledVarint();
+    if (width > MAX_UINT32_VARINT_BYTES || value > MAX_UINT32) throw MALFORMED();
+    return value;
+  }
+
+  /** A length prefix, as the number of bytes {@link slice} should take. */
+  length(): number {
+    return Number(this.uint32());
+  }
+
+  /**
+   * An `int32`, in one of the two spellings protobuf writes: a non-negative
+   * value in at most five bytes, or a NEGATIVE one sign-extended to 64 bits,
+   * which is always ten. Anything else is a number no `int32` can be; see rule 7.
+   */
+  int32(): number {
+    const { value, width } = this.spelledVarint();
+    if (value <= MAX_INT32 && width <= MAX_UINT32_VARINT_BYTES) return Number(value);
+    // A value this large has bit 63 set, so its spelling is necessarily ten bytes.
+    if (value >= MIN_SIGN_EXTENDED_INT32) return Number(BigInt.asIntN(64, value));
+    throw MALFORMED();
+  }
+
+  /** A varint, and how many bytes spelled it. */
+  private spelledVarint(): { value: bigint; width: number } {
     let value = 0n;
     let shift = 0n;
     for (let read = 1; read < MAX_VARINT_BYTES; read += 1) {
       const byte = this.byte();
       value |= BigInt(byte & 0x7f) << shift;
-      if ((byte & 0x80) === 0) return value;
+      if ((byte & 0x80) === 0) return { value, width: read };
       shift += 7n;
     }
     // The tenth byte may carry bit 63 and nothing else. That also refuses a
     // continuation bit here, since an eleventh byte cannot describe 64 bits.
     const last = this.byte();
     if (last > MAX_FINAL_VARINT_BYTE) throw MALFORMED();
-    return value | (BigInt(last) << shift);
+    return { value: value | (BigInt(last) << shift), width: MAX_VARINT_BYTES };
   }
 
   slice(length: number): Uint8Array {
@@ -213,9 +270,10 @@ class Cursor {
   }
 }
 
-function toSafeInt(value: bigint): number {
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw MALFORMED();
-  return Number(value);
+/** A count or an index, which an export can only mean as zero or more. */
+function nonNegative(value: number): number {
+  if (value < 0) throw MALFORMED();
+  return value;
 }
 
 /** Skip one field this reader does not model, or refuse if it cannot be skipped. */
@@ -228,7 +286,7 @@ function skipField(cursor: Cursor, wireType: number): void {
       cursor.slice(8);
       return;
     case 2:
-      cursor.slice(toSafeInt(cursor.varint()));
+      cursor.slice(cursor.length());
       return;
     case 5:
       cursor.slice(4);
@@ -274,8 +332,7 @@ function eachField(cursor: Cursor, visit: (fieldNumber: number, wireType: number
   while (!cursor.done) {
     if ((fields += 1) > MAX_FIELDS_PER_MESSAGE) throw MALFORMED();
     const before = cursor.offset;
-    const tag = cursor.varint();
-    if (tag > MAX_TAG) throw MALFORMED();
+    const tag = cursor.uint32();
     const fieldNumber = Number(tag >> 3n);
     if (fieldNumber === 0) throw MALFORMED();
     visit(fieldNumber, Number(tag & 0x07n));
@@ -389,22 +446,22 @@ function readOtpParameters(bytes: Uint8Array): MigrationEntry {
     switch (fieldNumber) {
       case 1: {
         if (wireType !== 2 || read.secret !== null) throw MALFORMED();
-        read.secret = cursor.slice(toSafeInt(cursor.varint()));
+        read.secret = cursor.slice(cursor.length());
         break;
       }
       case 2: {
         if (wireType !== 2 || read.name !== null) throw MALFORMED();
-        read.name = decodeLabel(cursor.slice(toSafeInt(cursor.varint())));
+        read.name = decodeLabel(cursor.slice(cursor.length()));
         break;
       }
       case 3: {
         if (wireType !== 2 || read.issuer !== null) throw MALFORMED();
-        read.issuer = decodeLabel(cursor.slice(toSafeInt(cursor.varint())));
+        read.issuer = decodeLabel(cursor.slice(cursor.length()));
         break;
       }
       case 4: {
         if (wireType !== 0 || read.algorithm !== null) throw MALFORMED();
-        const resolved = ALGORITHMS.get(toSafeInt(cursor.varint()));
+        const resolved = ALGORITHMS.get(cursor.int32());
         if (resolved === undefined) {
           throw new MigrationParseError('bad-enum', 'That export uses an unknown hash algorithm.');
         }
@@ -413,7 +470,7 @@ function readOtpParameters(bytes: Uint8Array): MigrationEntry {
       }
       case 5: {
         if (wireType !== 0 || read.digits !== null) throw MALFORMED();
-        const resolved = DIGIT_COUNTS.get(toSafeInt(cursor.varint()));
+        const resolved = DIGIT_COUNTS.get(cursor.int32());
         if (resolved === undefined) {
           throw new MigrationParseError('bad-enum', 'That export uses an unknown code length.');
         }
@@ -422,7 +479,7 @@ function readOtpParameters(bytes: Uint8Array): MigrationEntry {
       }
       case 6: {
         if (wireType !== 0 || read.type !== null) throw MALFORMED();
-        const resolved = OTP_TYPES.get(toSafeInt(cursor.varint()));
+        const resolved = OTP_TYPES.get(cursor.int32());
         if (resolved === undefined) {
           throw new MigrationParseError('bad-enum', 'That export uses an unknown code type.');
         }
@@ -489,24 +546,25 @@ export function readMigrationPayload(bytes: Uint8Array): MigrationPayload {
               'That export holds more accounts than this app will read at once.',
             );
           }
-          entries.push(readOtpParameters(cursor.slice(toSafeInt(cursor.varint()))));
+          entries.push(readOtpParameters(cursor.slice(cursor.length())));
           break;
         }
         case 2:
           if (wireType !== 0) throw MALFORMED();
-          version = toSafeInt(cursor.varint());
+          version = nonNegative(cursor.int32());
           break;
         case 3:
           if (wireType !== 0) throw MALFORMED();
-          batchSize = toSafeInt(cursor.varint());
+          batchSize = nonNegative(cursor.int32());
           break;
         case 4:
           if (wireType !== 0) throw MALFORMED();
-          batchIndex = toSafeInt(cursor.varint());
+          batchIndex = nonNegative(cursor.int32());
           break;
         case 5:
           if (wireType !== 0) throw MALFORMED();
-          batchId = toSafeInt(cursor.varint());
+          // The one field that may be negative: a random `int32` identifier.
+          batchId = cursor.int32();
           break;
         default:
           skipField(cursor, wireType);

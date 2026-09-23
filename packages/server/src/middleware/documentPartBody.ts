@@ -4,18 +4,19 @@ import { ErrorHandler, httpErrors } from '@hiprax/errors';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
-  MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
 } from '@hvault/shared';
+import { config } from '../config/index.js';
 import { createModuleLogger } from '../utils/logger.js';
 import { partUploadSemaphore, partUploadUserQuota } from '../utils/partSemaphore.js';
-import { admitWithinBudget } from './admission.js';
+import { admitWithinBudget, createHandlerSettledRelease } from './admission.js';
+import type { SlotHandler } from './admission.js';
 
 const logger = createModuleLogger('document-part-body');
 
 /**
  * The three middlewares that stand in front of `PUT /documents/uploads/:id/parts/:n`,
  * in the order they must run: the length guard, the concurrency slot, then the body
- * parser.
+ * parser; and the wrapper the route's handler is mounted through, last.
  *
  * THE ORDER IS THE WHOLE POINT, and each step is here because the step after it
  * cannot do its job otherwise:
@@ -29,11 +30,14 @@ const logger = createModuleLogger('document-part-body');
  *      consumes a concurrency slot.
  *   2. {@link holdPartUploadSlot} charges this identity's share of the budget and
  *      takes one of `MAX_IN_FLIGHT_PART_UPLOADS` slots, holding both until the
- *      response closes — so across the parser AND across the storage call. It must
- *      sit AHEAD of the parser: Express runs a route's parser before its handler,
- *      so a slot taken in the handler is taken after 8 MiB has already been
+ *      response has closed AND the handler has settled — so across the parser AND
+ *      across the storage call, including for a client that has already gone away.
+ *      It must sit AHEAD of the parser: Express runs a route's parser before its
+ *      handler, so a slot taken in the handler is taken after 8 MiB has already been
  *      buffered and bounds nothing.
  *   3. {@link parsePartUploadBody} buffers the part.
+ *   4. {@link holdingPartUploadSlot} wraps the handler, which is what lets the slot
+ *      outlive a response that closed while the handler was still running.
  */
 
 // ---------------------------------------------------------------------------
@@ -79,12 +83,21 @@ export function requirePartContentLength(req: Request, _res: Response, next: Nex
 /** How soon a refused client may try again. One second: the condition is a peer's part. */
 const PART_SLOT_RETRY_AFTER_SECONDS = '1';
 
+/** When a part's slot comes back: once the response closed AND the handler settled. */
+const settledRelease = createHandlerSettledRelease();
+
 /**
- * How long the server will wait for ONE part's body once that part holds a slot.
+ * How long the server will wait for ONE part's body once that part holds a slot:
+ * `DOCUMENT_PART_BODY_TIMEOUT_MS`.
  *
- * Derived, never chosen: one sealed segment at
- * {@link MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND}, which is 64 seconds at today's
- * numbers. It is far tighter than `HTTP_REQUEST_TIMEOUT_MS`, and it has to be,
+ * Its default is derived, never chosen (`DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS` in
+ * `config/index.ts`): one sealed segment at `MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND`,
+ * which is 64 seconds at today's numbers. That is a floor on upload speed PER
+ * TRANSFER, and a user uploading several files at once splits one uplink between
+ * them, so an operator whose users upload over slow links raises it; raising it
+ * also lengthens how long one account can hold a slot with a body it never sends,
+ * and the config refuses a value above `HTTP_REQUEST_TIMEOUT_MS`. By default it is
+ * far tighter than `HTTP_REQUEST_TIMEOUT_MS`, and it has to be,
  * because the two bound different things. The server-wide deadline is sized to the
  * largest body ANY route accepts (a 30 MB restore), since Node has no per-route
  * form of it; this one is sized to the largest body THIS route accepts — and here
@@ -101,8 +114,7 @@ const PART_SLOT_RETRY_AFTER_SECONDS = '1';
  * allowed to hold a slot, and turning this into a deadline on the whole request
  * would cap a healthy upload to protect against an unhealthy engine.
  */
-export const PART_UPLOAD_BODY_DEADLINE_MS =
-  (DOCUMENT_CIPHERTEXT_CHUNK_BYTES / MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND) * 1_000;
+export const PART_UPLOAD_BODY_DEADLINE_MS = config.DOCUMENT_PART_BODY_TIMEOUT_MS;
 
 /**
  * The identity a part upload is charged to.
@@ -156,8 +168,14 @@ function partUploadIdentity(req: Request): string {
  * taken from the live one waiting behind it.
  *
  * Those mechanics live ONCE, in `middleware/admission.ts` (`admitWithinBudget`),
- * shared with the large-body slot holder; what is part-specific here is the 503
- * refusal, the body deadline, and releasing on `close` without waiting for anything.
+ * shared with the large-body slot holder, and so does WHEN the slot comes back
+ * (`createHandlerSettledRelease`): once the response has closed AND the handler has
+ * settled. Express does not cancel a handler whose client went away, so a part whose
+ * client disconnects during the storage call still has its 8 MiB buffer resident
+ * until that call returns, and a slot handed back on `close` would let one account
+ * send a whole part, drop the connection and send the next, with every one of them
+ * in memory at once. What is part-specific here is the 503 refusal and the body
+ * deadline.
  *
  * Built by a FACTORY over `bodyDeadlineMs` rather than reading
  * {@link PART_UPLOAD_BODY_DEADLINE_MS} directly, so the deadline can be exercised
@@ -173,7 +191,7 @@ export function createPartSlotHolder(bodyDeadlineMs: number): RequestHandler {
       semaphore: partUploadSemaphore,
       quota: partUploadUserQuota,
       identity: partUploadIdentity(req),
-      refuse(refused, refuse) {
+      refuse(refused, fail) {
         // Logged, because on the wire this refusal is indistinguishable from the 503
         // an unreachable storage engine produces (both are redacted to their status
         // text in production), and those two call for opposite operator responses.
@@ -183,13 +201,14 @@ export function createPartSlotHolder(bodyDeadlineMs: number): RequestHandler {
           limit: MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
         });
         refused.setHeader('Retry-After', PART_SLOT_RETRY_AFTER_SECONDS);
-        refuse(
+        fail(
           httpErrors.serviceUnavailable(
             'Too many document part uploads are already in flight for this account',
           ),
         );
       },
       granted() {
+        settledRelease.admit(res);
         // The body deadline, armed at the moment this request starts costing the
         // process memory. The socket is DESTROYED rather than answered: the parser
         // below is mid-stream by then, so writing a response would race a body that
@@ -213,10 +232,11 @@ export function createPartSlotHolder(bodyDeadlineMs: number): RequestHandler {
         });
       },
       closed(release) {
-        // A part holds its slot across the storage call and no further: once the
-        // response has closed there is nothing left of it in memory to account for.
+        // Nothing is left for the deadline to protect once the response has closed;
+        // the slot and the share are another matter, and stay held while the
+        // handler still holds the part.
         if (deadline !== undefined) clearTimeout(deadline);
-        release();
+        settledRelease.closed(res, release);
       },
     });
   };
@@ -226,6 +246,24 @@ export function createPartSlotHolder(bodyDeadlineMs: number): RequestHandler {
 export const holdPartUploadSlot: RequestHandler = createPartSlotHolder(
   PART_UPLOAD_BODY_DEADLINE_MS,
 );
+
+/**
+ * Wraps the part route's handler so the slot {@link holdPartUploadSlot} took is held
+ * until the handler has SETTLED, not merely until the response closed. A handler
+ * reached with no slot is refused with 500 rather than run: it would be buffering and
+ * forwarding a part that no budget counted.
+ */
+export function holdingPartUploadSlot(handler: SlotHandler): RequestHandler {
+  return async function partUploadHandler(req, res, next): Promise<void> {
+    await settledRelease.run(
+      handler,
+      req,
+      res,
+      next,
+      'Part upload handler reached without an admission slot',
+    );
+  };
+}
 
 // ---------------------------------------------------------------------------
 // 3. The body parser
@@ -250,17 +288,19 @@ export const PART_BODY_LIMIT_BYTES = DOCUMENT_CIPHERTEXT_CHUNK_BYTES + PART_BODY
  * Buffers the part as a `Buffer`.
  *
  * MOUNTED AT ROUTE LEVEL, NEVER APP LEVEL, and the reason is not body size — it is
- * the MongoDB injection sanitizer in `app.ts`. That sanitizer rebuilds any object
- * body key by key to strip `$`-prefixed operators, and a `Buffer` is an object that
- * is not an Array, so it would be rewritten into a plain object of numeric keys:
+ * the MongoDB injection sanitizer that `app.ts` mounts app-wide
+ * (`sanitizeRequestBody`, `middleware/sanitizeBody.ts`). That sanitizer rebuilds
+ * any object body key by key to strip `$`-prefixed operators, and a `Buffer` is an
+ * object that is not an Array, so it would be rewritten into a plain object of numeric keys:
  * `{0: 137, 1: 80, …}`. The part would then fail its own digest check, or worse be
  * forwarded as something that is not the bytes the client sealed. Mounted here, the
  * parser runs after the sanitizer, after `hppx` and after the request logger, none
  * of which ever see a Buffer.
  *
  * There is deliberately NO entry added to `CUSTOM_BODY_LIMIT_PATHS` for this route.
- * That Set is matched by exact `req.path` equality, so a parameterised path can
- * never match it and the entry would do nothing; and adding a dead entry would read
+ * That Set is matched against the literal path (lowercased, one trailing slash
+ * dropped, as the router matches), so a parameterised path can never match it and
+ * the entry would do nothing; and adding a dead entry would read
  * as though the global JSON parser were the hazard here, when the hazard is the
  * sanitizer. The global parser is inert on this route anyway: it only parses
  * `application/json`, and `body-parser` leaves `req.body` undefined when it skips.

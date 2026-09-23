@@ -36,13 +36,15 @@ import { MAX_IN_FLIGHT_PART_UPLOADS, MAX_IN_FLIGHT_PART_UPLOADS_PER_USER } from 
  * TWO THINGS BOUND THAT WINDOW, and neither of them is the queue. The first is
  * {@link partUploadUserQuota} below: one identity may hold at most
  * `MAX_IN_FLIGHT_PART_UPLOADS_PER_USER` of these slots, so a single account can
- * never be every waiter's reason for waiting. The second is the HTTP layer:
- * `utils/httpTimeouts.ts` bounds how long the server will wait for a request body
- * at all, which is what turns "a client that stops sending" from an indefinite
- * hold into a bounded one. Before the pair existed, four requests from one account
- * that declared a `Content-Length` and then dribbled held the whole budget for as
- * long as Node's default `requestTimeout` of five minutes, without sending a byte,
- * naming a valid upload id, or spending a unit of quota.
+ * never be every waiter's reason for waiting. The second is the part route's own
+ * body deadline (`DOCUMENT_PART_BODY_TIMEOUT_MS`, 64 s by default, armed by
+ * `middleware/documentPartBody.ts` when a slot is granted), which turns "a client
+ * that stops sending" from an indefinite hold into a bounded one; the server-wide
+ * receive deadline in `utils/httpTimeouts.ts` is only its ceiling. Before the pair
+ * existed, four requests from one account that declared a `Content-Length` and
+ * then dribbled held the whole budget for as long as Node's default
+ * `requestTimeout` of five minutes, without sending a byte, naming a valid upload
+ * id, or spending a unit of quota.
  *
  * THE ORDERING RULE THIS EXISTS TO ENFORCE, which is easy to get wrong and
  * invisible when wrong: a slot must be taken **before the body parser runs**, and
@@ -50,7 +52,8 @@ import { MAX_IN_FLIGHT_PART_UPLOADS, MAX_IN_FLIGHT_PART_UPLOADS_PER_USER } from 
  * handler, so a slot acquired inside the handler is acquired after 8 MiB has
  * already been buffered and bounds nothing at all. The middleware that mounts this
  * therefore sits AHEAD of `express.raw` (see `middleware/documentPartBody.ts`) and
- * releases only when the response closes.
+ * releases only once the response has closed AND the handler has settled, since a
+ * handler whose client went away still holds the part until its storage call returns.
  *
  * The API is CALLBACK-based rather than promise-based on purpose. A promise here
  * would be a promise nobody awaits, resolved from inside an Express middleware; if

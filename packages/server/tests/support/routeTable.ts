@@ -854,12 +854,16 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     // budget over time: it charges this account's share of the process-wide
     // in-flight budget (503 past it), takes one of `MAX_IN_FLIGHT_PART_UPLOADS`
     // slots, and arms the deadline by which this part's body must have arrived.
+    // The handler is mounted through `holdingPartUploadSlot`, last, so the slot
+    // is handed back when the handler settles and not when a departed client's
+    // socket closes.
     limiters: ['documentPartLimiter'],
     chain: [
       'documentPartLimiter',
       'requirePartContentLength',
       'holdPartUploadSlot',
       'parsePartUploadBody',
+      'partUploadHandler',
     ],
     owned: { param: 'id', resource: 'documentUpload' },
     when: 'always',
@@ -978,7 +982,7 @@ export const isMountedUnderTest = (row: RouteRow): boolean =>
 /**
  * Every function exported by the rate-limiter module, by name.
  *
- * A namespace import rather than fifteen named ones on purpose: a limiter added
+ * A namespace import rather than one named import per limiter, on purpose: a limiter added
  * to `rateLimiter.ts` and mounted on a route is then named automatically, so
  * the table cannot silently omit it. With named imports, an unrecognised
  * middleware is indistinguishable from a validator closure and the new limiter
@@ -1141,7 +1145,24 @@ const STRUCTURED_BODY_PARSERS: ReadonlySet<string> = new Set(['parseLargeJsonBod
 export const UNNAMED_PARSER_PREFIX = 'unnamedBodyParser:';
 
 /** The name `holdingLargeBodySlot` gives the handler it wraps. */
-export const LARGE_BODY_HANDLER = 'largeBodyHandler';
+const LARGE_BODY_HANDLER = 'largeBodyHandler';
+
+/** The name `holdingPartUploadSlot` gives the handler it wraps. */
+const PART_UPLOAD_HANDLER = 'partUploadHandler';
+
+/**
+ * Each slot holder, and the wrapper its route's handler must be mounted through,
+ * last. The two come as a PAIR: the holder takes the slot, and only the wrapper
+ * hands it back when the handler settles rather than when the socket closes.
+ * Matched by the wrapper's FUNCTION NAME, because each call of a wrapper factory
+ * returns a fresh function with no identity to look up.
+ */
+export const SLOT_HANDLERS: ReadonlyMap<string, string> = new Map([
+  ['holdPartUploadSlot', PART_UPLOAD_HANDLER],
+  ['holdLargeBodySlot', LARGE_BODY_HANDLER],
+]);
+
+const SLOT_HANDLER_NAMES: ReadonlySet<string> = new Set(SLOT_HANDLERS.values());
 
 /** The chain name of one stack entry, or `undefined` for anything else (validators, handlers). */
 function chainNameOf(handle: unknown): string | undefined {
@@ -1149,7 +1170,7 @@ function chainNameOf(handle: unknown): string | undefined {
   if (named !== undefined) return named;
   if (typeof handle !== 'function') return undefined;
   if (BODY_PARSER_FUNCTION_NAMES.has(handle.name)) return `${UNNAMED_PARSER_PREFIX}${handle.name}`;
-  if (handle.name === LARGE_BODY_HANDLER) return LARGE_BODY_HANDLER;
+  if (SLOT_HANDLER_NAMES.has(handle.name)) return handle.name;
   return undefined;
 }
 

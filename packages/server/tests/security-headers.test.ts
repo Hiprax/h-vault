@@ -489,18 +489,16 @@ describe('Security Headers & Middleware', () => {
       });
     }
 
-    it('should handle arrays in request body without stripping valid data', async () => {
-      const csrfRes = await request(app).get('/api/v1/csrf-token');
-      const csrfToken: string = csrfRes.body.data.csrfToken;
-      const setCookies: string[] = (csrfRes.headers['set-cookie'] as string[] | undefined) ?? [];
-      const csrfCookieRaw = setCookies.find((c) => c.startsWith('__csrf='));
-      const csrfCookie = csrfCookieRaw ? csrfCookieRaw.split(';')[0]! : '';
-
-      // Arrays should be preserved (sanitized element-by-element)
+    it('sanitizes an array element by element, keeping it an array and every valid element', async () => {
+      // Observed at the input to validation, like the cases above: the registration
+      // schema strips the unknown `probe` key afterwards whatever the sanitizer did.
+      // A walk that rebuilt an array as an object of indices, dropped an element, or
+      // stopped at the array instead of entering it, fails here.
+      const csrf = await getCsrf(request.agent(app));
       const res = await request(app)
         .post('/api/v1/auth/register')
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
+        .set('x-csrf-token', csrf.token)
+        .set('Cookie', csrf.cookie)
         .send({
           email: 'test@example.com',
           authHash: 'my-hash',
@@ -510,10 +508,15 @@ describe('Security Headers & Middleware', () => {
           kdfIterations: 600000,
           kdfAlgorithm: 'PBKDF2-SHA256',
           encryptionVersion: 1,
+          probe: ['plain', 7, { $gt: '', keep: 'x' }, ['nested', { $where: '1', keep: 2 }]],
         });
 
-      // Should process normally (201 for new registration)
-      expect(res.status).toBe(201);
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(validatedBodies).toHaveLength(1);
+      const seen = validatedBodies[0]!.body as Record<string, unknown>;
+      expect(Array.isArray(seen.probe)).toBe(true);
+      expect(seen.probe).toStrictEqual(['plain', 7, { keep: 'x' }, ['nested', { keep: 2 }]]);
+      expect(seen).toMatchObject({ email: 'test@example.com', kdfIterations: 600000 });
     });
   });
 
