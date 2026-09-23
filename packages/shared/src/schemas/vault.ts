@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { objectIdSchema, optionalVaultKeyVersionSchema, paginationSchema } from './common.js';
+import {
+  objectIdSchema,
+  optionalVaultKeyVersionSchema,
+  paginationSchema,
+  rowIdNonceSchema,
+} from './common.js';
 import { documentKeyRewrapSchema } from './document.js';
 import {
   ITEM_TYPES,
@@ -95,6 +100,9 @@ export const createVaultItemSchema = z.object({
   nameIv: z.string().min(1).max(24),
   nameTag: z.string().min(1).max(32),
   searchHash: searchHashSchema,
+  // The nonce the new row's id is derived from, so the six ciphertext fields above
+  // can be bound to that id before the row exists. See `rowIdNonceSchema`.
+  idNonce: rowIdNonceSchema.optional(),
   // The vault-key generation the six ciphertext fields above were sealed under.
   // See `optionalVaultKeyVersionSchema`.
   vaultKeyVersion: optionalVaultKeyVersionSchema,
@@ -251,6 +259,29 @@ export const bulkReEncryptSchema = z
      * accident, and so adding it is not a breaking change on the wire.
      */
     discardPendingVaultKey: z.boolean().optional(),
+    /**
+     * Re-seal every row under the SAME vault key instead of rotating to a new one.
+     *
+     * The format backfill: it runs the whole rotation machinery (the fence, the
+     * lock, the completeness check, crash recovery) but stores no new key, moves
+     * no generation and writes no pending wrapper, because the key does not
+     * change. The three `newVaultKey*` fields must then equal the account's
+     * STORED wrapper, and `vaultKeyVersion` and `idempotencyKey` are required: a re-seal sealed under a
+     * key another session has since rotated away would otherwise store every row
+     * under a retired key behind a 200.
+     */
+    reseal: z.boolean().optional(),
+    /**
+     * The vault-field format the sending client understands. `2` says it can read
+     * and write fields bound to their row. A rotation that carries a bound field
+     * WITHOUT this is refused: only a client that could not open that field would
+     * send it back unchanged, and it would then be left under the retired key.
+     */
+    vaultFieldFormat: z.literal(2).optional(),
+    // The vault-key generation a re-seal's ciphertext was sealed under. Required
+    // when `reseal` is set (below); ignored by an ordinary rotation, whose commit
+    // is conditioned on the credential it authenticated against instead.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   /**
    * No leg may name the same row twice.
@@ -265,6 +296,30 @@ export const bulkReEncryptSchema = z
    * question rather than two questions wearing one status code.
    */
   .superRefine((data, ctx) => {
+    if (data.reseal === true && data.vaultKeyVersion === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['vaultKeyVersion'],
+        message: 'A re-seal must name the vault-key generation it was sealed under',
+      });
+    }
+    // And its idempotency key: besides making a retry safe, it is what makes the
+    // re-seal's commit a real write to the account on every attempt, so a key
+    // replaced underneath it is a write conflict rather than an unseen change.
+    if (data.reseal === true && data.idempotencyKey === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['idempotencyKey'],
+        message: 'A re-seal must carry an idempotency key',
+      });
+    }
+    if (data.reseal === true && data.discardPendingVaultKey === true) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['discardPendingVaultKey'],
+        message: 'A re-seal cannot abandon an interrupted rotation',
+      });
+    }
     for (const leg of ['items', 'folders', 'documents'] as const) {
       const repeated = duplicateIds(data[leg]);
       if (repeated.length > 0) {

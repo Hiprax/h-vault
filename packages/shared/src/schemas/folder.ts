@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { objectIdSchema, optionalVaultKeyVersionSchema } from './common.js';
+import { objectIdSchema, optionalVaultKeyVersionSchema, rowIdNonceSchema } from './common.js';
 import { MAX_ENCRYPTED_NAME_LENGTH, MAX_SORT_ORDER } from '../constants/index.js';
 
 // NOTE: Folder nesting depth (MAX_FOLDER_NESTING_DEPTH) is enforced server-side
@@ -26,6 +26,9 @@ export const createFolderSchema = z.object({
     .regex(/^#[0-9a-fA-F]{6}$/, 'Color must be a valid hex color code (e.g. #ff0000)')
     .optional(),
   sortOrder: z.number().int().min(0).max(MAX_SORT_ORDER).default(0),
+  // The nonce the new folder's id is derived from, so `encryptedName` can be bound
+  // to that id before the folder exists. See `rowIdNonceSchema`.
+  idNonce: rowIdNonceSchema.optional(),
   // The vault-key generation `encryptedName` was sealed under. See
   // `optionalVaultKeyVersionSchema`.
   vaultKeyVersion: optionalVaultKeyVersionSchema,

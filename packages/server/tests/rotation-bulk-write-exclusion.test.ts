@@ -174,7 +174,13 @@ describe('POST /tools/import holds the vault-key exclusion lock across its span'
     const res = await importVault();
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 1,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(1);
     expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
     expect(await heldLocks()).toEqual({ rotation: 0, import: 0 });
   });

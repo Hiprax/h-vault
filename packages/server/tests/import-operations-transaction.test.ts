@@ -106,7 +106,13 @@ describe('Import operations — transaction (replica-set) branch', () => {
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 2, updatedCount: 1 });
+    expect(res.body.data).toEqual({
+      insertedCount: 2,
+      updatedCount: 1,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(2);
 
     const stored = await VaultItem.find({ userId: user.id }).lean();
     expect(stored).toHaveLength(3);

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PAGINATION_DEFAULTS } from '../constants/index.js';
+import { PAGINATION_DEFAULTS, ROW_ID_NONCE_PATTERN } from '../constants/index.js';
 
 export const objectIdSchema = z
   .string()
@@ -43,3 +43,15 @@ export const paginationSchema = z.object({
  * required outright.
  */
 export const optionalVaultKeyVersionSchema = z.number().int().min(0).optional();
+
+/**
+ * The nonce a create sends so that both sides can derive the new row's id before
+ * it exists (`deriveRowId`; the layout is on `ROW_ID_DERIVATION_PREFIX`).
+ *
+ * Lower-case only, with NO transform, unlike `objectIdSchema`: the nonce is hashed
+ * as sent, and the browser has already derived the id from its own spelling, so a
+ * server that normalised it would store the row under an id the browser did not
+ * seal to. Optional on every create, which keeps the addition non-breaking; a
+ * create without one gets a server-minted id, exactly as before.
+ */
+export const rowIdNonceSchema = z.string().regex(ROW_ID_NONCE_PATTERN, 'Invalid row id nonce');

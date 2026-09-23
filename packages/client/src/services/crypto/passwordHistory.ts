@@ -17,7 +17,7 @@
 
 import { PASSWORD_HISTORY_MAX } from '@hvault/shared';
 import type { IPasswordHistoryEntry } from '@hvault/shared';
-import { cryptoService } from './cryptoService';
+import { encryptVaultField } from './vaultField';
 
 export interface BuildPasswordHistoryArgs {
   /** The matched item's existing `passwordHistory` (its `_raw.passwordHistory`). */
@@ -26,6 +26,12 @@ export interface BuildPasswordHistoryArgs {
   oldPassword: unknown;
   /** The password the update would write (decrypted). */
   newPassword: unknown;
+  /**
+   * The id of the row the history belongs to. The retained password is sealed to
+   * it (format v2, role `item.password-history`), so it cannot be moved onto
+   * another item's history and read there as that item's previous password.
+   */
+  rowId: string;
   vaultKey: CryptoKey;
 }
 
@@ -64,19 +70,26 @@ export function passwordDidChange(
  * password is encrypted with the vault key, stamped with the current time,
  * prepended to the existing history, and the result is sliced to the
  * {@link PASSWORD_HISTORY_MAX} most recent entries. Existing entries are copied
- * field-by-field so no extraneous keys ride along into the request body.
+ * field-by-field so no extraneous keys ride along into the request body, and
+ * VERBATIM: they already belong to this row, in whichever format they were
+ * written, and re-sealing them would need their plaintext.
  */
 export async function buildPasswordHistoryPayload({
   existingRawHistory,
   oldPassword,
   newPassword,
+  rowId,
   vaultKey,
 }: BuildPasswordHistoryArgs): Promise<IPasswordHistoryEntry[] | undefined> {
   if (!passwordDidChange(oldPassword, newPassword)) {
     return undefined;
   }
 
-  const encrypted = await cryptoService.encryptData(oldPassword, vaultKey);
+  const encrypted = await encryptVaultField(
+    oldPassword,
+    { role: 'item.password-history', rowId },
+    vaultKey,
+  );
 
   const existingHistory = (existingRawHistory ?? []).map((entry) => ({
     encryptedPassword: entry.encryptedPassword,

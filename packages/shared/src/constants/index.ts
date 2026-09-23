@@ -707,6 +707,38 @@ export const VAULT_FIELD_ROLES = [
 export type VaultFieldRole = (typeof VAULT_FIELD_ROLES)[number];
 
 // ---------------------------------------------------------------------------
+// ROW IDS KNOWN BEFORE THE ROW EXISTS
+// ---------------------------------------------------------------------------
+// A format-v2 field is bound to its row's id, so a row the client CREATES has to
+// know that id before anything is sealed. The client sends a nonce and both
+// sides derive the id from it and from the caller's own user id:
+//
+//   _id = nonce[0..8] || hex(SHA-256(ROW_ID_DERIVATION_PREFIX || userId || "|" || nonce))[0..16]
+//
+// The first eight hex characters are the nonce's own seconds timestamp, so the id
+// is still a well-formed ObjectId that sorts roughly by creation time. The other
+// sixteen are bound to the caller's user id, which is the point of deriving rather
+// than accepting an id: a caller cannot name an id another account's row already
+// has (and so cannot probe whether one exists), and cannot occupy the id a
+// server-minted row will get later. The nonce is 40 lower-case hex characters:
+// eight of timestamp and thirty-two of randomness.
+//
+// FORMAT constant: the derivation is computed independently on both sides, so a
+// change on one side alone makes every created row unreadable. Pinned by a vector.
+export const ROW_ID_DERIVATION_PREFIX = 'hvault/row-id/v1|';
+export const ROW_ID_NONCE_PATTERN = /^[0-9a-f]{40}$/;
+
+// ---------------------------------------------------------------------------
+// VAULT SEARCH KEY
+// ---------------------------------------------------------------------------
+// An item's `searchHash` is HMAC-SHA256 of its normalised name under a SUBKEY of
+// the vault key, `HKDF-SHA256(ikm = vault key, salt = empty, info = this)`, and
+// never under the vault key itself: the vault key is an AES-GCM key, and using the
+// same bytes as an HMAC key as well is exactly the key reuse NIST SP 800-108
+// separates. FORMAT constant: changing it changes every hash written afterwards.
+export const VAULT_SEARCH_KEY_INFO = 'hvault/item/search/v1';
+
+// ---------------------------------------------------------------------------
 // DOCUMENT PREVIEW
 // ---------------------------------------------------------------------------
 // The application decides WHETHER a preview is offered; the isolated sandbox

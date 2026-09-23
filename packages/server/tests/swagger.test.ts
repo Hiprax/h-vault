@@ -5,6 +5,7 @@ import request from 'supertest';
 import { z } from 'zod';
 import * as sharedSchemas from '@hvault/shared';
 import {
+  bulkReEncryptSchema,
   APP_VERSION,
   backupChangePasswordSchema,
   backupSetupSchema,
@@ -582,6 +583,16 @@ describe('API Documentation', () => {
         schema: importSchema,
         component: 'ImportRequest',
         route: '/tools/import',
+        method: 'post',
+      },
+      // A rotation reads the generation only in re-seal mode, where it is the one
+      // thing standing between a same-key re-seal and a key rotated away underneath
+      // it; an ordinary rotation conditions its commit on the credential instead.
+      {
+        schemaName: 'bulkReEncryptSchema',
+        schema: bulkReEncryptSchema,
+        component: 'BulkReEncryptRequest',
+        route: '/vault/items/bulk-reencrypt',
         method: 'post',
       },
       {

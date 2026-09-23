@@ -24,6 +24,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
+import { deriveRowId } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia for jsdom
@@ -119,6 +120,11 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
       tag: 'tag',
     }),
     decryptData: vi.fn().mockResolvedValue('decrypted'),
+    encryptDataWithAad: vi.fn().mockResolvedValue({
+      encrypted: 'bound',
+      iv: 'iv',
+      tag: 'tag',
+    }),
     generateSearchHash: vi.fn().mockResolvedValue('hash'),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
@@ -347,6 +353,28 @@ function setupDefaultProfileMock(overrides: Record<string, unknown> = {}) {
 // 1 - SettingsPage
 // ==========================================================================
 
+/** This session's own account: every imported row's id is derived from it. */
+const USER_ID = '65a1b2c3d4e5f60718293a4b';
+
+/**
+ * A server that stores every insert where its nonce says, answering with the ids
+ * `deriveRowId` gives them, in insert order, exactly as the real one does. The
+ * page refuses an import whose answer names any other id.
+ */
+function acceptImport(counts: { insertedCount: number; updatedCount: number }) {
+  return async (body: { operations: { inserts: { idNonce?: string }[] } }) => ({
+    data: {
+      success: true,
+      data: {
+        ...counts,
+        insertedIds: await Promise.all(
+          body.operations.inserts.map((insert) => deriveRowId(USER_ID, insert.idNonce ?? '')),
+        ),
+      },
+    },
+  });
+}
+
 /** An empty, well-formed first page — enough for `fetchItems()` to complete. */
 const EMPTY_ITEMS_PAGE = {
   data: {
@@ -398,7 +426,7 @@ describe('SettingsPage', () => {
 
     useAuthStore.setState({
       accessToken: 'test-token',
-      user: { userId: 'u1', email: 'test@example.com' },
+      user: { userId: USER_ID, email: 'test@example.com' },
       isAuthenticated: true,
       isLocked: false,
       vaultKey: new Uint8Array(32) as unknown as CryptoKey,
@@ -1420,10 +1448,11 @@ describe('SettingsPage', () => {
     expect(select.querySelectorAll('option')).toHaveLength(8);
   });
 
-  it('re-sends the ORIGINAL ciphertext of a native item rather than re-encrypting it', async () => {
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+  it('seals a native item again to the NEW row it is inserted as, never re-sending its ciphertext', async () => {
+    // Premise changed: a native row's file ciphertext is bound to the row it was
+    // exported from (or to nothing), so it is no longer forwarded verbatim; it is
+    // opened and sealed again (format v2) to the id the insert's nonce derives.
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
 
@@ -1456,11 +1485,36 @@ describe('SettingsPage', () => {
     };
     expect(payload.operations.inserts).toHaveLength(1);
     expect(payload.operations.updates).toEqual([]);
-    // The row is already encrypted under the current vault key, so its bytes are
-    // forwarded verbatim (a re-encrypt would show the mocked `enc:` prefix).
-    expect(payload.operations.inserts[0]).toMatchObject(nativeItem);
-    // Only the search hash is recomputed — it is a deterministic HMAC of the name.
-    expect(payload.operations.inserts[0]?.searchHash).toBe('hash');
+    const insert = payload.operations.inserts[0] ?? {};
+    // Sealed again and marked v2; none of the file's ciphertext is on the wire.
+    expect(insert).toMatchObject({
+      itemType: 'login',
+      encryptedName: 'bound',
+      nameIv: 'v2:iv',
+      nameTag: 'tag',
+      encryptedData: 'bound',
+      dataIv: 'v2:iv',
+      dataTag: 'tag',
+    });
+    const wire = JSON.stringify(payload);
+    for (const fileValue of ['"ed"', '"di"', '"dt"', '"en"', '"ni"', '"nt"']) {
+      expect(wire).not.toContain(fileValue);
+    }
+    // Bound to the row the server will store: the id this insert's nonce derives.
+    expect(insert.idNonce).toMatch(/^[0-9a-f]{40}$/);
+    const rowId = await deriveRowId(USER_ID, insert.idNonce ?? '');
+    const { vaultKey } = useAuthStore.getState();
+    const sealed = vi
+      .mocked(cryptoService.encryptDataWithAad)
+      .mock.calls.map(([plain, key, aad]) => [plain, key, new TextDecoder().decode(aad)]);
+    expect(sealed).toEqual([
+      ['decrypted', vaultKey, `hvault/vault-field/v2|item.name|${rowId}`],
+      ['decrypted', vaultKey, `hvault/vault-field/v2|item.data|login|${rowId}`],
+    ]);
+    // Nothing is sealed unbound (v1).
+    expect(cryptoService.encryptData).not.toHaveBeenCalled();
+    // The search hash is recomputed — it is a deterministic HMAC of the name.
+    expect(insert.searchHash).toBe('hash');
   });
 
   it('shows CSV field mapping UI when CSV format is selected', async () => {
@@ -2021,9 +2075,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce('decrypted-name') // item 1 name
       .mockRejectedValueOnce(new Error('Decryption failed')); // item 2 data fails
 
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
 
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
@@ -2135,9 +2187,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce('decrypted-data')
       .mockResolvedValueOnce('decrypted-name');
 
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
 
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
@@ -2201,9 +2251,7 @@ describe('SettingsPage', () => {
       Promise.resolve(`plain:${encrypted}`),
     );
 
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 2, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 2, updatedCount: 0 }));
 
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
@@ -2250,9 +2298,7 @@ describe('SettingsPage', () => {
   });
 
   it('skips validation for non-JSON import formats', async () => {
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
 
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));

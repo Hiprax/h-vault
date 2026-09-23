@@ -103,12 +103,13 @@ import { clearSettingsCache } from '../hooks/useUserSettings';
 import { copySecretToClipboard } from '../services/clipboard/clipboardService';
 import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
 import { passwordDidChange } from '../services/crypto/passwordHistory';
-import { decryptVaultField, isBoundField } from '../services/crypto/vaultField';
+import { decryptVaultField, encryptVaultField } from '../services/crypto/vaultField';
 import { parseCsv } from '../services/import/csv';
 import {
   IMPORT_FORMATS,
   ImportParseError,
   MAX_IMPORT_WARNINGS,
+  assertInsertedWhereSealed,
   buildImportOperations,
   chunkImportOperations,
   detectCsvFormat,
@@ -119,6 +120,7 @@ import {
 import type {
   ImportSourceFormat,
   NativeCiphertext,
+  PreviousPassword,
   ResolvableImportItem,
 } from '../services/import';
 
@@ -262,82 +264,46 @@ function sanitizeNativePasswordHistory(value: unknown): IPasswordHistoryEntry[] 
 }
 
 /**
- * The row's ciphertext as it may be RE-SENT: verbatim when it is format v1, and
- * re-sealed as v1 from the plaintext just opened when any of it is format v2.
- *
- * A re-import sends its rows as INSERTS, and the server gives every insert a
- * fresh id. A v2 field is bound to the id it was exported from, so sent verbatim
- * it would be stored under an id it can never open under again: a row that
- * imports cleanly and is unreadable for good. This release writes v1 everywhere,
- * so the re-seal is v1 as well, of exactly the plaintext the vault stored.
+ * The retained previous passwords of a native row, decrypted, so they can be
+ * sealed again to whatever row the import stores them on. Opened against the row
+ * they were exported with (a v1 entry never reads its binding); one that will not
+ * open is dropped like any other unusable ENTRY, never failing the row that still
+ * carries a good current password.
  */
-async function unbindNativeCiphertext(
-  cipher: NativeCiphertext,
-  name: string,
-  dataJson: string,
-  vaultKey: CryptoKey,
-): Promise<NativeCiphertext> {
-  if (!isBoundField(cipher.nameIv) && !isBoundField(cipher.dataIv)) return cipher;
-  const sealedName = await cryptoService.encryptData(name, vaultKey);
-  const sealedData = await cryptoService.encryptData(dataJson, vaultKey);
-  return {
-    encryptedName: sealedName.encrypted,
-    nameIv: sealedName.iv,
-    nameTag: sealedName.tag,
-    encryptedData: sealedData.encrypted,
-    dataIv: sealedData.iv,
-    dataTag: sealedData.tag,
-  };
-}
-
-/**
- * The same rule for the retained previous passwords: a v1 entry is carried
- * verbatim, a v2 entry is opened against its exported row and re-sealed as v1,
- * and one that will not open is dropped like any other unusable ENTRY, never
- * failing the row that still carries a good current password.
- */
-async function unbindNativePasswordHistory(
+async function openNativePasswordHistory(
   entries: IPasswordHistoryEntry[],
   rowId: string,
   vaultKey: CryptoKey,
-): Promise<IPasswordHistoryEntry[]> {
-  const carried: IPasswordHistoryEntry[] = [];
+): Promise<PreviousPassword[]> {
+  const opened: PreviousPassword[] = [];
   for (const entry of entries) {
-    if (!isBoundField(entry.iv)) {
-      carried.push(entry);
-      continue;
-    }
     try {
-      const password = await decryptVaultField(
-        { encrypted: entry.encryptedPassword, iv: entry.iv, tag: entry.tag },
-        { role: 'item.password-history', rowId },
-        vaultKey,
-      );
-      const sealed = await cryptoService.encryptData(password, vaultKey);
-      carried.push({
-        encryptedPassword: sealed.encrypted,
-        iv: sealed.iv,
-        tag: sealed.tag,
+      opened.push({
+        password: await decryptVaultField(
+          { encrypted: entry.encryptedPassword, iv: entry.iv, tag: entry.tag },
+          { role: 'item.password-history', rowId },
+          vaultKey,
+        ),
         changedAt: entry.changedAt,
       });
     } catch {
       continue;
     }
   }
-  return carried;
+  return opened;
 }
 
 /**
  * Unwrap a native H-Vault export into rows the resolver can work with.
  *
  * These rows are ALREADY encrypted under the current vault key, so they take the
- * same road as every other source but skip two of its steps: their content was
- * validated when it was first stored (no clamping, no re-validation), and the
- * ciphertext this decrypts is what gets re-sent — the decryption here exists
- * only to prove readability and to give the resolver an identity to match on.
- * The one exception is a format-v2 field, which is bound to the row it was
- * exported from and is re-sealed as v1 instead (see `unbindNativeCiphertext`).
- * A row that cannot be decrypted is counted and dropped, as before.
+ * same road as every other source but skip one of its steps: their content was
+ * validated when it was first stored (no clamping, no re-validation). Their
+ * ciphertext is NOT re-sent. It is bound to the row it was exported from (format
+ * v2) or to nothing (v1), and the row will be stored as a different one, so it is
+ * opened here and its stored data string is sealed again, verbatim, to wherever
+ * resolution sends it (`buildImportOperations`). A row that cannot be decrypted is
+ * counted and dropped, as before.
  */
 async function extractNativeItems(raw: string, vaultKey: CryptoKey): Promise<NativeExtraction> {
   let parsed: { items?: unknown };
@@ -398,7 +364,7 @@ async function extractNativeItems(raw: string, vaultKey: CryptoKey): Promise<Nat
     }
 
     const folderId = row.folderId;
-    const passwordHistory = await unbindNativePasswordHistory(
+    const previousPasswords = await openNativePasswordHistory(
       sanitizeNativePasswordHistory(row.passwordHistory),
       rowId,
       vaultKey,
@@ -409,11 +375,11 @@ async function extractNativeItems(raw: string, vaultKey: CryptoKey): Promise<Nat
       data: parseNativeData(dataJson),
       tags: sanitizeNativeTags(row.tags),
       favorite: row.favorite === true,
-      cipher: await unbindNativeCiphertext(cipher, name, dataJson, vaultKey),
+      native: { dataJson },
       // A folder id from another account is stripped server-side; a malformed
       // one would fail the whole batch's schema, so it never leaves here.
       ...(typeof folderId === 'string' && OBJECT_ID_RE.test(folderId) ? { folderId } : {}),
-      ...(passwordHistory.length > 0 ? { passwordHistory } : {}),
+      ...(previousPasswords.length > 0 ? { previousPasswords } : {}),
     });
   }
 
@@ -873,7 +839,7 @@ export default function SettingsPage() {
    * under, and getting that wrong in the `finish` direction is unrecoverable, so
    * it is chosen when the control is pressed rather than inferred at commit time.
    */
-  const [rotationMode, setRotationMode] = useState<'new' | 'finish' | 'discard'>('new');
+  const [rotationMode, setRotationMode] = useState<'new' | 'finish' | 'discard' | 'reseal'>('new');
   const [rotationBackupPassword, setRotationBackupPassword] = useState('');
 
   // Password strength
@@ -1395,8 +1361,10 @@ export default function SettingsPage() {
     // Key and generation from ONE read: the generation names the key the rows
     // below are sealed with, and a pair taken from two snapshots could name a
     // combination that never existed at the same instant.
-    const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
-    if (!vaultKey) {
+    // The user id comes from the same read: every insert's id is derived from it.
+    const { vaultKey, vaultKeyVersion, user: importUser } = useAuthStore.getState();
+    const importUserId = importUser?.userId;
+    if (!vaultKey || !importUserId) {
       toast({ title: 'Unlock your vault before importing', type: 'error' });
       return;
     }
@@ -1572,6 +1540,7 @@ export default function SettingsPage() {
       const operations = await buildImportOperations({
         inserts: resolution.inserts,
         updates: resolution.updates,
+        userId: importUserId,
         vaultKey,
       });
       skippedInvalid += operations.failedCount;
@@ -1598,6 +1567,9 @@ export default function SettingsPage() {
           });
           const body = res.data;
           if (!body.success) throw new Error('Failed to import vault data');
+          // Every insert was sealed to the id its nonce derives; a batch the server
+          // stored anywhere else is unreadable, and is reported as the failure it is.
+          await assertInsertedWhereSealed(importUserId, batch.inserts, body.data.insertedIds);
           inserted += body.data.insertedCount;
           updated += body.data.updatedCount;
           sentBatches++;
@@ -1699,6 +1671,17 @@ export default function SettingsPage() {
     // master-password change since has replaced that MEK — where finishing is
     // impossible and, without this, the account could never rotate again.
     const discarding = rotationMode === 'discard';
+    // Re-seal every entry under the key the vault ALREADY uses, to bind each field
+    // to its row (format v2). The same enumeration, completeness check and fence as
+    // a rotation, and none of what a new key needs: no key is minted or stored, the
+    // backup wrapper stays valid, documents keep their wraps, and this session's
+    // generation does not move. It binds the entries as they are now; copies of the
+    // older, unbound entries a server may have kept still open under this key,
+    // which only a rotation to a new key retires.
+    const resealing = rotationMode === 'reseal';
+    // What an abort is called in the toasts below, so a re-seal is not reported as
+    // a rotation it never was.
+    const abortedLabel = resealing ? 'Re-seal aborted' : 'Rotation aborted';
 
     setRotatingVaultKey(true);
     setRotationProgress(0);
@@ -1723,7 +1706,46 @@ export default function SettingsPage() {
       let encrypted: string;
       let iv: string;
       let tag: string;
-      if (finishing) {
+      // The generation a re-seal names; read with the wrapper, from ONE response.
+      let resealVaultKeyVersion = 0;
+      if (resealing) {
+        // The wrapper is read FRESH, not taken from this session's copy, and the
+        // key it opens is proved to be the one this session holds before anything
+        // is sealed: the server refuses a re-seal naming any other wrapper, and
+        // re-sealing under a key that is not the account's would be a vault
+        // nothing can open.
+        const currentRes = await getProfileApi();
+        const currentBody = currentRes.data;
+        if (!currentBody.success) throw new Error('Failed to read the vault key');
+        setProfile(currentBody.data);
+        const stored = currentBody.data;
+        const rawStoredKey = await cryptoService.decryptVaultKey(
+          stored.encryptedVaultKey,
+          stored.vaultKeyIv,
+          stored.vaultKeyTag,
+          mek,
+        );
+        let holdsStoredKey: boolean;
+        try {
+          holdsStoredKey = await cryptoService.vaultKeyEqualsRaw(oldVaultKey, rawStoredKey);
+        } finally {
+          cryptoService.clearKey(rawStoredKey);
+        }
+        if (!holdsStoredKey) {
+          toast({
+            title:
+              'Re-seal aborted: this page holds a vault key that is no longer the account’s. Reload the app and try again.',
+            type: 'error',
+          });
+          return;
+        }
+        newVaultKey = oldVaultKey;
+        encrypted = stored.encryptedVaultKey;
+        iv = stored.vaultKeyIv;
+        tag = stored.vaultKeyTag;
+        // An account with no stored generation has never rotated, so `0`.
+        resealVaultKeyVersion = stored.vaultKeyVersion ?? 0;
+      } else if (finishing) {
         const pendingRes = await getProfileApi();
         const pendingBody = pendingRes.data;
         if (!pendingBody.success) throw new Error('Failed to read the interrupted rotation');
@@ -1851,9 +1873,19 @@ export default function SettingsPage() {
           undecryptable.push({ leg: 'item', id: item._id });
         } else {
           rowsOpened++;
-          // Re-encrypt with new vault key
-          const encName = await cryptoService.encryptData(plaintext.name, newVaultKey);
-          const encData = await cryptoService.encryptData(plaintext.data, newVaultKey);
+          // Re-encrypt with new vault key, each field bound to this row (format v2).
+          // The id and type are the row's own, read off the enumeration: the row
+          // keeps both, so the binding is the one it will be read under.
+          const encName = await encryptVaultField(
+            plaintext.name,
+            { role: 'item.name', rowId: item._id },
+            newVaultKey,
+          );
+          const encData = await encryptVaultField(
+            plaintext.data,
+            { role: 'item.data', rowId: item._id, itemType: item.itemType },
+            newVaultKey,
+          );
           const searchHash = await cryptoService.generateSearchHash(plaintext.name, newVaultKey);
 
           // Re-encrypt password history entries if present. Each rewritten
@@ -1863,7 +1895,11 @@ export default function SettingsPage() {
           if (plaintext.history.length > 0) {
             reEncryptedHistory = [];
             for (const entry of plaintext.history) {
-              const encPassword = await cryptoService.encryptData(entry.password, newVaultKey);
+              const encPassword = await encryptVaultField(
+                entry.password,
+                { role: 'item.password-history', rowId: item._id },
+                newVaultKey,
+              );
               reEncryptedHistory.push({
                 encryptedPassword: encPassword.encrypted,
                 iv: encPassword.iv,
@@ -1917,7 +1953,11 @@ export default function SettingsPage() {
           continue;
         }
         rowsOpened++;
-        const encName = await cryptoService.encryptData(name, newVaultKey);
+        const encName = await encryptVaultField(
+          name,
+          { role: 'folder.name', rowId: folder._id },
+          newVaultKey,
+        );
         reEncryptedFolders.push({
           id: folder._id,
           encryptedName: encName.encrypted,
@@ -1963,10 +2003,10 @@ export default function SettingsPage() {
       // anything is sent, which changes nothing at all and can be retried.
       const documentsConfig = await readDocumentsConfigFresh();
       if (documentsConfig === null) {
-        await cryptoService.clearCryptoKey(newVaultKey);
+        // Never for a re-seal: its key is the live vault key, not a candidate.
+        if (!resealing) await cryptoService.clearCryptoKey(newVaultKey);
         toast({
-          title:
-            'Rotation aborted: could not confirm whether this server stores documents. Check your connection and try again.',
+          title: `${abortedLabel}: could not confirm whether this server stores documents. Check your connection and try again.`,
           type: 'error',
         });
         return;
@@ -1983,6 +2023,20 @@ export default function SettingsPage() {
         ];
 
         for (const [i, row] of documentRows.entries()) {
+          if (resealing) {
+            // A document's key is wrapped under a key derived from the vault key
+            // AND its own id, so it is already bound, and a re-seal keeps the vault
+            // key: its existing wrap is exactly right. It is still NAMED, because
+            // the server refuses a payload that does not cover every row, and it
+            // counts as neither opened nor skipped, since nothing was attempted.
+            reWrappedDocuments.push({
+              id: row._id,
+              encryptedDek: row.encryptedDek,
+              dekIv: row.dekIv,
+              dekTag: row.dekTag,
+            });
+            continue;
+          }
           rowsSeen++;
           let dek: DocumentBytes | null = null;
           try {
@@ -2043,7 +2097,7 @@ export default function SettingsPage() {
       // WHY every row failed is NOT one answer, which is what the two-branch
       // description below is for: see the comment on it.
       if (rowsSeen > 0 && rowsOpened === 0) {
-        await cryptoService.clearCryptoKey(newVaultKey);
+        if (!resealing) await cryptoService.clearCryptoKey(newVaultKey);
         // A one-row vault is the boundary, it is reachable, and the count-only
         // sentence read "none of the 1 entries in this vault" there. The
         // skipped-rows toast further down this function varies `entry`/`entries`
@@ -2053,8 +2107,8 @@ export default function SettingsPage() {
         const onlyRow = rowsSeen === 1;
         toast({
           title: onlyRow
-            ? 'Rotation aborted: the only entry in this vault could not be decrypted, so nothing was changed.'
-            : `Rotation aborted: none of the ${String(rowsSeen)} entries in this vault could be ` +
+            ? `${abortedLabel}: the only entry in this vault could not be decrypted, so nothing was changed.`
+            : `${abortedLabel}: none of the ${String(rowsSeen)} entries in this vault could be ` +
               'decrypted, so nothing was changed.',
           // Two causes, and the remedy differs, so neither is asserted. The
           // common one is a session holding a key that is not this account's,
@@ -2096,123 +2150,137 @@ export default function SettingsPage() {
         newVaultKeyIv: iv,
         newVaultKeyTag: tag,
         ...(discarding ? { discardPendingVaultKey: true } : {}),
+        ...(resealing ? { reseal: true, vaultKeyVersion: resealVaultKeyVersion } : {}),
+        // This client reads and writes bound fields, and says so: the server
+        // refuses a rotation that carries one from a client that does not, since
+        // only such a client would pass one through unopened.
+        vaultFieldFormat: 2,
       });
       setRotationProgress(100);
 
-      // Step 5: Update BWK-encrypted vault key if backup is configured
-      try {
-        const profileRes = await getProfileApi();
-        const profileData = profileRes.data;
-        if (profileData.success) {
-          // The committed rotation clears the pending wrapper, so this re-read is
-          // also what retires the "finish the interrupted rotation" offer. A
-          // failure here leaves it showing, and the finish path re-reads the
-          // profile before acting, so the stale offer answers "nothing left to
-          // finish" rather than re-committing a superseded key.
-          setProfile(profileData.data);
-          // The generation the account is NOW on, read from the same response.
-          // An account with no stored generation has never rotated, so `0`.
-          const rotatedVaultKeyVersion = profileData.data.vaultKeyVersion ?? 0;
-          const backup = profileData.data.settings.backup;
-          if (
-            backup.isConfigured &&
-            backup.encryptedBWK &&
-            backup.bwkIv &&
-            backup.bwkTag &&
-            backup.bwkSalt
-          ) {
-            if (rotationBackupPassword) {
-              // User provided backup password — decrypt BWK and re-encrypt new vault key
-              const bwkSalt = cryptoService.base64ToArrayBuffer(backup.bwkSalt);
-              const bek = await cryptoService.deriveBEK(rotationBackupPassword, bwkSalt);
-              const rawBwk = await cryptoService.decryptBWK(
-                backup.encryptedBWK,
-                backup.bwkIv,
-                backup.bwkTag,
-                bek,
-              );
-              const bwkVaultKeyData = await cryptoService.encryptVaultKeyWithBWK(
-                newVaultKey,
-                rawBwk,
-              );
-              cryptoService.clearKey(rawBwk);
-              await cryptoService.clearCryptoKey(bek);
+      // Step 5: Update BWK-encrypted vault key if backup is configured. Not after a
+      // re-seal: the key did not change, so the backup's copy of it is still right.
+      if (!resealing) {
+        try {
+          const profileRes = await getProfileApi();
+          const profileData = profileRes.data;
+          if (profileData.success) {
+            // The committed rotation clears the pending wrapper, so this re-read is
+            // also what retires the "finish the interrupted rotation" offer. A
+            // failure here leaves it showing, and the finish path re-reads the
+            // profile before acting, so the stale offer answers "nothing left to
+            // finish" rather than re-committing a superseded key.
+            setProfile(profileData.data);
+            // The generation the account is NOW on, read from the same response.
+            // An account with no stored generation has never rotated, so `0`.
+            const rotatedVaultKeyVersion = profileData.data.vaultKeyVersion ?? 0;
+            const backup = profileData.data.settings.backup;
+            if (
+              backup.isConfigured &&
+              backup.encryptedBWK &&
+              backup.bwkIv &&
+              backup.bwkTag &&
+              backup.bwkSalt
+            ) {
+              if (rotationBackupPassword) {
+                // User provided backup password — decrypt BWK and re-encrypt new vault key
+                const bwkSalt = cryptoService.base64ToArrayBuffer(backup.bwkSalt);
+                const bek = await cryptoService.deriveBEK(rotationBackupPassword, bwkSalt);
+                const rawBwk = await cryptoService.decryptBWK(
+                  backup.encryptedBWK,
+                  backup.bwkIv,
+                  backup.bwkTag,
+                  bek,
+                );
+                const bwkVaultKeyData = await cryptoService.encryptVaultKeyWithBWK(
+                  newVaultKey,
+                  rawBwk,
+                );
+                cryptoService.clearKey(rawBwk);
+                await cryptoService.clearCryptoKey(bek);
 
-              await api.post('/backup/setup', {
-                authHash,
-                encryptedBWK: backup.encryptedBWK,
-                bwkIv: backup.bwkIv,
-                bwkTag: backup.bwkTag,
-                bwkSalt: backup.bwkSalt,
-                bwkEncryptedVaultKey: bwkVaultKeyData.encrypted,
-                bwkVaultKeyIv: bwkVaultKeyData.iv,
-                bwkVaultKeyTag: bwkVaultKeyData.tag,
-                // FROM THE PROFILE just re-read, not from `authStore`. This runs
-                // AFTER the rotation committed and BEFORE step 6 moves the
-                // store's own number, so `useAuthStore.getState()` still reports
-                // the generation the rotation replaced — and the endpoint would
-                // refuse it. The profile read above is what makes the current
-                // number available here at all.
-                vaultKeyVersion: rotatedVaultKeyVersion,
-              });
-            } else {
-              // No backup password — clear stale bwkEncryptedVaultKey
-              await api.post('/backup/setup', {
-                authHash,
-                encryptedBWK: backup.encryptedBWK,
-                bwkIv: backup.bwkIv,
-                bwkTag: backup.bwkTag,
-                bwkSalt: backup.bwkSalt,
-                // Named on the CLEARING branch too: this call is how a client
-                // legitimately drops a wrapper the rotation just made stale, and
-                // the endpoint is guarded as a whole rather than by which fields
-                // a body happens to carry.
-                vaultKeyVersion: rotatedVaultKeyVersion,
-              });
-              toast({
-                title:
-                  'Vault key rotated. To restore backups on a different account, please update your backup password.',
-                type: 'warning',
-              });
+                await api.post('/backup/setup', {
+                  authHash,
+                  encryptedBWK: backup.encryptedBWK,
+                  bwkIv: backup.bwkIv,
+                  bwkTag: backup.bwkTag,
+                  bwkSalt: backup.bwkSalt,
+                  bwkEncryptedVaultKey: bwkVaultKeyData.encrypted,
+                  bwkVaultKeyIv: bwkVaultKeyData.iv,
+                  bwkVaultKeyTag: bwkVaultKeyData.tag,
+                  // FROM THE PROFILE just re-read, not from `authStore`. This runs
+                  // AFTER the rotation committed and BEFORE step 6 moves the
+                  // store's own number, so `useAuthStore.getState()` still reports
+                  // the generation the rotation replaced — and the endpoint would
+                  // refuse it. The profile read above is what makes the current
+                  // number available here at all.
+                  vaultKeyVersion: rotatedVaultKeyVersion,
+                });
+              } else {
+                // No backup password — clear stale bwkEncryptedVaultKey
+                await api.post('/backup/setup', {
+                  authHash,
+                  encryptedBWK: backup.encryptedBWK,
+                  bwkIv: backup.bwkIv,
+                  bwkTag: backup.bwkTag,
+                  bwkSalt: backup.bwkSalt,
+                  // Named on the CLEARING branch too: this call is how a client
+                  // legitimately drops a wrapper the rotation just made stale, and
+                  // the endpoint is guarded as a whole rather than by which fields
+                  // a body happens to carry.
+                  vaultKeyVersion: rotatedVaultKeyVersion,
+                });
+                toast({
+                  title:
+                    'Vault key rotated. To restore backups on a different account, please update your backup password.',
+                  type: 'warning',
+                });
+              }
             }
           }
+        } catch {
+          // Non-critical — backup will still work, just without BWK-encrypted vault key
         }
-      } catch {
-        // Non-critical — backup will still work, just without BWK-encrypted vault key
       }
 
-      // Step 6: Update client state
-      void cryptoService.clearCryptoKey(oldVaultKey);
-      useAuthStore.setState({
-        vaultKey: newVaultKey,
-        encryptedVaultKeyData: { encrypted, iv, tag },
-        // The generation moves with the key, or this session would keep claiming
-        // the one it has just replaced — and an upload from it would then be
-        // refused for ever rather than recovered from.
-        //
-        // `+ 1` rather than a re-read, and the DIRECTION of any error is what
-        // makes that safe. The server increments once per committing rotation, so
-        // a request that returns 200 here has moved the account by at least one
-        // and this is a FLOOR. A floor that is short self-heals: the next upload
-        // sends it, takes the recoverable 409 carrying the true number, rewraps
-        // and finishes. A number ABOVE the account's own would have nothing to
-        // recover from, so being short is the error to prefer.
-        //
-        // The one 200 that does NOT increment is the idempotent replay — a repeat
-        // carrying a `lastRotationKey` already recorded — and it cannot make this
-        // an over-estimate, because `idempotencyKey` is minted fresh per attempt
-        // just above. A replay can therefore only be a retransmission of THIS
-        // request, whose first delivery did the increment.
-        vaultKeyVersion: useAuthStore.getState().vaultKeyVersion + 1,
-      });
+      // Step 6: Update client state. Not after a re-seal: the key, its wrapper and
+      // its generation are all unchanged, and moving the generation here would make
+      // every later write from this session name one the account never reached.
+      if (!resealing) {
+        void cryptoService.clearCryptoKey(oldVaultKey);
+        useAuthStore.setState({
+          vaultKey: newVaultKey,
+          encryptedVaultKeyData: { encrypted, iv, tag },
+          // The generation moves with the key, or this session would keep claiming
+          // the one it has just replaced — and an upload from it would then be
+          // refused for ever rather than recovered from.
+          //
+          // `+ 1` rather than a re-read, and the DIRECTION of any error is what
+          // makes that safe. The server increments once per committing rotation, so
+          // a request that returns 200 here has moved the account by at least one
+          // and this is a FLOOR. A floor that is short self-heals: the next upload
+          // sends it, takes the recoverable 409 carrying the true number, rewraps
+          // and finishes. A number ABOVE the account's own would have nothing to
+          // recover from, so being short is the error to prefer.
+          //
+          // The one 200 that does NOT increment is the idempotent replay — a repeat
+          // carrying a `lastRotationKey` already recorded — and it cannot make this
+          // an over-estimate, because `idempotencyKey` is minted fresh per attempt
+          // just above. A replay can therefore only be a retransmission of THIS
+          // request, whose first delivery did the increment.
+          vaultKeyVersion: useAuthStore.getState().vaultKeyVersion + 1,
+        });
+      }
 
       // The outcome, in full: what moved and what did NOT. A rotation that left
       // rows behind must say so in the same breath as reporting success, because a
       // bare "rotated successfully" is how a skipped entry goes unnoticed until the
       // day someone needs it.
-      const rotatedTitle = finishing
-        ? 'Interrupted vault key rotation finished'
-        : 'Vault key rotated successfully';
+      const rotatedTitle = resealing
+        ? 'Vault entries re-sealed'
+        : finishing
+          ? 'Interrupted vault key rotation finished'
+          : 'Vault key rotated successfully';
       if (undecryptable.length > 0) {
         const skipped = undecryptable.length;
         const one = skipped === 1;
@@ -2247,11 +2315,14 @@ export default function SettingsPage() {
       // permanent deletion still awaiting the hourly cleanup keeps its row counted.
       // Collapsing that into a flat "Failed to rotate vault key" leaves a user
       // retrying forever with no way to learn that the answer is to wait.
+      const resealFallback = resealing
+        ? 'Failed to re-seal vault entries'
+        : 'Failed to rotate vault key';
       const status = isAxiosError(err) ? err.response?.status : undefined;
       const title =
         status !== undefined && status >= 400 && status < 500
-          ? getApiErrorMessage(err, 'Failed to rotate vault key')
-          : 'Failed to rotate vault key';
+          ? getApiErrorMessage(err, resealFallback)
+          : resealFallback;
       toast({ title, type: 'error' });
 
       // Re-read the profile after ANY failure, because a rotation that got far
@@ -2947,12 +3018,43 @@ export default function SettingsPage() {
                   <Key className="h-4 w-4" />
                 )}
                 {rotatingVaultKey
-                  ? `${interruptedRotation ? 'Finishing' : 'Rotating'}... ${rotationProgress}%`
+                  ? `${rotationMode === 'reseal' ? 'Re-sealing' : interruptedRotation ? 'Finishing' : 'Rotating'}... ${rotationProgress}%`
                   : interruptedRotation
                     ? 'Finish Rotation'
                     : 'Rotate Key'}
               </button>
             </div>
+            {/*
+              The format backfill: every entry re-sealed under the key the vault
+              already uses, each field bound to its own entry. Not offered while an
+              interrupted rotation is outstanding, which the server refuses anyway:
+              a re-seal keeps the current key, so it cannot carry the entries that
+              rotation already moved.
+            */}
+            {!interruptedRotation && (
+              <div className="mt-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-[hsl(var(--foreground))]">
+                    Re-seal Entries
+                  </p>
+                  <p className="text-xs text-[hsl(var(--muted-foreground))]">
+                    Bind every entry to its own place, under the key you already use
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRotationMode('reseal');
+                    setShowRotateConfirm(true);
+                  }}
+                  disabled={rotatingVaultKey || changingPassword}
+                  className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-3 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-colors disabled:opacity-50"
+                >
+                  <Key className="h-4 w-4" />
+                  Re-seal
+                </button>
+              </div>
+            )}
             {interruptedRotation && (
               <div className="mt-2 space-y-1">
                 <p className="text-xs text-yellow-800 dark:text-yellow-400">
@@ -3023,18 +3125,22 @@ export default function SettingsPage() {
                   behaviour was already fixed.
                 */}
                 <DialogTitle>
-                  {rotationMode === 'finish'
-                    ? 'Finish Interrupted Rotation'
-                    : rotationMode === 'discard'
-                      ? 'Abandon the Interrupted Rotation'
-                      : 'Rotate Vault Key'}
+                  {rotationMode === 'reseal'
+                    ? 'Re-seal Vault Entries'
+                    : rotationMode === 'finish'
+                      ? 'Finish Interrupted Rotation'
+                      : rotationMode === 'discard'
+                        ? 'Abandon the Interrupted Rotation'
+                        : 'Rotate Vault Key'}
                 </DialogTitle>
                 <DialogDescription>
-                  {rotationMode === 'finish'
-                    ? 'This will re-encrypt every entry under the key the interrupted rotation was already using, rather than generating another one. This operation cannot be undone. Make sure you have a recent backup.'
-                    : rotationMode === 'discard'
-                      ? 'This will generate a new vault key and abandon the one the interrupted rotation was using. Any entry already re-encrypted under that key becomes permanently unreadable — only a backup can recover it. Choose this only if finishing the rotation has failed. This operation cannot be undone.'
-                      : 'This will generate a new vault key and re-encrypt all your vault items. This operation cannot be undone. Make sure you have a recent backup.'}
+                  {rotationMode === 'reseal'
+                    ? 'This will re-encrypt every entry under the vault key you already use, binding each entry’s fields to that entry so they cannot be moved onto another. Your key does not change. Copies of the older, unbound entries that a server kept can still be opened with this key; rotating the vault key is what retires them.'
+                    : rotationMode === 'finish'
+                      ? 'This will re-encrypt every entry under the key the interrupted rotation was already using, rather than generating another one. This operation cannot be undone. Make sure you have a recent backup.'
+                      : rotationMode === 'discard'
+                        ? 'This will generate a new vault key and abandon the one the interrupted rotation was using. Any entry already re-encrypted under that key becomes permanently unreadable — only a backup can recover it. Choose this only if finishing the rotation has failed. This operation cannot be undone.'
+                        : 'This will generate a new vault key and re-encrypt all your vault items. This operation cannot be undone. Make sure you have a recent backup.'}
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
@@ -3055,7 +3161,7 @@ export default function SettingsPage() {
                     autoComplete="current-password"
                   />
                 </div>
-                {profile?.settings.backup.isConfigured && (
+                {rotationMode !== 'reseal' && profile?.settings.backup.isConfigured && (
                   <div>
                     <label
                       htmlFor="rotation-backup-password"
@@ -3101,7 +3207,7 @@ export default function SettingsPage() {
                   className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
                 >
                   {rotatingVaultKey && <Loader2 className="h-4 w-4 animate-spin" />}
-                  Confirm Rotation
+                  {rotationMode === 'reseal' ? 'Confirm Re-seal' : 'Confirm Rotation'}
                 </button>
               </DialogFooter>
             </DialogContent>

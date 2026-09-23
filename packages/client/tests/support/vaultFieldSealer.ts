@@ -1,10 +1,10 @@
 /**
  * A format-v2 vault-field SEALER, for tests only.
  *
- * Nothing in the application writes format v2 yet: this release reads it and
- * keeps writing v1, so that a vault can be read by the build that will later
- * start writing it. The suites that prove the read path therefore need a way to
- * produce a bound field, and this is it.
+ * The application seals v2 through `encryptVaultField`, and a suite proving the
+ * READ path must not produce its fixtures with the very module it is judging.
+ * This is the independent sealer those suites use instead, and the one the
+ * writer's own tests open its output against.
  *
  * It restates the format from its WRITTEN specification (the comment above
  * `VAULT_FIELD_AAD_PREFIX` in `@hvault/shared`) with string literals, and it

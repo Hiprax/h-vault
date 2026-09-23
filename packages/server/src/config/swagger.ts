@@ -198,6 +198,20 @@ const VAULT_KEY_VERSION_PROPERTY = {
 };
 
 /**
+ * The nonce a create sends so the new row's id is known before the row exists.
+ *
+ * ONE definition for the three creates that accept it, because the three must
+ * describe one derivation. Optional: a create without it gets a server-minted id,
+ * exactly as before the field existed.
+ */
+const ID_NONCE_PROPERTY = {
+  type: 'string',
+  pattern: '^[0-9a-f]{40}$',
+  description:
+    '40 lower-case hex characters: eight of seconds since the epoch, then thirty-two of randomness. The new row is stored under the id derived from this and the caller\'s own user id — the first eight characters, then the first sixteen hex characters of SHA-256("hvault/row-id/v1|" + userId + "|" + idNonce) — so a client can seal the row\'s fields to its id before the row exists. An id that is already stored is refused with 409 and nothing is written.',
+};
+
+/**
  * The RECOVERABLE 409 every write derived from the vault key can answer with.
  *
  * It is the one refusal in this document whose body carries a NUMBER, and it is
@@ -630,6 +644,7 @@ export const swaggerSpec: JsonObject = {
           nameIv: { type: 'string', minLength: 1, maxLength: 24 },
           nameTag: { type: 'string', minLength: 1, maxLength: 32 },
           searchHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          idNonce: ID_NONCE_PROPERTY,
           vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
@@ -714,6 +729,22 @@ export const swaggerSpec: JsonObject = {
             },
             maxItems: 10000,
           },
+          reseal: {
+            type: 'boolean',
+            description:
+              "Re-seal every row under the SAME vault key instead of rotating to a new one, to move each row's fields to the current format. The whole rotation machinery runs (the password check, the completeness check, the write fence) but no key is stored, the account's vault-key version does not move and no interrupted-rotation state is written. The three newVaultKey fields must equal the account's stored wrapper, and vaultKeyVersion and idempotencyKey are required; either mismatch is refused with 409 before anything is written. Cannot be combined with discardPendingVaultKey, and is refused with 409 while an interrupted rotation is outstanding. Absent means false.",
+          },
+          vaultFieldFormat: {
+            type: 'integer',
+            enum: [2],
+            description:
+              'The vault-field format the sending client understands. A request carrying any field sealed to its row (an IV beginning `v2:`) without stating 2 is refused with 409 before anything is read: only a client that could not open such a field would send it back unchanged, and a rotation would leave it under the key it retires.',
+          },
+          vaultKeyVersion: {
+            ...VAULT_KEY_VERSION_PROPERTY,
+            description:
+              "Required when reseal is true, and read only then: the generation of the vault key the re-sealed rows were sealed under. Refused with 409, carrying the account's current generation in `data.vaultKeyVersion`, when it is not the current one. An ordinary rotation's commit is conditioned on the credential it authenticated against instead.",
+          },
           discardPendingVaultKey: {
             type: 'boolean',
             description:
@@ -788,6 +819,7 @@ export const swaggerSpec: JsonObject = {
           icon: { type: 'string', maxLength: 50 },
           color: { type: 'string', maxLength: 20 },
           sortOrder: { type: 'integer', default: 0 },
+          idNonce: ID_NONCE_PROPERTY,
           vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
@@ -1118,6 +1150,10 @@ export const swaggerSpec: JsonObject = {
           dataIv: { type: 'string', minLength: 1, maxLength: 24 },
           dataTag: { type: 'string', minLength: 1, maxLength: 32 },
           searchHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          idNonce: {
+            ...ID_NONCE_PROPERTY,
+            description: `${ID_NONCE_PROPERTY.description} Two inserts in one request may not name the same nonce.`,
+          },
           tags: {
             type: 'array',
             items: { type: 'string', minLength: 1, maxLength: 50 },
@@ -2474,7 +2510,7 @@ export const swaggerSpec: JsonObject = {
           429: { $ref: '#/components/responses/RateLimited' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes.',
+            'The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported, which is retried unchanged once it finishes; and how a create whose `idNonce` derives an id that is already stored is refused, which on a retry means the first delivery landed.',
           ),
         },
       },
@@ -2594,7 +2630,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Vault'],
         summary: 'Bulk re-encrypt vault items',
         description:
-          'Re-encrypts an account onto a new vault key after a master password change: every item, every folder and every document key, in one request. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 5 requests per account per 15 min, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
+          'Re-encrypts an account onto a new vault key after a master password change: every item, every folder and every document key, in one request. With `reseal: true` it re-seals every row under the SAME key instead, to move each row to the current field format, and stores no key. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 5 requests per account per 15 min, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BulkReEncryptRequest'),
         responses: {
@@ -2618,10 +2654,9 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           404: { $ref: '#/components/responses/NotFound' },
-          409: {
-            description:
-              'The rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, or an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey. Re-read the vault and retry. The same status, carrying no `data`, is returned before the body is read when this account already has a restore or key rotation in flight.',
-          },
+          409: staleVaultKeyConflict(
+            'Only a re-seal (`reseal: true`) is refused for its vault key version. The same status, carrying no `data`, means the rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey (a re-seal must finish it first), a re-seal named a wrapper that is not the stored one, or the payload carries a field sealed to its row without `vaultFieldFormat: 2`. Re-read the vault and retry. It is also returned before the body is read when this account already has a restore or key rotation in flight.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2751,7 +2786,7 @@ export const swaggerSpec: JsonObject = {
           429: { $ref: '#/components/responses/RateLimited' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'The same status, carrying no `data`, also reports a vault-key rotation currently in progress and a folder whose name already exists on this account; neither is about the vault key version.',
+            'The same status, carrying no `data`, also reports a vault-key rotation currently in progress, a folder whose name already exists on this account, and a create whose `idNonce` derives an id that is already stored; none is about the vault key version.',
           ),
         },
       },
@@ -3292,6 +3327,12 @@ export const swaggerSpec: JsonObject = {
                       properties: {
                         insertedCount: { type: 'integer' },
                         updatedCount: { type: 'integer' },
+                        insertedIds: {
+                          type: 'array',
+                          items: { type: 'string' },
+                          description:
+                            'The id each insert was stored under, in the order the inserts were sent, so a client that derived ids from `idNonce` can confirm every row landed where its fields were sealed.',
+                        },
                       },
                     },
                     message: { type: 'string' },
@@ -3306,7 +3347,7 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           409: staleVaultKeyConflict(
-            'The same status, carrying no `data`, also reports a vault-key rotation in flight, another import for this account already running, and an item an update targeted having been modified or removed mid-request. Under `skip` and `overwrite`, re-running the import is safe: the client re-resolves against the current vault and sends only what is left. Under `keep_both` nothing is ever matched, so a re-run inserts the rows that already landed a second time.',
+            'The same status, carrying no `data`, also reports a vault-key rotation in flight, another import for this account already running, an insert whose `idNonce` derives an id that is already stored (nothing is inserted), and an item an update targeted having been modified or removed mid-request. Under `skip` and `overwrite`, re-running the import is safe: the client re-resolves against the current vault and sends only what is left. Under `keep_both` nothing is ever matched, so a re-run inserts the rows that already landed a second time.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -3471,7 +3512,7 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress, and, before the body is read, a restore or key rotation this account already has in flight.',
+            'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress; a backup carrying a field sealed to its row (an IV beginning `v2:`), which only a client that could not open it sends unchanged and which a restore under a fresh id would leave unreadable; and, before the body is read, a restore or key rotation this account already has in flight.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },

@@ -26,7 +26,11 @@ import React from 'react';
 // which is why this note does not quote the number — because a fixture that
 // drifts from the real value is a test asserting against a document layout that
 // does not exist.
-import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, MAX_DOCUMENTS_PER_ROTATION } from '@hvault/shared';
+import {
+  DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+  MAX_DOCUMENTS_PER_ROTATION,
+  deriveRowId,
+} from '@hvault/shared';
 
 vi.hoisted(() => {
   if (typeof globalThis.window !== 'undefined') {
@@ -116,8 +120,10 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptVaultKey: vi.fn(),
     importVaultKey: vi.fn(),
     encryptData: vi.fn(),
+    encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
     decryptDataWithAad: vi.fn(),
+    vaultKeyEqualsRaw: vi.fn(),
     generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn(),
@@ -405,6 +411,71 @@ const PENDING_WRAPPER = {
 } as const;
 
 /**
+ * The wrapper the account stores for the key this session ALREADY holds, as a
+ * re-seal reads it fresh from the profile. Its generation is deliberately neither
+ * the store's (4) nor `LIVE_PROFILE_WRAPPER`'s (6), so a re-seal that named any
+ * number other than the one read with this wrapper is caught.
+ */
+const HELD_WRAPPER = {
+  encryptedVaultKey: 'held-wrapped-vault-key',
+  vaultKeyIv: 'held-vk-iv',
+  vaultKeyTag: 'held-vk-tag',
+  vaultKeyVersion: 7,
+} as const;
+
+/** The stub tag of a bound seal: the key it was sealed under and its exact AAD. */
+function boundTag(keyName: string, aad: string): string {
+  return `tag:${keyName}@${aad}`;
+}
+
+/** The exact additional data each kind of v2 vault field is sealed with. */
+const AAD_PREFIX = 'hvault/vault-field/v2|';
+const nameAad = (rowId: string): string => `${AAD_PREFIX}item.name|${rowId}`;
+const dataAad = (itemType: string, rowId: string): string =>
+  `${AAD_PREFIX}item.data|${itemType}|${rowId}`;
+const historyAad = (rowId: string): string => `${AAD_PREFIX}item.password-history|${rowId}`;
+const folderAad = (rowId: string): string => `${AAD_PREFIX}folder.name|${rowId}`;
+
+/**
+ * Row ids for the rotation fixtures. Real ObjectIds, because a row's id is what
+ * every re-sealed field is bound to and the binding refuses anything else; the
+ * LABEL stays in the fixture's ciphertext so a payload still reads by row.
+ */
+const ROW_IDS = {
+  i1: '66c0f1a2b3c4d5e6f7a8c001',
+  i2: '66c0f1a2b3c4d5e6f7a8c002',
+  t1: '66c0f1a2b3c4d5e6f7a8c003',
+  good: '66c0f1a2b3c4d5e6f7a8c004',
+  bad: '66c0f1a2b3c4d5e6f7a8c005',
+  'old-row': '66c0f1a2b3c4d5e6f7a8c006',
+  'pending-row': '66c0f1a2b3c4d5e6f7a8c007',
+  'pending-row-2': '66c0f1a2b3c4d5e6f7a8c008',
+  f1: '66c0f1a2b3c4d5e6f7a8c009',
+} as const;
+type RowLabel = keyof typeof ROW_IDS;
+
+/** This session's own account: every imported row's id is derived from it. */
+const USER_ID = '65a1b2c3d4e5f60718293a4b';
+
+/**
+ * A server that stores every insert where its nonce says, answering with the ids
+ * `deriveRowId` gives them, in insert order, exactly as the real one does.
+ */
+function acceptImport(counts: { insertedCount: number; updatedCount: number }) {
+  return async (body: { operations: { inserts: { idNonce?: string }[] } }) => ({
+    data: {
+      success: true,
+      data: {
+        ...counts,
+        insertedIds: await Promise.all(
+          body.operations.inserts.map((insert) => deriveRowId(USER_ID, insert.idNonce ?? '')),
+        ),
+      },
+    },
+  });
+}
+
+/**
  * Deterministic, *distinguishable* crypto stubs: every derived value carries the
  * input it came from, so a test can prove WHICH password / WHICH key was used.
  */
@@ -422,6 +493,24 @@ function installCryptoStubs() {
   cs.decryptData.mockImplementation((enc: string) => Promise.resolve(`plain:${enc}`));
   cs.encryptData.mockImplementation((plain: string, key: { key: string }) =>
     Promise.resolve({ encrypted: `enc:${plain}`, iv: `iv:${key.key}`, tag: `tag:${key.key}` }),
+  );
+  // A bound (format v2) seal names the additional data in its TAG, which is what
+  // the real GCM tag authenticates: a payload field whose tag reads
+  // `boundTag(key, aad)` was sealed under exactly that key AND that binding.
+  cs.encryptDataWithAad.mockImplementation((plain: string, key: { key: string }, aad: Uint8Array) =>
+    Promise.resolve({
+      encrypted: `enc:${plain}`,
+      iv: `iv:${key.key}`,
+      tag: boundTag(key.key, new TextDecoder().decode(aad)),
+    }),
+  );
+  // Whether the key this session holds is the one the STORED wrapper opens to.
+  // Faithful to the real comparison: only this session's key against the raw
+  // bytes of the wrapper the re-seal fixtures store, opened under the MEK.
+  cs.vaultKeyEqualsRaw.mockImplementation((key: unknown, raw: unknown) =>
+    Promise.resolve(
+      key === OLD_VAULT_KEY && raw === `raw:${HELD_WRAPPER.encryptedVaultKey}:under:mek`,
+    ),
   );
   cs.generateSearchHash.mockImplementation((name: string) => Promise.resolve(`sh:${name}`));
   cs.rotateVaultKey.mockResolvedValue({
@@ -661,7 +750,7 @@ describe('SettingsPage — error paths and branches', () => {
 
     useAuthStore.setState({
       accessToken: 'test-token',
-      user: { userId: 'u1', email: 'test@example.com' },
+      user: { userId: USER_ID, email: 'test@example.com' },
       isAuthenticated: true,
       isLocked: false,
       vaultKey: OLD_VAULT_KEY,
@@ -1391,9 +1480,15 @@ describe('SettingsPage — error paths and branches', () => {
   // Vault key rotation
   // -------------------------------------------------------------------------
 
-  function vaultItem(id: string, withHistory = false) {
+  /**
+   * One stored login, id'd by `ROW_IDS[label]`; its ciphertext names the label so
+   * a payload reads by row. A real ObjectId and a real item type, because both
+   * are what each of its re-sealed fields is bound to.
+   */
+  function vaultItem(id: RowLabel, withHistory = false) {
     return {
-      _id: id,
+      _id: ROW_IDS[id],
+      itemType: 'login',
       encryptedName: `${id}-name`,
       nameIv: `${id}-nameIv`,
       nameTag: `${id}-nameTag`,
@@ -1440,7 +1535,7 @@ describe('SettingsPage — error paths and branches', () => {
     mockListFolders.mockResolvedValue({
       data: {
         success: true,
-        data: [{ _id: 'f1', encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' }],
+        data: [{ _id: ROW_IDS.f1, encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' }],
       },
     });
 
@@ -1456,53 +1551,73 @@ describe('SettingsPage — error paths and branches', () => {
       newEncryptedVaultKey: string;
       newVaultKeyIv: string;
       newVaultKeyTag: string;
+      vaultFieldFormat?: number;
       items: Record<string, unknown>[];
       folders: Record<string, unknown>[];
     };
 
     expect(payload.authHash).toBe('hash:MasterPassword1!');
+    // This client writes bound fields and says so; an ordinary rotation is not a
+    // re-seal and names no generation of its own.
+    expect(payload.vaultFieldFormat).toBe(2);
+    expect(payload).not.toHaveProperty('reseal');
     expect(payload.idempotencyKey).toEqual(expect.any(String));
     expect(payload.newEncryptedVaultKey).toBe('newEnc');
     expect(payload.newVaultKeyIv).toBe('newIv');
     expect(payload.newVaultKeyTag).toBe('newTag');
 
     // Page 2 and the trash are both enumerated.
-    expect(payload.items.map((i) => i.id)).toEqual(['i1', 'i2', 't1']);
+    expect(payload.items.map((i) => i.id)).toEqual([ROW_IDS.i1, ROW_IDS.i2, ROW_IDS.t1]);
+    // Every field sealed under the NEW key in format v2 (the `v2:` IV marker),
+    // bound to THIS row's own id, and the data to its own type as well.
+    const i1 = ROW_IDS.i1;
     expect(payload.items[0]).toEqual({
-      id: 'i1',
+      id: i1,
       encryptedName: 'enc:plain:i1-name',
-      nameIv: 'iv:new-vault-key',
-      nameTag: 'tag:new-vault-key',
+      nameIv: 'v2:iv:new-vault-key',
+      nameTag: boundTag('new-vault-key', nameAad(i1)),
       encryptedData: 'enc:plain:i1-data',
-      dataIv: 'iv:new-vault-key',
-      dataTag: 'tag:new-vault-key',
+      dataIv: 'v2:iv:new-vault-key',
+      dataTag: boundTag('new-vault-key', dataAad('login', i1)),
       searchHash: 'sh:plain:i1-name',
       passwordHistory: [
         {
           encryptedPassword: 'enc:plain:i1-pw',
-          iv: 'iv:new-vault-key',
-          tag: 'tag:new-vault-key',
+          iv: 'v2:iv:new-vault-key',
+          tag: boundTag('new-vault-key', historyAad(i1)),
           changedAt: '2026-01-01T00:00:00.000Z',
         },
       ],
     });
+    // The trashed row is bound to ITS id, not the first row's.
+    expect(payload.items[2]).toMatchObject({
+      nameTag: boundTag('new-vault-key', nameAad(ROW_IDS.t1)),
+      dataTag: boundTag('new-vault-key', dataAad('login', ROW_IDS.t1)),
+    });
     expect(payload.folders).toEqual([
       {
-        id: 'f1',
+        id: ROW_IDS.f1,
         encryptedName: 'enc:plain:f1-name',
-        nameIv: 'iv:new-vault-key',
-        nameTag: 'tag:new-vault-key',
+        nameIv: 'v2:iv:new-vault-key',
+        nameTag: boundTag('new-vault-key', folderAad(ROW_IDS.f1)),
       },
     ]);
 
-    // Ciphertext is read with the OLD key and written with the NEW one.
+    // Ciphertext is read with the OLD key and written with the NEW one, the AAD
+    // reaching the cipher as the bytes of exactly that binding.
     expect(cs.decryptData).toHaveBeenCalledWith(
       'i1-name',
       'i1-nameIv',
       'i1-nameTag',
       OLD_VAULT_KEY,
     );
-    expect(cs.encryptData).toHaveBeenCalledWith('plain:i1-name', NEW_VAULT_KEY);
+    expect(cs.encryptDataWithAad).toHaveBeenCalledWith(
+      'plain:i1-name',
+      NEW_VAULT_KEY,
+      new TextEncoder().encode(nameAad(i1)),
+    );
+    // No row field is sealed unbound (v1) any more.
+    expect(cs.encryptData).not.toHaveBeenCalled();
 
     // The client now holds the new key.
     await waitFor(() => {
@@ -1572,17 +1687,33 @@ describe('SettingsPage — error paths and branches', () => {
       items: Record<string, unknown>[];
       folders: Record<string, unknown>[];
     };
-    // Rotated, not passed through: every field is the NEW key's ciphertext.
+    // Rotated, not passed through: every field is the NEW key's ciphertext,
+    // sealed again to the same row and field it was opened from.
     expect(payload.items).toEqual([
       expect.objectContaining({
         id,
         encryptedName: 'enc:plain:b-name',
+        nameIv: 'v2:iv:new-vault-key',
+        nameTag: boundTag('new-vault-key', nameAad(id)),
         encryptedData: 'enc:plain:b-data',
-        passwordHistory: [expect.objectContaining({ encryptedPassword: 'enc:plain:b-pw' })],
+        dataIv: 'v2:iv:new-vault-key',
+        dataTag: boundTag('new-vault-key', dataAad('login', id)),
+        passwordHistory: [
+          expect.objectContaining({
+            encryptedPassword: 'enc:plain:b-pw',
+            iv: 'v2:iv:new-vault-key',
+            tag: boundTag('new-vault-key', historyAad(id)),
+          }),
+        ],
       }),
     ]);
     expect(payload.folders).toEqual([
-      expect.objectContaining({ id: folderId, encryptedName: 'enc:plain:bf-name' }),
+      expect.objectContaining({
+        id: folderId,
+        encryptedName: 'enc:plain:bf-name',
+        nameIv: 'v2:iv:new-vault-key',
+        nameTag: boundTag('new-vault-key', folderAad(folderId)),
+      }),
     ]);
 
     // Each field was opened with ITS binding, the marker stripped from its IV.
@@ -1632,15 +1763,16 @@ describe('SettingsPage — error paths and branches', () => {
     // BOTH rows are named. A skipped row is passed through, never OMITTED: the
     // server's completeness check refuses a payload that does not cover every row
     // the account holds, so omitting it would refuse the whole rotation instead.
-    expect(payload.items.map((i) => i.id)).toEqual(['good', 'bad']);
+    expect(payload.items.map((i) => i.id)).toEqual([ROW_IDS.good, ROW_IDS.bad]);
     expect(payload.items[0]).toMatchObject({
       encryptedName: 'enc:plain:good-name',
-      nameIv: 'iv:new-vault-key',
+      nameIv: 'v2:iv:new-vault-key',
+      nameTag: boundTag('new-vault-key', nameAad(ROW_IDS.good)),
     });
     // The poisoned row's ciphertext crosses BYTE FOR BYTE — not re-encrypted, not
     // replaced by a placeholder, not dropped.
     expect(payload.items[1]).toEqual({
-      id: 'bad',
+      id: ROW_IDS.bad,
       encryptedName: 'bad-name',
       nameIv: 'bad-nameIv',
       nameTag: 'bad-nameTag',
@@ -1675,7 +1807,7 @@ describe('SettingsPage — error paths and branches', () => {
     mockListFolders.mockResolvedValue({
       data: {
         success: true,
-        data: [{ _id: 'f1', encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' }],
+        data: [{ _id: ROW_IDS.f1, encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' }],
       },
     });
     cs.decryptData.mockImplementation((enc: string) =>
@@ -1694,7 +1826,7 @@ describe('SettingsPage — error paths and branches', () => {
       folders: Record<string, unknown>[];
     };
     expect(payload.folders).toEqual([
-      { id: 'f1', encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' },
+      { id: ROW_IDS.f1, encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' },
     ]);
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
@@ -1722,7 +1854,7 @@ describe('SettingsPage — error paths and branches', () => {
     mockListFolders.mockResolvedValue({
       data: {
         success: true,
-        data: [{ _id: 'f1', encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' }],
+        data: [{ _id: ROW_IDS.f1, encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' }],
       },
     });
     cs.decryptData.mockImplementation((enc: string) =>
@@ -1741,7 +1873,7 @@ describe('SettingsPage — error paths and branches', () => {
       items: Record<string, unknown>[];
     };
     expect(payload.items[1]).toEqual({
-      id: 'bad',
+      id: ROW_IDS.bad,
       encryptedName: 'bad-name',
       nameIv: 'bad-nameIv',
       nameTag: 'bad-nameTag',
@@ -1753,7 +1885,12 @@ describe('SettingsPage — error paths and branches', () => {
     });
     // Neither optional field was re-encrypted on the way through.
     expect(cs.generateSearchHash).not.toHaveBeenCalledWith(expect.stringContaining('bad'), MEK);
-    expect(cs.encryptData).not.toHaveBeenCalledWith('plain:bad-pw', NEW_VAULT_KEY);
+    expect(cs.encryptDataWithAad).not.toHaveBeenCalledWith(
+      'plain:bad-pw',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(cs.encryptData).not.toHaveBeenCalled();
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
@@ -1785,7 +1922,7 @@ describe('SettingsPage — error paths and branches', () => {
     mockListFolders.mockResolvedValue({
       data: {
         success: true,
-        data: [{ _id: 'f1', encryptedName: 'f1-name', nameIv: 'iv', nameTag: 'tag' }],
+        data: [{ _id: ROW_IDS.f1, encryptedName: 'f1-name', nameIv: 'iv', nameTag: 'tag' }],
       },
     });
     cs.decryptData.mockRejectedValue(new Error('GCM tag mismatch'));
@@ -2376,9 +2513,13 @@ describe('SettingsPage — error paths and branches', () => {
     );
 
     // Both sides of the interrupted swap are carried across, under the pending key.
-    expect(payload.items.map((i) => i.id)).toEqual(['old-row', 'pending-row']);
+    expect(payload.items.map((i) => i.id)).toEqual([ROW_IDS['old-row'], ROW_IDS['pending-row']]);
     for (const item of payload.items) {
-      expect(item).toMatchObject({ nameIv: 'iv:pending-vault-key' });
+      expect(item).toMatchObject({
+        nameIv: 'v2:iv:pending-vault-key',
+        nameTag: boundTag('pending-vault-key', nameAad(item.id as string)),
+        dataTag: boundTag('pending-vault-key', dataAad('login', item.id as string)),
+      });
     }
     // Nothing was skipped, so the report says so by staying silent about skips.
     expect(mockToast).toHaveBeenCalledWith(
@@ -2410,7 +2551,9 @@ describe('SettingsPage — error paths and branches', () => {
     mockListFolders.mockResolvedValue({
       data: {
         success: true,
-        data: [{ _id: 'f1', encryptedName: 'pending-row-f1', nameIv: 'f1-iv', nameTag: 'f1-tag' }],
+        data: [
+          { _id: ROW_IDS.f1, encryptedName: 'pending-row-f1', nameIv: 'f1-iv', nameTag: 'f1-tag' },
+        ],
       },
     });
     mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
@@ -2436,10 +2579,10 @@ describe('SettingsPage — error paths and branches', () => {
     // carry the original ciphertext, which these do not.
     expect(payload.folders).toEqual([
       {
-        id: 'f1',
+        id: ROW_IDS.f1,
         encryptedName: 'enc:plain:pending-row-f1',
-        nameIv: 'iv:pending-vault-key',
-        nameTag: 'tag:pending-vault-key',
+        nameIv: 'v2:iv:pending-vault-key',
+        nameTag: boundTag('pending-vault-key', folderAad(ROW_IDS.f1)),
       },
     ]);
     expect(payload.documents).toEqual([
@@ -2534,7 +2677,7 @@ describe('SettingsPage — error paths and branches', () => {
     // The row that was already re-sealed cannot be read with the live key, so it
     // crosses unchanged — and is reported.
     expect(payload.items[1]).toMatchObject({
-      id: 'pending-row',
+      id: ROW_IDS['pending-row'],
       encryptedName: 'pending-row-name',
     });
     await waitFor(() => {
@@ -2623,6 +2766,279 @@ describe('SettingsPage — error paths and branches', () => {
     });
     const payload = mockBulkReEncrypt.mock.calls[0]![0] as Record<string, unknown>;
     expect(payload).not.toHaveProperty('discardPendingVaultKey');
+  });
+
+  // -------------------------------------------------------------------------
+  // Re-seal: every entry sealed again (format v2) under the key already in use
+  // -------------------------------------------------------------------------
+
+  /** Opens the rotation dialog through the Re-seal control and confirms it. */
+  async function confirmReseal(password = 'MasterPassword1!') {
+    fireEvent.click(screen.getByRole('button', { name: 'Re-seal' }));
+    await waitFor(() => screen.getByText('Re-seal Vault Entries'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: password },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Re-seal'));
+    });
+  }
+
+  /** The profile a re-seal reads fresh: the stored wrapper for the HELD key. */
+  function heldKeyProfile(overrides: Record<string, unknown> = {}) {
+    return { data: { success: true, data: { ...defaultProfile, ...HELD_WRAPPER, ...overrides } } };
+  }
+
+  /** A configured backup, so a re-seal that re-wrapped the backup key would show. */
+  const CONFIGURED_BACKUP_SETTINGS = {
+    ...defaultProfile.settings,
+    backup: {
+      enabled: true,
+      scheduleHour: 3,
+      backupEmails: [],
+      isConfigured: true,
+      encryptedBWK: 'bwk',
+      bwkIv: 'iv',
+      bwkTag: 'tag',
+      bwkSalt: 'salt',
+    },
+  };
+
+  it('re-seals every entry under the key already in use, naming the stored wrapper and the generation read with it', async () => {
+    const heldWrapperData = {
+      encrypted: HELD_WRAPPER.encryptedVaultKey,
+      iv: HELD_WRAPPER.vaultKeyIv,
+      tag: HELD_WRAPPER.vaultKeyTag,
+    };
+    useAuthStore.setState({ encryptedVaultKeyData: heldWrapperData });
+    setProfile({ settings: CONFIGURED_BACKUP_SETTINGS });
+    mockListItems.mockResolvedValue({
+      data: { success: true, data: [vaultItem('i1', true)], pagination: { totalPages: 1 } },
+    });
+    mockListTrash.mockResolvedValue({
+      data: { success: true, data: [vaultItem('t1')], pagination: { totalPages: 1 } },
+    });
+    mockListFolders.mockResolvedValue({
+      data: {
+        success: true,
+        data: [{ _id: ROW_IDS.f1, encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' }],
+      },
+    });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
+    mockListDocuments.mockResolvedValue(documentPage([documentRow(docId(1))]));
+    mockListDocumentTrash.mockResolvedValue(documentPage([documentRow(docId(2))]));
+
+    await renderSettings();
+    // The FRESH read the re-seal makes, after the page loaded: a generation (7)
+    // neither the store (4) nor the page's first read (6) holds.
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: CONFIGURED_BACKUP_SETTINGS }));
+    const profileReadsBefore = mockGetProfileApi.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Re-seal' }));
+    await waitFor(() => screen.getByText('Re-seal Vault Entries'));
+    // No backup password is asked for: the key does not change, so neither does
+    // the backup's copy of it.
+    expect(screen.queryByPlaceholderText('Backup password')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Re-seal'));
+    });
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGetProfileApi.mock.calls.length).toBeGreaterThan(profileReadsBefore);
+    const payload = mockBulkReEncrypt.mock.calls[0]![0] as Record<string, unknown> & {
+      items: Record<string, unknown>[];
+      folders: Record<string, unknown>[];
+      documents: Record<string, unknown>[];
+    };
+    expect(payload).toMatchObject({
+      authHash: 'hash:MasterPassword1!',
+      reseal: true,
+      vaultKeyVersion: 7,
+      // The STORED wrapper, byte for byte: no key is minted or re-wrapped.
+      newEncryptedVaultKey: HELD_WRAPPER.encryptedVaultKey,
+      newVaultKeyIv: HELD_WRAPPER.vaultKeyIv,
+      newVaultKeyTag: HELD_WRAPPER.vaultKeyTag,
+      vaultFieldFormat: 2,
+    });
+    expect(payload).not.toHaveProperty('discardPendingVaultKey');
+    expect(cs.rotateVaultKey).not.toHaveBeenCalled();
+    // The held key was proved to be the stored wrapper's before anything was
+    // sealed: that wrapper opened under the MEK, compared, and its bytes zeroed.
+    expect(cs.decryptVaultKey).toHaveBeenCalledWith(
+      HELD_WRAPPER.encryptedVaultKey,
+      HELD_WRAPPER.vaultKeyIv,
+      HELD_WRAPPER.vaultKeyTag,
+      MEK,
+    );
+    expect(cs.vaultKeyEqualsRaw).toHaveBeenCalledWith(
+      OLD_VAULT_KEY,
+      `raw:${HELD_WRAPPER.encryptedVaultKey}:under:mek`,
+    );
+    expect(cs.clearKey).toHaveBeenCalledWith(`raw:${HELD_WRAPPER.encryptedVaultKey}:under:mek`);
+
+    // Every row sealed again under the SAME key, each field bound to its own row.
+    const i1 = ROW_IDS.i1;
+    expect(payload.items.map((i) => i.id)).toEqual([i1, ROW_IDS.t1]);
+    expect(payload.items[0]).toEqual({
+      id: i1,
+      encryptedName: 'enc:plain:i1-name',
+      nameIv: 'v2:iv:old-vault-key',
+      nameTag: boundTag('old-vault-key', nameAad(i1)),
+      encryptedData: 'enc:plain:i1-data',
+      dataIv: 'v2:iv:old-vault-key',
+      dataTag: boundTag('old-vault-key', dataAad('login', i1)),
+      searchHash: 'sh:plain:i1-name',
+      passwordHistory: [
+        {
+          encryptedPassword: 'enc:plain:i1-pw',
+          iv: 'v2:iv:old-vault-key',
+          tag: boundTag('old-vault-key', historyAad(i1)),
+          changedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    });
+    expect(payload.folders).toEqual([
+      {
+        id: ROW_IDS.f1,
+        encryptedName: 'enc:plain:f1-name',
+        nameIv: 'v2:iv:old-vault-key',
+        nameTag: boundTag('old-vault-key', folderAad(ROW_IDS.f1)),
+      },
+    ]);
+    expect(cs.encryptData).not.toHaveBeenCalled();
+    // Documents keep their wraps VERBATIM, active and trashed alike, and no
+    // document key is opened or wrapped at all.
+    expect(payload.documents).toEqual([
+      {
+        id: docId(1),
+        encryptedDek: `${docId(1)}-dek`,
+        dekIv: `${docId(1)}-dekIv`,
+        dekTag: `${docId(1)}-dekTag`,
+      },
+      {
+        id: docId(2),
+        encryptedDek: `${docId(2)}-dek`,
+        dekIv: `${docId(2)}-dekIv`,
+        dekTag: `${docId(2)}-dekTag`,
+      },
+    ]);
+    expect(mockUnwrapDek).not.toHaveBeenCalled();
+    expect(mockWrapDek).not.toHaveBeenCalled();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Vault entries re-sealed', type: 'success' }),
+      );
+    });
+    // The session is exactly as it was: same key object, same wrapper, same
+    // generation, and the live key was never destroyed.
+    const after = useAuthStore.getState();
+    expect(after.vaultKey).toBe(OLD_VAULT_KEY);
+    expect(after.encryptedVaultKeyData).toBe(heldWrapperData);
+    expect(after.vaultKeyVersion).toBe(4);
+    expect(cs.clearCryptoKey).not.toHaveBeenCalledWith(OLD_VAULT_KEY);
+    // And the backup step was skipped, though a backup is configured.
+    expect(mockApiPost.mock.calls.map(([url]) => url as string)).not.toContain('/backup/setup');
+  });
+
+  it('refuses to re-seal, sending nothing, when the held key is not the stored one', async () => {
+    // The fresh read returns the account's LIVE wrapper, which opens to a key this
+    // session does not hold (a rotation elsewhere superseded it): re-sealing under
+    // the held key would write a vault the account's key cannot open.
+    mockListItems.mockResolvedValue({
+      data: { success: true, data: [vaultItem('i1')], pagination: { totalPages: 1 } },
+    });
+
+    await renderSettings();
+    await confirmReseal();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title:
+          'Re-seal aborted: this page holds a vault key that is no longer the account’s. Reload the app and try again.',
+        type: 'error',
+      });
+    });
+    expect(cs.vaultKeyEqualsRaw).toHaveBeenCalledWith(
+      OLD_VAULT_KEY,
+      `raw:${LIVE_PROFILE_WRAPPER.encryptedVaultKey}:under:mek`,
+    );
+    // The opened wrapper is zeroed on the refusal too.
+    expect(cs.clearKey).toHaveBeenCalledWith(
+      `raw:${LIVE_PROFILE_WRAPPER.encryptedVaultKey}:under:mek`,
+    );
+    // Nothing sealed, nothing sent, and the session untouched.
+    expect(cs.encryptDataWithAad).not.toHaveBeenCalled();
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(cs.clearCryptoKey).not.toHaveBeenCalledWith(OLD_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(4);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Vault entries re-sealed' }),
+    );
+  });
+
+  it('reports a re-seal that aborts as a re-seal, and never clears the live key it was using', async () => {
+    // The same abort a rotation takes when the server will not say whether it
+    // stores documents, reached from the re-seal. Two things differ: the toast
+    // names what was aborted, and the key is NOT zeroed on the way out, because a
+    // re-seal's key is the live vault key rather than a candidate it minted.
+    useAuthStore.setState({
+      encryptedVaultKeyData: {
+        encrypted: HELD_WRAPPER.encryptedVaultKey,
+        iv: HELD_WRAPPER.vaultKeyIv,
+        tag: HELD_WRAPPER.vaultKeyTag,
+      },
+    });
+    mockListItems.mockResolvedValue({
+      data: { success: true, data: [vaultItem('i1')], pagination: { totalPages: 1 } },
+    });
+    mockReadDocumentsConfigFresh.mockResolvedValue(null);
+
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile());
+    await confirmReseal();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            'Re-seal aborted: could not confirm whether this server stores documents. Check your connection and try again.',
+          type: 'error',
+        }),
+      );
+    });
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(cs.clearCryptoKey).not.toHaveBeenCalledWith(OLD_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringMatching(/^Rotation aborted/) }),
+    );
+  });
+
+  it('offers no Re-seal control while an interrupted rotation is outstanding', async () => {
+    // A re-seal keeps the current key, so it cannot carry the entries that
+    // rotation already moved; the server refuses it, and the page does not offer it.
+    setProfile(PENDING_WRAPPER);
+
+    await renderSettings();
+
+    expect(screen.getByText('Finish Rotation')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Re-seal' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Re-seal Entries')).not.toBeInTheDocument();
+  });
+
+  it('offers the Re-seal control when no rotation is outstanding', async () => {
+    // The counterpart of the case above, so its absence there is the interrupted
+    // rotation's doing and not a control that is never rendered.
+    await renderSettings();
+
+    expect(screen.getByRole('button', { name: 'Re-seal' })).toBeInTheDocument();
+    expect(screen.getByText('Re-seal Entries')).toBeInTheDocument();
   });
 
   it('refuses to finish, and sends nothing, when the pending key will not open', async () => {
@@ -2771,14 +3187,77 @@ describe('SettingsPage — error paths and branches', () => {
     expect(screen.getByPlaceholderText('Paste exported data here...')).toBeInTheDocument();
   });
 
+  it('reports an error, never a success, when the server stored the inserts under other ids', async () => {
+    // Every insert was sealed to the id its nonce derives; a server that stored it
+    // anywhere else (one that ignores the nonce) has written a row nothing can
+    // read, so the batch is a failure however many rows the server counts.
+    mockImportVaultApi.mockResolvedValue({
+      data: {
+        success: true,
+        data: { insertedCount: 1, updatedCount: 0, insertedIds: ['66c0f1a2b3c4d5e6f7a8ffff'] },
+      },
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: [nativeItem] }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Import'));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: expect.stringContaining(
+          'The server stored imported entries under unexpected ids',
+        ) as string,
+        type: 'error',
+      });
+    });
+    expect(mockImportVaultApi).toHaveBeenCalledTimes(1);
+    for (const [arg] of mockToast.mock.calls) {
+      expect((arg as { title: string }).title).not.toMatch(/^Imported/);
+    }
+    // The panel stays open, as for any failed import.
+    expect(screen.getByPlaceholderText('Paste exported data here...')).toBeInTheDocument();
+  });
+
+  it('reports an error when the server does not say where it stored the inserts', async () => {
+    // An older server answers without `insertedIds` at all; it cannot have stored
+    // the rows where they were sealed, so that is the same failure.
+    mockImportVaultApi.mockResolvedValue({
+      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: JSON.stringify({ items: [nativeItem] }) },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Import'));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: expect.stringContaining(
+          'The server stored imported entries under unexpected ids',
+        ) as string,
+        type: 'error',
+      });
+    });
+    for (const [arg] of mockToast.mock.calls) {
+      expect((arg as { title: string }).title).not.toMatch(/^Imported/);
+    }
+  });
+
   it('names the generation every batch was sealed under', async () => {
     // Without it the server cannot tell a row sealed under the live key from one
     // sealed under a key it replaced days ago, and the second kind lands
     // stranded: the rotation enumerated the vault before the row existed, and no
     // later rotation can decrypt it either.
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
@@ -2829,9 +3308,7 @@ describe('SettingsPage — error paths and branches', () => {
     // are the same item listed twice: one is imported and the other is reported
     // rather than silently duplicated. Every row is accounted for, and the
     // counts sum to the number of rows the file held.
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
@@ -2892,9 +3369,7 @@ describe('SettingsPage — error paths and branches', () => {
   });
 
   it('parses a CSV via column mapping, encrypts client-side, and sends encrypted items (never plaintext or a mapping)', async () => {
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
@@ -2934,6 +3409,17 @@ describe('SettingsPage — error paths and branches', () => {
     expect(payload.operations.inserts[0]?.encryptedData).toMatch(/^enc:/);
     expect(payload.operations.inserts[0]?.encryptedName).toMatch(/^enc:/);
     expect(payload.operations.inserts[0]?.searchHash).toMatch(/^sh:/);
+    // Sealed in format v2 under this session's key, to the id the insert's nonce
+    // derives for this account (the id the server will store it under).
+    const insert = payload.operations.inserts[0] ?? {};
+    const rowId = await deriveRowId(USER_ID, insert.idNonce ?? '');
+    expect(insert).toMatchObject({
+      nameIv: 'v2:iv:old-vault-key',
+      nameTag: boundTag('old-vault-key', nameAad(rowId)),
+      dataIv: 'v2:iv:old-vault-key',
+      dataTag: boundTag('old-vault-key', dataAad('login', rowId)),
+    });
+    expect(cs.encryptData).not.toHaveBeenCalled();
     // The zero-knowledge property itself is asserted in settings-import-flow,
     // where the crypto stub does not embed its input in its output — here the
     // `enc:<plain>` stub would make such a check meaningless.
@@ -3030,9 +3516,7 @@ describe('SettingsPage — error paths and branches', () => {
   });
 
   it('imports a card whose number is past the cap, clamped, instead of dropping the card', async () => {
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
@@ -3055,9 +3539,13 @@ describe('SettingsPage — error paths and branches', () => {
       operations: { inserts: unknown[] };
     };
     expect(payload.operations.inserts).toHaveLength(1);
-    expect(mockToast).toHaveBeenCalledWith(
-      expect.objectContaining({ title: 'Imported 1 items', type: 'success' }),
-    );
+    // Waited for: the summary follows the server's answer, whose insert ids are
+    // checked against the ones each insert was sealed to before anything is said.
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Imported 1 items', type: 'success' }),
+      );
+    });
     // The negative half, and the one that matters: nothing was skipped, so the
     // user is never told an item vanished.
     for (const [arg] of mockToast.mock.calls) {
@@ -3069,9 +3557,7 @@ describe('SettingsPage — error paths and branches', () => {
   // past the 2048 cap) is CLAMPED and the item still imports, rather than being
   // dropped wholesale — the fidelity-clamp guarantee at the SettingsPage level.
   it('imports an item with an over-long URL instead of dropping it (fidelity clamp)', async () => {
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
     await renderSettings();
 
     fireEvent.click(screen.getByText('Import Vault'));
@@ -3094,9 +3580,13 @@ describe('SettingsPage — error paths and branches', () => {
       operations: { inserts: unknown[] };
     };
     expect(payload.operations.inserts).toHaveLength(1);
-    expect(mockToast).toHaveBeenCalledWith(
-      expect.objectContaining({ title: 'Imported 1 items', type: 'success' }),
-    );
+    // Waited for: the summary follows the server's answer, whose insert ids are
+    // checked against the ones each insert was sealed to before anything is said.
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Imported 1 items', type: 'success' }),
+      );
+    });
   });
 
   // The preview shows 3 sample rows out of the file's true total. That total is

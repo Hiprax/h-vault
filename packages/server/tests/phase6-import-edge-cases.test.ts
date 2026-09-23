@@ -110,7 +110,13 @@ describe('Import validation and edge cases', () => {
         operations: { inserts: [insertRow(duplicate), insertRow(duplicate)] },
       });
       expect(first.status).toBe(201);
-      expect(first.body.data).toEqual({ insertedCount: 2, updatedCount: 0 });
+      expect(first.body.data).toEqual({
+        insertedCount: 2,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(first.body.data.insertedIds).toHaveLength(2);
 
       const second = await postImport(user.accessToken, {
         format: 'json',
@@ -118,7 +124,13 @@ describe('Import validation and edge cases', () => {
         operations: { inserts: [insertRow(duplicate)] },
       });
       expect(second.status).toBe(201);
-      expect(second.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(second.body.data).toEqual({
+        insertedCount: 1,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(second.body.data.insertedIds).toHaveLength(1);
 
       // Three rows, three distinct ids — `conflictStrategy` is audit metadata
       // and changes no outcome here.

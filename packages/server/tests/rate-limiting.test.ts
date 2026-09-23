@@ -193,7 +193,13 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(1);
     });
 
     it('should still enforce auth before rate limiter on import', async () => {

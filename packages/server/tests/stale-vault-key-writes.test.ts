@@ -541,7 +541,17 @@ describe('POST /tools/import refuses operations sealed under a superseded vault 
     const res = await importOperations({ vaultKeyVersion: current });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 1,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, each naming a stored row (the exact ids are
+    // pinned in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(1);
+    for (const id of res.body.data.insertedIds as string[]) {
+      expect(await VaultItem.exists({ _id: id, userId: user.id })).not.toBeNull();
+    }
     expect(await importAudits()).toBe(1);
   });
 
@@ -658,6 +668,75 @@ describe('POST /backup/restore refuses rows sealed under a superseded vault key'
  * to which fields the body happens to carry — so it too must name the current
  * generation, and it must still clear the wrapper when it does.
  */
+describe('POST /vault/items/bulk-reencrypt in re-seal mode refuses a key rotated away underneath it', () => {
+  /** A re-seal of every row the account holds, under the wrapper it now stores. */
+  async function resealBody(vaultKeyVersion?: number): Promise<Record<string, unknown>> {
+    const items = await VaultItem.find({ userId: user.id }).lean();
+    const stored = await User.findById(user.id).lean();
+    return {
+      authHash: user.rawPassword,
+      reseal: true,
+      vaultFieldFormat: 2,
+      idempotencyKey: crypto.randomUUID(),
+      ...(vaultKeyVersion === undefined ? {} : { vaultKeyVersion }),
+      items: items.map((item) => ({
+        id: String(item._id),
+        encryptedName: STALE_CIPHERTEXT,
+        nameIv: 'v2:resealed-iv',
+        nameTag: 'resealed-tag',
+        encryptedData: STALE_CIPHERTEXT,
+        dataIv: 'v2:resealed-iv',
+        dataTag: 'resealed-tag',
+      })),
+      folders: [],
+      documents: [],
+      newEncryptedVaultKey: stored!.encryptedVaultKey,
+      newVaultKeyIv: stored!.vaultKeyIv,
+      newVaultKeyTag: stored!.vaultKeyTag,
+    };
+  }
+
+  it('refuses a generation BEHIND the account and rewrites nothing', async () => {
+    await seedItem(user.id);
+    const current = await rotateVaultKey();
+    const before = await snapshot();
+
+    const res = await send(
+      'post',
+      '/api/v1/vault/items/bulk-reencrypt',
+      await resealBody(current - 1),
+    );
+
+    expectRecoverableConflict(res, current, /rotated elsewhere/i);
+    await expectNothingWritten(before);
+    expect((await User.findById(user.id).lean())?.rotationInProgress).toBe(false);
+  });
+
+  it('refuses a re-seal that names NO generation, at 400, before anything is read', async () => {
+    await seedItem(user.id);
+    const before = await snapshot();
+
+    const res = await send('post', '/api/v1/vault/items/bulk-reencrypt', await resealBody());
+
+    expect(res.status).toBe(400);
+    await expectNothingWritten(before);
+  });
+
+  it('accepts the current generation and leaves it where it is', async () => {
+    await seedItem(user.id);
+    const current = await rotateVaultKey();
+
+    const res = await send('post', '/api/v1/vault/items/bulk-reencrypt', await resealBody(current));
+
+    expect(res.status).toBe(200);
+    const after = await User.findById(user.id).lean();
+    expect(vaultKeyVersionOf(after)).toBe(current);
+    expect(after?.encryptedVaultKey).toBe(ROTATED_VAULT_KEY);
+    const [row] = await VaultItem.find({ userId: user.id }).lean();
+    expect(row?.nameIv).toBe('v2:resealed-iv');
+  });
+});
+
 describe('the two backup writes that also seal the vault key', () => {
   const BWK_WRAPPER = {
     bwkEncryptedVaultKey: 'vault-key-wrapped-under-the-BACKUP-key',

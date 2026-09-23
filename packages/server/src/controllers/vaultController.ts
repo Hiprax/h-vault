@@ -18,8 +18,14 @@ import {
   pickAllowedFields,
   releaseVaultRotationLock,
   resolveVaultKeyVersion,
+  assertVaultKeyVersion,
+  sendStaleVaultKey,
+  StaleVaultKeyError,
+  vaultKeyVersionFilter,
 } from '../utils/controllerHelpers.js';
+import { carriesBoundField } from '../utils/vaultFieldFormat.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
+import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils/rowIds.js';
 import { MAX_ITEMS_PER_USER } from '@hvault/shared';
 import type {
   ListVaultItemsInput,
@@ -90,6 +96,15 @@ const ALLOWED_UPDATE_FIELDS = new Set([
   'searchHash',
   'passwordHistory',
 ]);
+
+/**
+ * What a re-seal is told when the vault key it sealed under is no longer the
+ * account's: read before it starts, or found moved when it commits. Under 200
+ * characters with the remedy first, because the client slices a 4xx there.
+ */
+const RESEAL_KEY_MOVED_MESSAGE =
+  'Reload the app, then re-seal again: the vault key this page holds is no longer the ' +
+  "account's current one.";
 
 /**
  * Lifts the rotation fence, and NOTHING ELSE.
@@ -260,10 +275,25 @@ export const createItem = catchAsync(async (req: Request, res: Response): Promis
 
   const sanitizedBody = pickAllowedFields(body, ALLOWED_CREATE_FIELDS);
 
-  const item = await VaultItem.create({
-    ...sanitizedBody,
-    userId,
-  });
+  // The id this row's fields were sealed to, when the client derived one. It is
+  // spread in by name because the allowlist above does not carry it; see
+  // `createdRowId`.
+  const rowId = await createdRowId(userId, body.idNonce);
+
+  let item;
+  try {
+    item = await VaultItem.create({
+      ...sanitizedBody,
+      ...rowId,
+      userId,
+    });
+  } catch (err: unknown) {
+    // Only a derived id can collide: its tail is bound to this account, so the row
+    // holding it is this account's own, almost always the first delivery of a
+    // create being retried. A 409, never the 500 an unmapped E11000 becomes.
+    if (isDuplicateIdError(err)) throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
+    throw err;
+  }
 
   const createCtx = getRequestContext(req);
   await createAuditLog(
@@ -593,7 +623,37 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     newVaultKeyIv,
     newVaultKeyTag,
     discardPendingVaultKey,
+    reseal,
+    vaultFieldFormat,
+    vaultKeyVersion,
   } = req.body as BulkReEncryptInput;
+
+  /**
+   * A RE-SEAL: every row rewritten under the SAME vault key, to move it to the
+   * current field format. The whole machinery below runs for it — the password
+   * check, the lock, the idempotency, the outstanding-rotation guard, the fence and
+   * the completeness check — and exactly four things do not, because the key does
+   * not change: no key is stored, no generation moves, no pending wrapper is
+   * written, and a partial failure is not rolled back (every row is readable under
+   * the unchanged key either way, so undoing the ones already rewritten would only
+   * undo their binding). Each is marked `reseal` where it happens.
+   */
+  const resealing = reseal === true;
+
+  // The old-client gate, before any work at all: it reads nothing but the payload.
+  // A field sealed to its row (format v2) can only come back UNCHANGED from a
+  // client that could not open it, and a rotation then leaves it under the key the
+  // commit retires. See `carriesBoundField`. A client that states it understands
+  // the format is trusted to have opened what it could and to have reported the
+  // rest; one that does not state it and carries no bound field loses nothing.
+  if (vaultFieldFormat !== 2 && carriesBoundField(items, folders)) {
+    // Under 200 characters with the remedy first, for the reason the outstanding-
+    // rotation refusal below gives.
+    throw httpErrors.conflict(
+      'Reload the app, then try again: this vault holds entries in a newer format than this ' +
+        'page understands, and rotating from it would lose them.',
+    );
+  }
 
   // Verify the user's password before allowing vault key rotation
   const user = await User.findById(userId).select('+authHash');
@@ -628,7 +688,9 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     });
     res.status(200).json({
       success: true,
-      message: 'Vault key rotated successfully',
+      message: resealing
+        ? 'Vault entries re-sealed successfully'
+        : 'Vault key rotated successfully',
       data: { updatedCount: items.length + folders.length + documents.length },
     });
   };
@@ -693,6 +755,48 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     await releaseVaultRotationLock(userId, lockId);
     sendAlreadyRotated();
     return;
+  }
+
+  // ── The re-seal's same-key proof ─────────────────────────────────────────
+  //
+  // A re-seal stores no key, so nothing in it would notice that the key it sealed
+  // under is no longer the account's. Two readings, both under the lock and before
+  // the fence, and both required. The GENERATION (the one optimistic-concurrency
+  // token every vault-key write carries) catches a rotation that committed after
+  // the client enumerated: without it, every row would be rewritten under a
+  // retired key behind a 200, and the completeness check would pass. The WRAPPER
+  // catches a key replaced without the generation moving, which `resetPassword`
+  // does; it also refuses a re-seal from a tab that has not seen a master-password
+  // change (which re-wraps the same key), and that costs the tab a reload.
+  //
+  // Refused the way the idempotency read above is: the lock released first, then
+  // the answer, so no response is written inside the span. The stale generation is
+  // rendered with its number, which a thrown 409 cannot carry.
+  if (resealing) {
+    let refusal: Error | undefined;
+    try {
+      const stored = await User.findById(userId)
+        .select('encryptedVaultKey vaultKeyIv vaultKeyTag')
+        .lean();
+      if (
+        stored?.encryptedVaultKey !== newEncryptedVaultKey ||
+        stored.vaultKeyIv !== newVaultKeyIv ||
+        stored.vaultKeyTag !== newVaultKeyTag
+      ) {
+        throw httpErrors.conflict(RESEAL_KEY_MOVED_MESSAGE);
+      }
+      await assertVaultKeyVersion(userId, vaultKeyVersion);
+    } catch (error) {
+      refusal = error instanceof Error ? error : new Error(String(error));
+    }
+    if (refusal !== undefined) {
+      await releaseVaultRotationLock(userId, lockId);
+      if (refusal instanceof StaleVaultKeyError) {
+        sendStaleVaultKey(res, refusal);
+        return;
+      }
+      throw refusal;
+    }
   }
 
   /**
@@ -773,7 +877,16 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     ) {
       logger.warn('Vault key rotation refused: an interrupted rotation is still outstanding', {
         userId,
+        reseal: resealing,
       });
+      if (resealing) {
+        // Its own sentence: the rotation one below tells the user to resend with
+        // `discardPendingVaultKey`, which a re-seal refuses outright.
+        throw httpErrors.conflict(
+          'Finish the interrupted vault key rotation first: a re-seal keeps the current key, so ' +
+            'it cannot carry the entries that rotation already re-encrypted.',
+        );
+      }
       // Under 200 characters, and that is a requirement rather than a style
       // preference: the client renders a 4xx through `getApiErrorMessage`, which
       // SLICES at `MAX_ERROR_MESSAGE_LENGTH` (200). The first draft of this
@@ -965,6 +1078,32 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           // 404 the loops above raise rather than as a coverage complaint.
           await assertRotationCoversEveryRow(txnSession);
 
+          if (resealing) {
+            // No key, no generation, no markers: the key did not change. What is
+            // still checked is that it did not change UNDER this transaction, and
+            // it is checked with a conditional WRITE rather than a read. A read
+            // inside the transaction sees its snapshot, so a key replaced by a
+            // writer that holds no rotation lock (`resetPassword`) after that
+            // snapshot would go unseen; a write to the same document is a write
+            // conflict instead, which retries the transaction on fresh state,
+            // where this filter misses. The idempotency key a re-seal must carry
+            // (the schema requires it) is what makes this a real change to the
+            // document every time. A miss aborts, and every rewritten row with it.
+            const resealCommit = await User.updateOne(
+              {
+                _id: userId,
+                encryptedVaultKey: newEncryptedVaultKey,
+                vaultKeyVersion: vaultKeyVersionFilter(vaultKeyVersion ?? 0),
+              },
+              { $set: { lastRotationKey: idempotencyKey } },
+              { session: txnSession },
+            );
+            if (resealCommit.matchedCount === 0) {
+              throw httpErrors.conflict(RESEAL_KEY_MOVED_MESSAGE);
+            }
+            return;
+          }
+
           // Update the encrypted vault key and idempotency key on the user
           const userUpdate: Record<string, unknown> = {
             encryptedVaultKey: newEncryptedVaultKey,
@@ -1094,15 +1233,24 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       // Set rotation state marker before starting sequential updates so that a
       // crash mid-way can be detected on the next login. Store the pending new
       // vault key data so the rotation can be identified as incomplete.
+      //
+      // A re-seal raises the fence and writes NO pending wrapper. The wrapper
+      // exists so that rows re-sealed under a NEW key survive a crash; a re-seal
+      // has no new key, so a crash leaves every row, rewritten or not, under the
+      // key the account still stores. Writing one anyway would offer "finish the
+      // interrupted rotation" for a rotation that never happened, and refuse every
+      // later rotation until somebody did.
       await User.updateOne(
         { _id: userId },
         {
-          $set: {
-            rotationInProgress: true,
-            pendingEncryptedVaultKey: newEncryptedVaultKey,
-            pendingVaultKeyIv: newVaultKeyIv,
-            pendingVaultKeyTag: newVaultKeyTag,
-          },
+          $set: resealing
+            ? { rotationInProgress: true }
+            : {
+                rotationInProgress: true,
+                pendingEncryptedVaultKey: newEncryptedVaultKey,
+                pendingVaultKeyIv: newVaultKeyIv,
+                pendingVaultKeyTag: newVaultKeyTag,
+              },
         },
       );
 
@@ -1412,8 +1560,9 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
 
           // Roll back successfully-written ciphertext to its pre-rotation state
           // so the user's existing (unchanged) vault key can still decrypt
-          // everything on next login.
-          await rollbackPartialWrites();
+          // everything on next login. Not for a re-seal: its rewritten rows are
+          // under that same key already.
+          if (!resealing) await rollbackPartialWrites();
 
           // Clear rotation state so the user can retry. The vault key remains
           // as whatever was last successfully committed (i.e. unchanged).
@@ -1430,31 +1579,52 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         // rollback is correct precisely because this write did NOT apply, and
         // `rollbackWouldDestroyACommittedRotation` confirms that rather than
         // assuming it.
-        const keyWrite = await User.updateOne(unchangedCredentialFilter, {
-          $set: {
-            encryptedVaultKey: newEncryptedVaultKey,
-            vaultKeyIv: newVaultKeyIv,
-            vaultKeyTag: newVaultKeyTag,
-            rotationInProgress: false,
-            ...(idempotencyKey
-              ? { lastRotationKey: idempotencyKey, lastRotationAt: new Date() }
-              : {}),
-          },
-          // Same update document as the key it names, and `$inc` rather than a
-          // value computed from the `user` read above, which happened before the
-          // rotation lock was taken.
-          $inc: { vaultKeyVersion: 1 },
-          $unset: {
-            pendingEncryptedVaultKey: '',
-            pendingVaultKeyIv: '',
-            pendingVaultKeyTag: '',
-          },
-        });
-        if (keyWrite.matchedCount === 0) {
-          logger.warn('Vault key rotation aborted: the master password changed mid-rotation', {
-            userId,
+        if (resealing) {
+          // The re-seal's commit: the fence comes down and the idempotency key is
+          // recorded, conditioned on the key being the one the proof read. A miss
+          // throws into the catch below, which lowers the fence and — for a
+          // re-seal — rolls nothing back.
+          const resealCommit = await User.updateOne(
+            {
+              _id: userId,
+              encryptedVaultKey: newEncryptedVaultKey,
+              vaultKeyVersion: vaultKeyVersionFilter(vaultKeyVersion ?? 0),
+            },
+            {
+              // The schema requires a re-seal's idempotency key.
+              $set: { rotationInProgress: false, lastRotationKey: idempotencyKey },
+            },
+          );
+          if (resealCommit.matchedCount === 0) {
+            throw httpErrors.conflict(RESEAL_KEY_MOVED_MESSAGE);
+          }
+        } else {
+          const keyWrite = await User.updateOne(unchangedCredentialFilter, {
+            $set: {
+              encryptedVaultKey: newEncryptedVaultKey,
+              vaultKeyIv: newVaultKeyIv,
+              vaultKeyTag: newVaultKeyTag,
+              rotationInProgress: false,
+              ...(idempotencyKey
+                ? { lastRotationKey: idempotencyKey, lastRotationAt: new Date() }
+                : {}),
+            },
+            // Same update document as the key it names, and `$inc` rather than a
+            // value computed from the `user` read above, which happened before the
+            // rotation lock was taken.
+            $inc: { vaultKeyVersion: 1 },
+            $unset: {
+              pendingEncryptedVaultKey: '',
+              pendingVaultKeyIv: '',
+              pendingVaultKeyTag: '',
+            },
           });
-          throw httpErrors.conflict(credentialMovedMessage);
+          if (keyWrite.matchedCount === 0) {
+            logger.warn('Vault key rotation aborted: the master password changed mid-rotation', {
+              userId,
+            });
+            throw httpErrors.conflict(credentialMovedMessage);
+          }
         }
       } catch (rotationErr) {
         // Unexpected exception path (not the orderly conflict abort above). Roll
@@ -1466,7 +1636,9 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           error: rotationErr,
         });
         try {
-          await rollbackPartialWrites();
+          // A re-seal's partial writes are left in place: they are sealed under
+          // the key the account still holds, and only their binding is newer.
+          if (!resealing) await rollbackPartialWrites();
         } catch (rollbackErr) {
           logger.error('Rollback after rotation failure also failed', {
             userId,
@@ -1489,7 +1661,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     userId,
     'password_change',
     {
-      action: 'vault_key_rotation',
+      action: resealing ? 'vault_reseal' : 'vault_key_rotation',
       itemCount: items.length,
       folderCount: folders.length,
       documentCount: documents.length,
@@ -1505,7 +1677,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     rotateCtx.userAgent,
   );
 
-  logger.info('Vault key rotated', {
+  logger.info(resealing ? 'Vault entries re-sealed' : 'Vault key rotated', {
     userId,
     itemCount: items.length,
     folderCount: folders.length,
@@ -1518,7 +1690,9 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     message:
       totalErrors > 0
         ? `Vault key rotated with ${String(totalErrors)} error(s)`
-        : 'Vault key rotated successfully',
+        : resealing
+          ? 'Vault entries re-sealed successfully'
+          : 'Vault key rotated successfully',
     data: {
       updatedCount: items.length + folders.length + documents.length - totalErrors,
       ...(rotationItemErrors.length > 0 ? { itemErrors: rotationItemErrors } : {}),

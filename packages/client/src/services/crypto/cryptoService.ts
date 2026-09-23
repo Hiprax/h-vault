@@ -17,7 +17,7 @@
  *   Vault data encrypted with Vault Key (AES-256-GCM)
  */
 
-import { KDF_ITERATIONS } from '@hvault/shared';
+import { KDF_ITERATIONS, VAULT_SEARCH_KEY_INFO } from '@hvault/shared';
 
 /*
  * The PBKDF2 work factor for every password-based derivation here (the master
@@ -179,8 +179,11 @@ export class CryptoService {
    * Import raw vault key bytes as an AES-GCM CryptoKey.
    *
    * The resulting CryptoKey is extractable so that we can export it for
-   * encryption (e.g. when encrypting the vault key with MEK or BWK) and
-   * for best-effort zeroing via `clearCryptoKey`.
+   * encryption (e.g. when encrypting the vault key with MEK or BWK), as HKDF
+   * input (once per key for the search subkey, and per document for its wrap
+   * key), and for best-effort zeroing via `clearCryptoKey`. It is NOT exported
+   * per item write: the search hash, which used to export it on every save, now
+   * reads a memoised non-extractable subkey.
    *
    * SECURITY TRADE-OFF: an extractable key means page script can call
    * `exportKey()` to obtain raw key material. Accepted for the VAULT key (and
@@ -314,12 +317,48 @@ export class CryptoService {
     data: string,
     vaultKey: CryptoKey,
   ): Promise<{ encrypted: string; iv: string; tag: string }> {
+    return this.sealAesGcm(data, vaultKey, undefined);
+  }
+
+  /**
+   * {@link encryptData} with AES-GCM additional data, which the ciphertext is then
+   * bound to: {@link decryptDataWithAad} opens it only with the same bytes.
+   *
+   * A PRIMITIVE, like its decrypt twin: it takes the additional data ready-made and
+   * returns the plain triple, unmarked. A vault ROW's field is sealed through
+   * `encryptVaultField` (`vaultField.ts`), which builds the one binding layout and
+   * stamps the format marker on the IV; calling this directly for a row would
+   * produce a bound field that no reader recognises as bound.
+   */
+  async encryptDataWithAad(
+    data: string,
+    vaultKey: CryptoKey,
+    additionalData: Uint8Array<ArrayBuffer>,
+  ): Promise<{ encrypted: string; iv: string; tag: string }> {
+    return this.sealAesGcm(data, vaultKey, additionalData);
+  }
+
+  /**
+   * The one AES-GCM seal both encrypts share, mirroring {@link openAesGcm}: with
+   * `additionalData` undefined the parameter object carries no `additionalData`
+   * key at all, which is exactly the call format v1 has always made.
+   */
+  private async sealAesGcm(
+    data: string,
+    vaultKey: CryptoKey,
+    additionalData: Uint8Array<ArrayBuffer> | undefined,
+  ): Promise<{ encrypted: string; iv: string; tag: string }> {
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));
     const encoder = new TextEncoder();
     const plaintext = encoder.encode(data);
 
     const ciphertextWithTag = await this.subtle.encrypt(
-      { name: 'AES-GCM', iv, tagLength: TAG_BYTES * 8 },
+      {
+        name: 'AES-GCM',
+        iv,
+        tagLength: TAG_BYTES * 8,
+        ...(additionalData === undefined ? {} : { additionalData }),
+      },
       vaultKey,
       plaintext,
     );
@@ -413,32 +452,76 @@ export class CryptoService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Generate a deterministic HMAC-SHA256 hash of an item name using the vault
-   * key. This allows the server to perform equality-match lookups without
-   * knowing the plaintext name.
+   * The search subkey of each vault key this session has hashed a name under.
    *
-   * Exports the CryptoKey to raw bytes to re-import as an HMAC key, then
-   * zeroes the exported buffer.
+   * Keyed by the vault key's own handle, so a rotation, which installs a new
+   * handle, gets a new entry, and the entry of a key nothing holds any more goes
+   * with it. The value is the derivation's PROMISE, so concurrent first calls
+   * share one derivation, and a derivation that rejects is evicted so the next
+   * call can retry rather than inheriting the failure for the life of the key.
+   */
+  private readonly searchKeys = new WeakMap<CryptoKey, Promise<CryptoKey>>();
+
+  /**
+   * `SK_search = HKDF-SHA256(ikm = vault key, salt = empty, info =
+   * VAULT_SEARCH_KEY_INFO)`, imported as a NON-extractable HMAC key.
+   *
+   * Two defects this replaces, both of the kind the backup key and the documents
+   * already avoid (NIST SP 800-108 key separation). The vault key was used
+   * directly as the HMAC key, so one key served AES-GCM and HMAC at once; and it
+   * was EXPORTED on every item write to do it, putting the raw vault key on the
+   * JavaScript heap once per save. Now the raw bytes are exported once per vault
+   * key, as HKDF input, and zeroed before this resolves; the HMAC key itself never
+   * exists as bytes script can read, since `deriveKey` produces it inside the
+   * crypto engine and it is not extractable. The empty salt is RFC 5869 compliant
+   * because the input keying material is already a uniformly random key.
+   */
+  private searchKeyFor(vaultKey: CryptoKey): Promise<CryptoKey> {
+    const memoised = this.searchKeys.get(vaultKey);
+    if (memoised) return memoised;
+    const derived = (async () => {
+      const raw = await this.subtle.exportKey('raw', vaultKey);
+      try {
+        const base = await this.subtle.importKey('raw', raw, 'HKDF', false, ['deriveKey']);
+        return await this.subtle.deriveKey(
+          {
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: new Uint8Array(0),
+            info: new TextEncoder().encode(VAULT_SEARCH_KEY_INFO),
+          },
+          base,
+          { name: 'HMAC', hash: 'SHA-256', length: 256 },
+          false,
+          ['sign'],
+        );
+      } finally {
+        this.clearKey(raw);
+      }
+    })();
+    this.searchKeys.set(vaultKey, derived);
+    derived.catch(() => {
+      if (this.searchKeys.get(vaultKey) === derived) this.searchKeys.delete(vaultKey);
+    });
+    return derived;
+  }
+
+  /**
+   * A deterministic HMAC-SHA256 of an item name, normalised by trimming and
+   * lower-casing, under the vault key's search subkey (see `searchKeyFor`). It
+   * lets the server compare names for equality without learning them.
+   *
+   * A hash computed before the subkey existed was taken under the raw vault key,
+   * so the same name hashes differently in the two schemes. Nothing in this app
+   * matches ITEMS by their hash (import identity is computed from decrypted
+   * content), and a rotation or a re-seal recomputes every item's hash; a
+   * folder's hash is written only by a restore and is not recomputed by either.
    */
   async generateSearchHash(name: string, vaultKey: CryptoKey): Promise<string> {
-    const encoder = new TextEncoder();
-    const message = encoder.encode(name.trim().toLowerCase());
-
-    const rawBytes = await this.subtle.exportKey('raw', vaultKey);
-    try {
-      const hmacKey = await this.subtle.importKey(
-        'raw',
-        rawBytes,
-        { name: 'HMAC', hash: 'SHA-256' },
-        false,
-        ['sign'],
-      );
-
-      const signature = await this.subtle.sign('HMAC', hmacKey, message);
-      return Array.from(new Uint8Array(signature), (b) => b.toString(16).padStart(2, '0')).join('');
-    } finally {
-      this.clearKey(rawBytes);
-    }
+    const message = new TextEncoder().encode(name.trim().toLowerCase());
+    const hmacKey = await this.searchKeyFor(vaultKey);
+    const signature = await this.subtle.sign('HMAC', hmacKey, message);
+    return Array.from(new Uint8Array(signature), (b) => b.toString(16).padStart(2, '0')).join('');
   }
 
   // ---------------------------------------------------------------------------
@@ -695,8 +778,9 @@ export class CryptoService {
    * taken before a vault-key rotation. When the keys are identical (the common
    * same-account, un-rotated case) adoption is a no-op and can be skipped.
    *
-   * The vault key is already extractable and is exported on every save, so
-   * this exposes no capability an in-page attacker did not already have.
+   * The vault key is extractable by design (see `importVaultKey`), so this
+   * exposes no capability an in-page attacker does not already have; the copy it
+   * exports is zeroed before it returns.
    */
   async vaultKeyEqualsRaw(vaultKey: CryptoKey, rawCandidate: ArrayBuffer): Promise<boolean> {
     let raw: ArrayBuffer | undefined;

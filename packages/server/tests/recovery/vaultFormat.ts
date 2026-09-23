@@ -214,6 +214,58 @@ export async function openText(sealed: Sealed, key: webcrypto.CryptoKey): Promis
 }
 
 /**
+ * A vault field in format v2: sealed with the additional data naming its role and
+ * row, and marked `v2:` on its IV. Written out from the specification (the
+ * comment above `VAULT_FIELD_AAD_PREFIX` in the shared package) rather than
+ * imported from the client, so this suite reads the format independently.
+ */
+export async function sealBound(
+  plaintext: string,
+  key: webcrypto.CryptoKey,
+  aad: string,
+): Promise<Sealed> {
+  const iv = randomBytes(IV_BYTES);
+  const combined = new Uint8Array(
+    await subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: encoder.encode(aad), tagLength: TAG_BYTES * 8 },
+      key,
+      encoder.encode(plaintext),
+    ),
+  );
+  return {
+    encrypted: toBase64(combined.slice(0, combined.length - TAG_BYTES)),
+    iv: `v2:${toBase64(iv)}`,
+    tag: toBase64(combined.slice(combined.length - TAG_BYTES)),
+  };
+}
+
+/** Opens a v2 field under the additional data it must have been sealed with. */
+export async function openBound(
+  sealed: Sealed,
+  key: webcrypto.CryptoKey,
+  aad: string,
+): Promise<string> {
+  if (!sealed.iv.startsWith('v2:')) throw new Error('not a v2 field');
+  const ciphertext = fromBase64(sealed.encrypted);
+  const tag = fromBase64(sealed.tag);
+  const combined = new Uint8Array(ciphertext.length + tag.length);
+  combined.set(ciphertext, 0);
+  combined.set(tag, ciphertext.length);
+  return decoder.decode(
+    await subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: fromBase64(sealed.iv.slice('v2:'.length)),
+        additionalData: encoder.encode(aad),
+        tagLength: TAG_BYTES * 8,
+      },
+      key,
+      combined,
+    ),
+  );
+}
+
+/**
  * The HMAC-SHA256 search hash of an item or folder name, as hex.
  *
  * Keyed on the RAW vault key (not an HKDF subkey), over the trimmed, lowercased

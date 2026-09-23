@@ -133,7 +133,7 @@ describe('import per-user cap counts net-new inserts', () => {
     );
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 3 });
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 3, insertedIds: [] });
 
     const stored = await rawItems(user.id);
     expect(stored).toHaveLength(3);
@@ -186,7 +186,13 @@ describe('import per-user cap counts net-new inserts', () => {
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 3, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 3,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(3);
     expect(await rawItems(user.id)).toHaveLength(3);
   });
 

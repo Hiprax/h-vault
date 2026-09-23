@@ -24,7 +24,7 @@ import {
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
 } from '../constants/index.js';
-import { objectIdSchema, optionalVaultKeyVersionSchema } from './common.js';
+import { objectIdSchema, optionalVaultKeyVersionSchema, rowIdNonceSchema } from './common.js';
 
 /**
  * How many characters of a class the generator must guarantee, counting only the
@@ -374,6 +374,9 @@ export const importInsertItemSchema = z.object({
   favorite: z.boolean().default(false),
   folderId: objectIdSchema.optional(),
   passwordHistory: z.array(importPasswordHistoryEntrySchema).max(PASSWORD_HISTORY_MAX).optional(),
+  // The nonce the inserted row's id is derived from, so its fields can be bound to
+  // that id before it exists. See `rowIdNonceSchema`.
+  idNonce: rowIdNonceSchema.optional(),
 });
 
 /**
@@ -403,10 +406,28 @@ export const importUpdateItemSchema = z.object({
  * `MAX_IMPORT_ITEMS`) is enforced on `importSchema` itself, so it can produce a
  * clear message when `operations` carries no work at all.
  */
-export const importOperationsSchema = z.object({
-  inserts: z.array(importInsertItemSchema).default([]),
-  updates: z.array(importUpdateItemSchema).default([]),
-});
+export const importOperationsSchema = z
+  .object({
+    inserts: z.array(importInsertItemSchema).default([]),
+    updates: z.array(importUpdateItemSchema).default([]),
+  })
+  // Two inserts naming one nonce would derive one id: the second insert collides
+  // with the first, and on a server without transactions the first is already
+  // stored by then. Refused here, at 400, before anything is written.
+  .superRefine((operations, ctx) => {
+    const seen = new Set<string>();
+    for (const [index, insert] of operations.inserts.entries()) {
+      if (insert.idNonce === undefined) continue;
+      if (seen.has(insert.idNonce)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['inserts', index, 'idNonce'],
+          message: 'inserts contain a repeated idNonce',
+        });
+      }
+      seen.add(insert.idNonce);
+    }
+  });
 
 export const importSchema = z
   .object({

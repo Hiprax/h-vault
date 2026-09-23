@@ -60,6 +60,7 @@ vi.mock('../src/stores/encryptedStorage', () => ({
 vi.mock('../src/services/crypto/cryptoService', () => ({
   cryptoService: {
     encryptData: vi.fn(),
+    encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
     generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
@@ -69,6 +70,7 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
 
 vi.mock('../src/services/api/vaultApi', () => ({
   listItemsApi: vi.fn(),
+  getItemApi: vi.fn(),
   createItemApi: vi.fn(),
   updateItemApi: vi.fn(),
   deleteItemApi: vi.fn(),
@@ -127,6 +129,14 @@ const SERVER_GENERATION = 4;
 
 const mockVaultKey = {} as CryptoKey;
 
+/**
+ * Row and account ids are ObjectIds in production, and a v2 field is bound to
+ * its row id, so a fixture id that is not one is refused before anything is sealed.
+ */
+const USER_ID = '64b7f0c2a1d3e4f5a6b7c8d9';
+const ITEM_ID = '65a1b2c3d4e5f60718293a4b';
+const FOLDER_ID = '65a1b2c3d4e5f60718293a4c';
+
 /** The recoverable 409: a conflict whose body carries a generation. */
 function staleVaultKeyRejection(vaultKeyVersion = SERVER_GENERATION): AxiosError {
   return new AxiosError('conflict', 'ERR_BAD_REQUEST', undefined, undefined, {
@@ -151,7 +161,7 @@ function bareConflict(): AxiosError {
 
 function existingItem(): DecryptedVaultItem {
   return {
-    id: 'item-1',
+    id: ITEM_ID,
     itemType: 'login',
     tags: [],
     favorite: false,
@@ -160,7 +170,7 @@ function existingItem(): DecryptedVaultItem {
     createdAt: '2024-01-01T00:00:00Z',
     updatedAt: '2024-01-01T00:00:00Z',
     _raw: {
-      _id: 'item-1',
+      _id: ITEM_ID,
       itemType: 'login',
       encryptedName: 'original-name-ciphertext',
       nameIv: 'n-iv',
@@ -179,12 +189,22 @@ function existingItem(): DecryptedVaultItem {
 beforeEach(() => {
   vi.clearAllMocks();
   useVaultStore.setState({ items: [existingItem()], folders: [], trashItems: [] });
-  useAuthStore.setState({ vaultKey: mockVaultKey, vaultKeyVersion: HELD_GENERATION });
+  // A create derives the new row's id from this session's own user id.
+  useAuthStore.setState({
+    vaultKey: mockVaultKey,
+    vaultKeyVersion: HELD_GENERATION,
+    user: { userId: USER_ID, email: 'user@example.com' },
+  });
   useUIStore.setState({ staleVaultKeyVersion: null });
   vi.mocked(cryptoService.encryptData).mockResolvedValue({
     encrypted: 'fresh-ciphertext',
     iv: 'fresh-iv',
     tag: 'fresh-tag',
+  });
+  vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
+    encrypted: 'fresh-bound-ciphertext',
+    iv: 'fresh-bound-iv',
+    tag: 'fresh-bound-tag',
   });
   vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('f'.repeat(64));
   vi.mocked(cryptoService.decryptData).mockResolvedValue(JSON.stringify({ username: 'u' }));
@@ -202,6 +222,7 @@ describe('every vault write names the generation it sealed its ciphertext with',
 
     expect(vi.mocked(createItemApi).mock.calls[0]?.[0]).toMatchObject({
       vaultKeyVersion: HELD_GENERATION,
+      idNonce: expect.stringMatching(/^[0-9a-f]{40}$/) as unknown,
     });
   });
 
@@ -209,7 +230,7 @@ describe('every vault write names the generation it sealed its ciphertext with',
     vi.mocked(updateItemApi).mockRejectedValue(new Error('stop after the request'));
 
     await expect(
-      useVaultStore.getState().updateItem('item-1', 'login', 'New', { username: 'u' }),
+      useVaultStore.getState().updateItem(ITEM_ID, 'login', 'New', { username: 'u' }),
     ).rejects.toThrow();
 
     expect(vi.mocked(updateItemApi).mock.calls[0]?.[1]).toMatchObject({
@@ -220,7 +241,7 @@ describe('every vault write names the generation it sealed its ciphertext with',
   it('renameItem', async () => {
     vi.mocked(updateItemApi).mockRejectedValue(new Error('stop after the request'));
 
-    await expect(useVaultStore.getState().renameItem('item-1', 'Renamed')).rejects.toThrow();
+    await expect(useVaultStore.getState().renameItem(ITEM_ID, 'Renamed')).rejects.toThrow();
 
     expect(vi.mocked(updateItemApi).mock.calls[0]?.[1]).toMatchObject({
       vaultKeyVersion: HELD_GENERATION,
@@ -234,13 +255,14 @@ describe('every vault write names the generation it sealed its ciphertext with',
 
     expect(vi.mocked(createFolderApi).mock.calls[0]?.[0]).toMatchObject({
       vaultKeyVersion: HELD_GENERATION,
+      idNonce: expect.stringMatching(/^[0-9a-f]{40}$/) as unknown,
     });
   });
 
   it('updateFolder', async () => {
     vi.mocked(updateFolderApi).mockRejectedValue(new Error('stop after the request'));
 
-    await expect(useVaultStore.getState().updateFolder('folder-1', 'Work')).rejects.toThrow();
+    await expect(useVaultStore.getState().updateFolder(FOLDER_ID, 'Work')).rejects.toThrow();
 
     expect(vi.mocked(updateFolderApi).mock.calls[0]?.[1]).toMatchObject({
       vaultKeyVersion: HELD_GENERATION,
@@ -256,7 +278,7 @@ describe('every vault write names the generation it sealed its ciphertext with',
     useAuthStore.setState({ vaultKey: null });
 
     await expect(
-      useVaultStore.getState().updateItemMeta('item-1', { favorite: true }),
+      useVaultStore.getState().updateItemMeta(ITEM_ID, { favorite: true }),
     ).rejects.toThrow();
 
     expect(vi.mocked(updateItemApi).mock.calls[0]?.[1]).toEqual({
@@ -266,10 +288,13 @@ describe('every vault write names the generation it sealed its ciphertext with',
     // The negative that keeps this path safe: it never encrypted anything, so it
     // cannot have overwritten the item's real ciphertext with a placeholder.
     expect(cryptoService.encryptData).not.toHaveBeenCalled();
+    // Row fields are now sealed through the bound (v2) path, so that is the one
+    // that proves nothing was sealed.
+    expect(cryptoService.encryptDataWithAad).not.toHaveBeenCalled();
   });
 
   it('does not turn an EMPTY metadata update into a request carrying only a generation', async () => {
-    await useVaultStore.getState().updateItemMeta('item-1', {});
+    await useVaultStore.getState().updateItemMeta(ITEM_ID, {});
 
     expect(updateItemApi).not.toHaveBeenCalled();
   });
@@ -317,7 +342,7 @@ describe('a refused write raises the reload notice and changes nothing', () => {
     const before = useVaultStore.getState().items[0];
 
     await expect(
-      useVaultStore.getState().updateItem('item-1', 'login', 'New name', { username: 'v' }),
+      useVaultStore.getState().updateItem(ITEM_ID, 'login', 'New name', { username: 'v' }),
     ).rejects.toThrow();
 
     expect(updateItemApi).toHaveBeenCalledTimes(1);
@@ -326,8 +351,8 @@ describe('a refused write raises the reload notice and changes nothing', () => {
   });
 
   it.each([
-    ['renameItem', () => useVaultStore.getState().renameItem('item-1', 'Renamed')],
-    ['updateItemMeta', () => useVaultStore.getState().updateItemMeta('item-1', { favorite: true })],
+    ['renameItem', () => useVaultStore.getState().renameItem(ITEM_ID, 'Renamed')],
+    ['updateItemMeta', () => useVaultStore.getState().updateItemMeta(ITEM_ID, { favorite: true })],
   ])('raises the notice from %s too', async (_name, run) => {
     vi.mocked(updateItemApi).mockRejectedValue(staleVaultKeyRejection());
 
@@ -340,7 +365,7 @@ describe('a refused write raises the reload notice and changes nothing', () => {
     ['createFolder', () => useVaultStore.getState().createFolder('Work'), createFolderApi],
     [
       'updateFolder',
-      () => useVaultStore.getState().updateFolder('folder-1', 'Work'),
+      () => useVaultStore.getState().updateFolder(FOLDER_ID, 'Work'),
       updateFolderApi,
     ],
   ])('raises the notice from %s too', async (_name, run, api) => {

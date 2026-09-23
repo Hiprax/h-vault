@@ -9,7 +9,12 @@
 import { create } from 'zustand';
 import { cryptoService } from '../services/crypto/cryptoService.js';
 import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
-import { decryptVaultField } from '../services/crypto/vaultField.js';
+import {
+  assertStoredUnder,
+  decryptVaultField,
+  encryptVaultField,
+  newBoundRow,
+} from '../services/crypto/vaultField.js';
 import { offlineCache, offlineCacheErrorType } from '../services/offlineCache.js';
 import { clearScoreCache } from '../services/health/strengthCache.js';
 import { logger } from '../lib/logger.js';
@@ -23,6 +28,7 @@ import { noteStaleVaultKey, useUIStore } from './uiStore.js';
 import { useDocumentsStore } from './documentsStore.js';
 import {
   listItemsApi,
+  getItemApi,
   createItemApi,
   updateItemApi,
   deleteItemApi,
@@ -534,6 +540,49 @@ function requireVaultKey(): { vaultKey: CryptoKey; vaultKeyVersion: number } {
   }
   // CryptoKey is an opaque handle — no need to copy (unlike ArrayBuffer).
   return { vaultKey, vaultKeyVersion };
+}
+
+/**
+ * Refuses an update naming an item type other than the one the row is stored with.
+ *
+ * Read from this store when the row is in it (active or trashed), and otherwise
+ * from the server, because a caller the store cannot see is precisely the caller
+ * whose type nothing here has checked. Under format v1 a wrong type cost nothing
+ * at write time; under v2 the data is bound to the type it names, so a wrong one
+ * is a row whose data never opens again.
+ */
+async function assertStoredItemType(
+  id: string,
+  itemType: ItemType,
+  get: () => VaultState,
+): Promise<void> {
+  const { items, trashItems } = get();
+  let stored = (items.find((item) => item.id === id) ?? trashItems.find((item) => item.id === id))
+    ?.itemType;
+  if (stored === undefined) {
+    const response = await getItemApi(id);
+    if (response.data.success) stored = response.data.data.itemType;
+  }
+  if (stored !== itemType) {
+    throw new Error(
+      `This entry is stored as ${stored === undefined ? 'an unknown type' : `a ${stored}`}, so it cannot be saved as a ${itemType}.`,
+    );
+  }
+}
+
+/**
+ * This session's own user id, which a created row's id is derived from.
+ *
+ * Read beside the vault key rather than from a response, because it is the id
+ * the SERVER derives from too (the authenticated caller's), and the two must
+ * agree or the row is stored under an id its fields were not sealed to.
+ */
+function requireUserId(): string {
+  const userId = useAuthStore.getState().user?.userId;
+  if (!userId) {
+    throw new Error('Vault is locked. Unlock it before performing vault operations.');
+  }
+  return userId;
 }
 
 /** The unlocked vault key alone, for callers that seal nothing to a generation. */
@@ -1150,8 +1199,20 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // point it is the only copy that exists.
     assertValidItemData(itemType, data);
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
-    const encryptedData = await cryptoService.encryptData(JSON.stringify(data), vaultKey);
+    // The id the row WILL have, derived before it exists, so both fields can be
+    // sealed to it (format v2). The server stores the row under the id the same
+    // nonce derives on its side.
+    const row = await newBoundRow(requireUserId());
+    const encryptedName = await encryptVaultField(
+      name,
+      { role: 'item.name', rowId: row.rowId },
+      vaultKey,
+    );
+    const encryptedData = await encryptVaultField(
+      JSON.stringify(data),
+      { role: 'item.data', rowId: row.rowId, itemType },
+      vaultKey,
+    );
     // Pre-flight size check: the server enforces these via Mongoose validators,
     // so bail out early with a user-friendly error instead of round-tripping
     // to receive a cryptic 400.
@@ -1175,6 +1236,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         ...(options?.folderId != null ? { folderId: options.folderId } : {}),
         tags: options?.tags ?? [],
         favorite: options?.favorite ?? false,
+        idNonce: row.idNonce,
         vaultKeyVersion,
       }),
     );
@@ -1182,6 +1244,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const createResult = response.data;
     if (createResult.success) {
       const rawItem = createResult.data;
+      assertStoredUnder(row.rowId, rawItem._id);
       const decrypted = await decryptItem(rawItem, vaultKey);
       // Skip the local plaintext write if a lock/logout landed while the
       // request was in flight — clearStore() bumped the generation and emptied
@@ -1220,8 +1283,18 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // caller can supply.
     const existingItem = get().items.find((item) => item.id === id);
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
-    const encryptedData = await cryptoService.encryptData(JSON.stringify(data), vaultKey);
+    // The data is sealed to the item type it will be READ under, so it must be the
+    // type the row actually has: data bound to any other type never opens again.
+    // Type is immutable after create, so a caller naming another is refused here,
+    // before anything is sealed.
+    await assertStoredItemType(id, itemType, get);
+
+    const encryptedName = await encryptVaultField(name, { role: 'item.name', rowId: id }, vaultKey);
+    const encryptedData = await encryptVaultField(
+      JSON.stringify(data),
+      { role: 'item.data', rowId: id, itemType },
+      vaultKey,
+    );
     // Pre-flight size check: same rationale as createItem.
     assertEncryptedSizes(encryptedName, encryptedData);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
@@ -1235,6 +1308,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
             existingRawHistory: existingItem._raw.passwordHistory,
             oldPassword: existingItem.data.password,
             newPassword: data.password,
+            rowId: id,
             vaultKey,
           })
         : undefined;
@@ -1370,7 +1444,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
+    const encryptedName = await encryptVaultField(name, { role: 'item.name', rowId: id }, vaultKey);
     assertEncryptedNameSize(encryptedName);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
@@ -1553,7 +1627,13 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
+    // Sealed to the id the folder WILL have; see `createItem`.
+    const row = await newBoundRow(requireUserId());
+    const encryptedName = await encryptVaultField(
+      name,
+      { role: 'folder.name', rowId: row.rowId },
+      vaultKey,
+    );
 
     // Assign a sortOrder higher than any existing folder so new folders appear at the end
     const existingFolders = get().folders;
@@ -1568,6 +1648,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         ...(options?.parentId != null ? { parentId: options.parentId } : {}),
         ...(options?.icon != null ? { icon: options.icon } : {}),
         ...(options?.color != null ? { color: options.color } : {}),
+        idNonce: row.idNonce,
         vaultKeyVersion,
       }),
     );
@@ -1575,6 +1656,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const createFolderResult = response.data;
     if (createFolderResult.success) {
       const rawFolder = createFolderResult.data;
+      assertStoredUnder(row.rowId, rawFolder._id);
       const decrypted = await decryptFolder(rawFolder, vaultKey);
       // Skip the local plaintext write if a lock/logout superseded us (see
       // createItem).
@@ -1591,7 +1673,11 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
+    const encryptedName = await encryptVaultField(
+      name,
+      { role: 'folder.name', rowId: id },
+      vaultKey,
+    );
 
     const response = await withStaleVaultKeyNotice(() =>
       updateFolderApi(id, {

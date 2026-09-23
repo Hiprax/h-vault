@@ -3,6 +3,12 @@ import { PASSWORD_HISTORY_MAX } from '@hvault/shared';
 import type { IPasswordHistoryEntry } from '@hvault/shared';
 import { cryptoService } from '../src/services/crypto/cryptoService';
 import { buildPasswordHistoryPayload } from '../src/services/crypto/passwordHistory';
+import { decryptVaultField } from '../src/services/crypto/vaultField';
+
+/** The row the history belongs to: a realistic ObjectId, as every row id is. */
+const ROW_ID = '507f1f77bcf86cd799439011';
+/** Another row of the same vault, which the entry must NOT open under. */
+const OTHER_ROW_ID = '507f1f77bcf86cd799439012';
 
 /**
  * Unit coverage for the shared password-history builder. It uses the REAL
@@ -30,6 +36,7 @@ describe('buildPasswordHistoryPayload', () => {
       existingRawHistory: [],
       oldPassword: 'same',
       newPassword: 'same',
+      rowId: ROW_ID,
       vaultKey,
     });
     expect(payload).toBeUndefined();
@@ -41,6 +48,7 @@ describe('buildPasswordHistoryPayload', () => {
         existingRawHistory: undefined,
         oldPassword: '',
         newPassword: 'new',
+        rowId: ROW_ID,
         vaultKey,
       }),
     ).toBeUndefined();
@@ -49,6 +57,7 @@ describe('buildPasswordHistoryPayload', () => {
         existingRawHistory: undefined,
         oldPassword: undefined,
         newPassword: 'new',
+        rowId: ROW_ID,
         vaultKey,
       }),
     ).toBeUndefined();
@@ -59,6 +68,7 @@ describe('buildPasswordHistoryPayload', () => {
       existingRawHistory: [],
       oldPassword: 'old',
       newPassword: undefined,
+      rowId: ROW_ID,
       vaultKey,
     });
     expect(payload).toBeUndefined();
@@ -69,21 +79,62 @@ describe('buildPasswordHistoryPayload', () => {
       existingRawHistory: [],
       oldPassword: 'the-old-secret',
       newPassword: 'the-new-secret',
+      rowId: ROW_ID,
       vaultKey,
     });
 
     expect(payload).toBeDefined();
     expect(payload).toHaveLength(1);
     const first = payload![0]!;
-    // The stored entry decrypts back to the OLD password, never the new one.
-    const recovered = await cryptoService.decryptData(
-      first.encryptedPassword,
-      first.iv,
-      first.tag,
+    // Sealed in format v2: the marker is on the IV.
+    expect(first.iv.startsWith('v2:')).toBe(true);
+    // The stored entry decrypts back to the OLD password, never the new one,
+    // when opened as THIS row's password history.
+    const recovered = await decryptVaultField(
+      { encrypted: first.encryptedPassword, iv: first.iv, tag: first.tag },
+      { role: 'item.password-history', rowId: ROW_ID },
       vaultKey,
     );
     expect(recovered).toBe('the-old-secret');
     expect(typeof first.changedAt).toBe('string');
+  });
+
+  it('binds the retained password to its own row and role, so it opens nowhere else', async () => {
+    // The point of passing `rowId`: an entry moved onto another item's history,
+    // or into another field of the same row, fails its tag check instead of
+    // being read there as that item's previous password.
+    const payload = await buildPasswordHistoryPayload({
+      existingRawHistory: [],
+      oldPassword: 'the-old-secret',
+      newPassword: 'the-new-secret',
+      rowId: ROW_ID,
+      vaultKey,
+    });
+    const first = payload![0]!;
+    const field = { encrypted: first.encryptedPassword, iv: first.iv, tag: first.tag };
+
+    await expect(
+      decryptVaultField(field, { role: 'item.password-history', rowId: OTHER_ROW_ID }, vaultKey),
+    ).rejects.toThrow();
+    await expect(
+      decryptVaultField(field, { role: 'item.name', rowId: ROW_ID }, vaultKey),
+    ).rejects.toThrow();
+    // Nor does it open as an unbound v1 field with the marker stripped.
+    await expect(
+      cryptoService.decryptData(first.encryptedPassword, first.iv.slice(3), first.tag, vaultKey),
+    ).rejects.toThrow();
+  });
+
+  it('refuses a row id that is not an ObjectId before sealing anything', async () => {
+    await expect(
+      buildPasswordHistoryPayload({
+        existingRawHistory: [],
+        oldPassword: 'the-old-secret',
+        newPassword: 'the-new-secret',
+        rowId: 'not-an-object-id',
+        vaultKey,
+      }),
+    ).rejects.toThrow('A vault field is bound to an ObjectId row id');
   });
 
   it('prepends before existing history and preserves prior entries verbatim', async () => {
@@ -92,6 +143,7 @@ describe('buildPasswordHistoryPayload', () => {
       existingRawHistory,
       oldPassword: 'current',
       newPassword: 'next',
+      rowId: ROW_ID,
       vaultKey,
     });
 
@@ -109,6 +161,7 @@ describe('buildPasswordHistoryPayload', () => {
       existingRawHistory,
       oldPassword: 'current',
       newPassword: 'next',
+      rowId: ROW_ID,
       vaultKey,
     });
 
@@ -129,6 +182,7 @@ describe('buildPasswordHistoryPayload', () => {
       existingRawHistory: [dirty],
       oldPassword: 'current',
       newPassword: 'next',
+      rowId: ROW_ID,
       vaultKey,
     });
     expect(payload![1]).toEqual(entry('prev'));

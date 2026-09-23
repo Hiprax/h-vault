@@ -132,7 +132,17 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 3, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 3,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, each naming a stored row (the exact ids are
+    // pinned in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(3);
+    for (const id of res.body.data.insertedIds as string[]) {
+      expect(await VaultItem.exists({ _id: id, userId: user.id })).not.toBeNull();
+    }
 
     const stored = await rawItems(user.id);
     expect(stored).toHaveLength(3);
@@ -157,7 +167,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
 
     const stored = await rawItems(user.id);
     expect(stored).toHaveLength(1);
@@ -180,7 +190,17 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 2, updatedCount: 1 });
+    expect(res.body.data).toEqual({
+      insertedCount: 2,
+      updatedCount: 1,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, each naming a stored row (the exact ids are
+    // pinned in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(2);
+    for (const id of res.body.data.insertedIds as string[]) {
+      expect(await VaultItem.exists({ _id: id, userId: user.id })).not.toBeNull();
+    }
 
     const stored = await rawItems(user.id);
     expect(stored).toHaveLength(3);
@@ -211,7 +231,17 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 1,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, each naming a stored row (the exact ids are
+    // pinned in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(1);
+    for (const id of res.body.data.insertedIds as string[]) {
+      expect(await VaultItem.exists({ _id: id, userId: user.id })).not.toBeNull();
+    }
 
     const stored = await rawItems(user.id);
     const history = stored[0]!.passwordHistory as { encryptedPassword: string }[];
@@ -419,7 +449,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
     const stored = await rawItems(user.id);
     const history = stored[0]!.passwordHistory as { encryptedPassword: string }[];
     expect(history.map((entry) => entry.encryptedPassword)).toEqual([atBound]);
@@ -583,7 +613,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
     expect((await rawItems(user.id))[0]!.encryptedData).toBe('updated-data');
   });
 

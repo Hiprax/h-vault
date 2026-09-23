@@ -65,7 +65,14 @@ security posture, not a disclaimer.
   wrapped key and a set of sizes. **A hostile server cannot reorder, truncate, or splice one
   document into another either** — a segment's position and an end-of-file marker are inside
   its nonce, and the document's id is inside every key derivation, so each of those
-  tamperings makes the decryption fail rather than producing plausible bytes.
+  tamperings makes the decryption fail rather than producing plausible bytes. **Vault
+  entries are bound the same way**: every entry field the app writes (a restore is the one
+  exception, below) is sealed to its entry,
+  its field and its item type, so one moved elsewhere is refused (the limits of that are under
+  _What it cannot protect against_). The keyed hash of each item's name that the server stores
+  is computed under a separate subkey derived from the vault key and held by the browser as
+  non-extractable, so the vault key is never used as a hashing key, and its raw bytes are
+  exported once per vault key to derive that subkey rather than on every save.
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
 - **Credential stuffing and online guessing.** Rate limiting, account lockout with progressive
@@ -255,27 +262,38 @@ security posture, not a disclaimer.
   open every later vault key until the master password changed; a copy of the vault key
   itself is retired by a rotation. Script still present when you next unlock can capture the
   master password as you type it and derive the key again.
-- **A hostile server rearranging your vault items, as distinct from reading them.** A vault
-  item's contents and its name are each sealed with AES-256-GCM, and the authentication tag
-  proves the bytes came back exactly as they went in — but nothing inside the sealed bytes
-  says _which_ item or _which_ field they belong to. So a server holding your ciphertext can
-  put a superseded copy of a row back (you see the breached password you already replaced,
-  under a modification date that looks right) or move one row's sealed bytes onto another
-  (you copy what the screen calls the forum password and paste the bank one), and both
-  decrypt cleanly, because they are genuine ciphertext under your own key merely sitting in
-  the wrong place. Neither reveals anything the server did not already hold; both make the
-  vault say something untrue. This is exactly the property claimed for **documents** above,
-  where the document's id is inside every key derivation and a segment's position is inside
-  its nonce; vault items do not have it yet. This release can already READ an entry sealed
-  to its own row and field (and an item's contents to its type), but nothing writes one yet, so every entry you have is
-  still in the unbound form. Two limits will remain once entries are written that way, and
-  they are stated now so the binding is not taken for more than it is. It refuses an entry
-  moved to another row or field; it does not refuse a superseded copy of the same field put
-  back on the same row, because every version of that field is bound to the same place.
-  And an unbound entry keeps opening wherever it is placed for as long as unbound entries
-  are read at all, including copies a server kept from before an entry was rewritten.
-  Either way, treat an item that changed without you changing it as something to check
-  against a backup rather than something to trust.
+- **A hostile server rearranging your vault items, beyond what the binding refuses.** A vault
+  item's name, its contents, each of its previous passwords and a folder's name are each sealed
+  with AES-256-GCM, and every one of them the app writes is sealed to the entry and the field it
+  belongs to (and an item's contents to its item type): the entry's id, the field's role and the
+  type are part of what the authentication tag covers. So a server that moves one entry's sealed
+  bytes onto another entry, into another field of the same entry, or under another item type is
+  **refused**: the field does not decrypt, and the app shows it as unreadable rather than showing
+  you the wrong password under the right name. This is the property already claimed for
+  **documents** above. Four things it does not refuse, stated so it is not taken for more:
+  - **Putting back an older version of the same field.** Every version of an entry's name, say,
+    is sealed to the same place, so a server that replays a superseded copy onto the entry it came
+    from is not refused (you would see the password you already replaced, under a modification
+    date the server chose). Refusing it needs a version the client can check, which the format
+    does not carry.
+  - **Removing an entry, or reordering, dropping or repeating an entry's previous passwords.** They
+    share one binding on purpose: their positions move every time a password changes.
+  - **Entries still in the older, unbound format, and copies of them.** An entry written before
+    this release, or by a restore (whose entries the server stores under ids it chooses, so they
+    are written unbound and bound at the next re-seal), or by a page loaded before this release,
+    is unbound and opens wherever it is placed. **Settings → Re-seal Entries** rewrites every
+    entry bound, under the key you already have; but a server that kept copies of the unbound
+    versions (an earlier database snapshot, a downloaded backup) can still present them, because
+    they are genuine ciphertext under that same key. **Rotating the vault key** also writes every
+    entry bound, and in addition makes every copy from before it useless, since none of them
+    opens under the new key. Rotate when it matters to you that no older copy can be substituted.
+  - **Plain metadata.** Which folder an entry is in, its tags, whether it is a favorite and when
+    each previous password was replaced are stored in the clear (see _Metadata_ below), so a server
+    can change them.
+
+  An entry you did not change but that now reads differently, or says it cannot be read, is
+  something to check against a backup rather than something to trust.
+
 - **A weak master password.** It is the root of the entire key hierarchy. PBKDF2 at
   600,000 iterations raises the cost of an offline attack against a stolen auth hash; it
   does not rescue a guessable password.
@@ -724,6 +742,14 @@ An entry that cannot be decrypted at all — by the live key or by an outstandin
 stops a rotation. Its stored ciphertext is carried across untouched and it is named in the result,
 because such an entry is already unreadable and letting one of them block every future rotation
 would leave the whole account unable to change its key.
+
+**A re-seal stopped part way through has nothing to finish.** Settings → Re-seal Entries runs the
+same machinery under the key the vault already uses, so an interruption leaves some entries in the
+new format and the rest in the old one, all of them under the key the account still stores, and
+no second key is kept, because there is none. The next sign-in lowers the write fence as it does
+after any interrupted rotation, and running the re-seal again completes it. The server refuses a
+re-seal that names a key or a key generation other than the account's current one, so a page that
+has not seen a rotation made elsewhere cannot rewrite entries under a key the account has retired.
 
 ### Deleting a document, and why it cannot be undone
 

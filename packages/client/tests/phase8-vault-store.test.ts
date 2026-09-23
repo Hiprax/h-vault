@@ -52,6 +52,7 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptVaultKey: vi.fn(),
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
+    encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
     generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
@@ -61,6 +62,7 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
 
 vi.mock('../src/services/api/vaultApi', () => ({
   listItemsApi: vi.fn(),
+  getItemApi: vi.fn(),
   createItemApi: vi.fn(),
   updateItemApi: vi.fn(),
   deleteItemApi: vi.fn(),
@@ -122,13 +124,16 @@ import {
   listItemsApi,
   listTrashApi,
   listFoldersApi,
+  getItemApi,
   createItemApi,
   updateItemApi,
   deleteItemApi,
   permanentDeleteApi,
   emptyTrashApi,
 } from '../src/services/api/vaultApi';
-import { MAX_ENCRYPTED_NAME_LENGTH, MAX_ENCRYPTED_DATA_LENGTH } from '@hvault/shared';
+import { MAX_ENCRYPTED_NAME_LENGTH, MAX_ENCRYPTED_DATA_LENGTH, deriveRowId } from '@hvault/shared';
+import type { ItemType } from '@hvault/shared';
+import type { DecryptedVaultItem } from '../src/stores/vaultStore';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -136,8 +141,48 @@ import { MAX_ENCRYPTED_NAME_LENGTH, MAX_ENCRYPTED_DATA_LENGTH } from '@hvault/sh
 
 const mockVaultKey = {} as CryptoKey;
 
+/**
+ * Row and account ids are ObjectIds in production, and a v2 field is bound to
+ * its row id (a create derives that id from the session's user id), so every id
+ * that reaches a binding here is a realistic lower-case ObjectId.
+ */
+const USER_ID = '64b7f0c2a1d3e4f5a6b7c8d9';
+const ITEM_ID = '65a1b2c3d4e5f60718293a4b';
+
 function setupUnlockedVault(): void {
-  useAuthStore.setState({ vaultKey: mockVaultKey });
+  useAuthStore.setState({
+    vaultKey: mockVaultKey,
+    user: { userId: USER_ID, email: 'user@example.com' },
+  });
+}
+
+/**
+ * The additional data one `encryptDataWithAad` call sealed with, as text.
+ *
+ * Checked by its tag, not `instanceof`: `TextEncoder` under jsdom returns a
+ * Uint8Array from Node's realm, which fails `instanceof` against jsdom's.
+ */
+function aadText(call: readonly unknown[] | undefined): string {
+  const aad = call?.[2];
+  if (Object.prototype.toString.call(aad) !== '[object Uint8Array]') {
+    throw new Error('encryptDataWithAad was not given a Uint8Array of additional data');
+  }
+  return new TextDecoder().decode(aad as Uint8Array);
+}
+
+/** A decrypted row of `itemType` stored under {@link ITEM_ID}. */
+function storedRow(itemType: ItemType): DecryptedVaultItem {
+  return {
+    id: ITEM_ID,
+    itemType,
+    tags: [],
+    favorite: false,
+    name: 'Old',
+    data: {},
+    createdAt: '2024-01-01T00:00:00Z',
+    updatedAt: '2024-01-01T00:00:00Z',
+    _raw: makeRawItemResponse({ _id: ITEM_ID, itemType }) as never,
+  };
 }
 
 function resetVault(): void {
@@ -161,7 +206,7 @@ function resetVault(): void {
     sortOrder: 'desc' as const,
     filteredItemCount: null,
   });
-  useAuthStore.setState({ vaultKey: null });
+  useAuthStore.setState({ vaultKey: null, user: null });
 }
 
 function makeRawItemResponse(overrides: Record<string, unknown> = {}) {
@@ -487,12 +532,15 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
     vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('deadbeef'.repeat(8));
   });
 
+  // Row fields are sealed through the bound (v2) path, `encryptDataWithAad`, so
+  // that is the call these size checks feed an oversized ciphertext through.
+
   it('createItem rejects when encrypted name exceeds MAX_ENCRYPTED_NAME_LENGTH', async () => {
     const tooLongName = 'n'.repeat(MAX_ENCRYPTED_NAME_LENGTH + 1);
     // Use mockImplementation so each call returns the same oversized name.
     // The first call in createItem encrypts the name, the second the data.
     let callIndex = 0;
-    vi.mocked(cryptoService.encryptData).mockImplementation(() => {
+    vi.mocked(cryptoService.encryptDataWithAad).mockImplementation(() => {
       callIndex += 1;
       // Odd calls → name, even calls → data
       return Promise.resolve(
@@ -519,12 +567,13 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
 
     // API must not be called when pre-flight fails
     expect(createItemApi).not.toHaveBeenCalled();
+    expect(cryptoService.encryptData).not.toHaveBeenCalled();
   });
 
   it('createItem rejects when encrypted data exceeds MAX_ENCRYPTED_DATA_LENGTH', async () => {
     const tooLongData = 'd'.repeat(MAX_ENCRYPTED_DATA_LENGTH + 1);
     let callIndex = 0;
-    vi.mocked(cryptoService.encryptData).mockImplementation(() => {
+    vi.mocked(cryptoService.encryptDataWithAad).mockImplementation(() => {
       callIndex += 1;
       return Promise.resolve(
         callIndex % 2 === 1
@@ -547,16 +596,25 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
     }
 
     expect(createItemApi).not.toHaveBeenCalled();
+    expect(cryptoService.encryptData).not.toHaveBeenCalled();
   });
 
   it('createItem still works when encrypted sizes are within limits', async () => {
-    vi.mocked(cryptoService.encryptData)
-      .mockResolvedValueOnce({ encrypted: 'ok-name', iv: 'iv', tag: 'tag' })
-      .mockResolvedValueOnce({ encrypted: 'ok-data', iv: 'iv', tag: 'tag' });
+    vi.mocked(cryptoService.encryptDataWithAad)
+      .mockResolvedValueOnce({ encrypted: 'ok-name', iv: 'name-iv', tag: 'name-tag' })
+      .mockResolvedValueOnce({ encrypted: 'ok-data', iv: 'data-iv', tag: 'data-tag' });
 
-    vi.mocked(createItemApi).mockResolvedValue({
-      data: { success: true, data: makeRawItemResponse() },
-    } as unknown as Awaited<ReturnType<typeof createItemApi>>);
+    // The server stores the row under the id the request's nonce derives, which
+    // is the id the client sealed both fields to before sending.
+    vi.mocked(createItemApi).mockImplementation(async (body) => {
+      if (body.idNonce === undefined) throw new Error('the create carried no idNonce');
+      return {
+        data: {
+          success: true,
+          data: makeRawItemResponse({ _id: await deriveRowId(USER_ID, body.idNonce) }),
+        },
+      } as unknown as Awaited<ReturnType<typeof createItemApi>>;
+    });
 
     vi.mocked(cryptoService.decryptData)
       .mockResolvedValueOnce('My Login')
@@ -565,70 +623,202 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
     await useVaultStore.getState().createItem('login', 'My Login', { username: 'u' });
 
     expect(createItemApi).toHaveBeenCalledTimes(1);
+    const body = vi.mocked(createItemApi).mock.calls[0]![0];
+    const rowId = await deriveRowId(USER_ID, body.idNonce!);
+    expect(body).toMatchObject({
+      encryptedName: 'ok-name',
+      nameIv: 'v2:name-iv',
+      encryptedData: 'ok-data',
+      dataIv: 'v2:data-iv',
+    });
+    const sealCalls = vi.mocked(cryptoService.encryptDataWithAad).mock.calls;
+    expect(sealCalls).toHaveLength(2);
+    expect(sealCalls[0]![0]).toBe('My Login');
+    expect(sealCalls[0]![1]).toBe(mockVaultKey);
+    expect(aadText(sealCalls[0])).toBe(`hvault/vault-field/v2|item.name|${rowId}`);
+    expect(sealCalls[1]![0]).toBe(JSON.stringify({ username: 'u' }));
+    expect(sealCalls[1]![1]).toBe(mockVaultKey);
+    expect(aadText(sealCalls[1])).toBe(`hvault/vault-field/v2|item.data|login|${rowId}`);
+    // No row field goes through the unbound (v1) seal any more.
+    expect(cryptoService.encryptData).not.toHaveBeenCalled();
     expect(useVaultStore.getState().items).toHaveLength(1);
+    expect(useVaultStore.getState().items[0]!.id).toBe(rowId);
   });
 
   it('updateItem rejects when encrypted name exceeds MAX_ENCRYPTED_NAME_LENGTH', async () => {
+    // The row is in the store, so its stored type is known without a request.
+    useVaultStore.setState({ items: [storedRow('login')] });
     const tooLongName = 'n'.repeat(MAX_ENCRYPTED_NAME_LENGTH + 1);
-    vi.mocked(cryptoService.encryptData)
+    vi.mocked(cryptoService.encryptDataWithAad)
       .mockResolvedValueOnce({ encrypted: tooLongName, iv: 'iv', tag: 'tag' })
       .mockResolvedValueOnce({ encrypted: 'ok', iv: 'iv', tag: 'tag' });
 
     await expect(
-      useVaultStore.getState().updateItem('item-1', 'login', 'x', { username: 'u' }),
+      useVaultStore.getState().updateItem(ITEM_ID, 'login', 'x', { username: 'u' }),
     ).rejects.toThrow(EncryptedFieldTooLargeError);
 
     expect(updateItemApi).not.toHaveBeenCalled();
+    expect(getItemApi).not.toHaveBeenCalled();
   });
 
   it('updateItem rejects when encrypted data exceeds MAX_ENCRYPTED_DATA_LENGTH', async () => {
+    useVaultStore.setState({ items: [storedRow('note')] });
     const tooLongData = 'd'.repeat(MAX_ENCRYPTED_DATA_LENGTH + 1);
-    vi.mocked(cryptoService.encryptData)
+    vi.mocked(cryptoService.encryptDataWithAad)
       .mockResolvedValueOnce({ encrypted: 'name-ok', iv: 'iv', tag: 'tag' })
       .mockResolvedValueOnce({ encrypted: tooLongData, iv: 'iv', tag: 'tag' });
 
     await expect(
-      useVaultStore.getState().updateItem('item-1', 'note', 'n', { content: 'x' }),
+      useVaultStore.getState().updateItem(ITEM_ID, 'note', 'n', { content: 'x' }),
     ).rejects.toThrow(/Item data is too large/);
 
     expect(updateItemApi).not.toHaveBeenCalled();
+    expect(getItemApi).not.toHaveBeenCalled();
   });
 
   it('updateItem succeeds when sizes are within limits', async () => {
     // Pre-populate an existing item so updateItem's password-history lookup
-    // does not throw.
-    useVaultStore.setState({
-      items: [
-        {
-          id: 'item-1',
-          itemType: 'login',
-          tags: [],
-          favorite: false,
-          name: 'Old',
-          data: {},
-          createdAt: '2024-01-01T00:00:00Z',
-          updatedAt: '2024-01-01T00:00:00Z',
-          _raw: makeRawItemResponse({ _id: 'item-1' }) as never,
-        },
-      ],
-    });
+    // and stored-type check both find it.
+    useVaultStore.setState({ items: [storedRow('login')] });
 
-    vi.mocked(cryptoService.encryptData)
-      .mockResolvedValueOnce({ encrypted: 'name', iv: 'iv', tag: 'tag' })
-      .mockResolvedValueOnce({ encrypted: 'data', iv: 'iv', tag: 'tag' });
+    vi.mocked(cryptoService.encryptDataWithAad)
+      .mockResolvedValueOnce({ encrypted: 'name', iv: 'name-iv', tag: 'tag' })
+      .mockResolvedValueOnce({ encrypted: 'data', iv: 'data-iv', tag: 'tag' });
 
     vi.mocked(updateItemApi).mockResolvedValue({
-      data: { success: true, data: makeRawItemResponse({ _id: 'item-1' }) },
+      data: { success: true, data: makeRawItemResponse({ _id: ITEM_ID }) },
     } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
 
     vi.mocked(cryptoService.decryptData)
       .mockResolvedValueOnce('Updated')
       .mockResolvedValueOnce(JSON.stringify({ username: 'u2' }));
 
-    await useVaultStore.getState().updateItem('item-1', 'login', 'Updated', { username: 'u2' });
+    await useVaultStore.getState().updateItem(ITEM_ID, 'login', 'Updated', { username: 'u2' });
 
     expect(updateItemApi).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(updateItemApi).mock.calls[0]![0]).toBe(ITEM_ID);
+    expect(vi.mocked(updateItemApi).mock.calls[0]![1]).toMatchObject({
+      nameIv: 'v2:name-iv',
+      dataIv: 'v2:data-iv',
+    });
+    // An edit binds both fields to the row's OWN id, never to a derived one.
+    const sealCalls = vi.mocked(cryptoService.encryptDataWithAad).mock.calls;
+    expect(aadText(sealCalls[0])).toBe(`hvault/vault-field/v2|item.name|${ITEM_ID}`);
+    expect(aadText(sealCalls[1])).toBe(`hvault/vault-field/v2|item.data|login|${ITEM_ID}`);
+    expect(cryptoService.encryptData).not.toHaveBeenCalled();
+    expect(getItemApi).not.toHaveBeenCalled();
   });
+});
+
+// =========================================================================
+// updateItem — the item type must be the row's stored type
+// =========================================================================
+
+describe('updateItem refuses an item type other than the row’s stored type', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetVault();
+    setupUnlockedVault();
+    vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('deadbeef'.repeat(8));
+    vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
+      encrypted: 'sealed',
+      iv: 'sealed-iv',
+      tag: 'sealed-tag',
+    });
+  });
+
+  /** The refusal leaves nothing behind: no request, no seal of any kind. */
+  function expectNothingSealedOrSent(): void {
+    expect(updateItemApi).not.toHaveBeenCalled();
+    expect(cryptoService.encryptDataWithAad).not.toHaveBeenCalled();
+    expect(cryptoService.encryptData).not.toHaveBeenCalled();
+    expect(cryptoService.generateSearchHash).not.toHaveBeenCalled();
+  }
+
+  function getItemResponse(data: unknown, success = true): Awaited<ReturnType<typeof getItemApi>> {
+    return { data: { success, data } } as unknown as Awaited<ReturnType<typeof getItemApi>>;
+  }
+
+  it('refuses when the row found in `items` is stored as another type', async () => {
+    useVaultStore.setState({ items: [storedRow('login')] });
+
+    await expect(
+      useVaultStore.getState().updateItem(ITEM_ID, 'note', 'n', { content: 'x' }),
+    ).rejects.toThrow('This entry is stored as a login, so it cannot be saved as a note.');
+
+    expectNothingSealedOrSent();
+    // The store answered, so the server was not asked.
+    expect(getItemApi).not.toHaveBeenCalled();
+    expect(useVaultStore.getState().items[0]!.itemType).toBe('login');
+  });
+
+  it('refuses when the row found only in `trashItems` is stored as another type', async () => {
+    useVaultStore.setState({ items: [], trashItems: [storedRow('note')] });
+
+    await expect(
+      useVaultStore.getState().updateItem(ITEM_ID, 'login', 'n', { username: 'u' }),
+    ).rejects.toThrow('This entry is stored as a note, so it cannot be saved as a login.');
+
+    expectNothingSealedOrSent();
+    expect(getItemApi).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the row, found only via getItemApi, is stored as another type', async () => {
+    vi.mocked(getItemApi).mockResolvedValue(
+      getItemResponse(makeRawItemResponse({ _id: ITEM_ID, itemType: 'card' })),
+    );
+
+    await expect(
+      useVaultStore.getState().updateItem(ITEM_ID, 'login', 'n', { username: 'u' }),
+    ).rejects.toThrow('This entry is stored as a card, so it cannot be saved as a login.');
+
+    expect(getItemApi).toHaveBeenCalledTimes(1);
+    expect(getItemApi).toHaveBeenCalledWith(ITEM_ID);
+    expectNothingSealedOrSent();
+  });
+
+  it('refuses when the server cannot say what type the row is stored as', async () => {
+    vi.mocked(getItemApi).mockResolvedValue(getItemResponse(undefined, false));
+
+    await expect(
+      useVaultStore.getState().updateItem(ITEM_ID, 'login', 'n', { username: 'u' }),
+    ).rejects.toThrow('This entry is stored as an unknown type, so it cannot be saved as a login.');
+
+    expect(getItemApi).toHaveBeenCalledTimes(1);
+    expectNothingSealedOrSent();
+  });
+
+  it.each([
+    ['items', 'login', { username: 'u' }],
+    ['trashItems', 'note', { content: 'x' }],
+    ['getItemApi', 'login', { username: 'u' }],
+  ] as const)(
+    'proceeds when the type agrees with the row found via %s',
+    async (source, itemType, data) => {
+      if (source === 'items') useVaultStore.setState({ items: [storedRow(itemType)] });
+      if (source === 'trashItems') useVaultStore.setState({ trashItems: [storedRow(itemType)] });
+      if (source === 'getItemApi') {
+        vi.mocked(getItemApi).mockResolvedValue(
+          getItemResponse(makeRawItemResponse({ _id: ITEM_ID, itemType })),
+        );
+      }
+      vi.mocked(updateItemApi).mockResolvedValue({
+        data: { success: true, data: makeRawItemResponse({ _id: ITEM_ID, itemType }) },
+      } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
+      vi.mocked(cryptoService.decryptData)
+        .mockResolvedValueOnce('n')
+        .mockResolvedValueOnce(JSON.stringify(data));
+
+      await useVaultStore.getState().updateItem(ITEM_ID, itemType, 'n', { ...data });
+
+      expect(getItemApi).toHaveBeenCalledTimes(source === 'getItemApi' ? 1 : 0);
+      expect(updateItemApi).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(updateItemApi).mock.calls[0]![0]).toBe(ITEM_ID);
+      const sealCalls = vi.mocked(cryptoService.encryptDataWithAad).mock.calls;
+      expect(sealCalls).toHaveLength(2);
+      expect(aadText(sealCalls[1])).toBe(`hvault/vault-field/v2|item.data|${itemType}|${ITEM_ID}`);
+    },
+  );
 });
 
 // =========================================================================

@@ -63,6 +63,7 @@
  * genuinely atomic — so testing one and claiming the other would be a guess
  * about the deployment that matters most.
  */
+import { randomUUID } from 'node:crypto';
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcryptjs';
@@ -79,8 +80,10 @@ import { expectKilled, reapOrphanedTransactions, runCrashProbe } from './crashPr
 import {
   generateKey,
   open,
+  openBound,
   openText,
   seal,
+  sealBound,
   sealText,
   searchHashOf,
   type Bytes,
@@ -233,6 +236,69 @@ async function rotationBody(account: CrashAccount): Promise<Record<string, unkno
     newVaultKeyIv: account.newWrapped.iv,
     newVaultKeyTag: account.newWrapped.tag,
   };
+}
+
+/** The additional data a v2 item field is bound to, spelled from the format. */
+const itemAad = (role: 'name' | 'data', id: string): string =>
+  role === 'name'
+    ? `hvault/vault-field/v2|item.name|${id}`
+    : `hvault/vault-field/v2|item.data|login|${id}`;
+
+/**
+ * A RE-SEAL payload: every item sealed again under the account's OWN key, each
+ * field bound to its row (format v2), with the stored wrapper named as the key.
+ */
+async function resealBody(account: CrashAccount): Promise<Record<string, unknown>> {
+  const items = [];
+  for (const [index, id] of account.itemIds.entries()) {
+    const data = await sealBound(PLAINTEXTS[index]!, account.oldKey, itemAad('data', id));
+    const name = await sealBound(NAMES[index]!, account.oldKey, itemAad('name', id));
+    items.push({
+      id,
+      encryptedData: data.encrypted,
+      dataIv: data.iv,
+      dataTag: data.tag,
+      encryptedName: name.encrypted,
+      nameIv: name.iv,
+      nameTag: name.tag,
+    });
+  }
+  return {
+    authHash: RAW_AUTH_HASH,
+    items,
+    folders: [],
+    reseal: true,
+    vaultFieldFormat: 2,
+    vaultKeyVersion: 0,
+    idempotencyKey: randomUUID(),
+    newEncryptedVaultKey: account.oldWrapped.encrypted,
+    newVaultKeyIv: account.oldWrapped.iv,
+    newVaultKeyTag: account.oldWrapped.tag,
+  };
+}
+
+/**
+ * The seeded items' data, each opened under the OLD key in whichever format it is
+ * stored, with the format beside it: a re-seal's whole claim is that a row is
+ * readable under the unchanged key whether or not it has been reached yet.
+ */
+async function openSeededEitherFormat(
+  account: CrashAccount,
+): Promise<{ plaintext: string; bound: boolean }[]> {
+  const rows = await VaultItem.find({ _id: { $in: account.itemIds } }).lean();
+  expect(rows).toHaveLength(account.itemIds.length);
+  const opened = [];
+  for (const row of rows) {
+    const sealed = sealedOf(row, 'data');
+    const bound = sealed.iv.startsWith('v2:');
+    opened.push({
+      plaintext: bound
+        ? await openBound(sealed, account.oldKey, itemAad('data', String(row._id)))
+        : await openText(sealed, account.oldKey),
+      bound,
+    });
+  }
+  return opened.sort((a, b) => a.plaintext.localeCompare(b.plaintext));
 }
 
 /** An import payload of `count` fresh rows, sealed under the account's key. */
@@ -519,6 +585,64 @@ describe('Crash consistency — sequential path (standalone mongod)', () => {
     expect(await openSeeded(account, account.oldKey)).toEqual([...PLAINTEXTS].sort());
   }, 90_000);
 
+  it('leaves a crashed RE-SEAL readable under the unchanged key, with nothing to finish', async () => {
+    const outcome = await runCrashProbe({
+      uri: getActiveMongoUri(),
+      scenario: 'reseal-after-first-item-write',
+      path: '/api/v1/vault/items/bulk-reencrypt',
+      token: account.token,
+      body: await resealBody(account),
+    });
+    expectKilled(outcome, 'reseal-after-first-item-write');
+
+    // The fence is up (the process died inside it), and NOTHING about the key
+    // moved: not the wrapper, not the generation, and no pending wrapper, since a
+    // re-seal has no new key whose loss a crash could cause.
+    const crashed = await User.findById(account.userId).lean();
+    expect(crashed!.rotationInProgress).toBe(true);
+    expect(crashed!.encryptedVaultKey).toBe(account.oldWrapped.encrypted);
+    expect(crashed!.vaultKeyVersion ?? 0).toBe(0);
+    expect(crashed!.pendingEncryptedVaultKey).toBeUndefined();
+
+    // One row was reached and one was not, and BOTH open under the key the
+    // account still stores: the half-done re-seal lost nothing.
+    const midway = await openSeededEitherFormat(account);
+    expect(midway.map((row) => row.plaintext)).toEqual([...PLAINTEXTS].sort());
+    expect(midway.filter((row) => row.bound)).toHaveLength(1);
+
+    // Recovery is the ordinary one: the fence comes down once the dead process's
+    // lock has expired, and it reports that nothing is outstanding.
+    await expireLock(`vault-rotation:${account.userId}`);
+    const email = crashed!.email;
+    const recovered = await post('/api/v1/auth/login', account.token, {
+      email,
+      authHash: RAW_AUTH_HASH,
+    });
+    expect(recovered.status).toBe(200);
+    expect((await User.findById(account.userId).lean())!.rotationInProgress).toBe(false);
+    const audits = await AuditLog.find({
+      userId: account.userId,
+      action: 'rotation_recovery',
+    }).lean();
+    expect(audits).toHaveLength(1);
+    expect((audits[0]!.metadata as Record<string, unknown>)['interruptedRotation']).toBe(false);
+
+    // And the re-seal simply runs again, to completion, still under the same key.
+    const retry = await post(
+      '/api/v1/vault/items/bulk-reencrypt',
+      account.token,
+      await resealBody(account),
+    );
+    expect(retry.status, JSON.stringify(retry.body)).toBe(200);
+    const done = await openSeededEitherFormat(account);
+    expect(done.map((row) => row.plaintext)).toEqual([...PLAINTEXTS].sort());
+    expect(done.every((row) => row.bound)).toBe(true);
+    const after = await User.findById(account.userId).lean();
+    expect(after!.encryptedVaultKey).toBe(account.oldWrapped.encrypted);
+    expect(after!.vaultKeyVersion ?? 0).toBe(0);
+    expect(after!.rotationInProgress).toBe(false);
+  }, 90_000);
+
   it('writes no row at all when the crash lands before the import’s first insert', async () => {
     const body = await importBody(account, 5);
     const outcome = await runCrashProbe({
@@ -566,7 +690,12 @@ describe('Crash consistency — sequential path (standalone mongod)', () => {
     await expireLock(exclusionLockName);
     const retry = await post('/api/v1/tools/import', account.token, body);
     expect(retry.status).toBe(201);
-    expect(retry.body.data).toEqual({ insertedCount: 5, updatedCount: 0 });
+    expect(retry.body.data).toEqual({
+      insertedCount: 5,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    expect(retry.body.data.insertedIds).toHaveLength(5);
     expect(await VaultItem.countDocuments({ userId: account.userId })).toBe(PLAINTEXTS.length + 5);
   }, 90_000);
 
@@ -734,7 +863,12 @@ describe('Crash consistency — transactional path (replica set)', () => {
     await expireLock(`vault-rotation:${account.userId}`);
     const retry = await post('/api/v1/tools/import', account.token, body);
     expect(retry.status).toBe(201);
-    expect(retry.body.data).toEqual({ insertedCount: 5, updatedCount: 0 });
+    expect(retry.body.data).toEqual({
+      insertedCount: 5,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    expect(retry.body.data.insertedIds).toHaveLength(5);
     expect(await VaultItem.countDocuments({ userId: account.userId })).toBe(PLAINTEXTS.length + 5);
   }, 120_000);
 });

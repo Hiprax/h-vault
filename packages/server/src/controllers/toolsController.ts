@@ -21,6 +21,7 @@ import {
   sendStaleVaultKey,
   vaultImportLockName,
 } from '../utils/controllerHelpers.js';
+import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils/rowIds.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
@@ -743,13 +744,21 @@ async function executeImportOperations(
   // Every insert is mapped through the FIXED `ALLOWED_ITEM_FIELDS` projection,
   // never a spread, so an injected or prototype-polluting key on an import row
   // is inert even if the schema's unknown-key stripping is ever relaxed.
-  const insertDocs = inserts.map((item) => {
+  //
+  // The derived `_id` is spread in by name, past that projection, for the reason
+  // `createdRowId` gives: an insert whose fields were sealed to the id its nonce
+  // derives must be stored under exactly that id.
+  const insertDocs: Record<string, unknown>[] = [];
+  for (const item of inserts) {
     const doc = pickAllowedFields(item, ALLOWED_ITEM_FIELDS);
     if (typeof doc.folderId === 'string' && !ownedFolderIds.has(doc.folderId)) {
       delete doc.folderId;
     }
-    return { ...doc, userId };
-  });
+    insertDocs.push({ ...doc, ...(await createdRowId(userId, item.idNonce)), userId });
+  }
+  const derivedIds = insertDocs
+    .map((doc) => doc._id)
+    .filter((id): id is string => typeof id === 'string');
 
   // 3 ── Update-target ownership. The lookup is scoped to LIVE items of this
   // user so it mirrors the client resolver's own matching scope (non-trashed,
@@ -801,6 +810,7 @@ async function executeImportOperations(
 
   let insertedCount = 0;
   let updatedCount = 0;
+  let insertedIds: string[] = [];
   let rotationLockId: string | null = null;
 
   try {
@@ -836,6 +846,16 @@ async function executeImportOperations(
     const existingItemCount = await VaultItem.countDocuments({ userId });
     if (existingItemCount + insertDocs.length > MAX_ITEMS_PER_USER) {
       throw httpErrors.badRequest(importCapExceededMessage(existingItemCount, insertDocs.length));
+    }
+
+    // A derived id that is already stored, refused BEFORE the first insert. The
+    // standalone path has no transaction, and an ordered `insertMany` that meets a
+    // duplicate `_id` keeps every row ahead of it, so leaving this to the
+    // duplicate-key error would half-apply a batch. Under the import lock, so no
+    // second import can store one of these ids in between; a create from another
+    // endpoint still can, and that hairline is caught at the insert below.
+    if (derivedIds.length > 0 && (await VaultItem.exists({ _id: { $in: derivedIds } }))) {
+      throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
     }
 
     const execute = async (session?: mongoose.ClientSession): Promise<void> => {
@@ -874,10 +894,20 @@ async function executeImportOperations(
       // transient error, and the aborted attempt's rows no longer exist.
       insertedCount = 0;
       updatedCount = 0;
+      insertedIds = [];
 
       if (insertDocs.length > 0) {
-        const created = await VaultItem.insertMany(insertDocs, sessionOpt);
+        let created;
+        try {
+          created = await VaultItem.insertMany(insertDocs, sessionOpt);
+        } catch (err: unknown) {
+          if (isDuplicateIdError(err)) throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
+          throw err;
+        }
         insertedCount = created.length;
+        // In insertion order, which `insertMany` preserves: the client checks each
+        // against the id it sealed that row to.
+        insertedIds = created.map((doc) => String(doc._id));
       }
 
       for (const update of updates) {
@@ -952,7 +982,7 @@ async function executeImportOperations(
 
   res.status(201).json({
     success: true,
-    data: { insertedCount, updatedCount },
+    data: { insertedCount, updatedCount, insertedIds },
     message: `${String(insertedCount)} items imported, ${String(updatedCount)} items updated`,
   });
 }

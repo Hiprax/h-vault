@@ -390,8 +390,10 @@ export const DEFECTS = {
     // a fixed-IV implementation round-trips correctly, rejects a wrong key, and
     // rejects a flipped tag. Only the freshness property notices.
     //
-    // The pattern is byte-exact against today's `encryptData`. A rewrite of that
-    // line turns `String.replace` into a no-op, which fails in the SAFE direction:
+    // The pattern is byte-exact against today's `sealAesGcm`, the one seal both
+    // `encryptData` (format v1) and `encryptDataWithAad` (format v2) run, so the
+    // planted IV reaches every vault field whichever format writes it. A rewrite
+    // of that line turns `String.replace` into a no-op, which fails in the SAFE direction:
     // the gate then stays green, the harness reports `unproven`, and the run exits
     // non-zero — provided the evidence predicate below cannot be satisfied by a
     // green report, which is why it matches the ASSERTION MESSAGE rather than a
@@ -400,14 +402,10 @@ export const DEFECTS = {
     mutate: {
       'packages/client/src/services/crypto/cryptoService.ts': (text) =>
         text.replace(
-          `  async encryptData(
-    data: string,
-    vaultKey: CryptoKey,
+          `    additionalData: Uint8Array<ArrayBuffer> | undefined,
   ): Promise<{ encrypted: string; iv: string; tag: string }> {
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));`,
-          `  async encryptData(
-    data: string,
-    vaultKey: CryptoKey,
+          `    additionalData: Uint8Array<ArrayBuffer> | undefined,
   ): Promise<{ encrypted: string; iv: string; tag: string }> {
     const iv = new Uint8Array(IV_BYTES);`,
         ),
@@ -672,8 +670,8 @@ export const DEFECTS = {
     mutate: {
       'packages/server/src/controllers/toolsController.ts': (text) =>
         text.replace(
-          'const created = await VaultItem.insertMany(insertDocs, sessionOpt);',
-          'const created = await VaultItem.insertMany(insertDocs);',
+          'created = await VaultItem.insertMany(insertDocs, sessionOpt);',
+          'created = await VaultItem.insertMany(insertDocs);',
         ),
     },
     // The assertion's own message, which a PASSING run cannot contain — the trap

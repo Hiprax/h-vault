@@ -62,6 +62,7 @@ import {
   AUDIT_LOG_MAX_LIMIT,
   BACKUP_HISTORY_PAGE_LIMIT,
   BACKUP_HISTORY_MAX_LIMIT,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
 } from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
@@ -3491,19 +3492,23 @@ describe('importSchema operations contract', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects an over-length encryptedPassword in passwordHistory', () => {
-    const result = importSchema.safeParse({
-      format: 'json',
-      operations: {
-        updates: [
-          {
-            ...validUpdate,
-            passwordHistory: [{ ...validHistoryEntry, encryptedPassword: 'x'.repeat(5_001) }],
-          },
-        ],
-      },
-    });
-    expect(result.success).toBe(false);
+  it('rejects an over-length encryptedPassword in passwordHistory, one past the named bound', () => {
+    // Pinned to the bound, never a literal: the bound was raised to hold any storable
+    // login password, and a literal left below it stopped exercising the refusal.
+    const withHistory = (length: number) =>
+      importSchema.safeParse({
+        format: 'json',
+        operations: {
+          updates: [
+            {
+              ...validUpdate,
+              passwordHistory: [{ ...validHistoryEntry, encryptedPassword: 'x'.repeat(length) }],
+            },
+          ],
+        },
+      });
+    expect(withHistory(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH + 1).success).toBe(false);
+    expect(withHistory(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH).success).toBe(true);
   });
 
   it('strips unknown keys from operation items (.strip semantics preserved)', () => {

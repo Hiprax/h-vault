@@ -25,6 +25,7 @@ import {
   vaultKeyVersionFilter,
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
+import { carriesBoundField } from '../utils/vaultFieldFormat.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import { collectDocumentSummary } from '../utils/documentSummary.js';
 import { hasCycle } from '../utils/folderGraph.js';
@@ -804,6 +805,19 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
 
   const backupItems = backupPayload.items ?? [];
   const backupFolders = backupPayload.folders ?? [];
+
+  // A field sealed to its row (format v2) never arrives here from a client that
+  // understands it: that client re-seals every such field before sending, because
+  // a row restored under a FRESH id could never open a field bound to its old one.
+  // One that does arrive came from a client that could not open it and sent it on
+  // unchanged, and on the fresh-id paths below it would be stored unreadable.
+  // Refused before anything is counted or written. See `carriesBoundField`.
+  if (carriesBoundField(backupItems, backupFolders)) {
+    throw httpErrors.conflict(
+      'Reload the app, then restore again: this backup holds entries in a newer format than ' +
+        'this page understands, and restoring them from it would lose them.',
+    );
+  }
 
   const totalEntries = backupItems.length + backupFolders.length;
   if (totalEntries > MAX_IMPORT_ITEMS) {

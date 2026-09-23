@@ -13,6 +13,7 @@
 export type CrashScenario =
   | 'rotation-before-first-item-write'
   | 'rotation-before-vault-key-update'
+  | 'reseal-after-first-item-write'
   | 'import-before-insert'
   | 'import-after-insert-before-commit'
   | 'import-after-commit'

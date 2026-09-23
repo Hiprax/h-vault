@@ -221,6 +221,9 @@ const LOGGABLE_BODY_KEYS = new Map<string, string>([
   // An opaque retry token scoped to one account's rotation: replaying it can only
   // make that account's own retry a no-op, so it authenticates nothing.
   ['idempotencyKey', METADATA],
+  // The input a created row's id is derived from, together with the account's own
+  // id: it names a row, and the id it derives is returned in the response anyway.
+  ['idNonce', METADATA],
   ['ids', METADATA],
   ['inserts', METADATA],
   ['itemType', METADATA],
@@ -257,6 +260,8 @@ const LOGGABLE_BODY_KEYS = new Map<string, string>([
   ['passwordHistory', METADATA],
   ['portableFormat', METADATA],
   ['rememberMe', METADATA],
+  // A rotation's re-seal flag: rewrite under the same key.
+  ['reseal', METADATA],
   ['scheduleHour', METADATA],
   // An HMAC of the item NAME, stored server-side for duplicate detection; it reveals
   // nothing the stored row does not.
@@ -270,6 +275,8 @@ const LOGGABLE_BODY_KEYS = new Map<string, string>([
   ['updates', METADATA],
   ['uppercase', METADATA],
   ['userAgent', PERSONAL],
+  // The vault-field format a rotating client understands.
+  ['vaultFieldFormat', METADATA],
   ['vaultKeyIv', PUBLIC_PARAMETER],
   ['vaultKeyTag', PUBLIC_PARAMETER],
   ['vaultKeyVersion', METADATA],

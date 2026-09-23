@@ -558,7 +558,17 @@ describe('vault + tools controller edge branches', () => {
         })
         .expect(201);
 
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+
+        updatedCount: 0,
+
+        insertedIds: expect.any(Array),
+      });
+
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+
+      expect(res.body.data.insertedIds).toHaveLength(1);
 
       const persisted = await VaultItem.findOne({ encryptedName: 'projected' }).lean();
       expect(persisted).not.toBeNull();

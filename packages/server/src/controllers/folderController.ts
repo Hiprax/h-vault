@@ -13,6 +13,7 @@ import {
   pickAllowedFields,
   resolveVaultKeyVersion,
 } from '../utils/controllerHelpers.js';
+import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils/rowIds.js';
 import { getAncestorChain, hasCycle } from '../utils/folderGraph.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import {
@@ -160,13 +161,21 @@ export const createFolder = catchAsync(async (req: Request, res: Response): Prom
 
   const filteredBody = pickAllowedFields(body, ALLOWED_CREATE_FOLDER_FIELDS);
 
+  // Spread in by name, past the allowlist, for the reason `createdRowId` gives.
+  const rowId = await createdRowId(userId, body.idNonce);
+
   let folder;
   try {
     folder = await Folder.create({
       ...filteredBody,
+      ...rowId,
       userId,
     });
   } catch (err: unknown) {
+    // Two unique indexes can refuse this insert, and they mean different things:
+    // the derived `_id` (a retried create) and `(userId, searchHash)` (a name this
+    // account already uses). The id is told apart by the index it violated.
+    if (isDuplicateIdError(err)) throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
     if (err instanceof Error && 'code' in err && (err as { code?: number }).code === 11000) {
       throw httpErrors.conflict('A folder with this name already exists');
     }

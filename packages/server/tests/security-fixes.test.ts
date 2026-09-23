@@ -92,7 +92,13 @@ describe('Import operations: server-side execution without matching', () => {
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 1,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(1);
     expect(await VaultItem.countDocuments({ userId: user.id })).toBe(2);
   });
 
@@ -119,7 +125,13 @@ describe('Import operations: server-side execution without matching', () => {
     expect(res.status).toBe(201);
     // 'overwrite' overwrote nothing: the existing row is untouched and the
     // incoming one was added beside it.
-    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 1,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(1);
     const untouched = await VaultItem.findById(String(existing._id)).lean();
     expect(untouched).not.toBeNull();
     expect(untouched!.encryptedData).toBe(sampleVaultItem().encryptedData);
@@ -168,7 +180,7 @@ describe('Import operations: server-side execution without matching', () => {
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
 
     const persisted = await VaultItem.findById(String(existing._id)).lean();
     expect(persisted).not.toBeNull();

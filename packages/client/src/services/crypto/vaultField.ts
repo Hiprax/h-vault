@@ -57,11 +57,26 @@
  *     have to recover from a file, and a row that fails to decrypt forever when
  *     they recover the wrong one.
  *
- * This module is the ONE definition of the byte layout. Nothing here writes v2:
- * this release reads both formats and keeps writing v1.
+ * This module is the ONE definition of the byte layout, and the one place a
+ * vault field is sealed in format v2 (`encryptVaultField`). Every ordinary write
+ * goes through it: creating, editing and renaming an item or a folder, the
+ * previous password an edit retains, an import, and a rotation or re-seal. Two
+ * writers stay on v1 by design: a RESTORE, whose rows the server stores under ids
+ * it mints itself, so no id is known to seal to (they are bound by the next
+ * re-seal); and the health-results cache, which is a local blob and not a row.
+ *
+ * A row the client CREATES has no id until the server stores it, so a create
+ * derives one first (`newBoundRow`): the server stores the row under the id the
+ * same nonce derives on its side, and the fields are sealed to it beforehand.
  */
 
-import { ITEM_TYPES, VAULT_FIELD_AAD_PREFIX, VAULT_FIELD_V2_IV_MARKER } from '@hvault/shared';
+import {
+  ITEM_TYPES,
+  VAULT_FIELD_AAD_PREFIX,
+  VAULT_FIELD_V2_IV_MARKER,
+  deriveRowId,
+  generateRowIdNonce,
+} from '@hvault/shared';
 import type { ItemType, VaultFieldRole } from '@hvault/shared';
 import { cryptoService } from './cryptoService';
 
@@ -153,4 +168,65 @@ export async function decryptVaultField(
     vaultKey,
     additionalData,
   );
+}
+
+/**
+ * Seal one vault field in format v2: bound to its binding, marked on its IV.
+ *
+ * The ONE writer of a bound field, so the layout and the marker cannot drift
+ * apart: a field sealed with additional data but left unmarked would be opened as
+ * v1 and fail for ever, and a marked field sealed without it would be refused.
+ * The binding is built BEFORE anything is encrypted, so a row id or item type that
+ * cannot be bound throws here rather than producing ciphertext nothing can open.
+ */
+export async function encryptVaultField(
+  plaintext: string,
+  binding: VaultFieldBinding,
+  vaultKey: CryptoKey,
+): Promise<VaultFieldCiphertext> {
+  const additionalData = vaultFieldAad(binding);
+  const sealed = await cryptoService.encryptDataWithAad(plaintext, vaultKey, additionalData);
+  return {
+    encrypted: sealed.encrypted,
+    iv: `${VAULT_FIELD_V2_IV_MARKER}${sealed.iv}`,
+    tag: sealed.tag,
+  };
+}
+
+/** A row about to be created: the nonce to send, and the id it will be stored under. */
+export interface NewBoundRow {
+  readonly idNonce: string;
+  readonly rowId: string;
+}
+
+/**
+ * The identity of a row this client is about to create, known before it exists.
+ *
+ * The server derives the same id from the same nonce and the caller's own user id
+ * (`deriveRowId`, the ONE definition, shared by both), so the fields sealed to
+ * `rowId` here are the fields of the row stored there. `userId` is this session's
+ * own; a create made with any other would be stored under an id its fields were
+ * not sealed to, which is why the caller checks the id the server answers with.
+ */
+export async function newBoundRow(userId: string): Promise<NewBoundRow> {
+  const idNonce = generateRowIdNonce();
+  return { idNonce, rowId: await deriveRowId(userId, idNonce) };
+}
+
+/**
+ * Refuses a create the server stored under an id other than the one its fields
+ * were sealed to.
+ *
+ * Unreachable against a server that derives ids, which is the only kind this
+ * client is shipped with; it exists for a server that does not (an older one,
+ * after a downgrade), which would store the row under an id of its own and leave
+ * every field of it unreadable. There is no quiet recovery from that, so it is
+ * reported, loudly, rather than shown as a row that "failed to decrypt" later.
+ */
+export function assertStoredUnder(expectedRowId: string, storedRowId: string): void {
+  if (storedRowId.toLowerCase() !== expectedRowId) {
+    throw new Error(
+      'The server stored this entry under an unexpected id, so its encrypted fields cannot be read back. Reload the app and check the server version.',
+    );
+  }
 }
