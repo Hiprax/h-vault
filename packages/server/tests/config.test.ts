@@ -93,9 +93,14 @@ describe('Server Config Validation', () => {
     });
 
     it('falls back to the working directory .env, named explicitly, with the same pins', async () => {
+      // The negative below means something only while the two paths differ, so
+      // the working directory is PINNED to the package directory rather than
+      // inherited. Inherited, it depended on how the suite was launched: `npm
+      // test -w` starts it in the package, but the mutation runner starts its
+      // workers at the root of its sandbox, where the fallback IS the root .env
+      // and this precondition failed the whole dry run.
+      vi.spyOn(process, 'cwd').mockReturnValue(path.join(repoRoot, 'packages', 'server'));
       const { rootEnvPath, config } = await loadWithRootEnv(false);
-      // The negative below means something only while the two paths differ,
-      // which holds because the suite runs from the package directory.
       expect(path.resolve(process.cwd(), '.env')).not.toBe(rootEnvPath);
 
       expect(config).toHaveBeenCalledTimes(1);

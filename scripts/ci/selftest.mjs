@@ -252,12 +252,20 @@ function prepareWorkspace() {
   // `test:smoke`, which runs the emitted JavaScript rather than the sources: a
   // workspace without them makes that gate exit "no built artifact", which is a
   // non-zero exit that has nothing to do with the planted defect — and a case
-  // that cannot be attributed proves nothing. All three are gitignored, so the
+  // that cannot be attributed proves nothing. All four are gitignored, so the
   // `git ls-files` enumeration above never sees them.
+  //
+  // `packages/client/dist-sandbox` is the fourth because the isolated render
+  // document is emitted OUTSIDE `dist/`, so that no static root can serve it
+  // without its per-response policy. Both `test:smoke` and `audit:bundle` refuse
+  // to run without it, and while it was missing from this list both cases failed
+  // in their first step with "missing — build the client first", reported as
+  // unproven: two gates whose planted defects were never reached.
   for (const rel of [
     join('packages', 'shared', 'dist'),
     join('packages', 'server', 'dist'),
     join('packages', 'client', 'dist'),
+    join('packages', 'client', 'dist-sandbox'),
   ]) {
     const from = join(ROOT, rel);
     if (existsSync(from)) cpSync(from, join(dir, rel), { recursive: true });

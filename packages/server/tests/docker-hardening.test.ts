@@ -1843,6 +1843,48 @@ describe('Docker deployment', () => {
       );
     });
 
+    it('ships no TypeScript compiler in the one-shot bootstrap image', () => {
+      // The stage derives from `build-server`, so it inherits every dev
+      // dependency, and since the build moved to TypeScript 7 that includes a
+      // NATIVE compiler: a Go binary whose embedded standard library the image
+      // scan reported as carrying fixable HIGH findings. Nothing in the container
+      // runs it (`tsx` transpiles through esbuild), so the stage deletes it, the
+      // TypeScript 6 compatibility package and their `.bin` links in the same
+      // layer as npm. The scan alone would not hold that line: it goes red only
+      // while the compiler happens to embed a Go release with an open advisory,
+      // so a revert would pass silently the day upstream ships a patched build.
+      const start = dockerfile.indexOf('AS bootstrap\n');
+      expect(start).toBeGreaterThan(-1);
+      const stage = dockerfile.slice(start, dockerfile.indexOf('\nFROM ', start + 1));
+      // Comments stripped for the reason given in the test above, then each
+      // backslash continuation folded so one RUN reads as one line.
+      const directives = stage
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n')
+        .replace(/\\\n\s*/g, ' ');
+      const removal = directives
+        .split('\n')
+        .find((line) => line.startsWith('RUN rm -rf /usr/local/lib/node_modules/npm'));
+      expect(removal, 'the bootstrap stage lost its removal RUN').toBeDefined();
+      const removed = new Set((removal as string).split(/\s+/).slice(3));
+      for (const path of [
+        '/app/node_modules/@typescript',
+        '/app/node_modules/typescript',
+        '/app/node_modules/.bin/tsc',
+        '/app/node_modules/.bin/tsc6',
+        '/app/node_modules/.bin/tsserver',
+      ]) {
+        expect(removed.has(path), `bootstrap must remove ${path}`).toBe(true);
+      }
+      // And nothing after the removal brings a compiler back in or runs one.
+      const afterRemoval = directives.slice(
+        directives.indexOf(removal as string) + (removal as string).length,
+      );
+      expect(afterRemoval).not.toMatch(/\bCOPY\b[^\n]*node_modules/);
+      expect(afterRemoval).not.toMatch(/\btsc\b/);
+    });
+
     it('pins the node base image to an explicit Alpine minor, not the floating tag', () => {
       // The floating `node:24-alpine` tag rolled onto Alpine 3.24, whose musl
       // userspace SIGSEGVs npm at process launch under the WSL2 kernel used for

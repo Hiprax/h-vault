@@ -32,7 +32,8 @@
 # `COPY . .`) and, since type-checking became incremental, `tsbuildinfo/`. That
 # last one matters for correctness, not size: it records the state of ONE machine's
 # tree, and an incremental tsc that trusts it does not check whether the outputs it
-# describes exist — so a host copy sneaking in could leave a stage's build a silent
+# describes exist (measured on TypeScript 6.0.3 and again on the native 7.0.2
+# compiler) — so a host copy sneaking in could leave a stage's build a silent
 # no-op. The rule above already excludes those files by name; this one keeps the
 # directory itself out of the context.
 **/.cache

@@ -219,7 +219,20 @@ ENV NODE_ENV=production
 # cwd = /app/packages/server; the WORKDIR below supplies that cwd, which is
 # load-bearing twice over — the script's own relative path, and @hiprax/logger's
 # eager `<cwd>/logs` mkdir described below.
-RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+#
+# THIS IMAGE SHIPS NO TYPESCRIPT COMPILER EITHER, for the same reason. It inherits
+# every dev dependency from `build-server`, and since the build moved to
+# TypeScript 7 that includes a NATIVE compiler (`@typescript/typescript-linux-x64`,
+# a Go binary) whose embedded Go standard library the image scan reports as
+# carrying fixable HIGH findings. Nothing here runs it: `tsx` transpiles through
+# esbuild and never loads the `typescript` package, and the compile already
+# happened in the stage this one derives from. So `@typescript/*`, the
+# `typescript` compatibility package and their three `.bin` links are removed in
+# the same layer as npm, and the image scan judges what the container can
+# actually execute.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+      /app/node_modules/@typescript /app/node_modules/typescript \
+      /app/node_modules/.bin/tsc /app/node_modules/.bin/tsc6 /app/node_modules/.bin/tsserver
 
 # The log directory MUST exist and be owned by `node` before the drop to that user.
 # This is the difference between a stack that comes up on a fresh clone and one

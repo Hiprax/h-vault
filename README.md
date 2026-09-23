@@ -477,7 +477,7 @@ the stored passwords the vault-health check grades.
 
 **Backend**
 
-- Node.js 24 · TypeScript 6 (strict)
+- Node.js 24 · TypeScript 7 (strict)
 - Express 5
 - MongoDB 7+ · Mongoose 9
 - Passport JWT (access + refresh rotation)
@@ -491,7 +491,7 @@ the stored passwords the vault-health check grades.
 **Frontend**
 
 - React 19 · Vite 8 (Rolldown)
-- TypeScript 6 (strict)
+- TypeScript 7 (strict)
 - Zustand 5 (auth · vault · ui)
 - React Router 8, lazy-loaded
 - Tailwind CSS 4 · shadcn/ui-inspired
@@ -1387,8 +1387,8 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Server** | 189   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
-| **Client** | 174   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
+| **Server** | 190   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
+| **Client** | 175   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
 | **Shared** | 13    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
 | **E2E**    | 22    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
 

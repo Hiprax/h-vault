@@ -60,8 +60,17 @@ function run(args, label) {
   return result.status ?? 1;
 }
 
-// 1) Type-check + project references. Pure JS (no native addon) — never retried.
-const tscStatus = run([binOf('typescript', 'bin/tsc'), '-b'], 'tsc -b');
+// 1) Type-check + project references — never retried: the retry below answers a
+// measured Rolldown crash, and no such crash has been observed from tsc.
+//
+// The compiler is TypeScript 7, installed under the alias `@typescript/native`.
+// The name `typescript` resolves to the TypeScript 6 compatibility package, which
+// exists for the tools that still need the compiler's JavaScript API (ESLint's
+// type-aware rules, and the server suites that parse tsconfigs) and ships only a
+// `tsc6` binary, so `binOf('typescript', 'bin/tsc')` would name a file that is
+// not there. TypeScript 7's `bin/tsc` is a small Node launcher for the native
+// compiler, which is why it can still be run with `process.execPath`.
+const tscStatus = run([binOf('@typescript/native', 'bin/tsc'), '-b'], 'tsc -b');
 if (tscStatus !== 0) process.exit(tscStatus);
 
 /**

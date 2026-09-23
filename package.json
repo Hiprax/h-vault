@@ -124,8 +124,9 @@
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.63.0",
     "@stoplight/spectral-cli": "^6.16.3",
-    "@stryker-mutator/core": "9.6.1",
-    "@stryker-mutator/vitest-runner": "9.6.1",
+    "@stryker-mutator/core": "10.0.0",
+    "@stryker-mutator/vitest-runner": "10.0.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
     "concurrently": "^10.0.5",
     "eslint": "^10.11.0",
     "eslint-plugin-security": "^4.0.1",
@@ -140,7 +141,7 @@
     "otpauth": "^9.5.2",
     "prettier": "^3.9.8",
     "rimraf": "^6.1.3",
-    "typescript": "^6.0.3",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-eslint": "^8.70.1"
   },
   "allowScripts": {
