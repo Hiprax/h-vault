@@ -351,8 +351,12 @@ export interface TransformFailurePanelProps {
 /**
  * The stop. Where the document broke, and the one thing that can still be done.
  *
- * Every string here comes from the frame, which built it from the document's own
- * bytes, so all of it is rendered as text and none of it is interpreted.
+ * The sentence is the APPLICATION's own — the frame reports a refusal as a code
+ * and `services/documents/transform.ts` words it — and the position is two
+ * integers. The excerpt is the one string here nothing in the application wrote:
+ * a line of the reader's own document, usually quoted from the application's own
+ * copy, bounded, and rendered in a `<pre>` as a quotation. All of it is rendered
+ * as text and none of it is interpreted.
  */
 export function TransformFailurePanel({
   failure,

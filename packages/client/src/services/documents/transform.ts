@@ -2,11 +2,17 @@ import type { DocumentMeta } from '@hvault/shared';
 import { z } from 'zod';
 import {
   MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH,
+  MAX_SANDBOX_CODE_LENGTH,
   MAX_TRANSFORM_EXCERPT_LENGTH,
-  MAX_TRANSFORM_MESSAGE_LENGTH,
+  transformExcerpt,
+  transformToolLabels,
 } from '@hvault/shared';
 import { createHiddenSandboxFrame } from '../../lib/sandboxFrame';
 import { connectSandbox } from '../../lib/sandboxHandshake';
+import {
+  describeTransformFailure,
+  describeTransformRequestFailure,
+} from '../../lib/sandboxRefusals';
 import { diffText, type TextDiff } from '../../lib/textDiff';
 
 /**
@@ -43,6 +49,15 @@ import { diffText, type TextDiff } from '../../lib/textDiff';
  *     what it is asking permission for.
  *  d. A FRESH FRAME PER TRANSFORM, destroyed afterwards. One document can never
  *     observe the next, and a frame that has answered is never asked again.
+ *  e. EVERY WORD THE PANEL SAYS ABOUT A TRANSFORM. The frame reports a refusal
+ *     as a code and this module words it (`src/lib/sandboxRefusals.ts`); the
+ *     tool labels are required to be exactly the pair its own request can
+ *     produce; and the offending line is quoted from this module's own copy of
+ *     the document wherever that copy is the text the line refers to. The only
+ *     frame text left on a refusal is one bounded line, used only when a failure
+ *     in the formatter points into text a REPAIR produced, which only the frame
+ *     holds. The transformed document itself is DATA: it is shown only as the
+ *     diff this module computes, for the user to review.
  */
 
 /** The provenance block sealed into the encrypted metadata. */
@@ -50,12 +65,20 @@ type DocumentTransformProvenance = NonNullable<DocumentMeta['transform']>;
 
 /** Why a transform could not be completed, in the terms the panel displays. */
 export interface TransformFailure {
-  /** The tool's own sentence, or this module's when the document never reached one. */
+  /**
+   * This application's sentence, ALWAYS: chosen from the frame's code, or this
+   * module's own when the document never reached a tool. Never the tool's or
+   * the frame's wording.
+   */
   readonly message: string;
   /** 1-based, or `null` when nothing reported a position. */
   readonly line: number | null;
   readonly column: number | null;
-  /** The offending source line, bounded, or `''` when there is none to quote. */
+  /**
+   * The offending source line, bounded, or `''` when there is none to quote.
+   * The document's OWN content, and the one string here the application did not
+   * write, so it is shown as a quotation and nothing else.
+   */
   readonly excerpt: string;
 }
 
@@ -107,8 +130,11 @@ const REPLY_TIMEOUT_MS = 30_000;
  * capability, and each host would then have to ignore messages it should be
  * tearing the frame down for.
  *
- * Every string is bounded, because every one of them is built by the frame from
- * the document's own bytes.
+ * Every string is bounded, because the frame chose every one of them. A refusal
+ * carries a CODE and no sentence: an older frame's `message` or `reason`, or a
+ * hostile frame's prose, is stripped here and never reaches the panel. Codes are
+ * bounded strings rather than enums so that one this host does not recognise is
+ * worded generically instead of tearing down a frame newer than the host.
  *
  * Exported so the fuzz suite can hold the ENGINE to it directly. That is the
  * contract that actually matters: an engine output this schema rejects is a
@@ -126,29 +152,58 @@ export const transformReplySchema = z.discriminatedUnion('kind', [
     text: z.string(),
     formatted: z.boolean(),
     repaired: z.boolean(),
-    // Bounded by the METADATA schema's own limit, because that is where these
-    // two end up: `documentMetaSchema.transform` caps both at
-    // `MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH`. Without the bound here a frame
-    // could return a 10,000-character `tool`, survive this boundary, survive the
-    // review dialog, and die in the store's meta pre-flight as "the upload could
-    // not be started" — a message about the upload for a fault in the FRAME.
-    // Refused here it is what it is: the formatter sent something unexpected and
-    // was stopped.
+    // Bounded here, and then required to be EXACTLY what `transformToolLabels`
+    // gives for this request (see `answersTheRequest`), because both are shown
+    // beside the upload button and sealed into the document for good. The bound
+    // still matters: it keeps an absurd string from being compared at all.
     tool: z.string().min(1).max(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH),
     toolVersion: z.string().min(1).max(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH),
   }),
   z.object({
     kind: z.literal('transformFailed'),
     stage: z.enum(['repair', 'format']),
-    message: z.string().max(MAX_TRANSFORM_MESSAGE_LENGTH),
+    code: z.string().max(MAX_SANDBOX_CODE_LENGTH),
+    detail: z.string().max(MAX_SANDBOX_CODE_LENGTH).optional(),
     line: z.number().int().positive().nullable(),
     column: z.number().int().positive().nullable(),
     excerpt: z.string().max(MAX_TRANSFORM_EXCERPT_LENGTH),
   }),
   // The protocol-level refusal, which either job may answer with: the frame
   // could not parse the request at all.
-  z.object({ kind: z.literal('failed'), reason: z.string().max(MAX_TRANSFORM_MESSAGE_LENGTH) }),
+  z.object({ kind: z.literal('failed'), code: z.string().max(MAX_SANDBOX_CODE_LENGTH) }),
 ]);
+
+/** What this module says about a frame that answered with something it must not. */
+const UNEXPECTED_REPLY =
+  'The formatter sent something unexpected and was stopped, so this file was not changed.';
+
+interface TransformOptions {
+  readonly ext: string;
+  readonly format: boolean;
+  readonly repair: boolean;
+}
+
+/**
+ * Does this result describe the transform THIS request asked for, labelled the
+ * way that transform must be labelled?
+ *
+ * A result that reports a different pair of transforms is a provenance record
+ * about something that did not happen, and a label that is not the fixed pair
+ * for this request is words the frame chose, bound for the review panel and the
+ * sealed metadata. Either is a frame that has gone wrong.
+ */
+function answersTheRequest(
+  reply: Extract<TransformReply, { kind: 'transformed' }>,
+  options: TransformOptions,
+): boolean {
+  const labels = transformToolLabels(options.repair, options.format);
+  return (
+    reply.formatted === options.format &&
+    reply.repaired === options.repair &&
+    reply.tool === labels.tool &&
+    reply.toolVersion === labels.toolVersion
+  );
+}
 
 /** A failure with no position, which is every failure that never reached a parser. */
 function plainFailure(message: string): TransformAttempt {
@@ -248,7 +303,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
  */
 export async function transformDocument(
   source: Blob,
-  options: { readonly ext: string; readonly format: boolean; readonly repair: boolean },
+  options: TransformOptions,
 ): Promise<TransformAttempt> {
   const bytes = await source.arrayBuffer();
   const decoded = decodeTransformSource(bytes);
@@ -257,15 +312,22 @@ export async function transformDocument(
   const originalSha256 = await sha256Hex(bytes);
 
   const reply = await requestTransform(originalText, options);
-  if (reply.kind === 'failed') return plainFailure(reply.reason);
+  if (reply.kind === 'hostFailed') return plainFailure(reply.message);
+  if (reply.kind === 'failed') return plainFailure(describeTransformRequestFailure(reply.code));
   if (reply.kind === 'transformFailed') {
+    // The repairer always reads the ORIGINAL, and so does a formatter that ran
+    // without one, so in both cases the line the failure names is a line of THIS
+    // module's own copy and is quoted from it. Only a formatter failure AFTER a
+    // repair points into text this module never saw, and only then is the
+    // frame's bounded excerpt used.
+    const quotesOwnCopy = reply.stage === 'repair' || !options.repair;
     return {
       status: 'failed',
       failure: {
-        message: reply.message,
+        message: describeTransformFailure(reply.stage, reply.code, reply.detail),
         line: reply.line,
         column: reply.column,
-        excerpt: reply.excerpt,
+        excerpt: quotesOwnCopy ? transformExcerpt(originalText, reply.line) : reply.excerpt,
       },
     };
   }
@@ -276,10 +338,10 @@ export async function transformDocument(
     review: {
       blob,
       transform: {
-        formatted: reply.formatted,
-        repaired: reply.repaired,
-        tool: reply.tool,
-        toolVersion: reply.toolVersion,
+        // From the REQUEST, which the reply has already been required to match.
+        formatted: options.format,
+        repaired: options.repair,
+        ...transformToolLabels(options.repair, options.format),
         originalSha256,
       },
       // From THIS module's copy of the original, which is the whole point.
@@ -293,6 +355,15 @@ export async function transformDocument(
 type TransformReply = z.infer<typeof transformReplySchema>;
 
 /**
+ * What {@link requestTransform} resolves with: the frame's validated reply, or
+ * this module's own sentence when there is no reply to speak of — a frame that
+ * never loaded, spoke out of turn, answered with something it must not, or took
+ * too long. Kept apart from the frame's `failed` so that nothing this module
+ * wrote could be mistaken for something the frame sent, or the reverse.
+ */
+type TransformOutcome = TransformReply | { readonly kind: 'hostFailed'; readonly message: string };
+
+/**
  * One frame, one request, one answer, then nothing.
  *
  * The window listener is registered BEFORE the frame is attached, because
@@ -300,16 +371,13 @@ type TransformReply = z.infer<typeof transformReplySchema>;
  * first thing that document does. The reverse order is a race this loses on a
  * fast machine and wins on a slow one, which is the worst kind.
  */
-function requestTransform(
-  text: string,
-  options: { readonly ext: string; readonly format: boolean; readonly repair: boolean },
-): Promise<TransformReply> {
-  return new Promise<TransformReply>((resolve) => {
+function requestTransform(text: string, options: TransformOptions): Promise<TransformOutcome> {
+  return new Promise<TransformOutcome>((resolve) => {
     const frame = createHiddenSandboxFrame('Document formatter');
     let replyTimer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
 
-    const finish = (reply: TransformReply): void => {
+    const finish = (reply: TransformOutcome): void => {
       if (settled) return;
       settled = true;
       if (replyTimer !== null) clearTimeout(replyTimer);
@@ -332,8 +400,8 @@ function requestTransform(
         // the frame is working, and the thing being bounded is the work.
         replyTimer = setTimeout(() => {
           finish({
-            kind: 'failed',
-            reason:
+            kind: 'hostFailed',
+            message:
               'Formatting this file took too long and was stopped, so it was not changed. You can upload it exactly as it is.',
           });
         }, REPLY_TIMEOUT_MS);
@@ -352,15 +420,17 @@ function requestTransform(
           // message, a render result, a malformed one — is a frame that has gone
           // wrong. `fail` tears the channel down and reports through
           // `onUnavailable` below.
-          fail(
-            'The formatter sent something unexpected and was stopped, so this file was not changed.',
-          );
+          fail(UNEXPECTED_REPLY);
+          return;
+        }
+        if (parsed.data.kind === 'transformed' && !answersTheRequest(parsed.data, options)) {
+          fail(UNEXPECTED_REPLY);
           return;
         }
         finish(parsed.data);
       },
       onUnavailable: (reason) => {
-        finish({ kind: 'failed', reason });
+        finish({ kind: 'hostFailed', message: reason });
       },
     });
 

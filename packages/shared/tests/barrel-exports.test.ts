@@ -132,6 +132,16 @@ import {
   previewModeForName,
 } from '../src/index.js';
 import type { SandboxFrameMessage, SandboxRenderRequest, SandboxTheme } from '../src/index.js';
+import {
+  MAX_SANDBOX_CODE_LENGTH,
+  SANDBOX_QR_IMAGE_FAILURE_CODES,
+  SANDBOX_QR_SESSION_FAILURE_CODES,
+  SANDBOX_RENDER_FAILURE_CODES,
+  SANDBOX_REPAIR_DETAIL_CODES,
+  SANDBOX_TRANSFORM_FAILURE_CODES,
+  transformExcerpt,
+  transformToolLabels,
+} from '../src/index.js';
 
 describe('barrel exports (src/index.ts)', () => {
   it('exports all common schemas', () => {
@@ -312,7 +322,7 @@ describe('barrel exports (src/index.ts)', () => {
     expect(MAX_PREVIEW_TABLE_CELLS).toBe(250_000);
   });
 
-  it('exports the sandbox message types, which are the ONLY thing the two graphs share', () => {
+  it('exports the sandbox message types, which the two graphs share with no runtime schema', () => {
     // Type-only, and that is the whole design: `manualChunks` puts `zod` in
     // `vendor-core` next to AXIOS, so a shared RUNTIME schema would drag an HTTP
     // client into a document whose policy forbids it every request. These
@@ -329,6 +339,53 @@ describe('barrel exports (src/index.ts)', () => {
     const reply: SandboxFrameMessage = { kind: 'link', href: 'https://example.com' };
     expect(request.mode).toBe('text');
     expect(reply.kind).toBe('link');
+    // A refusal is a CODE, and the type says so: this is the shape the frame
+    // must build, with no sentence field to put words in.
+    const refusal: SandboxFrameMessage = { kind: 'failed', code: 'noRenderer' };
+    expect(refusal).toEqual({ kind: 'failed', code: 'noRenderer' });
+  });
+
+  it('exports the closed refusal-code lists both programs are built against', () => {
+    // RUNTIME values, unlike the message types above, because the application
+    // tests a frame's code for MEMBERSHIP in these lists before it looks up a
+    // sentence. Pinned in full: a code quietly added here without a sentence in
+    // the application would be a type error there, and one quietly removed
+    // would leave the frame sending a code the host words generically.
+    expect(SANDBOX_RENDER_FAILURE_CODES).toEqual([
+      'requestNotUnderstood',
+      'emptyFile',
+      'contentMismatch',
+      'contentImpostor',
+      'noRenderer',
+      'renderFailed',
+    ]);
+    expect(SANDBOX_QR_SESSION_FAILURE_CODES).toEqual([
+      'requestNotUnderstood',
+      'scannerUnavailable',
+      'engineUnavailable',
+    ]);
+    expect(SANDBOX_QR_IMAGE_FAILURE_CODES).toEqual(['imageTooLarge', 'imageUnreadable']);
+    expect(SANDBOX_TRANSFORM_FAILURE_CODES).toEqual([
+      'nothingRequested',
+      'unsupportedType',
+      'repairUnsupported',
+      'syntaxError',
+      'recordTooLong',
+      'engineFailed',
+    ]);
+    expect(SANDBOX_REPAIR_DETAIL_CODES).toHaveLength(6);
+    // Every code fits the bound a host reads codes under, with room to spare.
+    for (const code of [
+      ...SANDBOX_RENDER_FAILURE_CODES,
+      ...SANDBOX_QR_SESSION_FAILURE_CODES,
+      ...SANDBOX_QR_IMAGE_FAILURE_CODES,
+      ...SANDBOX_TRANSFORM_FAILURE_CODES,
+      ...SANDBOX_REPAIR_DETAIL_CODES,
+    ]) {
+      expect(code.length, code).toBeLessThan(MAX_SANDBOX_CODE_LENGTH);
+    }
+    expect(typeof transformToolLabels).toBe('function');
+    expect(typeof transformExcerpt).toBe('function');
   });
 
   it('exports the backup-code parser and its bounds', () => {

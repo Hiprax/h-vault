@@ -70,8 +70,10 @@ export function TotpScanPanel({ onDecoded, onError, status }: TotpScanPanelProps
    *
    * The panel has a generic sentence for a scan that failed — "That image could
    * not be read." — and the driver has specific ones that name the remedy: "The
-   * scanner could not start. Paste your export link instead.", or the frame's
-   * own account of an image it refused. Both arrive for the SAME failure, and
+   * scanner could not start. Paste your export link instead.", or the
+   * driver's sentence for the code the frame sent about an image it refused
+   * (always the application's own words, never the frame's). Both arrive for
+   * the SAME failure, and
    * the two consumers of this panel funnel both into one status line
    * (`onError={setStatus}`), so whichever lands last is the only one the user
    * ever sees.
@@ -276,7 +278,8 @@ export function TotpScanPanel({ onDecoded, onError, status }: TotpScanPanelProps
           // line, so saying anything now would overwrite it with something
           // vaguer. Staying silent is the report.
         } else if (error instanceof QrImageRefusedError) {
-          // The frame looked at this image and said which limit it crossed.
+          // The frame looked at this image and said, by code, which limit it
+          // crossed; the driver has already turned that into its own sentence.
           onError(error.message);
         } else {
           onError('That image could not be read.');

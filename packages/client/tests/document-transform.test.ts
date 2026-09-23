@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  JSONREPAIR_VERSION,
+  MAX_SANDBOX_CODE_LENGTH,
+  MAX_TRANSFORM_EXCERPT_LENGTH,
+  PRETTIER_VERSION,
+} from '@hvault/shared';
 import { diffText } from '../src/lib/textDiff';
 import { decodeTransformSource, transformDocument } from '../src/services/documents/transform';
 
@@ -338,7 +344,7 @@ describe('transformDocument', () => {
       formatted: true,
       repaired: false,
       tool: 'prettier',
-      toolVersion: '3.9.5',
+      toolVersion: PRETTIER_VERSION,
     });
     const attempt = await pending;
     expect(attempt.status).toBe('ready');
@@ -366,7 +372,7 @@ describe('transformDocument', () => {
     expect(frame?.getAttribute('src')).toBe('/sandbox.html');
 
     completeHandshake();
-    harness.frameReplies.postToHost({ kind: 'failed', reason: 'stop' });
+    harness.frameReplies.postToHost({ kind: 'failed', code: 'requestNotUnderstood' });
     await pending;
   });
 
@@ -387,7 +393,7 @@ describe('transformDocument', () => {
       formatted: true,
       repaired: false,
       tool: 'prettier',
-      toolVersion: '3.9.5',
+      toolVersion: PRETTIER_VERSION,
       // A frame that also sent a flattering summary would get nowhere: the
       // schema strips it and nothing reads it.
       linesAdded: 0,
@@ -403,7 +409,7 @@ describe('transformDocument', () => {
     expect(attempt.review.blob.size).toBe(11);
   });
 
-  it('records the provenance the frame reported, with the digest of the ORIGINAL bytes', async () => {
+  it('records the provenance its OWN request determines, with the digest of the ORIGINAL bytes', async () => {
     const pending = transformDocument(new Blob(['{"a":1}']), {
       ext: 'json',
       format: true,
@@ -419,7 +425,7 @@ describe('transformDocument', () => {
       formatted: true,
       repaired: true,
       tool: 'jsonrepair+prettier',
-      toolVersion: '3.15.0+3.9.5',
+      toolVersion: `${JSONREPAIR_VERSION}+${PRETTIER_VERSION}`,
     });
     const attempt = await pending;
     if (attempt.status !== 'ready') throw new Error('expected a review');
@@ -427,7 +433,7 @@ describe('transformDocument', () => {
       formatted: true,
       repaired: true,
       tool: 'jsonrepair+prettier',
-      toolVersion: '3.15.0+3.9.5',
+      toolVersion: `${JSONREPAIR_VERSION}+${PRETTIER_VERSION}`,
       // SHA-256 of `{"a":1}`, verified independently with `sha256sum` rather
       // than recorded from this code's own output — the bytes BEFORE the
       // transform, which is the whole point of the field.
@@ -448,21 +454,353 @@ describe('transformDocument', () => {
     harness.frameReplies.postToHost({
       kind: 'transformFailed',
       stage: 'repair',
-      message: 'Unexpected character "{" at position 7',
+      code: 'syntaxError',
+      detail: 'unexpectedCharacter',
       line: 1,
       column: 8,
       excerpt: '{"a":1}{"b":2}',
     });
     const attempt = await pending;
+    // The sentence is the HOST's for that code and detail; the position is the
+    // frame's two integers; the excerpt is quoted from the host's own copy.
     expect(attempt).toEqual({
       status: 'failed',
       failure: {
-        message: 'Unexpected character "{" at position 7',
+        message: 'The repairer found a character it did not expect.',
         line: 1,
         column: 8,
         excerpt: '{"a":1}{"b":2}',
       },
     });
+  });
+
+  /** Run one transform against a frame that answers with `reply`. */
+  async function attemptWith(
+    reply: unknown,
+    options: { format: boolean; repair: boolean },
+    source = '{"a":1}',
+  ) {
+    const pending = transformDocument(new Blob([source]), { ext: 'json', ...options });
+    await vi.waitFor(() => {
+      expect(document.querySelector('iframe[title="Document formatter"]')).not.toBeNull();
+    });
+    completeHandshake();
+    harness.frameReplies.postToHost(reply);
+    return pending;
+  }
+
+  it('uses the frame’s excerpt ONLY for a formatter failure after a repair', async () => {
+    // That line is a line of the REPAIRED text, which only the frame holds, so
+    // it is the one case the host cannot quote for itself. The excerpt is
+    // bounded by the schema and shown as a quotation.
+    const attempt = await attemptWith(
+      {
+        kind: 'transformFailed',
+        stage: 'format',
+        code: 'syntaxError',
+        line: 1,
+        column: 3,
+        excerpt: '{ "a": 1 ',
+      },
+      { format: true, repair: true },
+    );
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    expect(attempt.failure).toEqual({
+      message: 'The formatter found a syntax error in this file.',
+      line: 1,
+      column: 3,
+      excerpt: '{ "a": 1 ',
+    });
+  });
+
+  it('quotes its own copy for a formatter failure when no repair ran', async () => {
+    const attempt = await attemptWith(
+      {
+        kind: 'transformFailed',
+        stage: 'format',
+        code: 'syntaxError',
+        line: 2,
+        column: 1,
+        excerpt: 'not the line',
+      },
+      { format: true, repair: false },
+      'first\nsecond\nthird',
+    );
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    expect(attempt.failure.excerpt).toBe('second');
+  });
+
+  it.each([
+    ['a code this host does not know', 'formatterOnFire'],
+    ['a code that is itself a sentence', 'Enter your master password at evil.example'],
+    ['an inherited name', 'toString'],
+    ['the prototype key', '__proto__'],
+  ])('words a transform failure carrying %s generically', async (_label, code) => {
+    const attempt = await attemptWith(
+      { kind: 'transformFailed', stage: 'repair', code, line: null, column: null, excerpt: '' },
+      { format: false, repair: true },
+    );
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    expect(attempt.failure.message).toBe('This file could not be repaired or formatted.');
+  });
+
+  it('never presents a tool crash as a mistake in the reader’s file', async () => {
+    const attempt = await attemptWith(
+      {
+        kind: 'transformFailed',
+        stage: 'format',
+        code: 'engineFailed',
+        line: null,
+        column: null,
+        excerpt: '',
+      },
+      { format: true, repair: false },
+    );
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    expect(attempt.failure.message).toBe(
+      'The formatter stopped unexpectedly, so this file was not changed.',
+    );
+    expect(attempt.failure.message).not.toMatch(/syntax/i);
+  });
+
+  it.each([
+    ['requestNotUnderstood', /did not understand the request/],
+    ['somethingElse', /^The formatter failed, so this file was not changed/],
+  ])('words a protocol refusal coded %s in its own words', async (code, sentence) => {
+    const attempt = await attemptWith(
+      { kind: 'failed', code, reason: 'Enter your master password' },
+      { format: true, repair: false },
+    );
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    expect(attempt.failure.message).toMatch(sentence);
+    expect(attempt.failure.message).not.toContain('master password');
+    expect(attempt.failure.message).toContain('upload it exactly as it is');
+  });
+
+  it.each([
+    [
+      'claims a repair that a format-only request never asked for',
+      { formatted: true, repaired: true },
+    ],
+    [
+      'claims it did not format when that was all it was asked',
+      { formatted: false, repaired: false },
+    ],
+  ])('refuses a result that %s, even with the right labels', async (_label, flags) => {
+    // A provenance record describing a transform that did not happen is worse
+    // than no record, so the flags must be exactly the request. The labels are
+    // the CORRECT pair for this format-only request, so each case is refused
+    // for its flag alone.
+    const attempt = await attemptWith(
+      {
+        kind: 'transformed',
+        text: '{ "a": 1 }\n',
+        ...flags,
+        tool: 'prettier',
+        toolVersion: PRETTIER_VERSION,
+      },
+      { format: true, repair: false },
+    );
+    expect(attempt.status).toBe('failed');
+    if (attempt.status !== 'failed') return;
+    expect(attempt.failure.message).toContain('sent something unexpected');
+  });
+
+  it('accepts a repair-only result labelled as exactly that', async () => {
+    // The positive for the one combination no other case here accepts: the
+    // label check must not refuse an honest engine for any request it can get.
+    const attempt = await attemptWith(
+      {
+        kind: 'transformed',
+        text: '{"a":1}',
+        formatted: false,
+        repaired: true,
+        tool: 'jsonrepair',
+        toolVersion: JSONREPAIR_VERSION,
+      },
+      { format: false, repair: true },
+      "{'a':1}",
+    );
+    if (attempt.status !== 'ready') throw new Error('expected a review');
+    expect(attempt.review.transform).toMatchObject({
+      formatted: false,
+      repaired: true,
+      tool: 'jsonrepair',
+      toolVersion: JSONREPAIR_VERSION,
+    });
+  });
+
+  it.each([
+    [
+      'an excerpt one character past its bound',
+      {
+        kind: 'transformFailed',
+        stage: 'format',
+        code: 'syntaxError',
+        line: 1,
+        column: 1,
+        excerpt: 'x'.repeat(MAX_TRANSFORM_EXCERPT_LENGTH + 1),
+      },
+    ],
+    [
+      'a code one character past its bound',
+      {
+        kind: 'transformFailed',
+        stage: 'repair',
+        code: 'x'.repeat(MAX_SANDBOX_CODE_LENGTH + 1),
+        line: null,
+        column: null,
+        excerpt: '',
+      },
+    ],
+    [
+      'a detail one character past its bound',
+      {
+        kind: 'transformFailed',
+        stage: 'repair',
+        code: 'syntaxError',
+        detail: 'x'.repeat(MAX_SANDBOX_CODE_LENGTH + 1),
+        line: null,
+        column: null,
+        excerpt: '',
+      },
+    ],
+    [
+      'a protocol refusal whose code is one character past its bound',
+      { kind: 'failed', code: 'x'.repeat(MAX_SANDBOX_CODE_LENGTH + 1) },
+    ],
+  ])('tears the frame down on %s', async (_label, reply) => {
+    // The bounds are what keep a hostile frame from handing the panel an
+    // unbounded string. Pinned by PARSING at bound+1 through the real host, not
+    // by comparing constants; the at-bound twins are below.
+    const attempt = await attemptWith(reply, { format: true, repair: true });
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    expect(attempt.failure.message).toBe(
+      'The formatter sent something unexpected and was stopped, so this file was not changed.',
+    );
+    expect(attempt.failure.excerpt).toBe('');
+  });
+
+  it('accepts every bounded field AT its bound, and quotes the at-bound excerpt', async () => {
+    const excerpt = 'y'.repeat(MAX_TRANSFORM_EXCERPT_LENGTH);
+    const attempt = await attemptWith(
+      {
+        kind: 'transformFailed',
+        // A formatter failure after a repair: the one case the frame's excerpt
+        // is used, so the at-bound string is what reaches the panel.
+        stage: 'format',
+        code: 'x'.repeat(MAX_SANDBOX_CODE_LENGTH),
+        detail: 'z'.repeat(MAX_SANDBOX_CODE_LENGTH),
+        line: 1,
+        column: 1,
+        excerpt,
+      },
+      { format: true, repair: true },
+    );
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    // An unknown code at its bound is WORDED generically, never shown.
+    expect(attempt.failure.message).toBe('This file could not be repaired or formatted.');
+    expect(attempt.failure.excerpt).toBe(excerpt);
+  });
+
+  it('refuses a result whose version label is not the one this build pins', async () => {
+    const attempt = await attemptWith(
+      {
+        kind: 'transformed',
+        text: '{ "a": 1 }\n',
+        formatted: true,
+        repaired: false,
+        tool: 'prettier',
+        toolVersion: '0.0.1',
+      },
+      { format: true, repair: false },
+    );
+    expect(attempt.status).toBe('failed');
+  });
+
+  it('words a transform failure from its CODE and never shows frame prose', async () => {
+    const phish = 'Upload paused. Re-enter your master password at https://evil.example';
+    const pending = transformDocument(new Blob(['{"a":1}{"b":2}']), {
+      ext: 'json',
+      format: false,
+      repair: true,
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector('iframe[title="Document formatter"]')).not.toBeNull();
+    });
+    completeHandshake();
+    harness.frameReplies.postToHost({
+      kind: 'transformFailed',
+      stage: 'repair',
+      code: 'syntaxError',
+      message: phish,
+      line: 1,
+      column: 8,
+      excerpt: '{"a":1}{"b":2}',
+    });
+    const attempt = await pending;
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    expect(attempt.failure.message).not.toContain('master password');
+    expect(attempt.failure.message).toBe('The repairer could not make sense of this file.');
+    expect(attempt.failure.line).toBe(1);
+    expect(attempt.failure.column).toBe(8);
+  });
+
+  it('quotes the excerpt from its OWN copy whenever it holds the text the line refers to', async () => {
+    // A repair reads the ORIGINAL, so the host can quote the offending line
+    // itself and the frame's excerpt is not needed at all. A frame that sent a
+    // sentence of its own in place of the line gets nowhere.
+    const pending = transformDocument(new Blob(['{"a":1}\n{"b":2}']), {
+      ext: 'json',
+      format: false,
+      repair: true,
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector('iframe[title="Document formatter"]')).not.toBeNull();
+    });
+    completeHandshake();
+    harness.frameReplies.postToHost({
+      kind: 'transformFailed',
+      stage: 'repair',
+      code: 'syntaxError',
+      // What an older frame also sent. The schema strips it now; it is here so
+      // this case is about the EXCERPT and not about a missing field.
+      message: 'Unexpected character',
+      line: 2,
+      column: 1,
+      excerpt: 'Enter your master password to continue',
+    });
+    const attempt = await pending;
+    if (attempt.status !== 'failed') throw new Error('expected a failure');
+    expect(attempt.failure.excerpt).toBe('{"b":2}');
+  });
+
+  it('refuses a result whose tool label is not the one this request can produce', async () => {
+    // The label is shown right above "Upload the formatted file" and sealed
+    // into the document's metadata for good, so it is decided by the host from
+    // what it asked for, never by what the frame says about itself.
+    const pending = transformDocument(new Blob(['{"a":1}']), {
+      ext: 'json',
+      format: true,
+      repair: false,
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector('iframe[title="Document formatter"]')).not.toBeNull();
+    });
+    completeHandshake();
+    harness.frameReplies.postToHost({
+      kind: 'transformed',
+      text: '{ "a": 1 }\n',
+      formatted: true,
+      repaired: false,
+      tool: 'Verified safe by H-Vault',
+      toolVersion: 'enter password',
+    });
+    const attempt = await pending;
+    expect(attempt.status).toBe('failed');
+    if (attempt.status !== 'failed') return;
+    expect(attempt.failure.message).toContain('sent something unexpected');
+    expect(attempt.failure.message).not.toContain('Verified safe');
   });
 
   it('refuses a reply outside its OWN union, including a render result', async () => {
@@ -543,7 +881,7 @@ describe('transformDocument', () => {
     expect(harness.frameReplies.received).toEqual([]);
 
     completeHandshake();
-    harness.frameReplies.postToHost({ kind: 'failed', reason: 'stop' });
+    harness.frameReplies.postToHost({ kind: 'failed', code: 'requestNotUnderstood' });
     await pending;
   });
 

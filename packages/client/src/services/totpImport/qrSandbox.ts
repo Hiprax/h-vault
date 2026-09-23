@@ -1,6 +1,7 @@
 import { MAX_SANDBOX_QR_TEXT_LENGTH } from '@hvault/shared';
 import { createHiddenSandboxFrame } from '../../lib/sandboxFrame';
 import { connectSandbox, type SandboxSession } from '../../lib/sandboxHandshake';
+import { describeQrImageFailure, describeQrSessionFailure } from '../../lib/sandboxRefusals';
 
 /**
  * The application's half of the QR-scanning protocol.
@@ -57,7 +58,7 @@ import { connectSandbox, type SandboxSession } from '../../lib/sandboxHandshake'
  */
 
 /**
- * The frame looked at ONE image and refused it, in its own words.
+ * The frame looked at ONE image and refused it.
  *
  * A TYPE rather than a sentence for the caller to recognise, because `scan`
  * rejects for several reasons and only this one carries a message written FOR A
@@ -65,6 +66,11 @@ import { connectSandbox, type SandboxSession } from '../../lib/sandboxHandshake'
  * can say only that something went wrong. Matching on the text instead would
  * make every one of those sentences load-bearing, and they are meant to be free
  * to change.
+ *
+ * The message is THIS APPLICATION'S sentence for the code the frame sent
+ * (`describeQrImageFailure`), never the frame's own words: it is shown in the
+ * import tool's status line, and a decoder that could choose it could write
+ * anything there.
  *
  * It is NOT a dead channel. The session is still good and the next image is
  * worth trying, which is the distinction `SandboxQrFailedMessage` exists to
@@ -184,24 +190,6 @@ type Post = (message: unknown, transfer?: Transferable[]) => void;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
-}
-
-/**
- * The longest sentence this host will repeat from the frame.
- *
- * Every `reason` is the frame's own words, and the frame is the untrusted side
- * of this boundary: it is rendered as TEXT and never as markup, so the risk is
- * not injection but a message long enough to bury the page. The document viewer
- * bounds its own `reason` for exactly this, and this is the same rule at the
- * same boundary.
- */
-const MAX_REASON_LENGTH = 200;
-
-/** A frame-supplied sentence, or the host's own words when it is not usable. */
-function reasonOrDefault(value: unknown, fallback: string): string {
-  return typeof value === 'string' && value.length > 0 && value.length <= MAX_REASON_LENGTH
-    ? value
-    : fallback;
 }
 
 /**
@@ -341,7 +329,11 @@ export function openQrScanner(onUnavailable: (reason: string) => void): QrScanne
         // sent, or its decoder will not load. Neither improves with the next
         // image, so it ends the session rather than one scan. A failure that IS
         // about one image arrives as `qrFailed` below and is answered there.
-        connection.fail(reasonOrDefault(data.reason, 'The scanner failed.'));
+        //
+        // The KIND decided that; the code only picks the sentence, and an
+        // unrecognised one gets the generic sentence. Nothing the frame wrote is
+        // repeated — a `reason` it sends as well is never read.
+        connection.fail(describeQrSessionFailure(data.code));
         return;
       }
       if (kind !== 'qrFound' && kind !== 'qrMiss' && kind !== 'qrFailed') {
@@ -393,12 +385,12 @@ export function openQrScanner(onUnavailable: (reason: string) => void): QrScanne
 
       if (kind === 'qrFailed') {
         // ONE image refused, by a frame that is still perfectly healthy. The
-        // session stays up, the camera keeps going, and the caller is handed the
-        // frame's own sentence because it says WHICH limit the image crossed —
-        // which "That image could not be read." cannot.
-        entry.reject(
-          new QrImageRefusedError(reasonOrDefault(data.reason, 'That image could not be read.')),
-        );
+        // session stays up, the camera keeps going, and the caller is handed
+        // THIS host's sentence for the frame's code, because it says WHICH limit
+        // the image crossed — which "That image could not be read." cannot. An
+        // unrecognised code is still one refused image, never a dead session:
+        // the shape, not the code, decides that.
+        entry.reject(new QrImageRefusedError(describeQrImageFailure(data.code)));
         return;
       }
       // `qrMiss` carries no text and leaves `found` null, which IS its answer;

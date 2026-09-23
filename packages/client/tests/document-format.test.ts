@@ -2,24 +2,25 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  JSONREPAIR_VERSION,
   MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH,
   MAX_TRANSFORM_EXCERPT_LENGTH,
-  MAX_TRANSFORM_MESSAGE_LENGTH,
+  PRETTIER_VERSION,
   REPAIRABLE_TRANSFORM_SYNTAXES,
+  SANDBOX_REPAIR_DETAIL_CODES,
+  SANDBOX_TRANSFORM_FAILURE_CODES,
   TRANSFORM_SYNTAXES,
   canRepairSyntax,
+  transformExcerpt,
   transformSyntaxForExtension,
   transformSyntaxForName,
 } from '@hvault/shared';
 import {
-  JSONREPAIR_VERSION,
-  PRETTIER_VERSION,
-  excerptFor,
-  firstLine,
   locOf,
   positionAt,
+  repairDetailOf,
   runTransform,
 } from '../src/sandbox/transform/formatEngine';
 import { parseTransformRequest } from '../src/sandbox/protocol';
@@ -128,15 +129,17 @@ describe('positions and excerpts', () => {
   });
 
   it('quotes the offending line, without its carriage return, and marks a cut', () => {
-    expect(excerptFor('one\r\ntwo', 1)).toBe('one');
-    expect(excerptFor('one\ntwo', 2)).toBe('two');
+    // The SHARED definition, which the engine and the application both call —
+    // so the line the frame quotes and the line the host quotes are one rule.
+    expect(transformExcerpt('one\r\ntwo', 1)).toBe('one');
+    expect(transformExcerpt('one\ntwo', 2)).toBe('two');
     // Out of range in both directions answers nothing rather than a wrong line.
-    expect(excerptFor('one', 0)).toBe('');
-    expect(excerptFor('one', 9)).toBe('');
-    expect(excerptFor('one', null)).toBe('');
+    expect(transformExcerpt('one', 0)).toBe('');
+    expect(transformExcerpt('one', 9)).toBe('');
+    expect(transformExcerpt('one', null)).toBe('');
 
     const long = 'x'.repeat(MAX_TRANSFORM_EXCERPT_LENGTH + 50);
-    const cut = excerptFor(long, 1);
+    const cut = transformExcerpt(long, 1);
     expect(cut).toHaveLength(MAX_TRANSFORM_EXCERPT_LENGTH);
     expect(cut.endsWith('…')).toBe(true);
   });
@@ -169,35 +172,66 @@ describe('positions and excerpts', () => {
     });
   });
 
-  it('takes a tool message down to its first line, trimmed, and bounds it', () => {
-    // The code frame Prettier appends is dropped: the panel draws its own
-    // excerpt, from its own copy of the text, in its own font.
-    expect(firstLine('  Unexpected token (1:5)  \n> 1 | {\n    |     ^')).toBe(
-      'Unexpected token (1:5)',
-    );
-    expect(firstLine('')).toBe('');
+  it.each([
+    ['Invalid character "\\u0001"', 'invalidCharacter'],
+    ['Unexpected character "{"', 'unexpectedCharacter'],
+    ['Unexpected end of json string', 'unexpectedEnd'],
+    ['Object key expected', 'objectKeyExpected'],
+    ['Colon expected', 'colonExpected'],
+    ['Invalid unicode character "\\uZZZZ"', 'invalidUnicode'],
+  ] as const)('names the repairer complaint %s by its code', (message, code) => {
+    // `jsonrepair`'s six messages, spelled as its own source throws them — and
+    // with the " at position N" suffix its error class appends. The WORDING is
+    // never sent; which complaint it was is.
+    expect(repairDetailOf(new Error(`${message} at position 3`))).toBe(code);
+  });
 
-    // And the bound, which is what stops an over-long sentence taking a
-    // positioned failure down with it: the host's reply schema declares
-    // `message: z.string().max(MAX_TRANSFORM_MESSAGE_LENGTH)` and REJECTS the
-    // whole message past it, so an unbounded one here would turn "line 4,
-    // column 12" into "the formatter sent something unexpected".
-    const shout = 'e'.repeat(MAX_TRANSFORM_MESSAGE_LENGTH + 500);
-    const bounded = firstLine(shout);
-    expect(bounded).toHaveLength(MAX_TRANSFORM_MESSAGE_LENGTH);
-    expect(bounded.endsWith('…')).toBe(true);
-    // The bound is the schema's, not a number invented here — a message this
-    // module trimmed must still be one the host will accept.
-    expect(
-      transformReplySchema.safeParse({
-        kind: 'transformFailed',
-        stage: 'format',
-        message: bounded,
-        line: 1,
-        column: 1,
-        excerpt: '',
-      }).success,
-    ).toBe(true);
+  it('names every repairer complaint the host has a sentence for, and no other', () => {
+    // Both directions: the six above are the whole list, so a code added to
+    // the shared list without a prefix here is caught, and so is the reverse.
+    expect([...SANDBOX_REPAIR_DETAIL_CODES].sort()).toEqual(
+      [
+        'colonExpected',
+        'invalidCharacter',
+        'invalidUnicode',
+        'objectKeyExpected',
+        'unexpectedCharacter',
+        'unexpectedEnd',
+      ].sort(),
+    );
+  });
+
+  it('sends no detail for a complaint it does not recognise, or for a non-error', () => {
+    // A future release, or a plugin, saying something new: the host's general
+    // sentence stands, and nothing the tool wrote travels.
+    expect(repairDetailOf(new Error('Something the repairer has never said'))).toBeUndefined();
+    // Matched at the START only, so a message that merely CONTAINS a known
+    // phrase is not mistaken for it.
+    expect(repairDetailOf(new Error('Note: Colon expected'))).toBeUndefined();
+    expect(repairDetailOf('Colon expected')).toBeUndefined();
+    expect(repairDetailOf(null)).toBeUndefined();
+  });
+
+  it('produces failures the host schema accepts, for every code and every detail', () => {
+    // The contract that actually matters: an engine output the host's schema
+    // rejects dies at the message boundary as "sent something unexpected", and
+    // the position the reader needed goes with it.
+    for (const code of SANDBOX_TRANSFORM_FAILURE_CODES) {
+      for (const detail of [undefined, ...SANDBOX_REPAIR_DETAIL_CODES]) {
+        const reply = {
+          kind: 'transformFailed',
+          stage: 'repair',
+          code,
+          ...(detail === undefined ? {} : { detail }),
+          line: 1,
+          column: 1,
+          excerpt: 'x',
+        };
+        expect(transformReplySchema.safeParse(reply).success, `${code}/${String(detail)}`).toBe(
+          true,
+        );
+      }
+    }
   });
 });
 
@@ -240,9 +274,55 @@ describe('repair', () => {
     // Position 7 is the second `{`; a 1-based column is one more than that.
     expect(result.column).toBe(8);
     expect(result.excerpt).toBe('{"a":1}{"b":2}');
-    expect(result.message).toContain('position 7');
+    // A code, and WHICH complaint the repairer made, never its wording.
+    expect(result.code).toBe('syntaxError');
+    expect(result.detail).toBe('unexpectedCharacter');
+    expect(result).not.toHaveProperty('message');
     // And NOTHING partially repaired escapes: a failure carries no text at all.
     expect(result).not.toHaveProperty('text');
+  });
+
+  it('names the complaint for the document the end-to-end suite uploads', async () => {
+    // `e2e/fixtures/broken.json`, verbatim: the elided array element on line 3
+    // is what the upload panel names by position, and "a colon was expected"
+    // is the host's sentence for the complaint the repairer really makes.
+    const broken = '{\n  "vault": "h-vault",\n  "items": [1, 2,, 3]\n}\n';
+    const result = await runTransform(request(broken, 'json', { format: true, repair: true }));
+    expect(result).toEqual({
+      kind: 'transformFailed',
+      stage: 'repair',
+      code: 'syntaxError',
+      detail: 'colonExpected',
+      line: 3,
+      column: 21,
+      excerpt: '  "items": [1, 2,, 3]',
+    });
+  });
+
+  it('reports a repairer that threw WITHOUT a position as the tool failing, not the file', async () => {
+    // The third party is the thing replaced here, never the engine: a thrown
+    // error with no `position` is exactly what a future release or an
+    // out-of-memory would produce, and it cannot be provoked from real input.
+    vi.doMock('jsonrepair', () => ({
+      jsonrepair: () => {
+        throw new Error('Colon expected');
+      },
+    }));
+    try {
+      const result = await runTransform(request('{}', 'json', { format: false, repair: true }));
+      expect(result).toEqual({
+        kind: 'transformFailed',
+        stage: 'repair',
+        // NOT `syntaxError`: nothing located the problem in the document.
+        code: 'engineFailed',
+        detail: 'colonExpected',
+        line: null,
+        column: null,
+        excerpt: '',
+      });
+    } finally {
+      vi.doUnmock('jsonrepair');
+    }
   });
 
   it('refuses to repair a syntax it has no repairer for', async () => {
@@ -250,7 +330,7 @@ describe('repair', () => {
     expect(result.kind).toBe('transformFailed');
     if (result.kind !== 'transformFailed') return;
     expect(result.stage).toBe('repair');
-    expect(result.message).toContain('JSON family');
+    expect(result.code).toBe('repairUnsupported');
     expect(result.line).toBeNull();
   });
 });
@@ -303,10 +383,12 @@ describe('format', () => {
     expect(result.stage).toBe('format');
     expect(result.line).toBe(3);
     expect(result.column).toBe(1);
-    // The tool's own sentence, WITHOUT the code frame it appends: the panel
-    // draws its own excerpt from its own copy of the text.
-    expect(result.message).toContain('Flow sequence');
-    expect(result.message).not.toContain('\n');
+    // A syntax error BECAUSE Prettier reported where. Its own sentence is not
+    // carried — Prettier's messages are open-ended — and no repair detail is
+    // invented for a formatter.
+    expect(result.code).toBe('syntaxError');
+    expect(result).not.toHaveProperty('detail');
+    expect(result).not.toHaveProperty('message');
   });
 
   it('preserves CRLF line endings rather than rewriting every line', async () => {
@@ -323,7 +405,7 @@ describe('format', () => {
     const result = await runTransform(request('x', 'png'));
     expect(result.kind).toBe('transformFailed');
     if (result.kind !== 'transformFailed') return;
-    expect(result.message).toContain('cannot be formatted');
+    expect(result.code).toBe('unsupportedType');
     expect(result.line).toBeNull();
     expect(result.excerpt).toBe('');
   });
@@ -349,6 +431,8 @@ describe('JSON Lines', () => {
     // The column is relative to the LINE. Whole-file offset 15 would be
     // meaningless against a line number.
     expect(result.column).toBe(8);
+    expect(result.code).toBe('syntaxError');
+    expect(result.detail).toBe('unexpectedCharacter');
   });
 
   it('repairs each record independently', async () => {
@@ -391,7 +475,7 @@ describe('repair then format, in that order', () => {
   ])('seals a provenance block the metadata schema accepts, having run %s', async (_l, flags) => {
     // Driven through `runTransform` and validated against the REAL
     // `documentMetaSchema`, not against arithmetic on two string literals: the
-    // labels are built by `toolLabels`, both fields are
+    // labels are built by `transformToolLabels`, both fields are
     // `.max(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH)` in the schema, and a record
     // that will not seal is a document that cannot be uploaded WITH its
     // provenance — discovered after the user has chosen the file and confirmed
@@ -479,7 +563,7 @@ describe('the frame validator for a transform request', () => {
     });
     expect(result.kind).toBe('transformFailed');
     if (result.kind !== 'transformFailed') return;
-    expect(result.message).toContain('No transform was requested');
+    expect(result.code).toBe('nothingRequested');
     expect(result).not.toHaveProperty('tool');
   });
 

@@ -522,9 +522,10 @@ describe('an uploaded photo', () => {
     });
   });
 
-  it("shows the FRAME's reason for one refused image, not its own generic sentence", async () => {
+  it("shows the DRIVER's sentence for one refused image, not its own generic one", async () => {
     // "That image could not be read." cannot say which limit was crossed. The
-    // frame's own sentence can, and it is the one worth showing.
+    // driver's sentence for the frame's code can, and it is the one worth
+    // showing. (It is the application's own wording: the frame sends a code.)
     scan.mockRejectedValue(new QrImageRefusedError('That image is too large to read.'));
     const { onError } = renderPanel();
 

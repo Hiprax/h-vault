@@ -1,10 +1,12 @@
 import {
-  MAX_TRANSFORM_EXCERPT_LENGTH,
-  MAX_TRANSFORM_MESSAGE_LENGTH,
   canRepairSyntax,
   extensionTable,
+  transformExcerpt,
   transformSyntaxForExtension,
+  transformToolLabels,
+  type SandboxRepairDetailCode,
   type SandboxTransformFailedMessage,
+  type SandboxTransformFailureCode,
   type SandboxTransformRequest,
   type SandboxTransformedMessage,
   type TransformSyntax,
@@ -65,24 +67,16 @@ import {
  * `DEFAULT_CHUNK_BUDGET_KB` on size.
  */
 
-/**
- * The two tool versions this engine records as provenance.
- *
- * Written down rather than read at runtime, and that is a deliberate trade with
- * a gate behind it. `jsonrepair` publishes no version at all; Prettier publishes
- * one on its standalone module but does not declare it in
- * `standalone.d.ts`, so reading it would take a cast and a fallback branch that
- * nothing can reach. Two constants and one test are honest where a cast and a
- * dead branch are not.
- *
- * `packages/client/tests/document-format.test.ts` reads both packages' own
- * `package.json` and asserts they agree with these, so a dependency bump that
- * forgets them is a failing test rather than a metadata record that quietly
- * describes the wrong software. That matters more here than it looks: this pair
- * is sealed into the document and is the only record of what rewrote the bytes.
+/*
+ * The two tool versions this engine records as provenance, and the labels built
+ * from them, live in `@hvault/shared` (`JSONREPAIR_VERSION`, `PRETTIER_VERSION`,
+ * `transformToolLabels`) rather than here, because the APPLICATION must compute
+ * the same pair: it refuses any reply whose labels are not exactly the ones its
+ * own request can produce, since they are shown beside the upload button and
+ * sealed into the document. They are still hand-written, and
+ * `packages/client/tests/document-format.test.ts` still pins them to the
+ * installed packages.
  */
-export const JSONREPAIR_VERSION = '3.15.0';
-export const PRETTIER_VERSION = '3.9.6';
 
 /**
  * The Prettier parser for each extension in the JSON family.
@@ -160,56 +154,38 @@ export function positionAt(text: string, offset: number): EnginePosition {
   return { line, column: bounded - lineStart + 1 };
 }
 
-/**
- * The source line a failure points at, bounded and marked when it was cut.
- *
- * Built from the document's own bytes, so it is bounded here rather than trusted
- * to be short: it crosses the port, and the application displays it. An
- * out-of-range line answers `''`, which the panel renders as "no excerpt"
- * instead of an empty quotation.
- */
-export function excerptFor(text: string, line: number | null): string {
-  if (line === null || line < 1) return '';
-  const lines = text.split('\n');
-  const found = lines[line - 1];
-  if (found === undefined) return '';
-  // The trailing carriage return of a CRLF file is invisible on screen and would
-  // spend a character of the bound for nothing.
-  const cleaned = found.endsWith('\r') ? found.slice(0, -1) : found;
-  if (cleaned.length <= MAX_TRANSFORM_EXCERPT_LENGTH) return cleaned;
-  return `${cleaned.slice(0, MAX_TRANSFORM_EXCERPT_LENGTH - 1)}…`;
-}
+// `Invalid character` is not a prefix of `Invalid unicode character`, so the
+// order of this list decides nothing; it follows `jsonrepair`'s own source.
+const REPAIR_DETAIL_PREFIXES: readonly (readonly [string, SandboxRepairDetailCode])[] = [
+  ['Invalid character', 'invalidCharacter'],
+  ['Unexpected character', 'unexpectedCharacter'],
+  ['Unexpected end of json string', 'unexpectedEnd'],
+  ['Object key expected', 'objectKeyExpected'],
+  ['Colon expected', 'colonExpected'],
+  ['Invalid unicode character', 'invalidUnicode'],
+];
 
 /**
- * The first line of a tool's error message, bounded.
+ * Which of `jsonrepair`'s six complaints this is, as a code, or `undefined`.
  *
- * Prettier's syntax errors carry a code frame after the sentence — the offending
- * source with a caret under it — and this panel draws its own excerpt from its
- * own copy of the text. Keeping both would show the same line twice, once in a
- * frame whose alignment depends on a monospace font the panel does not impose.
+ * The repairer's wording is not sent: the application words every refusal it
+ * shows, because the words land in its chrome. But WHICH complaint it was is
+ * worth keeping — "a colon was expected" beside a line and a column is the whole
+ * diagnosis — and `jsonrepair` has exactly six things it can say, each thrown
+ * from one helper with a fixed prefix. Matched by prefix because three of them
+ * append the offending text. A message this does not recognise (a future
+ * release, a plugin) sends no detail, and the host's general sentence stands.
  *
- * The bound is applied HERE rather than left to the host, and the difference is
- * not academic. The host's reply schema declares
- * `message: z.string().max(MAX_TRANSFORM_MESSAGE_LENGTH)`, so an over-long
- * sentence does not reach a user either way — but it fails the whole message,
- * and a positioned failure that named the line and the column then degrades into
- * "the formatter sent something unexpected". Truncating keeps the position,
- * which is the part the user needs; rejecting throws it away to punish a string
- * length. Neither tool is known to produce one this long, which is exactly why
- * it must be bounded rather than assumed: `String(error)` for a non-`Error`
- * thrown by a future plugin has no length at all.
- *
- * Exported for the same reason {@link positionAt} and {@link excerptFor} are:
- * these three are where a failure's shape is decided, and neither of the two
- * libraries below can be made to produce the inputs that exercise their bounds —
- * measured, the longest first line either of them emits is under a hundred
- * characters. A bound nothing can reach through the public entry point is either
- * tested here or not tested at all.
+ * Exported so the table can be held to each prefix directly: not every one of
+ * the six can be provoked through `jsonrepair` with an input small enough to
+ * keep in a test.
  */
-export function firstLine(message: string): string {
-  const head = (message.split('\n')[0] ?? '').trim();
-  if (head.length <= MAX_TRANSFORM_MESSAGE_LENGTH) return head;
-  return `${head.slice(0, MAX_TRANSFORM_MESSAGE_LENGTH - 1)}…`;
+export function repairDetailOf(error: unknown): SandboxRepairDetailCode | undefined {
+  if (!(error instanceof Error)) return undefined;
+  for (const [prefix, code] of REPAIR_DETAIL_PREFIXES) {
+    if (error.message.startsWith(prefix)) return code;
+  }
+  return undefined;
 }
 
 /**
@@ -223,9 +199,9 @@ export function firstLine(message: string): string {
  * a `TypeError` the frame answers with its generic refusal, losing the position
  * that made the message useful.
  *
- * Exported for the same reason {@link positionAt}, {@link excerptFor} and
- * {@link firstLine} are: the malformed shapes cannot be produced by asking
- * Prettier for them, so they are constructed directly in the test.
+ * Exported for the same reason {@link positionAt} is: the malformed shapes
+ * cannot be produced by asking Prettier for them, so they are constructed
+ * directly in the test.
  */
 export function locOf(error: unknown): EnginePosition {
   if (typeof error !== 'object' || error === null || !('loc' in error)) {
@@ -251,21 +227,37 @@ function offsetOf(error: unknown): number | null {
   return typeof position === 'number' ? position : null;
 }
 
-/** The message every failure path goes through, so the bounds are applied once. */
+/**
+ * The message every failure path goes through, so its shape is decided once.
+ *
+ * A CODE, never a sentence: the application words the refusal. `detail` is
+ * added only when there is one, so an ordinary failure carries no empty field.
+ */
 function failure(
   stage: SandboxTransformFailedMessage['stage'],
-  message: string,
+  code: SandboxTransformFailureCode,
   position: EnginePosition,
   excerpt: string,
+  detail?: SandboxRepairDetailCode,
 ): SandboxTransformFailedMessage {
-  return {
+  const base = {
     kind: 'transformFailed',
     stage,
-    message,
+    code,
     line: position.line,
     column: position.column,
     excerpt,
-  };
+  } as const;
+  return detail === undefined ? base : { ...base, detail };
+}
+
+/**
+ * A tool that threw WITH a position is reporting a problem in the document; one
+ * that threw without one is reporting a problem in itself, and saying "syntax
+ * error" about the reader's file then would be a claim nothing supports.
+ */
+function syntaxOrEngine(located: boolean): SandboxTransformFailureCode {
+  return located ? 'syntaxError' : 'engineFailed';
 }
 
 /**
@@ -429,9 +421,10 @@ async function repairLines(text: string): Promise<string | SandboxTransformFaile
       const lineNumber = index + 1;
       return failure(
         'repair',
-        firstLine(error instanceof Error ? error.message : String(error)),
+        syntaxOrEngine(offset !== null),
         { line: lineNumber, column },
-        excerptFor(text, lineNumber),
+        transformExcerpt(text, lineNumber),
+        repairDetailOf(error),
       );
     }
   }
@@ -457,9 +450,9 @@ async function formatLines(
       if (body === null) {
         return failure(
           'format',
-          'This record is too long to keep on one line, and a JSON Lines record may not be split across lines.',
+          'recordTooLong',
           { line: lineNumber, column: 1 },
-          excerptFor(text, lineNumber),
+          transformExcerpt(text, lineNumber),
         );
       }
       out.push({ body, carriageReturn: line.carriageReturn });
@@ -467,11 +460,11 @@ async function formatLines(
       const loc = locOf(error);
       return failure(
         'format',
-        firstLine(error instanceof Error ? error.message : String(error)),
+        syntaxOrEngine(loc.line !== null || loc.column !== null),
         // Prettier saw ONE line, so its own line number is always 1 and would be
         // a lie about the file; the column it reports is the one that matters.
         { line: lineNumber, column: loc.column },
-        excerptFor(text, lineNumber),
+        transformExcerpt(text, lineNumber),
       );
     }
   }
@@ -488,30 +481,12 @@ async function repairWhole(text: string): Promise<string | SandboxTransformFaile
     const position = offset === null ? { line: null, column: null } : positionAt(text, offset);
     return failure(
       'repair',
-      firstLine(error instanceof Error ? error.message : String(error)),
+      syntaxOrEngine(offset !== null),
       position,
-      excerptFor(text, position.line),
+      transformExcerpt(text, position.line),
+      repairDetailOf(error),
     );
   }
-}
-
-/**
- * The provenance labels for whichever halves actually ran.
- *
- * Both fields are bounded by `MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH` (64) in the
- * metadata schema, and the longest pair either of them can produce here is
- * `jsonrepair+prettier` with two semvers — comfortably inside it, and a test
- * pins that rather than leaving it to arithmetic in a comment.
- */
-function toolLabels(repaired: boolean, formatted: boolean): { tool: string; toolVersion: string } {
-  if (repaired && formatted) {
-    return {
-      tool: 'jsonrepair+prettier',
-      toolVersion: `${JSONREPAIR_VERSION}+${PRETTIER_VERSION}`,
-    };
-  }
-  if (repaired) return { tool: 'jsonrepair', toolVersion: JSONREPAIR_VERSION };
-  return { tool: 'prettier', toolVersion: PRETTIER_VERSION };
 }
 
 /**
@@ -538,29 +513,14 @@ export async function runTransform(
   // beside it — a provenance record naming software that never touched the
   // bytes, which is exactly the lie the record exists to prevent.
   if (!format && !repair) {
-    return failure(
-      'format',
-      'No transform was requested, so nothing was done to this file.',
-      { line: null, column: null },
-      '',
-    );
+    return failure('format', 'nothingRequested', { line: null, column: null }, '');
   }
   const syntax = transformSyntaxForExtension(ext);
   if (syntax === null) {
-    return failure(
-      'format',
-      'This file type cannot be formatted or repaired in your browser.',
-      { line: null, column: null },
-      '',
-    );
+    return failure('format', 'unsupportedType', { line: null, column: null }, '');
   }
   if (repair && !canRepairSyntax(syntax)) {
-    return failure(
-      'repair',
-      'Repair covers the JSON family only.',
-      { line: null, column: null },
-      '',
-    );
+    return failure('repair', 'repairUnsupported', { line: null, column: null }, '');
   }
 
   let current = text;
@@ -589,12 +549,12 @@ export async function runTransform(
         const position = locOf(error);
         return failure(
           'format',
-          firstLine(error instanceof Error ? error.message : String(error)),
+          syntaxOrEngine(position.line !== null || position.column !== null),
           position,
           // The excerpt comes from the text the FORMATTER saw, which is the
           // repaired text when a repair ran — quoting the original would point
           // at a line the reported number no longer describes.
-          excerptFor(current, position.line),
+          transformExcerpt(current, position.line),
         );
       }
     }
@@ -605,6 +565,6 @@ export async function runTransform(
     text: current,
     formatted: format,
     repaired: repair,
-    ...toolLabels(repair, format),
+    ...transformToolLabels(repair, format),
   };
 }

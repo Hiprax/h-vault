@@ -218,7 +218,11 @@ the sidebar and nothing to switch off.
   vault key, an access token, the document's id or even its name. The title, the toolbar and the
   download button are drawn outside the frame, so nothing a document renders can forge them, and
   a link inside a document asks for confirmation and shows you the destination's origin before it
-  opens. **Full screen expands the whole panel, never the frame alone** — the name and the
+  opens. **The frame never writes a word of the app's interface either**: when it declines a
+  preview, a format-and-repair or a photo, it names which of a fixed set of refusals it is and the
+  app supplies every sentence you read, so a compromised parser cannot put text of its own beside
+  the Download button. The one exception is quoting the line of your own file that a failed repair
+  or format points at. **Full screen expands the whole panel, never the frame alone** — the name and the
   Download button stay outside it in both states, and the browser keeps its own address bar, which
   is the one piece of chrome a document can never draw.
 

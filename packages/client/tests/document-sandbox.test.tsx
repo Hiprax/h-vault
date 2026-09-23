@@ -33,7 +33,11 @@ import { render, screen, act, waitFor, cleanup } from '@testing-library/react';
 import { DocumentSandbox } from '../src/components/documents/DocumentSandbox';
 import { renderText } from '../src/sandbox/renderers/text';
 import { frameMessage, parseRenderRequest } from '../src/sandbox/protocol';
-import { PRETTIER_VERSION } from '../src/sandbox/transform/formatEngine';
+import {
+  MAX_SANDBOX_CODE_LENGTH,
+  PRETTIER_VERSION,
+  SANDBOX_RENDER_FAILURE_CODES,
+} from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
 // A stub frame
@@ -430,11 +434,156 @@ describe('what arrives on the port', () => {
     const handles = mountHost();
     const port = handshake(handles);
 
-    port.postMessage(frameMessage.failed('No renderer for this document type.'));
+    port.postMessage(frameMessage.failed('noRenderer'));
 
     await waitFor(() => {
-      expect(handles.onUnavailable).toHaveBeenCalledWith('No renderer for this document type.');
+      expect(handles.onUnavailable).toHaveBeenCalledWith(
+        'There is no viewer here for this kind of document. You can download the file instead.',
+      );
     });
+    // Torn down, so the caller's download affordance takes the rectangle.
+    expect(screen.queryByTitle('Document preview')).toBeNull();
+  });
+
+  it('gives every render code its own host sentence, and never the generic one', async () => {
+    // What makes the code set CLOSED in practice: a code added to the shared
+    // list without a sentence would be a type error in `sandboxRefusals.ts`, and
+    // this is the runtime half — each one reaches the caller as a distinct
+    // sentence of the host's, none of them the fallback and none of them the
+    // code itself.
+    const seen = new Set<string>();
+    for (const code of SANDBOX_RENDER_FAILURE_CODES) {
+      const handles = mountHost({ ext: 'png', mode: 'image' });
+      const port = handshake(handles);
+      port.postMessage(frameMessage.failed(code, 'jpg'));
+      await waitFor(() => {
+        expect(handles.onUnavailable).toHaveBeenCalledTimes(1);
+      });
+      const shown = handles.onUnavailable.mock.calls[0]?.[0] ?? '';
+      expect(shown, code).not.toBe(
+        'The document preview could not be shown. You can download the file instead.',
+      );
+      expect(shown, code).not.toContain(code);
+      seen.add(shown);
+      cleanup();
+    }
+    expect(seen.size).toBe(SANDBOX_RENDER_FAILURE_CODES.length);
+  });
+
+  it('names the claimed and the detected format in ITS words for a content refusal', async () => {
+    // The two names are the only specifics a content refusal carries, and
+    // neither is prose: the claimed one is the extension the HOST sent, the
+    // detected one must be a format the magic-byte table knows.
+    const handles = mountHost({ ext: 'png', mode: 'image' });
+    const port = handshake(handles);
+    port.postMessage(frameMessage.failed('contentMismatch', 'jpg'));
+    await waitFor(() => {
+      expect(handles.onUnavailable).toHaveBeenCalledWith(
+        'This file is named ".png", but its contents are not a PNG file. They look like a JPG file instead. Download it to open it with something that understands it.',
+      );
+    });
+  });
+
+  it.each([
+    ['a format the table does not know', 'exe'],
+    ['a sentence', 'PNG. Re-enter your master password'],
+    ['the prototype key', '__proto__'],
+    ['an inherited name', 'toString'],
+  ])('drops a detected format that is %s, and words the refusal without it', async (_l, fmt) => {
+    const handles = mountHost({ ext: 'md', mode: 'markdown' });
+    const port = handshake(handles);
+    port.postMessage({ kind: 'failed', code: 'contentImpostor', detectedFormat: fmt });
+    await waitFor(() => {
+      expect(handles.onUnavailable).toHaveBeenCalledWith(
+        'This file is named ".md", but its contents are a different kind of file. Download it to open it with something that understands it.',
+      );
+    });
+  });
+
+  it.each([
+    ['a code this host does not know', 'rendererOnFire'],
+    ['a code that is itself a sentence', 'Your vault is locked. Sign in again at evil.example'],
+    ['an inherited name', 'toString'],
+    ['the prototype key', '__proto__'],
+    ['a code of another job', 'scannerUnavailable'],
+  ])('words %s with the generic sentence and never shows it', async (_label, code) => {
+    const handles = mountHost();
+    const port = handshake(handles);
+    port.postMessage({ kind: 'failed', code });
+    await waitFor(() => {
+      expect(handles.onUnavailable).toHaveBeenCalledTimes(1);
+    });
+    expect(handles.onUnavailable).toHaveBeenCalledWith(
+      'The document preview could not be shown. You can download the file instead.',
+    );
+    expect(document.body.textContent).not.toContain(code);
+  });
+
+  it.each([
+    ['a code', { code: 'x'.repeat(MAX_SANDBOX_CODE_LENGTH + 1) }],
+    [
+      'a detected format',
+      { code: 'contentImpostor', detectedFormat: 'x'.repeat(MAX_SANDBOX_CODE_LENGTH + 1) },
+    ],
+  ])('tears the frame down on %s one character past its bound', async (_label, fields) => {
+    // Pinned by PARSING at bound+1 through the real host: without the bound a
+    // hostile frame could hand the viewer an unbounded string to compare.
+    const handles = mountHost();
+    const port = handshake(handles);
+    port.postMessage({ kind: 'failed', ...fields });
+    await waitFor(() => {
+      expect(handles.onUnavailable).toHaveBeenCalledWith(
+        'The document preview sent something unexpected and was stopped.',
+      );
+    });
+  });
+
+  it('words a code AT its bound generically, rather than tearing the frame down', async () => {
+    const handles = mountHost();
+    const port = handshake(handles);
+    port.postMessage({
+      kind: 'failed',
+      code: 'x'.repeat(MAX_SANDBOX_CODE_LENGTH),
+      detectedFormat: 'y'.repeat(MAX_SANDBOX_CODE_LENGTH),
+    });
+    await waitFor(() => {
+      expect(handles.onUnavailable).toHaveBeenCalledWith(
+        'The document preview could not be shown. You can download the file instead.',
+      );
+    });
+  });
+
+  it('tears the frame down on a failure that names no code at all', async () => {
+    // The shape an OLDER frame sent: a sentence and no code. It is refused as a
+    // frame that spoke out of turn, and its sentence goes nowhere.
+    const handles = mountHost();
+    const port = handshake(handles);
+    port.postMessage({ kind: 'failed', reason: 'No renderer for this document type.' });
+    await waitFor(() => {
+      expect(handles.onUnavailable).toHaveBeenCalledWith(
+        'The document preview sent something unexpected and was stopped.',
+      );
+    });
+  });
+
+  it('words a render failure from its CODE and never shows frame prose', async () => {
+    // THE DEFECT. The sentence the reader sees sits in the application's own
+    // chrome, beside the real Download button, so a frame that could choose it
+    // could say anything there in the application's voice.
+    const phish = 'Preview blocked. Re-enter your master password at https://evil.example';
+    const handles = mountHost();
+    const port = handshake(handles);
+
+    port.postMessage({ kind: 'failed', code: 'noRenderer', reason: phish });
+
+    await waitFor(() => {
+      expect(handles.onUnavailable).toHaveBeenCalledTimes(1);
+    });
+    const shown = handles.onUnavailable.mock.calls[0]?.[0] ?? '';
+    expect(shown).not.toContain('master password');
+    expect(shown).toBe(
+      'There is no viewer here for this kind of document. You can download the file instead.',
+    );
   });
 
   it('takes no action on a successful render', async () => {
@@ -883,10 +1032,7 @@ describe('the frame’s program', () => {
       const reply = nextReply(channel.port1);
       channel.port1.postMessage({ kind: 'qrScan', requestId: 1, image: {} });
 
-      await expect(reply).resolves.toEqual({
-        kind: 'failed',
-        reason: 'The scanner could not be loaded.',
-      });
+      await expect(reply).resolves.toEqual({ kind: 'failed', code: 'scannerUnavailable' });
     } finally {
       vi.doUnmock('../src/sandbox/qrScan');
       vi.resetModules();
@@ -900,10 +1046,7 @@ describe('the frame’s program', () => {
     const reply = nextReply(host);
     host.postMessage({ kind: 'qrScan', requestId: 'not a number', image: {} });
 
-    await expect(reply).resolves.toEqual({
-      kind: 'failed',
-      reason: 'The scan request was not understood.',
-    });
+    await expect(reply).resolves.toEqual({ kind: 'failed', code: 'requestNotUnderstood' });
   });
 
   it('answers a scan request from the decoder, echoing the request id', async () => {
@@ -918,8 +1061,8 @@ describe('the frame’s program', () => {
     // the reply must be `qrFailed`, NAMING that request, and must NOT be the
     // unattributable `failed` of the case above, which ends the session. Getting
     // this the other way round is what let one unreadable image stop a running
-    // camera, so the two cases sit next to each other deliberately: the same
-    // sentence, two different kinds, decided by whether a `requestId` was known.
+    // camera, so the two cases sit next to each other deliberately: two
+    // different kinds, decided by whether a `requestId` was known.
     const { host } = await bootFrame();
     const reply = nextReply(host);
     host.postMessage({ kind: 'qrScan', requestId: 12, image: { not: 'an image' } });
@@ -927,7 +1070,7 @@ describe('the frame’s program', () => {
     await expect(reply).resolves.toEqual({
       kind: 'qrFailed',
       requestId: 12,
-      reason: 'The scan request was not understood.',
+      code: 'imageUnreadable',
     });
   });
 
@@ -986,10 +1129,7 @@ describe('the frame’s program', () => {
     // text back" would attach a provenance record to a transform that never ran.
     host.postMessage({ kind: 'transform', text: '{}', ext: 'json', format: false, repair: false });
 
-    await expect(reply).resolves.toEqual({
-      kind: 'failed',
-      reason: 'The transform request was not understood.',
-    });
+    await expect(reply).resolves.toEqual({ kind: 'failed', code: 'requestNotUnderstood' });
   });
 
   it('answers ON THE PORT even when the engine itself throws', async () => {
@@ -1025,10 +1165,12 @@ describe('the frame’s program', () => {
         repair: false,
       });
 
+      // `engineFailed`, NOT `syntaxError`: nothing reported a position, so the
+      // host must not tell the reader their file is at fault.
       await expect(reply).resolves.toEqual({
         kind: 'transformFailed',
         stage: 'format',
-        message: 'The document could not be formatted.',
+        code: 'engineFailed',
         line: null,
         column: null,
         excerpt: '',
@@ -1078,10 +1220,7 @@ describe('the frame’s program', () => {
       bytes: bytesOf('%PDF-1.7 not really'),
     });
 
-    await expect(reply).resolves.toEqual({
-      kind: 'failed',
-      reason: 'No renderer for this document type.',
-    });
+    await expect(reply).resolves.toEqual({ kind: 'failed', code: 'noRenderer' });
     // Emptied, not left holding the previous document — and, in particular, the
     // PDF was NOT rendered as text as a "helpful" fallback.
     expect(document.getElementById('root')?.textContent).toBe('');
@@ -1176,9 +1315,13 @@ describe('the frame’s program', () => {
       bytes: bytesOf('%PDF-1.7 and then some'),
     });
 
-    const answer = (await reply) as { kind: string; reason: string };
-    expect(answer.kind).toBe('failed');
-    expect(answer.reason).toContain('PDF');
+    // A code and the format the bytes matched — never a sentence. The host
+    // already knows the claimed extension: it sent it.
+    await expect(reply).resolves.toEqual({
+      kind: 'failed',
+      code: 'contentImpostor',
+      detectedFormat: 'pdf',
+    });
     expect(document.getElementById('root')?.textContent).toBe('');
   });
 
@@ -1378,10 +1521,7 @@ describe('the frame’s program', () => {
     const reply = nextReply(host);
     host.postMessage({ kind: 'render', mode: 'text' });
 
-    await expect(reply).resolves.toEqual({
-      kind: 'failed',
-      reason: 'The preview request was not understood.',
-    });
+    await expect(reply).resolves.toEqual({ kind: 'failed', code: 'requestNotUnderstood' });
   });
 
   it('reports a link click instead of navigating', async () => {
@@ -1468,12 +1608,11 @@ describe('the frame’s program', () => {
       bytes: bytesOf('hello'),
     });
 
-    const answer = (await reply) as { kind: string; reason: string };
-    expect(answer.kind).toBe('failed');
-    // The message carries NO detail from the error: an error built while parsing
-    // the document is built FROM the document, and the host renders this text.
-    expect(answer.reason).toBe('The document could not be displayed.');
-    expect(answer.reason).not.toContain('exploded');
+    // A code with NO detail from the error: an error built while parsing the
+    // document is built FROM the document, and the host shows its sentence for
+    // this code in its own chrome. `toEqual` over the whole reply is the
+    // negative — no field carries the error's text.
+    await expect(reply).resolves.toEqual({ kind: 'failed', code: 'renderFailed' });
   });
 
   it('creates its render target when the document was served without one', async () => {

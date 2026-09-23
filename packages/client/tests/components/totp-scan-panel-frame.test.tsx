@@ -138,23 +138,27 @@ describe('the frame an uploaded photo creates', () => {
     }
   });
 
-  it("shows the frame's OWN reason for an image it refused, and keeps the frame rule", async () => {
-    // End to end over a real port: the frame refuses one image with a reason
-    // that names the limit, the host rejects that one scan, and the panel shows
-    // the frame's sentence rather than its own. The session was never told to
-    // die, so the only thing taken down is the frame this call created.
+  it('shows the HOST’S sentence for the code a frame refused an image with, never its words', async () => {
+    // End to end over a real port: the frame refuses one image with a code that
+    // names the limit, the host rejects that one scan, and the panel shows the
+    // driver's sentence for that code rather than its own generic one. Prose the
+    // frame sends alongside is never shown: the status line is the application's.
+    // The session was never told to die, so the only thing taken down is the
+    // frame this call created.
     const { onError, onDecoded } = renderPanel();
 
     await uploadPhoto();
     await answerAsFrame((requestId) => ({
       kind: 'qrFailed',
       requestId,
-      reason: 'That image is too large to read.',
+      code: 'imageTooLarge',
+      reason: 'Import paused. Re-enter your master password at https://evil.example',
     }));
 
     await waitFor(() => {
       expect(onError).toHaveBeenCalledWith('That image is too large to read.');
     });
+    expect(onError).not.toHaveBeenCalledWith(expect.stringContaining('master password'));
     expect(onError).not.toHaveBeenCalledWith('That image could not be read.');
     expect(onDecoded).not.toHaveBeenCalled();
     expect(document.querySelectorAll('iframe')).toHaveLength(0);

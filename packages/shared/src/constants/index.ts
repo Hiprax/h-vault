@@ -625,17 +625,34 @@ export const REPAIRABLE_TRANSFORM_SYNTAXES: readonly TransformSyntax[] = Object.
   'jsonl',
 ]);
 
-// The two free-text fields a transform FAILURE carries across the port. Both are
-// built by the frame from the document's own bytes, so both are bounded: they are
-// displayed by the application's chrome, and an unbounded string chosen by the
-// least-trusted component in the system is a denial-of-service on the very panel
-// that has to explain what went wrong.
-//
-// The message is a formatter's or a repairer's own wording (Prettier's syntax
-// errors run to several lines with a source snippet); the excerpt is ONE line of
-// the offending document, which is what makes "line 4, column 12" actionable.
-export const MAX_TRANSFORM_MESSAGE_LENGTH = 2_000;
+// The ONE free-text field a transform FAILURE carries across the port: ONE line
+// of the offending document, which is what makes "line 4, column 12" actionable.
+// It is bounded because it is displayed in the application's chrome, and an
+// unbounded string chosen by the least-trusted component in the system is a
+// denial-of-service on the very panel that has to explain what went wrong. (The
+// failure's SENTENCE is not a field at all: the frame sends a code and the
+// application words it, so there is no tool wording to bound.)
 export const MAX_TRANSFORM_EXCERPT_LENGTH = 200;
+
+// The two tool versions a transform records as provenance, sealed into the
+// document's encrypted metadata as the only record of what rewrote the bytes.
+//
+// Written down rather than read at runtime, and that is a deliberate trade with
+// a gate behind it. `jsonrepair` publishes no version at all; Prettier publishes
+// one on its standalone module but does not declare it in `standalone.d.ts`, so
+// reading it would take a cast and a fallback branch that nothing can reach.
+// `packages/client/tests/document-format.test.ts` reads both packages' own
+// `package.json` and asserts they agree with these, so a dependency bump that
+// forgets them is a failing test rather than a metadata record that quietly
+// describes the wrong software.
+//
+// HERE rather than beside the engine, because BOTH programs need them: the
+// sandbox's engine stamps its reply with them, and the application refuses any
+// reply whose labels are not exactly what its own request can produce (see
+// `transformToolLabels`). A label the frame chose would be shown beside the
+// upload button and sealed into the document for good.
+export const JSONREPAIR_VERSION = '3.15.0';
+export const PRETTIER_VERSION = '3.9.6';
 
 // HKDF `info` prefixes, concatenated with the document id to bind every derived
 // key to ONE document: the stream key, the metadata key and the DEK wrapping key.

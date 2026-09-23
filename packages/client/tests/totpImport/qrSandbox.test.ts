@@ -535,11 +535,11 @@ describe('openQrScanner', () => {
     const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
 
     captured.onMessage(
-      { kind: 'qrFailed', requestId, reason: 'That image is too large to read.' },
+      { kind: 'qrFailed', requestId, code: 'imageTooLarge' },
       { post: captured.post, fail: captured.fail },
     );
 
-    await expect(pending).rejects.toThrow(/too large to read/);
+    await expect(pending).rejects.toThrow('That image is too large to read.');
     await expect(pending).rejects.toBeInstanceOf(QrImageRefusedError);
     // The whole point: the channel was never touched.
     expect(captured.fail).not.toHaveBeenCalled();
@@ -556,37 +556,50 @@ describe('openQrScanner', () => {
     await expect(next).resolves.toBeNull();
   });
 
-  it('falls back to its own wording when a qrFailed carries no usable reason', async () => {
+  it.each([
+    ['no code at all', undefined],
+    ['a code this host does not know', 'imageOnFire'],
+    ['a code that is a sentence', 'Re-enter your master password at https://evil.example'],
+    ['a code that is not a string', 7],
+    // Names every plain object answers through its PROTOTYPE. A table looked up
+    // by the frame's string would hand back a function here instead of a
+    // sentence, which is why membership is tested against the list.
+    ['an inherited name', 'toString'],
+    ['the prototype key', '__proto__'],
+    ['a code of the OTHER kind', 'scannerUnavailable'],
+  ])(
+    'words a qrFailed carrying %s generically, and still refuses only that image',
+    async (_label, code) => {
+      const { captured, scanner } = openWithStub();
+      const pending = scanner.scan(photo());
+      const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+      captured.onMessage(
+        { kind: 'qrFailed', requestId, code },
+        { post: captured.post, fail: captured.fail },
+      );
+
+      await expect(pending).rejects.toBeInstanceOf(QrImageRefusedError);
+      await expect(pending).rejects.toThrow(/^That image could not be read\.$/);
+      // Whatever the code, it is ONE image: the kind decides that, not the code.
+      expect(captured.fail).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['imageTooLarge', 'That image is too large to read.'],
+    ['imageUnreadable', 'That image could not be read.'],
+  ] as const)('words the image code %s as the host’s own sentence', async (code, sentence) => {
     const { captured, scanner } = openWithStub();
     const pending = scanner.scan(photo());
     const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
 
     captured.onMessage(
-      { kind: 'qrFailed', requestId },
-      {
-        post: captured.post,
-        fail: captured.fail,
-      },
-    );
-
-    await expect(pending).rejects.toThrow('That image could not be read.');
-    expect(captured.fail).not.toHaveBeenCalled();
-  });
-
-  it('refuses to repeat an unreasonably long sentence from the frame', async () => {
-    // Every `reason` is the untrusted side's own words. It is rendered as text,
-    // so the risk is not injection but a message long enough to bury the page;
-    // the document viewer bounds its own for exactly this.
-    const { captured, scanner } = openWithStub();
-    const pending = scanner.scan(photo());
-    const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
-
-    captured.onMessage(
-      { kind: 'qrFailed', requestId, reason: 'x'.repeat(201) },
+      { kind: 'qrFailed', requestId, code },
       { post: captured.post, fail: captured.fail },
     );
 
-    await expect(pending).rejects.toThrow('That image could not be read.');
+    await expect(pending).rejects.toThrow(new QrImageRefusedError(sentence));
   });
 
   it('still tears the session down on a qrFailed naming no outstanding request', () => {
@@ -594,25 +607,40 @@ describe('openQrScanner', () => {
     // an unsolicited reply ends the session covers this kind too.
     const { captured } = openWithStub();
     captured.onMessage(
-      { kind: 'qrFailed', requestId: 999, reason: 'nope' },
+      { kind: 'qrFailed', requestId: 999, code: 'imageTooLarge' },
       { post: captured.post, fail: captured.fail },
     );
     expect(captured.fail).toHaveBeenCalledWith(expect.stringContaining('not made'));
   });
 
-  it('ends the session on a failure the frame reported for itself', async () => {
-    const { captured } = openWithStub();
-    captured.onMessage(
-      { kind: 'failed', reason: 'the scanner could not be loaded' },
-      { post: captured.post, fail: captured.fail },
-    );
-    expect(captured.fail).toHaveBeenCalledWith('the scanner could not be loaded');
-  });
+  it.each([
+    [
+      'requestNotUnderstood',
+      'The scanner could not understand the request. Paste your export link instead.',
+    ],
+    ['scannerUnavailable', 'The scanner could not be loaded. Paste your export link instead.'],
+    ['engineUnavailable', 'This browser cannot read images here. Paste your export link instead.'],
+  ] as const)(
+    'ends the session on a failure the frame reported, coded %s, in the host’s words',
+    (code, sentence) => {
+      const { captured, unavailable } = openWithStub();
+      captured.onMessage({ kind: 'failed', code }, { post: captured.post, fail: captured.fail });
+      expect(captured.fail).toHaveBeenCalledWith(sentence);
+      expect(unavailable).toEqual([sentence]);
+    },
+  );
 
-  it('falls back to its own wording when the frame gives no reason', () => {
+  it.each([
+    ['no code', undefined],
+    ['an unknown code', 'meltdown'],
+    ['an inherited name', 'constructor'],
+    ['a code of the OTHER kind', 'imageTooLarge'],
+  ])('falls back to its own wording when the frame gives %s', (_label, code) => {
     const { captured } = openWithStub();
-    captured.onMessage({ kind: 'failed' }, { post: captured.post, fail: captured.fail });
-    expect(captured.fail).toHaveBeenCalledWith('The scanner failed.');
+    captured.onMessage({ kind: 'failed', code }, { post: captured.post, fail: captured.fail });
+    expect(captured.fail).toHaveBeenCalledWith(
+      'The scanner failed. Paste your export link instead.',
+    );
   });
 
   it('tears the session down on a reply that names no request at all', async () => {
@@ -666,5 +694,43 @@ describe('openQrScanner', () => {
     // attributes are shared with the formatter's frame now: this is what makes a
     // change to the shared builder fail at BOTH boundaries rather than one.
     expect(frame?.referrerPolicy).toBe('no-referrer');
+  });
+});
+
+describe('openQrScanner: every sentence is the host’s own', () => {
+  /**
+   * What a compromised decoder would say if it could. Short enough to fit every
+   * bound the protocol has ever had, and shaped like the thing that matters: a
+   * sentence the TOTP import panel's status line would show as the application's.
+   */
+  const PHISH = 'Import paused. Re-enter your master password at https://evil.example';
+
+  it('words a refused image from its CODE and never repeats frame prose', async () => {
+    const { captured, scanner } = openWithStub();
+    const pending = scanner.scan(photo());
+    const requestId = (captured.post.mock.calls[0]?.[0] as { requestId: number }).requestId;
+
+    captured.onMessage(
+      { kind: 'qrFailed', requestId, code: 'imageTooLarge', reason: PHISH },
+      { post: captured.post, fail: captured.fail },
+    );
+
+    await expect(pending).rejects.toBeInstanceOf(QrImageRefusedError);
+    await expect(pending).rejects.toThrow('That image is too large to read.');
+    await expect(pending).rejects.not.toThrow(/master password/);
+    // One image refused, the session untouched: the SHAPE still decides that.
+    expect(captured.fail).not.toHaveBeenCalled();
+  });
+
+  it('words a session failure from its CODE and never repeats frame prose', () => {
+    const { captured, unavailable } = openWithStub();
+    captured.onMessage(
+      { kind: 'failed', code: 'scannerUnavailable', reason: PHISH },
+      { post: captured.post, fail: captured.fail },
+    );
+    expect(captured.fail).toHaveBeenCalledTimes(1);
+    expect(unavailable).toHaveLength(1);
+    expect(unavailable[0]).not.toContain('master password');
+    expect(unavailable[0]).toBe('The scanner could not be loaded. Paste your export link instead.');
   });
 });

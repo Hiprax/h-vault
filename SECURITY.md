@@ -539,7 +539,19 @@ correctness, and these are the things it does not buy:
    renderer painting something that looks like a prompt. This is why the master password is asked
    for **only on the full-page lock screen** and nowhere else, and why the document's title, its
    toolbar and its download button are drawn by the application _outside_ the frame, where a
-   renderer cannot forge them.
+   renderer cannot forge them. It cannot put words _outside_ its rectangle either: every refusal
+   the frame reports — for a preview, a format-and-repair, or a photo read by the authenticator
+   import — is a code from a closed list, the application writes every sentence shown for it, and
+   a code it does not recognise is described generically and never repeated. The provenance labels
+   of a reformatted upload are required to be exactly the pair the application's own request
+   produces. The one frame-supplied string the application shows about a refusal is a transform
+   failure's excerpt: at most 200 characters of the offending line, shown as a quotation, and
+   taken from the application's own copy of the file whenever the line refers to text it holds —
+   so only a formatter failure _after_ a repair, which points into repaired text only the frame
+   has, quotes the frame. (What a frame returns as its RESULT is a different thing — the
+   transformed document you review as a diff before it is uploaded, or the export link a photo
+   contained — and is treated as data: compared, parsed and validated, never shown as the
+   application's own words.)
 3. **Isolation does nothing about a renderer that displays something other than the file.** A bug
    that renders the wrong text is invisible to every boundary described here, and it matters most
    for exactly the documents someone reads in order to act on them — a recovery sheet, a set of

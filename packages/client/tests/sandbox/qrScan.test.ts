@@ -113,11 +113,10 @@ describe('what the frame refuses to decode at all', () => {
     // cannot attribute a bare `failed` to one image, so it has to read it as the
     // session dying — which stopped a running camera because somebody picked one
     // oversized photograph. Saying WHICH request lets it refuse just that image.
-    expect(reply).toEqual({
-      kind: 'qrFailed',
-      requestId: 1,
-      reason: expect.stringContaining('too large'),
-    });
+    // A CODE, never a sentence: the host words it, because its status line is
+    // the application's chrome. `toEqual` over the whole reply is what pins that
+    // no `reason` rides along.
+    expect(reply).toEqual({ kind: 'qrFailed', requestId: 1, code: 'imageTooLarge' });
     expect(globalThis.createImageBitmap).not.toHaveBeenCalled();
   });
 
@@ -129,18 +128,14 @@ describe('what the frame refuses to decode at all', () => {
     // photograph is 8000 x 6000 and routinely UNDER twelve mebibytes, so it
     // reaches the frame and is refused here. Attributable, so it costs one
     // image rather than the session.
-    expect(reply).toEqual({
-      kind: 'qrFailed',
-      requestId: 7,
-      reason: expect.stringContaining('too large'),
-    });
+    expect(reply).toEqual({ kind: 'qrFailed', requestId: 7, code: 'imageTooLarge' });
   });
 
   it('refuses something that is not an image at all', async () => {
     expect(await scanImage(4, { nope: true }, 2, 120)).toEqual({
       kind: 'qrFailed',
       requestId: 4,
-      reason: expect.any(String),
+      code: 'imageUnreadable',
     });
   });
 
@@ -151,10 +146,12 @@ describe('what the frame refuses to decode at all', () => {
     vi.mocked(globalThis.createImageBitmap).mockRejectedValueOnce(
       new Error('The source image could not be decoded.'),
     );
+    // The browser's own message is NOT forwarded: it is words the application
+    // did not write, bound for the application's status line.
     expect(await scanImage(9, new Blob([new Uint8Array(4)]), 2, 120)).toEqual({
       kind: 'qrFailed',
       requestId: 9,
-      reason: 'The source image could not be decoded.',
+      code: 'imageUnreadable',
     });
   });
 
@@ -173,7 +170,7 @@ describe('what the frame refuses to decode at all', () => {
       },
     );
     const reply = await scanImage(11, bitmap(), 2, 120);
-    expect(reply).toEqual({ kind: 'failed', reason: 'This browser cannot read images here.' });
+    expect(reply).toEqual({ kind: 'failed', code: 'engineUnavailable' });
     // The negative: NOT attributed to this one image, because the next one would
     // fail identically.
     expect(reply).not.toHaveProperty('requestId');
@@ -181,11 +178,11 @@ describe('what the frame refuses to decode at all', () => {
 
   it('ends the session when the engine has no OffscreenCanvas at all', async () => {
     // The same fault one step earlier. Named rather than left to throw a bare
-    // `ReferenceError`, so the host has a sentence to show instead of the
-    // decoder-load wording, which would be false.
+    // `ReferenceError`, so the host gets the specific code instead of reading
+    // it as the decoder failing to load, which would be false.
     vi.stubGlobal('OffscreenCanvas', undefined);
     const reply = await scanImage(12, bitmap(), 2, 120);
-    expect(reply).toEqual({ kind: 'failed', reason: 'This browser cannot read images here.' });
+    expect(reply).toEqual({ kind: 'failed', code: 'engineUnavailable' });
     expect(reply).not.toHaveProperty('requestId');
   });
 

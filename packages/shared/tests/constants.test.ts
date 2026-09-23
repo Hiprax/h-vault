@@ -110,7 +110,8 @@ import {
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
   MAX_FORMATTABLE_SIZE_BYTES,
   MAX_TRANSFORM_EXCERPT_LENGTH,
-  MAX_TRANSFORM_MESSAGE_LENGTH,
+  JSONREPAIR_VERSION,
+  PRETTIER_VERSION,
   REPAIRABLE_TRANSFORM_SYNTAXES,
   TRANSFORM_SYNTAXES,
   TRANSFORM_SYNTAX_NAMES,
@@ -136,8 +137,10 @@ import {
 import {
   canRepairSyntax,
   previewModeForName,
+  transformExcerpt,
   transformSyntaxForExtension,
   transformSyntaxForName,
+  transformToolLabels,
 } from '../src/utils/index.js';
 
 // ---------------------------------------------------------------------------
@@ -430,7 +433,6 @@ describe('Document-store constants', () => {
     ['MAX_DOCUMENT_META_JSON_BYTES', MAX_DOCUMENT_META_JSON_BYTES, 36_864],
     ['MAX_ENCRYPTED_DOCUMENT_META_LENGTH', MAX_ENCRYPTED_DOCUMENT_META_LENGTH, 49_152],
     ['MAX_FORMATTABLE_SIZE_BYTES', MAX_FORMATTABLE_SIZE_BYTES, 5_242_880],
-    ['MAX_TRANSFORM_MESSAGE_LENGTH', MAX_TRANSFORM_MESSAGE_LENGTH, 2_000],
     ['MAX_TRANSFORM_EXCERPT_LENGTH', MAX_TRANSFORM_EXCERPT_LENGTH, 200],
   ])('%s is %i', (_name, actual, expected) => {
     expect(actual).toBe(expected);
@@ -1237,6 +1239,51 @@ describe('TRANSFORM_SYNTAXES, transformSyntaxForName and canRepairSyntax', () =>
     // Not a `yml`: `values.prod.yaml` is, and `bundle.yaml.gz` is not.
     expect(transformSyntaxForName('values.prod.yaml')).toBe('yaml');
     expect(transformSyntaxForName('bundle.yaml.gz')).toBeNull();
+  });
+
+  it('labels each combination of transforms with exactly one fixed pair', () => {
+    // The ONE definition both programs read: the engine stamps its reply with
+    // it and the application refuses any reply whose labels differ. Every
+    // combination is spelled out, so swapping two branches is caught.
+    expect(transformToolLabels(true, true)).toEqual({
+      tool: 'jsonrepair+prettier',
+      toolVersion: `${JSONREPAIR_VERSION}+${PRETTIER_VERSION}`,
+    });
+    expect(transformToolLabels(true, false)).toEqual({
+      tool: 'jsonrepair',
+      toolVersion: JSONREPAIR_VERSION,
+    });
+    expect(transformToolLabels(false, true)).toEqual({
+      tool: 'prettier',
+      toolVersion: PRETTIER_VERSION,
+    });
+    // Both labels land in the metadata schema, which caps each at 64.
+    for (const [repaired, formatted] of [
+      [true, true],
+      [true, false],
+      [false, true],
+    ] as const) {
+      const labels = transformToolLabels(repaired, formatted);
+      expect(labels.tool.length).toBeLessThanOrEqual(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH);
+      expect(labels.toolVersion.length).toBeLessThanOrEqual(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH);
+    }
+  });
+
+  it('quotes one line of a document, bounded, and nothing for a line it does not have', () => {
+    expect(transformExcerpt('one\ntwo\nthree', 2)).toBe('two');
+    // The CR of a CRLF file would spend a character of the bound on nothing.
+    expect(transformExcerpt('one\r\ntwo', 1)).toBe('one');
+    expect(transformExcerpt('one', null)).toBe('');
+    expect(transformExcerpt('one', 0)).toBe('');
+    expect(transformExcerpt('one', -1)).toBe('');
+    expect(transformExcerpt('one', 2)).toBe('');
+    // At the bound it is untouched; one past it, cut and marked.
+    const atBound = 'x'.repeat(MAX_TRANSFORM_EXCERPT_LENGTH);
+    expect(transformExcerpt(atBound, 1)).toBe(atBound);
+    const cut = transformExcerpt(`${atBound}y`, 1);
+    expect(cut).toHaveLength(MAX_TRANSFORM_EXCERPT_LENGTH);
+    expect(cut.endsWith('…')).toBe(true);
+    expect(cut.startsWith('x'.repeat(MAX_TRANSFORM_EXCERPT_LENGTH - 1))).toBe(true);
   });
 
   it('offers repair for the JSON family and NOTHING else', () => {

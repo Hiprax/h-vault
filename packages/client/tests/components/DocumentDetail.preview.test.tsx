@@ -933,7 +933,7 @@ describe('DocumentDetail — full screen', () => {
     // would leave the refusal paragraph stranded on a full-viewport canvas.
     const port = handshake();
     await act(async () => {
-      port.postMessage({ kind: 'failed', reason: 'This file could not be displayed.' });
+      port.postMessage({ kind: 'failed', code: 'renderFailed' });
       await Promise.resolve();
     });
 
@@ -942,6 +942,29 @@ describe('DocumentDetail — full screen', () => {
     });
     expect(section()).not.toHaveAttribute('role');
     expect(document.body.style.overflow).toBe('');
+  });
+
+  it('puts the APPLICATION’s sentence beside the Download button, never the frame’s', async () => {
+    // The chrome this whole design protects: the refusal paragraph sits next to
+    // the real Download button, in the application's voice. A frame that could
+    // choose its words could ask for the master password right there.
+    await renderExpandable();
+    const port = handshake();
+    await act(async () => {
+      port.postMessage({
+        kind: 'failed',
+        code: 'renderFailed',
+        reason: 'Preview blocked. Re-enter your master password at https://evil.example',
+      });
+      await Promise.resolve();
+    });
+
+    const refusal = await screen.findByTestId('document-download-to-view');
+    expect(refusal).toHaveTextContent(
+      'The document could not be displayed. You can download the file instead.',
+    );
+    expect(document.body.textContent).not.toContain('master password');
+    expect(screen.getByRole('button', { name: /^Download\b/ })).toBeInTheDocument();
   });
 
   it('does not carry full screen from one document to the next', async () => {

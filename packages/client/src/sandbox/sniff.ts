@@ -1,5 +1,5 @@
 import { PREVIEW_MAGIC_BYTES, PREVIEW_MODES } from '@hvault/shared';
-import type { PreviewMode, PreviewSignature } from '@hvault/shared';
+import type { PreviewMode, PreviewSignature, SandboxRenderFailureCode } from '@hvault/shared';
 
 /**
  * Comparing a document's first bytes with what its name claims, before any
@@ -123,30 +123,43 @@ function identify(view: Uint8Array): Identification | null {
   return best;
 }
 
-/** `png` becomes `PNG`, which is how a person names a format. */
-function formatName(ext: string): string {
-  return ext.toUpperCase();
+/**
+ * Why a document must not be previewed: WHICH rule refused it, and what the bytes
+ * looked like instead when that is known.
+ *
+ * A code and an extension, never a sentence. The refusal is shown in the
+ * application's chrome, so the application words it
+ * (`src/lib/sandboxRefusals.ts`); this document only reports what it found.
+ * `detectedFormat` is always a key of `PREVIEW_MAGIC_BYTES`, which is the only
+ * shape the application will honour.
+ */
+interface PreviewRefusal {
+  readonly code: Extract<
+    SandboxRenderFailureCode,
+    'emptyFile' | 'contentMismatch' | 'contentImpostor'
+  >;
+  readonly detectedFormat?: string;
 }
-
-/** The sentence appended to every refusal, because a refusal needs a next step. */
-const DOWNLOAD_ADVICE = 'Download it to open it with something that understands it.';
 
 /**
  * Why this document must not be previewed, or `null` when it may be.
  *
  * Called once, before a renderer is chosen, so a refusal costs nothing but the
- * comparison. The returned sentence is shown to the reader by the application's
- * chrome, so it names what was expected and what was found rather than reporting
- * that "validation failed".
+ * comparison. The answer names what was expected (the host already knows: it
+ * sent the extension) and what was found, so the application can say that
+ * rather than report that "validation failed".
  */
-export function previewRefusal(mode: PreviewMode, ext: string, bytes: ArrayBuffer): string | null {
+export function previewRefusal(
+  mode: PreviewMode,
+  ext: string,
+  bytes: ArrayBuffer,
+): PreviewRefusal | null {
   if (bytes.byteLength === 0) {
     // Ahead of everything else: an empty file matches no signature, so without
-    // this it would be refused by Rule A with a sentence about its contents
-    // disagreeing with its name — which is true and useless. It is also what
-    // stops an `<img>` or a `<video>` being handed nothing and rendering as a
-    // broken glyph with no explanation.
-    return 'This file is empty. There is nothing to show.';
+    // this it would be refused by Rule A as contents disagreeing with a name —
+    // which is true and useless. It is also what stops an `<img>` or a `<video>`
+    // being handed nothing and rendering as a broken glyph with no explanation.
+    return { code: 'emptyFile' };
   }
 
   const view = new Uint8Array(bytes);
@@ -155,9 +168,9 @@ export function previewRefusal(mode: PreviewMode, ext: string, bytes: ArrayBuffe
   if (claimed !== undefined) {
     if (claimed.some((signature) => matches(signature, view))) return null;
     const actual = identify(view);
-    const looksLike =
-      actual === null ? '' : ` They look like a ${formatName(actual.ext)} file instead.`;
-    return `This file is named ".${ext}", but its contents are not a ${formatName(ext)} file.${looksLike} ${DOWNLOAD_ADVICE}`;
+    return actual === null
+      ? { code: 'contentMismatch' }
+      : { code: 'contentMismatch', detectedFormat: actual.ext };
   }
 
   // Rule B. Only reachable for a claim with no signature of its own, which after
@@ -168,5 +181,5 @@ export function previewRefusal(mode: PreviewMode, ext: string, bytes: ArrayBuffe
   // still renders, and refusing it would be pedantry with a download button
   // attached.
   if (PREVIEW_MODES[actual.ext] === mode) return null;
-  return `This file is named ".${ext}", but its contents are a ${formatName(actual.ext)} file. ${DOWNLOAD_ADVICE}`;
+  return { code: 'contentImpostor', detectedFormat: actual.ext };
 }
