@@ -9,7 +9,7 @@
  *
  * Key hierarchy:
  *   Master Password + Email (salt)
- *     -> PBKDF2 (600k iterations, SHA-256, 512-bit output)
+ *     -> PBKDF2 (KDF_ITERATIONS = 600k, SHA-256, 512-bit output)
  *       -> first 256 bits = Master Encryption Key (MEK) - AES-GCM
  *       -> last  256 bits -> PBKDF2 (1 iteration) -> Authentication Key (sent to server)
  *
@@ -17,7 +17,23 @@
  *   Vault data encrypted with Vault Key (AES-256-GCM)
  */
 
-const PBKDF2_ITERATIONS = 600_000;
+import { KDF_ITERATIONS } from '@hvault/shared';
+
+/*
+ * The PBKDF2 work factor for every password-based derivation here (the master
+ * key and the backup key) is `KDF_ITERATIONS`, the ONE definition the server's
+ * `User` model defaults `kdfIterations` to as well.
+ *
+ * It is a compile-time constant ON PURPOSE, and the server-supplied
+ * `kdfIterations` (returned by login and by every profile read, and stored by
+ * `authStore`) is deliberately NEVER read here. Deriving with a number the
+ * server chose would hand a hostile or compromised server a KDF-downgrade
+ * attack: answer `1`, and the next sign-in or unlock derives with a single
+ * round, so the captured auth hash costs one hash per guess instead of
+ * 600,000. Ignoring the server's value is what makes that impossible. A future
+ * change of work factor therefore needs a migration that the CLIENT drives, not
+ * a server-side setting.
+ */
 const AUTH_KEY_ITERATIONS = 1;
 const KEY_LENGTH_BITS = 512;
 const AES_KEY_BITS = 256;
@@ -47,7 +63,7 @@ export class CryptoService {
    * password and the user's email address.
    *
    * 1. Import `masterPassword` as a raw PBKDF2 key.
-   * 2. Derive 512 bits (64 bytes) with PBKDF2-SHA256, email as salt, 600k iterations.
+   * 2. Derive 512 bits (64 bytes) with PBKDF2-SHA256, email as salt, KDF_ITERATIONS rounds.
    * 3. Split the output:
    *    - First 256 bits  -> Master Encryption Key (MEK), imported as AES-GCM CryptoKey
    *    - Last  256 bits  -> raw auth material
@@ -72,7 +88,7 @@ export class CryptoService {
       {
         name: 'PBKDF2',
         salt,
-        iterations: PBKDF2_ITERATIONS,
+        iterations: KDF_ITERATIONS,
         hash: 'SHA-256',
       },
       baseKey,
@@ -84,17 +100,25 @@ export class CryptoService {
     const authMaterial = derivedBits.slice(32, 64);
 
     try {
-      // Import MEK as AES-GCM CryptoKey (extractable so we can zero key material on lock/logout).
-      // SECURITY TRADE-OFF: extractable keys allow `exportKey()` which means an XSS attacker
-      // could export raw key material. This is a known, accepted trade-off: the benefit of
-      // being able to zero key bytes in memory on lock/logout (via clearCryptoKey) outweighs
-      // the marginal additional risk, because an XSS attacker who can call `exportKey()` could
-      // also call `encrypt()`/`decrypt()` directly on the CryptoKey handle regardless.
+      // Import the MEK as a NON-extractable AES-GCM key. Nothing needs its raw
+      // bytes: it only ever wraps and unwraps the vault key, through
+      // `encrypt()`/`decrypt()` on this handle.
+      //
+      // Non-extractable is the property that matters, because the MEK is the one
+      // key a vault-key rotation does not retire: `rotateVaultKey` seals the new
+      // vault key under this SAME MEK and the server returns that wrapper to
+      // every session, so exported MEK bytes would unwrap every later vault key
+      // until the master password changes. Page script holding the handle can
+      // still use it while the page is open; it cannot carry it away.
+      //
+      // `clearCryptoKey` cannot zero this key and never could: it zeroes a raw
+      // copy it exports itself, never the live handle (see `clearCryptoKey`). What
+      // retires the MEK on lock and logout is dropping every reference to it.
       const masterEncryptionKey = await this.subtle.importKey(
         'raw',
         mekBytes,
         { name: 'AES-GCM', length: AES_KEY_BITS },
-        true,
+        false,
         ['encrypt', 'decrypt'],
       );
 
@@ -158,9 +182,11 @@ export class CryptoService {
    * encryption (e.g. when encrypting the vault key with MEK or BWK) and
    * for best-effort zeroing via `clearCryptoKey`.
    *
-   * SECURITY TRADE-OFF: Same as MEK — extractable keys mean XSS can call
-   * `exportKey()` to obtain raw key material. Accepted because XSS could
-   * already call `encrypt()`/`decrypt()` on the handle directly.
+   * SECURITY TRADE-OFF: an extractable key means page script can call
+   * `exportKey()` to obtain raw key material. Accepted for the VAULT key (and
+   * not for the MEK, which is non-extractable) because a rotation retires it:
+   * the bytes of a superseded vault key open nothing written after the rotation,
+   * while the MEK outlives every rotation.
    */
   async importVaultKey(rawKey: ArrayBuffer): Promise<CryptoKey> {
     return this.subtle.importKey('raw', rawKey, { name: 'AES-GCM', length: AES_KEY_BITS }, true, [
@@ -378,7 +404,7 @@ export class CryptoService {
 
   /**
    * Derive a Backup Encryption Key (BEK) from a backup password and salt
-   * using PBKDF2 (600k iterations, SHA-256).
+   * using PBKDF2 (KDF_ITERATIONS rounds, SHA-256).
    */
   async deriveBEK(backupPassword: string, salt: ArrayBuffer): Promise<CryptoKey> {
     const encoder = new TextEncoder();
@@ -393,7 +419,7 @@ export class CryptoService {
         {
           name: 'PBKDF2',
           salt: new Uint8Array(salt),
-          iterations: PBKDF2_ITERATIONS,
+          iterations: KDF_ITERATIONS,
           hash: 'SHA-256',
         },
         baseKey,
@@ -595,9 +621,15 @@ export class CryptoService {
   }
 
   /**
-   * Best-effort clearing of a CryptoKey object by exporting its raw key
-   * material and zeroing the resulting buffer. The CryptoKey must have been
-   * imported with `extractable: true` for this to work.
+   * Best-effort zeroing of a TRANSIENT raw copy of a key, never of the key.
+   *
+   * For an extractable key this exports the raw bytes and zeroes that buffer,
+   * which is all script can do: a `CryptoKey`'s material lives outside the
+   * JavaScript heap, and neither exporting nor zeroing a copy changes the live
+   * handle, which goes on encrypting and decrypting until every reference to it
+   * is dropped. For a non-extractable key (the MEK, the backup key) the export
+   * is refused and this is a no-op. Callers retire a key by dropping their
+   * reference to it; this call only narrows the window a raw copy exists in.
    */
   async clearCryptoKey(key: CryptoKey): Promise<void> {
     try {

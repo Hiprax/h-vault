@@ -233,7 +233,15 @@ security posture, not a disclaimer.
   compromised host, a hostile CDN, a malicious dependency, a stored XSS) can exfiltrate
   the master password or the vault key at the moment they are in memory. This is inherent
   to every browser-based zero-knowledge application, H-Vault included. Self-host it, pin
-  the version you deploy, and treat the served bundle as security-critical.
+  the version you deploy, and treat the served bundle as security-critical. A modified
+  build can do anything the genuine one can, so nothing below holds against one. What the
+  genuine build does narrow is script injected into its page: the master encryption key
+  derived from your master password is held by the browser as non-extractable, so such
+  script can use it while the vault is unlocked but cannot read it out. That matters because
+  a vault-key rotation seals the new vault key under that same key, so a copy of it would
+  open every later vault key until the master password changed; a copy of the vault key
+  itself is retired by a rotation. Script still present when you next unlock can capture the
+  master password as you type it and derive the key again.
 - **A hostile server rearranging your vault items, as distinct from reading them.** A vault
   item's contents and its name are each sealed with AES-256-GCM, and the authentication tag
   proves the bytes came back exactly as they went in — but nothing inside the sealed bytes
@@ -821,9 +829,11 @@ read between the lines.
 ### Auto-lock
 
 The vault locks after `autoLockTimeout` minutes without interaction (1 to 1440, default 15).
-Locking zeroes the vault key and the master encryption key and clears decrypted data from
-memory and from the offline cache; the session itself stays alive, so unlocking needs only the
-master password, not a full sign-in.
+Locking discards the vault key and the master encryption key and clears decrypted data from
+memory and from the offline cache. Discarding means dropping every reference the app holds, not
+overwriting the key: a browser-held key does not live in memory page script can write to, so the
+app lets go of it rather than claiming to zero it. The session itself stays alive, so unlocking
+needs only the master password, not a full sign-in.
 
 Two properties of that timer are worth stating plainly, because the obvious implementation
 gets both wrong:

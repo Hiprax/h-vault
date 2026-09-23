@@ -69,8 +69,10 @@ describe('clearCryptoKey', () => {
   it('handles calling clearCryptoKey on an MEK from deriveKeys', async () => {
     const { masterEncryptionKey: mek } = await crypto.deriveKeys('password', 'email@test.com');
 
-    // MEK is extractable (per source code: extractable = true)
-    // clearCryptoKey should succeed without error
+    // The MEK is NON-extractable, so the export inside clearCryptoKey is refused
+    // and the call is a silent no-op rather than a rejection that would break
+    // lock and logout. That it is non-extractable, and that nothing is zeroed,
+    // is pinned in key-handling.test.ts.
     await expect(crypto.clearCryptoKey(mek)).resolves.toBeUndefined();
   });
 });

@@ -783,8 +783,13 @@ export const verify2fa = catchAsync(async (req: Request, res: Response): Promise
     throw httpErrors.badRequest('Invalid verification code');
   }
 
-  // The secret is already encrypted from the setup step — re-encrypt for permanent storage
-  const encryptedSecret = cryptoManager.encryptTextSync(secret, twoFactorEncryptionKey);
+  // The pending ciphertext is stored as the permanent secret VERBATIM. It was
+  // sealed under the same key by the setup step and has just been opened to check
+  // the code, so re-sealing the same plaintext would only buy a second full KDF
+  // derivation on the event loop. The in-memory copy read above is the one moved,
+  // never a `$rename` of whatever the field holds at write time: a concurrent
+  // setup could have replaced it with a secret this code was not checked against.
+  const encryptedSecret = user.pendingTwoFactorSecret;
 
   // Generate and hash backup codes
   const backupCodes: string[] = [];
