@@ -22,12 +22,12 @@
     "type-check": "tsc --noEmit --incremental --tsBuildInfoFile ../../.cache/tsbuildinfo/shared.src.tsbuildinfo && tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "zod": "^4.5.4"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
+    "@types/node": "^24.13.6",
     "@vitest/coverage-v8": "^4.1.11",
-    "fast-check": "^4.9.0",
+    "fast-check": "^4.10.2",
     "vitest": "^4.1.11"
   }
 }

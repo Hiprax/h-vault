@@ -127,27 +127,27 @@
     "@stryker-mutator/core": "9.6.1",
     "@stryker-mutator/vitest-runner": "9.6.1",
     "concurrently": "^10.0.5",
-    "eslint": "^10.10.0",
+    "eslint": "^10.11.0",
     "eslint-plugin-security": "^4.0.1",
     "globals": "^17.12.0",
     "husky": "^9.1.7",
-    "jscpd": "^5.1.2",
-    "knip": "^6.34.0",
+    "jscpd": "^5.3.1",
+    "knip": "^6.37.0",
     "license-checker-rseidelsohn": "^5.0.1",
-    "lint-staged": "^17.5.0",
-    "mongodb": "^7.5.0",
-    "mongodb-memory-server": "^11.2.0",
+    "lint-staged": "^17.5.1",
+    "mongodb": "^7.6.0",
+    "mongodb-memory-server": "^11.3.0",
     "otpauth": "^9.5.2",
-    "prettier": "^3.9.6",
+    "prettier": "^3.9.8",
     "rimraf": "^6.1.3",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.70.0"
+    "typescript-eslint": "^8.70.1"
   },
   "allowScripts": {
     "@scarf/scarf": false,
     "argon2": false,
     "esbuild@0.28.1": true,
-    "mongodb-memory-server@11.2.0": true
+    "mongodb-memory-server@11.3.0": true
   },
   "scarfSettings": {
     "enabled": false

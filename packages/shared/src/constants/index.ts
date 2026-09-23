@@ -652,7 +652,7 @@ export const MAX_TRANSFORM_EXCERPT_LENGTH = 200;
 // `transformToolLabels`). A label the frame chose would be shown beside the
 // upload button and sealed into the document for good.
 export const JSONREPAIR_VERSION = '3.15.0';
-export const PRETTIER_VERSION = '3.9.6';
+export const PRETTIER_VERSION = '3.9.8';
 
 // HKDF `info` prefixes, concatenated with the document id to bind every derived
 // key to ONE document: the stream key, the metadata key and the DEK wrapping key.
