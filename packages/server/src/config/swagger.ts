@@ -110,6 +110,25 @@ const DOCUMENT_SORT_ORDER_PARAM = {
   schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
 };
 
+/**
+ * A folder's optional name hash. The server stores it and a unique index over it
+ * turns a second folder with the same hash into a 409; the web client sends none
+ * for an ordinary create or rename and checks duplicate names itself.
+ */
+const FOLDER_SEARCH_HASH_PROPERTY = {
+  type: 'string',
+  pattern: '^[a-f0-9]{64}$',
+  description:
+    "HMAC-SHA256 of the folder's trimmed, lower-cased name under a subkey of the vault key. Optional; when sent, a second folder of this account carrying the same hash is refused with 409.",
+};
+
+/** `sortOrder` as the two vault item lists declare it. */
+const VAULT_SORT_ORDER_PARAM = {
+  name: 'sortOrder',
+  in: 'query',
+  schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+};
+
 /** The one schema reference three document responses return. */
 const DOCUMENT_RESPONSE_REF = { $ref: '#/components/schemas/DocumentResponse' };
 
@@ -288,15 +307,23 @@ const jsonRequestBody = (schemaName: string): Record<string, unknown> => ({
   },
 });
 
-/** A response whose body is the plain `SuccessResponse` acknowledgement. */
-const successResponse = (description: string): Record<string, unknown> => ({
+/** A response whose body is exactly one component schema. */
+const schemaResponse = (description: string, schemaName: string): Record<string, unknown> => ({
   description,
   content: {
     'application/json': {
-      schema: { $ref: '#/components/schemas/SuccessResponse' },
+      schema: { $ref: `#/components/schemas/${schemaName}` },
     },
   },
 });
+
+/** A response whose body is the plain `SuccessResponse` acknowledgement. */
+const successResponse = (description: string): Record<string, unknown> =>
+  schemaResponse(description, 'SuccessResponse');
+
+/** A response whose body is the flat `ErrorResponse` envelope, with its own description. */
+const errorResponse = (description: string): Record<string, unknown> =>
+  schemaResponse(description, 'ErrorResponse');
 
 /**
  * The answers of a request that re-checks the caller's own credentials and then
@@ -329,6 +356,43 @@ const ITEM_WRITE_BUDGET =
   'Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).';
 const FOLDER_WRITE_BUDGET =
   'Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.';
+
+/**
+ * A count an earlier revision of this document declared under a name the handler
+ * never used. Kept, because removing a documented response property is a breaking
+ * change to the contract; described, so nobody reads it.
+ */
+const NEVER_SENT_COUNT = {
+  type: 'integer',
+  description: 'Declared by earlier revisions of this document; never sent.',
+};
+
+/**
+ * The 200 of a bulk vault operation: `data.<sent>` is the count the handler
+ * really returns, beside the name this document used to declare for it.
+ */
+const bulkCountResponse = (
+  description: string,
+  declared: string,
+  sent: string,
+): Record<string, unknown> =>
+  jsonEnvelope(
+    description,
+    { type: 'object', properties: { [declared]: NEVER_SENT_COUNT, [sent]: { type: 'integer' } } },
+    { message: { type: 'string' } },
+  );
+
+/**
+ * The refusal every loser of the per-account re-seal lock receives, as the five
+ * operations that hold it describe it. The server sends one message for all five,
+ * because the loser cannot know which of them won.
+ */
+const RESEAL_LOCK_BUSY =
+  ' The same status, with no `data`, also answers a request that arrives while another change re-sealing this account under its vault key holds the account (a vault-key rotation, an import, a backup restore, a document completion or a master-password change): wait for it to finish and retry.';
+
+/** The heavy-operation budget, as the vault's bulk routes quote it. */
+const HEAVY_OP_BUDGET =
+  'Rate limited: 10 req/user per 15 min, one budget shared with the other heavy operations (bulk delete and bulk move, emptying either trash, export, and triggering or downloading a backup).';
 
 /**
  * OpenAPI 3.0.3 specification for the H-Vault REST API.
@@ -425,8 +489,13 @@ export const swaggerSpec: JsonObject = {
       },
       ErrorResponse: {
         type: 'object',
+        description:
+          'An error answered through the error middleware is FLAT: `{ success: false, message, statusCode, statusText }`. A few refusals written by their handlers carry `{ success: false, message, data }` instead, with `data` explaining the refusal (the stale-vault-key 409s and the unverified-email 401); none carries `error`. `message` is the sentence to show, `statusCode` repeats the HTTP status and `statusText` names it. In production a 5xx carries only the status text as its message. The nested `error` object is declared for compatibility with earlier revisions of this document and is never sent; read `message`.',
         properties: {
           success: { type: 'boolean', example: false },
+          message: { type: 'string', example: 'Invalid request body' },
+          statusCode: { type: 'integer', example: 400 },
+          statusText: { type: 'string', example: 'Bad Request' },
           error: {
             type: 'object',
             properties: {
@@ -476,7 +545,12 @@ export const swaggerSpec: JsonObject = {
           encryptedVaultKey: { type: 'string', minLength: 1, maxLength: 200 },
           vaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
           vaultKeyTag: { type: 'string', minLength: 1, maxLength: 32 },
-          kdfIterations: { type: 'integer', minimum: 100000 },
+          kdfIterations: {
+            type: 'integer',
+            minimum: 100000,
+            description:
+              "The server accepts 500,000 to 10,000,000 and refuses anything else with 400; the `minimum` above is an earlier revision's bound, kept because narrowing a request schema is a breaking change. It is recorded for the account, but the client derives with its own constant (600,000) and never with a count the server hands back, so a server cannot talk a client into a weaker derivation.",
+          },
           kdfAlgorithm: { type: 'string', enum: ['PBKDF2-SHA256'] },
           encryptionVersion: { type: 'integer', default: 1 },
         },
@@ -573,6 +647,13 @@ export const swaggerSpec: JsonObject = {
         ],
         properties: {
           token: { type: 'string', minLength: 1 },
+          email: {
+            type: 'string',
+            format: 'email',
+            maxLength: 254,
+            description:
+              "REQUIRED by the server (400 when absent), and listed as optional here only because this document once omitted it. It must be the account's address (400 `EMAIL_MISMATCH` otherwise), because the email is the salt the new keys were derived with: keys derived from any other address would never open the vault.",
+          },
           newAuthHash: { type: 'string', minLength: 1, maxLength: 100 },
           newEncryptedVaultKey: { type: 'string', minLength: 1, maxLength: 200 },
           newVaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
@@ -725,14 +806,27 @@ export const swaggerSpec: JsonObject = {
                 dataIv: { type: 'string' },
                 dataTag: { type: 'string' },
                 searchHash: { type: 'string' },
+                passwordHistory: {
+                  type: 'array',
+                  maxItems: 10,
+                  items: { $ref: '#/components/schemas/ImportPasswordHistoryEntry' },
+                  description:
+                    "The item's previous passwords, each re-encrypted under the new key. Omit to leave the stored history as it is.",
+                },
               },
             },
             maxItems: 10000,
           },
+          idempotencyKey: {
+            type: 'string',
+            format: 'uuid',
+            description:
+              'Optional for a rotation and REQUIRED for a re-seal (400 when absent). A retry carrying the key of a rotation that already committed is answered as a success without rotating a second time, so a client that lost the response can safely send the same request again.',
+          },
           reseal: {
             type: 'boolean',
             description:
-              "Re-seal every row under the SAME vault key instead of rotating to a new one, to move each row's fields to the current format. The whole rotation machinery runs (the password check, the completeness check, the write fence) but no key is stored, the account's vault-key version does not move and no interrupted-rotation state is written. The three newVaultKey fields must equal the account's stored wrapper, and vaultKeyVersion and idempotencyKey are required; either mismatch is refused with 409 before anything is written. Cannot be combined with discardPendingVaultKey, and is refused with 409 while an interrupted rotation is outstanding. Absent means false.",
+              "Re-seal every row under the SAME vault key instead of rotating to a new one, to move each row's fields to the current format. The whole rotation machinery runs (the password check, the completeness check, the write fence) but no key is stored, the account's vault-key version does not move and no interrupted-rotation state is written. The three newVaultKey fields must equal the account's stored wrapper and vaultKeyVersion must be the current generation; either mismatch is refused with 409 before anything is written. vaultKeyVersion and idempotencyKey are required, and combining it with discardPendingVaultKey is not allowed: each of those is refused with 400 by schema validation. It is refused with 409 while an interrupted rotation is outstanding. Absent means false.",
           },
           vaultFieldFormat: {
             type: 'integer',
@@ -791,6 +885,19 @@ export const swaggerSpec: JsonObject = {
         },
       },
 
+      RotationRowErrors: {
+        type: 'array',
+        description:
+          'Rows of one kind the rotation could not write, each with its id and the reason. Present only when there is at least one.',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            error: { type: 'string' },
+          },
+        },
+      },
+
       // -- Folder schemas --
       FolderResponse: {
         type: 'object',
@@ -815,6 +922,7 @@ export const swaggerSpec: JsonObject = {
           encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
           nameIv: { type: 'string', minLength: 1, maxLength: 24 },
           nameTag: { type: 'string', minLength: 1, maxLength: 32 },
+          searchHash: FOLDER_SEARCH_HASH_PROPERTY,
           parentId: { type: 'string' },
           icon: { type: 'string', maxLength: 50 },
           color: { type: 'string', maxLength: 20 },
@@ -829,6 +937,7 @@ export const swaggerSpec: JsonObject = {
           encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
           nameIv: { type: 'string', minLength: 1, maxLength: 24 },
           nameTag: { type: 'string', minLength: 1, maxLength: 32 },
+          searchHash: FOLDER_SEARCH_HASH_PROPERTY,
           parentId: { type: 'string', nullable: true },
           icon: { type: 'string', maxLength: 50 },
           color: { type: 'string', maxLength: 20 },
@@ -876,6 +985,24 @@ export const swaggerSpec: JsonObject = {
       UserSettings: {
         type: 'object',
         properties: {
+          backup: {
+            type: 'object',
+            readOnly: true,
+            description:
+              'Ignored if sent; change it through the /backup endpoints. The profile returns the backup schedule and state plus the backup wrapping key still sealed under the backup password (opaque ciphertext, returned so the browser can check a backup password locally). The reply to PUT /user/settings carries the whole stored subdocument instead, which also holds the vault key sealed under the backup key (`bwkEncryptedVaultKey`, `bwkVaultKeyIv`, `bwkVaultKeyTag`); every key field in it is ciphertext the account owner already holds.',
+            properties: {
+              enabled: { type: 'boolean' },
+              scheduleHour: { type: 'integer', minimum: 0, maximum: 23 },
+              backupEmails: { type: 'array', items: { type: 'string', format: 'email' } },
+              lastBackupAt: { type: 'string', format: 'date-time', nullable: true },
+              lastBackupStatus: { type: 'string', nullable: true },
+              isConfigured: { type: 'boolean' },
+              encryptedBWK: { type: 'string' },
+              bwkIv: { type: 'string' },
+              bwkTag: { type: 'string' },
+              bwkSalt: { type: 'string' },
+            },
+          },
           autoLockTimeout: { type: 'integer', description: 'Idle minutes before lock (1-1440)' },
           lockOnHidden: {
             type: 'boolean',
@@ -1268,11 +1395,23 @@ export const swaggerSpec: JsonObject = {
       BackupSetupRequest: {
         type: 'object',
         required: ['encryptedBWK', 'bwkIv', 'bwkTag', 'bwkSalt'],
+        description:
+          'The optional `bwkEncryptedVaultKey`, `bwkVaultKeyIv` and `bwkVaultKeyTag` are the vault key sealed under the backup key, the copy a restore into ANOTHER account opens; send all three or none.',
         properties: {
+          authHash: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 100,
+            description:
+              'REQUIRED by the server (400 when absent; listed as optional only because this document once omitted it): the auth hash of the master password, re-checked before anything is stored (401 when wrong).',
+          },
           encryptedBWK: { type: 'string', minLength: 1, maxLength: 500 },
           bwkIv: { type: 'string', minLength: 1, maxLength: 24 },
           bwkTag: { type: 'string', minLength: 1, maxLength: 32 },
           bwkSalt: { type: 'string', minLength: 1, maxLength: 64 },
+          bwkEncryptedVaultKey: { type: 'string', minLength: 1, maxLength: 500 },
+          bwkVaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
+          bwkVaultKeyTag: { type: 'string', minLength: 1, maxLength: 32 },
           vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
@@ -1291,11 +1430,23 @@ export const swaggerSpec: JsonObject = {
       BackupChangePasswordRequest: {
         type: 'object',
         required: ['newEncryptedBWK', 'newBwkIv', 'newBwkTag', 'newBwkSalt'],
+        description:
+          'The optional `newBwkEncryptedVaultKey`, `newBwkVaultKeyIv` and `newBwkVaultKeyTag` re-seal the vault key under the new backup key, for a restore into another account; send all three or none.',
         properties: {
+          password: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 500,
+            description:
+              'REQUIRED by the server (400 when absent; listed as optional only because this document once omitted it). Despite its name it carries the auth hash of the master password, not the backup password, and is re-checked before anything is stored (401 when wrong).',
+          },
           newEncryptedBWK: { type: 'string', minLength: 1, maxLength: 500 },
           newBwkIv: { type: 'string', minLength: 1, maxLength: 24 },
           newBwkTag: { type: 'string', minLength: 1, maxLength: 32 },
           newBwkSalt: { type: 'string', minLength: 1, maxLength: 64 },
+          newBwkEncryptedVaultKey: { type: 'string', minLength: 1, maxLength: 500 },
+          newBwkVaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
+          newBwkVaultKeyTag: { type: 'string', minLength: 1, maxLength: 32 },
           vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
       },
@@ -1338,7 +1489,7 @@ export const swaggerSpec: JsonObject = {
       InitDocumentUploadRequest: {
         type: 'object',
         description:
-          'Opens a transfer. The document key (DEK) is already wrapped under a key derived from the vault key and bound to the upload id; the salt and nonce prefix are the plaintext framing parameters of the stored container. chunkPlaintextBytes, vaultKeyVersion and the storage key are assigned by the server and are rejected here.',
+          'Opens a transfer. The document key (DEK) is already wrapped under a key derived from the vault key and bound to the upload id; the salt and nonce prefix are the plaintext framing parameters of the stored container. chunkPlaintextBytes, vaultKeyVersion and the storage key are assigned by the server and are ignored if sent.',
         required: [
           'encryptedDek',
           'dekIv',
@@ -1630,58 +1781,19 @@ export const swaggerSpec: JsonObject = {
     // Reusable response references
     // -----------------------------------------------------------------------
     responses: {
-      Unauthorized: {
-        description: 'Missing or invalid authentication token',
-        content: {
-          'application/json': {
-            schema: { $ref: '#/components/schemas/ErrorResponse' },
-          },
-        },
-      },
-      Forbidden: {
-        description: 'CSRF token invalid or insufficient permissions',
-        content: {
-          'application/json': {
-            schema: { $ref: '#/components/schemas/ErrorResponse' },
-          },
-        },
-      },
-      NotFound: {
-        description: 'Requested resource not found',
-        content: {
-          'application/json': {
-            schema: { $ref: '#/components/schemas/ErrorResponse' },
-          },
-        },
-      },
-      RateLimited: {
-        description: 'Rate limit exceeded',
-        content: {
-          'application/json': {
-            schema: { $ref: '#/components/schemas/ErrorResponse' },
-          },
-        },
-      },
-      ValidationError: {
-        description: 'Request body failed schema validation',
-        content: {
-          'application/json': {
-            schema: { $ref: '#/components/schemas/ErrorResponse' },
-          },
-        },
-      },
+      Unauthorized: errorResponse('Missing or invalid authentication token'),
+      Forbidden: errorResponse('CSRF token invalid or insufficient permissions'),
+      NotFound: errorResponse('Requested resource not found'),
+      RateLimited: errorResponse('Rate limit exceeded'),
+      ValidationError: errorResponse(
+        'Request body failed schema validation. A JSON body nested more than 32 levels deep is refused the same way on every route, before validation runs.',
+      ),
       Acknowledged: successResponse(
         'The operation succeeded and returns no payload beyond the acknowledgement',
       ),
-      StorageUnavailable: {
-        description:
-          'The document store is not available on this deployment because no object storage is configured. In production the body is redacted to its status text, so a client determines availability from GET /config rather than from this response.',
-        content: {
-          'application/json': {
-            schema: { $ref: '#/components/schemas/ErrorResponse' },
-          },
-        },
-      },
+      StorageUnavailable: errorResponse(
+        'The document store is not available on this deployment because no object storage is configured. In production the body is redacted to its status text, so a client determines availability from GET /config rather than from this response.',
+      ),
     },
   },
 
@@ -1810,15 +1922,9 @@ export const swaggerSpec: JsonObject = {
             $ref: '#/components/schemas/InitDocumentUploadResponse',
           }),
           ...DOCUMENT_ITEM_WRITE_ERRORS,
-          409: {
-            description:
-              'A vault-key rotation is in progress, or another transfer is already being opened for this account; retry when it finishes',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/ErrorResponse' },
-              },
-            },
-          },
+          409: errorResponse(
+            'A vault-key rotation is in progress, or another transfer is already being opened for this account; retry when it finishes',
+          ),
         },
       },
     },
@@ -1905,27 +2011,18 @@ export const swaggerSpec: JsonObject = {
             },
           }),
           ...DOCUMENT_ITEM_WRITE_ERRORS,
-          411: {
-            description: 'The request declared no Content-Length',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/ErrorResponse' },
-              },
-            },
-          },
-          413: {
-            description: 'The body is larger than one sealed segment',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/ErrorResponse' },
-              },
-            },
-          },
-          415: {
-            description: 'The body was not sent as unencoded application/octet-stream',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/ErrorResponse' },
+          411: errorResponse('The request declared no Content-Length'),
+          413: errorResponse('The body is larger than one sealed segment'),
+          415: errorResponse('The body was not sent as unencoded application/octet-stream'),
+          503: {
+            ...errorResponse(
+              'Either this account already has its share of the parts the server buffers at once (three of the four), and `Retry-After` says to try again in a second, or no object storage is configured on this deployment (which GET /config advertises), or the storage engine cannot be reached; neither of those two carries `Retry-After`. In production every such body is redacted to its status text, so the header is what tells the per-account refusal apart.',
+            ),
+            headers: {
+              'Retry-After': {
+                description:
+                  'Seconds to wait before re-sending the part; sent only on the per-account refusal.',
+                schema: { type: 'integer', example: 1 },
               },
             },
           },
@@ -1948,7 +2045,8 @@ export const swaggerSpec: JsonObject = {
           ...DOCUMENT_ITEM_WRITE_ERRORS,
           409: {
             description:
-              "The completion cannot proceed yet. A vaultKeyVersion that is not the account's current one carries the current one in `data`, so the client rewraps the document key it still holds and retries this request alone rather than re-sending the file; the message distinguishes a key superseded by a rotation from a version the account has never had, which no rotation can explain. A rotation in progress or a completion already in flight carry no data and are retried unchanged.",
+              "The completion cannot proceed yet. A vaultKeyVersion that is not the account's current one carries the current one in `data`, so the client rewraps the document key it still holds and retries this request alone rather than re-sending the file; the message distinguishes a key superseded by a rotation from a version the account has never had, which no rotation can explain. A rotation in progress or a completion already in flight carry no data and are retried unchanged." +
+              RESEAL_LOCK_BUSY,
             content: {
               'application/json': {
                 schema: {
@@ -2257,15 +2355,13 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
-          401: { $ref: '#/components/responses/Unauthorized' },
-          403: {
-            description: 'Email not verified or account locked',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/ErrorResponse' },
-              },
-            },
-          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: errorResponse(
+            'Invalid email or password. The same status and message answer an account whose deletion is still being completed, and an account whose email is not yet verified; the latter, and only once the password was correct, also carries `data: { reason: "email_not_verified" }` so the client can say what to do.',
+          ),
+          403: errorResponse(
+            '`ACCOUNT_LOCKED`: the account is temporarily locked after too many failed attempts. Answered only when the password was correct; a wrong password during a lockout gets the ordinary 401 and leaves the lockout as it was.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2295,7 +2391,13 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
+          400: errorResponse(
+            'The body failed schema validation, or the account no longer has two-factor authentication enabled (`TWO_FA_NOT_ENABLED`).',
+          ),
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: errorResponse(
+            '`ACCOUNT_LOCKED`: the account became locked between the password step and this one. The temporary token does not bypass a lockout.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2309,7 +2411,8 @@ export const swaggerSpec: JsonObject = {
           'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection. The account is evaluated BEFORE the presented token is claimed, so a refusal costs nothing: a temporarily locked account is answered without spending the token or touching the cookie, and the same cookie works again once the lockout is discharged.',
         responses: {
           200: {
-            description: 'Token refreshed',
+            description:
+              'Token refreshed: the body carries only `data.accessToken` (none of the wrapped-key fields a login returns), and a rotated refresh-token cookie is set.',
             content: {
               'application/json': {
                 schema: { $ref: '#/components/schemas/LoginSuccessResponse' },
@@ -2317,15 +2420,9 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
-          403: {
-            description:
-              'The account is temporarily locked. The presented refresh token is NOT spent and the cookie is NOT cleared, so the same session resumes once the lockout is discharged.',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/ErrorResponse' },
-              },
-            },
-          },
+          403: errorResponse(
+            'The account is temporarily locked. The presented refresh token is NOT spent and the cookie is NOT cleared, so the same session resumes once the lockout is discharged.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2486,10 +2583,13 @@ export const swaggerSpec: JsonObject = {
               default: 'updatedAt',
             },
           },
+          VAULT_SORT_ORDER_PARAM,
           {
-            name: 'sortOrder',
+            name: 'trash',
             in: 'query',
-            schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' },
+            description:
+              'true lists trashed items instead of live ones, as GET /vault/items/trash does; false or absent lists live items.',
+            schema: { type: 'boolean' },
           },
         ],
         responses: {
@@ -2505,6 +2605,7 @@ export const swaggerSpec: JsonObject = {
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CreateVaultItemRequest'),
         responses: {
+          404: errorResponse('The folder named by `folderId` does not exist or is not yours.'),
           201: jsonEnvelope('Item created', { $ref: '#/components/schemas/VaultItemResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
@@ -2522,7 +2623,19 @@ export const swaggerSpec: JsonObject = {
         summary: 'List trashed items',
         description: 'Returns paginated list of soft-deleted vault items.',
         security: [{ bearerAuth: [] }],
-        parameters: [...LIST_PAGE_PARAMS],
+        parameters: [
+          ...LIST_PAGE_PARAMS,
+          {
+            name: 'sortBy',
+            in: 'query',
+            schema: {
+              type: 'string',
+              enum: ['deletedAt', 'createdAt', 'updatedAt', 'itemType'],
+              default: 'deletedAt',
+            },
+          },
+          VAULT_SORT_ORDER_PARAM,
+        ],
         responses: {
           200: pageEnvelope('Paginated trashed items', '#/components/schemas/VaultItemResponse'),
           401: { $ref: '#/components/responses/Unauthorized' },
@@ -2534,26 +2647,10 @@ export const swaggerSpec: JsonObject = {
         operationId: 'emptyVaultItemTrash',
         tags: ['Vault'],
         summary: 'Empty trash',
-        description: 'Permanently deletes all items in the trash.',
+        description: 'Permanently deletes all items in the trash. ' + HEAVY_OP_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
-          200: {
-            description: 'Trash emptied',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'object',
-                      properties: { deleted: { type: 'integer' } },
-                    },
-                  },
-                },
-              },
-            },
-          },
+          200: bulkCountResponse('Trash emptied', 'deleted', 'deletedCount'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2564,27 +2661,11 @@ export const swaggerSpec: JsonObject = {
         operationId: 'bulkDeleteVaultItems',
         tags: ['Vault'],
         summary: 'Bulk soft-delete items',
-        description: 'Soft-deletes up to 100 vault items at once.',
+        description: 'Soft-deletes up to 100 vault items at once. ' + HEAVY_OP_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BulkDeleteRequest'),
         responses: {
-          200: {
-            description: 'Items soft-deleted',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'object',
-                      properties: { deleted: { type: 'integer' } },
-                    },
-                  },
-                },
-              },
-            },
-          },
+          200: bulkCountResponse('Items soft-deleted', 'deleted', 'modifiedCount'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
           400: { $ref: '#/components/responses/ValidationError' },
@@ -2596,27 +2677,13 @@ export const swaggerSpec: JsonObject = {
         operationId: 'bulkMoveVaultItems',
         tags: ['Vault'],
         summary: 'Bulk move items to folder',
-        description: 'Moves up to 100 vault items to a folder (or root if folderId is null).',
+        description:
+          'Moves up to 100 vault items to a folder (or root if folderId is null). ' +
+          HEAVY_OP_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BulkMoveRequest'),
         responses: {
-          200: {
-            description: 'Items moved',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    success: { type: 'boolean', example: true },
-                    data: {
-                      type: 'object',
-                      properties: { updated: { type: 'integer' } },
-                    },
-                  },
-                },
-              },
-            },
-          },
+          200: bulkCountResponse('Items moved', 'updated', 'modifiedCount'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
@@ -2630,7 +2697,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Vault'],
         summary: 'Bulk re-encrypt vault items',
         description:
-          'Re-encrypts an account onto a new vault key after a master password change: every item, every folder and every document key, in one request. With `reseal: true` it re-seals every row under the SAME key instead, to move each row to the current field format, and stores no key. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 5 requests per account per 15 min, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
+          'Re-encrypts an account onto a new vault key: every item, every folder and every document key, in one request. (Changing the master password does not need this: it re-wraps the SAME vault key, through PUT /user/change-password.) With `reseal: true` it re-seals every row under the SAME key instead, to move each row to the current field format, and stores no key. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 5 requests per account per 15 min, one budget shared by every request that re-checks the master password, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BulkReEncryptRequest'),
         responses: {
@@ -2642,9 +2709,19 @@ export const swaggerSpec: JsonObject = {
                   type: 'object',
                   properties: {
                     success: { type: 'boolean', example: true },
+                    message: { type: 'string' },
                     data: {
                       type: 'object',
-                      properties: { updated: { type: 'integer' } },
+                      properties: {
+                        updated: NEVER_SENT_COUNT,
+                        updatedCount: {
+                          type: 'integer',
+                          description: 'Rows written: items, folders and documents together.',
+                        },
+                        itemErrors: { $ref: '#/components/schemas/RotationRowErrors' },
+                        folderErrors: { $ref: '#/components/schemas/RotationRowErrors' },
+                        documentErrors: { $ref: '#/components/schemas/RotationRowErrors' },
+                      },
                     },
                   },
                 },
@@ -2655,7 +2732,8 @@ export const swaggerSpec: JsonObject = {
           400: { $ref: '#/components/responses/ValidationError' },
           404: { $ref: '#/components/responses/NotFound' },
           409: staleVaultKeyConflict(
-            'Only a re-seal (`reseal: true`) is refused for its vault key version. The same status, carrying no `data`, means the rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey (a re-seal must finish it first), a re-seal named a wrapper that is not the stored one, or the payload carries a field sealed to its row without `vaultFieldFormat: 2`. Re-read the vault and retry. It is also returned before the body is read when this account already has a restore or key rotation in flight.',
+            'Only a re-seal (`reseal: true`) is refused for its vault key version. The same status, carrying no `data`, means the rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey (a re-seal must finish it first), a re-seal named a wrapper that is not the stored one, or the payload carries a field sealed to its row without `vaultFieldFormat: 2`. Re-read the vault and retry. It is also returned before the body is read when this account already has a restore or key rotation in flight.' +
+              RESEAL_LOCK_BUSY,
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2781,6 +2859,7 @@ export const swaggerSpec: JsonObject = {
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CreateFolderRequest'),
         responses: {
+          404: errorResponse('The parent folder does not exist or is not yours.'),
           201: jsonEnvelope('Folder created', { $ref: '#/components/schemas/FolderResponse' }),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
@@ -2804,14 +2883,9 @@ export const swaggerSpec: JsonObject = {
         requestBody: jsonRequestBody('UpdateFolderRequest'),
         responses: {
           200: jsonEnvelope('Folder updated', { $ref: '#/components/schemas/FolderResponse' }),
-          400: {
-            description: 'Circular parent reference detected',
-            content: {
-              'application/json': {
-                schema: { $ref: '#/components/schemas/ErrorResponse' },
-              },
-            },
-          },
+          400: errorResponse(
+            'The move would create a cycle, a folder was made its own parent, or the move would nest folders deeper than the maximum depth (counting the subtree it carries).',
+          ),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
@@ -2869,7 +2943,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Delete the account',
         description:
-          'Permanently deletes the account and everything it owns: vault items, folders, documents and their stored objects, uploads in progress, sessions, trusted devices, and its own audit and backup logs. Requires the password, and a current TOTP or backup code when two-factor authentication is enabled. Cannot be undone. Rate limited: 5 req/user per 15 min.',
+          'Permanently deletes the account and everything it owns: vault items, folders, documents and their stored objects, uploads in progress, sessions, trusted devices, and its own audit and backup logs. Requires the password, and a current TOTP code (not a backup code) when two-factor authentication is enabled. Cannot be undone. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ReauthenticateWithCodeRequest'),
         responses: ACKNOWLEDGED_REAUTH_RESPONSES,
@@ -2899,7 +2973,10 @@ export const swaggerSpec: JsonObject = {
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('UserSettings'),
         responses: {
-          200: jsonEnvelope('Settings updated', { $ref: '#/components/schemas/UserProfile' }),
+          200: jsonEnvelope(
+            'Settings updated. `data` is the settings object alone, with every default filled in, not the whole profile the schema below names (kept for compatibility with earlier revisions of this document).',
+            { $ref: '#/components/schemas/UserProfile' },
+          ),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
@@ -2912,7 +2989,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Change master password',
         description:
-          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token and every trusted device granted under the old password is revoked. Rate limited: 5 req/user per 15 min.',
+          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token and every trusted device granted under the old password is revoked. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ChangePasswordRequest'),
         responses: {
@@ -2920,7 +2997,8 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'This is the endpoint where the refusal matters most: the new wrapper REPLACES the stored one, so accepting a wrapper built from a superseded vault key would overwrite the only copy of the live one and there is nothing anywhere that could decrypt the vault afterwards. The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes, and how a change is refused for not carrying an outstanding interrupted rotation forward (see `newPendingEncryptedVaultKey`), which is resolved by re-reading the profile and re-sending with all three of those fields.',
+            'This is the endpoint where the refusal matters most: the new wrapper REPLACES the stored one, so accepting a wrapper built from a superseded vault key would overwrite the only copy of the live one and there is nothing anywhere that could decrypt the vault afterwards. The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes, and how a change is refused for not carrying an outstanding interrupted rotation forward (see `newPendingEncryptedVaultKey`), which is resolved by re-reading the profile and re-sending with all three of those fields.' +
+              RESEAL_LOCK_BUSY,
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2932,10 +3010,12 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Start 2FA setup',
         description:
-          'Initiates two-factor authentication setup. Returns a TOTP secret and QR code. Rate limited: 5 req/user per 15 min.',
+          'Initiates two-factor authentication setup. Returns a TOTP secret and QR code. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('Setup2faRequest'),
         responses: {
+          400: { $ref: '#/components/responses/ValidationError' },
+          409: errorResponse('Two-factor authentication is already enabled.'),
           200: {
             description: '2FA setup data',
             content: {
@@ -2972,6 +3052,13 @@ export const swaggerSpec: JsonObject = {
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('Verify2faRequest'),
         responses: {
+          400: errorResponse(
+            'The body failed schema validation, the pending setup has expired, or the code is wrong.',
+          ),
+          404: { $ref: '#/components/responses/NotFound' },
+          409: errorResponse(
+            'Two-factor authentication is already enabled; a concurrent confirmation won.',
+          ),
           200: {
             description: '2FA enabled with backup codes',
             content: {
@@ -3005,10 +3092,14 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Disable 2FA',
         description:
-          'Disables two-factor authentication. Requires a valid TOTP or backup code. Rate limited: 5 req/user per 15 min.',
+          'Disables two-factor authentication. Requires the password and a current TOTP code (not a backup code). Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('Disable2faRequest'),
         responses: {
+          400: errorResponse(
+            'The body failed schema validation, two-factor authentication is not enabled, or the code is wrong.',
+          ),
+          404: { $ref: '#/components/responses/NotFound' },
           200: successResponse('2FA disabled'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
@@ -3021,7 +3112,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Regenerate 2FA backup codes',
         description:
-          'Replaces every backup code with a fresh set, returned once. Requires the password and a current TOTP or backup code, and two-factor authentication must be enabled. Rate limited: 5 req/user per 15 min.',
+          'Replaces every backup code with a fresh set, returned once. Requires the password and a current TOTP code (not a backup code), and two-factor authentication must be enabled. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ReauthenticateWithCodeRequest'),
         responses: {
@@ -3252,7 +3343,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Tools'],
         summary: 'Export vault',
         description:
-          'Exports all vault items as JSON. Rate limited: 10 req/user per 15 min + 5 req/user per 15 min.',
+          'Exports every live vault item (not the trash) and every folder, still encrypted, as a JSON file attachment (`Content-Disposition: attachment`). Refused with 413 when the export would exceed EXPORT_MAX_SIZE_MB. Rate limited: 10 req/user per 15 min + 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3291,7 +3382,24 @@ export const swaggerSpec: JsonObject = {
                           type: 'array',
                           items: { $ref: '#/components/schemas/VaultItemResponse' },
                         },
-                        exportedAt: { type: 'string', format: 'date-time' },
+                        exportedAt: {
+                          type: 'string',
+                          format: 'date-time',
+                          description:
+                            'Declared by earlier revisions of this document; never sent. The export time is `metadata.exportDate`.',
+                        },
+                        folders: {
+                          type: 'array',
+                          items: { $ref: '#/components/schemas/FolderResponse' },
+                        },
+                        metadata: {
+                          type: 'object',
+                          properties: {
+                            exportDate: { type: 'string', format: 'date-time' },
+                            version: { type: 'string', description: 'The server release.' },
+                            itemCount: { type: 'integer' },
+                          },
+                        },
                       },
                     },
                   },
@@ -3299,7 +3407,10 @@ export const swaggerSpec: JsonObject = {
               },
             },
           },
+          400: { $ref: '#/components/responses/ValidationError' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+          413: errorResponse('The export would exceed EXPORT_MAX_SIZE_MB. Nothing is sent.'),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3347,7 +3458,8 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           409: staleVaultKeyConflict(
-            'The same status, carrying no `data`, also reports a vault-key rotation in flight, another import for this account already running, an insert whose `idNonce` derives an id that is already stored (nothing is inserted), and an item an update targeted having been modified or removed mid-request. Under `skip` and `overwrite`, re-running the import is safe: the client re-resolves against the current vault and sends only what is left. Under `keep_both` nothing is ever matched, so a re-run inserts the rows that already landed a second time.',
+            'The same status, carrying no `data`, also reports a vault-key rotation in flight, another import for this account already running, an insert whose `idNonce` derives an id that is already stored (nothing is inserted), and an item an update targeted having been modified or removed mid-request. Under `skip` and `overwrite`, re-running the import is safe: the client re-resolves against the current vault and sends only what is left. Under `keep_both` nothing is ever matched, so a re-run inserts the rows that already landed a second time.' +
+              RESEAL_LOCK_BUSY,
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -3361,12 +3473,14 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Setup backup encryption',
         description:
-          'Configures the backup encryption key (BWK). The client generates and encrypts the BWK before sending. Rate limited: 5 req/user per 15 min.',
+          'Configures the backup encryption key (BWK). The client generates and encrypts the BWK before sending. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BackupSetupRequest'),
         responses: {
           200: successResponse('Backup configured'),
+          400: { $ref: '#/components/responses/ValidationError' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
           409: staleVaultKeyConflict(
             "The wrapper this request stores is the account's vault key sealed under the backup " +
               'key, so it is guarded like any other write derived from that key. The same status, ' +
@@ -3415,6 +3529,10 @@ export const swaggerSpec: JsonObject = {
           'Creates and emails an encrypted backup immediately. Rate limited: 10 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
+          400: errorResponse('Backup encryption has not been set up yet.'),
+          404: { $ref: '#/components/responses/NotFound' },
+          409: errorResponse('A backup is already in progress for this account.'),
+          413: errorResponse('The backup would exceed BACKUP_MAX_SIZE_MB. Nothing is sent.'),
           200: successResponse('Backup triggered'),
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
@@ -3430,6 +3548,9 @@ export const swaggerSpec: JsonObject = {
           'Downloads the latest encrypted backup as a file stream. Rate limited: 10 req/user per 15 min.',
         security: [{ bearerAuth: [] }],
         responses: {
+          400: errorResponse('Backup encryption has not been set up yet.'),
+          404: { $ref: '#/components/responses/NotFound' },
+          413: errorResponse('The backup would exceed BACKUP_MAX_SIZE_MB. Nothing is sent.'),
           200: {
             description: 'Encrypted backup file',
             content: {
@@ -3464,12 +3585,14 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Change backup password',
         description:
-          'Re-encrypts the BWK with a new backup password. Rate limited: 5 req/user per 15 min.',
+          'Re-encrypts the BWK with a new backup password. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BackupChangePasswordRequest'),
         responses: {
           200: successResponse('Backup password changed'),
+          400: { $ref: '#/components/responses/ValidationError' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
           409: staleVaultKeyConflict(
             "Re-keying backup encryption re-seals the account's vault key under a new backup " +
               'key, so it is guarded like any other write derived from that key. The same status, ' +
@@ -3486,7 +3609,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Restore from backup',
         description:
-          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. Rate limited: 5 requests per account per 15 min, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
+          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. Rate limited: 5 requests per account per 15 min, one budget shared by every request that re-checks the master password, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('RestoreBackupRequest'),
         responses: {
@@ -3498,10 +3621,35 @@ export const swaggerSpec: JsonObject = {
                   type: 'object',
                   properties: {
                     success: { type: 'boolean', example: true },
+                    message: { type: 'string' },
                     data: {
                       type: 'object',
                       properties: {
                         itemsRestored: { type: 'integer' },
+                        itemsSkipped: { type: 'integer' },
+                        foldersRestored: { type: 'integer' },
+                        foldersSkipped: { type: 'integer' },
+                        itemSkipReasons: {
+                          type: 'array',
+                          description:
+                            'One entry per item not stored as requested: `itemId` and a machine-readable `reason` such as `conflict_skipped`, `invalid_item_type` or `missing_encryption_fields`.',
+                          items: {
+                            type: 'object',
+                            properties: { itemId: { type: 'string' }, reason: { type: 'string' } },
+                          },
+                        },
+                        folderSkipReasons: {
+                          type: 'array',
+                          description:
+                            'One entry per folder not stored as requested: `folderId` and a machine-readable `reason` such as `conflict_skipped`.',
+                          items: {
+                            type: 'object',
+                            properties: {
+                              folderId: { type: 'string' },
+                              reason: { type: 'string' },
+                            },
+                          },
+                        },
                       },
                     },
                   },
@@ -3512,7 +3660,8 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress; a backup carrying a field sealed to its row (an IV beginning `v2:`), which only a client that could not open it sends unchanged and which a restore under a fresh id would leave unreadable; and, before the body is read, a restore or key rotation this account already has in flight.',
+            'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress; a backup carrying a field sealed to its row (an IV beginning `v2:`), which only a client that could not open it sends unchanged and which a restore under a fresh id would leave unreadable; and, before the body is read, a restore or key rotation this account already has in flight.' +
+              RESEAL_LOCK_BUSY,
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },

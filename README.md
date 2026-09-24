@@ -61,16 +61,16 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 
 ### Vault
 
-|                        |                                                                                                                                                                                                                                                                                                                                                          |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Five item types**    | Logins (with optional 2FA recovery codes), secrets, notes, cards (with Luhn validation, notes and an optional two-line billing address) and identities (a two-line address with courier delivery notes, plus company, Social Security and passport numbers — both masked — notes and custom fields) — with search, folders, tags, favorites and a trash. |
-| **Reuse an address**   | A card's billing address can be filled from any identity that has one, chosen from a searchable list with an undo. Delivery notes stay on the identity — a card cannot hold them. Runs entirely on already-decrypted items in the browser; nothing is sent anywhere.                                                                                     |
-| **Client-side crypto** | AES-256-GCM under a vault key the server never sees. Item and folder names are ciphertext too — so search runs entirely in the browser, over data only you can decrypt.                                                                                                                                                                                  |
-| **Password generator** | Character-set and passphrase modes (2048-word EFF-based list, exactly 11 bits per word). Strength is reported as **exact entropy**, not a heuristic score — see [below](#honest-strength-metering).                                                                                                                                                      |
-| **Vault health**       | Finds weak, reused, old (90+ days) and breached passwords, and logins with no TOTP configured.                                                                                                                                                                                                                                                           |
-| **Password history**   | The last 10 passwords per login, each individually encrypted, decrypted on demand.                                                                                                                                                                                                                                                                       |
-| **Built-in TOTP**      | Generate 2FA codes for your stored logins, with a clipboard that clears itself.                                                                                                                                                                                                                                                                          |
-| **Key rotation**       | Re-key the entire vault on demand. The server raises a write fence for the duration, so a second session can't write ciphertext under the old key and silently lose it.                                                                                                                                                                                  |
+|                        |                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Five item types**    | Logins (with optional 2FA recovery codes), secrets, notes, cards (with Luhn validation, notes and an optional two-line billing address) and identities (a two-line address with courier delivery notes, plus company, Social Security and passport numbers — both masked — notes and custom fields) — with search, folders, tags, favorites and a trash.                          |
+| **Reuse an address**   | A card's billing address can be filled from any identity that has one, chosen from a searchable list with an undo. Delivery notes stay on the identity — a card cannot hold them. Runs entirely on already-decrypted items in the browser; nothing is sent anywhere.                                                                                                              |
+| **Client-side crypto** | AES-256-GCM under a vault key the server never sees. Item and folder names are ciphertext too — so search runs entirely in the browser, over data only you can decrypt.                                                                                                                                                                                                           |
+| **Password generator** | Character-set and passphrase modes (2048-word EFF-based list, exactly 11 bits per word). Strength is reported as **exact entropy**, not a heuristic score — see [below](#honest-strength-metering).                                                                                                                                                                               |
+| **Vault health**       | Finds weak, reused, old (90+ days) and breached passwords, and logins with no TOTP configured.                                                                                                                                                                                                                                                                                    |
+| **Password history**   | The last 10 passwords per login, each individually encrypted, decrypted on demand.                                                                                                                                                                                                                                                                                                |
+| **Built-in TOTP**      | Generate 2FA codes for your stored logins, with a clipboard that clears itself.                                                                                                                                                                                                                                                                                                   |
+| **Key rotation**       | Re-key the entire vault on demand. The server raises a write fence for the duration, so a second session can't write ciphertext under the old key and silently lose it. A rotation cut short by a crash is kept, and Settings offers to finish it with the key it was moving to. **Re-seal Entries** rewrites every entry under the key you already have, bound to its own entry. |
 
 ### Security
 
@@ -90,7 +90,9 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 
 - **Encrypted backups.** Scheduled or on-demand backups, encrypted under a _separate_ backup
   password so they stay opaque even to a server that holds them. Downloads are signed with
-  HMAC-SHA256 and the signature is verified on restore, so a tampered file is rejected.
+  HMAC-SHA256 and restore checks the signature against your account's own backup key: a file it
+  verifies restores directly, a file that is unsigned or verifies only under the key it carries
+  itself restores only once you confirm it, and a file no key verifies is refused.
   Restores are safe to repeat: a restore **never replaces your vault key** — the client
   re-encrypts incoming rows to the key you already have — and previously-restored content is
   matched by provenance, so re-running the same backup doesn't accumulate duplicates. Any
@@ -289,8 +291,8 @@ no user of a shared deployment is stuck inside it.
 - **Accessible by construction** — focus traps, `aria-activedescendant` roving focus in menus,
   live regions, and correct ARIA roles on virtualized lists (`react-window` above 50 items).
   Every page has one `main` landmark and one `h1` (a loading screen has only the `main`), headings
-  never skip a level, and the `a11y` gate fails on any moderate, serious or critical axe finding
-  in the thirty-four views it scans.
+  never skip a level, and the `a11y` gate fails on any axe finding above minor (moderate, serious,
+  critical, or one axe gives no impact) in the thirty-four views it scans.
 - **Keyboard-first** — `Ctrl`+`L` lock, `Ctrl`+`N` new item, `Ctrl`+`K` search, `Ctrl`+`↑`/`↓`
   reorder folders (`Cmd` on macOS).
 - **Auto-lock on a wall-clock deadline** — the vault locks when your configured idle timeout has
@@ -328,7 +330,7 @@ flowchart TD
         VK["Vault Key<br/>random 256-bit"]
         MEK -->|"AES-256-GCM wraps"| EVK["Encrypted vault key"]
         VK --> EVK
-        VK -->|"AES-256-GCM<br/>unique IV per field"| CT["Encrypted items,<br/>names and folders"]
+        VK -->|"AES-256-GCM<br/>unique IV per field,<br/>bound to its entry"| CT["Encrypted items,<br/>names and folders"]
     end
 
     subgraph server["THE SERVER — only ever sees ciphertext"]
@@ -349,7 +351,18 @@ flowchart TD
 
 The server can verify you know your password (it bcrypts the auth hash) and hand back your
 encrypted vault key — but it cannot unwrap that key, because the MEK that wraps it is derived
-from a password it never receives.
+from a password it never receives. The browser holds the MEK as a non-extractable key, and it
+always derives it with its own iteration count, never one the server supplies, so a server cannot
+talk it into a weaker derivation.
+
+**Row binding.** Every vault field (an item's name, its data, each password-history entry, and a
+folder's name) is sealed with AES-GCM additional data naming the field and the entry's id, and for
+an item's data its type as well, so ciphertext a server moves to another entry or another field
+fails to decrypt instead of showing the wrong secret. A new entry's id is derived on both sides
+from a nonce the browser sends, so it can be bound before it exists. **Re-seal Entries** in
+Settings rewrites older entries in this format under the key you already have. What the binding
+cannot stop, a server putting back an older value of the same field or deleting an entry, is set
+out in [SECURITY.md](SECURITY.md).
 
 **Why the email is the salt.** The client must derive the _same_ MEK on every device before it
 has spoken to the server, so the salt has to be something it already knows. A per-user random
@@ -441,20 +454,21 @@ metadata blob, under a freshly generated IV each time.
 
 ### Cryptographic parameters
 
-| Parameter                 | Value                                                                                                                                          |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)                                                               |
-| Master-key salt           | The account email — see the note above                                                                                                         |
-| Backup-key salt           | 16 random bytes                                                                                                                                |
-| Encryption                | AES-256-GCM                                                                                                                                    |
-| Key size                  | 256 bits                                                                                                                                       |
-| IV                        | 12 bytes, freshly random for **every** field                                                                                                   |
-| Authentication tag        | 16 bytes                                                                                                                                       |
-| Name hash                 | HMAC-SHA256 over the name, keyed by the vault key — folder-name uniqueness, not search                                                         |
-| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                                                                         |
-| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                                                                                     |
-| Document key              | Random 256-bit per document, wrapped under HKDF-SHA256(vault key, info bound to the document id)                                               |
-| Document segment          | AES-256-GCM over 8,388,592 bytes of plaintext, sealing to exactly 8 MiB; nonce = 7 random bytes ‖ big-endian segment index ‖ last-segment flag |
+| Parameter                 | Value                                                                                                                                                                |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)                                                                                     |
+| Master-key salt           | The account email — see the note above                                                                                                                               |
+| Backup-key salt           | 16 random bytes                                                                                                                                                      |
+| Encryption                | AES-256-GCM                                                                                                                                                          |
+| Key size                  | 256 bits                                                                                                                                                             |
+| IV                        | 12 bytes, freshly random for **every** field                                                                                                                         |
+| Authentication tag        | 16 bytes                                                                                                                                                             |
+| Name hash                 | HMAC-SHA256 over the trimmed, lower-cased name under a subkey, HKDF-SHA256(vault key, info `hvault/item/search/v1`), never the vault key itself; not used for search |
+| Field binding             | AES-GCM additional data naming the field and the entry's id (and an item's type), so ciphertext moved to another entry or field fails to decrypt                     |
+| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                                                                                               |
+| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                                                                                                           |
+| Document key              | Random 256-bit per document, wrapped under HKDF-SHA256(vault key, info bound to the document id)                                                                     |
+| Document segment          | AES-256-GCM over 8,388,592 bytes of plaintext, sealing to exactly 8 MiB; nonce = 7 random bytes ‖ big-endian segment index ‖ last-segment flag                       |
 
 ### Honest strength metering
 
@@ -495,7 +509,7 @@ the stored passwords the vault-health check grades.
 
 - React 19 · Vite 8 (Rolldown)
 - TypeScript 7 (strict)
-- Zustand 5 (auth · vault · ui)
+- Zustand 5 (auth · vault · ui · documents)
 - React Router 8, lazy-loaded
 - Tailwind CSS 4 · shadcn/ui-inspired
 - React Hook Form + Zod
@@ -716,9 +730,11 @@ bundle's one-year lifetime, from `hvault-pm2.locations.conf`) at
   none of the app's rate limiting, CSRF or session handling in front of it — is unreachable from
   anywhere but the app container.
 - **Security headers stay intact.** Nginx serves the content-hashed `/assets/*` straight from disk
-  (immutable caching, gzip, `nosniff`), but every **HTML document** is proxied to Express, so
-  helmet remains the single owner of the CSP, its per-request nonce, `X-Frame-Options` and
-  `Referrer-Policy`. HSTS belongs to the outer Nginx alone.
+  (immutable caching, gzip, `nosniff`), but every **HTML document** is proxied to Express, which
+  owns its CSP: helmet's, with a per-request nonce, `X-Frame-Options` and `Referrer-Policy`, for the
+  application, and a far stricter one of its own for the isolated document viewer, whose file is
+  kept outside every directory either server serves from disk. HSTS belongs to the outer Nginx
+  alone.
 - **API responses are never compressed.** Gzipping a response that mixes a secret (a CSRF or
   bearer token) with attacker-influenced content is the precondition for a BREACH-style
   compression oracle. The payloads are base64 ciphertext, which barely compresses anyway.
@@ -880,7 +896,7 @@ password, but `TWO_FACTOR_ENCRYPTION_KEY` is what makes the stored 2FA secrets r
 
 | Symptom                                                                                                                      | Cause and fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MongoDB crash-loops on Ubuntu 26.04 / any Linux 6.19+ kernel                                                                 | SERVER-121912. MongoDB 8.0 moved TCMalloc to per-CPU caches that violate the rseq ABI as it changed in kernel 6.19, so mongod aborts at startup and `restart: unless-stopped` loops forever. The fix ships in the stack — `GLIBC_TUNABLES=glibc.pthread.rseq=1`, set at **every** mongod launch site (both compose files, the server test harness, the E2E harness and the smoke gate). If you hit this, something removed it. **Never set it to `0`**: that is mongod's own default, and precisely the value that breaks.                                                                  |
+| MongoDB crash-loops on Ubuntu 26.04 / any Linux 6.19+ kernel                                                                 | SERVER-121912. MongoDB 8.0 moved TCMalloc to per-CPU caches that violate the rseq ABI as it changed in kernel 6.19, so mongod aborts at startup and `restart: unless-stopped` loops forever. The fix ships in the stack — `GLIBC_TUNABLES=glibc.pthread.rseq=1`, set at **every** mongod launch site (both compose files, the server test harness, the E2E harness, the smoke gate and the sandbox gate). If you hit this, something removed it. **Never set it to `0`**: that is mongod's own default, and precisely the value that breaks.                                                |
 | `docker compose up` fails: "Pool overlaps with other one on this address space"                                              | Another Docker network already owns `172.31.240.0/24` or `172.31.241.0/24`. Set `HVAULT_EDGE_SUBNET` / `HVAULT_DATA_SUBNET` to free blocks, and give each stack its own `HVAULT_HTTP_PORT`. If free blocks keep getting taken, narrow Docker's own auto-allocation range instead — it carves bridges out of `172.17.0.0/12` from the bottom up — by setting `default-address-pools` in `/etc/docker/daemon.json`.                                                                                                                                                                           |
 | `up -d --wait` exits 1 saying `container hvault-nginx is unhealthy`, but the port answers `200`                              | Only after an app outage longer than ~75 s. Nginx's health probe runs **through** the proxy to `/api/v1/health`, so while the app is down nginx fails its five retries and is marked unhealthy; Compose treats an already-unhealthy container as terminal instead of waiting for its next probe. The stack is fine — confirm with `curl -fsS http://127.0.0.1:${HVAULT_HTTP_PORT:-8080}/api/v1/health`, then re-run the command (nginx clears itself on its first good probe, ≤15 s). The deep probe is deliberate: it is what proves the whole single-port path at deploy time.            |
 | Upgrading an **existing** deployment from `mongo:7.0`                                                                        | mongod 8.0 starts on a 7.0 data directory as-is. Then raise the compatibility version once, or 8.0 keeps behaving like 7.0: `docker compose exec hvault-db mongosh -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({setFeatureCompatibilityVersion:"8.0", confirm:true})'`. Take a `mongodump` first — it is not reversible without a restore.                                                                                                                                                                                   |
@@ -1205,16 +1221,20 @@ Treat it as a nudge for your own users, not as a control at the API boundary.
 | PUT    | `/backup/change-password`            | Change the backup password                             |
 | POST   | `/backup/restore`                    | Restore from an encrypted backup                       |
 
-`POST /tools/import` takes `{ format, conflictStrategy, operations: { inserts, updates } }` and
-answers `{ insertedCount, updatedCount }`. The client parses the source (Bitwarden, LastPass,
+`POST /tools/import` takes `{ format, conflictStrategy, operations: { inserts, updates } }`, plus
+an optional `vaultKeyVersion` and an `idNonce` on each insert, and answers
+`{ insertedCount, updatedCount, insertedIds }`, the ids in insertion order so the client can
+check that each entry landed under the id it was sealed to. The client parses the source (Bitwarden, LastPass,
 KeePass, Chrome, Firefox, 1Password, generic CSV, or a native H-Vault export), decides what is a
 duplicate against its own decrypted vault, and encrypts every item before the call — so each update
 names the id of the item it replaces and **the server matches nothing**. `format` and
 `conflictStrategy` are recorded for the audit log only. It answers `400` when the body fails schema
 validation or when an update names an item that is unknown, trashed or someone else's, and `409`
-while a vault-key rotation or another import for the same account is running, or when an item an
-update targeted was changed or removed mid-request. Nothing is written on any `400`, nor on the
-rotation or already-running `409` — those are all refused before the first write. The
+while a vault-key rotation or another import for the same account is running, when the client's
+vault key is out of date (the body then carries the current `vaultKeyVersion`), when an insert's
+derived id is already taken, or when an item an update targeted was changed or removed
+mid-request. Nothing is written on any `400`, nor on the rotation, already-running, out-of-date
+or id-taken `409`: those are all refused before the first write. The
 changed-mid-request `409` is the one exception: on a replica set the whole request rolls back, but
 on a standalone MongoDB (the default `MONGODB_URI`) earlier operations in that same request may
 already have committed. Re-running is safe under `skip` and `overwrite`, which re-resolve against
@@ -1341,22 +1361,25 @@ h-vault/
 │   ├── shared/                  # @hvault/shared — built FIRST, both others depend on it
 │   │   └── src/
 │   │       ├── constants/       #   Crypto parameters, limits, enums, audit actions
-│   │       ├── schemas/         #   Zod: auth, vault, folder, user, config, common
-│   │       ├── types/           #   TypeScript interfaces for every model
-│   │       ├── utils/           #   maskEmail, formatBytes, generateId
+│   │       ├── schemas/         #   Zod: auth, vault, folder, document, user, config, common
+│   │       ├── types/           #   TypeScript interfaces for every model + the sandbox protocol
+│   │       ├── utils/           #   maskEmail, formatBytes, generateId, deriveRowId
 │   │       └── generated/       #   APP_VERSION, injected from package.json at build time
 │   │
 │   ├── server/                  # @hvault/server
 │   │   ├── src/
 │   │   │   ├── config/          #   Zod-validated env, Mongo connection, OpenAPI spec
-│   │   │   ├── controllers/     #   auth, vault, folder, user, backup, tools, health, config, metrics
-│   │   │   ├── middleware/      #   JWT auth, validation, CSRF, rate limiting (+ its Mongo store)
-│   │   │   ├── models/          #   User, VaultItem, Folder, RefreshToken,
-│   │   │   │                    #   AuditLog, BackupLog, JobLock, Migration
+│   │   │   ├── controllers/     #   auth, vault, folder, document, user, backup, tools, health, config, metrics
+│   │   │   ├── middleware/      #   JWT auth, validation, CSRF, rate limiting (+ its Mongo store),
+│   │   │   │                    #   body sanitising, upload and 30 MB request admission
+│   │   │   ├── models/          #   User, VaultItem, Folder, Document, DocumentUpload,
+│   │   │   │                    #   RefreshToken, TrustedDevice, AuditLog, BackupLog,
+│   │   │   │                    #   JobLock, Migration, PwnedRangeCache
 │   │   │   ├── routes/          #   Express routers
 │   │   │   ├── services/        #   auditService
 │   │   │   ├── jobs/            #   backup scheduler, token cleanup, trash purge, document GC
 │   │   │   └── utils/           #   tokens, email, job locks, folder graph, graceful shutdown
+│   │   ├── sandbox-document/    #   (build output) the viewer document, copied from client/dist-sandbox
 │   │   └── tests/               #   Vitest + Supertest + mongodb-memory-server
 │   │
 │   └── client/                  # @hvault/client
@@ -1373,11 +1396,12 @@ h-vault/
 │       │   │   │                #   SearchBar, SavedAddressPicker, PasswordGenerator
 │       │   │   ├── tools/       #   FileEncryptPanel, FileDecryptPanel
 │       │   │   └── ui/          #   Button, Card, Input, Dialog, Toast, Tabs, Badge…
-│       │   ├── pages/           #   19 route pages, all lazy-loaded
+│       │   ├── sandbox/         #   the isolated viewer: renderers, decode/sniff, format-and-repair, QR scan
+│       │   ├── pages/           #   20 route pages, all lazy-loaded
 │       │   ├── hooks/           #   useAutoLock, useClipboardGuard, useClipboardCountdown,
 │       │   │                    #   useKeyboardShortcuts, useUserSettings,
 │       │   │                    #   useConnectionStatus, useFavicon
-│       │   ├── stores/          #   Zustand: auth, vault, ui + the encrypted storage adapter
+│       │   ├── stores/          #   Zustand: auth, vault, ui, documents + the encrypted storage adapter
 │       │   ├── services/
 │       │   │   ├── api/         #   Axios client (CSRF, refresh, retry interceptors)
 │       │   │   ├── clipboard/   #   clipboardService (copy + erase-deadline state machine)
@@ -1385,10 +1409,12 @@ h-vault/
 │       │   ├── utils/           #   passwordEntropy, deviceFingerprint, favicon
 │       │   ├── constants/       #   the 2048-word passphrase list
 │       │   └── lib/             #   logger, lazyZxcvbn, vaultSearch, cn
+│       ├── dist-sandbox/        #   (build output) the viewer document, outside every static root
 │       ├── public/              #   PWA icons and favicons
 │       └── tests/               #   Vitest + jsdom
 │
 ├── e2e/                         # Playwright specs + helpers + in-memory Mongo harness
+├── tests/harness/               # Shared test harness: seed/shuffle, clock, storage container
 ├── scripts/ci/                  # THE PIPELINE — local-ci, docker-gate, sast-gate, secret-scan
 ├── docker/
 │   ├── Dockerfile               # One file, four targets: app | web | bootstrap | development
@@ -1415,14 +1441,14 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Server** | 194   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
-| **Client** | 181   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
+| **Server** | 195   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
+| **Client** | 183   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
 | **Shared** | 14    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
 | **E2E**    | 22    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
 
 **Files** counts every test file each suite owns on disk, which is not the same as the number the
 command above runs: the server's default Vitest config excludes `tests/resource/**` and
-`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 194 on disk and
+`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 195 on disk and
 those two directories run under their own gates (`test:resource`, `test:storage`). The number of
 test _cases_ is a third figure again, and it is ratcheted rather than written down here —
 `.testfortress/baseline.json`'s `tests.count` is a floor fed from the JUnit reports, and it only
@@ -1557,7 +1583,7 @@ things guard the gates themselves.
 
 **`.testfortress/suppressions.json` is the complete, honest list of everything exempt from a gate.**
 The `integrity` gate scans every tracked and untracked file for the markers that weaken a check — a
-skipped or focused test, a silenced type checker or linter, an inline coverage pragma, a swallowed
+skipped or focused test, a silenced type checker or linter, an inline coverage pragma, a mutation-testing disable comment, a swallowed
 error, a retry that hides a race, a `sleep` used as synchronisation — and fails unless each one is
 either gone or written down with an owner, a reason, an expiry and the exact rule it excuses. Some
 patterns cannot be written down at all: a neutered exit code, a committed test filter, a strictness
@@ -1611,7 +1637,9 @@ own line, never folded into the proven total: the run says how many gates it act
 missing tool cannot read as a clean sheet. It is the release tier, not the push gate, because it
 runs the whole pipeline once per gate.
 
-**A full run takes 15–30 minutes.** That is the deliberate trade: time spent before the push
+**A full run takes 15–30 minutes, plus `mutation-diff`**, which adds seconds for a shared-only
+change, several minutes for each server or client leg it has to mutate, and about an hour on a very
+large branch. That is the deliberate trade: time spent before the push
 instead of minutes billed after it. Two escape hatches exist:
 
 ```bash
@@ -1699,40 +1727,42 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ### Scripts
 
-| Command                        | Description                                              |
-| ------------------------------ | -------------------------------------------------------- |
-| `npm run dev`                  | Server + client together, hot-reloading                  |
-| `npm run build`                | Build all packages (shared → server → client)            |
-| `npm run start`                | Start the production server                              |
-| `npm run test`                 | Every workspace's tests                                  |
-| `npm run test:unit`            | The hermetic suites (shared, client)                     |
-| `npm run test:integration`     | The server suite, against a real `mongod`                |
-| `npm run test:e2e`             | Playwright E2E tests                                     |
-| `npm run lint`                 | ESLint, warnings are errors                              |
-| `npm run type-check`           | Type-check all packages, tests and `e2e/`                |
-| `npm run format`               | Prettier — write                                         |
-| `npm run format:check`         | Prettier — verify only                                   |
-| `npm run ci`                   | The whole pipeline (what `pre-push` runs)                |
-| `npm run verify:fast`          | The fast tier only (1m 18s idle, 1m 19s-2m 44s busy)     |
-| `npm run verify:full`          | The whole pipeline plus the release tier                 |
-| `npm run ci:list`              | List the pipeline's gates and their tiers                |
-| `npm run ci:docker`            | The container gate on its own                            |
-| `npm run ci:sast`              | The static-analysis gate on its own                      |
-| `npm run audit:bundle`         | The client bundle size budgets on their own              |
-| `npm run test:resource`        | The volume and memory budgets on their own               |
-| `npm run test:upgrade`         | The previous release's vault and `.env`, read            |
-| `npm run test:recovery`        | The backup-restore and crash-consistency drills          |
-| `npm run test:dst`             | The whole suite again, in a DST-observing zone           |
-| `npm run test:flake`           | Ten shuffled runs, plus E2E three times over             |
-| `npm run report`               | Collect the gates' warning counts                        |
-| `npm run verify:selftest`      | Prove every registered gate can still fail               |
-| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger           |
-| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline            |
-| `npm run audit:ratchet:full`   | Every gated number, against the baseline                 |
-| `npm run secret-scan`          | Scan every tracked file for committed secrets            |
-| `npm run audit:prod`           | Dependency audit, production deps only                   |
-| `npm run release:next-version` | Compute the next release tag                             |
-| `npm run clean`                | Remove `dist/`, `node_modules/`, `logs/`, tsc build info |
+| Command                        | Description                                                               |
+| ------------------------------ | ------------------------------------------------------------------------- |
+| `npm run dev`                  | Server + client together, hot-reloading                                   |
+| `npm run build`                | Build all packages (shared → server → client)                             |
+| `npm run start`                | Start the production server                                               |
+| `npm run test`                 | Every workspace's tests                                                   |
+| `npm run test:unit`            | The hermetic suites (shared, client)                                      |
+| `npm run test:integration`     | The server suite, against a real `mongod`                                 |
+| `npm run test:e2e`             | Playwright E2E tests                                                      |
+| `npm run test:sandbox`         | Every preview in a browser under the built app's headers                  |
+| `npm run test:mutation:diff`   | Mutants on the lines this change touched, vs its floor                    |
+| `npm run lint`                 | ESLint, warnings are errors                                               |
+| `npm run type-check`           | Type-check all packages, tests and `e2e/`                                 |
+| `npm run format`               | Prettier — write                                                          |
+| `npm run format:check`         | Prettier — verify only                                                    |
+| `npm run ci`                   | The whole pipeline (what `pre-push` runs)                                 |
+| `npm run verify:fast`          | The fast tier only (1m 18s idle, 1m 19s-2m 44s busy)                      |
+| `npm run verify:full`          | The whole pipeline plus the release tier                                  |
+| `npm run ci:list`              | List the pipeline's gates and their tiers                                 |
+| `npm run ci:docker`            | The container gate on its own                                             |
+| `npm run ci:sast`              | The static-analysis gate on its own                                       |
+| `npm run audit:bundle`         | The client bundle size budgets on their own                               |
+| `npm run test:resource`        | The volume and memory budgets on their own                                |
+| `npm run test:upgrade`         | The previous release's vault and `.env`, read                             |
+| `npm run test:recovery`        | The backup-restore and crash-consistency drills                           |
+| `npm run test:dst`             | The whole suite again, in a DST-observing zone                            |
+| `npm run test:flake`           | Ten shuffled runs, plus E2E three times over                              |
+| `npm run report`               | Collect the gates' warning counts                                         |
+| `npm run verify:selftest`      | Prove every registered gate can still fail                                |
+| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger                            |
+| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline                             |
+| `npm run audit:ratchet:full`   | Every gated number, against the baseline                                  |
+| `npm run secret-scan`          | Scan every tracked file for committed secrets                             |
+| `npm run audit:prod`           | Dependency audit, production deps only                                    |
+| `npm run release:next-version` | Compute the next release tag                                              |
+| `npm run clean`                | Remove `dist/`, `dist-sandbox/`, `node_modules/`, `logs/`, tsc build info |
 
 ---
 
@@ -2218,7 +2248,7 @@ duration.
 
 ### Watch it from anywhere
 
-The runner streams. It prints a `[n/38]` step line for each gate as it starts, the
+The runner streams. It prints a `[n/39]` step line for each gate as it starts, the
 gate's own output beneath it, and a pass or fail line with a duration when it ends. A
 boxed summary table and the tier budget comparison come last.
 
@@ -2248,9 +2278,9 @@ the launcher is the only unambiguous signal that this run is over.
 
 **The step counter is not a clock either.** Gates run in the order `npm run ci -- --list`
 prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the two
-longest gates in the repository sit at positions 33 and 34 of 38. A `verify:full` that has
-been on `[34/38]` for four hours is not stuck; it is doing the thing you asked for. The
-same run reaching `[31/38]` in half an hour is likewise normal, and tells you almost
+longest gates in the repository sit at positions 34 and 35 of 39. A `verify:full` that has
+been on `[35/39]` for four hours is not stuck; it is doing the thing you asked for. The
+same run reaching `[32/39]` in half an hour is likewise normal, and tells you almost
 nothing about how much is left.
 
 **Distinguishing slow from stuck** needs one number: how long the gate named on the
@@ -2709,7 +2739,7 @@ are the only durable record that a given commit was measured on a given day.
 The first runs `npm run ci` — the same T0 + T1 gates the pre-push hook runs, not a narrower set —
 on a clean checkout. The second tags the commit and publishes the Release, and runs only if the
 first passed. The pipeline having already run locally is not a substitute: the hook has documented
-escape hatches (see below), so an unverified commit can reach `main`, and re-running the gauntlet
+escape hatches (see [The pipeline runs locally](#the-pipeline-runs-locally)), so an unverified commit can reach `main`, and re-running the gauntlet
 on a hosted runner costs nothing on a public repository.
 
 **A release happens when the version says so.** `package.json` is the version of truth —

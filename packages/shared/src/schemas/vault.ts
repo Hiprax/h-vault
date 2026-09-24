@@ -250,10 +250,11 @@ export const bulkReEncryptSchema = z
      * rotation that commits THAT wrapper — the crash left rows sealed under it and
      * nothing else anywhere stores it, so a rotation to any other key would strand
      * them for ever behind a 200. This flag is the explicit, opt-in way to say so
-     * deliberately, and exists because that wrapper can become unopenable: it is
-     * sealed under the MEK the rotation ran with, and a master-password change
-     * since replaces the MEK. Without an escape, such an account could never
-     * rotate its vault key again.
+     * deliberately, and exists because finishing can fail for good (a wrapper
+     * that no longer opens the rows it was moving). A master-password change is
+     * not such a case: it carries the wrapper across under the new MEK, or is
+     * refused. Without an escape, such an account could never rotate its vault
+     * key again.
      *
      * Optional and absent-means-false, so an older client cannot discard a key by
      * accident, and so adding it is not a breaking change on the wire.

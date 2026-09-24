@@ -1666,10 +1666,11 @@ export default function SettingsPage() {
     // Rotate to a fresh key and ABANDON the interrupted rotation's stored one. The
     // server refuses that by default while a wrapper is outstanding, because it
     // strands whatever the crash had already re-sealed; the flag below is how a
-    // user says they mean it. The reachable case is a wrapper that can no longer
-    // be opened at all — it is sealed under the MEK the rotation ran with, and a
-    // master-password change since has replaced that MEK — where finishing is
-    // impossible and, without this, the account could never rotate again.
+    // user says they mean it. The case it exists for is a stored key that no
+    // longer opens the entries it was moving, where finishing cannot succeed and,
+    // without this, the account could never rotate again. A master-password change
+    // is not such a case: it carries the wrapper across under the new MEK, or is
+    // refused.
     const discarding = rotationMode === 'discard';
     // Re-seal every entry under the key the vault ALREADY uses, to bind each field
     // to its row (format v2). The same enumeration, completeness check and fence as
@@ -3063,12 +3064,12 @@ export default function SettingsPage() {
                   rotation to bring every entry back under one key.
                 </p>
                 {/*
-                  The escape hatch, and it is deliberately secondary. The stored key
-                  is sealed under the master password that was in force when the
-                  rotation ran, so a password change since makes finishing
-                  impossible — and the server refuses any other rotation while the
-                  wrapper is outstanding, which without this would leave the account
-                  unable to rotate at all.
+                  The escape hatch, and it is deliberately secondary. The server
+                  refuses any other rotation while the wrapper is outstanding, so
+                  when finishing cannot succeed (the stored key no longer opens the
+                  entries it was moving) this is the only way the account can rotate
+                  again. A master-password change does not cause that: it carries the
+                  wrapper across under the new password, or is refused.
                 */}
                 <button
                   type="button"

@@ -9,8 +9,9 @@ pipeline and about tests are not optional.
 
 ## Getting set up
 
-You need **Node 24+** (pinned in `.nvmrc`), **Docker** (for MongoDB and the object
-storage the document store uses, and for the `docker` pipeline gate), and **two Playwright
+You need **Node 24+** (pinned in `.nvmrc`), **Docker** (for the development MongoDB and
+object storage, and for the gates that start containers: `e2e`, `a11y`, `sandbox`, `storage` and
+`docker`, and in the release tier `deploy` and `flake`), and **two Playwright
 browsers** — the end-to-end gate declares a Chromium project over every spec and a Firefox
 project over the clipboard and auto-lock specs, and a browser that is not installed fails
 those specs outright rather than reporting "could not run":
@@ -24,13 +25,22 @@ git clone https://github.com/Hiprax/h-vault.git
 cd h-vault
 npm install                                   # installs all workspaces
 cp .env.example .env                          # then set the three required secrets
-docker compose -f docker-compose.dev.yml up -d   # MongoDB + object storage
+docker compose -f docker-compose.dev.yml up -d hvault-db hvault-s3   # MongoDB + object storage only
 npm run build:shared                          # shared must be built before server/client
 npm run dev                                   # http://localhost:5173
 ```
 
 `packages/shared` is a build-time dependency of both other packages. If the server or
 client fails to resolve `@hvault/shared`, you skipped `npm run build:shared`.
+
+TypeScript is installed twice, on purpose. `@typescript/native` is TypeScript 7, the native
+compiler: it owns `tsc` and runs every build and `npm run type-check`. The package name
+`typescript` is an alias for the TypeScript 6 API, which the linter's type-aware rules and a few
+server suites import, because TypeScript 7 ships no JavaScript API. Leave both as they are:
+`packages/server/tests/toolchain-resolution.test.ts` fails if `tsc` stops being TypeScript 7 or
+`typescript` leaves the range the linter supports. Vitest is held at 4.1.x for a similar reason:
+on Vitest 5 the mutation runner selects no test inside a `describe` block, so every mutant would
+be reported as surviving, and the same test file goes red on that upgrade.
 
 Dependency install scripts have a recorded review policy: the root `package.json` `allowScripts`
 field approves each one pinned to the version that was reviewed, and denies the rest. When a
@@ -78,7 +88,8 @@ browser bundle's size budgets, the storage port against a real object-storage en
 container, container builds with Trivy scanning, and a static-analysis
 pass (CodeQL where its CLI is installed, otherwise Semgrep CE or OpenGrep, with the gate
 naming the engine that answered) — and refuses the push if any of them fail. A
-commit that reaches `main` has already passed everything. Eight further gates sit in the
+commit pushed without one of the escape hatches below has passed every T0 and T1 gate, and the
+release workflow runs the same `npm run ci` again before it publishes. Eight further gates sit in the
 release tier: `fuzz`, whose suites still run inside the ordinary test gates on every push
 so that only the separately-reported, deadline-bounded run is held back; `resource`, the
 volume and memory budgets, which builds ten-thousand-item vaults and therefore both takes
@@ -96,7 +107,7 @@ artifact on every push; `flake`, ten complete runs of every suite in ten differe
 shuffled orders plus the Playwright suite three times over, measured at 84 and 79 minutes
 on two separate runs; and `mutation`, the oracle, which re-runs the suite once per mutant.
 `mutation` is measured in DAYS on a four-core machine, not in hours: its `shared` leg takes
-17m14s from scratch, but 41 % of the `server` leg's 12,174 mutants are static — a static mutant has no
+17m14s from scratch, but 41 % of the `server` leg's roughly 12,900 mutants are static — a static mutant has no
 per-test coverage, so it is run against the whole suite, and that suite boots a real mongod
 per file. Measured at about one mutant per minute per runner, which is 120-130 hours for
 that leg alone. Plan for it, and never make it cheap by narrowing what it mutates or by
@@ -116,13 +127,16 @@ or, if no test can kill it, add a dated `EQUIV-MUTANT` entry to the suppression 
 that file. The campaign itself banks a floor per leg, and a floor is recorded only from a
 from-scratch run: `npm run test:mutation -- --leg=<id> --full`, then `npm run audit:ratchet:full`,
 then `node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.<id> --reason "..."` (the
-very first leg of all is `--seed mutation`).
+very first leg of all is `--seed mutation`). Today only the `shared` leg is banked (88.64% of
+2,633 mutants); `client` (about 20 hours from scratch) and `server` (120-130 hours) are not, so
+`test:mutation`, and with it `npm run verify:full`, exits 1 naming them UNBANKED until an operator
+banks each in an idle window.
 
 The gates are grouped into tiers by how long they take, so there is something worth
 running at every point in the loop:
 
 ```bash
-npm run verify:fast               # the fast tier (T0): engines, secrets, lint, format, types
+npm run verify:fast               # the fast tier (T0): engines, secrets, lint, format, types, integrity, ratchet
 npm run ci                        # everything the pre-push hook runs (T0 + T1)
 npm run verify:full               # the above plus the release tier (T0 + T1 + T2)
 npm run ci:local                  # all of it again, from a fresh worktree at HEAD (clean room)
@@ -192,7 +206,8 @@ because the obvious way past each of them is the wrong one.
   touches**. The package percentages are an average over thousands of lines, so a new
   module with no tests at all barely moves them; this is the gate that notices. Three
   things are worth knowing before you meet it. First, **branch coverage is the thin
-  metric** — server sits at 91.39% and client at 92.48%, so a handful of uncovered
+  metric**: it sits only a few points above the 90% threshold in server and client (the
+  current floors are in `.testfortress/baseline.json`), so a handful of uncovered
   `if`/`??`/`?.`/default-parameter arms in one new module will fail the run. Budget branch
   tests, not just line tests. Second, a changed production file that appears in **no**
   coverage report fails the gate by name, because a file nothing measured is otherwise
@@ -328,7 +343,7 @@ documenting its own defeat. The hatches themselves are unchanged and still work.
 | `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
 
 The first is the one to reach for: it is scoped, it is visible in the run summary, and it
-leaves the other twenty-eight gates in place. **Say so in the pull request description
+leaves the other twenty-nine gates in place. **Say so in the pull request description
 whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
 a claim someone else now has to check.
 

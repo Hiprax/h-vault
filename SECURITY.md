@@ -88,7 +88,7 @@ security posture, not a disclaimer.
   the **lock episode** rather than to the moment the lockout is due to end. Extending a lockout
   extends the episode, so the link already sent keeps working however long an attacker grinds,
   and a fresh one is sent only when the outstanding link would expire before the lockout it
-  covers — at most one new link per unlock-link lifetime, which is what stops that guarantee from
+  covers — at most one new link about every half hour, which is what stops that guarantee from
   becoming a mail-flood vector of its own. The honest bound is per **window** rather than per
   episode: a link lives an hour and a lockout lasts thirty minutes, so an attacker who keeps an
   episode alive indefinitely can cause a new link to be sent roughly every half hour. That is
@@ -618,7 +618,9 @@ which one it used; if that is no longer the current one the write is refused and
 handed the current generation so it can recover rather than guess.
 
 Every such write is that case: creating or editing an item, creating or renaming a folder,
-importing, restoring a backup, uploading a document, and changing your master password. The
+importing, restoring a backup, uploading a document, setting up backup encryption or changing
+the backup password (both store a copy of the vault key sealed under the backup key), and
+changing your master password. The
 check fails closed — a request that names no generation at all is refused too, on any account
 that has rotated at least once, because a client that cannot say which key it used may be
 holding the superseded one. An account that has never rotated has no superseded key for anyone
@@ -681,9 +683,9 @@ entry, so one badly timed upload permanently ended that account's ability to rot
 
 All four now hold the account's vault key steady, with the same per-user lock, from their check
 until their last write, and a rotation arriving meanwhile is asked to wait. The cost is stated
-rather than left to be discovered: finishing several document uploads at the very same instant
-now completes them one at a time. An upload asked to wait keeps every byte it has already
-uploaded; retrying re-reads the staging ledger, skips the parts the server already holds, and
+rather than left to be discovered: of several document uploads finishing at the very same
+instant, one goes through and the others are refused, to be retried. An upload refused this way
+keeps every byte it has already uploaded; retrying re-reads the staging ledger, skips the parts the server already holds, and
 re-sends none of them. A document completion takes that lock a step earlier than its key check
 needs, before it measures the account's storage quota, so the quota's read and the insert it
 permits are one decision per account: uploads finishing together can no longer each see room
@@ -723,7 +725,9 @@ the server holds something it cannot open and nobody else can either — and it 
 there is, because the browser that generated it is gone. Your account reports that an
 interrupted rotation is outstanding, and finishing it re-encrypts everything under that same key
 rather than generating a third one. Until a rotation commits, nothing removes the stored key: not
-signing in, and not a rotation that fails or is refused.
+signing in, and not a rotation that fails or is refused. The one exception is a password reset,
+which replaces the vault key outright, so the old key and anything sealed under the outstanding
+one were beyond reach already.
 
 Two consequences follow, and both are deliberate:
 
@@ -732,14 +736,16 @@ Two consequences follow, and both are deliberate:
   to a third key would leave them unreadable for ever behind an apparent success. Abandoning the
   interrupted rotation is still possible, but it has to be asked for in so many words and the
   interface says what it costs.
-- **Changing your master password while one is outstanding makes it unopenable.** The stored key
-  is wrapped under the password that was in force when the rotation ran, and changing the password
-  replaces that wrapping. Finish an interrupted rotation before changing your master password; if
-  it is already too late, abandoning it is what lets the account rotate again, and only a backup
-  can recover whatever was sealed under the key that was abandoned.
+- **Changing your master password while one is outstanding carries it across.** The stored key
+  is wrapped under the password that was in force when the rotation ran, so the browser re-wraps
+  it under the new password and sends it with the change, and the server stores both wrappers in
+  the same write. A change that does not carry it is refused and nothing is written, so a
+  password change cannot leave that key sealed under a password nobody has. A password _reset_ is
+  different: it replaces the vault key outright and drops the outstanding key with it.
 
 An entry that cannot be decrypted at all — by the live key or by an outstanding one — no longer
-stops a rotation. Its stored ciphertext is carried across untouched and it is named in the result,
+stops a rotation. Its stored ciphertext is carried across untouched and the result says how many entries of
+each kind were left unchanged,
 because such an entry is already unreadable and letting one of them block every future rotation
 would leave the whole account unable to change its key.
 
@@ -1016,7 +1022,7 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 
 ## Security practices in this repository
 
-- Every push runs `npm run ci` locally through the `pre-push` hook — twenty-nine gates,
+- Every push runs `npm run ci` locally through the `pre-push` hook — thirty-one gates,
   including a dependency audit at moderate and above over the production tree, ESLint with
   `eslint-plugin-security`, static analysis (CodeQL where the CLI is installed, otherwise
   Semgrep CE or OpenGrep, and the gate reports which engine answered), container builds
@@ -1024,9 +1030,11 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   **and every blob in git history**, the cross-user authorization matrix over the whole
   route table, a conformance run of the storage port against the real object-storage engine
   in a container, and a redaction suite that asserts no request value, audit row or
-  production error body carries a secret. Eight further gates run before a release, among them a fuzz
-  run over the seven import parsers, a crash-consistency drill that SIGKILLs a real process
-  mid-write, the mutation oracle, and the deployment clean room.
+  production error body carries a secret. Eight further gates form the release tier, run on
+  demand with `npm run verify:full` rather than by the release workflow, among them a fuzz run
+  over the seven import parsers, a crash-consistency drill that SIGKILLs a real process
+  mid-write, the mutation oracle (which today holds a floor for the `shared` leg only), and the
+  deployment clean room.
 - The gates are themselves guarded, because a security gate that can be edited to pass is
   not a control. Every marker that weakens a check — a skipped test, a silenced analyzer, a
   swallowed error — must be absent or written down in `.testfortress/suppressions.json`
@@ -1036,8 +1044,11 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   attributes to that defect. A gate whose prerequisite is missing on the machine — an
   absent CodeQL CLI, a stopped Docker daemon — is reported BLOCKED and counted separately,
   never as proven.
-- Production images run non-root on read-only root filesystems, drop all Linux
-  capabilities, and set `no-new-privileges`. The Compose stack publishes exactly one
+- Every container sets `no-new-privileges` and drops all Linux capabilities, and every
+  one but the database runs on a read-only root filesystem; the application, Nginx and
+  bootstrap images run as a numeric non-root user. The database container is the exception,
+  because its entrypoint starts as root to fix volume ownership, adds back exactly five
+  capabilities and keeps a writable root filesystem. The Compose stack publishes exactly one
   loopback-bound port; the database has no published port and no route to the internet.
 - Secrets are validated at boot: the app refuses to start in production with a
   placeholder secret, a non-HTTPS origin, or a partial mail configuration.
