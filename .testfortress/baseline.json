@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-09-24",
-  "commit": "975a66a",
+  "commit": "04f1579",
   "tests": {
-    "count": 11582
+    "count": 11587
   },
   "coverage": {
     "diff": 100
@@ -55,8 +55,8 @@
       "coverage": {
         "line": 98.98,
         "branch": 93.49,
-        "function": 98.55,
-        "linesTotal": 4502,
+        "function": 98.56,
+        "linesTotal": 4513,
         "branchesTotal": 2352,
         "filesMeasured": [
           "src/app.ts",
@@ -151,7 +151,7 @@
         ]
       },
       "tests": {
-        "count": 4536
+        "count": 4541
       }
     },
     "packages/client": {
@@ -545,9 +545,9 @@
     ]
   },
   "duplication": {
-    "percentage": 1.42,
-    "clones": 104,
-    "duplicatedLines": 1274,
+    "percentage": 1.38,
+    "clones": 102,
+    "duplicatedLines": 1242,
     "totalLines": 52849,
     "ceiling": 2.89,
     "sources": 190
@@ -581,7 +581,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 29 sandbox-prod-header-gate: registers test:sandbox (T1) in the task list; records the de-duplication of the account forms (accountEmailSchema, FormAlert) and the new tests; seeds a11y.moderate at its measured 0, which Phase 28 added to the blocking set but never recorded",
+  "reason": "final-sweep 2026-09-24: flake 10/10 clean at 672 E2E executions, suite growth and duplication drop measured by the green ci on the final tree",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -654,7 +654,7 @@
   "flake": {
     "runs": 10,
     "failures": 0,
-    "e2eExecutions": 654
+    "e2eExecutions": 672
   },
   "mutation": {
     "legs": {

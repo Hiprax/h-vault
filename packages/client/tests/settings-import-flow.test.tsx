@@ -15,7 +15,7 @@
  *    than resolving against an incomplete list.
  */
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { createHash } from 'node:crypto';
@@ -219,6 +219,7 @@ vi.mock('../src/lib/lazyZxcvbn', () => ({
 
 import { useAuthStore } from '../src/stores/authStore';
 import { useVaultStore } from '../src/stores/vaultStore';
+import { settleImportFlow } from './support/settleImport';
 import { cryptoService } from '../src/services/crypto/cryptoService';
 
 // ---------------------------------------------------------------------------
@@ -379,6 +380,10 @@ describe('SettingsPage import flow', () => {
     } as never);
     useVaultStore.setState({ items: [] });
   });
+
+  // An import's tail (summary toast, `fetchItems()`) must run inside the test that
+  // started it, never inside the next one: see `settleImportFlow`.
+  afterEach(settleImportFlow);
 
   it('sends nothing until an import that modifies existing items is confirmed', async () => {
     await renderSettings();

@@ -20,7 +20,7 @@
  *  - Backup history display
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
@@ -99,61 +99,81 @@ vi.mock('../src/stores/encryptedStorage', () => ({
   isStorageDegraded: vi.fn().mockReturnValue(false),
 }));
 
-vi.mock('../src/services/crypto/cryptoService', () => ({
-  cryptoService: {
-    deriveKeys: vi.fn().mockResolvedValue({
+/**
+ * The cryptoService stub's defaults, in ONE place: the factory arms each stub with
+ * them once, and `resetCryptoServiceStub()` resets and re-arms every stub before
+ * each test. `vi.clearAllMocks()` alone clears calls but KEEPS an implementation a
+ * test installed, and this file runs shuffled, so a test's `decryptData` or
+ * `vaultKeyEqualsRaw` override used to decide what whichever test the seed ran
+ * next saw (measured under `test:flake`: seeds 1338, 1344 and 1346 failed "seals
+ * a native item again..." on the previous test's decryptor).
+ */
+const cryptoServiceDefaults = vi.hoisted(() => ({
+  deriveKeys: (fn: Mock) =>
+    fn.mockResolvedValue({
       masterEncryptionKey: new Uint8Array(32),
       authKey: new Uint8Array(32),
     }),
-    getAuthHash: vi.fn().mockReturnValue('mock-auth-hash'),
-    generateVaultKey: vi.fn(),
-    encryptVaultKey: vi.fn().mockResolvedValue({
+  getAuthHash: (fn: Mock) => fn.mockReturnValue('mock-auth-hash'),
+  generateVaultKey: (fn: Mock) => fn,
+  encryptVaultKey: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'enc',
       iv: 'iv',
       tag: 'tag',
     }),
-    decryptVaultKey: vi.fn(),
-    importVaultKey: vi.fn().mockResolvedValue(new Uint8Array(32)),
-    vaultKeyEqualsRaw: vi.fn().mockResolvedValue(true),
-    encryptData: vi.fn().mockResolvedValue({
+  decryptVaultKey: (fn: Mock) => fn,
+  importVaultKey: (fn: Mock) => fn.mockResolvedValue(new Uint8Array(32)),
+  vaultKeyEqualsRaw: (fn: Mock) => fn.mockResolvedValue(true),
+  encryptData: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'enc',
       iv: 'iv',
       tag: 'tag',
     }),
-    decryptData: vi.fn().mockResolvedValue('decrypted'),
-    encryptDataWithAad: vi.fn().mockResolvedValue({
+  decryptData: (fn: Mock) => fn.mockResolvedValue('decrypted'),
+  encryptDataWithAad: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'bound',
       iv: 'iv',
       tag: 'tag',
     }),
-    generateSearchHash: vi.fn().mockResolvedValue('hash'),
-    clearKey: vi.fn(),
-    clearCryptoKey: vi.fn().mockResolvedValue(undefined),
-    rotateVaultKey: vi.fn().mockResolvedValue({
+  generateSearchHash: (fn: Mock) => fn.mockResolvedValue('hash'),
+  clearKey: (fn: Mock) => fn,
+  clearCryptoKey: (fn: Mock) => fn.mockResolvedValue(undefined),
+  rotateVaultKey: (fn: Mock) =>
+    fn.mockResolvedValue({
       newVaultKey: new Uint8Array(32),
       encrypted: 'newEnc',
       iv: 'newIv',
       tag: 'newTag',
     }),
-    generateSalt: vi.fn().mockReturnValue(new Uint8Array(16)),
-    deriveBEK: vi.fn().mockResolvedValue(new Uint8Array(32)),
-    generateBWK: vi.fn().mockReturnValue(new Uint8Array(32)),
-    encryptBWK: vi.fn().mockResolvedValue({
+  generateSalt: (fn: Mock) => fn.mockReturnValue(new Uint8Array(16)),
+  deriveBEK: (fn: Mock) => fn.mockResolvedValue(new Uint8Array(32)),
+  generateBWK: (fn: Mock) => fn.mockReturnValue(new Uint8Array(32)),
+  encryptBWK: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'encBWK',
       iv: 'bwkIv',
       tag: 'bwkTag',
     }),
-    encryptVaultKeyWithBWK: vi.fn().mockResolvedValue({
+  encryptVaultKeyWithBWK: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'bwkEncVK',
       iv: 'bwkVKIv',
       tag: 'bwkVKTag',
     }),
-    decryptVaultKeyWithBWK: vi.fn().mockResolvedValue(new Uint8Array(32)),
-    decryptBWK: vi.fn().mockResolvedValue(new Uint8Array(32)),
-    computeBackupHmac: vi.fn().mockResolvedValue('mock-integrity-hmac'),
-    base64ToArrayBuffer: vi.fn().mockReturnValue(new Uint8Array(16)),
-    arrayBufferToBase64: vi.fn().mockReturnValue('base64salt'),
-  },
+  decryptVaultKeyWithBWK: (fn: Mock) => fn.mockResolvedValue(new Uint8Array(32)),
+  decryptBWK: (fn: Mock) => fn.mockResolvedValue(new Uint8Array(32)),
+  computeBackupHmac: (fn: Mock) => fn.mockResolvedValue('mock-integrity-hmac'),
+  base64ToArrayBuffer: (fn: Mock) => fn.mockReturnValue(new Uint8Array(16)),
+  arrayBufferToBase64: (fn: Mock) => fn.mockReturnValue('base64salt'),
+}));
+
+vi.mock('../src/services/crypto/cryptoService', () => ({
+  cryptoService: Object.fromEntries(
+    Object.entries(cryptoServiceDefaults).map(([name, arm]) => [name, arm(vi.fn())]),
+  ),
 }));
 
 vi.mock('../src/services/api/authApi', () => ({
@@ -315,6 +335,17 @@ import { useAuthStore } from '../src/stores/authStore';
 import { useUIStore } from '../src/stores/uiStore';
 import { cryptoService } from '../src/services/crypto/cryptoService';
 import { clearSettingsCache } from '../src/hooks/useUserSettings';
+import { settleImportFlow } from './support/settleImport';
+
+/** Resets every cryptoService stub and re-arms its default (see `cryptoServiceDefaults`). */
+function resetCryptoServiceStub(): void {
+  const stubs = cryptoService as unknown as Record<string, Mock>;
+  for (const [name, arm] of Object.entries(cryptoServiceDefaults)) {
+    const stub = stubs[name];
+    if (stub === undefined) throw new Error(`cryptoService has no stub named ${name}`);
+    arm(stub.mockReset());
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -415,6 +446,7 @@ function answerConfigWithoutDocuments(): void {
 describe('SettingsPage', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    resetCryptoServiceStub();
     setupDefaultProfileMock();
     // Import resolves conflicts client-side against the WHOLE vault, so it loads
     // the item list before deciding anything. Without a well-formed page here the
@@ -444,6 +476,10 @@ describe('SettingsPage', () => {
     // Store setTheme mock - do not delegate to real implementation to avoid recursion
     useUIStore.setState({ theme: 'system', setTheme: mockSetTheme });
   });
+
+  // An import's tail (summary toast, `fetchItems()`) must run inside the test that
+  // started it, never inside the next one: see `settleImportFlow`.
+  afterEach(settleImportFlow);
 
   async function renderSettings() {
     const { default: SettingsPage } = await import('../src/pages/SettingsPage');
@@ -2357,6 +2393,7 @@ describe('SettingsPage', () => {
 describe('BackupSettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetCryptoServiceStub();
 
     useAuthStore.setState({
       accessToken: 'test-token',
@@ -3114,9 +3151,6 @@ describe('BackupSettingsPage', () => {
     // The item survived (not dropped) and only the good history entry remains.
     expect(parsed.items).toHaveLength(1);
     expect(parsed.items[0]!.passwordHistory).toHaveLength(1);
-
-    // Restore the shared decryptData mock default for later tests.
-    vi.mocked(cryptoService.decryptData).mockResolvedValue('decrypted');
   });
 
   it('forwards item and folder _id values verbatim (client never strips ids)', async () => {

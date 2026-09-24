@@ -282,8 +282,40 @@ export const MUTATION_DIFF_BUDGETS = { shared: 200, client: 120, server: 20 };
  * "could not run" (exit 2), never a verdict. Generous on purpose: a deadline that
  * a busy machine could reach would turn the gate into a coin toss, the argument
  * `mutation-gate.mjs` decision (e) makes for having none at all.
+ *
+ * So it SCALES WITH THE PLAN, because the budget does not bound the planned
+ * count: the stratification takes one mutant per changed file whatever the
+ * budget says. A flat hour was reached by a healthy run. Measured on the
+ * reference machine over a 105-file branch diff, the server leg planned 81
+ * mutants against its budget of 20, its dry run took 8m20s, its mutants cost
+ * about 38 s each at its concurrency of 2, and the flat guard stopped it at 80
+ * of 81, still progressing. The deadline is therefore an hour, or a dry-run
+ * allowance of about three and a half times that measured dry run plus two
+ * minutes per planned mutant (about three times that per-mutant cost),
+ * whichever is larger. It grows with the plan and never
+ * shrinks below the hour a small change always had.
  */
-export const MUTATION_DIFF_LEG_DEADLINE_MS = 60 * 60 * 1000;
+const MUTATION_DIFF_LEG_MIN_DEADLINE_MS = 60 * 60 * 1000;
+const MUTATION_DIFF_LEG_DRY_RUN_ALLOWANCE_MS = 30 * 60 * 1000;
+const MUTATION_DIFF_LEG_PER_MUTANT_ALLOWANCE_MS = 2 * 60 * 1000;
+
+/**
+ * The hang guard for one leg that plans `planned` mutants.
+ *
+ * @param {number} planned
+ * @returns {number} milliseconds
+ */
+export function mutationDiffLegDeadlineMs(planned) {
+  if (!Number.isInteger(planned) || planned < 0) {
+    throw new RangeError(
+      `a leg plans a whole, non-negative number of mutants, not ${String(planned)}`,
+    );
+  }
+  return Math.max(
+    MUTATION_DIFF_LEG_MIN_DEADLINE_MS,
+    MUTATION_DIFF_LEG_DRY_RUN_ALLOWANCE_MS + MUTATION_DIFF_LEG_PER_MUTANT_ALLOWANCE_MS * planned,
+  );
+}
 
 /** The per-change leg's report: deliberately not `mutation-<leg>.json`'s shape. */
 export const MUTATION_DIFF_REPORT = 'mutation-diff.json';

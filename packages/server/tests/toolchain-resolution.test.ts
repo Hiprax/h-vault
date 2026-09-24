@@ -256,7 +256,7 @@ describe('the mutation runner and Vitest agree on test names', () => {
       filtered.ran.map((entry) => entry.test),
       'The Stryker vitest-runner builds test names this Vitest does not match, so every ' +
         'mutant would "survive" (stryker-js #6210). Do not lift the Vitest hold until a ' +
-        'released runner makes this pass: see PLAN §1.9 and CLAUDE.md.\n' +
+        'released runner makes this pass: see the Vitest note in CONTRIBUTING.md.\n' +
         filtered.output,
     ).toEqual(['selected case']);
   }, 120_000);

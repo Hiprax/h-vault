@@ -361,6 +361,7 @@ import {
   bulkReEncryptApi,
 } from '../src/services/api/vaultApi';
 import { DOCUMENT_PAGE_SIZE, MAX_DOCUMENT_PAGES } from '../src/services/api/documentsApi';
+import { settleImportFlow } from './support/settleImport';
 
 // ---------------------------------------------------------------------------
 // Typed handles on the mocks
@@ -770,7 +771,10 @@ describe('SettingsPage — error paths and branches', () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // An import's tail (summary toast, `fetchItems()`) must run inside the test
+    // that started it, never inside the next one: see `settleImportFlow`.
+    await settleImportFlow();
     vi.restoreAllMocks();
   });
 

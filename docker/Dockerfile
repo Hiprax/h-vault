@@ -258,8 +258,9 @@ RUN mkdir -p /app/packages/server/logs && chown -R node:node /app/packages/serve
 # node:24-alpine3.23). Written numerically because that is the form the OTHER
 # half of this contract is written in: docker-compose.yml pins every tmpfs this
 # container mounts to `uid=1000,gid=1000`, and a tmpfs whose owner disagrees with
-# the process is the failure CLAUDE.md records as an app that exits 0 silently
-# and never restarts. Two spellings of one uid is how those two drift apart.
+# the process is the failure the app service's tmpfs comment in docker-compose.yml
+# records as an app that exits 0 silently and never restarts. Two spellings of
+# one uid is how those two drift apart.
 # hadolint DL3066 asks for the same thing for its own reason: a name has to be
 # resolvable, a number always is.
 USER 1000:1000

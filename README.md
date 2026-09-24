@@ -1768,7 +1768,8 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ## Running the whole gauntlet on a remote machine
 
-The push gate is a little over twenty minutes. The release tier is a working day, and most of
+The push gate is about half an hour on an ordinary change and far longer on a large branch,
+because `mutation-diff` grows with the change. The release tier is a working day, and most of
 that day is one gate: `mutation` re-runs the entire test suite once per mutant. That
 is not something to run on the machine you are working on, so the full gauntlet
 usually belongs on a spare box you can start and walk away from.
@@ -1784,13 +1785,17 @@ to do with the answer.
 
 ### What you are signing up for
 
-Measured on the reference machine, from the reports each run leaves behind:
+Measured on the reference machine, from the reports each run leaves behind. The two lower rows
+come from one `verify:full` of this whole branch on 2026-09-24: the `ci` figure is the time its
+T0 and T1 gates took inside it, not a separate `npm run ci`, and that run exited 1 — `flake`
+failed 4 of its 10 shuffled runs on test-isolation defects fixed the same day, and
+`mutation-diff` was stopped by the flat guard this change replaced:
 
-| Command               | Gates | Measured                            | What dominates it                                                                                                                                                          |
-| --------------------- | ----- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info                                     |
-| `npm run ci`          | 30    | **85m 00s** on a very large diff    | `mutation-diff` at 55m 46s over an 85-file branch diff (57m 40s at the current budgets), then Playwright at ~10.5 min and CodeQL at ~5.5; 29m 07s before that gate existed |
-| `npm run verify:full` | 38    | **hours**                           | `flake`, then `mutation`, which has no honest estimate                                                                                                                     |
+| Command               | Gates | Measured                            | What dominates it                                                                                                                                                                                                                                                        |
+| --------------------- | ----- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info                                                                                                                                   |
+| `npm run ci`          | 31    | **107m 34s** of T0+T1 gate time     | `mutation-diff` at 74m 02s over a 105-file branch diff, stopped at the flat one-hour guard its per-plan guard replaced (55m 46s over 85 files), then Playwright at ~11 min and CodeQL at ~5.7 min, against a 12-minute design budget; 33m 32s for the other thirty gates |
+| `npm run verify:full` | 39    | **232m 00s** without `mutation`     | `flake` at 112m 22s, then `mutation-diff`; `mutation` itself has no honest estimate (see below)                                                                                                                                                                          |
 
 **The fast tier fits its own budget on a machine doing nothing else, and not
 otherwise. The table is the honest number rather than the target.** T0's design
@@ -1828,14 +1833,16 @@ browser was open on the same four cores. Quote the range, run the gauntlet on a 
 doing nothing else, and treat any single number as the floor.
 
 `verify:full` is cumulative: it is `npm run ci` plus the eight release-tier gates, so
-those twenty-odd minutes are inside the number rather than beside it. Six of the
-release-tier gates are cheap, and two separate measurements of them are quoted for the
-same reason the push tier is quoted as a range — neither is a constant:
-`dst` 6m52s / 4m56s, `deploy` 1m25s / 1m33s, `resource` 1m06s / 47s, `fuzz` 41s / 32s,
-`recovery` 20s / 14s, `upgrade` 13s / 10s. Eight to eleven minutes for the six.
-`flake` is the seventh and it is an hour and a quarter by itself: **78m46s** measured,
-being ten shuffled runs of all three package suites and then the E2E suite three times
-over, 654 executions in all.
+the push tier's time is inside the number rather than beside it. Six of the
+release-tier gates are cheap, and three separate measurements of them are quoted for the
+same reason the push tier is quoted as a range — none is a constant:
+`dst` 6m52s / 4m56s / 7m56s, `deploy` 1m25s / 1m33s / 1m46s, `resource` 1m06s / 47s / 1m04s,
+`fuzz` 41s / 32s / 39s, `recovery` 20s / 14s / 21s, `upgrade` 13s / 10s / 17s. Eight to
+twelve minutes for the six. `flake` is the seventh and it is nearly two hours by itself:
+**112m22s** on the latest run (78m46s before the suites grew), being ten shuffled runs of
+all three package suites, about eight minutes each, and then the E2E suite three times
+over, 672 executions taking 31 minutes. (That run failed 4 of the 10 on test-isolation
+defects; the duration is what the gate costs either way.)
 
 `mutation` is the eighth, and it is the one gate this page will not give you a day for.
 Measured on the four-core reference machine, idle: the `shared` leg finishes in
@@ -1922,17 +1929,22 @@ npm run build:shared       # T0 excludes `build`, so verify:fast consumes shared
 **Playwright's browser is the one prerequisite nothing checks**, and what makes it a trap
 is the classification rather than the message. Every other external tool is declared per
 gate and reports **could not run**, which is exit 2 and a verdict of "unknown". The
-browser is declared by nothing, so `e2e`, `a11y` and the E2E leg of `flake` report a
-**failure** instead, exit 1, the same verdict a real defect gets. Pointed at an empty
-browser cache, Playwright itself is clear enough:
+browser is declared by nothing, so `e2e`, `a11y`, `sandbox`, the E2E leg of `flake` and
+the browser step of `deploy` report a **failure** instead, exit 1, the same verdict a real
+defect gets. Declaring `docker` does not help here: those gates check the daemon, which
+is present, and then fail inside Playwright. Pointed at an empty browser cache, Playwright
+itself is clear enough (Playwright 1.63.0):
 
 ```text
 browserType.launch: Executable doesn't exist at
-  .../chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell
+  .../chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell
 ╔════════════════════════════════════════════════════════════╗
 ║ Looks like Playwright was just installed or updated.       ║
 ║ Please run the following command to download new browsers: ║
+║                                                            ║
 ║     npx playwright install                                 ║
+║                                                            ║
+║ <3 Playwright Team                                         ║
 ╚════════════════════════════════════════════════════════════╝
 ```
 
@@ -1940,7 +1952,9 @@ So the cost is not that the transcript is unreadable; it is that the summary tab
 `✖ e2e` and nothing there distinguishes a missing browser from broken code. **Two
 projects are declared, so two browsers are needed** — Chromium runs every spec, and a
 Firefox project runs the clipboard-hygiene and auto-lock specs, whose answers depend on
-the engine's clipboard and visibility rules rather than on this application:
+the engine's clipboard and visibility rules rather than on this application. (`a11y`,
+`sandbox` and the browser step of `deploy` pin Chromium alone, so a Chromium-only cache
+passes those three and still fails `e2e` and `flake`.)
 
 ```bash
 npx playwright install --with-deps chromium firefox
@@ -2018,7 +2032,7 @@ image builds and the harnesses, and a fifth only when `trivy` is not on `PATH`:
 | `mongo:8.0`                                                     | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
 | `aquasec/trivy:latest`                                          | 252 MB  | only when `trivy` is absent from `PATH`                  |
 | `node:24-alpine3.23`                                            | 235 MB  | the `base` stage every image built here is built through |
-| `dxflrs/garage:v2.3.0` (digest-pinned)                          | 100 MB  | `storage`, `e2e`, `a11y`, `flake`, `deploy`              |
+| `dxflrs/garage:v2.3.0` (digest-pinned)                          | 100 MB  | `storage`, `e2e`, `a11y`, `sandbox`, `flake`, `deploy`   |
 | `nginxinc/nginx-unprivileged:1.30.5-alpine3.24` (digest-pinned) | 81 MB   | the `web` stage                                          |
 
 Trivy's vulnerability database is a further download on its first scan, into the named
@@ -2056,15 +2070,19 @@ Semgrep CE or OpenGrep and says so in its report; with no analyser at all it rep
 **SKIPPED**, the one gate allowed to.
 
 **Budget about 20 GB on the filesystem holding the checkout.** Almost none of it is the
-project. Measured on this checkout immediately before a full pass: `.cache/` holds
-**3.7 GB** (the CodeQL bundle at 2.5 GB plus the database it builds at 1.1 GB, alongside
-the type-checker's incremental build info in `.cache/tsbuildinfo/` at 1.3 MB),
-`node_modules` is **759 MB**, the three `packages/*/dist` directories come to 8 MB, `.git`
-is 5.6 MB, and the whole working directory is **6.0 GB** before `mutation` runs. The
+project. Measured on this checkout after a full pass on 2026-09-24: `.cache/` holds
+**7.1 GB** (the CodeQL bundle at 2.5 GB plus the database it builds at 4.6 GB, alongside
+the type-checker's incremental build info in `.cache/tsbuildinfo/` at 1.8 MB),
+`node_modules` is **615 MB**, the three `packages/*/dist` directories come to 9 MB, `.git`
+is 8.5 MB, and the working directory is about **8.6 GB** before `mutation` runs. The
 mutation gate's Stryker sandboxes then land in `.stryker-tmp/` inside the repository and
 measured **8.9 GB** after one complete run, which is where the rest of the twenty
-gigabytes goes. A release-tier run's reports come to about 15 MB. All of it is gitignored
-and all of it is disposable, but it has to fit while the run is happening.
+gigabytes goes. A release-tier run's reports come to about 56 MB. All of it is gitignored
+and all of it is disposable, but it has to fit while the run is happening. One directory
+is reclaimed by nothing: the E2E suite's development server writes rotating log files into
+`packages/server/logs`, about 10 MB per pass of the suite, and `flake` makes three passes.
+It measured **6.2 GB** on this checkout, most of it dated from a single earlier day, so
+look at it before a run and empty it when it has grown.
 
 **Then give the run a `TMPDIR` on a real disk, and check it rather than assuming.** Two
 more large things go to `os.tmpdir()` instead: the clean room's worktree with its
@@ -2104,6 +2122,39 @@ port and Playwright's base URL together; the Mongo port is fixed, so free it.
 publishes it as `-p 127.0.0.1:0:3900`, so the daemon picks the host port and has already
 bound it by the time `docker run` returns. Nothing probes for a free one, so nothing
 collides, and 3900 on the host is not involved.
+
+**Leave the server's receive deadlines at their defaults, and out of the environment.**
+Three settings bound how long the server waits for a request to arrive:
+`HTTP_REQUEST_TIMEOUT_MS` (240000 by default, the whole request), `HTTP_HEADERS_TIMEOUT_MS`
+(60000, the headers alone) and `DOCUMENT_PART_BODY_TIMEOUT_MS` (64000, one document part's
+body). No gate reads or sets any of them, and a run needs none of them set: every gate runs
+on the defaults `.env.example` documents. The trap is inheriting one. The server refuses to
+start when either of the other two is greater than `HTTP_REQUEST_TIMEOUT_MS`, and the part
+deadline has a default of its own, so lowering `HTTP_REQUEST_TIMEOUT_MS` below 64 seconds
+on its own is enough. A value exported in the shell that starts the run reaches every gate
+that boots the server, `smoke` and `sandbox` included, because their production environment
+starts from the runner's. A value in a root `.env` on the box — which a machine that also
+hosts a deployment has — reaches the server suites and the E2E dev server, because the
+configuration reads that file for every key the environment leaves unset. Either way it
+arrives as ordinary test failures rather than as a missing prerequisite. Measured, with
+`HTTP_REQUEST_TIMEOUT_MS=60000` exported and one server suite run on its own:
+
+```text
+$ HTTP_REQUEST_TIMEOUT_MS=60000 npx vitest run tests/health.test.ts    # in packages/server
+ FAIL  tests/health.test.ts [ tests/health.test.ts ]
+Error: Invalid environment configuration:
+  DOCUMENT_PART_BODY_TIMEOUT_MS: DOCUMENT_PART_BODY_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS
+ ❯ loadConfig src/config/index.ts:574:11
+
+ Test Files  1 failed (1)
+      Tests  no tests
+```
+
+So check the environment you are about to launch from, and expect no output:
+
+```bash
+env | grep -E '^(HTTP_REQUEST_TIMEOUT_MS|HTTP_HEADERS_TIMEOUT_MS|DOCUMENT_PART_BODY_TIMEOUT_MS)='
+```
 
 **The first run needs outbound network.** The unit tier blocks egress on purpose, with
 exactly one hole punched: `mongodb-memory-server` fetching the `mongod` binary on a
@@ -2239,12 +2290,19 @@ rather than killing the run, and which deadlines that breaks is not obvious. The
 leg deadlines in the table below are Node timers on a **monotonic** clock, which stops
 while the machine is asleep, so none of them is charged for the nap. Three things are
 measured with `Date.now()` and are: the deployment drill's 120-second health and restart
-waits, the `smoke` gate's 45-second boot deadline, and every budget in `resource`. A
-suspend inside one of those fails a healthy run, and it does not even fail as a hang — it
-reports "no healthy response within 120000ms", or a blown volume budget, for a reason that
-is nowhere in the code. Run it under
+waits, the 45-second boot deadline the `smoke` and `sandbox` gates share, and every budget
+in `resource`. A suspend inside one of those fails a healthy run, and it does not even fail
+as a hang — it reports "no healthy response within 120000ms", or a blown volume budget,
+for a reason that is nowhere in the code. Run it under
 `systemd-inhibit --what=handle-lid-switch:sleep:idle`, or disable suspend for the
-duration.
+duration. A run you already started can be covered after the fact, by an inhibitor that
+lets go when the verdict is written:
+
+```bash
+setsid --fork systemd-inhibit --what=handle-lid-switch:sleep:idle --why="h-vault gauntlet" \
+  sh -c "until [ -f '$RUN/exit-code' ]; do sleep 30; done" < /dev/null > /dev/null 2>&1 &
+systemd-inhibit --list | grep h-vault     # the lock is held while the run is
+```
 
 ### Watch it from anywhere
 
@@ -2277,33 +2335,35 @@ one. Read its `startedAt` — or its mtime — before believing it. The `exit-co
 the launcher is the only unambiguous signal that this run is over.
 
 **The step counter is not a clock either.** Gates run in the order `npm run ci -- --list`
-prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the two
-longest gates in the repository sit at positions 34 and 35 of 39. A `verify:full` that has
-been on `[35/39]` for four hours is not stuck; it is doing the thing you asked for. The
-same run reaching `[32/39]` in half an hour is likewise normal, and tells you almost
-nothing about how much is left.
+prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the three
+longest gates in the repository sit at positions 34, 35 and 36 of 39 (`flake`, `mutation`,
+`mutation-diff`). A `verify:full` that has been on `[35/39]` for four hours is not stuck; it
+is doing the thing you asked for. The same run reaching `[32/39]` in half an hour is
+likewise normal, and tells you almost nothing about how much is left. A gate skipped by
+name prints no step line at all, so a run with `mutation` skipped goes straight from
+`[34/39]` to `[36/39]`; the skip appears in the summary table and in `summary.json`.
 
 **Distinguishing slow from stuck** needs one number: how long the gate named on the
-last step line is expected to take. Only these exceed half a minute; everything else
-in the run is seconds.
+last step line is expected to take. These are the longest, measured on one `verify:full`
+of the whole branch; everything else in the run finishes within about half a minute.
 
-| Gate               | Measured | Its own deadline, if it has one              |
-| ------------------ | -------- | -------------------------------------------- |
-| `mutation`         | hours    | none, deliberately                           |
-| `mutation-diff`    | 57m 40s  | 60 min per leg, a hang guard only            |
-| `flake`            | 84m 26s  | 30 min per suite leg, 90 min for the E2E leg |
-| `e2e`              | 8m 28s   | 180 s just to boot the stack                 |
-| `dst`              | 6m 52s   | 15 min per leg                               |
-| `test-integration` | 4m 53s   | none                                         |
-| `sast`             | 4m 46s   | none                                         |
-| `test`             | 3m 11s   | none                                         |
-| `type-check`       | 1m 24s   | none                                         |
-| `deploy`           | 1m 25s   | 120 s per health wait                        |
-| `resource`         | 1m 06s   | 15 min                                       |
-| `a11y`             | 1m 05s   | none                                         |
-| `lint`             | 48s      | none                                         |
-| `fuzz`             | 41s      | 5 min per leg                                |
-| `property`         | 31s      | none                                         |
+| Gate               | Measured | Its own deadline, if it has one                                                         |
+| ------------------ | -------- | --------------------------------------------------------------------------------------- |
+| `mutation`         | hours    | none, deliberately                                                                      |
+| `mutation-diff`    | 74m 02s  | per leg, the larger of an hour and 30 min + 2 min per planned mutant; a hang guard only |
+| `flake`            | 112m 22s | 30 min per suite leg, 90 min for the E2E leg                                            |
+| `e2e`              | 10m 57s  | 180 s just to boot the stack                                                            |
+| `dst`              | 7m 56s   | 15 min per leg                                                                          |
+| `test-integration` | 6m 29s   | none                                                                                    |
+| `sast`             | 5m 41s   | none                                                                                    |
+| `test`             | 5m 01s   | none                                                                                    |
+| `type-check`       | 1m 24s   | none                                                                                    |
+| `deploy`           | 1m 46s   | 120 s per health wait                                                                   |
+| `resource`         | 1m 04s   | 15 min                                                                                  |
+| `a11y`             | 1m 12s   | none                                                                                    |
+| `lint`             | 50s      | none                                                                                    |
+| `fuzz`             | 39s      | 5 min per leg                                                                           |
+| `property`         | 38s      | none                                                                                    |
 
 `type-check` is the one row that depends on what the machine already knows: **1m 24s is a
 COLD run**, which is what a fresh clone and the clean room always get. Every one of its
@@ -2314,7 +2374,7 @@ run over an unchanged tree measured **25s** when the gate was timed on its own, 
 Everything else in the run measured under half a minute, and three of those are worth
 a word. `docker` came in at 14.5 s only because its layer cache and Trivy's database
 were warm, as the pull table above says. `build` (24 s), `recovery` (20 s), `upgrade`
-(13 s) and `storage` (10 s) are genuinely that cheap. `format` at 25 s and the 48 s in
+(13 s) and `storage` (10 s) are genuinely that cheap. `format` at 25 s and the 50 s in
 the `lint` row above it are cheap **on a quiet machine only**: like `type-check`, both
 are single figures from one idle run, and on contended cores they measure 22 to 47 s and
 40 s to 1m 20s respectively — which is the whole reason the fast tier overruns its budget
@@ -2325,7 +2385,9 @@ on the same commit while something else was reading the tree, which is the whole
 for a machine doing nothing else.
 
 A gate that owns a deadline enforces it itself: exceeding it is a **SIGKILL and a
-failure**, reported as _a hang, not a slow machine_, never as a skip. A gate with no
+failure**, reported as _a hang, not a slow machine_, never as a skip. The one exception is
+`mutation-diff`, whose per-leg hang guard reports **could not run** (exit 2), because an
+expired leg says nothing either way about the change. A gate with no
 deadline can only be judged by whether the log is still growing:
 
 ```bash
@@ -2385,7 +2447,7 @@ which is always a failure.
 One more thing about a `1` on a first full run: read the failing gate names before
 reading the code as a verdict on your change. On the **earlier** reference run these
 numbers come from — kept because its three failures are three different lessons, and
-superseded on the counts by the 36-of-37 / 151m 54s run quoted under `mutation` above —
+superseded on the counts by every later run —
 34 of the 37 gates it then had passed and three did not. `mutation` was **stopped at a time limit**
 after 114 seconds, so by the rule further down it is reported as **not run**, not as red,
 and the 2h 3m the run took therefore excludes a real mutation leg. `ratchet-full` failed
@@ -2502,6 +2564,68 @@ setting is not negotiable.
 > Commit and push it from the machine that measured it, never after copying reports
 > between hosts.
 
+### When the machine is yours for hours, not a week
+
+Most spare machines are borrowed for an evening, not a week, and a `verify:full` that
+starts `mutation` cannot end inside an evening: the gate runs its three legs one after
+another, and after the shared leg's quarter of an hour comes the client leg's day and the
+server leg's week. Stopping it part-way is worse than not starting it. A leg you kill
+banks nothing, the gate records the kill as a **failure** — so the run exits 1, the verdict
+a real defect gets — and killing only the Stryker process does not even stop the gate: it
+counts that leg as failed and moves on to the next one, which is the server's.
+
+So in a bounded window, skip the gate by name and measure the leg that fits separately.
+Add one line to the launcher's `run.sh`, above the `npm run verify:full` line:
+
+```bash
+export HVAULT_SKIP_GATES=mutation
+```
+
+Three things follow from it, all by design. The skip is printed in the summary table and
+recorded in `summary.json` as `skip` with the detail `HVAULT_SKIP_GATES`, and it does not
+change the exit code, so report the run as "`verify:full` with `mutation` skipped", never as
+a full pass. The gate's reports are still cleared when the run starts, skipped or not, so
+the last `mutation-shared.json` is deleted with them. And `ratchet-full` then finds no
+mutation evidence, and **defers** every `mutation.*` field to the gate that owns it rather
+than failing on it. Once the `exit-code` file exists, give the one leg that fits the idle
+machine, from scratch, and let the ratchet compare it:
+
+```bash
+npm run test:mutation -- --leg=shared --full
+npm run audit:ratchet:full
+```
+
+Measured on the reference machine on 2026-09-24, from scratch, with another project's
+Compose stack and the desktop's file indexer running beside it: **88.64 % of 2,633
+mutants in 20m 06s**, exactly the banked floor, so `audit:ratchet:full` recorded no change
+and there was nothing to accept. The idle run that banked it took 17m 14s; the three
+extra minutes are the neighbours, and they are why a leg is banked only from an idle
+machine.
+
+The other two legs need the idle machine for longer than a bounded window has, so each is a
+campaign of its own, started with nothing else running and read the next day, or the next
+week. Use the same launcher with the command changed, one leg per run:
+
+```bash
+npm run test:mutation -- --leg=client --full     # about 24,000 mutants, about twenty hours
+npm run audit:ratchet:full
+node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.client --reason "client leg, measured on <host> at <sha>"
+
+npm run test:mutation -- --leg=server --full     # about 12,900 mutants, 41 % static, 120-130 hours
+npm run audit:ratchet:full
+node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.server --reason "server leg, measured on <host> at <sha>"
+```
+
+Each leg is seeded under its own name because the `mutation` family is already partly
+present. Seeding also refuses a family the run measured nothing for, so running the accept
+without the leg's evidence changes nothing; the refusal exits 2 and reads:
+
+```text
+ratchet-check: --seed mutation.legs.client: nothing under "mutation.legs.client" was measured by this run, so there is no evidence to record. Run the gate that produces it, then seed from the same tree.
+```
+
+The merged floor is seeded only by a run in which all three legs complete.
+
 ### Re-running only what failed
 
 Three failures out of thirty-nine gates should not cost another day. The runner takes an
@@ -2577,8 +2701,8 @@ disjoint mongod port bands and separate coverage directories via `VITEST_COVERAG
 so a blind sweep can delete a live sibling's database.
 
 **A gate was SIGKILLed at its deadline (exit 124).** The message says to treat it as a
-hang rather than a slow machine, and on a dedicated box that is right — the deadlines
-carry an order of magnitude of headroom. On a shared box, check what else was running
+hang rather than a slow machine, and on a dedicated box that is usually right — the
+deadlines carry about three times the measured cost of what they bound. On a shared box, check what else was running
 before believing it.
 
 **Port 27017 was already answering.** The harness adopted it instead of starting its
@@ -2606,7 +2730,10 @@ whole checkout, measured at **8.9 GB** after one complete run and at **3.6 GB** 
 stopped two minutes in, and nothing reclaims it on the next run. Deleting it costs
 nothing a killed run had earned, because the incremental state a later run resumes from is
 written only by a leg that finished, and a killed leg leaves sandboxes without one:
-`rm -rf .stryker-tmp`.
+`rm -rf .stryker-tmp`. It does cost what FINISHED legs left there: each completed leg's
+`incremental-<leg>.json` and `report-<leg>.json`, and `mutation-diff`'s plans and reports.
+The next plain `test:mutation` of that leg then starts from scratch — which banking needs
+anyway, since a floor is only recorded from a `--full` run.
 
 **A killed `ci:local` left a registered worktree.** `git worktree list` shows it;
 `git worktree prune` clears the bookkeeping and `git worktree remove --force <path>`

@@ -225,11 +225,15 @@ describe('mutation-diff-gate.mjs', () => {
       candidates: number;
       planned: number;
       sampled?: boolean;
+      deadlineMs?: number;
     }[];
     const shared = legs.find((leg) => leg.id === 'shared')!;
     expect(shared.candidates).toBeGreaterThan(5);
     expect(shared.planned).toBe(shared.candidates);
     expect(shared.sampled).toBe(false);
+    // The hang guard the leg actually ran under is recorded, and a plan this
+    // small keeps the hour.
+    expect(shared.deadlineMs).toBe(60 * 60 * 1000);
     // Only the shared leg had anything to test; the others started nothing.
     expect(legs.filter((leg) => leg.id !== 'shared').every((leg) => leg.planned === 0)).toBe(true);
     expect(run.report).toMatchObject({

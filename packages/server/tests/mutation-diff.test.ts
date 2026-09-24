@@ -43,6 +43,7 @@ import {
   incrementalFileFor,
   jsonReportFor,
   legOfReport,
+  mutationDiffLegDeadlineMs,
 } from '../../../scripts/ci/lib/mutation-scope.mjs';
 
 interface Loc {
@@ -372,6 +373,49 @@ describe('the sample', () => {
     // The lowest rank is the block; its range selects the two nested mutants too.
     expect(plan.seeds).toEqual([block]);
     expect(new Set(plan.planned)).toEqual(new Set(all));
+  });
+});
+
+describe('the per-leg hang guard', () => {
+  const MINUTE = 60_000;
+
+  it('keeps the hour a small change always had', () => {
+    expect(mutationDiffLegDeadlineMs(0)).toBe(60 * MINUTE);
+    expect(mutationDiffLegDeadlineMs(1)).toBe(60 * MINUTE);
+    expect(mutationDiffLegDeadlineMs(14)).toBe(60 * MINUTE);
+    expect(mutationDiffLegDeadlineMs(15)).toBe(60 * MINUTE);
+  });
+
+  it('grows by two minutes per planned mutant once the plan outgrows the hour', () => {
+    expect(mutationDiffLegDeadlineMs(16)).toBe(62 * MINUTE);
+    expect(mutationDiffLegDeadlineMs(17)).toBe(64 * MINUTE);
+    expect(mutationDiffLegDeadlineMs(81)).toBe(192 * MINUTE);
+  });
+
+  it('leaves twice the measured cost of the leg a flat hour stopped at 80 of 81', () => {
+    // Measured on the reference machine over a 105-file branch diff: the server
+    // leg planned 81 mutants, its dry run took 8m20s and its slowest mutants cost
+    // 38 s each. A guard that a healthy run can reach is a coin toss, not a guard.
+    const measuredMs = (8 * 60 + 20) * 1000 + 81 * 38_000;
+    expect(mutationDiffLegDeadlineMs(81)).toBeGreaterThanOrEqual(2 * measuredMs);
+  });
+
+  it('never shrinks as the plan grows', () => {
+    let previous = 0;
+    for (let planned = 0; planned <= 500; planned++) {
+      const deadline = mutationDiffLegDeadlineMs(planned);
+      expect(deadline, `planned ${String(planned)}`).toBeGreaterThanOrEqual(previous);
+      previous = deadline;
+    }
+  });
+
+  it('refuses a count no plan can have, rather than guessing a deadline for it', () => {
+    for (const planned of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => mutationDiffLegDeadlineMs(planned)).toThrow(RangeError);
+      expect(() => mutationDiffLegDeadlineMs(planned)).toThrow(
+        /a leg plans a whole, non-negative number of mutants/,
+      );
+    }
   });
 });
 

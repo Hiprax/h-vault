@@ -80,12 +80,12 @@ import {
   CORE_MODULES,
   MUTATION_DIFF_BUDGETS,
   MUTATION_DIFF_FLOOR,
-  MUTATION_DIFF_LEG_DEADLINE_MS,
   MUTATION_DIFF_REPORT,
   MUTATION_LEGS,
   diffJsonReportFor,
   diffPlanFor,
   legForFile,
+  mutationDiffLegDeadlineMs,
 } from './lib/mutation-scope.mjs';
 import { createTally, pct, sortedSurvivors, tallyReport } from './lib/mutation-evidence.mjs';
 import {
@@ -272,19 +272,20 @@ for (const leg of MUTATION_LEGS) {
   const reportFile = path.join(repoRoot, diffJsonReportFor(leg.id));
   rmSync(reportFile, { force: true });
 
+  const deadlineMs = mutationDiffLegDeadlineMs(plan.planned.length);
   const legStarted = Date.now();
   const code = await runExe(
     process.execPath,
     [path.join('node_modules', '@stryker-mutator', 'core', 'bin', 'stryker.js'), 'run'],
     {
       env: { HVAULT_MUTATION_LEG: leg.id, HVAULT_MUTATION_DIFF_PLAN: planFile },
-      timeoutMs: MUTATION_DIFF_LEG_DEADLINE_MS,
+      timeoutMs: deadlineMs,
     },
   );
   const durationMs = Date.now() - legStarted;
   if (code === TIMEOUT_EXIT) {
     cannotRun(
-      `${leg.id}: Stryker was still running at the ${String(MUTATION_DIFF_LEG_DEADLINE_MS / 60000)}-minute hang guard`,
+      `${leg.id}: Stryker was still running at the ${String(deadlineMs / 60000)}-minute hang guard`,
     );
   }
   if (code !== 0 || !existsSync(reportFile)) {
@@ -335,6 +336,7 @@ for (const leg of MUTATION_LEGS) {
     scored,
     score: pct(killed, scored),
     durationMs,
+    deadlineMs,
   });
   console.log(
     color.gray(
