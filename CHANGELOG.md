@@ -27,7 +27,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **The integrity scan now reports a Stryker disable comment** (`MUTANT-DISABLE`), which hides mutants from the mutation score, as a suppression that needs a ledger entry.
 
+- **A browser gate for document previews under production headers, `test:sandbox`, now runs with every push (`npm run ci`).** Every other browser run drives the development server, which serves the isolated preview document with no Content-Security-Policy at all, so the policy production attaches to it had only ever been checked over HTTP. The new gate boots the built application in production mode beside a real database and the pinned object-storage engine, and a real browser opens every preview type — text, highlighted code, markdown, a stored web page, an image and an SVG, an image embedded in a document as `data:`, audio, and the PDF refusal — plus the committed hostile documents, from a page the service worker controls. Each preview must arrive under exactly one policy equal to the server's own, finish rendering, and cause no policy refusal except the hostile documents' remote images. It needs Docker and a build; without either it reports "could not run".
+
 ### Changed
+
+- **`npm run test:deploy` now also opens every document preview in a real browser through the Compose stack's published port,** so the preview is rendered under the inner nginx's own headers for the preview assets as well as the application's policy; the development-server E2E run and the new `test:sandbox` gate cannot reach that nginx layer.
 
 - **The two nginx layers now come from the ecosystem's golden nginx policy instead of being hand-written.** The `web` image installs the golden `nginx.conf` over the base image's own (an explicit worker count, the `/tmp` paths a read-only root needs, a JSON access log, the `.mjs`/`.webmanifest` MIME types, and a security-header FLOOR that yields to whatever helmet already sent, so nothing is doubled and nothing is missing on a static response); `docker/nginx/internal.conf` keeps this project's routing (every HTML document to Express, the bundle and the sandboxed viewer's assets from disk) but reaches the app through `upstream app { server hvault-app:5000 resolve; keepalive 32; }` (background re-resolution AND a keepalive pool, where the variable `proxy_pass` had only the former), answers `/api/` 5xx from an absent app as JSON, and refuses dotfiles, source maps and dumps with a 404. The base image is pinned by digest (`nginxinc/nginx-unprivileged:1.30.5-alpine3.24`). The host examples are rendered (`system.docker.example.conf`, `system.pm2.example.conf`, the two host files beside them and `includes/hvault-pm2.conf`): every header is a floor, HSTS is owned there with the two-year value, the host SETS `X-Forwarded-For` rather than appending, and the site declares no `map`, `upstream` or zone of its own.
 
@@ -64,6 +68,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Encrypted `.env.vault` files are no longer read.** H-Vault never documented them; the server's `.env` loader, dotenv 18, dropped them, together with the `DOTENV_KEY` variable that unlocked them. A plain `.env` is read exactly as before.
 
 ### Fixed
+
+- **`npm run test:deploy` no longer fails on the application bundle's `Cross-Origin-Resource-Policy: same-origin`.** The inner nginx's move to the golden policy added that header to `/assets/` through its header floor, and the drill still expected none. The check exists to keep the preview's cross-origin allowance out of `/assets/`, and `same-origin` is the opposite of that allowance, so the drill now expects it.
 
 - **Changing a very long login password no longer fails.** The previous password is kept in the item's history, and the server capped each kept password at 5,000 characters of ciphertext, which a password of roughly 3,750 characters or more (fewer when it uses accented or non-Latin characters) exceeds, so the whole save was refused. The cap now fits the longest password a login can hold. The same limit on re-importing an H-Vault export is raised to match.
 

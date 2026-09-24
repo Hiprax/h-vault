@@ -789,6 +789,34 @@ export const DEFECTS = {
     evidence: (text) => /script nonce=false/.test(text),
   },
 
+  'test:sandbox': {
+    requires: ['docker'],
+    // The policy the SOURCE declares, and the policy the ARTIFACT serves, made to
+    // disagree: `media-src` stops admitting the `blob:` URL the audio and video
+    // renderers mint. The spec compares the header each preview frame was really
+    // served under, read off the browser's own response, with the server's
+    // exported constant — so the first preview goes red on the disagreement.
+    //
+    // Planted in the source rather than in the built `dist/`, deliberately and
+    // not for convenience. The registry test checks that every mutated file
+    // EXISTS, and a build output exists only after a build, so a `dist/` target
+    // would make the server suite depend on one. The stronger form of the same
+    // defect — the SAME narrowed policy in both, so the header check passes and
+    // only the engine can object — was run by hand when this gate was written:
+    // the audio preview went red because the element refused its `blob:` source,
+    // and the same with `data:` removed from `img-src` for the inline image.
+    title: 'narrow the declared sandbox policy so media-src no longer admits blob:',
+    mutate: {
+      'packages/server/src/config/sandboxCsp.ts': (text) =>
+        text.replace("'media-src': ['blob:'],", "'media-src': [\"'self'\"],"),
+    },
+    // The spec's own message, which a passing run cannot contain, beside the
+    // directive the plant changed.
+    evidence: (text) =>
+      /the policy the isolated document was served under/.test(text) &&
+      /media-src 'self'/.test(text),
+  },
+
   'test:deploy': {
     requires: ['docker'],
     // The single most dangerous edit anyone can make to this deployment, and it

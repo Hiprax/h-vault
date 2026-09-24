@@ -3,13 +3,15 @@ import { Link, useNavigate, useLocation } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Eye, EyeOff, AlertCircle, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Eye, EyeOff, CheckCircle, AlertTriangle } from 'lucide-react';
 import { BrandLogo } from '../ui/BrandLogo';
 import { useAuthStore } from '../../stores/authStore';
-import { getApiErrorMessage, hasValidEmailTld } from '../../lib/utils';
+import { getApiErrorMessage } from '../../lib/utils';
+import { accountEmailSchema } from '../../lib/accountEmail';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
+import { FormAlert } from '../ui/FormAlert';
 import { OtpInput } from '../ui/OtpInput';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
 import { StandalonePage } from '../layout/StandalonePage';
@@ -19,11 +21,7 @@ import { StandalonePage } from '../layout/StandalonePage';
 /* -------------------------------------------------------------------------- */
 
 const loginFormSchema = z.object({
-  email: z
-    .string()
-    .min(1, 'Email is required')
-    .pipe(z.email('Enter a valid email address'))
-    .refine(hasValidEmailTld, 'Enter a valid email address'),
+  email: accountEmailSchema,
   masterPassword: z.string().min(1, 'Master password is required'),
   rememberMe: z.boolean(),
 });
@@ -150,15 +148,7 @@ export function LoginPage() {
           {useBackupCode ? (
             <form onSubmit={(e) => void twoFactorForm.handleSubmit(handleVerify2fa)(e)}>
               <CardContent className="space-y-4">
-                {apiError && (
-                  <div
-                    role="alert"
-                    className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
-                  >
-                    <AlertCircle className="h-4 w-4 shrink-0" />
-                    <span>{apiError}</span>
-                  </div>
-                )}
+                {apiError && <FormAlert message={apiError} />}
 
                 <div className="space-y-2">
                   <Label htmlFor="backup-code">Backup Code</Label>
@@ -206,15 +196,7 @@ export function LoginPage() {
               }}
             >
               <CardContent className="space-y-4">
-                {apiError && (
-                  <div
-                    role="alert"
-                    className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
-                  >
-                    <AlertCircle className="h-4 w-4 shrink-0" />
-                    <span>{apiError}</span>
-                  </div>
-                )}
+                {apiError && <FormAlert message={apiError} />}
 
                 <div className="space-y-2">
                   <Label>Verification Code</Label>
@@ -306,15 +288,7 @@ export function LoginPage() {
               </div>
             )}
 
-            {apiError && (
-              <div
-                role="alert"
-                className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
-              >
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{apiError}</span>
-              </div>
-            )}
+            {apiError && <FormAlert message={apiError} />}
 
             {/* Email */}
             <div className="space-y-2">

@@ -740,6 +740,36 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/a11y-gate.mjs'], options),
   },
   {
+    id: 'sandbox',
+    task: 'test:sandbox',
+    tier: 1,
+    // The one browser run against the BUILT artifact. `e2e` and `a11y` drive the
+    // dev server, which serves `/sandbox.html` with no policy at all, and `smoke`
+    // asserts the policy over HTTP without an engine to enforce it — so this is
+    // the only push-tier place a policy that is right on the wire and breaks a
+    // renderer (a refused `blob:` source, a refused `data:` image, a module
+    // refused across the opaque origin) can be seen. It boots what `smoke` boots,
+    // plus the storage engine the previews need.
+    //
+    // It runs AFTER `e2e` and `a11y`, because all three drive Playwright and the
+    // browser run below cannot share a machine with another one without making
+    // a PBKDF2 step a coin toss; it runs on its own mongod and its own port, so
+    // nothing either earlier gate left listening is adopted.
+    title: 'The isolated render document in a real browser, under the built artifact’s own headers',
+    ci: 'new — no job ever rendered a preview under the policy production sends',
+    dependsOn: ['build'],
+    // `build:server` and `build:client` for the reason `smoke` carries them (the
+    // artifact IS the subject), `build:shared` because that artifact and the
+    // index bootstrap both resolve `@hvault/shared` to its build at run time, and
+    // `docker` for the reason `e2e` carries it:
+    // without the storage engine the document store is off and every preview
+    // fails for a reason that says nothing about the policy. Any one missing is
+    // COULD NOT RUN, never red.
+    requires: ['build:shared', 'build:server', 'build:client', 'docker'],
+    run: (options) =>
+      runExe(process.execPath, ['--import', 'tsx', 'scripts/ci/sandbox-gate.mjs'], options),
+  },
+  {
     id: 'docker',
     task: 'audit:image',
     tier: 1,

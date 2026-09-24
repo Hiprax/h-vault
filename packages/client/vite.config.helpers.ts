@@ -348,13 +348,24 @@ export const WORKBOX_GLOB_IGNORES = [SANDBOX_HTML, `${SANDBOX_ASSETS_DIR}/**`];
 /**
  * Navigations the service worker must NOT answer with the application shell.
  *
- * MANDATORY rather than conditional. `vite-plugin-pwa` ships
+ * Kept unconditionally. `vite-plugin-pwa` ships
  * `defaultWorkbox = { …, navigateFallback: 'index.html' }` and this project sets
- * none of its own, so a NavigationRoute covers every navigation — and AN IFRAME
- * LOAD IS A NAVIGATION. Without this the service worker answers `/sandbox.html`
- * with the app shell: the frame boots the application instead of the sandbox,
- * never completes a handshake, and the viewer degrades to "download to view"
- * with no failing request anywhere to explain it.
+ * none of its own, so a NavigationRoute covers every navigation the worker is
+ * handed, and without this entry it would answer `/sandbox.html` with the app
+ * shell: a frame would boot the application instead of the sandbox, never
+ * complete a handshake, and the viewer would degrade to "download to view" with
+ * no failing request anywhere to explain it.
+ *
+ * WHICH navigations the worker is handed was MEASURED rather than assumed, and
+ * the answer makes this defence in depth for the viewer on Chromium: with the
+ * page under the worker's control and this entry neutralised in the built
+ * `sw.js`, `test:sandbox` still rendered every preview from the network under the
+ * sandbox policy, because Chromium does not route a sandboxed frame's navigation
+ * (no `allow-same-origin`) through the embedding page's worker. The entry still
+ * governs whatever navigation to the URL the worker IS handed, on any engine;
+ * and were a frame's ever handed to it without the entry, `test:sandbox` would
+ * refuse the shell, because it compares the policy each frame was actually
+ * served under with the server's own.
  *
  * Anchored with `(?:\?|$)` rather than a bare `$`, because workbox tests a
  * denylist entry against `pathname + search`. A bare `$` stops matching the

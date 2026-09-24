@@ -71,8 +71,9 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — thirty gates including the full test suite, the export-format
-goldens, patch coverage on the lines you changed, a smoke run of the built artifact, the
+pipeline locally — thirty-one gates including the full test suite, the export-format
+goldens, patch coverage on the lines you changed, a smoke run of the built artifact, a
+browser rendering every document preview under that artifact's own headers, the
 browser bundle's size budgets, the storage port against a real object-storage engine in a
 container, container builds with Trivy scanning, and a static-analysis
 pass (CodeQL where its CLI is installed, otherwise Semgrep CE or OpenGrep, with the gate
@@ -181,9 +182,9 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
-### Twelve gates whose failure asks for something specific
+### Thirteen gates whose failure asks for something specific
 
-Most gates tell you what to fix. These twelve are worth reading before you meet them,
+Most gates tell you what to fix. These thirteen are worth reading before you meet them,
 because the obvious way past each of them is the wrong one.
 
 - **`coverage`** holds each package to the line, branch and function coverage already
@@ -251,6 +252,18 @@ because the obvious way past each of them is the wrong one.
   `AppLayout` it has one; a full-screen page uses `StandalonePage`), exactly one `h1`, and
   headings that step down one level at a time; only minor findings are recorded without
   failing the run.
+- **`sandbox`** renders every document preview in a real browser against the BUILT
+  artifact in production mode — the one browser run in which `/sandbox.html` arrives
+  under its own Content-Security-Policy, because the dev server `e2e` and `a11y` drive
+  sends none. It needs the `docker` CLI for the same storage engine, and a build. A red
+  run names the preview that broke, and three things are asserted about each frame: it
+  was served under exactly ONE policy equal to `packages/server/src/config/sandboxCsp.ts`,
+  its renderer finished (audio reached its metadata, an image decoded), and the engine
+  raised no policy violation except the hostile corpus's remote images. **Never answer a
+  refused `blob:`, `data:` or module source by widening the policy**, and never by
+  weakening the violation check: read the violation the report names, then decide whether
+  the renderer or the policy changed. The same specs run again behind the Compose stack's
+  Nginx inside `deploy`.
 - **`storage`** runs the storage port against the real object-storage engine, in a
   container, on a loopback port — the same `StorageProvider` contract the in-memory double
   passes on every other gate, plus the cases only a real engine can answer. Read a red run

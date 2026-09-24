@@ -20,20 +20,12 @@
  * LOAD-BEARING DECISIONS
  * ---------------------------------------------------------------------------
  *
- *  a. THE ARTIFACT IS STAGED IN A TEMPORARY DIRECTORY, NOT IN THE CHECKOUT. In
- *     production the server resolves its static root as `<dist>/../public`, so
- *     a naive version of this gate would copy the client bundle into
- *     `packages/server/public` — an untracked, un-ignored tree that the secret
- *     scan, the integrity scan and the format check would all then walk, and
- *     that a crashed run would leave behind. Staging `dist/`, `public/` and
- *     `sandbox-document/` as siblings under a temp directory reproduces the
- *     image's layout exactly and writes nothing into the repository. The third
- *     one is the security-relevant one: the isolated render document is emitted
- *     OUTSIDE the static root on purpose, and a gate that flattened the two
- *     would be exercising a tree production never has. `node_modules` is SYMLINKED there
- *     (600 MB, and nothing writes to it), which also proves the emitted tree
- *     resolves its dependencies by ordinary Node resolution rather than by
- *     accident of location.
+ *  a. THE ARTIFACT IS STAGED IN A TEMPORARY DIRECTORY, NOT IN THE CHECKOUT, in
+ *     the image's layout (`dist/`, `public/` and `sandbox-document/` as
+ *     siblings). The staging and the boot live in `lib/artifact.mjs`, ONE copy
+ *     shared with `test:sandbox`, which renders the isolated document in a real
+ *     browser against this same artifact; the reasons for the layout are
+ *     written down there.
  *
  *  b. IT RUNS IN PRODUCTION MODE, WITH REAL SECRETS. That is most of the value:
  *     `NODE_ENV=production` is where the config schema refuses `dev-` secrets
@@ -56,17 +48,20 @@
  *     (`lib/vault-flow.mjs`). Two copies of "the flow" would drift, and the
  *     difference between them is exactly where the interesting failure hides.
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { randomBytes } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { repoRoot } from './lib/proc.mjs';
 import { color, formatDuration, note, symbol, warn } from './lib/ui.mjs';
 import { ensureReportDir, writeJsonReport } from './lib/reports.mjs';
-import { runVaultFlow, waitForHealth } from './lib/vault-flow.mjs';
+import { runVaultFlow } from './lib/vault-flow.mjs';
 import { applyRseqTunable } from './lib/mongo-rseq.mjs';
+import {
+  BOOT_DEADLINE_MS,
+  bootArtifact,
+  freePort,
+  missingArtifact,
+  productionEnv,
+  removeWorkspace,
+  stageArtifact,
+  stopArtifact,
+} from './lib/artifact.mjs';
 /**
  * The policy and the two asset headers `/sandbox.html` depends on, restated ON
  * PURPOSE — but in ONE gate-side place, shared with the deployment drill.
@@ -95,13 +90,11 @@ import {
   sandboxBypassProblems,
 } from './lib/sandbox-headers.mjs';
 
-/** (d) A production boot on a cold machine is seconds; 45 of them is a hang. */
-const BOOT_DEADLINE_MS = 45_000;
 /** What the gate is meant to cost, reported rather than enforced — see (d). */
 const BUDGET_MS = 60_000;
-const SHUTDOWN_GRACE_MS = 5_000;
+/** The https origin production requires of `APP_URL` and `CORS_ORIGIN`. */
+const ORIGIN = 'https://smoke.hvault.test';
 
-const secret = () => randomBytes(32).toString('hex');
 const started = Date.now();
 const steps = [];
 const failures = [];
@@ -116,20 +109,6 @@ const record = (name, ok, detail, extra = {}) => {
   return ok;
 };
 
-/** An OS-assigned free port, released immediately; the server binds it a moment later. */
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => {
-        resolve(port);
-      });
-    });
-  });
-}
-
 // SERVER-121912 — mongod 8.x aborts at startup on Linux kernels >= 6.19 unless
 // restartable sequences are handed back to glibc, and `mongodb-memory-server`
 // downloads and spawns a REAL mongod, so this runner is one of the repository's
@@ -142,62 +121,22 @@ applyRseqTunable();
 ensureReportDir();
 console.log(color.bold('\n  smoke — the built artifact, in production mode\n'));
 
-const serverDist = path.join(repoRoot, 'packages', 'server', 'dist');
-const clientDist = path.join(repoRoot, 'packages', 'client', 'dist');
-// The isolated render document is emitted OUTSIDE the client's `dist/`, because
-// `dist/` becomes the `express.static` root and the document's whole containment
-// is the per-response CSP Express attaches to it. Staged into its own sibling
-// here for the same reason the image copies it into its own directory: the
-// layout IS the control, so a gate that flattened the two would be testing a
-// tree production never has.
-const clientSandboxDist = path.join(repoRoot, 'packages', 'client', 'dist-sandbox');
-for (const [label, dir, file] of [
-  ['server', serverDist, 'server.js'],
-  ['client', clientDist, 'index.html'],
-  ['sandbox document', clientSandboxDist, 'sandbox.html'],
-]) {
-  if (!existsSync(path.join(dir, file))) {
-    record(
-      'artifact',
-      false,
-      `no built ${label} artifact at ${path.relative(repoRoot, path.join(dir, file))} — run npm run build`,
-    );
-    writeJsonReport('smoke.json', { version: 1, task: 'test:smoke', failures, steps });
-    process.exit(1);
-  }
+const missing = missingArtifact();
+if (missing) {
+  record('artifact', false, missing);
+  writeJsonReport('smoke.json', { version: 1, task: 'test:smoke', failures, steps });
+  process.exit(1);
 }
 
 // (a) The image's layout, in a directory nothing else can see.
-const workspace = mkdtempSync(path.join(tmpdir(), 'hvault-smoke-'));
-const artifact = path.join(workspace, 'artifact');
-mkdirSync(artifact, { recursive: true });
-cpSync(serverDist, path.join(artifact, 'dist'), { recursive: true });
-cpSync(clientDist, path.join(artifact, 'public'), { recursive: true });
-// Beside `public/`, never inside it — the name matches
-// `packages/server/src/config/clientArtifacts.ts`, which is the one place the
-// server resolves either path.
-cpSync(clientSandboxDist, path.join(artifact, 'sandbox-document'), { recursive: true });
-symlinkSync(path.join(repoRoot, 'node_modules'), path.join(workspace, 'node_modules'), 'dir');
+const { workspace, artifact } = stageArtifact('hvault-smoke-');
 record('stage', true, 'dist + public + sandbox-document staged beside a linked dependency tree');
 
 let mongo;
 let child;
 
 const stop = async () => {
-  if (child && child.exitCode === null) {
-    child.kill('SIGTERM');
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL');
-        resolve(undefined);
-      }, SHUTDOWN_GRACE_MS);
-      timer.unref?.();
-      child.once('exit', () => {
-        clearTimeout(timer);
-        resolve(undefined);
-      });
-    });
-  }
+  await stopArtifact(child);
   // A teardown failure must not destroy the run's evidence. `mongo.stop()`
   // rejecting here escaped before `writeJsonReport`, so the runner reported the
   // gate as failed AND as having written no report — losing the transcript of
@@ -210,7 +149,7 @@ const stop = async () => {
       record('teardown', false, `mongod did not stop cleanly: ${String(error)}`);
     }
   }
-  rmSync(workspace, { recursive: true, force: true });
+  removeWorkspace(workspace);
 };
 
 try {
@@ -226,70 +165,26 @@ try {
   // 2. Boot the artifact exactly as the image's CMD does (b)
   // -------------------------------------------------------------------------
   const port = await freePort();
-  const baseUrl = `http://127.0.0.1:${String(port)}`;
-  const bootLog = [];
-  child = spawn(process.execPath, [path.join(artifact, 'dist', 'server.js')], {
-    // cwd is the temp workspace, not the checkout: the logger eagerly creates
-    // `<cwd>/logs` at module scope and throws if it cannot, and a gate has no
-    // business writing into the repository to prove the artifact boots.
-    cwd: workspace,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      NODE_ENV: 'production',
-      PORT: String(port),
-      HOST: '127.0.0.1',
-      MONGODB_URI: mongoUri,
-      JWT_ACCESS_SECRET: secret(),
-      JWT_REFRESH_SECRET: secret(),
-      SESSION_SECRET: secret(),
-      // Production refuses a non-https CORS origin and any `dev-` secret, which
-      // is half of what this gate proves about the artifact.
-      APP_URL: 'https://smoke.hvault.test',
-      CORS_ORIGIN: 'https://smoke.hvault.test',
-      APP_NAME: 'H-Vault',
-      SMTP_HOST: '',
-      SMTP_USER: '',
-      SMTP_PASS: '',
-    },
+  // The image's CMD, with cwd the temp workspace rather than the checkout: the
+  // logger eagerly creates `<cwd>/logs` at module scope and throws if it cannot,
+  // and a gate has no business writing into the repository to prove the
+  // artifact boots.
+  const boot = await bootArtifact({
+    workspace,
+    artifact,
+    env: productionEnv({ port, mongoUri, origin: ORIGIN }),
   });
-  for (const source of [child.stdout, child.stderr]) {
-    source?.on('data', (chunk) => {
-      bootLog.push(chunk.toString('utf8'));
-    });
-  }
-  child.once('exit', (code, signal) => {
-    if (code !== 0 && code !== null) bootLog.push(`\n[artifact exited with code ${String(code)}]`);
-    else if (signal) bootLog.push(`\n[artifact terminated by ${signal}]`);
-  });
-
-  // A dead process cannot become healthy, so stop waiting for it. The single
-  // most likely thing this gate catches — the production config validation
-  // refusing to boot — exits in about a second, and polling the full deadline
-  // afterwards spent 45 s proving nothing. `waitForHealth` still owns the
-  // timeout for a process that is merely slow.
-  const health = await Promise.race([
-    waitForHealth(baseUrl, { deadlineMs: BOOT_DEADLINE_MS, intervalMs: 500 }),
-    new Promise((resolve) => {
-      child.once('exit', (code, signal) =>
-        resolve({
-          ok: false,
-          attempts: 0,
-          waitedMs: Date.now() - started,
-          detail: `the artifact exited before serving a health response (${signal ? `signal ${signal}` : `code ${String(code)}`})`,
-        }),
-      );
-    }),
-  ]);
+  child = boot.child;
+  const { baseUrl, health } = boot;
   const booted = record(
     'boot',
     health.ok,
     health.ok
       ? `listening and connected after ${formatDuration(health.waitedMs)} (${String(health.attempts)} probes)`
       : `no healthy response within ${String(BOOT_DEADLINE_MS)}ms — ${health.detail}`,
-    health.ok ? {} : { output: bootLog.join('').slice(-4000) },
+    health.ok ? {} : { output: boot.output() },
   );
-  if (!booted) console.error(color.gray(bootLog.join('').slice(-4000)));
+  if (!booted) console.error(color.gray(boot.output()));
 
   if (booted) {
     // -----------------------------------------------------------------------
@@ -425,7 +320,7 @@ try {
         // of its directory and handed every sandboxed document on the internet
         // read access to the app's bundle.
         ...appAssetProblems(appAsset, (name) => appRes.headers.get(name), {
-          acao: 'https://smoke.hvault.test',
+          acao: ORIGIN,
           corp: 'same-origin',
         }),
       ];

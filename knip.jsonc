@@ -11,10 +11,10 @@
   // own module, or by declaring the dependency that was really being used.
   //
   // `entry` is not an exception to that rule; it is the opposite of one. knip can
-  // only follow imports, and six of this repository's programs are started by
+  // only follow imports, and eight of this repository's programs are started by
   // something that is not an import. Each carries the exact line that runs it, so
-  // the claim is checkable; the five that ship carry knip's `!` (production)
-  // suffix, and the test-tier one deliberately does not:
+  // the claim is checkable; the six that ship carry knip's `!` (production)
+  // suffix, and the two test-tier ones deliberately do not:
   //
   //   e2e/start-server.ts             playwright.config.ts:72  `npx tsx e2e/start-server.ts`
   //   packages/client/src/sandbox/sandbox.ts
@@ -34,6 +34,13 @@
   //                                   recognises the default config NAME, so the a11y config —
   //                                   which the accessibility gate passes on the command line —
   //                                   is invisible to it)
+  //   playwright.sandbox.config.ts    scripts/ci/sandbox-gate.mjs and scripts/ci/deploy-drill.mjs
+  //                                   `playwright test --config playwright.sandbox.config.ts`
+  //                                   (the same trap as the a11y config)
+  //   e2e/sandbox-policy.prod.ts      playwright.sandbox.config.ts `testMatch` — named outside
+  //                                   Playwright's default `*.spec.ts` pattern on purpose, so the
+  //                                   dev-server gates never load it, which also hides it from
+  //                                   knip's Playwright plugin
   //   ecosystem.config.cjs            README.md:658            `pm2 start ecosystem.config.cjs --env production`
   //   docker/mongo/provision-app-user.js
   //                                   docker-compose.yml:508   mongosh argument in `hvault-db-init`
@@ -52,6 +59,8 @@
         "e2e/helpers.ts",
         "e2e/start-server.ts!",
         "playwright.a11y.config.ts!",
+        "playwright.sandbox.config.ts!",
+        "e2e/sandbox-policy.prod.ts",
         "ecosystem.config.cjs!",
         "docker/mongo/provision-app-user.js!",
       ],

@@ -49,10 +49,10 @@ export default defineConfig({
         // nothing here for these patterns to match. What actually keeps the
         // sandbox out of the precache is the two-build layout.
         globIgnores: WORKBOX_GLOB_IGNORES,
-        // MANDATORY, not conditional: an iframe load IS a navigation, and
-        // without this the service worker answers `/sandbox.html` with the
-        // application shell. See the constant for the whole reason, including
-        // why the anchor is `(?:\?|$)` and not a bare `$`.
+        // Kept unconditionally: without it the service worker's navigation route
+        // would answer any navigation to `/sandbox.html` it is handed with the
+        // application shell. See the constant for what is and is not handed to
+        // it (measured), and why the anchor is `(?:\?|$)` and not a bare `$`.
         navigateFallbackDenylist: NAVIGATE_FALLBACK_DENYLIST,
         runtimeCaching: [
           {

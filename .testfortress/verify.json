@@ -253,10 +253,18 @@
       "report": ["smoke.json", "smoke.log"],
       "requires": ["build:server", "build:client"]
     },
+    "test:sandbox": {
+      "cmd": "npm run test:sandbox",
+      "tier": 1,
+      "gate": "a real browser renders the isolated document under the headers the BUILT artifact sends in production mode \u2014 booted beside a real mongod and the pinned object-storage engine, after the deployment's own index bootstrap, with the service worker controlling the page \u2014 across every preview mode (text, code, markdown, a stored web page, a raster image and an SVG from blob: URLs, a data: image inside a document, audio from a blob: URL, and the PDF refusal) plus the committed hostile corpus, each frame served under exactly one Content-Security-Policy equal to the server's own constant, and the engine refusing nothing but the corpus's remote images, on img-src",
+      "report": ["sandbox.json", "junit-sandbox.xml"],
+      "countsTests": false,
+      "requires": ["build:shared", "build:server", "build:client", "docker"]
+    },
     "test:deploy": {
       "cmd": "npm run test:deploy",
       "tier": 2,
-      "gate": "the Compose stack comes up from nothing with every service healthy and both one-shots completed, publishes exactly one loopback-bound port and nothing else (the object storage engine none at all), completes a vault journey AND a document journey through that port \u2014 upload, byte-identical download, purge \u2014 serves the isolated render document from Express under its own tailored policy with the two opaque-origin headers scoped to its assets, keeps the data and the wrapped keys across a restart and a storage redeploy, refuses to boot on a half-rotated storage credential and boots on a fully rotated one, and re-runs its bootstrap without rewriting a rotated application password",
+      "gate": "the Compose stack comes up from nothing with every service healthy and both one-shots completed, publishes exactly one loopback-bound port and nothing else (the object storage engine none at all), completes a vault journey AND a document journey through that port \u2014 upload, byte-identical download, purge \u2014 serves the isolated render document from Express under its own tailored policy with the two opaque-origin headers scoped to its assets, renders every preview of the sandbox specs in a real browser through that port behind the stack's own Nginx, keeps the data and the wrapped keys across a restart and a storage redeploy, refuses to boot on a half-rotated storage credential and boots on a fully rotated one, and re-runs its bootstrap without rewriting a rotated application password",
       "report": ["deploy.json", "deploy.log"],
       "requires": ["docker"]
     },
@@ -344,7 +352,7 @@
     },
     {
       "area": "cross-browser end-to-end: WebKit",
-      "detail": "playwright.config.ts now declares two engine projects: Chromium over every spec, and Firefox over the two whose answers depend on the engine (clipboard-hygiene, auto-lock), attributed in the JUnit report by project name. That leg drives a GENUINE transient-activation refusal on Gecko and the gesture-scoped retry that follows it, so the clipboard guard is no longer verified only by unit tests with simulated refusals. What is still asserted about one engine only: WebKit, and the other nineteen specs \u2014 the latter deliberately, because they assert application behaviour that does not vary by engine.",
+      "detail": "playwright.config.ts now declares two engine projects: Chromium over every spec, and Firefox over the two whose answers depend on the engine (clipboard-hygiene, auto-lock), attributed in the JUnit report by project name. That leg drives a GENUINE transient-activation refusal on Gecko and the gesture-scoped retry that follows it, so the clipboard guard is no longer verified only by unit tests with simulated refusals. What is still asserted about one engine only: WebKit, and the other nineteen specs \u2014 the latter deliberately, because they assert application behaviour that does not vary by engine. One engine-dependent claim is Chromium-only as well: `test:sandbox` and the Nginx leg of `test:deploy` render the isolated document under the production policy in Chromium alone, and enforcing a Content-Security-Policy is engine behaviour, so Gecko's and WebKit's reading of that policy is unmeasured. Nor does either leg go through the operator's outer, TLS-terminating host Nginx, which adds a header floor of its own: the inner Nginx is the last layer a browser here renders behind.",
       "ledger": ["SUP-0042"],
       "review": "2026-11-11"
     },
@@ -388,12 +396,6 @@
       "area": "accessibility below the blocking threshold, and the dark theme",
       "detail": "`test:a11y` blocks on axe impacts `moderate`, `serious` and `critical` (and on a violation axe could not grade), and `ratchet-check.mjs` holds `a11y.moderate`, `a11y.serious` and `a11y.critical` at zero beside `a11y.viewsScanned`. Only `minor` findings are recorded without blocking across the thirty-four scanned views (the counts are in `a11y.json`, and are deliberately not repeated here: nothing would keep them true). What remains is a gap in COVERAGE, not in the threshold: a check axe could not decide is recorded as undecided and never gated, and the scan runs in the light theme only, so the dark palette is unmeasured; the one dark-theme defect already known is ledgered as SUP-0043.",
       "ledger": ["SUP-0043"],
-      "review": "2026-11-11"
-    },
-    {
-      "area": "the isolated render document under the production header set",
-      "detail": "No gate RENDERS `/sandbox.html` in a browser under the headers a deployment actually sends. The E2E and accessibility suites drive the Vite dev server, which has neither helmet nor the stack's Nginx, so the tailored per-response policy and the two CORS-ish headers scoped to `sandbox-assets/` are absent there; `test:deploy` and `test:smoke` assert those headers over HTTP, directive by directive against the server's own exported constant, but neither runs a browser. What stands in for it is the pair: the behavioural assertions in the E2E viewer specs (a real `/sandbox.html` rendering a real document, including the hostile-input corpus) plus the header assertions in those two gates. The residual risk is a policy that is correct on the wire and still breaks a renderer in a real engine \u2014 a `blob:` media source or a `data:` image refused by a browser rule no HTTP assertion can see. Closing it needs a Playwright project pointed at the built artifact behind the stack's own Nginx rather than at the dev server. No suppression is attached because nothing is excused: this is a stated boundary of what the gate surface covers.",
-      "ledger": [],
       "review": "2026-11-11"
     }
   ],

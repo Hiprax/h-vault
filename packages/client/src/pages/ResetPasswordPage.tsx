@@ -8,11 +8,13 @@ import { getZxcvbn } from '../lib/lazyZxcvbn';
 import { ArrowLeft, CheckCircle, AlertCircle, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { BrandLogo } from '../components/ui/BrandLogo';
 import { resetPasswordApi } from '../services/api/authApi';
-import { cn, getApiErrorMessage, hasValidEmailTld } from '../lib/utils';
+import { cn, getApiErrorMessage } from '../lib/utils';
+import { accountEmailSchema } from '../lib/accountEmail';
 import { cryptoService } from '../services/crypto/cryptoService';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Label } from '../components/ui/Label';
+import { FormAlert } from '../components/ui/FormAlert';
 import {
   Card,
   CardContent,
@@ -29,11 +31,7 @@ import { StandalonePage } from '../components/layout/StandalonePage';
 
 const resetPasswordSchema = z
   .object({
-    email: z
-      .string()
-      .min(1, 'Email is required')
-      .pipe(z.email('Enter a valid email address'))
-      .refine(hasValidEmailTld, 'Enter a valid email address'),
+    email: accountEmailSchema,
     newPassword: z.string().min(12, 'Password must be at least 12 characters'),
     confirmPassword: z.string().min(1, 'Please confirm your password'),
   })
@@ -235,15 +233,7 @@ export default function ResetPasswordPage() {
               </span>
             </div>
 
-            {apiError && (
-              <div
-                role="alert"
-                className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
-              >
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{apiError}</span>
-              </div>
-            )}
+            {apiError && <FormAlert message={apiError} />}
 
             {/* Email */}
             <div className="space-y-2">

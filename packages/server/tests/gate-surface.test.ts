@@ -72,6 +72,15 @@ import {
 import playwrightConfig, { FIREFOX_SUITE } from '../../../playwright.config';
 import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
 import flakePlaywrightConfig, { FLAKE_REPEAT_EACH } from '../../../playwright.flake.config';
+import sandboxPlaywrightConfig, {
+  SANDBOX_JUNIT_REPORTS,
+  SANDBOX_SUITE,
+} from '../../../playwright.sandbox.config';
+import {
+  SANDBOX_JUNIT,
+  SANDBOX_NGINX_JUNIT,
+  SANDBOX_SUITE as GATE_SANDBOX_SUITE,
+} from '../../../scripts/ci/lib/sandbox-browser.mjs';
 import { A11Y_BLOCKING_IMPACTS, A11Y_VIEWS, A11Y_VIEW_IDS } from '../../../e2e/a11yViews';
 import { DST_TZ, PINNED_TZ, RUN_TZ, resolveRunTz } from '../../../tests/harness/determinism';
 import {
@@ -1503,16 +1512,82 @@ describe('machine-readable reports', () => {
     }
   });
 
+  it('points the sandbox specs at a server the config never starts, on one engine, into their own report', () => {
+    // `test:sandbox` exists to render the isolated document under the headers the
+    // BUILT artifact sends, so the one outcome it must never have is a green run
+    // against the Vite dev server, which sends no policy at all. The base config
+    // carries a `webServer` in THIS process (no `E2E_BASE_URL` is set here), which
+    // is what makes the absence below a statement about the derived config rather
+    // than an accident of the environment.
+    expect(playwrightConfig.webServer).toBeDefined();
+    expect(sandboxPlaywrightConfig.webServer).toBeUndefined();
+
+    // The suite, in both of its homes, and every file on disk. Playwright errors
+    // only when NOTHING matches, so a half-stale `testMatch` shrinks the gate in
+    // silence; the gate script's own restatement is what reads the JUnit report.
+    expect([...SANDBOX_SUITE]).toEqual([...GATE_SANDBOX_SUITE]);
+    expect(sandboxPlaywrightConfig.testMatch).toEqual([...SANDBOX_SUITE]);
+    for (const file of SANDBOX_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'e2e', file)), file).toBe(true);
+    }
+
+    // The policy file is SELECTED here and nowhere else. It asserts a header the
+    // dev server does not send, so it must sit outside Playwright's default
+    // `*.spec.*`/`*.test.*` pattern — which is what the E2E, a11y and flake gates
+    // use, because the base config names no `testMatch` of its own.
+    expect(playwrightConfig.testMatch).toBeUndefined();
+    const policyFile = SANDBOX_SUITE.find((file) => file.endsWith('.prod.ts'));
+    expect(policyFile).toBe('sandbox-policy.prod.ts');
+    expect(policyFile).not.toMatch(/\.(?:spec|test)\.[cm]?[jt]sx?$/);
+
+    // Chromium alone, and by NAME: a project-level `testMatch` replaces the
+    // top-level one, so inheriting the base's Firefox project would run the
+    // clipboard and auto-lock specs against the production server in this gate.
+    expect(sandboxPlaywrightConfig.projects?.map((project) => project.name)).toEqual(['chromium']);
+    expect(sandboxPlaywrightConfig.projects?.[0]?.testMatch).toBeUndefined();
+
+    // Its own report, attributable by engine, and no HTML report to overwrite the
+    // E2E run's.
+    const junit = playwrightReporter('junit', sandboxPlaywrightConfig);
+    expect(junit).toBeDefined();
+    expect(path.resolve(repoRoot, String(junit!['outputFile']))).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', SANDBOX_JUNIT),
+    );
+    expect(junit!['includeProjectInTestName']).toBe(true);
+    expect(playwrightReporter('html', sandboxPlaywrightConfig)).toBeUndefined();
+    // Both legs' names, against the ones the two gates read back: the Nginx leg
+    // inside `test:deploy` selects the second with `HVAULT_SANDBOX_LEG=nginx`, and
+    // a drift between the two literals would leave that gate reading no report.
+    expect(
+      Object.fromEntries(
+        Object.entries(SANDBOX_JUNIT_REPORTS).map(([leg, file]) => [leg, path.basename(file)]),
+      ),
+    ).toEqual({ express: SANDBOX_JUNIT, nginx: SANDBOX_NGINX_JUNIT });
+
+    // Everything else inherited: the same pinned zone and locale, the same retries.
+    expect(sandboxPlaywrightConfig.use).toEqual(playwrightConfig.use);
+    expect(sandboxPlaywrightConfig.retries).toBe(0);
+
+    // And the manifest declares what the runner needs to call this COULD NOT RUN
+    // rather than red: the artifact, and the daemon for the storage engine.
+    const task = manifest.tasks['test:sandbox']!;
+    expect(reportsOf(task)).toEqual(['sandbox.json', SANDBOX_JUNIT]);
+    expect(task.requires).toEqual(['build:shared', 'build:server', 'build:client', 'docker']);
+    // `document-viewer.spec.ts` is already counted by the E2E gate.
+    expect(task.countsTests).toBe(false);
+  });
+
   it('resolves every Playwright config to one worker, and names the gates a raise would move', () => {
     // `workers: 1` is a FLAKE-HIDE marker — `scripts/ci/integrity-scan.mjs` matches the
     // literal `1` inside any runner config — so it is ledgered, dated and expiring
     // rather than treated as settled. What this test pins is the thing that makes
     // raising it a larger act than the one-character diff looks like:
-    // `playwright.a11y.config.ts` and `playwright.flake.config.ts` both spread the base
-    // config and override only `testMatch` / `projects` / `reporter` / `repeatEach`, so
-    // `workers` and `fullyParallel` reach them by INHERITANCE. One edit to the base
-    // therefore changes the concurrency model of THREE gates — `e2e`, `a11y` and
-    // `flake` — two of which nobody raising it would think to re-measure.
+    // `playwright.a11y.config.ts`, `playwright.flake.config.ts` and
+    // `playwright.sandbox.config.ts` all spread the base config and override only
+    // `testMatch` / `projects` / `reporter` / `repeatEach` / `webServer`, so `workers`
+    // and `fullyParallel` reach them by INHERITANCE. One edit to the base therefore
+    // changes the concurrency model of FOUR gates — `e2e`, `a11y`, `flake` and
+    // `sandbox` — three of which nobody raising it would think to re-measure.
     //
     // The constraint is not costless and was measured rather than assumed. On the
     // reference machine (four cores), `--workers=2` ran the whole suite 218 of 218
@@ -1531,7 +1606,7 @@ describe('machine-readable reports', () => {
     // measurements and the removal condition are in
     // `.testfortress/phase-logs/e2e-worker-measurements.md`.
     //
-    // Hence all three, labelled — and SOFT, for the reason `e2e/a11y.spec.ts` gives for
+    // Hence all four, labelled — and SOFT, for the reason `e2e/a11y.spec.ts` gives for
     // the same choice: one failing arm must not hide the state of the others. A hard
     // `expect` aborts on the first, so a raise would report the E2E gate and say nothing
     // about the two that were converted along with it, which is precisely the silence
@@ -1540,6 +1615,7 @@ describe('machine-readable reports', () => {
       ['the E2E gate', playwrightConfig],
       ['the accessibility gate', a11yPlaywrightConfig],
       ['the flake gate', flakePlaywrightConfig],
+      ['the sandbox gate', sandboxPlaywrightConfig],
     ] as const) {
       expect.soft(config.workers, gate).toBe(1);
       expect.soft(config.fullyParallel, gate).toBe(false);

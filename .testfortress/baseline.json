@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-09-24",
-  "commit": "bb8050b",
+  "commit": "975a66a",
   "tests": {
-    "count": 11531
+    "count": 11582
   },
   "coverage": {
     "diff": 100
@@ -17,7 +17,8 @@
   "a11y": {
     "critical": 0,
     "serious": 0,
-    "viewsScanned": 34
+    "viewsScanned": 34,
+    "moderate": 0
   },
   "suppressions": {
     "count": 18,
@@ -150,7 +151,7 @@
         ]
       },
       "tests": {
-        "count": 4516
+        "count": 4536
       }
     },
     "packages/client": {
@@ -158,8 +159,8 @@
         "line": 99.28,
         "branch": 93.75,
         "function": 98.93,
-        "linesTotal": 10574,
-        "branchesTotal": 7499,
+        "linesTotal": 10580,
+        "branchesTotal": 7505,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -182,6 +183,7 @@
           "src/components/layout/PublicOnlyRoute.tsx",
           "src/components/layout/RailLayout.tsx",
           "src/components/layout/ReloadPrompt.tsx",
+          "src/components/layout/StandalonePage.tsx",
           "src/components/tools/FileDecryptPanel.tsx",
           "src/components/tools/FileEncryptPanel.tsx",
           "src/components/tools/TotpAttachDialog.tsx",
@@ -195,6 +197,7 @@
           "src/components/ui/Card.tsx",
           "src/components/ui/Dialog.tsx",
           "src/components/ui/DropdownMenu.tsx",
+          "src/components/ui/FormAlert.tsx",
           "src/components/ui/Input.tsx",
           "src/components/ui/Label.tsx",
           "src/components/ui/OtpInput.tsx",
@@ -229,6 +232,7 @@
           "src/hooks/useVaultFolderScope.ts",
           "src/hooks/useVaultFolders.ts",
           "src/lib/accessToken.ts",
+          "src/lib/accountEmail.ts",
           "src/lib/address.ts",
           "src/lib/backupSignature.ts",
           "src/lib/documentSearch.ts",
@@ -347,7 +351,7 @@
         ]
       },
       "tests": {
-        "count": 5410
+        "count": 5441
       }
     },
     "e2e": {
@@ -389,6 +393,7 @@
     "test:property",
     "test:recovery",
     "test:resource",
+    "test:sandbox",
     "test:security",
     "test:smoke",
     "test:snapshot",
@@ -410,6 +415,7 @@
   "meta": {
     "fields": [
       "a11y.critical",
+      "a11y.moderate",
       "a11y.serious",
       "a11y.viewsScanned",
       "bundle.budgetKb.VaultItemForm",
@@ -539,9 +545,9 @@
     ]
   },
   "duplication": {
-    "percentage": 1.46,
-    "clones": 107,
-    "duplicatedLines": 1307,
+    "percentage": 1.42,
+    "clones": 104,
+    "duplicatedLines": 1274,
     "totalLines": 52849,
     "ceiling": 2.89,
     "sources": 190
@@ -575,7 +581,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 27 mutation-oracle: shared leg banked from a from-scratch run (--full) on an idle 4-core host at HEAD bb8050b + phase-27 working tree, 88.64% of 2,633 mutants (23 timeouts, all genuine loop/cursor hangs in shared/utils/backupCodes.ts); per-change floor 85 and diff budgets shared 200 / client 120 / server 20 recorded from source; 27 measured improvements accepted",
+  "reason": "Phase 29 sandbox-prod-header-gate: registers test:sandbox (T1) in the task list; records the de-duplication of the account forms (accountEmailSchema, FormAlert) and the new tests; seeds a11y.moderate at its measured 0, which Phase 28 added to the blocking set but never recorded",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
