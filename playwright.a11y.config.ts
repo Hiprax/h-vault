@@ -6,9 +6,10 @@ import base, { CHROMIUM_PROJECT } from './playwright.config';
  *
  * The same shape as `packages/server/vitest.security.config.ts`: a NAMED SUBSET
  * of a suite that already runs, re-run under its own name so that "this
- * application is keyboard operable and free of serious machine-detectable
- * accessibility defects" is a claim somebody can point at, with its own report,
- * rather than two files buried in a six-minute end-to-end run.
+ * application is keyboard operable and free of moderate, serious and critical
+ * machine-detectable accessibility defects" is a claim somebody can point at,
+ * with its own report, rather than two files buried in a six-minute end-to-end
+ * run.
  *
  * Nothing is narrowed by this. `playwright.config.ts` has no `testMatch` of its
  * own, so both files below ALSO run inside `test:e2e` on every push; this config

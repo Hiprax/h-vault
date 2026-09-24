@@ -971,7 +971,7 @@ describe('VaultItemPage - not found', () => {
       );
     });
 
-    expect(screen.getByText('Item Not Found')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Item Not Found' })).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Back to Vault' }));

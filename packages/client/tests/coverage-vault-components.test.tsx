@@ -678,6 +678,9 @@ describe('VaultList — bulk delete', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete Forever' })[0]!);
 
     const dialog = screen.getByRole('alertdialog', { name: 'Bulk delete confirmation' });
+    expect(
+      within(dialog).getByRole('heading', { level: 2, name: 'Permanently Delete Items' }),
+    ).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete Forever' }));
 
     await waitFor(() => {

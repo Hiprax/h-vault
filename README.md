@@ -288,6 +288,9 @@ no user of a shared deployment is stuck inside it.
   cache and automatic re-sync when connectivity returns.
 - **Accessible by construction** — focus traps, `aria-activedescendant` roving focus in menus,
   live regions, and correct ARIA roles on virtualized lists (`react-window` above 50 items).
+  Every page has one `main` landmark and one `h1` (a loading screen has only the `main`), headings
+  never skip a level, and the `a11y` gate fails on any moderate, serious or critical axe finding
+  in the thirty-four views it scans.
 - **Keyboard-first** — `Ctrl`+`L` lock, `Ctrl`+`N` new item, `Ctrl`+`K` search, `Ctrl`+`↑`/`↓`
   reorder folders (`Cmd` on macOS).
 - **Auto-lock on a wall-clock deadline** — the vault locks when your configured idle timeout has
@@ -1412,14 +1415,14 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Server** | 190   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
-| **Client** | 175   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
-| **Shared** | 13    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
+| **Server** | 194   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
+| **Client** | 181   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
+| **Shared** | 14    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
 | **E2E**    | 22    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
 
 **Files** counts every test file each suite owns on disk, which is not the same as the number the
 command above runs: the server's default Vitest config excludes `tests/resource/**` and
-`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 189 on disk and
+`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 194 on disk and
 those two directories run under their own gates (`test:resource`, `test:storage`). The number of
 test _cases_ is a third figure again, and it is ratcheted rather than written down here —
 `.testfortress/baseline.json`'s `tests.count` is a floor fed from the JUnit reports, and it only

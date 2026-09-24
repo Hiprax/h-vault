@@ -502,6 +502,119 @@ describe('audit:ratchet', () => {
     expect(refreshed.exitCode).toBe(1);
   });
 
+  describe('accessibility, whose moderate findings block and are ratcheted at zero', () => {
+    const a11yReport = (violations: Record<string, number>): Record<string, string> => ({
+      ...HEALTHY_REPORTS,
+      '.testfortress/reports/a11y.json': JSON.stringify({
+        viewsScanned: 34,
+        violations: { critical: 0, serious: 0, moderate: 0, minor: 0, unknown: 0, ...violations },
+      }),
+    });
+    const baselineWithA11y = {
+      ...HEALTHY_BASELINE,
+      a11y: { critical: 0, serious: 0, moderate: 0, viewsScanned: 34 },
+      meta: {
+        fields: [
+          ...HEALTHY_BASELINE.meta.fields,
+          'a11y.critical',
+          'a11y.moderate',
+          'a11y.serious',
+          'a11y.viewsScanned',
+        ].sort(),
+      },
+    };
+
+    it('reads a11y.moderate from the gate report and passes while it holds at zero', () => {
+      const result = ratchet({ baseline: baselineWithA11y, reports: a11yReport({}) });
+      expect(result.regressions).toEqual([]);
+      expect(result.missing).toEqual([]);
+      expect(result.undeclared).toEqual([]);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('fails on ONE new moderate finding, in the lower-is-better direction', () => {
+      const result = ratchet({ baseline: baselineWithA11y, reports: a11yReport({ moderate: 1 }) });
+      const moderate = result.regressions.find((r) => r.path === 'a11y.moderate');
+      expect(moderate?.dir).toBe('lower');
+      // Only that field moved: the serious and critical floors are untouched.
+      expect(result.regressions.map((r) => r.path)).toEqual(['a11y.moderate']);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('does not ratchet minor findings: a minor one is recorded, never a regression', () => {
+      const result = ratchet({ baseline: baselineWithA11y, reports: a11yReport({ minor: 3 }) });
+      expect(result.regressions).toEqual([]);
+      expect(result.exitCode).toBe(0);
+    });
+
+    const readBaseline = (dir: string): Record<string, unknown> =>
+      JSON.parse(readFileSync(path.join(dir, '.testfortress/baseline.json'), 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+
+    it('seeds a11y.moderate alone beside the recorded a11y fields, at its measured zero', () => {
+      // The field this phase brings in: the rest of the `a11y` family is already
+      // recorded, so the family cannot be seeded as a whole, and the one-field
+      // sub-family is the mechanism.
+      const before = {
+        ...HEALTHY_BASELINE,
+        a11y: { critical: 0, serious: 0, viewsScanned: 34 },
+        meta: {
+          fields: [
+            ...HEALTHY_BASELINE.meta.fields,
+            'a11y.critical',
+            'a11y.serious',
+            'a11y.viewsScanned',
+          ].sort(),
+        },
+      };
+      const whole = ratchet({
+        baseline: before,
+        reports: a11yReport({}),
+        args: ['--accept', '--seed', 'a11y', '--reason', 'bank moderate'],
+      });
+      expect(whole.exitCode).not.toBe(0);
+      // Refused for THAT reason, not merely refused: the family is partly recorded.
+      expect(whole.stderr).toMatch(
+        /--seed a11y: the baseline already records 3 field\(s\) under "a11y"/,
+      );
+      expect((readBaseline(whole.dir) as { a11y: Record<string, number> }).a11y).toEqual(
+        before.a11y,
+      );
+
+      const seeded = ratchet({
+        baseline: before,
+        reports: a11yReport({}),
+        args: ['--accept', '--seed', 'a11y.moderate', '--reason', 'bank moderate'],
+      });
+      expect(seeded.exitCode).toBe(0);
+      const after = readBaseline(seeded.dir) as {
+        a11y: Record<string, number>;
+        meta: { fields: string[] };
+      };
+      expect(after.a11y).toEqual({ critical: 0, serious: 0, viewsScanned: 34, moderate: 0 });
+      expect(after.meta.fields).toContain('a11y.moderate');
+      // Nothing else was written: minor stays record-only.
+      expect(after.meta.fields).not.toContain('a11y.minor');
+    });
+
+    it('treats a report that no longer carries the moderate count as unmeasured', () => {
+      const result = ratchet({
+        baseline: baselineWithA11y,
+        reports: {
+          ...HEALTHY_REPORTS,
+          '.testfortress/reports/a11y.json': JSON.stringify({
+            viewsScanned: 34,
+            violations: { critical: 0, serious: 0 },
+          }),
+        },
+      });
+      expect(result.missing.map((m) => m.path)).toContain('a11y.moderate');
+      expect(result.exitCode).toBe(1);
+    });
+  });
+
   describe('patch coverage, which is measured by a gate rather than by a suite', () => {
     const withDiff = (diff: number): Record<string, string> => ({
       ...HEALTHY_REPORTS,

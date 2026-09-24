@@ -2164,6 +2164,11 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
     fireEvent.click(screen.getByRole('button', { name: /^Trash/ }));
     expect(screen.getByText('The trash is empty')).toBeInTheDocument();
     expect(screen.getByText(/permanently removed after 30 days/)).toBeInTheDocument();
+    // A section of the page, one level below its h1 — in trash mode nothing else
+    // may stand between them, so an h3 here would skip a level.
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'The trash is empty' }),
+    ).toBeInTheDocument();
   });
 
   it('filters by name, tag and note, and finds nothing in a document it cannot open', async () => {

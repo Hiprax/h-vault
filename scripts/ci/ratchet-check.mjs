@@ -288,16 +288,17 @@ const DIRECTION = {
   // the same commit, which oasdiff then compares against a base that already
   // agrees with it. Refreshing the base now costs a written `--accept` reason.
   'openapi.snapshotHash': 'pin',
-  // Accessibility. The two impacts that FAIL the gate are ratcheted at zero, so
-  // the number cannot creep; `viewsScanned` is higher-is-better because an axe
-  // run over nothing reports zero violations exactly like an axe run over a
+  // Accessibility. The three impacts that FAIL the gate are ratcheted at zero,
+  // so the number cannot creep; `viewsScanned` is higher-is-better because an
+  // axe run over nothing reports zero violations exactly like an axe run over a
   // clean page — a shrinking surface is the one regression the violation counts
-  // themselves can never show. The `moderate` and `minor` findings are recorded
-  // in `a11y.json` and deliberately NOT ratcheted: gating them would mean a new
-  // view could not be added until its unrelated landmark debt was paid off,
-  // which prices scanning MORE of the application as a regression.
+  // themselves can never show. `moderate` joined the blocking set once its debt
+  // (landmarks, `main`, `h1`, heading order) had been paid down to zero, and
+  // not before: a gate moves up only, from a measured value. `minor` findings
+  // are still recorded in `a11y.json` and deliberately NOT ratcheted.
   'a11y.critical': 'lower',
   'a11y.serious': 'lower',
+  'a11y.moderate': 'lower',
   'a11y.viewsScanned': 'higher',
   // Size and volume budgets. These are CEILINGS, not measurements, so
   // lower-is-better means "a budget may be tightened, never quietly raised".
@@ -895,10 +896,11 @@ function collect() {
       }
       if (typeof snap.hash === 'string') got['openapi.snapshotHash'] = snap.hash;
     } else if (base === 'a11y.json') {
-      // Only the two gated impacts and the size of the scanned surface. The
+      // Only the three gated impacts and the size of the scanned surface. The
       // gate's own report carries the rest.
       if (typeof j.violations?.critical === 'number') got['a11y.critical'] = j.violations.critical;
       if (typeof j.violations?.serious === 'number') got['a11y.serious'] = j.violations.serious;
+      if (typeof j.violations?.moderate === 'number') got['a11y.moderate'] = j.violations.moderate;
       if (typeof j.viewsScanned === 'number') got['a11y.viewsScanned'] = j.viewsScanned;
     } else if (base === 'coverage.json') {
       // ONLY the patch-coverage number. The per-package percentages, the

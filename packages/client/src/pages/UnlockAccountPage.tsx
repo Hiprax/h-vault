@@ -11,6 +11,7 @@ import {
   CardTitle,
   CardDescription,
 } from '../components/ui/Card';
+import { StandalonePage } from '../components/layout/StandalonePage';
 
 export default function UnlockAccountPage() {
   const [searchParams] = useSearchParams();
@@ -43,7 +44,7 @@ export default function UnlockAccountPage() {
   }, [token]);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+    <StandalonePage>
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           {status === 'loading' && (
@@ -51,7 +52,7 @@ export default function UnlockAccountPage() {
               <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
                 <Loader2 className="h-6 w-6 animate-spin text-[hsl(var(--primary))]" />
               </div>
-              <CardTitle>Unlocking Account</CardTitle>
+              <CardTitle as="h1">Unlocking Account</CardTitle>
               <CardDescription>Please wait while we unlock your account...</CardDescription>
             </>
           )}
@@ -61,7 +62,7 @@ export default function UnlockAccountPage() {
               <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-100 dark:bg-green-950">
                 <CheckCircle className="h-6 w-6 text-green-600 dark:text-green-400" />
               </div>
-              <CardTitle>Account Unlocked</CardTitle>
+              <CardTitle as="h1">Account Unlocked</CardTitle>
               <CardDescription>{message}</CardDescription>
             </>
           )}
@@ -71,7 +72,7 @@ export default function UnlockAccountPage() {
               <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-950">
                 <XCircle className="h-6 w-6 text-red-600 dark:text-red-400" />
               </div>
-              <CardTitle>Unlock Failed</CardTitle>
+              <CardTitle as="h1">Unlock Failed</CardTitle>
               <CardDescription>{message}</CardDescription>
             </>
           )}
@@ -91,6 +92,6 @@ export default function UnlockAccountPage() {
           </CardContent>
         )}
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

@@ -25,6 +25,7 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router';
 import React from 'react';
 import { deriveRowId } from '@hvault/shared';
+import { firstSkippedHeadingLevel, headingLevels } from './support/documentOutline';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia for jsdom
@@ -1536,6 +1537,28 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Map CSV Columns')).toBeInTheDocument();
     });
+  });
+
+  it('keeps the CSV mapping panel inside the page outline: its headings sit one level below the card', async () => {
+    await renderSettings();
+    await waitFor(() => screen.getByText('Import Vault'));
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue('H-Vault (.enc / JSON)'), {
+      target: { value: 'csv' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: 'Name,Username,Password\nTest,user1,pass1' },
+    });
+    await waitFor(() => screen.getByText('Map CSV Columns'));
+
+    // The page names itself once, each card is a section of it, and the two
+    // panels inside the Data card are sub-sections of THAT card.
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { level: 2, name: /Data/ })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 3, name: 'Map CSV Columns' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 3, name: /^Preview/ })).toBeInTheDocument();
+    // …and no heading anywhere on the page skips a level to get there.
+    expect(firstSkippedHeadingLevel(headingLevels())).toBeNull();
   });
 
   it('shows an error when a generic CSV maps no identifying column', async () => {

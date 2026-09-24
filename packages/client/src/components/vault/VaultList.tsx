@@ -195,9 +195,9 @@ const EmptyState = memo(function EmptyState({
           <ShieldOff className="h-8 w-8 text-[hsl(var(--muted-foreground))]" />
         )}
       </div>
-      <h3 className="mt-4 text-lg font-semibold text-[hsl(var(--foreground))]">
+      <h2 className="mt-4 text-lg font-semibold text-[hsl(var(--foreground))]">
         {isTrash ? 'Trash is empty' : 'No items found'}
-      </h3>
+      </h2>
       <p className="mt-1 max-w-sm text-sm text-[hsl(var(--muted-foreground))]">
         {isTrash
           ? 'Items you delete will appear here. They are permanently removed after 30 days.'
@@ -921,7 +921,7 @@ export function VaultList({ onCreateNew }: VaultListProps) {
             aria-modal="true"
             aria-label="Empty trash confirmation"
           >
-            <h3 className="text-lg font-semibold text-[hsl(var(--destructive))]">Empty Trash</h3>
+            <h2 className="text-lg font-semibold text-[hsl(var(--destructive))]">Empty Trash</h2>
             <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
               This will <strong>permanently delete all {filteredItems.length} items</strong> in the
               trash. This action cannot be undone.
@@ -976,9 +976,9 @@ export function VaultList({ onCreateNew }: VaultListProps) {
             aria-modal="true"
             aria-label="Bulk delete confirmation"
           >
-            <h3 className="text-lg font-semibold text-[hsl(var(--destructive))]">
+            <h2 className="text-lg font-semibold text-[hsl(var(--destructive))]">
               {showTrash ? 'Permanently Delete Items' : 'Delete Items'}
-            </h3>
+            </h2>
             <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
               {showTrash ? (
                 <>

@@ -45,7 +45,7 @@ export default function VaultItemPage() {
   if (!item && !loading) {
     return (
       <div className="mx-auto max-w-md py-20 text-center">
-        <h2 className="text-2xl font-bold text-[hsl(var(--foreground))]">Item Not Found</h2>
+        <h1 className="text-2xl font-bold text-[hsl(var(--foreground))]">Item Not Found</h1>
         <p className="mt-2 text-[hsl(var(--muted-foreground))]">
           The vault item you are looking for does not exist or has been deleted.
         </p>
@@ -75,7 +75,12 @@ export default function VaultItemPage() {
   if (editing && !isTrashed && !isUndecodableData(item.data)) {
     return (
       <div className="mx-auto max-w-2xl">
-        <VaultItemForm item={item} onSaved={handleFormSaved} onCancel={() => setEditing(false)} />
+        <VaultItemForm
+          item={item}
+          titleLevel="h1"
+          onSaved={handleFormSaved}
+          onCancel={() => setEditing(false)}
+        />
       </div>
     );
   }

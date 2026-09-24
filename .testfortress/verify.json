@@ -174,7 +174,7 @@
     "test:a11y": {
       "cmd": "npm run test:a11y",
       "tier": 1,
-      "gate": "every primary view and modal \u2014 thirty-four of them, in the real authenticated DOM, seven of them the document store's and one of them the isolated preview document itself \u2014 carries zero serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
+      "gate": "every primary view and modal \u2014 thirty-four of them, in the real authenticated DOM, seven of them the document store's and one of them the isolated preview document itself \u2014 carries zero moderate, serious or critical axe violations, and the focus behaviours a scanner cannot infer still hold: the saved-address combobox keeps DOM focus on its input while aria-activedescendant tracks the active option, Escape closes that panel without closing the dialog around it, focus is re-homed across every billing-section transition, and the create dialog's focus trap holds",
       "report": ["a11y.json", "junit-a11y.xml"],
       "countsTests": false,
       "requires": ["build:shared", "docker"]
@@ -385,9 +385,9 @@
       "review": "2026-11-11"
     },
     {
-      "area": "accessibility below the blocking threshold",
-      "detail": "`test:a11y` blocks on axe impacts `critical` and `serious` only; `moderate` findings are reported but deliberately NOT ratcheted (`ratchet-check.mjs` records only `a11y.critical`, `a11y.serious` and `a11y.viewsScanned`), and the ones currently open across the thirty-four scanned views are `landmark-one-main`, `page-has-heading-one`, `region`, `landmark-unique` and `heading-order` (the count is in `a11y.json`, and is deliberately not repeated here: nothing would keep it true). The scan also runs in the light theme only.",
-      "ledger": [],
+      "area": "accessibility below the blocking threshold, and the dark theme",
+      "detail": "`test:a11y` blocks on axe impacts `moderate`, `serious` and `critical` (and on a violation axe could not grade), and `ratchet-check.mjs` holds `a11y.moderate`, `a11y.serious` and `a11y.critical` at zero beside `a11y.viewsScanned`. Only `minor` findings are recorded without blocking across the thirty-four scanned views (the counts are in `a11y.json`, and are deliberately not repeated here: nothing would keep them true). What remains is a gap in COVERAGE, not in the threshold: a check axe could not decide is recorded as undecided and never gated, and the scan runs in the light theme only, so the dark palette is unmeasured; the one dark-theme defect already known is ledgered as SUP-0043.",
+      "ledger": ["SUP-0043"],
       "review": "2026-11-11"
     },
     {

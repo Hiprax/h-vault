@@ -822,9 +822,9 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
             aria-modal="true"
             aria-label="Create new folder"
           >
-            <h3 className="mb-4 text-lg font-semibold text-[hsl(var(--card-foreground))]">
+            <h2 className="mb-4 text-lg font-semibold text-[hsl(var(--card-foreground))]">
               New Folder
-            </h3>
+            </h2>
             <input
               type="text"
               value={newFolderName}
@@ -877,9 +877,9 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
             aria-modal="true"
             aria-label="Rename folder"
           >
-            <h3 className="mb-4 text-lg font-semibold text-[hsl(var(--card-foreground))]">
+            <h2 className="mb-4 text-lg font-semibold text-[hsl(var(--card-foreground))]">
               Rename Folder
-            </h3>
+            </h2>
             <input
               type="text"
               value={renameValue}
@@ -935,7 +935,7 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
             aria-modal="true"
             aria-label="Delete folder confirmation"
           >
-            <h3 className="text-lg font-semibold text-[hsl(var(--destructive))]">Delete Folder</h3>
+            <h2 className="text-lg font-semibold text-[hsl(var(--destructive))]">Delete Folder</h2>
             <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
               Are you sure you want to delete the folder{' '}
               <strong>&quot;{folders.find((f) => f.id === deletingFolderId)?.name}&quot;</strong>?

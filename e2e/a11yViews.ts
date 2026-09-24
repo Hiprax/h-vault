@@ -251,11 +251,18 @@ export const A11Y_VIEW_IDS: readonly string[] = A11Y_VIEWS.map((view) => view.id
  * Impacts that fail the gate.
  *
  * axe grades every violation `minor`, `moderate`, `serious` or `critical`. The
- * gate is the top two (plus the ungraded case below), and the other two are
- * RECORDED rather than ignored, so
- * the report says what was found without a moderate finding blocking a push.
- * Both halves matter: a gate that failed on `minor` would be turned off within a
- * week, and one that recorded nothing could never show the debt moving.
+ * gate is the top three (plus the ungraded case below); `minor` is RECORDED
+ * rather than ignored, so the report says what was found without a minor
+ * finding blocking a push.
+ *
+ * `moderate` was added LAST, and only once it measured zero across every
+ * scanned view. What axe grades moderate here is page STRUCTURE — a page with no
+ * `main` landmark or no `h1`, content outside every landmark, two landmarks a
+ * landmark menu cannot tell apart, a heading that skips a level — and the forty
+ * such findings the scan once recorded were fixed in the layouts and pages
+ * rather than exempted. A gate moves up only: adding an impact while findings
+ * of it are open would have been a red gate nobody could satisfy, which is the
+ * shortest road to a gate that gets turned off.
  *
  * `unknown` is here for the third case: axe types `impact` as nullable, and
  * `scanA11y` maps a null one to `'unknown'`. Left out, an unclassified violation
@@ -263,4 +270,9 @@ export const A11Y_VIEW_IDS: readonly string[] = A11Y_VIEWS.map((view) => view.id
  * appeared nowhere at all. It fails closed instead, because "axe could not grade
  * this" is not evidence that it is minor.
  */
-export const A11Y_BLOCKING_IMPACTS: readonly string[] = ['serious', 'critical', 'unknown'];
+export const A11Y_BLOCKING_IMPACTS: readonly string[] = [
+  'moderate',
+  'serious',
+  'critical',
+  'unknown',
+];

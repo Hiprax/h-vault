@@ -57,6 +57,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **A fresh report that no longer measures a recorded floor now fails the ratchet instead of being deferred.** Deferral is meant for a release-tier gate that has not run; when its report is fresh, a missing field means the floor's subject disappeared.
 
+- **The accessibility gate now also fails on findings axe grades "moderate".** `npm run test:a11y` (part of `npm run ci`) used to record them without failing; the forty that were open are fixed (see Fixed), and `.testfortress/baseline.json` now holds the count at zero, so it can only stay there. Only "minor" findings are still recorded without failing the run.
+
 ### Removed
 
 - **Encrypted `.env.vault` files are no longer read.** H-Vault never documented them; the server's `.env` loader, dotenv 18, dropped them, together with the `DOTENV_KEY` variable that unlocked them. A plain `.env` is read exactly as before.
@@ -108,6 +110,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Finishing several uploads at once can no longer carry an account past its storage quota.** Each finished upload is checked against the quota using the files already stored, and two uploads finishing together could each see room for themselves before either was recorded, so both were kept and the account ended up over its limit. Finished uploads for one account are now checked one at a time, each against everything stored before it. One that arrives while another is being checked is asked to retry and keeps every byte it uploaded; if the retry then finds no room, it is refused with the usual quota message and its file is removed, exactly as a single over-quota upload already was.
 
 - **`npm run verify:selftest` can prove the mutation gate again.** Its planted defect narrows the shared leg's scope, which the gate's quick pre-flight catches as soon as that leg holds a floor, instead of falling through to a multi-hour run that the harness had to cut short.
+
+- **Every page now has one main region and one top-level heading, and headings no longer skip a level.** The sign-in, registration, password-reset, email-verification, account-unlock, vault-unlock and page-not-found screens and the full-screen error page had no main region for a screen reader to jump to, and all of them but the page-not-found screen lacked a top-level heading, as did the vault list; the loading screen also gains a main region; the application sidebar and the folder rail were announced as two identical, unnamed side regions; and the card headings on Settings, Backup, Export Data and File Encryption skipped a level below the page title. The sidebar is now announced as the page banner, the vault list has a visible "Vault" heading, and the item editor's title is the page heading when it fills the page.
 
 ### Security
 

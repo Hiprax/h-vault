@@ -246,7 +246,11 @@ because the obvious way past each of them is the wrong one.
   section, and the document journeys plus seven of the thirty-four scanned accessibility views
   fail with symptoms that say nothing about the code. Without a daemon both report **could
   not run** rather than passing quietly. `flake` inherits the same requirement, because
-  the Playwright suite is three of the runs it makes.
+  the Playwright suite is three of the runs it makes. **`a11y` blocks on every axe finding
+  graded moderate, serious or critical**, so a new page needs a `<main>` (inside
+  `AppLayout` it has one; a full-screen page uses `StandalonePage`), exactly one `h1`, and
+  headings that step down one level at a time; only minor findings are recorded without
+  failing the run.
 - **`storage`** runs the storage port against the real object-storage engine, in a
   container, on a loopback port — the same `StorageProvider` contract the in-memory double
   passes on every other gate, plus the cases only a real engine can answer. Read a red run

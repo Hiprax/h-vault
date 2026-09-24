@@ -757,7 +757,7 @@ describe('the accessibility gate’s scanned-view count', () => {
     },
     {
       file: '.testfortress/verify.json',
-      pattern: /currently open across the ([a-z-]+) scanned views/,
+      pattern: /recorded without blocking across the ([a-z-]+) scanned views/,
       expected: total,
       what: 'the below-threshold-a11y known gap',
     },

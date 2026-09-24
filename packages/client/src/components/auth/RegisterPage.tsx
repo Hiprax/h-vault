@@ -14,6 +14,7 @@ import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
 import { cn } from '../../lib/utils';
+import { StandalonePage } from '../layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schema                                                                    */
@@ -123,13 +124,13 @@ export function RegisterPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4 py-8">
+    <StandalonePage className="py-8">
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Create Account</CardTitle>
+          <CardTitle as="h1">Create Account</CardTitle>
           <CardDescription>Set up your H-Vault account</CardDescription>
         </CardHeader>
 
@@ -318,6 +319,6 @@ export function RegisterPage() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

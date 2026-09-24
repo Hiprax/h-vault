@@ -327,7 +327,7 @@ function EmptyState({
       <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[hsl(var(--muted))]">
         <Icon className="h-8 w-8 text-[hsl(var(--muted-foreground))]" />
       </div>
-      <h3 className="mt-4 text-lg font-semibold text-[hsl(var(--foreground))]">{copy.heading}</h3>
+      <h2 className="mt-4 text-lg font-semibold text-[hsl(var(--foreground))]">{copy.heading}</h2>
       <p className="mt-1 max-w-sm text-sm text-[hsl(var(--muted-foreground))]">{copy.body}</p>
     </div>
   );

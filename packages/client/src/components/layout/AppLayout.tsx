@@ -300,8 +300,18 @@ export function AppLayout() {
         />
       )}
 
-      {/* Sidebar */}
-      <aside
+      {/* Sidebar — the page's BANNER, deliberately a <header> and not an <aside>.
+
+          Everything in it is site-oriented rather than page-specific: the
+          product mark, the primary navigation, the connection indicator and the
+          account's own controls. That is the banner's definition, and it sits at
+          the top level of the document, which is the only place a <header> maps
+          to `banner`. As an <aside> it was a complementary landmark, and on
+          `/vault` and `/documents` it sat beside RailLayout's folder rail — a
+          SECOND unnamed complementary landmark, so a landmark menu listed two
+          entries nobody could tell apart (`landmark-unique`). Naming both would
+          have hidden that the sidebar was never complementary content at all. */}
+      <header
         onMouseEnter={() => {
           if (sidebarCollapsed) setHovered(true);
         }}
@@ -473,7 +483,7 @@ export function AppLayout() {
             </span>
           </button>
         </div>
-      </aside>
+      </header>
 
       {/* Main content */}
       <div className="flex flex-1 flex-col overflow-hidden">

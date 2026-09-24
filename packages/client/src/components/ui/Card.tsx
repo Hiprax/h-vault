@@ -22,9 +22,23 @@ const CardHeader = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
 );
 CardHeader.displayName = 'CardHeader';
 
-const CardTitle = forwardRef<HTMLHeadingElement, HTMLAttributes<HTMLHeadingElement>>(
-  ({ className, ...props }, ref) => (
-    <h3
+interface CardTitleProps extends HTMLAttributes<HTMLHeadingElement> {
+  /**
+   * The heading level, which is a statement about the PAGE, not the card.
+   *
+   * `h2` by default because that is what a card is almost everywhere here: one
+   * section of a page whose own `h1` sits above it (Settings, Backup, Export,
+   * File Encryption). A default of `h3` made every one of those pages skip a
+   * level (`heading-order`). A card that IS the page — the sign-in, registration,
+   * reset, verification and unlock screens — passes `h1`, because its title is
+   * the only heading that names the screen (`page-has-heading-one`).
+   */
+  as?: 'h1' | 'h2' | 'h3';
+}
+
+const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
+  ({ as: Heading = 'h2', className, ...props }, ref) => (
+    <Heading
       ref={ref}
       className={cn('text-2xl font-semibold leading-none tracking-tight', className)}
       {...props}

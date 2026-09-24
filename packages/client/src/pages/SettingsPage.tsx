@@ -3373,9 +3373,9 @@ export default function SettingsPage() {
               {/* CSV Field Mapping UI */}
               {importFormat === 'csv' && csvHeaders.length > 0 && (
                 <div className="space-y-3">
-                  <h4 className="text-sm font-medium text-[hsl(var(--foreground))]">
+                  <h3 className="text-sm font-medium text-[hsl(var(--foreground))]">
                     Map CSV Columns
-                  </h4>
+                  </h3>
                   <div className="space-y-2">
                     {csvHeaders.map((header) => (
                       <div key={header} className="flex items-center gap-3">
@@ -3406,9 +3406,9 @@ export default function SettingsPage() {
                   {/* Preview */}
                   {csvPreview.length > 0 && (
                     <div className="space-y-2">
-                      <h4 className="text-sm font-medium text-[hsl(var(--foreground))]">
+                      <h3 className="text-sm font-medium text-[hsl(var(--foreground))]">
                         Preview ({csvPreview.length} of {csvRowCount} rows)
-                      </h4>
+                      </h3>
                       <div className="overflow-x-auto rounded-md border border-[hsl(var(--border))]">
                         <table className="w-full text-xs">
                           <thead>

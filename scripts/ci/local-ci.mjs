@@ -719,9 +719,9 @@ const GATES = [
     tier: 1,
     // The same shape as `security`, `observability`, `property` and `snapshot`:
     // a named subset of a suite that already runs, re-run under its own name so
-    // that "this application is operable by keyboard and free of serious
-    // machine-detectable accessibility defects" is a claim with a report behind
-    // it. Both specs also run inside `e2e` on every push — `playwright.config.ts`
+    // that "this application is operable by keyboard and free of moderate,
+    // serious and critical machine-detectable accessibility defects" is a claim
+    // with a report behind it. Both specs also run inside `e2e` on every push — `playwright.config.ts`
     // narrows nothing — so the task carries `countsTests: false` and the tier
     // buys separate evidence rather than separate coverage.
     //

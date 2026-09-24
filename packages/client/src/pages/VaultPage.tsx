@@ -100,6 +100,10 @@ export default function VaultPage() {
           />
         }
       >
+        {/* The page's one h1, as `/documents` has. Outside the list's error
+            boundary so a list that fails to render still leaves a named page,
+            and outside the rail so it names the page rather than one pane. */}
+        <h1 className="mb-4 text-2xl font-bold text-[hsl(var(--foreground))]">Vault</h1>
         <ErrorBoundary>
           <VaultList onCreateNew={handleCreateNew} />
         </ErrorBoundary>

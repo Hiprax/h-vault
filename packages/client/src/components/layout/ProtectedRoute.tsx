@@ -4,6 +4,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { refreshTokenApi } from '../../services/api/authApi';
 import { isAccountLocked, isSessionGone } from '../../services/auth/sessionFailure';
 import { UnlockScreen } from '../auth/UnlockScreen';
+import { StandalonePage } from './StandalonePage';
 import { Button } from '../ui/Button';
 import { Loader2, LockKeyhole, WifiOff } from 'lucide-react';
 
@@ -95,14 +96,14 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
 
   if (accountLocked) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <div
           role="alert"
           className="flex max-w-sm flex-col items-center gap-4 text-center text-[hsl(var(--foreground))]"
         >
           <LockKeyhole className="h-8 w-8 text-[hsl(var(--muted-foreground))]" />
           <div className="space-y-1">
-            <p className="text-sm font-medium">Account temporarily locked</p>
+            <h1 className="text-sm font-medium">Account temporarily locked</h1>
             <p className="text-sm text-[hsl(var(--muted-foreground))]">
               Your session is still active. Use the unlock link we emailed you, or try again later.
             </p>
@@ -111,20 +112,20 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
             Try again
           </Button>
         </div>
-      </div>
+      </StandalonePage>
     );
   }
 
   if (refreshStalled) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <div
           role="alert"
           className="flex max-w-sm flex-col items-center gap-4 text-center text-[hsl(var(--foreground))]"
         >
           <WifiOff className="h-8 w-8 text-[hsl(var(--muted-foreground))]" />
           <div className="space-y-1">
-            <p className="text-sm font-medium">Could not reach the server</p>
+            <h1 className="text-sm font-medium">Could not reach the server</h1>
             <p className="text-sm text-[hsl(var(--muted-foreground))]">
               Your session is still active. Check your connection and try again.
             </p>
@@ -133,15 +134,15 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
             Try again
           </Button>
         </div>
-      </div>
+      </StandalonePage>
     );
   }
 
   if (isRefreshing) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))]">
+      <StandalonePage className="px-0">
         <Loader2 className="h-8 w-8 animate-spin text-[hsl(var(--muted-foreground))]" />
-      </div>
+      </StandalonePage>
     );
   }
 

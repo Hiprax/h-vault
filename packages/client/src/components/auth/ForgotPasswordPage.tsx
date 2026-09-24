@@ -11,6 +11,7 @@ import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
+import { StandalonePage } from '../layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schema                                                                    */
@@ -63,7 +64,7 @@ export function ForgotPasswordPage() {
   /* ---- Success view ---- */
   if (isSubmitted) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <Card className="w-full max-w-md">
           <CardHeader className="items-center text-center">
             {emailSent ? (
@@ -71,7 +72,7 @@ export function ForgotPasswordPage() {
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-100 dark:bg-green-950">
                   <CheckCircle className="h-6 w-6 text-green-600 dark:text-green-400" />
                 </div>
-                <CardTitle>Check Your Email</CardTitle>
+                <CardTitle as="h1">Check Your Email</CardTitle>
                 <CardDescription>
                   If an account exists with that email address, we&apos;ve sent password reset
                   instructions. Please check your inbox and spam folder.
@@ -82,7 +83,7 @@ export function ForgotPasswordPage() {
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-yellow-100 dark:bg-yellow-950">
                   <AlertTriangle className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
                 </div>
-                <CardTitle>Email Could Not Be Sent</CardTitle>
+                <CardTitle as="h1">Email Could Not Be Sent</CardTitle>
                 <CardDescription>
                   We were unable to send the password reset email. This may be due to a server
                   configuration issue. Please try again later or contact support.
@@ -101,19 +102,19 @@ export function ForgotPasswordPage() {
             </Link>
           </CardFooter>
         </Card>
-      </div>
+      </StandalonePage>
     );
   }
 
   /* ---- Form view ---- */
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+    <StandalonePage>
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Forgot Password</CardTitle>
+          <CardTitle as="h1">Forgot Password</CardTitle>
           <CardDescription>
             Enter the email address associated with your account and we&apos;ll send you a link to
             reset your password.
@@ -167,6 +168,6 @@ export function ForgotPasswordPage() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

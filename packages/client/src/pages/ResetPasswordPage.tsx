@@ -21,6 +21,7 @@ import {
   CardHeader,
   CardTitle,
 } from '../components/ui/Card';
+import { StandalonePage } from '../components/layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schema                                                                    */
@@ -154,13 +155,13 @@ export default function ResetPasswordPage() {
   /* ---- Missing token ---- */
   if (!token) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <Card className="w-full max-w-md">
           <CardHeader className="items-center text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-950">
               <AlertCircle className="h-6 w-6 text-red-600 dark:text-red-400" />
             </div>
-            <CardTitle>Invalid Link</CardTitle>
+            <CardTitle as="h1">Invalid Link</CardTitle>
             <CardDescription>
               No reset token found. Please check the link from your email or request a new password
               reset.
@@ -176,20 +177,20 @@ export default function ResetPasswordPage() {
             </Link>
           </CardFooter>
         </Card>
-      </div>
+      </StandalonePage>
     );
   }
 
   /* ---- Success view ---- */
   if (isSuccess) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <Card className="w-full max-w-md">
           <CardHeader className="items-center text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-100 dark:bg-green-950">
               <CheckCircle className="h-6 w-6 text-green-600 dark:text-green-400" />
             </div>
-            <CardTitle>Password Reset Complete</CardTitle>
+            <CardTitle as="h1">Password Reset Complete</CardTitle>
             <CardDescription>
               Your password has been reset successfully. You can now sign in with your new password.
             </CardDescription>
@@ -204,19 +205,19 @@ export default function ResetPasswordPage() {
             </Link>
           </CardFooter>
         </Card>
-      </div>
+      </StandalonePage>
     );
   }
 
   /* ---- Form view ---- */
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+    <StandalonePage>
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Reset Password</CardTitle>
+          <CardTitle as="h1">Reset Password</CardTitle>
           <CardDescription>Enter your email and choose a new master password.</CardDescription>
         </CardHeader>
 
@@ -380,6 +381,6 @@ export default function ResetPasswordPage() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

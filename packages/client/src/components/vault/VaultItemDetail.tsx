@@ -1064,9 +1064,9 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
             aria-modal="true"
             aria-label="Rename item"
           >
-            <h3 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
+            <h2 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
               Rename Item
-            </h3>
+            </h2>
             <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
               Only the name is changed. The item&rsquo;s stored contents are left exactly as they
               are.
@@ -1128,9 +1128,9 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
             aria-modal="true"
             aria-label="Confirm delete"
           >
-            <h3 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
+            <h2 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
               {isTrashed ? 'Permanently Delete Item' : 'Delete Item'}
-            </h3>
+            </h2>
             <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
               {isTrashed ? (
                 <>

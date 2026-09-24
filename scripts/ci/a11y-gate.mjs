@@ -34,11 +34,13 @@
  *     kept because they fail in different ways (a deleted step versus a spec that
  *     never ran at all).
  *
- *  b. THE THRESHOLD IS `serious` AND `critical`, AND IT IS NOT CONFIGURABLE HERE.
- *     Every violation axe reports is recorded, whatever its impact, so the
- *     moderate and minor debt is visible and can be paid down; only the top two
- *     impacts fail. A flag that let a caller pick the threshold would be the one
- *     knob needed to make this gate green without touching the application.
+ *  b. THE THRESHOLD IS `moderate` AND ABOVE, AND IT IS NOT CONFIGURABLE HERE.
+ *     Every violation axe reports is recorded, whatever its impact, so the minor
+ *     debt is visible and can be paid down; `moderate`, `serious` and `critical`
+ *     fail. `moderate` joined the set only once it measured zero across every
+ *     view, because a gate moves up from a measured value and never ahead of
+ *     one. A flag that let a caller pick the threshold would be the one knob
+ *     needed to make this gate green without touching the application.
  *
  *  c. A MISSING OR STALE SCAN FILE IS A FAILURE, NEVER AN EMPTY PASS. The specs
  *     write `a11y-scans.json`; this gate deletes it BEFORE the run, so a report
@@ -65,7 +67,7 @@ import { color, note, warn } from './lib/ui.mjs';
 import { ensureReportDir, reportPath, writeJsonReport } from './lib/reports.mjs';
 
 /** Mirrors `A11Y_BLOCKING_IMPACTS` in e2e/a11yViews.ts. */
-const BLOCKING_IMPACTS = ['serious', 'critical', 'unknown'];
+const BLOCKING_IMPACTS = ['moderate', 'serious', 'critical', 'unknown'];
 
 /**
  * Mirrors `A11Y_SUITE` in playwright.a11y.config.ts.
@@ -176,8 +178,8 @@ const payload = {
   suite: SUITE,
   viewsDeclared: views?.length ?? 0,
   viewsScanned: scanned.size,
-  // The gated numbers. `serious` and `critical` are ratcheted in
-  // `.testfortress/baseline.json`; the rest are recorded so the debt below the
+  // The gated numbers. `moderate`, `serious` and `critical` are ratcheted in
+  // `.testfortress/baseline.json`; `minor` is recorded so the debt below the
   // gate is visible and can only be paid down deliberately.
   violations: {
     critical: byImpact['critical'] ?? 0,
@@ -210,13 +212,13 @@ if (code !== 0 || problems.length > 0 || blocking.length > 0) {
       ),
     );
   }
-  warn('a11y.json carries the full findings, including the moderate and minor ones');
+  warn('a11y.json carries the full findings, including the minor ones');
   process.exit(1);
 }
 
 note(
-  `a11y.json — ${String(scanned.size)} views, 0 serious/critical, ` +
-    `${String(payload.violations.moderate)} moderate, ${String(payload.violations.minor)} minor, ` +
+  `a11y.json — ${String(scanned.size)} views, 0 moderate/serious/critical, ` +
+    `${String(payload.violations.minor)} minor, ` +
     `${String(undecided.length)} undecided ` +
     `(automated scanning finds roughly a third of real accessibility defects: this is a floor)`,
 );

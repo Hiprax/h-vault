@@ -1,12 +1,13 @@
 import { Link } from 'react-router';
 import { ShieldOff } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
+import { StandalonePage } from '../components/layout/StandalonePage';
 
 export default function NotFoundPage() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center space-y-4 bg-[hsl(var(--background))] px-4 text-center">
+    <StandalonePage className="flex-col space-y-4 text-center">
       <div className="flex h-20 w-20 items-center justify-center rounded-full bg-[hsl(var(--muted))]">
         <ShieldOff className="h-10 w-10 text-[hsl(var(--muted-foreground))]" />
       </div>
@@ -21,6 +22,6 @@ export default function NotFoundPage() {
       >
         {isAuthenticated ? 'Back to Vault' : 'Back to Login'}
       </Link>
-    </div>
+    </StandalonePage>
   );
 }

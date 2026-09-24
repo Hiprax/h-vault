@@ -1852,7 +1852,8 @@ describe('VaultItemDetail / rename for an undecodable item', () => {
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Failed to rename item', type: 'error' }),
     );
-    expect(screen.getByRole('dialog', { name: 'Rename item' })).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog', { name: 'Rename item' });
+    expect(dialog).toContainElement(screen.getByRole('heading', { level: 2, name: 'Rename Item' }));
   });
 
   it('closes without saving on Cancel', () => {

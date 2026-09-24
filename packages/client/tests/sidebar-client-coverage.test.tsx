@@ -889,7 +889,7 @@ describe('FolderRail - edit/rename folder', () => {
     fireEvent.click(screen.getByText('Rename'));
 
     // Rename dialog should open
-    expect(screen.getByText('Rename Folder')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Rename Folder' })).toBeInTheDocument();
     const renameInput = screen.getByPlaceholderText('New name');
     expect(renameInput).toHaveValue('Work');
 
@@ -1031,6 +1031,9 @@ describe('FolderRail - delete folder', () => {
     // Confirm in the confirmation dialog
     const dialog = screen.getByRole('alertdialog');
     expect(dialog).toBeInTheDocument();
+    expect(dialog).toContainElement(
+      screen.getByRole('heading', { level: 2, name: 'Delete Folder' }),
+    );
     fireEvent.click(screen.getAllByText('Delete').find((el) => dialog.contains(el))!);
 
     await waitFor(() => {
@@ -1771,7 +1774,7 @@ describe('AppLayout - comprehensive coverage', () => {
   // class: `translate-x-0` when open, `-translate-x-full` when closed. The overlay
   // (a button with aria-label "Close sidebar" and class `fixed inset-0`) only
   // renders while open. These helpers let each close test assert the actual result.
-  const getAside = () => screen.getByText('H-Vault').closest('aside')!;
+  const getAside = () => screen.getByText('H-Vault').closest('header')!;
   const getOverlay = () =>
     screen.queryAllByLabelText('Close sidebar').find((b) => b.className.includes('fixed'));
   const getCloseX = () =>
@@ -1966,7 +1969,7 @@ describe('AppLayout - comprehensive coverage', () => {
     renderAppLayout();
 
     // Hover over the sidebar to trigger temporary expansion
-    const sidebar = screen.getByText('H-Vault').closest('aside')!;
+    const sidebar = screen.getByText('H-Vault').closest('header')!;
     fireEvent.mouseEnter(sidebar);
 
     // aria-label remains "Expand sidebar" (based on sidebarCollapsed state),

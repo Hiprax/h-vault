@@ -729,7 +729,7 @@ export interface A11yScan {
   url: string;
   /** Every violation axe reported, whatever its impact. */
   violations: A11yViolation[];
-  /** The subset that fails the gate: `serious` and `critical`. */
+  /** The subset that fails the gate: every impact in `A11Y_BLOCKING_IMPACTS`. */
   blocking: A11yViolation[];
   /**
    * Checks axe COULD NOT DECIDE, recorded and not gated.
@@ -844,7 +844,7 @@ async function settleTransitions(page: Page): Promise<void> {
  * unique), and scanning only the dialog cannot see any of that.
  *
  * Nothing is disabled and no rule set is narrowed. axe's default rules run, all
- * findings are recorded, and only `serious`/`critical` fail — see
+ * findings are recorded, and everything from `moderate` up fails — see
  * {@link A11Y_BLOCKING_IMPACTS}. Narrowing the rules would raise the pass rate
  * without changing the application, which is the coverage-scope cheat wearing an
  * accessibility hat.
@@ -886,8 +886,8 @@ export async function scanA11y(page: Page, view: string): Promise<A11yScan> {
  * sends them back to the browser to find out what.
  */
 export function describeA11y(scan: A11yScan): string {
-  if (scan.blocking.length === 0) return `${scan.view}: no serious or critical violations`;
-  return `${scan.view} (${scan.url}) has ${String(scan.blocking.length)} serious/critical axe violation(s): ${scan.blocking
+  if (scan.blocking.length === 0) return `${scan.view}: no blocking violations`;
+  return `${scan.view} (${scan.url}) has ${String(scan.blocking.length)} blocking axe violation(s): ${scan.blocking
     .map(
       (violation) =>
         `${violation.id} [${violation.impact}] at ${violation.nodes.map((node) => node.target).join(', ')}`,

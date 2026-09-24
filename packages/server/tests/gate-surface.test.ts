@@ -1775,13 +1775,18 @@ describe('machine-readable reports', () => {
     // description is what makes a report readable a year later.
     expect(new Set(A11Y_VIEW_IDS).size).toBe(A11Y_VIEW_IDS.length);
     for (const view of A11Y_VIEWS) expect(view.description, view.id).toBeTruthy();
-    // The threshold is the gate. Widening it to `moderate` would be a stricter
-    // gate; narrowing it to `critical` alone would silently drop colour contrast,
-    // missing labels and broken ARIA relationships, which are all `serious`.
-    // `unknown` is the nullable-impact case `scanA11y` maps: blocking, because a
-    // violation axe could not grade is not thereby a minor one, and dropping it
-    // left a finding that appeared in no number the gate publishes.
-    expect([...A11Y_BLOCKING_IMPACTS]).toEqual(['serious', 'critical', 'unknown']);
+    // The threshold is the gate. `moderate` joined it once the structural debt
+    // it grades (a page with no `main` or no `h1`, content outside every
+    // landmark, two landmarks a menu cannot tell apart, a skipped heading level)
+    // had been paid down to zero across every scanned view; dropping it again
+    // would let that debt return in silence. Narrowing further, to `critical`
+    // alone, would drop colour contrast, missing labels and broken ARIA
+    // relationships, which are all `serious`. `unknown` is the nullable-impact
+    // case `scanA11y` maps: blocking, because a violation axe could not grade is
+    // not thereby a minor one, and dropping it left a finding that appeared in
+    // no number the gate publishes. `minor` is the one impact still recorded
+    // rather than gated.
+    expect([...A11Y_BLOCKING_IMPACTS]).toEqual(['moderate', 'serious', 'critical', 'unknown']);
     // The gate is a plain `.mjs` and cannot import the TypeScript constant, so it
     // RESTATES the list — and its docblock claimed this test held the two
     // together, which it did not: only `A11Y_SUITE` was pinned. A narrowed copy

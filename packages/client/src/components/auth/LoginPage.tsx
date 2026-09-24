@@ -12,6 +12,7 @@ import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
 import { OtpInput } from '../ui/OtpInput';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
+import { StandalonePage } from '../layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schemas                                                                   */
@@ -132,13 +133,13 @@ export function LoginPage() {
   /* ---- 2FA view ---- */
   if (twoFactorRequired) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <Card className="w-full max-w-md">
           <CardHeader className="items-center text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
               <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
             </div>
-            <CardTitle>Two-Factor Authentication</CardTitle>
+            <CardTitle as="h1">Two-Factor Authentication</CardTitle>
             <CardDescription>
               {useBackupCode
                 ? 'Enter one of your 16-character backup codes'
@@ -252,19 +253,19 @@ export function LoginPage() {
             </form>
           )}
         </Card>
-      </div>
+      </StandalonePage>
     );
   }
 
   /* ---- Login view ---- */
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+    <StandalonePage>
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Welcome Back</CardTitle>
+          <CardTitle as="h1">Welcome Back</CardTitle>
           <CardDescription>Sign in to your H-Vault account</CardDescription>
         </CardHeader>
 
@@ -416,6 +417,6 @@ export function LoginPage() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

@@ -905,7 +905,7 @@ describe('AppLayout', () => {
       expect(vaultLabel.className).toContain('opacity-0');
 
       // Simulate mouseEnter on the sidebar
-      const sidebar = screen.getByLabelText('Expand sidebar').closest('aside')!;
+      const sidebar = screen.getByLabelText('Expand sidebar').closest('header')!;
       fireEvent.mouseEnter(sidebar);
 
       // After hover: labels should have opacity-100
@@ -918,7 +918,7 @@ describe('AppLayout', () => {
       useUIStore.setState({ sidebarCollapsed: true });
       renderAppLayout();
 
-      const sidebar = screen.getByLabelText('Expand sidebar').closest('aside')!;
+      const sidebar = screen.getByLabelText('Expand sidebar').closest('header')!;
       const vaultLabel = screen.getByText('Vault');
 
       // Hover to expand
@@ -1007,7 +1007,8 @@ describe('FolderRail', () => {
 
     fireEvent.click(screen.getByLabelText('Create folder'));
 
-    expect(screen.getByText('New Folder')).toBeInTheDocument();
+    // The dialog's title continues the page outline: one level below the page h1.
+    expect(screen.getByRole('heading', { level: 2, name: 'New Folder' })).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Folder name')).toBeInTheDocument();
     expect(screen.getByText('Create')).toBeInTheDocument();
     expect(screen.getByText('Cancel')).toBeInTheDocument();
@@ -1277,7 +1278,7 @@ describe('VaultList', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('No items found')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'No items found' })).toBeInTheDocument();
     expect(screen.getByText('Create Item')).toBeInTheDocument();
   });
 
@@ -1290,7 +1291,7 @@ describe('VaultList', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('Trash is empty')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Trash is empty' })).toBeInTheDocument();
   });
 
   it('calls onCreateNew when "Create Item" is clicked in empty state', () => {

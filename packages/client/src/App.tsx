@@ -4,6 +4,7 @@ import { ProtectedRoute } from './components/layout/ProtectedRoute';
 import { PublicOnlyRoute } from './components/layout/PublicOnlyRoute';
 import { AppLayout } from './components/layout/AppLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
+import { StandalonePage } from './components/layout/StandalonePage';
 import { ToastProvider } from './components/ui/Toast';
 import { ReloadPrompt } from './components/layout/ReloadPrompt';
 import { useFavicon } from './hooks/useFavicon';
@@ -33,14 +34,21 @@ const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage'));
 const UnlockAccountPage = lazy(() => import('./pages/UnlockAccountPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
 
-function LoadingSpinner() {
+/**
+ * The full-screen loading state: shown while a remembered session resumes and as
+ * the route table's `Suspense` fallback. Both render at the TOP of the tree —
+ * the one `Suspense` boundary sits outside `AppLayout`, so a lazy page that
+ * suspends replaces the whole shell — which is why this is a `<main>` of its own
+ * and can never nest inside the layout's. Exported so that is pinned.
+ */
+export function LoadingSpinner() {
   return (
-    <div className="flex h-screen w-full items-center justify-center bg-[hsl(var(--background))]">
+    <StandalonePage className="h-screen w-full px-0">
       <div className="flex flex-col items-center gap-3">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-[hsl(var(--muted))] border-t-[hsl(var(--primary))]" />
         <p className="text-sm text-[hsl(var(--muted-foreground))]">Loading...</p>
       </div>
-    </div>
+    </StandalonePage>
   );
 }
 
@@ -85,14 +93,14 @@ export function App() {
 
   if (!resumeSettled) {
     return (
-      <ErrorBoundary>
+      <ErrorBoundary standalone>
         <LoadingSpinner />
       </ErrorBoundary>
     );
   }
 
   return (
-    <ErrorBoundary>
+    <ErrorBoundary standalone>
       <BrowserRouter>
         <ToastProvider>
           <Suspense fallback={<LoadingSpinner />}>

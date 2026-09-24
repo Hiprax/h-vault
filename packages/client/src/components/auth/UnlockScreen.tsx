@@ -14,6 +14,7 @@ import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
+import { StandalonePage } from '../layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schema                                                                    */
@@ -372,13 +373,13 @@ export function UnlockScreen() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+    <StandalonePage>
       <Card className="w-full max-w-sm">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <Lock className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Vault Locked</CardTitle>
+          <CardTitle as="h1">Vault Locked</CardTitle>
           <CardDescription>
             {user?.email ? `Signed in as ${user.email}` : 'Enter your master password to unlock'}
           </CardDescription>
@@ -473,6 +474,6 @@ export function UnlockScreen() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }
