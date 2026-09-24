@@ -373,77 +373,22 @@ RUN rm -f /app/packages/client/dist/index.html /app/packages/client/dist/sandbox
 # neither root nor NET_BIND_SERVICE. The routing config is BAKED IN rather than
 # bind-mounted, which keeps the image self-contained and portable across host OSes
 # (no Windows/WSL bind-mount permission or line-ending surprises).
-FROM nginxinc/nginx-unprivileged:1.29-alpine AS web
-
-# Patch the base image's OS packages before serving anything from it. The
-# nginx-unprivileged:1.29-alpine base ships fixable HIGH CVEs in c-ares, openssl
-# (libcrypto3 / libssl3), libexpat and libxml2 — exactly the kind the Trivy gate
-# refuses to let through. Upgrading pulls the patched packages from its pinned
-# Alpine release (3.23, matching the node base above). The base runs as the
-# unprivileged uid 101, so switch to root ONLY for the apk transaction and drop
-# straight back; the final runtime user is unchanged, and --no-cache leaves no apk
-# index behind in the layer.
-# `0`, not `root`: the same uid, written the way the `USER 101` below it is
-# written, so the pair reads as one decision rather than two conventions.
+FROM nginxinc/nginx-unprivileged:1.30.5-alpine3.24@sha256:4714e0b1b2577eaa1a6131d07c958b67f0eb68e6d0521e90c6e5287db8cf0bc5 AS web
+# Digest-pinned: the tag alone is re-published in place, so two builds of one tag are two images.
+# The OS packages are still upgraded (Trivy gates fixable HIGH/CRITICAL in `audit:image`), as root,
+# because apk needs it; the runtime user is put back before anything else happens.
 USER 0
-# ONE RUN, and the order inside it is load-bearing rather than cosmetic. The
-# upgrade must precede the edit, because an nginx package upgrade would overwrite
-# /etc/nginx/nginx.conf and take the worker count with it; `&&` fixes that order
-# in a way two instructions never did. It also collapses two layers into one and
-# clears hadolint DL3059, which is what `development` above already does for the
-# same reason.
-#
-# The second command bounds the worker count to this container's CPU budget, not
-# the host's core count. nginx ships `worker_processes auto`, which resolves
-# through sysconf(_SC_NPROCESSORS_ONLN) — that reports the HOST's cores and is
-# blind to the CFS quota, so on a 32-core machine nginx forks 32 workers inside a
-# service capped at `cpus: '0.5'` / `mem_limit: 256m`, and past ~99 cores it
-# cannot fork them all under `pids_limit: 100`. Two workers comfortably saturate
-# half a core for a reverse proxy while leaving a spare if one blocks on a
-# static-file read. This is baked at build time on purpose: the runtime
-# alternative (NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE) rewrites nginx.conf on
-# boot, which cannot work against this service's `read_only: true` root
-# filesystem.
-RUN apk upgrade --no-cache \
- && sed -i 's/^worker_processes .*/worker_processes 2;/' /etc/nginx/nginx.conf
+RUN apk upgrade --no-cache
 USER 101
-
-# The bundle is served from /srv/hvault, NOT from the base image's
-# /usr/share/nginx/html. That directory already contains nginx's own stock
-# index.html (the "Welcome to nginx!" page), and COPY overlays rather than
-# replaces — so serving from there means a request for /index.html is answered
-# with the stock page instead of falling through to Express, and it comes back
-# with none of helmet's security headers. Owning the document root outright means
-# nothing can be served from it that this repo did not put there.
 COPY --from=web-root /app/packages/client/dist /srv/hvault
-
-# 0444 is set explicitly rather than inherited, for the same reason
-# docker/mongo.Dockerfile sets it: COPY PRESERVES the source file's mode, so on a
-# checkout whose files are 0600 (any `umask 077` machine) the config lands in the
-# image as -rw------- owned by root while nginx serves as uid 101, and the config
-# test dies with
-#   open() "/etc/nginx/conf.d/default.conf" failed (13: Permission denied)
-# — an unbootable stack whose cause is the developer's umask rather than anything
-# in this repository. Read-only is also the right runtime mode: nothing in the
-# stack should be able to rewrite the routing config.
-#
-# Note that these two lines must NOT be collapsed with the directory COPY above.
-# --chmod=0444 on a DIRECTORY strips its execute bit, and mongo.Dockerfile
-# documents where that leads.
+# The ecosystem's golden nginx: nginx.conf REPLACES the image's own (it carries the explicit
+# worker count the `cpus: '0.5'` service needs, the /tmp paths a read-only rootfs needs, the JSON
+# access log, the MIME fixes and the header-floor maps); internal.conf is this project's routing.
+# Every file gets an explicit mode: COPY preserves the source mode, and a 0600 checkout would
+# leave uid 101 unable to read its own configuration.
+COPY --chmod=0444 docker/nginx/nginx.conf     /etc/nginx/nginx.conf
 COPY --chmod=0444 docker/nginx/internal.conf  /etc/nginx/conf.d/default.conf
-
-# Deliberately NOT under conf.d/: the stock nginx.conf globs conf.d/*.conf into
-# the http{} context, which would apply this fragment's proxy headers globally.
-#
-# The directory is created FIRST, exactly as mongo.Dockerfile does and for the
-# identical reason: /etc/nginx/hvault does not exist in the nginx-unprivileged
-# base, so a `COPY --chmod=0444` into it makes BuildKit create the parent with
-# THAT mode — dr--r--r--, which uid 101 cannot traverse, so the file inside is
-# unreadable while `ls` as root still shows it world-readable. Creating it up
-# front leaves it 0755 and the COPY then sets only the file's mode. This mkdir is
-# harmless without the --chmod and load-bearing with it, so the two belong
-# together.
-RUN mkdir -p /etc/nginx/hvault
-COPY --chmod=0444 docker/nginx/proxy_app.conf /etc/nginx/hvault/proxy_app.conf
-
+# The directory first, or `COPY --chmod=0444` creates it 0444 and nginx cannot traverse it.
+RUN mkdir -p /etc/nginx/snippets
+COPY --chmod=0444 docker/nginx/snippets/headers.conf docker/nginx/snippets/proxy.conf /etc/nginx/snippets/
 EXPOSE 8080

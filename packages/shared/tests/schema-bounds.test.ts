@@ -402,6 +402,33 @@ describe('bounds hold at the limit and refuse one past it', () => {
           newVaultKeyTag: 'g',
         }),
     },
+    ...(
+      [
+        ['newPendingEncryptedVaultKey', 200],
+        ['newPendingVaultKeyIv', 24],
+        ['newPendingVaultKeyTag', 32],
+      ] as const
+    ).map(([field, max]) => ({
+      name: `changePasswordSchema.${field} max ${String(max)}`,
+      at: () =>
+        accepts(changePasswordSchema, {
+          currentAuthHash: 'c',
+          newAuthHash: 'n',
+          newEncryptedVaultKey: 'k',
+          newVaultKeyIv: 'i',
+          newVaultKeyTag: 'g',
+          [field]: chars(max),
+        }),
+      past: () =>
+        accepts(changePasswordSchema, {
+          currentAuthHash: 'c',
+          newAuthHash: 'n',
+          newEncryptedVaultKey: 'k',
+          newVaultKeyIv: 'i',
+          newVaultKeyTag: 'g',
+          [field]: chars(max + 1),
+        }),
+    })),
     {
       name: 'updateFolderSchema.icon max 50',
       at: () => accepts(updateFolderSchema, { icon: chars(50) }),
@@ -487,6 +514,21 @@ describe('bounds hold at the limit and refuse one past it', () => {
     expect(at(), 'the value AT the bound must be accepted').toBe(true);
     expect(past(), 'the value one PAST the bound must be refused').toBe(false);
   });
+
+  it.each(['newPendingEncryptedVaultKey', 'newPendingVaultKeyIv', 'newPendingVaultKeyTag'])(
+    'changePasswordSchema refuses an EMPTY %s, which would carry no wrapper at all',
+    (field) => {
+      const base = {
+        currentAuthHash: 'c',
+        newAuthHash: 'n',
+        newEncryptedVaultKey: 'k',
+        newVaultKeyIv: 'i',
+        newVaultKeyTag: 'g',
+      };
+      expect(accepts(changePasswordSchema, { ...base, [field]: 'x' })).toBe(true);
+      expect(accepts(changePasswordSchema, { ...base, [field]: '' })).toBe(false);
+    },
+  );
 });
 
 describe('the ciphertext trios are all-or-nothing', () => {

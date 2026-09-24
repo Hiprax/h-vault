@@ -90,6 +90,7 @@ import { loadManifest, writeJsonReport } from './lib/reports.mjs';
 import { repoRoot, captureExe } from './lib/proc.mjs';
 import { parseLcov } from './lib/lcov.mjs';
 import { buildChangedDiff } from './lib/changed-diff.mjs';
+import { resolveDiffBase } from './lib/diff-base.mjs';
 import { inCoverageScope, packageOfPath, COVERAGE_SCOPE_GLOBS } from './lib/coverage-scope.mjs';
 
 const TF = path.join(repoRoot, '.testfortress');
@@ -231,46 +232,17 @@ for (const artifact of artifacts) {
 // ---------------------------------------------------------------------------
 // (e) the diff base
 // ---------------------------------------------------------------------------
-const requestedBase = process.env['HVAULT_DIFF_BASE'];
-const candidates = requestedBase ? [requestedBase] : ['main', 'origin/main'];
-const base = candidates.find((ref) => git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]));
-if (!base) {
-  cannotRun(
-    `none of ${candidates.join(', ')} resolves to a commit, so there is no trunk to compare against. ` +
-      'Set HVAULT_DIFF_BASE to the ref this branch forked from.',
-  );
+// The resolution itself — HVAULT_DIFF_BASE, then main, then origin/main; the
+// last commit when HEAD IS the trunk; a shallow trunk clone refused — lives in
+// `lib/diff-base.mjs`, because `test:mutation:diff` must measure exactly the
+// change this gate measures. Its docblock carries the reasons.
+let diffBase;
+try {
+  diffBase = resolveDiffBase({ git, requested: process.env['HVAULT_DIFF_BASE'] });
+} catch (error) {
+  cannotRun(error instanceof Error ? error.message : String(error));
 }
-if (!git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])) {
-  cannotRun('HEAD does not resolve to a commit, so there is nothing to diff');
-}
-const rawMergeBase = git(['merge-base', base, 'HEAD']) ?? base;
-const headSha = git(['rev-parse', 'HEAD']);
-/**
- * A build ON the trunk has no diff against the trunk, and "no changed lines" is
- * reported as 100% patch coverage — so this gate checked NOTHING for exactly the
- * run that matters most: `release.yml` builds a push to `main`, where `main` and
- * `HEAD` are the same commit. Anyone committing straight to `main` locally got
- * the same free pass.
- *
- * The last commit is the honest subject there: on the trunk, "this change" IS
- * `HEAD^..HEAD`. A repository whose HEAD has no parent keeps the empty diff,
- * because there is genuinely nothing before it to compare with.
- */
-const onTrunk = headSha !== null && rawMergeBase === headSha;
-const firstParent = onTrunk ? git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}~1']) : null;
-// A trunk build whose HEAD has no parent is one of two very different things: a
-// genuine root commit (there is nothing before it, and an empty diff is honest),
-// or a SHALLOW clone whose graft boundary is HEAD (the history exists and this
-// machine cannot see it, so an empty diff is a lie that reads as 100%). They are
-// indistinguishable from the rev alone, so ask git which one this is.
-if (onTrunk && firstParent === null && git(['rev-parse', '--is-shallow-repository']) === 'true') {
-  cannotRun(
-    'this is a shallow clone of the trunk, so the commit before HEAD is not present and ' +
-      '"the lines this change touched" cannot be identified. Fetch the history (fetch-depth: 0) ' +
-      'and re-run.',
-  );
-}
-const mergeBase = firstParent ?? rawMergeBase;
+const { ref: base, mergeBase, onTrunk } = diffBase;
 
 // ---------------------------------------------------------------------------
 // the changed production files: tracked and untracked

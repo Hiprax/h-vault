@@ -845,18 +845,58 @@ export const DEFECTS = {
     // for the other direction — if the anchor below ever drifts and the replace
     // becomes a no-op, the case is killed and reported `unproven` rather than
     // mutating the whole codebase while the harness waits.
-    title: 'exclude the client import services from the declared mutation scope',
+    //
+    // The plant lands in the SHARED leg, the cheapest one and the first to hold a
+    // floor, because the pre-flight compares the declared globs against every
+    // file a recorded floor names: a plant in a leg with no floor yet would leave
+    // nothing to compare against, the gate would fall through to Stryker, and the
+    // case would be reported `unproven` for a reason that says nothing about the
+    // gate. The schemas are a core module, so this is also the costliest file set
+    // to lose quietly.
+    title: 'exclude the shared schemas, a core module, from the declared mutation scope',
     mutate: {
       'scripts/ci/lib/mutation-scope.mjs': (text) =>
         text.replace(
-          '      PRESENTATIONAL_EXCLUDE,\n',
-          "      PRESENTATIONAL_EXCLUDE,\n      '!packages/client/src/services/import/**',\n",
+          "      '!packages/shared/src/types/**',\n",
+          "      '!packages/shared/src/types/**',\n      '!packages/shared/src/schemas/**',\n",
         ),
     },
     timeoutMs: 120_000,
     // The pre-flight's own message. A green run says nothing of the kind, and
     // the file list it prints names the excluded directory.
     evidence: (text) => /scope narrowed/.test(text),
+  },
+
+  'test:mutation:diff': {
+    // The defect this gate exists for, planted exactly where it lives: new
+    // production lines that the suite EXECUTES around but never ASSERTS. The
+    // function is appended to a module the shared suite imports, so the dry run
+    // has related tests to run and Stryker starts normally — and none of them
+    // calls it, so every mutant on the changed lines survives. A brand-new file
+    // nothing imports would not do: Stryker refuses a dry run that executes no
+    // test, which is "could not run", and a case must prove the gate FAILS, not
+    // that it crashes.
+    //
+    // The workspace is a fresh repository whose HEAD is `main`, so the change is
+    // exactly the plant (the trunk rule compares against HEAD's parent, and a
+    // root commit has none, so the working tree is compared with HEAD). The
+    // shared leg is the cheap one — the run is seconds — and `timeoutMs` is the
+    // backstop should the anchor ever drift and the plant land nowhere.
+    title: 'append production lines the suite runs beside but never asserts',
+    mutate: {
+      'packages/shared/src/utils/index.ts': (text) =>
+        `${text}\nexport function selftestUnassertedClamp(value: number): number {\n` +
+        '  if (value > 10) return 10;\n' +
+        '  return value < 0 ? 0 : value;\n' +
+        '}\n',
+    },
+    timeoutMs: 600_000,
+    // The verdict's own sentence, which a passing run never prints, AND the
+    // planted file among the survivors it lists — so the failure is attributable
+    // to these lines rather than to anything else in the workspace.
+    evidence: (text) =>
+      /is below the floor of \d+%/.test(text) &&
+      /packages\/shared\/src\/utils\/index\.ts:\d+/.test(text),
   },
 
   'audit:deps': {

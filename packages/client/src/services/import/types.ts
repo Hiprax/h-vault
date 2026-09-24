@@ -52,7 +52,7 @@ export interface NativeCiphertext {
  * from the parsed `data`: its content was validated when it was first stored, and
  * sealing the same string again is what guarantees a re-import cannot perturb it.
  */
-export interface NativeContent {
+interface NativeContent {
   dataJson: string;
 }
 

@@ -1,11 +1,17 @@
 /**
  * The DECLARED mutation scope, in one place.
  *
- * Three consumers read this module and no fourth may restate it:
+ * Its consumers read this module and none may restate it:
  *
- *   1. `stryker.config.mjs`      — what Stryker mutates, and with which runner.
- *   2. `scripts/ci/mutation-gate.mjs` — the `test:mutation` gate.
- *   3. `scripts/ci/ratchet-check.mjs`  — the direction map's core-module keys.
+ *   1. `scripts/ci/lib/stryker-config.mjs` (loaded by `stryker.config.mjs`)
+ *      — what Stryker mutates, and with which runner.
+ *   2. `scripts/ci/mutation-gate.mjs` — the `test:mutation` campaign.
+ *   3. `scripts/ci/mutation-diff-gate.mjs` — `test:mutation:diff`, which selects
+ *      the changed files through `legForFile` and so can never narrow the scope.
+ *   4. `scripts/ci/ratchet-check.mjs` — the direction map's core-module keys,
+ *      the per-leg fields and reports, and the per-change floor and budgets.
+ *   5. `scripts/ci/lib/mutation-evidence.mjs` — the module keys a per-module
+ *      score is recorded under.
  *
  * A second declaration is the whole failure mode here: mutation scope is a
  * DENOMINATOR, so a config that quietly stops mutating a directory raises the
@@ -47,6 +53,7 @@
  * `.testfortress/**` outside it — which several suites read through
  * `../../<path>` — so the dry run would fail before a single mutant was tested.
  */
+import path from 'node:path';
 
 /** `packages/client/src/components/ui/**` — see the header. */
 export const PRESENTATIONAL_EXCLUDE = '!packages/client/src/components/ui/**';
@@ -177,7 +184,110 @@ export const MUTATION_SCOPE_GLOBS = MUTATION_LEGS.flatMap((leg) => leg.mutate);
 /** The leg ids, for CLI validation and error messages. */
 export const MUTATION_LEG_IDS = MUTATION_LEGS.map((leg) => leg.id);
 
+/**
+ * Does this leg's declared scope select `file`? LAST MATCH WINS, which is
+ * Stryker's own rule for a `mutate` list mixing patterns and `!` negations, so
+ * this answers the question Stryker will answer rather than a tidier one.
+ *
+ * One definition, read by the campaign gate's pre-flight, by the diff-scoped
+ * gate's file selection and by `gate-surface.test.ts`: three copies of a
+ * last-match loop is three places for "which files are in scope" to disagree,
+ * and scope is a denominator.
+ */
+export function legSelects(leg, file) {
+  let selected = false;
+  for (const glob of leg.mutate) {
+    if (glob.startsWith('!')) {
+      if (path.matchesGlob(file, glob.slice(1))) selected = false;
+    } else if (path.matchesGlob(file, glob)) {
+      selected = true;
+    }
+  }
+  return selected;
+}
+
+/** The leg whose declared scope selects `file`, or `undefined` when none does. */
+export const legForFile = (file) => MUTATION_LEGS.find((leg) => legSelects(leg, file));
+
+/**
+ * The per-leg evidence file every COMPLETED leg writes into the report
+ * directory, beside the merged `mutation.json`.
+ *
+ * It is what makes a leg bankable on its own. The merged report is written only
+ * by a run in which all three legs completed, and one of them is measured in
+ * days, so while it was the only artifact no leg could ever hold a floor. A leg's
+ * own file describes exactly the code that leg mutated, so the ratchet can read
+ * it as `mutation.legs.<id>.*` without mistaking one package for the whole
+ * declared scope, which is the mistake the merged report's all-or-nothing rule
+ * exists to prevent.
+ */
+export const legReportFor = (id) => `mutation-${id}.json`;
+
+/** The inverse of `legReportFor`: the leg a report name belongs to, if any. */
+export const legOfReport = (name) => MUTATION_LEG_IDS.find((id) => legReportFor(id) === name);
+
 /** Where each leg's Stryker artifacts land (gitignored). */
 export const MUTATION_TMP_DIR = '.stryker-tmp';
 export const incrementalFileFor = (id) => `${MUTATION_TMP_DIR}/incremental-${id}.json`;
 export const jsonReportFor = (id) => `${MUTATION_TMP_DIR}/report-${id}.json`;
+
+// ---------------------------------------------------------------------------
+// the per-change leg: `test:mutation:diff`
+// ---------------------------------------------------------------------------
+
+/**
+ * The floor for the mutants a change owns, in percent.
+ *
+ * 85 is the changed-code target the project's testing doctrine sets for this
+ * gate, taken as written rather than measured off one change: the score of one
+ * run belongs to that change, not to the suite, so a floor copied from whichever
+ * change happened to be measured first would be arbitrary in both directions.
+ * It is a committed constant read by the gate AND injected into the ratchet as
+ * `mutationDiff.floor` (direction higher), so it can be raised with a written
+ * reason and never quietly lowered.
+ */
+export const MUTATION_DIFF_FLOOR = 85;
+
+/**
+ * How many of a change's mutants each leg tests, at most, beyond the one per
+ * changed file that is always taken — the leg's DENOMINATOR, and the reason the
+ * per-change tier has a bounded cost at all.
+ *
+ * A change that owns fewer mutants than this is tested in full, which is the
+ * ordinary case. A larger one is sampled, deterministically and disclosed (see
+ * `lib/mutation-diff.mjs`), and the whole population stays under the campaign's
+ * own floor at tier 2. Ratcheted as `mutationDiff.budget.<leg>` (direction
+ * higher): a larger budget always tests a superset of a smaller one, so the
+ * number can only grow.
+ *
+ * MEASURED, per leg, because the three legs differ in cost per mutant by two
+ * orders of magnitude. On the reference machine (4 cores), over this plan's
+ * 85-file branch diff, each leg's mutant phase — AFTER its dry run, which the
+ * budget cannot shorten — cost: shared about 0.4 s of wall clock per mutant
+ * (127 in 52 s, dry run included), client about 1.5 s (83 in ~2 min), and server
+ * about 27 s at its concurrency of 2 (80 in ~37 min), because a surviving or
+ * static server mutant runs every covering test file and each boots a real
+ * mongod. Each budget is sized for a mutant phase of about three minutes on
+ * shared and client and about nine on the server, beside dry runs measured at
+ * seconds, ~5.5 minutes and ~7 minutes respectively for a change touching widely
+ * imported modules. The one mutant per changed file the stratification always
+ * takes can exceed a budget; that is deliberate (no changed file goes unmeasured).
+ */
+export const MUTATION_DIFF_BUDGETS = { shared: 200, client: 120, server: 20 };
+
+/**
+ * A hang guard per leg, never the cost control. The budget above is what bounds
+ * the cost; Stryker's own per-mutant timeout and dry-run timeout bound a wedged
+ * mutant. This only catches a run that is stuck as a whole, and expiring it is
+ * "could not run" (exit 2), never a verdict. Generous on purpose: a deadline that
+ * a busy machine could reach would turn the gate into a coin toss, the argument
+ * `mutation-gate.mjs` decision (e) makes for having none at all.
+ */
+export const MUTATION_DIFF_LEG_DEADLINE_MS = 60 * 60 * 1000;
+
+/** The per-change leg's report: deliberately not `mutation-<leg>.json`'s shape. */
+export const MUTATION_DIFF_REPORT = 'mutation-diff.json';
+
+/** Its per-leg Stryker artifacts, kept apart from the campaign's by name. */
+export const diffPlanFor = (id) => `${MUTATION_TMP_DIR}/diff-plan-${id}.json`;
+export const diffJsonReportFor = (id) => `${MUTATION_TMP_DIR}/diff-report-${id}.json`;

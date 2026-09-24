@@ -231,7 +231,19 @@
       "cmd": "npm run test:mutation",
       "tier": 2,
       "gate": "the oracle: Stryker mutates every production file in the declared scope \u2014 packages/*/src/** minus the coverage-excluded entry points and the presentational UI primitives \u2014 and the suite kills at least the recorded share of them, with the seven core modules held to their own recorded scores, no file dropping out of the measured set, and no mutant left untested that was tested before",
-      "report": "mutation.json",
+      "report": [
+        "mutation.json",
+        "mutation-shared.json",
+        "mutation-client.json",
+        "mutation-server.json"
+      ],
+      "requires": ["build:shared"]
+    },
+    "test:mutation:diff": {
+      "cmd": "npm run test:mutation:diff",
+      "tier": 1,
+      "gate": "the cheap half of the oracle: the mutants this change owns \u2014 those touching a changed production line against the merge base, and swallowing no unchanged code \u2014 are killed at no less than the committed floor, from scratch, within each leg's committed sample budget with every changed file measured, the sample disclosed and verified against what Stryker actually tested",
+      "report": "mutation-diff.json",
       "requires": ["build:shared"]
     },
     "test:smoke": {
@@ -326,7 +338,7 @@
   "gaps": [
     {
       "area": "the mutation oracle's floor",
-      "detail": "`test:mutation` is registered but has no `mutation` block in baseline.json, so it holds no floor, exits 1 by design, and `npm run verify:full` does not pass. The tier-0 and tier-1 surface that the pre-push hook and the release workflow run is unaffected. Two of three legs are measured but unbanked, because they ran while another project saturated the machine and a CPU-starved timeout is recorded as a kill.",
+      "detail": "The `shared` leg holds a floor (mutation.legs.shared: 88.64% of 2,633 mutants, banked 2026-09-24 from a from-scratch run), and `test:mutation:diff` holds every push to 85% on the mutants its lines own. The `client` leg (about 24,000 mutants, roughly twenty hours from scratch) and the `server` leg (about 12,900, 41% static, 120-130 hours on four cores) are unbanked, so `test:mutation` still exits 1 naming them as UNBANKED and `npm run verify:full` does not pass. Neither fits the ten-hour window an unattended session is given, and neither may be measured beside other work, because a CPU-starved timeout is recorded as a kill. The tier-0 and tier-1 surface that the pre-push hook and the release workflow run is unaffected.",
       "ledger": ["SUP-0044"],
       "review": "2026-11-11"
     },

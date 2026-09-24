@@ -63,7 +63,12 @@ import clientMutationConfig from '../../client/vitest.mutation.config';
 import sharedFlakeConfig from '../../shared/vitest.flake.config';
 import serverFlakeConfig from '../vitest.flake.config';
 import clientFlakeConfig from '../../client/vitest.flake.config';
-import { CORE_MODULES, MUTATION_LEGS } from '../../../scripts/ci/lib/mutation-scope.mjs';
+import {
+  CORE_MODULES,
+  MUTATION_LEGS,
+  legReportFor,
+  legSelects,
+} from '../../../scripts/ci/lib/mutation-scope.mjs';
 import playwrightConfig, { FIREFOX_SUITE } from '../../../playwright.config';
 import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
 import flakePlaywrightConfig, { FLAKE_REPEAT_EACH } from '../../../playwright.flake.config';
@@ -351,12 +356,12 @@ describe('tiers', () => {
     //
     //   `mutation` — the oracle, and the longest-running gate in the repository
     //   by an order of magnitude: it re-runs the suite once per mutant over
-    //   ~53,000 lines of source. Unlike every other member it has no cheap
-    //   sibling on the push tier, and that is stated rather than hidden: what
-    //   guards it between runs is `ratchet-check.mjs`'s DEFERRABLE rule, which
-    //   keeps `mutation.*` in the baseline as a floor the gate enforces itself
-    //   and turns the fields back into hard failures the moment this task stops
-    //   being a registered tier-2 gate.
+    //   ~53,000 lines of source. Its cheap sibling on the push tier is
+    //   `mutation-diff`, which mutates only the lines a change touched; what
+    //   guards the campaign's own floors between runs is `ratchet-check.mjs`'s
+    //   DEFERRABLE rule, which keeps `mutation.*` in the baseline as floors the
+    //   gate enforces itself (merged and per leg) and turns the fields back into
+    //   hard failures the moment this task stops being a registered tier-2 gate.
     //
     //   `dst` — the whole suite, once, in America/New_York. Like `fuzz`,
     //   `upgrade` and `recovery` it narrows nothing and every one of its tests
@@ -1098,17 +1103,7 @@ describe('machine-readable reports', () => {
     for (const modulePath of CORE_MODULES) {
       const file = probes[modulePath] ?? modulePath;
       expect(existsSync(path.join(repoRoot, file)), file).toBe(true);
-      const selected = MUTATION_LEGS.some((leg) => {
-        let hit = false;
-        for (const glob of leg.mutate) {
-          if (glob.startsWith('!')) {
-            if (path.matchesGlob(file, glob.slice(1))) hit = false;
-          } else if (path.matchesGlob(file, glob)) {
-            hit = true;
-          }
-        }
-        return hit;
-      });
+      const selected = MUTATION_LEGS.some((leg) => legSelects(leg, file));
       expect(selected, `${file} must be inside the declared mutation scope`).toBe(true);
     }
   });
@@ -1167,13 +1162,21 @@ describe('machine-readable reports', () => {
     },
   );
 
-  it("declares only the mutation gate's merged report, and defers it to its own tier", () => {
-    // `mutation.json` and nothing else. There is no JUnit here to declare — the
-    // legs are Stryker runs, not vitest runs with a reporter — but the rule that
-    // shaped `test:fuzz` still applies to the JSON: `test:mutation` is tier 2 and
-    // does not run during `npm run ci`, so the ratchet must be able to defer the
-    // fields it supplies rather than reporting them stale on every push.
-    expect(reportsOf(manifest.tasks['test:mutation']!)).toEqual(['mutation.json']);
+  it("declares the mutation gate's merged report and one per leg, and defers them to its own tier", () => {
+    // `mutation.json` plus exactly one evidence file per declared leg, named by
+    // `legReportFor` — the name the gate writes and the name the ratchet reads.
+    // A leg missing here would still be written, but never cleared before a run
+    // (so a stale one could pass for fresh evidence) and never required on a pass.
+    // There is no JUnit to declare — the legs are Stryker runs, not vitest runs
+    // with a reporter — but the rule that shaped `test:fuzz` still applies to the
+    // JSON: `test:mutation` is tier 2 and does not run during `npm run ci`, so the
+    // ratchet must be able to defer the fields it supplies rather than reporting
+    // them stale on every push.
+    expect(reportsOf(manifest.tasks['test:mutation']!)).toEqual([
+      'mutation.json',
+      ...MUTATION_LEGS.map((leg) => legReportFor(leg.id)),
+    ]);
+    expect(MUTATION_LEGS.map((leg) => leg.id)).toEqual(['shared', 'client', 'server']);
     expect(manifest.tasks['test:mutation']!.tier).toBe(2);
     // The deferral is conditional on exactly that tier, which is what stops a
     // gate being retired by moving it somewhere it never runs.
@@ -1339,7 +1342,8 @@ describe('machine-readable reports', () => {
     // regression in its own right.
     expect(ratchet).toContain('const FLAKE_REQUIRED_FIELDS = [');
     expect(ratchet).toContain("'flake.runs', 'flake.failures', 'flake.e2eExecutions'");
-    expect(ratchet).toContain('...(baselineRaw.flake ? FLAKE_REQUIRED_FIELDS : []),');
+    expect(ratchet).toContain('...(raw.flake ? FLAKE_REQUIRED_FIELDS : []),');
+    expect(ratchet).toContain('for (const req of absentRequiredFields(baselineRaw)) {');
 
     // And once the record does exist, its CONTENT is checked — this half is
     // conditional on presence only, never on the numbers, so a sample that shrank

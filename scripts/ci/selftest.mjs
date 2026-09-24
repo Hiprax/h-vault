@@ -261,11 +261,20 @@ function prepareWorkspace() {
   // to run without it, and while it was missing from this list both cases failed
   // in their first step with "missing — build the client first", reported as
   // unproven: two gates whose planted defects were never reached.
+  //
+  // `packages/shared/src/generated` is the fifth, and the only one inside a
+  // source tree: `scripts/inject-version.js` writes `version.ts` there during the
+  // shared build, `src/constants` imports it, and it is gitignored. Without it
+  // every shared test fails to import its subject, so a gate that runs the
+  // shared SOURCE suite — `test:mutation:diff`'s Stryker dry run — found no
+  // runnable test at all and reported "could not run" instead of the planted
+  // survivors, which is how its case was first measured unproven.
   for (const rel of [
     join('packages', 'shared', 'dist'),
     join('packages', 'server', 'dist'),
     join('packages', 'client', 'dist'),
     join('packages', 'client', 'dist-sandbox'),
+    join('packages', 'shared', 'src', 'generated'),
   ]) {
     const from = join(ROOT, rel);
     if (existsSync(from)) cpSync(from, join(dir, rel), { recursive: true });

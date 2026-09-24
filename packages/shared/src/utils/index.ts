@@ -217,9 +217,11 @@ export function transformToolLabels(
  * instead of an empty quotation.
  */
 export function transformExcerpt(text: string, line: number | null): string {
-  if (line === null || line < 1) return '';
-  const lines = text.split('\n');
-  const found = lines[line - 1];
+  // No separate guard for `null`, zero or a negative line: each indexes before
+  // the first element, which is `undefined`, the same answer as a line past the
+  // end. A guard in front of that lookup was measured as dead code — the
+  // mutation oracle could delete it four ways and no input told the difference.
+  const found = text.split('\n')[(line ?? 0) - 1];
   if (found === undefined) return '';
   // The trailing carriage return of a CRLF file is invisible on screen and would
   // spend a character of the bound for nothing.

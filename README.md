@@ -666,16 +666,39 @@ Mongoose with `autoIndex` off, and the indexes are not merely a performance matt
 
 ### 3. Put your system Nginx in front
 
+The host's nginx is never hand-written: it is the ecosystem's golden nginx policy (TLS, HSTS,
+the security-header floor that yields to helmet's own headers, host-wide rate limits, the ACME
+path) rendered for this site. `docker/nginx/` holds that render for the placeholder
+`vault.example.com`: `system.docker.example.conf` (the site, with the policy inlined, proxying
+to `127.0.0.1:8080`) and the two files a host installs ONCE however many sites it carries
+(`00-newapp-http.conf`, the http-context names every site references, and
+`000-acme-catchall.conf`, the only `default_server` on :80 and :443, which also serves the ACME
+challenge for a name that has no site yet). Replace the domain, then install in this order, as
+root, from that directory (host files and the ACME path first, the certificate second, the site
+last):
+
 ```bash
-sudo cp docker/nginx/system.docker.example.conf /etc/nginx/sites-available/hvault.conf
-sudo ln -s /etc/nginx/sites-available/hvault.conf /etc/nginx/sites-enabled/
-# edit server_name + the ssl_certificate paths, then:
-sudo nginx -t && sudo systemctl reload nginx
+sed -i 's/vault\.example\.com/your-domain/g' system.docker.example.conf
+install -m 644 00-newapp-http.conf    /etc/nginx/conf.d/00-newapp-http.conf
+install -m 644 000-acme-catchall.conf /etc/nginx/sites-available/000-acme-catchall
+ln -sfn /etc/nginx/sites-available/000-acme-catchall /etc/nginx/sites-enabled/000-acme-catchall
+rm -f /etc/nginx/sites-enabled/default        # a second default_server on :80 is [emerg]
+mkdir -p /var/www/acme/.well-known/acme-challenge
+nginx -t && systemctl reload nginx
+certbot certonly --webroot -w /var/www/acme -d your-domain
+install -m 644 system.docker.example.conf /etc/nginx/sites-available/your-domain
+ln -sfn /etc/nginx/sites-available/your-domain /etc/nginx/sites-enabled/your-domain
+nginx -t && systemctl reload nginx
 ```
 
-Get certificates with `sudo certbot certonly --nginx -d vault.example.com`. Running under PM2
-instead? Use `docker/nginx/system.pm2.example.conf`, which proxies straight to Express on
-`127.0.0.1:5000` and sets `TRUST_PROXY=1`.
+On a host provisioned with the ecosystem's `provision.sh`, one command does the same:
+`sudo newapp your-domain --proxy 127.0.0.1:8080 --body-size 32M --read-timeout 300s --request-buffering off --gzip off`.
+Regenerate the rendered files rather than editing them (`--gzip off` is deliberate: every
+response from this stack is dynamic and secret-bearing, and the bundle is already compressed by
+the in-container nginx). Running under PM2 instead? Use `system.pm2.example.conf`, rendered the
+same way against Express on `127.0.0.1:5000`, after installing `includes/hvault-pm2.conf` (the
+bundle's one-year lifetime, from `hvault-pm2.locations.conf`) at
+`/etc/nginx/sites-local/hvault-pm2.conf`, and set `TRUST_PROXY=1`.
 
 > **Get `TRUST_PROXY_HOPS` right.** Express trusts the last _N_ entries of `X-Forwarded-For`. Too
 > high and any client can spoof its own IP by sending the header — defeating the IP-keyed rate
@@ -882,7 +905,9 @@ pm2 start ecosystem.config.cjs --env production
 512 MB memory restart limit, structured logs in `logs/`, cluster mode. Background jobs take
 distributed MongoDB locks, so they never double-run across instances. Express serves the SPA
 itself in this mode (there is no internal Nginx), so front it with
-`docker/nginx/system.pm2.example.conf` and set `TRUST_PROXY=1`.
+`docker/nginx/system.pm2.example.conf` (rendered from the ecosystem's golden nginx policy; install
+`docker/nginx/includes/hvault-pm2.conf` at `/etc/nginx/sites-local/hvault-pm2.conf` first) and set
+`TRUST_PROXY=1`.
 
 **The two copy steps are not optional and nothing else performs them.** The build writes the
 application into `packages/client/dist` and the document viewer into
@@ -1365,7 +1390,7 @@ h-vault/
 ├── docker/
 │   ├── Dockerfile               # One file, four targets: app | web | bootstrap | development
 │   ├── mongo.Dockerfile         # MongoDB + the replica-set key file its entrypoint generates
-│   └── nginx/                   # internal.conf (in-container) + system.*.example.conf (the host's)
+│   └── nginx/                   # nginx.conf + internal.conf + snippets/ (in-container); system.*.example.conf + host files (the host's)
 ├── .github/workflows/release.yml  # The ONLY workflow: tag + publish a Release
 ├── .husky/                      # pre-commit: secret scan + lint-staged │ pre-push: the full pipeline
 ├── docker-compose.yml           # Production stack, one loopback port
@@ -1485,7 +1510,8 @@ measurement you can check rather than a claim from the day it was written. They 
 | `recovery`         | T2   | A backup restored into a second, empty database, and a real process SIGKILLed mid-rotation, mid-import, mid-upload, mid-completion and mid-purge                                                                                                             | _new_                      |
 | `dst`              | T2   | The whole suite again in a DST-observing zone, so an assertion that is right only because local time and UTC agree fails here rather than on a user's machine                                                                                                | _new_                      |
 | `flake`            | T2   | Ten complete runs of every suite in ten different shuffled orders, plus the Playwright suite three times over with retries off                                                                                                                               | _new_                      |
-| `mutation`         | T2   | The oracle: Stryker mutates every file in the declared scope and the suite must kill the recorded share of them, per package and per core module                                                                                                             | _new_                      |
+| `mutation`         | T2   | The oracle: Stryker mutates every file in the declared scope and the suite must kill the recorded share of them, per leg, overall and per core module                                                                                                        | _new_                      |
+| `mutation-diff`    | T1   | The oracle's cheap half: the mutants on the lines this change touched, from scratch, held to a committed floor; a change owning more than a leg's committed budget is sampled, disclosed and verified                                                        | _new_                      |
 | `sast`             | T1   | CodeQL `security-and-quality` suite, or Semgrep CE / OpenGrep when the CodeQL CLI is absent — the gate names the engine that answered                                                                                                                        | `sast` job                 |
 | `coverage`         | T1   | Each package against its recorded line/branch/function coverage, and 100% of the production lines the change touched                                                                                                                                         | _new_                      |
 | `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                                                                                                                                     | _new_                      |
@@ -1615,11 +1641,12 @@ git push --no-verify                    # skip the hook entirely
   the execute bit leaves the launcher unrunnable; `chmod +x .cache/codeql/codeql/codeql` fixes that
   one. The gate distinguishes the two and prints the applicable fix rather than a bare exit code.
 
-  CodeQL currently reports 27 accepted error-severity findings, every one of them reviewed:
+  CodeQL currently reports 29 accepted error-severity findings, every one of them reviewed:
 
-  - 23 `js/sql-injection` — request values reaching a Mongoose query, which it flags because it
+  - 25 `js/sql-injection` — request values reaching a Mongoose query, which it flags because it
     cannot see the Zod schema, the `$`-stripping middleware or the field allowlist standing in
-    front of them.
+    front of them. The two most recent are the vault re-seal's two commit filters, which match
+    the stored wrapped key and generation against the validated request's own values.
   - 1 `js/type-confusion-through-parameter-tampering` on `Number(req.headers['content-length'])`
     in the document part route, which the query flags because a header is typed as possibly an
     array. The number is never used as a length: it is only compared for strict equality against
@@ -1725,11 +1752,11 @@ to do with the answer.
 
 Measured on the reference machine, from the reports each run leaves behind:
 
-| Command               | Gates | Measured                            | What dominates it                                                                                                                      |
-| --------------------- | ----- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info |
-| `npm run ci`          | 29    | **29m 07s**                         | Playwright at 10m 35s over two engines, then CodeQL at ~5, the client and shared suites at 4m 42s and the server suite at 3m 46s       |
-| `npm run verify:full` | 37    | **hours**                           | `flake`, then `mutation`, which has no honest estimate                                                                                 |
+| Command               | Gates | Measured                            | What dominates it                                                                                                                                                          |
+| --------------------- | ----- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info                                     |
+| `npm run ci`          | 30    | **85m 00s** on a very large diff    | `mutation-diff` at 55m 46s over an 85-file branch diff (57m 40s at the current budgets), then Playwright at ~10.5 min and CodeQL at ~5.5; 29m 07s before that gate existed |
+| `npm run verify:full` | 38    | **hours**                           | `flake`, then `mutation`, which has no honest estimate                                                                                                                     |
 
 **The fast tier fits its own budget on a machine doing nothing else, and not
 otherwise. The table is the honest number rather than the target.** T0's design
@@ -1777,8 +1804,9 @@ being ten shuffled runs of all three package suites and then the E2E suite three
 over, 654 executions in all.
 
 `mutation` is the eighth, and it is the one gate this page will not give you a day for.
-Measured on the four-core reference machine, idle, on 2026-09-08: the `shared` leg
-finishes in **13m30s** (2,469 mutants, 88.09 % killed). The `server` leg is a different
+Measured on the four-core reference machine, idle: the `shared` leg finishes in
+**17m14s** from scratch (2,633 mutants, 88.64 % killed, banked on 2026-09-24; 13m30s over
+2,469 on 2026-09-08, before Stryker 10's extra mutators). The `server` leg is a different
 animal — 12,174 mutants of which **4,977, 41 %, are static**. A static mutant executes
 while its module is being loaded, so it has no per-test coverage and is run against the
 _whole_ suite; on that package the whole suite is 3,224 tests, each file booting a real
@@ -1797,33 +1825,46 @@ the other one: a suite starved of CPU fails on a 30-second test timeout that has
 do with the mutation, and Stryker records a timeout as a **kill**, so the floor you bank
 would be inflated by exactly the contention you introduced.
 
+**What the oracle holds between campaigns.** Each leg banks a floor of its own
+(`mutation.legs.<leg>` in the baseline), so a leg is held to its own floor without
+waiting for the others. Today the `shared` leg holds one (88.64 % of 2,633); the
+`client` leg (about 24,000 mutants, roughly twenty hours from scratch) and the `server`
+leg (120-130 hours) do not yet, because each needs an idle machine for longer than any
+unattended session here is allowed to run, and a leg measured beside other work banks a
+score inflated by its own timeouts. The merged floor waits for the first run in which
+all three complete. Between campaigns, `mutation-diff` runs on every push: the same Stryker
+configuration, from scratch, over only the mutants on the lines a change touched. Its
+cost is the dry run over the tests related to the changed files plus the survivors:
+seconds for a change inside `shared`, several minutes once a widely imported client or
+server module is involved, and **55m 46s** and **57m 40s** measured on two runs over the
+85 changed files of the branch that introduced it (at two budget settings), most of it the server leg's survivors, each of which runs
+every covering test file against a real mongod.
+
 Two commands are **not registered gates**, so `verify:full` does not run them, and both are worth
 knowing about before you plan the day. `npm run verify:selftest` proves every gate can still fail,
 by planting one defect per gate into a temporary copy of the tree: one case per registered task,
-thirty-seven of them, each running that gate's real command until it fails for the declared reason.
+thirty-eight of them, each running that gate's real command until it fails for the declared reason.
 `npm run ci:local` is the clean room, and it is not a quick extra: its body **is** `verify:full`,
 run inside a fresh worktree after its own `npm ci`, so it costs a whole second run plus an install.
 Run either separately, and budget for it separately.
 
-**`verify:selftest` cannot pass while `mutation` holds no floor**, and the coupling is worth stating
-because it arrives looking like an unrelated failure. The `mutation` case plants an extra `!`
-pattern in the declared scope and expects the gate's cheap pre-flight to refuse it, naming the
-directory that left the scope. But that pre-flight compares the declared globs against the
-baseline's `mutation.filesMutated`, and with no `mutation` block there is nothing to compare
-against: the pre-flight passes, the case's failure comes from somewhere else, and the harness
-correctly refuses to credit it. Measured twice, and the verdict is the same both times: **36 proven,
-1 unproven**, in **33m 56s** and again in **50m** on a busier machine, the one being `mutation`,
-reported as _"exit 1, but its report never mentions the planted defect, so the failure is not
-attributable to it"_. The second sweep is also the run that found the `.cache` sandbox-copy defect
-described under `mutation` above, which is what a selftest is for: it exercises every gate's real
-command, so it finds the faults that only show up when a gate actually runs. Record the first floor (see below) and the case becomes the
-millisecond pre-flight check it was designed to be. Until then, read a selftest sweep as
-36-of-37 rather than as broken.
+**`verify:selftest`'s `mutation` case needs a recorded leg to compare against**, and the
+coupling is worth stating because it arrives looking like an unrelated failure. The case plants
+an extra `!` pattern in the shared leg's declared scope and expects the gate's cheap pre-flight
+to refuse it, naming the directory that left the scope. That pre-flight compares the declared
+globs against every file a recorded floor names — merged or per leg — so with no floor at all
+there is nothing to compare against: the pre-flight passes, the case's failure comes from
+somewhere else, and the harness correctly refuses to credit it. That is how every sweep before
+the shared leg was banked ended — **36 proven, 1 unproven**, in **33m 56s** and again in
+**50m** on a busier machine — and the second of those is also the run that found the `.cache`
+sandbox-copy defect described under `mutation` above, which is what a selftest is for. With the
+shared leg holding a floor, the case is the millisecond pre-flight it was designed to be.
 
 That is also the honest duration to plan against: the sweep is **34 to 50 minutes**, not the whole
-day `verify:full` needs, because each case runs its gate only until it fails. Two cases carry a time
-cap for the opposite reason, `flake` at five minutes and `mutation` at two, so that a defect which
-failed to land cannot leave the harness waiting on an hours-long gate.
+day `verify:full` needs, because each case runs its gate only until it fails. Three cases carry a
+time cap: `flake` at five minutes and `mutation` at two, so that a defect which failed to land
+cannot leave the harness waiting on an hours-long gate, and `mutation-diff` at ten, whose planted
+lines are measured by the cheap shared leg in well under a minute.
 
 ### Provision the machine, once
 
@@ -1937,13 +1978,13 @@ daemon socket: under rootless Docker that is `$XDG_RUNTIME_DIR/docker.sock`, not
 away rather than discovering it inside the first container gate. Four are needed for the
 image builds and the harnesses, and a fifth only when `trivy` is not on `PATH`:
 
-| Image                                     | Size    | Pulled for                                               |
-| ----------------------------------------- | ------- | -------------------------------------------------------- |
-| `mongo:8.0`                               | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
-| `aquasec/trivy:latest`                    | 252 MB  | only when `trivy` is absent from `PATH`                  |
-| `node:24-alpine3.23`                      | 235 MB  | the `base` stage every image built here is built through |
-| `dxflrs/garage:v2.3.0` (digest-pinned)    | 100 MB  | `storage`, `e2e`, `a11y`, `flake`, `deploy`              |
-| `nginxinc/nginx-unprivileged:1.29-alpine` | 82 MB   | the `web` stage                                          |
+| Image                                                           | Size    | Pulled for                                               |
+| --------------------------------------------------------------- | ------- | -------------------------------------------------------- |
+| `mongo:8.0`                                                     | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
+| `aquasec/trivy:latest`                                          | 252 MB  | only when `trivy` is absent from `PATH`                  |
+| `node:24-alpine3.23`                                            | 235 MB  | the `base` stage every image built here is built through |
+| `dxflrs/garage:v2.3.0` (digest-pinned)                          | 100 MB  | `storage`, `e2e`, `a11y`, `flake`, `deploy`              |
+| `nginxinc/nginx-unprivileged:1.30.5-alpine3.24` (digest-pinned) | 81 MB   | the `web` stage                                          |
 
 Trivy's vulnerability database is a further download on its first scan, into the named
 cache volume the container gate keeps for it. Note what a warm cache does to one number
@@ -2172,7 +2213,7 @@ duration.
 
 ### Watch it from anywhere
 
-The runner streams. It prints a `[n/37]` step line for each gate as it starts, the
+The runner streams. It prints a `[n/38]` step line for each gate as it starts, the
 gate's own output beneath it, and a pass or fail line with a duration when it ends. A
 boxed summary table and the tier budget comparison come last.
 
@@ -2202,9 +2243,9 @@ the launcher is the only unambiguous signal that this run is over.
 
 **The step counter is not a clock either.** Gates run in the order `npm run ci -- --list`
 prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the two
-longest gates in the repository sit at positions 33 and 34 of 37. A `verify:full` that has
-been on `[34/37]` for four hours is not stuck; it is doing the thing you asked for. The
-same run reaching `[31/37]` in half an hour is likewise normal, and tells you almost
+longest gates in the repository sit at positions 33 and 34 of 38. A `verify:full` that has
+been on `[34/38]` for four hours is not stuck; it is doing the thing you asked for. The
+same run reaching `[31/38]` in half an hour is likewise normal, and tells you almost
 nothing about how much is left.
 
 **Distinguishing slow from stuck** needs one number: how long the gate named on the
@@ -2214,6 +2255,7 @@ in the run is seconds.
 | Gate               | Measured | Its own deadline, if it has one              |
 | ------------------ | -------- | -------------------------------------------- |
 | `mutation`         | hours    | none, deliberately                           |
+| `mutation-diff`    | 57m 40s  | 60 min per leg, a hang guard only            |
 | `flake`            | 84m 26s  | 30 min per suite leg, 90 min for the E2E leg |
 | `e2e`              | 8m 28s   | 180 s just to boot the stack                 |
 | `dst`              | 6m 52s   | 15 min per leg                               |
@@ -2309,7 +2351,7 @@ One more thing about a `1` on a first full run: read the failing gate names befo
 reading the code as a verdict on your change. On the **earlier** reference run these
 numbers come from — kept because its three failures are three different lessons, and
 superseded on the counts by the 36-of-37 / 151m 54s run quoted under `mutation` above —
-34 of 37 gates passed and three did not. `mutation` was **stopped at a time limit**
+34 of the 37 gates it then had passed and three did not. `mutation` was **stopped at a time limit**
 after 114 seconds, so by the rule further down it is reported as **not run**, not as red,
 and the 2h 3m the run took therefore excludes a real mutation leg. `ratchet-full` failed
 because reports were invalidated by an edit made mid-run, which is the paragraph on a
@@ -2342,75 +2384,84 @@ Read `ratchet-full` last and read it properly. It runs after every other gate be
 it grades what they measured against `.testfortress/baseline.json`, and it is the gate
 that turns "green" into "green and not by having measured less".
 
-### The first full run will fail on `mutation`, and that is correct
+### Banking the `mutation` floor, one leg at a time
 
-`mutation`'s floor is `.testfortress/baseline.json`, not a threshold inside the tool.
-When that file carries no `mutation` block — which is its state until someone records
-one — the gate mutates the whole declared scope, writes `mutation.json`, and then
-**fails**, because a gate that passes while holding no floor is not a gate. It fails
-rather than refusing to start precisely so that the report you need in order to record
-the first floor exists by the time you read the failure.
+`mutation`'s floors live in `.testfortress/baseline.json`, not in a threshold inside the
+tool, and there are two kinds: one per **leg** (`mutation.legs.shared`, `.client`,
+`.server`) and one for the **merged** campaign over all three. Every leg that completes
+writes its own evidence to `.testfortress/reports/mutation-<leg>.json` and is held to its
+own floor; the merged figures are written to `mutation.json` only by a run in which all
+three legs completed, and are held to theirs. A leg, or the merged campaign, with **no**
+floor yet fails the run rather than passing — a gate that passes while holding no floor is
+not a gate — and it fails after writing its evidence, so the report you need in order to
+record the first floor exists by the time you read the failure. The failure message prints
+the exact commands.
 
-Record it from the machine that measured it, once the rest of the run is clean:
+Record a leg from the machine that measured it, from a **from-scratch** run, once the rest
+of the run is clean:
 
 ```bash
+npm run test:mutation -- --leg=shared --full
 npm run audit:ratchet:full
-node scripts/ci/ratchet-check.mjs --accept --seed mutation --reason "first mutation baseline, measured on <host> at <sha>"
+node scripts/ci/ratchet-check.mjs --accept --seed mutation --reason "shared leg, measured on <host> at <sha>"
 ```
 
-**`--seed mutation` is the load-bearing half of that second command, and leaving it off
-records nothing.** The ratchet's comparison loop is driven by the baseline's own keys —
-that is what makes every direction check work — so a family the baseline has never
-carried is measured, and then never compared against anything, and `--accept` writes only
-the fields it compared. Naming the family is what tells it to record a floor that has no
-predecessor. It is deliberately explicit: seeding is the one operation here that writes a
-number without comparing it, so it refuses a family that is only half present, refuses any
-path `meta.fields` still names (deleting a floor and re-seeding it from a worse run would
+The first leg ever recorded is seeded as `--seed mutation`. Every later one names itself —
+`--seed mutation.legs.client` — because once one leg is recorded the `mutation` family is
+partly present, and seeding refuses a partly present family by design. The merged figures
+are seeded the same way, from the first run in which all three legs complete:
+`--seed mutation.overall,mutation.totalMutants,mutation.filesMutated,mutation.modules`.
+
+**`--full` is not optional when banking.** Stryker's incremental mode reuses a mutant's
+earlier result whenever its code and its killing test are unchanged — including a timeout
+recorded while the machine was busy, which counts as a kill — so the ratchet refuses to
+record or raise any `mutation.*` field from a report that does not say
+`incremental: false`, which is what `--full` writes. An incremental run is still compared
+against the floor; it simply cannot move one.
+
+**`--seed` is the load-bearing half of the accept, and leaving it off records nothing.**
+The ratchet's comparison loop is driven by the baseline's own keys — that is what makes
+every direction check work — so a family the baseline has never carried is measured, and
+then never compared against anything, and `--accept` writes only the fields it compared.
+Naming the family is what tells it to record a floor that has no predecessor. It is
+deliberately explicit: seeding is the one operation here that writes a number without
+comparing it, so it refuses a family that is only half present, refuses any path
+`meta.fields` still names (deleting a floor and re-seeding it from a worse run would
 otherwise be a reduction with no `BASELINE-REDUCTION` entry and no sign-off), refuses a
-family this run measured nothing for, and blocks on a measured field with no declared
-direction. Seeded fields are reported under `seeded` rather than folded into
-`accepted`, because a floor compared against nothing and a floor that moved up are
-different claims.
+family this run measured nothing for, refuses to write a unit that would lack its measured
+file set, and blocks on a measured field with no declared direction. Seeded fields are
+reported under `seeded` rather than folded into `accepted`, because a floor compared
+against nothing and a floor that moved up are different claims.
 
 Everything else about `--accept` is unchanged: it moves every field in its improving
 direction only, refuses without a `--reason`, and refuses while anything is failing or
 unmeasured, so it can only ever be run from a tree that has just gone green. It also
 **refuses a `--tier` argument**: accepting demands the full comparison, because a partial
 one would write a floor from numbers it never looked at. Read the baseline back afterwards
-and confirm the block is there; if it is not, nothing was armed and the next run holds no
-floor either.
+and confirm the fields are there; if they are not, nothing was armed.
 
-Two things about that first run are easy to plan around badly, and both were measured
+Two things about a leg's first run are easy to plan around badly, and both were measured
 the hard way.
 
-**There is no incremental state until a leg finishes.** The Stryker configuration sets
-`incremental: true`, and the incremental file is what makes every later run re-test only
-the mutants whose code, or whose killing test, actually changed. It is written by a
-**completed** leg. So look for
-`.stryker-tmp/incremental-shared.json`, `-client.json` and `-server.json`, and not for
-`.stryker-tmp/` itself: the directory proves nothing, because a killed run leaves its
-sandbox copies behind and no incremental file. Measured on a run stopped after two
-minutes, that is 3.6 GB of sandboxes and three lines in the log reading
-`No incremental result file found`.
+**A leg banks nothing until it finishes.** Stryker writes its report — and, on an
+incremental run, its incremental file — only when a leg **completes**. A killed leg
+leaves its sandbox copies in `.stryker-tmp/` and nothing else: measured on a run stopped
+after two minutes, 3.6 GB of sandboxes and three lines in the log reading
+`No incremental result file found`. A leg that fails writes no `mutation-<leg>.json`, and
+a run in which any leg failed writes no `mutation.json`, because a report missing a
+package would be read as a shrunken scope rather than as a broken run. That is also why a
+`mutation` you stopped at a time limit must be reported as **not run**, never as red and
+never as a pass.
 
-Without them the first run is the entire scope from nothing, and the scope is what to
-budget against. Measured on that same run as each leg started: the shared leg is
-**2,469 mutants across 11 files**, the client leg **19,192 across 139**, and the server
-leg 79 files (its count was not reached before the leg was stopped). Stryker's own
-estimate for the shared leg is worth quoting because it explains where the hours go:
+**Budget each leg against its whole scope.** Measured as each leg started: the shared leg
+is about **2,500 mutants across 11 files** and finishes in minutes; the client leg
+**about 24,000**, whose last complete run (15,322 mutants, before the document store) took
+12h35m; the server leg **about 12,900**, of which roughly 41 % are static — run against
+the whole suite, every file of which boots a real mongod — which is **120-130 hours** on
+four cores. Stryker's own estimate for the shared leg explains where the hours go:
 _"Detected 1033 static mutants (42% of total) that are estimated to take 96% of the time
 running the tests"_, which is the price of `ignoreStatic: false` and the reason that
-setting is not negotiable. For calibration, the client leg last ran to completion at
-12h35m over 15,322 mutants, so scale that up by a quarter.
-
-**A partial run banks nothing, deliberately.** If any leg exits non-zero or writes no
-report, including because you killed it, the gate writes **no** `mutation.json` at all,
-on the stated grounds that a report missing a package would be read as a shrunken scope
-rather than as a broken run. There is therefore no way to accumulate a floor leg by leg,
-and equally no way for a killed run to leave behind a number `--accept` could bank. A
-floor comes from one complete run or from no run. That is also why a `mutation` you
-stopped at a time limit must be reported as **not run**, never as red and never as a
-pass.
+setting is not negotiable.
 
 > **`.testfortress/baseline.json` is the one file a run produces that belongs in git.**
 > Commit and push it from the machine that measured it, never after copying reports
@@ -2418,7 +2469,7 @@ pass.
 
 ### Re-running only what failed
 
-Three failures out of thirty-seven should not cost another day. The runner takes an
+Three failures out of thirty-eight gates should not cost another day. The runner takes an
 explicit gate list, and it **overrides the tier filter** rather than intersecting with
 it, so a release-tier gate can be re-run on its own:
 
@@ -2674,6 +2725,12 @@ Tags are ordered numerically, not lexically (`v1.10.0` is above `v1.9.0`). If HE
 tagged, no second tag is minted but the Release is still reconciled, so a run interrupted between
 the two heals on the retry. The workflow never commits back to the repository, and it cannot
 trigger itself.
+
+**Mind the job's 90-minute limit when merging a large branch.** On `main` the per-change gates
+measure `HEAD~1..HEAD`, so a merge or squash commit that carries a whole long-lived branch makes
+`mutation-diff` measure all of it: the branch that introduced that gate measured 57m 40s for it
+alone on a four-core machine. Merge such a branch fast-forward (its last commit is the subject),
+or raise `timeout-minutes` for that release, rather than letting the job be cut off mid-gate.
 
 Every user-visible change is recorded in the **[changelog](CHANGELOG.md)**
 ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/), [SemVer](https://semver.org/)).

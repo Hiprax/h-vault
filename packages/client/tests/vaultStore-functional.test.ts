@@ -328,6 +328,22 @@ describe('vaultStore – CRUD actions', () => {
       ).rejects.toThrow('Vault is locked');
     });
 
+    it('refuses to seal a create with no signed-in user, before anything is encrypted or sent', async () => {
+      // A vault key with no user id is a torn session: the row id the fields
+      // would be sealed to is derived from the user id, so sealing without one
+      // would bind the row to an id the server can never agree with.
+      useAuthStore.setState({ vaultKey: mockVaultKey, user: null });
+      await expect(
+        useVaultStore.getState().createItem('login', 'My Login', { username: 'u' }),
+      ).rejects.toThrow('Vault is locked');
+      await expect(useVaultStore.getState().createFolder('Work')).rejects.toThrow(
+        'Vault is locked',
+      );
+      expect(cryptoService.encryptDataWithAad).not.toHaveBeenCalled();
+      expect(createItemApi).not.toHaveBeenCalled();
+      expect(createFolderApi).not.toHaveBeenCalled();
+    });
+
     it('should encrypt name and data, call createItemApi, decrypt response, and add to items', async () => {
       setupUnlockedVault();
 

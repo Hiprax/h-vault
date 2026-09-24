@@ -80,6 +80,22 @@ describe('A created row is stored under the id its nonce derives', () => {
     expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
   });
 
+  it('lets any OTHER create failure through as the error it is, never as a 409', async () => {
+    // Only a duplicate _id means "this row already exists". Mapping every create
+    // failure to that 409 would tell a client to stop retrying a write that never
+    // happened; the rethrow is what keeps a real fault a 500.
+    const create = vi.spyOn(VaultItem, 'create').mockRejectedValueOnce(new Error('write refused'));
+    let res: request.Response;
+    try {
+      res = await send(user, 'post', '/vault/items', sampleVaultItem({ idNonce: NONCE_A }));
+    } finally {
+      create.mockRestore();
+    }
+    expect(res.status).toBe(500);
+    expect(res.body.message ?? '').not.toMatch(/already exists/);
+    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+  });
+
   it('still mints the id itself for an item create that sends no nonce', async () => {
     const res = await send(user, 'post', '/vault/items', sampleVaultItem());
     expect(res.status).toBe(201);
@@ -224,6 +240,21 @@ describe('An import inserts each row under the id its nonce derives', () => {
     const rows = await rawItems(user.id);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.encryptedName).toBe('already-here');
+  });
+
+  it('lets any OTHER bulk-insert failure through as a 500, never as the row-exists 409', async () => {
+    const insert = vi
+      .spyOn(VaultItem, 'insertMany')
+      .mockRejectedValueOnce(new Error('bulk write refused'));
+    let res: request.Response;
+    try {
+      res = await send(user, 'post', '/tools/import', importBody([insertRow(NONCE_A, 0)]));
+    } finally {
+      insert.mockRestore();
+    }
+    expect(res.status).toBe(500);
+    expect(res.body.message ?? '').not.toMatch(/row with this id already exists/);
+    expect(await rawItems(user.id)).toHaveLength(0);
   });
 
   it('refuses one batch naming a nonce twice at 400', async () => {

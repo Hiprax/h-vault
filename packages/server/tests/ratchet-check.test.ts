@@ -23,6 +23,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  MUTATION_DIFF_BUDGETS,
+  MUTATION_DIFF_FLOOR,
+} from '../../../scripts/ci/lib/mutation-scope.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
@@ -104,6 +108,10 @@ function mutationReport(
   extra: Record<string, unknown> = {},
 ): string {
   return JSON.stringify({
+    // What `mutation-gate.mjs --full` writes. The ratchet refuses to RAISE a
+    // mutation floor from anything else, so a fixture that omitted the flag would
+    // be a report too old to say, and every accept case below would be refused.
+    incremental: false,
     ...extra,
     files: Object.fromEntries(
       files.map((f) => [
@@ -227,6 +235,10 @@ const HEALTHY_BASELINE = {
     scopeGlobs: ['packages/app/src/**'],
   },
   tasks: ['lint', 'test:mutation', 'test:unit'],
+  // Read from SOURCE on every full run, like the bundle budgets, so the fixture
+  // carries the real committed values: anything else would be a regression or an
+  // improvement in every case below that is not about them.
+  mutationDiff: { floor: MUTATION_DIFF_FLOOR, budget: { ...MUTATION_DIFF_BUDGETS } },
   integrity: {
     excludeHash: 'aaaa',
     gateFilesHash: 'bbbb',
@@ -244,6 +256,8 @@ const HEALTHY_BASELINE = {
       'mutation.overall',
       'mutation.scopeGlobs',
       'mutation.totalMutants',
+      ...Object.keys(MUTATION_DIFF_BUDGETS).map((leg) => `mutationDiff.budget.${leg}`),
+      'mutationDiff.floor',
       'packages.packages/app.coverage.filesMeasured',
       'packages.packages/app.coverage.line',
       'packages.packages/app.coverage.linesTotal',
@@ -822,6 +836,420 @@ describe('audit:ratchet', () => {
     });
   });
 
+  describe('a floor per mutation leg, banked before the slowest leg ever completes', () => {
+    const LEG_REPORT = '.testfortress/reports/mutation-shared.json';
+    const SHARED_LEG = [
+      { name: 'packages/shared/src/utils/a.ts', killed: 8, survived: 2, ignored: 3 },
+      { name: 'packages/shared/src/schemas/vault.ts', killed: 3, survived: 1 },
+    ];
+    const SHARED_FLOOR = {
+      overall: 70,
+      totalMutants: 14,
+      filesMutated: ['packages/shared/src/schemas/vault.ts', 'packages/shared/src/utils/a.ts'],
+    };
+    const read = (dir: string): Record<string, unknown> =>
+      JSON.parse(readFileSync(path.join(dir, '.testfortress', 'baseline.json'), 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+    const metaFor = (mutation: Record<string, unknown>): string[] => {
+      const flat: string[] = [];
+      const walk = (value: unknown, prefix: string): void => {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          for (const [key, inner] of Object.entries(value)) walk(inner, `${prefix}.${key}`);
+        } else flat.push(prefix);
+      };
+      walk(mutation, 'mutation');
+      return [
+        ...HEALTHY_BASELINE.meta.fields.filter((f) => !f.startsWith('mutation.')),
+        ...flat,
+      ].sort();
+    };
+    /** HEALTHY_BASELINE with `mutation` replaced wholesale and meta.fields to match. */
+    const withMutation = (
+      mutation: Record<string, unknown> | undefined,
+    ): Record<string, unknown> => {
+      const { mutation: _dropped, ...rest } = HEALTHY_BASELINE;
+      return mutation === undefined
+        ? { ...rest, meta: { fields: metaFor({}) } }
+        : { ...rest, mutation, meta: { fields: metaFor(mutation) } };
+    };
+    const { '.testfortress/reports/mutation.json': _merged, ...NO_MERGED_REPORT } = HEALTHY_REPORTS;
+    const WITH_LEG_REPORT = { ...NO_MERGED_REPORT, [LEG_REPORT]: mutationReport(SHARED_LEG) };
+
+    it("reads a leg's own report into that leg's fields, and never into the merged ones", () => {
+      const result = ratchet({
+        baseline: withMutation({ legs: { shared: { ...SHARED_FLOOR, overall: 60 } } }),
+        reports: WITH_LEG_REPORT,
+      });
+      // 11 of 14 scored, the three Ignored ones in neither half.
+      expect(result.improvements.find((i) => i.path === 'mutation.legs.shared.overall')?.got).toBe(
+        78.57,
+      );
+      // The substring dispatch this replaced would have read `mutation-shared.json`
+      // as the MERGED campaign. Nothing merged may be measured from it.
+      expect(result.improvements.filter((i) => !i.path.startsWith('mutation.legs.'))).toEqual([]);
+      expect(result.regressions).toEqual([]);
+      // A block holding ONLY legs does not owe the merged pair: its slowest leg has
+      // never completed, and demanding the merged figures would be demanding a
+      // number nobody can yet measure.
+      expect(result.absent).toEqual([]);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("moves a banked leg's floor through the ordinary --accept, and records nothing it was not asked to", () => {
+      const result = ratchet({
+        baseline: withMutation({ legs: { shared: SHARED_FLOOR } }),
+        reports: WITH_LEG_REPORT,
+        args: ['--accept', '--reason', 'the shared leg improved'],
+      });
+      expect(result.exitCode).toBe(0);
+      const after = read(result.dir) as { mutation: { legs: { shared: Record<string, unknown> } } };
+      expect(after.mutation.legs.shared['overall']).toBe(78.57);
+      // The leg's core module IS measured, but the comparison loop is driven by
+      // the baseline's own keys, so a plain accept cannot bring it into existence:
+      // that takes a seed, exactly as for the merged modules.
+      expect(after.mutation.legs.shared['modules']).toBeUndefined();
+    });
+
+    it('requires BOTH fields of every banked leg', () => {
+      const result = ratchet({
+        baseline: withMutation({ legs: { shared: { overall: 70 } } }),
+        reports: WITH_LEG_REPORT,
+      });
+      expect(result.absent.map((a) => a.path)).toEqual(['mutation.legs.shared.filesMutated']);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('still owes the merged pair from an empty mutation block, as it always did', () => {
+      const result = ratchet({ baseline: withMutation({}), reports: HEALTHY_REPORTS });
+      expect(result.absent.map((a) => a.path).sort()).toEqual([
+        'mutation.filesMutated',
+        'mutation.overall',
+      ]);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('fails a leg whose score rises while it loses a file', () => {
+      const result = ratchet({
+        baseline: withMutation({ legs: { shared: { ...SHARED_FLOOR, overall: 50 } } }),
+        reports: {
+          ...NO_MERGED_REPORT,
+          [LEG_REPORT]: mutationReport([
+            { name: 'packages/shared/src/utils/a.ts', killed: 14, survived: 0 },
+          ]),
+        },
+      });
+      expect(result.improvements.map((i) => i.path)).toContain('mutation.legs.shared.overall');
+      expect(result.regressions.map((r) => r.path)).toContain('mutation.legs.shared.filesMutated');
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('defers a banked leg whose report is absent or stale, exactly like the merged floor', () => {
+      for (const fixture of [
+        { reports: NO_MERGED_REPORT },
+        { reports: WITH_LEG_REPORT, stale: [LEG_REPORT] },
+      ]) {
+        const result = ratchet({
+          baseline: withMutation({ legs: { shared: SHARED_FLOOR } }),
+          ...fixture,
+        });
+        expect(result.deferred.map((d) => d.path)).toContain('mutation.legs.shared.overall');
+        expect(result.deferred.find((d) => d.path === 'mutation.legs.shared.overall')?.owner).toBe(
+          'test:mutation',
+        );
+        expect(result.missing).toEqual([]);
+        expect(result.staleReports).not.toContain(LEG_REPORT);
+        expect(result.exitCode).toBe(0);
+      }
+    });
+
+    it('stops deferring a leg the moment the campaign is no longer a registered tier-2 gate', () => {
+      const { 'test:mutation': _gone, ...tasksWithoutMutation } = MANIFEST.tasks;
+      const result = ratchet({
+        baseline: withMutation({ legs: { shared: SHARED_FLOOR } }),
+        reports: NO_MERGED_REPORT,
+        manifest: { ...MANIFEST, tasks: tasksWithoutMutation },
+      });
+      expect(result.missing.map((m) => m.path)).toContain('mutation.legs.shared.overall');
+      expect(result.deferred).toEqual([]);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('refuses a leg the declaration no longer knows, rather than guessing its direction', () => {
+      const result = ratchet({
+        baseline: withMutation({ legs: { ghost: { overall: 70, filesMutated: ['x.ts'] } } }),
+        reports: NO_MERGED_REPORT,
+      });
+      expect(result.undeclared).toContain('mutation.legs.ghost.overall');
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('fails, rather than defers, a floor field its FRESH report does not measure', () => {
+      // Deferral means "the tier-2 gate has not run"; a fresh report means it has.
+      // A core module the leg's floor records that the fresh run scored no mutants
+      // in has not been deferred — it has disappeared.
+      const result = ratchet({
+        baseline: withMutation({
+          legs: {
+            shared: {
+              ...SHARED_FLOOR,
+              modules: { 'packages/shared/src/utils/gone/': 90 },
+            },
+          },
+        }),
+        reports: WITH_LEG_REPORT,
+      });
+      const missing = result.missing.find(
+        (m) => m.path === 'mutation.legs.shared.modules.packages/shared/src/utils/gone/',
+      );
+      expect(missing).toBeDefined();
+      expect(result.deferred.map((d) => d.path)).not.toContain(
+        'mutation.legs.shared.modules.packages/shared/src/utils/gone/',
+      );
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('refuses to raise, or to seed, a floor from evidence that was not measured from scratch', () => {
+      const incremental = {
+        ...NO_MERGED_REPORT,
+        [LEG_REPORT]: mutationReport(SHARED_LEG, { incremental: true }),
+      };
+      // A seed from incremental evidence…
+      const seed = ratchet({
+        baseline: withMutation(undefined),
+        reports: incremental,
+        args: ['--accept', '--seed', 'mutation', '--reason', 'bank from a warm cache'],
+      });
+      expect(seed.exitCode).toBe(2);
+      expect(seed.stderr).toMatch(/not measured from scratch/);
+      expect(seed.stderr).toMatch(/--full/);
+      expect(read(seed.dir)['mutation']).toBeUndefined();
+      // …and an ordinary improvement from it, alike.
+      const raise = ratchet({
+        baseline: withMutation({ legs: { shared: { ...SHARED_FLOOR, overall: 60 } } }),
+        reports: incremental,
+        args: ['--accept', '--reason', 'raise from a warm cache'],
+      });
+      expect(raise.exitCode).toBe(2);
+      const after = read(raise.dir) as { mutation: { legs: { shared: { overall: number } } } };
+      expect(after.mutation.legs.shared.overall).toBe(60);
+      // A report too old to say is treated exactly as an incremental one.
+      const { incremental: _flag, ...silent } = JSON.parse(mutationReport(SHARED_LEG)) as Record<
+        string,
+        unknown
+      >;
+      const unknown = ratchet({
+        baseline: withMutation(undefined),
+        reports: { ...NO_MERGED_REPORT, [LEG_REPORT]: JSON.stringify(silent) },
+        args: ['--accept', '--seed', 'mutation', '--reason', 'no provenance'],
+      });
+      expect(unknown.exitCode).toBe(2);
+    });
+
+    it("banks a leg measured from scratch even while the merged campaign's report is incremental", () => {
+      // Each field is judged by its OWN evidence. The merged report's prefix is
+      // `mutation.`, which every leg path also starts with; letting it claim them
+      // would make a warm campaign run block the one from-scratch leg run that
+      // is exactly what the refusal asks for.
+      const result = ratchet({
+        baseline: withMutation(undefined),
+        reports: {
+          ...WITH_LEG_REPORT,
+          '.testfortress/reports/mutation.json': mutationReport(HEALTHY_MUTATION, {
+            incremental: true,
+          }),
+        },
+        args: ['--accept', '--seed', 'mutation.legs.shared', '--reason', 'bank the shared leg'],
+      });
+      expect(result.exitCode).toBe(0);
+      const after = read(result.dir) as { mutation: Record<string, unknown> };
+      expect(Object.keys(after.mutation)).toEqual(['legs']);
+    });
+
+    it('still COMPARES incremental evidence, because comparing is not banking', () => {
+      const result = ratchet({
+        baseline: withMutation({ legs: { shared: { ...SHARED_FLOOR, overall: 90 } } }),
+        reports: {
+          ...NO_MERGED_REPORT,
+          [LEG_REPORT]: mutationReport(SHARED_LEG, { incremental: true }),
+        },
+      });
+      expect(result.regressions.map((r) => r.path)).toContain('mutation.legs.shared.overall');
+      expect(result.exitCode).toBe(1);
+    });
+
+    describe('seeding a leg', () => {
+      it('seeds only what a leg run measured when the whole family is absent', () => {
+        const result = ratchet({
+          baseline: withMutation(undefined),
+          reports: WITH_LEG_REPORT,
+          args: ['--accept', '--seed', 'mutation', '--reason', 'bank the shared leg'],
+        });
+        expect(result.exitCode).toBe(0);
+        const after = read(result.dir) as {
+          mutation: Record<string, unknown> & { legs: { shared: Record<string, unknown> } };
+          meta: { fields: string[] };
+        };
+        expect(after.mutation.legs.shared).toEqual({
+          overall: 78.57,
+          totalMutants: 14,
+          filesMutated: SHARED_FLOOR.filesMutated,
+          modules: { 'packages/shared/src/schemas/': 75 },
+        });
+        // No merged figure was measured, so none may be written.
+        expect(Object.keys(after.mutation)).toEqual(['legs']);
+        expect(after.meta.fields).toContain('mutation.legs.shared.filesMutated');
+        expect((result.seeded ?? []).every((s) => s.path.startsWith('mutation.legs.shared.'))).toBe(
+          true,
+        );
+      });
+
+      it('refuses the whole family once one leg is banked, and accepts the next leg by name', () => {
+        const baseline = withMutation({ legs: { shared: SHARED_FLOOR } });
+        const clientReport = {
+          ...WITH_LEG_REPORT,
+          '.testfortress/reports/mutation-client.json': mutationReport([
+            { name: 'packages/client/src/lib/b.ts', killed: 3, survived: 1 },
+          ]),
+        };
+        const whole = ratchet({
+          baseline,
+          reports: clientReport,
+          args: ['--accept', '--seed', 'mutation', '--reason', 'bank the client leg'],
+        });
+        expect(whole.exitCode).toBe(2);
+        expect(whole.stderr).toMatch(/already records/);
+
+        const byName = ratchet({
+          baseline,
+          reports: clientReport,
+          args: ['--accept', '--seed', 'mutation.legs.client', '--reason', 'bank the client leg'],
+        });
+        expect(byName.exitCode).toBe(0);
+        const after = read(byName.dir) as {
+          mutation: { legs: Record<string, Record<string, unknown>> };
+        };
+        expect(after.mutation.legs['client']).toMatchObject({
+          overall: 75,
+          totalMutants: 4,
+          filesMutated: ['packages/client/src/lib/b.ts'],
+        });
+        // The banked leg moved only through the improving direction, as any
+        // existing floor does: 70 -> 78.57.
+        expect(after.mutation.legs['shared']!['overall']).toBe(78.57);
+      });
+
+      it('refuses a seed that would write a score without its measured file set', () => {
+        const result = ratchet({
+          baseline: withMutation({ legs: { shared: SHARED_FLOOR } }),
+          reports: {
+            ...WITH_LEG_REPORT,
+            '.testfortress/reports/mutation-client.json': mutationReport([
+              { name: 'packages/client/src/lib/b.ts', killed: 3, survived: 1 },
+            ]),
+          },
+          args: [
+            '--accept',
+            '--seed',
+            'mutation.legs.client.overall',
+            '--reason',
+            'the score, but not the scope',
+          ],
+        });
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toMatch(
+          /missing required field\(s\) mutation\.legs\.client\.filesMutated/,
+        );
+        const after = read(result.dir) as { mutation: { legs: Record<string, unknown> } };
+        expect(after.mutation.legs['client']).toBeUndefined();
+      });
+    });
+  });
+
+  describe('the per-change mutation floor and budgets, which are read from source', () => {
+    const read = (dir: string): Record<string, unknown> =>
+      JSON.parse(readFileSync(path.join(dir, '.testfortress', 'baseline.json'), 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+    const { mutationDiff: _none, ...withoutDiff } = HEALTHY_BASELINE;
+    const withoutDiffBaseline = {
+      ...withoutDiff,
+      meta: {
+        fields: HEALTHY_BASELINE.meta.fields.filter((f) => !f.startsWith('mutationDiff.')),
+      },
+    };
+
+    it('holds the committed values, and fails a baseline whose floor is higher than the source', () => {
+      // The production change that turns this red is LOWERING the floor in
+      // `mutation-scope.mjs`: the baseline remembers the old, higher value.
+      const result = ratchet({
+        baseline: {
+          ...HEALTHY_BASELINE,
+          mutationDiff: { ...HEALTHY_BASELINE.mutationDiff, floor: MUTATION_DIFF_FLOOR + 1 },
+        },
+        reports: HEALTHY_REPORTS,
+      });
+      expect(result.regressions.map((r) => r.path)).toEqual(['mutationDiff.floor']);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('fails a leg whose committed sample budget shrank, because the budget is the denominator', () => {
+      const result = ratchet({
+        baseline: {
+          ...HEALTHY_BASELINE,
+          mutationDiff: {
+            floor: MUTATION_DIFF_FLOOR,
+            budget: { ...MUTATION_DIFF_BUDGETS, server: MUTATION_DIFF_BUDGETS.server + 1 },
+          },
+        },
+        reports: HEALTHY_REPORTS,
+      });
+      expect(result.regressions.map((r) => r.path)).toEqual(['mutationDiff.budget.server']);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('requires the family unconditionally, since source can always measure it', () => {
+      const result = ratchet({ baseline: withoutDiffBaseline, reports: HEALTHY_REPORTS });
+      expect(result.absent.map((a) => a.path).sort()).toEqual([
+        'mutationDiff.budget',
+        'mutationDiff.floor',
+      ]);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('seeds the family from source, which is the one cure for its absence', () => {
+      const result = ratchet({
+        baseline: withoutDiffBaseline,
+        reports: HEALTHY_REPORTS,
+        args: ['--accept', '--seed', 'mutationDiff', '--reason', 'register the per-change leg'],
+      });
+      expect(result.exitCode).toBe(0);
+      const after = read(result.dir) as {
+        mutationDiff: { floor: number; budget: Record<string, number> };
+        meta: { fields: string[] };
+      };
+      expect(after.mutationDiff).toEqual({
+        floor: MUTATION_DIFF_FLOOR,
+        budget: MUTATION_DIFF_BUDGETS,
+      });
+      expect(after.meta.fields).toContain('mutationDiff.floor');
+      expect((result.seeded ?? []).map((x) => x.path)).toContain('mutationDiff.floor');
+    });
+
+    it('refuses to seed half the family, so the absent half still blocks', () => {
+      const result = ratchet({
+        baseline: withoutDiffBaseline,
+        reports: HEALTHY_REPORTS,
+        args: ['--accept', '--seed', 'mutationDiff.floor', '--reason', 'only the floor'],
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toMatch(/ABSENT {5}mutationDiff\.budget/);
+      expect(read(result.dir)['mutationDiff']).toBeUndefined();
+    });
+  });
+
   describe('--accept', () => {
     it('refuses without a reason', () => {
       const result = ratchet({
@@ -1056,6 +1484,29 @@ describe('audit:ratchet', () => {
       expect(result.exitCode).toBe(2);
       expect(result.stderr).toMatch(/already records/);
       expect(result.stderr).toMatch(/mutation\.overall/);
+    });
+
+    it('refuses to seed the merged family from a campaign that ran incrementally', () => {
+      // The registered command runs incrementally, and that is right for ENFORCING
+      // a floor. It is wrong for RECORDING one: a reused result can be a busy
+      // machine's Timeout, counted as a kill, carried forward indefinitely.
+      const { incremental: _flag, ...silent } = JSON.parse(
+        mutationReport(HEALTHY_MUTATION),
+      ) as Record<string, unknown>;
+      // Explicitly incremental, and a report too old to say: both are refused.
+      for (const evidence of [
+        mutationReport(HEALTHY_MUTATION, { incremental: true }),
+        JSON.stringify(silent),
+      ]) {
+        const result = ratchet({
+          baseline: withoutMutation(),
+          reports: { ...HEALTHY_REPORTS, '.testfortress/reports/mutation.json': evidence },
+          args: ['--accept', '--seed', 'mutation', '--reason', 'first mutation baseline'],
+        });
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toMatch(/mutation\.json, which was not measured from scratch/);
+        expect(read(result.dir)['mutation']).toBeUndefined();
+      }
     });
 
     it('refuses a family nothing measured, rather than recording an empty one', () => {

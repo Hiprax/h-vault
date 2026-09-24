@@ -12,7 +12,6 @@ export type {
   CsvFieldMapping,
   ImportSourceFormat,
   NativeCiphertext,
-  NativeContent,
   ParsedImportItem,
   PreviousPassword,
   ParseResult,

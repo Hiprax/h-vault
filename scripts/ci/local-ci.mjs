@@ -828,6 +828,28 @@ const GATES = [
     run: (options) => runExe(process.execPath, ['scripts/ci/mutation-gate.mjs'], options),
   },
   {
+    id: 'mutation-diff',
+    task: 'test:mutation:diff',
+    // TIER 1: the cheap half of the oracle above, split off so that it runs on
+    // every push while the campaign keeps its own floor at tier 2. Coverage
+    // proves the lines this change touched RAN; this proves they are ASSERTED.
+    // It mutates only the mutants the change owns, from scratch, within each
+    // leg's committed sample budget — see the gate's own docblock for why a
+    // budget and not a deadline bounds it.
+    //
+    // Its cost is dominated by each touched leg's DRY RUN over the tests related
+    // to the changed files, not by the mutants: measured, a change to one widely
+    // imported server file costs about six minutes before its first mutant, and
+    // a shared-only change well under a minute. A change touching no production
+    // line starts no Stryker at all.
+    tier: 1,
+    title: 'Mutation testing of the lines this change touched (Stryker, per leg, from scratch)',
+    ci: 'new — nothing asked whether the lines a change adds are asserted until the campaign ran',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/mutation-diff-gate.mjs'], options),
+  },
+  {
     id: 'sast',
     task: 'audit:sast',
     tier: 1,

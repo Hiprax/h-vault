@@ -71,7 +71,7 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — twenty-nine gates including the full test suite, the export-format
+pipeline locally — thirty gates including the full test suite, the export-format
 goldens, patch coverage on the lines you changed, a smoke run of the built artifact, the
 browser bundle's size budgets, the storage port against a real object-storage engine in a
 container, container builds with Trivy scanning, and a static-analysis
@@ -95,13 +95,27 @@ artifact on every push; `flake`, ten complete runs of every suite in ten differe
 shuffled orders plus the Playwright suite three times over, measured at 84 and 79 minutes
 on two separate runs; and `mutation`, the oracle, which re-runs the suite once per mutant.
 `mutation` is measured in DAYS on a four-core machine, not in hours: its `shared` leg takes
-13m30s, but 41 % of the `server` leg's 12,174 mutants are static — a static mutant has no
+17m14s from scratch, but 41 % of the `server` leg's 12,174 mutants are static — a static mutant has no
 per-test coverage, so it is run against the whole suite, and that suite boots a real mongod
 per file. Measured at about one mutant per minute per runner, which is 120-130 hours for
 that leg alone. Plan for it, and never make it cheap by narrowing what it mutates or by
 raising its concurrency: the first shrinks the score's denominator and the second turns
 slow tests into timeouts, which Stryker counts as kills.
 All eight run in `npm run verify:full`.
+
+`mutation` is split rather than postponed, which is the rule for every expensive gate here.
+Its cheap half, `mutation-diff`, runs on every push at T1: it mutates only the lines your
+change touched (against the same merge base `coverage` uses), from scratch, and fails below
+a committed 85%. A change that owns more mutants than a leg's committed budget is tested on
+a sample keyed to the merge base, always including every changed file, and the report says
+so. Its cost is mostly the dry run over the tests related to the files you changed: under a
+minute for a `shared` change, several minutes once a widely imported server or client module
+is involved. A survivor it names is a line whose behaviour no test pins: write the assertion,
+or, if no test can kill it, add a dated `EQUIV-MUTANT` entry to the suppression ledger for
+that file. The campaign itself banks a floor per leg, and a floor is recorded only from a
+from-scratch run: `npm run test:mutation -- --leg=<id> --full`, then `npm run audit:ratchet:full`,
+then `node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.<id> --reason "..."` (the
+very first leg of all is `--seed mutation`).
 
 The gates are grouped into tiers by how long they take, so there is something worth
 running at every point in the loop:
@@ -297,7 +311,7 @@ documenting its own defeat. The hatches themselves are unchanged and still work.
 | `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
 
 The first is the one to reach for: it is scoped, it is visible in the run summary, and it
-leaves the other twenty-seven gates in place. **Say so in the pull request description
+leaves the other twenty-eight gates in place. **Say so in the pull request description
 whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
 a claim someone else now has to check.
 

@@ -95,6 +95,17 @@ describe('generateRowIdNonce', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('throws the same way when a crypto object exists but cannot generate randomness', () => {
+    // The second half of the guard: a partial polyfill with no getRandomValues
+    // must be refused by name, not left to fail as "undefined is not a function".
+    vi.stubGlobal('crypto', {});
+    try {
+      expect(() => generateRowIdNonce()).toThrow('Cryptographic random API is unavailable');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('the idNonce wire field', () => {
@@ -121,7 +132,12 @@ describe('the idNonce wire field', () => {
     );
     const folder = { encryptedName: 'n', nameIv: 'i', nameTag: 't' };
     expect(createFolderSchema.parse({ ...folder, idNonce: NONCE }).idNonce).toBe(NONCE);
-    expect(createFolderSchema.safeParse({ ...folder, idNonce: 'x' }).success).toBe(false);
+    const badNonce = createFolderSchema.safeParse({ ...folder, idNonce: 'x' });
+    expect(badNonce.success).toBe(false);
+    expect(badNonce.error?.issues[0]).toMatchObject({
+      path: ['idNonce'],
+      message: 'Invalid row id nonce',
+    });
   });
 
   it('refuses two import inserts naming one nonce, and names the repeat', () => {
@@ -131,7 +147,11 @@ describe('the idNonce wire field', () => {
     const repeated = importOperationsSchema.safeParse({ inserts: [insert, other, insert] });
     expect(repeated.success).toBe(false);
     expect(repeated.error?.issues).toHaveLength(1);
-    expect(repeated.error?.issues[0]?.path).toEqual(['inserts', 2, 'idNonce']);
+    expect(repeated.error?.issues[0]).toMatchObject({
+      code: 'custom',
+      path: ['inserts', 2, 'idNonce'],
+      message: 'inserts contain a repeated idNonce',
+    });
     // Inserts without a nonce are never "repeats" of each other.
     const bare = { ...insert, idNonce: undefined };
     expect(importOperationsSchema.safeParse({ inserts: [bare, bare] }).success).toBe(true);
@@ -152,9 +172,21 @@ describe('the re-seal fields of a rotation', () => {
     expect(bulkReEncryptSchema.safeParse(rotation).success).toBe(true);
     const missing = bulkReEncryptSchema.safeParse({ ...rotation, reseal: true });
     expect(missing.success).toBe(false);
-    expect(missing.error?.issues.map((i) => i.path)).toEqual([
-      ['vaultKeyVersion'],
-      ['idempotencyKey'],
+    // Code AND message, not only the path: the message is what a 400 carries back
+    // to the client, and a blank one reads as a validator that fired for nothing.
+    expect(
+      missing.error?.issues.map((i) => ({ path: i.path, code: i.code, message: i.message })),
+    ).toEqual([
+      {
+        path: ['vaultKeyVersion'],
+        code: 'custom',
+        message: 'A re-seal must name the vault-key generation it was sealed under',
+      },
+      {
+        path: ['idempotencyKey'],
+        code: 'custom',
+        message: 'A re-seal must carry an idempotency key',
+      },
     ]);
     const noKey = bulkReEncryptSchema.safeParse({ ...rotation, reseal: true, vaultKeyVersion: 0 });
     expect(noKey.error?.issues.map((i) => i.path)).toEqual([['idempotencyKey']]);
@@ -178,7 +210,15 @@ describe('the re-seal fields of a rotation', () => {
       discardPendingVaultKey: true,
     });
     expect(parsed.success).toBe(false);
-    expect(parsed.error?.issues.map((i) => i.path)).toEqual([['discardPendingVaultKey']]);
+    expect(
+      parsed.error?.issues.map((i) => ({ path: i.path, code: i.code, message: i.message })),
+    ).toEqual([
+      {
+        path: ['discardPendingVaultKey'],
+        code: 'custom',
+        message: 'A re-seal cannot abandon an interrupted rotation',
+      },
+    ]);
     // Discarding alone is still an ordinary, accepted rotation.
     expect(
       bulkReEncryptSchema.safeParse({ ...rotation, discardPendingVaultKey: true }).success,
