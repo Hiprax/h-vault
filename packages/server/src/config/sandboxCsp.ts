@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { SANDBOX_PERMISSIONS_POLICY } from './permissionsPolicy.js';
 
 /**
  * The Content-Security-Policy carried by `/sandbox.html`, the isolated document
@@ -203,7 +204,8 @@ export function applySandboxAssetHeaders(res: HeaderSink, filePath: string): voi
  *
  * `setHeader` REPLACES rather than appends, which is what makes exactly one
  * `Content-Security-Policy` reach the client even though helmet already set the
- * application's. That matters: two policies on one response are INTERSECTED by
+ * application's (and exactly one `Permissions-Policy`, over the application's
+ * own from `app.ts`). That matters: two policies on one response are INTERSECTED by
  * the browser, which would kill `blob:` media and `data:` images in one stroke.
  *
  * No nonce is injected, unlike the SPA shell. The document carries no inline
@@ -218,6 +220,9 @@ export function createSandboxDocumentHandler(
     res.setHeader('Content-Security-Policy', SANDBOX_CSP_HEADER);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', SANDBOX_DOCUMENT_CACHE_CONTROL);
+    // Replaces the application's value, which allows the camera for the
+    // authenticator import; this document never needs a device.
+    res.setHeader('Permissions-Policy', SANDBOX_PERMISSIONS_POLICY);
     res.send(html);
   };
 }

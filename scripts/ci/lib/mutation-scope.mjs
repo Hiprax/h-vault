@@ -249,9 +249,9 @@ export const jsonReportFor = (id) => `${MUTATION_TMP_DIR}/report-${id}.json`;
 export const MUTATION_DIFF_FLOOR = 85;
 
 /**
- * How many of a change's mutants each leg tests, at most, beyond the one per
- * changed file that is always taken — the leg's DENOMINATOR, and the reason the
- * per-change tier has a bounded cost at all.
+ * How many of a change's mutants each leg tests, at most, beyond the one
+ * location per changed file that is always taken — the leg's DENOMINATOR, and
+ * the reason the per-change tier has a bounded cost at all.
  *
  * A change that owns fewer mutants than this is tested in full, which is the
  * ordinary case. A larger one is sampled, deterministically and disclosed (see
@@ -270,8 +270,22 @@ export const MUTATION_DIFF_FLOOR = 85;
  * mongod. Each budget is sized for a mutant phase of about three minutes on
  * shared and client and about nine on the server, beside dry runs measured at
  * seconds, ~5.5 minutes and ~7 minutes respectively for a change touching widely
- * imported modules. The one mutant per changed file the stratification always
- * takes can exceed a budget; that is deliberate (no changed file goes unmeasured).
+ * imported modules. Those per-mutant figures were taken under the file shuffle
+ * the mutation configs used to inherit, which made every KILLED static mutant pay
+ * for a random share of its suite; with the kill-seeking file order
+ * (`tests/harness/mutationSequencer.ts`) the whole gate over a 104-file branch
+ * diff fell from 63–67 minutes to 30m 26s on the same plans (compared mutant by
+ * mutant, the shared and client legs changed no status; the server leg's
+ * kill count was unchanged), and to 21m 00s once the leaf sample below and four
+ * killed static survivors were added. A static mutant that SURVIVES is now the one thing that
+ * still costs a whole related suite.
+ *
+ * The one location per changed file the stratification always takes can exceed
+ * a budget; that is deliberate (no changed file goes unmeasured). It costs one
+ * span's mutants, never a subtree (`lib/mutation-diff.mjs` decision (c)): taking
+ * whichever candidate hashed lowest, block and object literal included, planned
+ * 83 server mutants on a 32-file change against this budget of 20, and one leaf
+ * span per file plans 50.
  */
 export const MUTATION_DIFF_BUDGETS = { shared: 200, client: 120, server: 20 };
 
@@ -284,7 +298,7 @@ export const MUTATION_DIFF_BUDGETS = { shared: 200, client: 120, server: 20 };
  * `mutation-gate.mjs` decision (e) makes for having none at all.
  *
  * So it SCALES WITH THE PLAN, because the budget does not bound the planned
- * count: the stratification takes one mutant per changed file whatever the
+ * count: the stratification takes one location per changed file whatever the
  * budget says. A flat hour was reached by a healthy run. Measured on the
  * reference machine over a 105-file branch diff, the server leg planned 81
  * mutants against its budget of 20, its dry run took 8m20s, its mutants cost

@@ -21,6 +21,7 @@ import {
   createSandboxDocumentHandler,
   requireBuildArtifact,
 } from './config/sandboxCsp.js';
+import { APPLICATION_PERMISSIONS_POLICY } from './config/permissionsPolicy.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
 import { sanitizeRequestBody } from './middleware/sanitizeBody.js';
@@ -130,6 +131,18 @@ app.use(
     crossOriginEmbedderPolicy: false,
   }),
 );
+
+// The Permissions-Policy helmet cannot send (it has no option for one). Set on
+// every response, before any route and before the static mount, because both
+// nginx layers in front of a deployment add the golden floor (which denies the
+// camera) to any response that arrives without one, and the authenticator
+// import's camera scan runs in the documents this server renders. Why this value,
+// and why the isolated document gets a stricter one of its own:
+// `config/permissionsPolicy.ts`.
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Permissions-Policy', APPLICATION_PERMISSIONS_POLICY);
+  next();
+});
 
 app.use(
   cors({

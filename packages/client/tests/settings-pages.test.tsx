@@ -1539,6 +1539,9 @@ describe('SettingsPage', () => {
     }
     // Bound to the row the server will store: the id this insert's nonce derives.
     expect(insert.idNonce).toMatch(/^[0-9a-f]{40}$/);
+    // The page's post-import tail settles first, so nothing of it runs
+    // outside act() while this test does its own asynchronous work.
+    await settleImportFlow();
     const rowId = await deriveRowId(USER_ID, insert.idNonce ?? '');
     const { vaultKey } = useAuthStore.getState();
     const sealed = vi

@@ -52,7 +52,6 @@ import { afterAll, describe, it, expect, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 
 /**
@@ -82,6 +81,12 @@ const staged = vi.hoisted(() => {
       '<!doctype html><html><head><script src="/assets/main-abc123.js"></script></head></html>',
     /** A real file under the static root, so "static is mounted" is not an assumption. */
     assetBody: 'export const sandbox = 1;\n',
+    /**
+     * Every `requireBuildArtifact(read, missing)` call, in order, with the reader
+     * it was handed: `app.ts` makes two at boot, and these are what a missing
+     * build turns into the operator's error.
+     */
+    artifactCalls: [] as { read: unknown; missing: string }[],
   };
 });
 
@@ -136,11 +141,33 @@ vi.mock('../src/config/clientArtifacts.js', async (importOriginal) => {
   };
 });
 
+// A CALL-THROUGH, not a stand-in: the real helper still reads and still throws;
+// the wrapper only records what `app.ts` hands it at boot. The message is the
+// operator's whole remedy when a build is incomplete, and the missing-artifact
+// branch itself cannot be reached here — `app.ts` evaluates once per file, and
+// evaluating it again needs `vi.resetModules()`, which is closed (see the last
+// describe) — so the argument is where it can be observed.
+vi.mock('../src/config/sandboxCsp.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config/sandboxCsp.js')>();
+  return {
+    ...actual,
+    requireBuildArtifact: (read: () => string, missing: string): string => {
+      staged.artifactCalls.push({ read, missing });
+      return actual.requireBuildArtifact(read, missing);
+    },
+  };
+});
+
 // Static, not a top-level dynamic import: a dynamically-imported module inside a
 // mocked graph is attributed to a separate V8 coverage entry, and the merge then
 // drops the file from the package report entirely.
 import app from '../src/app.js';
 import { requireBuildArtifact, SANDBOX_CSP_HEADER } from '../src/config/sandboxCsp.js';
+import { readApplicationShell, readSandboxDocument } from '../src/config/clientArtifacts.js';
+import {
+  APPLICATION_PERMISSIONS_POLICY,
+  SANDBOX_PERMISSIONS_POLICY,
+} from '../src/config/permissionsPolicy.js';
 // The canonical list of URL spellings that miss the sandbox route, shared with
 // `test:smoke` and `test:deploy`. `clean-room.test.ts` already reaches into the
 // same module from this tier, so the import path is an established one.
@@ -200,6 +227,39 @@ describe('the production block mounts the client and the isolated document', () 
     expect(response.headers['cross-origin-resource-policy']).toBe('cross-origin');
     // Not the SPA fallback wearing an asset's URL.
     expect(response.headers['content-type']).not.toMatch(/text\/html/);
+  });
+
+  describe('every document carries the Permissions-Policy it is meant to have', () => {
+    // Both nginx layers add the golden floor (camera denied) to any response
+    // whose upstream sent no Permissions-Policy, which made the authenticator
+    // import's camera scan impossible behind them. The application's own value
+    // is what they yield to, so it has to be on the documents a browser renders.
+    it('sends the application policy with the shell of a client-side route', async () => {
+      const response = await request(app).get('/vault');
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toMatch(/text\/html/);
+      expect(response.headers['permissions-policy']).toBe(APPLICATION_PERMISSIONS_POLICY);
+    });
+
+    it('sends it with the shell the service worker precaches, which static answers', async () => {
+      // The worker fetches `/index.html` once and replays that response,
+      // headers included, for every navigation; a document served from its
+      // cache takes its policy from the cached headers.
+      const response = await request(app).get('/index.html');
+
+      expect(response.status).toBe(200);
+      expect(response.text).toBe(staged.indexHtml);
+      expect(response.headers['permissions-policy']).toBe(APPLICATION_PERMISSIONS_POLICY);
+    });
+
+    it('sends the stricter policy with the isolated document, and only that one', async () => {
+      const response = await request(app).get('/sandbox.html');
+
+      expect(response.text).toContain(SANDBOX_DOCUMENT_MARKER);
+      expect(response.headers['permissions-policy']).toBe(SANDBOX_PERMISSIONS_POLICY);
+      expect(Array.isArray(response.headers['permissions-policy'])).toBe(false);
+    });
   });
 
   describe('no URL spelling delivers the isolated document without its policy', () => {
@@ -375,8 +435,9 @@ describe('a production build missing an artifact fails loudly at boot', () => {
   });
 
   it('tells the operator to STAGE the sandbox document, not just to build it', () => {
-    // The message `app.ts` actually passes, read from the source rather than
-    // restated, because what matters is the sentence an operator sees at boot.
+    // The messages `app.ts` actually passed at boot, as recorded by the
+    // call-through above — the sentence an operator sees, observed rather than
+    // read back out of the source.
     //
     // On the pm2 path the build is almost never what is missing: `build:client`
     // writes the document to `packages/client/dist-sandbox/`, and something has to
@@ -384,16 +445,22 @@ describe('a production build missing an artifact fails loudly at boot', () => {
     // bare-metal deployment does it by hand. "Run npm run build:client" alone
     // sends an operator to re-run a build they have just run while the file sits
     // one directory away.
-    const appSource = readFileSync(
-      path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app.ts'),
-      'utf8',
-    );
-    const message = /'Production build missing the document sandbox[\s\S]{0,400}?\);/.exec(
-      appSource,
-    );
-    expect(message).not.toBeNull();
-    expect(message?.[0]).toContain('dist-sandbox');
-    expect(message?.[0]).toContain('packages/server/sandbox-document');
+    //
+    // The first two calls are `app.ts`'s, made while this file was being loaded;
+    // the direct cases in this describe add theirs after, in whatever order the
+    // shuffle runs them.
+    expect(staged.artifactCalls.slice(0, 2)).toEqual([
+      {
+        read: readApplicationShell,
+        missing: 'Production build missing client dist. Run: npm run build:client',
+      },
+      {
+        read: readSandboxDocument,
+        missing:
+          'Production build missing the document sandbox (sandbox.html). Run: npm run build:client, ' +
+          'then copy packages/client/dist-sandbox to packages/server/sandbox-document',
+      },
+    ]);
   });
 
   it('returns the file untouched when the read succeeds', () => {

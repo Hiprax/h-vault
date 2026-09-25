@@ -32,12 +32,19 @@ export const symbol = {
   run: unicodeOk ? '▶' : '>',
 };
 
-/** `93.4s` / `2m 07s` — durations a human can compare at a glance. */
+/**
+ * `93.4s` / `2m 07s` — durations a human can compare at a glance.
+ *
+ * Rounded ONCE, to the unit that is printed, before it is split: rounding the
+ * seconds after the minutes had been taken off printed 1,259.6 s as `20m 60s`,
+ * and 59.96 s as `60.0s`.
+ */
 export function formatDuration(ms) {
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const tenths = Math.round(ms / 100);
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)}s`;
+  const seconds = Math.round(ms / 1000);
   const minutes = Math.floor(seconds / 60);
-  const rest = Math.round(seconds % 60);
+  const rest = seconds % 60;
   return `${String(minutes)}m ${String(rest).padStart(2, '0')}s`;
 }
 

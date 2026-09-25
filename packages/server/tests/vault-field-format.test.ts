@@ -397,6 +397,11 @@ describe('A payload a v2-unaware client could only have passed through is refuse
 
       expect(res.status).toBe(409);
       expect(res.body.message).toMatch(/^Reload the app, then try again/);
+      // And WHY, in full: the client shows a 4xx verbatim, so the reason is part
+      // of the refusal rather than decoration around it.
+      expect(res.body.message).toMatch(
+        /newer format than this page understands, and rotating from it would lose them\.$/,
+      );
       expect(String(res.body.message).length).toBeLessThanOrEqual(200);
       const after = await User.findById(user.id).lean();
       expect(after!.encryptedVaultKey).toBe('test-encrypted-vault-key');
@@ -438,6 +443,9 @@ describe('A payload a v2-unaware client could only have passed through is refuse
     const res = await send(user, 'post', '/backup/restore', { conflictStrategy: 'skip', data });
     expect(res.status).toBe(409);
     expect(res.body.message).toMatch(/^Reload the app, then restore again/);
+    expect(res.body.message).toMatch(
+      /newer format than this page understands, and restoring them from it would lose them\.$/,
+    );
     expect(String(res.body.message).length).toBeLessThanOrEqual(200);
     expect(await rawItems(user.id)).toHaveLength(0);
 
@@ -456,9 +464,11 @@ describe('A payload a v2-unaware client could only have passed through is refuse
 
   it('reads nothing but the row fields a v2 marker can sit on, and never throws on a malformed file', () => {
     expect(carriesBoundField(undefined, 'x')).toBe(false);
-    expect(carriesBoundField([null, 7, 'v2:', { nameIv: 'plain' }], [null])).toBe(false);
+    expect(
+      carriesBoundField([undefined, null, 7, 'v2:', { nameIv: 'plain' }], [undefined, null]),
+    ).toBe(false);
     expect(carriesBoundField([{ passwordHistory: 'v2:' }], [])).toBe(false);
-    expect(carriesBoundField([{ passwordHistory: [null, { iv: 3 }] }], [])).toBe(false);
+    expect(carriesBoundField([{ passwordHistory: [undefined, null, { iv: 3 }] }], [])).toBe(false);
     // The marker must LEAD the IV: base64 cannot contain it anywhere, but only a
     // leading one is the format's.
     expect(carriesBoundField([{ nameIv: 'AAAAv2:' }], [])).toBe(false);

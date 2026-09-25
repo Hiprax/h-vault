@@ -26,6 +26,7 @@ import { itemMatchesSearch } from '../../lib/vaultSearch';
 import { getItemSubtitle } from '../../lib/vaultDisplay';
 import { VAULT_SEARCH_RESULTS_ID } from './SearchBar';
 import {
+  sendPaced,
   useVaultStore,
   type DecryptedVaultItem,
   type SortBy,
@@ -164,6 +165,16 @@ const SkeletonRow = memo(function SkeletonRow() {
     </div>
   );
 });
+
+/**
+ * A bulk action fails as a whole when any of its requests failed, which is what
+ * it reported before its requests were paced. Every request has been attempted
+ * by the time this runs; the first refusal is the one the caller's toast names.
+ */
+function throwFirstRejection(results: readonly PromiseSettledResult<unknown>[]): void {
+  const failed = results.find((result) => result.status === 'rejected');
+  if (failed) throw failed.reason;
+}
 
 function LoadingSkeleton() {
   return (
@@ -748,8 +759,9 @@ export function VaultList({ onCreateNew }: VaultListProps) {
                             setShowTagMenu(false);
                             try {
                               const sourceItems = items;
-                              await Promise.all(
-                                [...selectedItems].map((id) => {
+                              // Paced, not all at once: see `sendPaced`.
+                              const results = await sendPaced(
+                                [...selectedItems].map((id) => () => {
                                   const item = sourceItems.find((i) => i.id === id);
                                   if (!item) return Promise.resolve();
                                   const newTags = item.tags.includes(tag)
@@ -768,6 +780,7 @@ export function VaultList({ onCreateNew }: VaultListProps) {
                                     .updateItemMeta(id, { tags: newTags });
                                 }),
                               );
+                              throwFirstRejection(results);
                               toast({
                                 title: `Tag "${tag}" applied to ${selectedItems.size} items`,
                                 type: 'success',
@@ -1007,7 +1020,11 @@ export function VaultList({ onCreateNew }: VaultListProps) {
                     setBulkLoading(true);
                     try {
                       if (showTrash) {
-                        await Promise.all([...selectedItems].map((id) => permanentDeleteApi(id)));
+                        throwFirstRejection(
+                          await sendPaced(
+                            [...selectedItems].map((id) => () => permanentDeleteApi(id)),
+                          ),
+                        );
                         toast({
                           title: `${selectedItems.size} items permanently deleted`,
                           type: 'success',

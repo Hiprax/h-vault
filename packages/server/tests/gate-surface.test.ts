@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import ts from 'typescript';
 import { NUMBER_WORDS } from './support/numberWords';
 import {
@@ -60,6 +61,7 @@ import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest
 import sharedMutationConfig from '../../shared/vitest.mutation.config';
 import serverMutationConfig from '../vitest.mutation.config';
 import clientMutationConfig from '../../client/vitest.mutation.config';
+import { MutationRunLedger, MutationSequencer } from '../../../tests/harness/mutationSequencer';
 import sharedFlakeConfig from '../../shared/vitest.flake.config';
 import serverFlakeConfig from '../vitest.flake.config';
 import clientFlakeConfig from '../../client/vitest.flake.config';
@@ -1171,6 +1173,56 @@ describe('machine-readable reports', () => {
     },
   );
 
+  it.each([
+    ['shared', sharedMutationConfig, sharedVitestConfig],
+    ['server', serverMutationConfig, serverVitestConfig],
+    ['client', clientMutationConfig, clientVitestConfig],
+  ])(
+    'runs the %s mutation leg killer-first, and only the FILE order differs from the base suite',
+    (name, mutation, base) => {
+      // Stryker drives one vitest worker that bails at the first failure, so the
+      // file order is the cost of every static mutant. Under the base config's
+      // seeded FILE shuffle a static mutant walked a random share of the suite
+      // before its killer (tests/harness/mutationSequencer.ts has the numbers).
+      const sequence = mutation.test?.sequence;
+      expect(sequence?.sequencer, `${name} sequencer`).toBe(MutationSequencer);
+      expect(sequence?.shuffle, `${name} shuffle`).toEqual({ files: false, tests: true });
+      // Everything else about the order is the base suite's own: the seed that
+      // shuffles the tests inside each file, and the hook order that
+      // `mongoHarness.test.ts` observes.
+      expect(sequence?.seed).toBe(base.test?.sequence?.seed);
+      expect(sequence?.hooks).toBe(base.test?.sequence?.hooks);
+      // The order learns only from this process: vitest's per-machine results
+      // file is neither read nor written, and the reporter that measures each
+      // run is installed.
+      expect(mutation.test?.cache).toBe(false);
+      const reporters = (mutation.test?.reporters ?? []) as unknown[];
+      expect(reporters.filter((reporter) => reporter instanceof MutationRunLedger)).toHaveLength(1);
+      // And NOTHING else differs from the base suite: every key the mutation
+      // config sets differently is one of these five, each accounted for in its
+      // header. A sixth would be a change to what the oracle asks, made where
+      // nothing names it.
+      const baseTestConfig = (base.test ?? {}) as Record<string, unknown>;
+      const mutationTestConfig = (mutation.test ?? {}) as Record<string, unknown>;
+      const differing = [
+        ...new Set([...Object.keys(baseTestConfig), ...Object.keys(mutationTestConfig)]),
+      ]
+        .filter((key) => !isDeepStrictEqual(baseTestConfig[key], mutationTestConfig[key]))
+        .sort();
+      expect(differing, `${name} keys that differ from the base`).toEqual([
+        'cache',
+        'coverage',
+        'reporters',
+        'root',
+        'sequence',
+      ]);
+      // And the check this order is NOT: the base suite still measures order
+      // independence by shuffling FILES, with no sequencer of its own.
+      expect(base.test?.sequence?.shuffle, `${name} base shuffle`).toBe(true);
+      expect(base.test?.sequence?.sequencer, `${name} base sequencer`).toBeUndefined();
+    },
+  );
+
   it("declares the mutation gate's merged report and one per leg, and defers them to its own tier", () => {
     // `mutation.json` plus exactly one evidence file per declared leg, named by
     // `legReportFor` — the name the gate writes and the name the ratchet reads.
@@ -1245,6 +1297,9 @@ describe('machine-readable reports', () => {
     // Shuffling is what makes a differently-seeded run a different ORDER. It is
     // inherited rather than restated, so assert it survived the spread.
     expect(flake.test?.sequence?.shuffle).toBe(true);
+    // The kill-seeking order belongs to the mutation configs alone: a flake leg
+    // that inherited it would run every seed in one order.
+    expect(flake.test?.sequence?.sequencer).toBeUndefined();
     // And the parallelism the gate claims to inherit. `flake-run.mjs` states
     // "parallelism is inherited, never reduced" as a load-bearing decision, and
     // until this line nothing enforced it: pinning either config to one worker

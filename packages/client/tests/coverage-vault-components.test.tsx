@@ -23,6 +23,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
+import { AxiosError, AxiosHeaders } from 'axios';
 
 // ---------------------------------------------------------------------------
 // Hoisted mock fns
@@ -204,6 +205,22 @@ import { FolderRail } from '../src/components/folders/FolderRail';
 import { useVaultFolderScope } from '../src/hooks/useVaultFolderScope';
 import { PasswordGenerator } from '../src/components/vault/PasswordGenerator';
 import { SearchBar, VAULT_SEARCH_RESULTS_ID } from '../src/components/vault/SearchBar';
+
+/**
+ * The refusal a rate-limiting proxy in front of the app sends: a genuine
+ * `AxiosError`, 429, asking for a one-second wait.
+ */
+function proxyRateLimited(): AxiosError {
+  const error = new AxiosError('Request failed with status code 429');
+  error.response = {
+    status: 429,
+    statusText: '',
+    data: '',
+    headers: new AxiosHeaders({ 'retry-after': '1' }),
+    config: { headers: new AxiosHeaders() },
+  };
+  return error;
+}
 
 /**
  * The shared search field, bound to the VAULT — which is what every case below is
@@ -617,6 +634,50 @@ describe('VaultList — bulk tag', () => {
     });
   });
 
+  it('paces a large bulk tag and waits out a short 429 from a proxy, instead of failing part-way', async () => {
+    // Behind the golden host nginx each request counts against a per-address
+    // rate limit, and a bulk tag fired every request at once: about forty landed
+    // and the rest were refused. Now at most four are in flight, and a 429 that
+    // asks for a short wait is waited out and sent again.
+    const ids = Array.from({ length: 10 }, (_, i) => `item-${String(i)}`);
+    let inFlight = 0;
+    let peak = 0;
+    let calls = 0;
+    const paced = vi.fn(async () => {
+      calls++;
+      const refuse = calls === 3;
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      if (refuse) throw proxyRateLimited();
+    });
+    resetVaultStore({
+      items: ids.map((id, i) => makeItem({ id, name: `Item ${String(i)}`, tags: [] })),
+      updateItemMeta: paced,
+    });
+    selectAllAndOpenTagMenu();
+
+    fireEvent.change(screen.getByPlaceholderText('Enter tag name'), { target: { value: 'work' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(
+      () => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ title: 'Tag "work" applied to 10 items', type: 'success' }),
+        );
+      },
+      { timeout: 5_000 },
+    );
+    // Every row once, plus the one that was refused sent a second time.
+    expect(paced).toHaveBeenCalledTimes(11);
+    for (const id of ids) expect(paced).toHaveBeenCalledWith(id, { tags: ['work'] });
+    expect(peak).toBe(4);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to apply tags' }),
+    );
+  });
+
   it('closes the tag popover when focus leaves it, applying nothing', () => {
     selectAllAndOpenTagMenu();
     const tagButton = screen.getByRole('button', { name: 'Tag' });
@@ -690,6 +751,48 @@ describe('VaultList — bulk delete', () => {
     expect(mockPermanentDeleteApi).toHaveBeenCalledWith('b');
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ title: '2 items permanently deleted', type: 'success' }),
+    );
+  });
+
+  it('paces a large permanent delete and waits out a short 429 from a proxy', async () => {
+    const ids = Array.from({ length: 9 }, (_, i) => `gone-${String(i)}`);
+    let inFlight = 0;
+    let peak = 0;
+    let calls = 0;
+    mockPermanentDeleteApi.mockImplementation(async () => {
+      calls++;
+      const refuse = calls === 2;
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      if (refuse) throw proxyRateLimited();
+    });
+    resetVaultStore({
+      showTrash: true,
+      trashItems: ids.map((id, i) => makeItem({ id, name: `Gone ${String(i)}` })),
+    });
+    renderWithRouter(<VaultList onCreateNew={vi.fn()} />);
+
+    fireEvent.click(screen.getAllByLabelText('Select item')[0]!);
+    fireEvent.click(screen.getByLabelText('Select all'));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Delete Forever' })[0]!);
+    const dialog = screen.getByRole('alertdialog', { name: 'Bulk delete confirmation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete Forever' }));
+
+    await waitFor(
+      () => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ title: '9 items permanently deleted', type: 'success' }),
+        );
+      },
+      { timeout: 5_000 },
+    );
+    expect(mockPermanentDeleteApi).toHaveBeenCalledTimes(10);
+    for (const id of ids) expect(mockPermanentDeleteApi).toHaveBeenCalledWith(id);
+    expect(peak).toBe(4);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to delete items' }),
     );
   });
 });

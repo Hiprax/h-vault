@@ -122,9 +122,11 @@ a committed 85%. A change that owns more mutants than a leg's committed budget i
 a sample keyed to the merge base, always including every changed file, and the report says
 so. Its cost is mostly the dry run over the tests related to the files you changed: under a
 minute for a `shared` change, several minutes once a widely imported server or client module
-is involved. A survivor it names is a line whose behaviour no test pins: write the assertion,
-or, if no test can kill it, add a dated `EQUIV-MUTANT` entry to the suppression ledger for
-that file. The campaign itself banks a floor per leg, and a floor is recorded only from a
+is involved. On top of that, a static mutant (module-scope code: a Zod bound, a route table, a
+message constant) that you leave SURVIVING re-runs every test related to its file, so the
+assertion that kills it also makes the gate faster. A survivor it names is a line whose
+behaviour no test pins: write the assertion, or, if no test can kill it, add a dated
+`EQUIV-MUTANT` entry to the suppression ledger for that file. The campaign itself banks a floor per leg, and a floor is recorded only from a
 from-scratch run: `npm run test:mutation -- --leg=<id> --full`, then `npm run audit:ratchet:full`,
 then `node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.<id> --reason "..."` (the
 very first leg of all is `--seed mutation`). Today only the `shared` leg is banked (88.64% of

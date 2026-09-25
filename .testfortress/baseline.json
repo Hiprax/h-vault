@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-09-24",
-  "commit": "04f1579",
+  "recordedAt": "2026-09-25",
+  "commit": "877a818",
   "tests": {
-    "count": 11587
+    "count": 11640
   },
   "coverage": {
     "diff": 100
@@ -56,7 +56,7 @@
         "line": 98.98,
         "branch": 93.49,
         "function": 98.56,
-        "linesTotal": 4513,
+        "linesTotal": 4519,
         "branchesTotal": 2352,
         "filesMeasured": [
           "src/app.ts",
@@ -64,6 +64,7 @@
           "src/config/clientArtifacts.ts",
           "src/config/database.ts",
           "src/config/index.ts",
+          "src/config/permissionsPolicy.ts",
           "src/config/sandboxCsp.ts",
           "src/config/swagger.ts",
           "src/constants/index.ts",
@@ -151,16 +152,16 @@
         ]
       },
       "tests": {
-        "count": 4541
+        "count": 4581
       }
     },
     "packages/client": {
       "coverage": {
         "line": 99.28,
-        "branch": 93.75,
+        "branch": 93.76,
         "function": 98.93,
-        "linesTotal": 10580,
-        "branchesTotal": 7505,
+        "linesTotal": 10604,
+        "branchesTotal": 7517,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -351,7 +352,7 @@
         ]
       },
       "tests": {
-        "count": 5441
+        "count": 5454
       }
     },
     "e2e": {
@@ -581,7 +582,7 @@
       "spectral": 1
     }
   },
-  "reason": "final-sweep 2026-09-24: flake 10/10 clean at 672 E2E executions, suite growth and duplication drop measured by the green ci on the final tree",
+  "reason": "validate-23-32: new tests for the mutation file order (mutation-sequencer, ci-duration-format) and the static-survivor kills; measured by the green npm run ci of 2026-09-25 11:24",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

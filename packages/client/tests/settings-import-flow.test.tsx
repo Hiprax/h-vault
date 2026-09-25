@@ -549,6 +549,9 @@ describe('SettingsPage import flow', () => {
     // Every field is sealed (format v2) to the row it will be stored as: the insert
     // to the id its nonce derives for this account, the update to the matched row.
     const insert = body.operations.inserts[0] ?? {};
+    // The page's post-import tail settles first, so nothing of it runs
+    // outside act() while this test does its own asynchronous work.
+    await settleImportFlow();
     const insertId = await insertRowId(insert);
     expect(openSentField(insert, 'name', nameAad(insertId))).toBe('gitlab.com (newuser)');
     expect(JSON.parse(openSentField(insert, 'data', dataAad('login', insertId)))).toMatchObject({
@@ -689,6 +692,9 @@ describe('SettingsPage import flow', () => {
     await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalled());
     const insert = lastImportBody().operations.inserts[0] ?? {};
     const history = insert.passwordHistory as SentHistoryEntry[] | undefined;
+    // The page's post-import tail settles first, so nothing of it runs
+    // outside act() while this test does its own asynchronous work.
+    await settleImportFlow();
     const insertId = await insertRowId(insert);
 
     expect(insert.folderId).toBe(FOLDER_ID);
@@ -783,6 +789,9 @@ describe('SettingsPage import flow', () => {
 
     expect(inserts).toHaveLength(1);
     const insert = inserts[0] ?? {};
+    // The page's post-import tail settles first, so nothing of it runs
+    // outside act() while this test does its own asynchronous work.
+    await settleImportFlow();
     const insertId = await insertRowId(insert);
     // Not the exported row's id: the insert is a new row.
     expect(insertId).not.toBe(ROW_ID);
@@ -894,6 +903,9 @@ describe('SettingsPage import flow', () => {
     expect(history?.map((e) => [e.encryptedPassword.length, e.changedAt])).toEqual([
       [MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH, '2026-01-02T03:04:05.000Z'],
     ]);
+    // The page's post-import tail settles first, so nothing of it runs
+    // outside act() while this test does its own asynchronous work.
+    await settleImportFlow();
     expect(openHistoryEntry(history?.[0], await insertRowId(insert))).toBe(atBound);
     expect(importInsertItemSchema.safeParse(insert).success).toBe(true);
   });

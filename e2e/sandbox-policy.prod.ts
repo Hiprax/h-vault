@@ -55,7 +55,29 @@ import {
  *     the worker's presence changes nothing about the frame; an engine that did
  *     route that navigation through the worker would have its shell refused here
  *     by (1).
+ *  4. **The application's own documents may use the camera.** Not a property of
+ *     the isolated document, but of the same production headers: both nginx
+ *     layers add the golden header floor, whose `Permissions-Policy` denies the
+ *     camera, to any response that arrives without one, which made the
+ *     authenticator import's camera scan impossible behind them. The server now
+ *     sends its own (`config/permissionsPolicy.ts`), and only an engine can say
+ *     whether the policy a page was served under lets it open a camera, so it is
+ *     asked, with a fake device, on the page the service worker serves.
  */
+
+// (4) needs a camera to open. A FAKE one, granted without a prompt: the question
+// is whether the policy lets the page ask, not whether this machine has a device.
+// Worker-scoped launch options can only be set at file level, and setting them
+// here keeps the shared `CHROMIUM_PROJECT` every other gate runs untouched.
+test.use({
+  launchOptions: {
+    args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
+  },
+  permissions: ['camera'],
+});
+
+/** Chromium's policy reader: which features the document's policy allows. */
+type PolicyDocument = Document & { featurePolicy?: { allowsFeature(feature: string): boolean } };
 
 const AUDIO = 'tone.wav';
 const SVG = 'badge.svg';
@@ -189,6 +211,25 @@ test.describe('the isolated document under the production policy', () => {
       expect(await page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
     });
 
+    await test.step('(4) the application may open the camera on its own origin', async () => {
+      // The page the worker just served, which is the document the authenticator
+      // import's scan runs in. The policy is read first, so a missing reader fails
+      // loudly instead of passing as "not denied"; then a stream is really opened.
+      const camera = await page.evaluate(async () => {
+        const policy = (document as PolicyDocument).featurePolicy;
+        let stream: string;
+        try {
+          const media = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          for (const track of media.getTracks()) track.stop();
+          stream = 'opened';
+        } catch (error) {
+          stream = error instanceof DOMException ? error.name : String(error);
+        }
+        return { allowed: policy === undefined ? null : policy.allowsFeature('camera'), stream };
+      });
+      expect(camera).toEqual({ allowed: true, stream: 'opened' });
+    });
+
     await gotoDocuments(page);
     for (const fixture of [AUDIO, SVG, INLINE_IMAGE, SOURCE]) {
       await uploadDocument(page, fixture);
@@ -205,6 +246,13 @@ test.describe('the isolated document under the production policy', () => {
       // the engine's default. Asked once, of the first frame, because every
       // preview loads the same document.
       expect(await frame.evaluate(() => window.origin)).toBe('null');
+      // And no device for the frame, whatever the page may use: its own policy
+      // denies the camera, and its embedder delegates nothing.
+      expect(
+        await frame.evaluate(
+          () => (document as PolicyDocument).featurePolicy?.allowsFeature('camera') ?? null,
+        ),
+      ).toBe(false);
       expect(await frame.evaluate(() => getComputedStyle(document.body).fontSize)).toBe('14px');
 
       // METADATA LOADED, which is the one thing a refused `media-src` cannot fake:

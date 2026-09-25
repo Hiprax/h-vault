@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import React from 'react';
+import { AxiosError, AxiosHeaders } from 'axios';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia for jsdom
@@ -1584,6 +1585,57 @@ describe('FolderRail - additional edge cases', () => {
     expect(reorderToasts).toHaveLength(1);
     expect(mockToast).not.toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Folder reordered' }),
+    );
+  });
+
+  it('waits out a short 429 from a proxy in front of the app and finishes the reorder', async () => {
+    // A drag moves every folder between the two positions, one request each;
+    // fired at once they outran a rate-limiting proxy. Now they are paced and a
+    // 429 asking for a short wait is waited out and sent again.
+    const refusal = new AxiosError('Request failed with status code 429');
+    refusal.response = {
+      status: 429,
+      statusText: '',
+      data: '',
+      headers: new AxiosHeaders({ 'retry-after': '1' }),
+      config: { headers: new AxiosHeaders() },
+    };
+    mockReorderFolderApi.mockRejectedValueOnce(refusal);
+    const mockToast = vi.fn();
+    vi.mocked(useToast).mockReturnValue({ toast: mockToast, dismiss: vi.fn(), update: vi.fn() });
+    const fetchFolders = vi.fn().mockResolvedValue(undefined);
+
+    useVaultStore.setState({
+      folders: [
+        makeFolder({ id: 'f1', name: 'First', sortOrder: 0 }),
+        makeFolder({ id: 'f2', name: 'Second', sortOrder: 1 }),
+      ] as never[],
+      fetchFolders,
+    });
+
+    renderWithRouter(<VaultRail />);
+
+    const firstBtn = screen.getByText('First').closest('button')!;
+    const secondBtn = screen.getByText('Second').closest('button')!;
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn(), getData: vi.fn() };
+
+    fireEvent.dragStart(firstBtn, { dataTransfer });
+    fireEvent.dragOver(secondBtn, { dataTransfer });
+    fireEvent.drop(secondBtn, { dataTransfer });
+
+    await waitFor(
+      () => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ title: 'Folder reordered', type: 'success' }),
+        );
+      },
+      { timeout: 5_000 },
+    );
+    // Two moved folders, and the refused one sent a second time.
+    expect(mockReorderFolderApi).toHaveBeenCalledTimes(3);
+    expect(fetchFolders).toHaveBeenCalledTimes(1);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to reorder' }),
     );
   });
 

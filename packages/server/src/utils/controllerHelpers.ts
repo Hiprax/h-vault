@@ -265,12 +265,13 @@ const VAULT_ROTATION_LOCK_TTL_MS = 5 * 60 * 1000;
  * won and must not be told a story that might be false: naming "a rotation"
  * specifically was accurate while the rotation was the only holder and is a lie
  * now. It keeps the words "already in progress" that the rotation's own refusal
- * has always carried.
+ * has always carried, and it stays under the 200 characters the client shows of
+ * any error (`MAX_ERROR_MESSAGE_LENGTH`), or the remedy at its end is cut off.
  */
 const VAULT_ROTATION_LOCK_BUSY_MESSAGE =
   'Another change that re-seals this account under its vault key is already in progress ' +
-  '(a vault key rotation, an import, a backup restore, a document completion or a master ' +
-  'password change). Please wait and retry.';
+  '(a key rotation, import, backup restore, document completion or master password ' +
+  'change). Please wait and retry.';
 
 /**
  * Takes {@link vaultRotationLockName} for the caller's check-to-commit span.

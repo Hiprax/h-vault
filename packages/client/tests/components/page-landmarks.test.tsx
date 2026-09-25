@@ -15,7 +15,7 @@
  * content by definition; as an `<aside>` it was a second unnamed complementary
  * landmark beside the folder rail on `/vault` and `/documents`.
  */
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
@@ -276,6 +276,18 @@ beforeEach(() => {
   stubVaultStore();
 });
 
+/**
+ * Lets the effects a screen starts on mount finish INSIDE act(): the password
+ * pages load the strength estimator and the shell reads the documents
+ * configuration, each a promise that resolves after the render returns. Left to
+ * land after the test's last assertion, their state updates arrive outside act()
+ * (and, depending on timing, after the test ends), which React reports as a
+ * warning and which would let a later assertion race them.
+ */
+async function settleMountEffects(): Promise<void> {
+  await act(async () => {});
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Standalone screens                                                         */
 /* -------------------------------------------------------------------------- */
@@ -294,8 +306,9 @@ describe('standalone screens are one main landmark with the card title as the h1
     expectStandaloneScreen(container, 'Two-Factor Authentication');
   });
 
-  it('the registration page', () => {
+  it('the registration page', async () => {
     const { container } = renderAt('/register', <RegisterPage />);
+    await settleMountEffects();
     expectStandaloneScreen(container, 'Create Account');
   });
 
@@ -304,13 +317,15 @@ describe('standalone screens are one main landmark with the card title as the h1
     expectStandaloneScreen(container, 'Forgot Password');
   });
 
-  it('the reset-password form, reached with a token', () => {
+  it('the reset-password form, reached with a token', async () => {
     const { container } = renderAt('/reset-password?token=abc', <ResetPasswordPage />);
+    await settleMountEffects();
     expectStandaloneScreen(container, 'Reset Password');
   });
 
-  it('the reset-password page without a token, on its invalid-link card', () => {
+  it('the reset-password page without a token, on its invalid-link card', async () => {
     const { container } = renderAt('/reset-password', <ResetPasswordPage />);
+    await settleMountEffects();
     expectStandaloneScreen(container, 'Invalid Link');
   });
 
@@ -418,8 +433,9 @@ describe('the application shell', () => {
     );
   }
 
-  it('makes the sidebar the banner: brand, primary navigation and account controls', () => {
+  it('makes the sidebar the banner: brand, primary navigation and account controls', async () => {
     renderShell('/generator', <h1>Password Generator</h1>);
+    await settleMountEffects();
     const banner = screen.getByRole('banner');
     expect(banner.tagName).toBe('HEADER');
     expect(banner).toContainElement(screen.getByRole('navigation'));

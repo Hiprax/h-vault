@@ -136,13 +136,30 @@ async function holdRotationLock(): Promise<() => Promise<void>> {
 }
 
 /**
+ * The ONE sentence every loser of the exclusion lock receives, whichever of the
+ * five holders it is and whichever of them won. Restated here rather than
+ * imported, because it is module-private on purpose (a second copy at a call
+ * site is how a holder-specific story creeps back in) and because what matters
+ * is the text on the wire.
+ */
+const EXCLUSION_MESSAGE =
+  'Another change that re-seals this account under its vault key is already in progress ' +
+  '(a key rotation, import, backup restore, document completion or master password ' +
+  'change). Please wait and retry.';
+
+/**
  * The refusal a loser of the exclusion lock receives: a 409 that names no
- * particular holder, because the loser cannot know which one won.
+ * particular holder, because the loser cannot know which one won — so it lists
+ * every holder there is, rather than guessing one.
  */
 function expectExclusionConflict(res: request.Response): void {
   expect(res.status, JSON.stringify(res.body)).toBe(409);
   expect(res.body.success).toBe(false);
-  expect(res.body.message).toMatch(/already in progress/i);
+  expect(res.body.message).toBe(EXCLUSION_MESSAGE);
+  // Whole, as the client shows it: `getApiErrorMessage` cuts every message at
+  // 200 characters (`MAX_ERROR_MESSAGE_LENGTH`), and a sentence longer than that
+  // loses its remedy — the part that tells the user what to do.
+  expect(String(res.body.message).length).toBeLessThanOrEqual(200);
   // NOT the recoverable stale-generation refusal: there is no number to hand
   // back, the caller's generation is fine, and a client that saw one would
   // rewrap under a key that was never the problem.

@@ -136,7 +136,15 @@ const campaignConfig = (leg) => ({
   //
   // The cost is real: a static mutant has no per-test coverage, so it is tested
   // against the whole suite. `bail` keeps that cheap for the ones that die and
-  // expensive only for the ones that survive, which is the right way round.
+  // expensive only for the ones that survive, which is the right way round —
+  // but only because each leg's `vitest.mutation.config.ts` visits the test
+  // files killer-first (`tests/harness/mutationSequencer.ts`). Under the base
+  // configs' seeded file shuffle, which those configs inherited until then, a
+  // dying static mutant still walked a random share of the suite before its
+  // killer came up: MEASURED on one 47-file client plan, 8,753 tests for nine
+  // static mutants, against 515 in the kill-seeking order with every verdict
+  // unchanged. A SURVIVING static mutant runs every related test in any order,
+  // which is why it is the costliest thing a change can leave behind.
   ignoreStatic: false,
   // Copying `.git`, the built output and the coverage directories into the
   // sandbox costs minutes per leg and changes nothing: no test reads them.

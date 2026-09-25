@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { TRASH_AUTO_PURGE_DAYS } from '@hvault/shared';
 import { cn } from '../../lib/utils';
-import { useVaultStore, type DecryptedFolder } from '../../stores/vaultStore';
+import { sendPaced, useVaultStore, type DecryptedFolder } from '../../stores/vaultStore';
 import { reorderFolderApi } from '../../services/api/vaultApi';
 import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
@@ -127,7 +127,10 @@ const FOLDER_COLORS = [
 
 /**
  * Sends one reorder, waits for every re-sort request in it to SETTLE, re-reads
- * the folders whatever happened, and reports the outcome in one toast.
+ * the folders whatever happened, and reports the outcome in one toast. The
+ * requests are paced and a short 429 is waited out (`sendPaced`): a drag across a
+ * long list moves every folder between the two positions, and fired all at once
+ * those requests outran a rate-limiting proxy in front of the app.
  *
  * A reorder is one request per folder whose position moved, and any of them can
  * be refused on its own: the folder-write budget running out part-way through a
@@ -138,15 +141,16 @@ const FOLDER_COLORS = [
  * as on success: otherwise the rail keeps showing an order the server does not
  * have.
  *
- * `sendUpdates` issues the requests rather than being handed them, so a request
- * that cannot even be issued is reported like one the server refused.
+ * `sendUpdates` lists the requests rather than issuing them, so they can be paced,
+ * and a request that cannot even be issued is reported like one the server
+ * refused.
  */
 async function applyFolderReorder(
-  sendUpdates: () => readonly Promise<unknown>[],
+  sendUpdates: () => readonly (() => Promise<unknown>)[],
   toast: ReturnType<typeof useToast>['toast'],
 ): Promise<void> {
   try {
-    const results = await Promise.allSettled(sendUpdates());
+    const results = await sendPaced(sendUpdates());
     await useVaultStore.getState().fetchFolders();
     toast(
       results.every((result) => result.status === 'fulfilled')
@@ -598,11 +602,11 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
 
       await applyFolderReorder(() => {
         // Update sortOrder for all folders whose position changed
-        const updates: Promise<unknown>[] = [];
+        const updates: (() => Promise<unknown>)[] = [];
         for (let i = 0; i < reordered.length; i++) {
           const folder = reordered[i];
           if (folder && folder.sortOrder !== i) {
-            updates.push(reorderFolderApi(folder.id, i));
+            updates.push(() => reorderFolderApi(folder.id, i));
           }
         }
         return updates;
@@ -639,8 +643,8 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
       // Swap sortOrder values
       await applyFolderReorder(
         () => [
-          reorderFolderApi(folderId, swapFolder.sortOrder),
-          reorderFolderApi(swapFolder.id, folder.sortOrder),
+          () => reorderFolderApi(folderId, swapFolder.sortOrder),
+          () => reorderFolderApi(swapFolder.id, folder.sortOrder),
         ],
         toast,
       );

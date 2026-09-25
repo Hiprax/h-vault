@@ -733,7 +733,10 @@ bundle's one-year lifetime, from `hvault-pm2.locations.conf`) at
   (immutable caching, gzip, `nosniff`), but every **HTML document** is proxied to Express, which
   owns its CSP: helmet's, with a per-request nonce, `X-Frame-Options` and `Referrer-Policy`, for the
   application, and a far stricter one of its own for the isolated document viewer, whose file is
-  kept outside every directory either server serves from disk. HSTS belongs to the outer Nginx
+  kept outside every directory either server serves from disk. Express also sends its own
+  `Permissions-Policy` (the golden list, but with the camera allowed on this origin for the
+  authenticator import's scan; the viewer's document denies it too), because the Nginx header floor
+  it replaces denies the camera outright. HSTS belongs to the outer Nginx
   alone.
 - **API responses are never compressed.** Gzipping a response that mixes a secret (a CSRF or
   bearer token) with attacker-influenced content is the precondition for a BREACH-style
@@ -1175,7 +1178,11 @@ authoritative.
 <summary><b>Documents</b> — <code>/api/v1/documents</code></summary>
 
 Available only where object storage is configured; every route answers **503** otherwise, and
-`GET /config` says which it is so the app can hide the feature rather than probe for it. A document
+`GET /config` says which it is so the app can hide the feature rather than probe for it. Behind the
+Docker stack's inner Nginx, any `502`, `503` or `504` from `/api/` (this one, and a part upload's
+`503` with `Retry-After`, among them) reaches the client as that Nginx's own JSON `502`, without
+`Retry-After`. The app retries an upload piece on any 5xx, so a transfer carries on; anywhere else it
+shows that Nginx's "the application is not reachable" in place of the server's own message. A document
 is encrypted in the browser before a byte leaves it: the server stores ciphertext, a wrapped key and
 sizes, and never sees a filename, a type, a tag or a note.
 
@@ -1338,6 +1345,14 @@ other's budget, and moving to another address buys nobody a fresh one.
 Exceeding a limit returns **429** with a JSON body. Responses carry the IETF standard headers —
 `RateLimit-Policy`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After`
 on a 429.
+
+In front of all of these, the golden host Nginx limits every address to 40 requests a second with a
+burst of 40, host-wide, and answers anything past that with its own 429 and `Retry-After: 5`. The
+app's bulk actions (tagging, permanent deletion and folder reordering, which send one request per
+row) therefore keep at most four requests in flight and wait out a 429 that asks for ten seconds or
+less by themselves, up to three times, which costs a large action about five seconds for every forty
+entries past the first forty; a longer wait is the app's own budget running out, and is reported.
+Where many people share one address, render the site with `newapp --burst N` to raise that burst.
 
 > Rate limiters are **pass-through no-ops outside production**, so development and the test suite
 > are never throttled. They are exercised against a real MongoDB by a dedicated test suite that
@@ -1638,8 +1653,8 @@ missing tool cannot read as a clean sheet. It is the release tier, not the push 
 runs the whole pipeline once per gate.
 
 **A full run takes 15–30 minutes, plus `mutation-diff`**, which adds seconds for a shared-only
-change, several minutes for each server or client leg it has to mutate, and about an hour on a very
-large branch. That is the deliberate trade: time spent before the push
+change, several minutes for each server or client leg it has to mutate, and about twenty
+minutes on a very large branch (21m 00s over this one's 104 changed files). That is the deliberate trade: time spent before the push
 instead of minutes billed after it. Two escape hatches exist:
 
 ```bash
@@ -1768,8 +1783,8 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ## Running the whole gauntlet on a remote machine
 
-The push gate is about half an hour on an ordinary change and far longer on a large branch,
-because `mutation-diff` grows with the change. The release tier is a working day, and most of
+The push gate is about half an hour on an ordinary change and close to an hour on a very large
+branch (49m 22s for this 104-file one), because `mutation-diff` grows with the change. The release tier is a working day, and most of
 that day is one gate: `mutation` re-runs the entire test suite once per mutant. That
 is not something to run on the machine you are working on, so the full gauntlet
 usually belongs on a spare box you can start and walk away from.
@@ -1785,17 +1800,17 @@ to do with the answer.
 
 ### What you are signing up for
 
-Measured on the reference machine, from the reports each run leaves behind. The two lower rows
-come from one `verify:full` of this whole branch on 2026-09-24: the `ci` figure is the time its
-T0 and T1 gates took inside it, not a separate `npm run ci`, and that run exited 1 — `flake`
-failed 4 of its 10 shuffled runs on test-isolation defects fixed the same day, and
-`mutation-diff` was stopped by the flat guard this change replaced:
+Measured on the reference machine, from the reports each run leaves behind. The `ci` row is one
+green `npm run ci` of this whole branch on 2026-09-25, after `mutation-diff` began visiting test
+files killer-first. The `verify:full` row comes from one run of it on 2026-09-24, and that run exited 1:
+`flake` failed 4 of its 10 shuffled runs on test-isolation defects fixed the same day, and
+`mutation-diff` was stopped by the flat guard this change replaced, at 74m 02s:
 
-| Command               | Gates | Measured                            | What dominates it                                                                                                                                                                                                                                                        |
-| --------------------- | ----- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info                                                                                                                                   |
-| `npm run ci`          | 31    | **107m 34s** of T0+T1 gate time     | `mutation-diff` at 74m 02s over a 105-file branch diff, stopped at the flat one-hour guard its per-plan guard replaced (55m 46s over 85 files), then Playwright at ~11 min and CodeQL at ~5.7 min, against a 12-minute design budget; 33m 32s for the other thirty gates |
-| `npm run verify:full` | 39    | **232m 00s** without `mutation`     | `flake` at 112m 22s, then `mutation-diff`; `mutation` itself has no honest estimate (see below)                                                                                                                                                                          |
+| Command               | Gates | Measured                            | What dominates it                                                                                                                                                                                                                                                                                                                              |
+| --------------------- | ----- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info                                                                                                                                                                                                         |
+| `npm run ci`          | 31    | **49m 22s** of T0+T1 gate time      | `mutation-diff` at 21m 00s over a 104-file branch diff (63 to 67 minutes before; the killer-first file order alone made it 30m 26s, the one-location sample and four static survivors now killed did the rest), then Playwright at ~10.5 min and CodeQL at ~6 min, against a 12-minute design budget; 12m 01s for the other twenty-eight gates |
+| `npm run verify:full` | 39    | **232m 00s** without `mutation`     | `flake` at 112m 22s, then `mutation-diff`; `mutation` itself has no honest estimate (see below)                                                                                                                                                                                                                                                |
 
 **The fast tier fits its own budget on a machine doing nothing else, and not
 otherwise. The table is the honest number rather than the target.** T0's design
@@ -1875,11 +1890,18 @@ unattended session here is allowed to run, and a leg measured beside other work 
 score inflated by its own timeouts. The merged floor waits for the first run in which
 all three complete. Between campaigns, `mutation-diff` runs on every push: the same Stryker
 configuration, from scratch, over only the mutants on the lines a change touched. Its
-cost is the dry run over the tests related to the changed files plus the survivors:
+cost is the dry run over the tests related to the changed files, plus the static mutants:
 seconds for a change inside `shared`, several minutes once a widely imported client or
-server module is involved, and **55m 46s** and **57m 40s** measured on two runs over the
-85 changed files of the branch that introduced it (at two budget settings), most of it the server leg's survivors, each of which runs
-every covering test file against a real mongod.
+server module is involved, and **21m 00s** over the 104 changed files of this branch. A
+static mutant (module-scope code, which here means every Zod bound and every route table)
+has no per-test coverage, so it runs every test related to its file, one file at a time,
+until one fails. The mutation configs therefore visit those files killer-first: the file
+that killed the module's previous mutant, then the files that import it, then the cheapest.
+That order changes no verdict: on this branch it alone took the gate from 63 to 67 minutes
+down to 30m 26s on the same plans, and sampling one location per changed file and killing four
+static survivors did the rest. A static mutant that SURVIVES still runs every one of
+them, so the assertion that kills it is also what makes the gate fast. Each changed file's
+guaranteed sample is one code location's mutants, never the whole block nested under it.
 
 Two commands are **not registered gates**, so `verify:full` does not run them, and both are worth
 knowing about before you plan the day. `npm run verify:selftest` proves every gate can still fail,
@@ -2160,8 +2182,17 @@ env | grep -E '^(HTTP_REQUEST_TIMEOUT_MS|HTTP_HEADERS_TIMEOUT_MS|DOCUMENT_PART_B
 exactly one hole punched: `mongodb-memory-server` fetching the `mongod` binary on a
 machine that has not cached it yet. Beyond that first fetch the run needs the network
 for `npm ci`, the Playwright download, `npm audit`, Trivy's vulnerability database and
-the Docker base images. After those are cached the gauntlet is offline apart from the
-dependency audit.
+the Docker base images. After those are cached the gauntlet is offline apart from three
+gates. The dependency audit asks the registry every time, and the two that build images
+(`ci:docker` and `test:deploy`) need Docker Hub on every run even with every layer cached:
+BuildKit asks the registry for image metadata before each build, the Dockerfiles'
+`# syntax=docker/dockerfile:1` frontend first. `ci:docker` also needs Trivy's database
+registry whenever its cached database has passed its `NextUpdate`, a day after it was
+built. A resolver that cannot answer therefore fails those gates at their first build
+(`resolve image config for docker-image://docker.io/docker/dockerfile:1`, then `failed
+to resolve source metadata for docker.io/docker/dockerfile:1`, with a `dial tcp: lookup
+registry-1.docker.io` error underneath); that is the network, not the images, and
+re-running once DNS answers again is the remedy.
 
 ### Confirm the machine before spending a day on it
 
@@ -2345,12 +2376,13 @@ name prints no step line at all, so a run with `mutation` skipped goes straight 
 
 **Distinguishing slow from stuck** needs one number: how long the gate named on the
 last step line is expected to take. These are the longest, measured on one `verify:full`
-of the whole branch; everything else in the run finishes within about half a minute.
+of the whole branch (`mutation-diff` on the `npm run ci` above, which is what it is expected to
+cost inside `verify:full` too); everything else in the run finishes within about half a minute.
 
 | Gate               | Measured | Its own deadline, if it has one                                                         |
 | ------------------ | -------- | --------------------------------------------------------------------------------------- |
 | `mutation`         | hours    | none, deliberately                                                                      |
-| `mutation-diff`    | 74m 02s  | per leg, the larger of an hour and 30 min + 2 min per planned mutant; a hang guard only |
+| `mutation-diff`    | 21m 00s  | per leg, the larger of an hour and 30 min + 2 min per planned mutant; a hang guard only |
 | `flake`            | 112m 22s | 30 min per suite leg, 90 min for the E2E leg                                            |
 | `e2e`              | 10m 57s  | 180 s just to boot the stack                                                            |
 | `dst`              | 7m 56s   | 15 min per leg                                                                          |
@@ -2890,8 +2922,8 @@ trigger itself.
 
 **Mind the job's 90-minute limit when merging a large branch.** On `main` the per-change gates
 measure `HEAD~1..HEAD`, so a merge or squash commit that carries a whole long-lived branch makes
-`mutation-diff` measure all of it: the branch that introduced that gate measured 57m 40s for it
-alone on a four-core machine. Merge such a branch fast-forward (its last commit is the subject),
+`mutation-diff` measure all of it: this 104-file branch measured 21m 00s for that gate alone and
+49m 22s for the whole `npm run ci` on a four-core machine, and a hosted runner may be slower. Merge such a branch fast-forward (its last commit is the subject),
 or raise `timeout-minutes` for that release, rather than letting the job be cut off mid-gate.
 
 Every user-visible change is recorded in the **[changelog](CHANGELOG.md)**

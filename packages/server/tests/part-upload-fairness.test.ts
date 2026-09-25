@@ -56,6 +56,42 @@ const { storageRef } = vi.hoisted(() => ({
   storageRef: { current: undefined as ReturnType<typeof createInMemoryStorage> | undefined },
 }));
 
+/**
+ * Every record the application's module loggers write, with the module that
+ * wrote it. The share refusal is LOGGED on purpose — on the wire it is the same
+ * 503 an unreachable storage engine produces, and the two call for opposite
+ * operator responses — so the log line is part of what the refusal delivers.
+ * `log` is here because `createRequestLogger` ends every response with it.
+ */
+const logged = vi.hoisted(() => {
+  const records: { module: string; level: string; message: unknown; meta: unknown }[] = [];
+  const loggerFor = (
+    module: string,
+  ): Record<string, (message: unknown, meta?: unknown) => void> => {
+    const at =
+      (level: string) =>
+      (message: unknown, meta?: unknown): void => {
+        records.push({ module, level, message, meta });
+      };
+    return {
+      error: at('error'),
+      warn: at('warn'),
+      info: at('info'),
+      debug: at('debug'),
+      verbose: at('verbose'),
+      http: at('http'),
+      silly: at('silly'),
+      log: at('log'),
+    };
+  };
+  return { records, loggerFor };
+});
+
+vi.mock('../src/utils/logger.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/logger.js')>();
+  return { ...actual, createModuleLogger: (name: string) => logged.loggerFor(name) };
+});
+
 vi.mock('../src/services/storage/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/services/storage/index.js')>();
   return {
@@ -185,6 +221,7 @@ beforeEach(async () => {
 
 describe('the per-identity share of the in-flight part budget', () => {
   it('refuses one identity a part past its share, without spending a slot or a queue place', async () => {
+    logged.records.length = 0;
     const storage = blockStorage();
     const overflow = await seedUpload(alice);
     let refused: request.Response | undefined;
@@ -232,6 +269,22 @@ describe('the per-identity share of the in-flight part budget', () => {
     // still had a free slot when this request arrived.
     expect(refused!.status, JSON.stringify(refused!.body)).toBe(503);
     expect(refused!.headers['retry-after']).toBe('1');
+
+    // Logged exactly once, by the part-body module, naming the share it hit —
+    // and NOT the identity, exactly as the rate limiters leave their key out.
+    const refusals = logged.records.filter(
+      (record) => record.module === 'document-part-body' && record.level === 'warn',
+    );
+    expect(refusals).toEqual([
+      {
+        module: 'document-part-body',
+        level: 'warn',
+        message: 'Document part refused: the account is at its in-flight share',
+        meta: { limit: MAX_IN_FLIGHT_PART_UPLOADS_PER_USER },
+      },
+    ]);
+    expect(JSON.stringify(refusals)).not.toContain(alice.id);
+    expect(JSON.stringify(refusals)).not.toContain(alice.email);
 
     // THE NEGATIVES, and they are the point of the case. The refusal never
     // reached the parser or the handler, so no fourth body was buffered, nothing

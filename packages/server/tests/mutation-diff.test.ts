@@ -27,6 +27,7 @@ import {
   apiMutantKey,
   candidateMutants,
   changedLinesByFile,
+  leafCandidates,
   locationIncluded,
   planSample,
   rankMutants,
@@ -355,7 +356,7 @@ describe('the sample', () => {
     expect(plan.planned.length).toBeGreaterThanOrEqual(12);
   });
 
-  it('plans the whole closure of a chosen range, exactly as Stryker will select it', () => {
+  describe('a block holding two nested mutants, the block hashing lowest', () => {
     const block = mutant(0, 10, 3, 1, 'BlockStatement', '{}');
     const inner = mutant(1, 2, 1, 12);
     const deeper = mutant(2, 4, 2, 8, 'BooleanLiteral', 'false');
@@ -365,14 +366,94 @@ describe('the sample', () => {
       [inner, '1'],
       [deeper, '2'],
     ]);
+    const planWith = (budget: number): ReturnType<typeof planSample> =>
+      planSample({
+        files: [{ file: block.fileName, candidates: all, all, ranks }],
+        budget,
+        isCore: () => false,
+      });
+
+    it("takes the file's guaranteed seed at a LEAF, so it costs one span, not the block's subtree", () => {
+      // The lowest hash overall is the block, but the per-file measurement is
+      // taken among the leaves: `inner` and `deeper`, of which `inner` is lower.
+      const plan = planWith(1);
+      expect(plan.seeds).toEqual([inner]);
+      expect(plan.planned).toEqual([inner]);
+      expect(plan.sampled).toBe(true);
+    });
+
+    it('plans the whole closure of a range the BUDGET picks, exactly as Stryker will select it', () => {
+      // With room for more, the budget takes the block by its hash, and its range
+      // selects both nested mutants too.
+      const plan = planWith(2);
+      expect(plan.seeds).toEqual([inner, block]);
+      expect(new Set(plan.planned)).toEqual(new Set(all));
+    });
+  });
+
+  it('treats mutants sharing one span as one leaf location, and selects every one of them', () => {
+    const block = mutant(0, 10, 3, 1, 'BlockStatement', '{}');
+    // `a < b` on line 1 is replaced three ways at exactly the same span.
+    const lessOrEqual = mutant(1, 6, 1, 11, 'EqualityOperator', 'a <= b');
+    const greaterOrEqual = mutant(1, 6, 1, 11, 'EqualityOperator', 'a >= b');
+    const alwaysTrue = mutant(1, 6, 1, 11, 'ConditionalExpression', 'true');
+    const all = [block, lessOrEqual, greaterOrEqual, alwaysTrue];
+    // Identical spans do not disqualify each other: all three are leaves, the
+    // block (which strictly contains them) is not.
+    expect(leafCandidates(all)).toEqual([lessOrEqual, greaterOrEqual, alwaysTrue]);
+    const ranks = new Map<Mutant, string>([
+      [block, '0'],
+      [lessOrEqual, '3'],
+      [greaterOrEqual, '1'],
+      [alwaysTrue, '2'],
+    ]);
     const plan = planSample({
       files: [{ file: block.fileName, candidates: all, all, ranks }],
       budget: 1,
       isCore: () => false,
     });
-    // The lowest rank is the block; its range selects the two nested mutants too.
-    expect(plan.seeds).toEqual([block]);
-    expect(new Set(plan.planned)).toEqual(new Set(all));
+    expect(plan.seeds).toEqual([greaterOrEqual]);
+    expect(new Set(plan.planned)).toEqual(new Set([lessOrEqual, greaterOrEqual, alwaysTrue]));
+  });
+
+  it('never leaves a file without a leaf: a lone container is its own leaf', () => {
+    const lone = mutant(0, 0, 4, 1, 'ObjectLiteral', '{}');
+    expect(leafCandidates([lone])).toEqual([lone]);
+    expect(leafCandidates([])).toEqual([]);
+  });
+
+  it("costs one span per file on the instrumenter's own output, however deep the new code nests", async () => {
+    const source = [
+      'export function within(a: number, b: number): boolean {',
+      '  if (a < b) {',
+      '    return a > 0 && b > 0;',
+      '  }',
+      '  return false;',
+      '}',
+      '',
+    ].join('\n');
+    const all = await mutantsOf(source);
+    // Brand-new code: every mutant is the change's, containers included.
+    const candidates = candidateMutants(all, new Set([1, 2, 3, 4, 5, 6]));
+    expect(candidates).toEqual(all);
+    expect(all.some((m) => leafCandidates(all).every((leaf) => leaf !== m))).toBe(true);
+    for (const key of ['k', 'another key', 'a third']) {
+      const plan = planSample({
+        files: [
+          {
+            file: 'packages/shared/src/probe.ts',
+            candidates,
+            all,
+            ranks: rankMutants(all, source, key),
+          },
+        ],
+        budget: 1,
+        isCore: () => false,
+      });
+      const spans = new Set(plan.planned.map((m) => JSON.stringify(m.location)));
+      expect(spans.size, `key ${key}`).toBe(1);
+      expect(plan.seeds).toHaveLength(1);
+    }
   });
 });
 

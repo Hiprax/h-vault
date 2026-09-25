@@ -18,6 +18,7 @@ import {
 import { offlineCache, offlineCacheErrorType } from '../services/offlineCache.js';
 import { clearScoreCache } from '../services/health/strengthCache.js';
 import { logger } from '../lib/logger.js';
+import { isRateLimited, retryAfterSeconds } from '../services/auth/sessionFailure.js';
 import { useAuthStore } from './authStore.js';
 import { noteStaleVaultKey, useUIStore } from './uiStore.js';
 // Folders are ONE collection shared by vault items and documents, so deleting a
@@ -353,6 +354,84 @@ export async function mapWithConcurrency<T, R>(
   for (let i = 0; i < limit; i++) workers.push(worker());
   await Promise.all(workers);
   return results;
+}
+
+/** How many of one bulk action's requests are in flight at once. */
+export const BULK_REQUEST_CONCURRENCY = 4;
+
+/**
+ * The longest `Retry-After` a bulk action waits out by itself, in seconds. A
+ * rate-limiting proxy in front of the app asks for seconds (the golden host nginx
+ * sends `5`); the app's own per-account budgets answer with the rest of their
+ * window, up to fifteen minutes, and that is a refusal to report, not a pause.
+ */
+export const MAX_BULK_RETRY_AFTER_SECONDS = 10;
+
+/** How many times one request of a bulk action is sent again after such a 429. */
+export const MAX_BULK_RETRIES = 3;
+
+/** What a request a lock or sign-out overtook is rejected with, unsent. */
+export const BULK_ABANDONED_MESSAGE =
+  'The vault was locked, so the rest of this action was not sent.';
+
+const waitMs = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+/**
+ * Sends one request per row for a bulk action (tagging, permanent deletion, a
+ * folder reorder) PACED rather than all at once, and waits out a short 429.
+ *
+ * These actions have always been one request per row, which the app's own
+ * limiters are sized for, but they used to fire every request in the same
+ * instant. A rate-limiting proxy counts each one: the golden host nginx a
+ * deployment puts in front of the app allows each address 40 requests a second
+ * with a burst of 40, so a bulk tag of a hundred items applied to about forty of
+ * them and refused the rest. No burst setting fixes an unpaced fan-out, because
+ * its arrival rate grows with the selection; pacing and retrying does, behind any
+ * such proxy. So at most {@link BULK_REQUEST_CONCURRENCY} are in flight, and a
+ * request refused with a 429 whose `Retry-After` is at most
+ * {@link MAX_BULK_RETRY_AFTER_SECONDS} is sent again after that wait, up to
+ * {@link MAX_BULK_RETRIES} times. Resending is safe: a 429 is answered before the
+ * request's handler runs, and each of these writes sets a value rather than
+ * adding one. Any other failure, or a longer wait, is the request's result as
+ * before.
+ *
+ * Every request is attempted, and the results are settled and in order, so a
+ * caller reports failures exactly as it did before. A request that throws before
+ * it is even sent is reported as rejected, like one the server refused.
+ *
+ * Except after a lock or a sign-out. Pacing means requests are still QUEUED when
+ * one lands, where before every one was already on the wire, so each request
+ * checks the store's mutation generation (which `clearStore()` moves) before it
+ * is sent and again after every wait; once it has moved, the rest are rejected
+ * with {@link BULK_ABANDONED_MESSAGE} without being sent. A locked vault must not
+ * go on writing, and after a sign-out each would be a 401 into the refresh path.
+ */
+export async function sendPaced<R>(
+  requests: readonly (() => Promise<R>)[],
+  wait: (ms: number) => Promise<void> = waitMs,
+): Promise<PromiseSettledResult<R>[]> {
+  const generation = mutationGeneration;
+  return mapWithConcurrency(requests, BULK_REQUEST_CONCURRENCY, async (send) => {
+    for (let retries = 0; ; retries++) {
+      if (generation !== mutationGeneration) throw new Error(BULK_ABANDONED_MESSAGE);
+      try {
+        return await send();
+      } catch (error: unknown) {
+        const seconds = isRateLimited(error) ? retryAfterSeconds(error) : null;
+        if (
+          seconds === null ||
+          seconds > MAX_BULK_RETRY_AFTER_SECONDS ||
+          retries >= MAX_BULK_RETRIES
+        ) {
+          throw error;
+        }
+        await wait(seconds * 1000);
+      }
+    }
+  });
 }
 
 type DecryptionContext = 'vault items' | 'trash items' | 'folders';

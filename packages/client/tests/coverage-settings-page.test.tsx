@@ -3416,6 +3416,9 @@ describe('SettingsPage — error paths and branches', () => {
     // Sealed in format v2 under this session's key, to the id the insert's nonce
     // derives for this account (the id the server will store it under).
     const insert = payload.operations.inserts[0] ?? {};
+    // The page's post-import tail settles first, so nothing of it runs
+    // outside act() while this test does its own asynchronous work.
+    await settleImportFlow();
     const rowId = await deriveRowId(USER_ID, insert.idNonce ?? '');
     expect(insert).toMatchObject({
       nameIv: 'v2:iv:old-vault-key',

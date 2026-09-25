@@ -3,6 +3,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import nodemailer from 'nodemailer';
 import SMTPTransport from 'nodemailer/lib/smtp-transport';
 
+/** `text` as a literal inside a regular expression: every metacharacter escaped. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // ── Why this file exists ─────────────────────────────────────────────────────
 // `email.test.ts` replaces nodemailer with a mock, so it pins what `sendEmail`
 // does with whatever the mock hands back, and nothing about what the REAL library
@@ -274,7 +279,7 @@ describe('sendEmail over the real nodemailer transport', () => {
     const [headers = '', body = ''] = (attachments[0] ?? '').split('\r\n\r\n');
     expect(headers).toMatch(/Content-Type: application\/octet-stream/);
     expect(headers).toMatch(/Content-Transfer-Encoding: base64/);
-    expect(headers).toMatch(new RegExp(`filename="?${filename.replace(/\./g, '\\.')}"?`));
+    expect(headers).toMatch(new RegExp(`filename="?${escapeRegExp(filename)}"?`));
     const decoded = Buffer.from(body.replace(/\s+/g, ''), 'base64');
     expect(decoded.equals(backup)).toBe(true);
   });

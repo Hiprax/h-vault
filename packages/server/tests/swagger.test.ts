@@ -219,6 +219,46 @@ describe('API Documentation', () => {
       expect(description as string).not.toMatch(/csv/i);
       expect(description as string).toContain('JSON');
     });
+
+    it('describes every response it documents, in words (OpenAPI 3.0.3 makes the description REQUIRED)', () => {
+      // A Response Object without a description is invalid, and one whose
+      // description is empty is valid and says nothing: the 411 a part upload
+      // answers is only useful to a client author if the document says it means
+      // "no Content-Length". Every documented response of every operation, plus
+      // the shared ones under `components.responses`.
+      const paths = swaggerSpec.paths as Record<string, Record<string, unknown>>;
+      const responseSets: [string, Record<string, unknown>][] = [];
+      for (const [route, methods] of Object.entries(paths)) {
+        for (const [method, op] of Object.entries(methods)) {
+          const responses =
+            op && typeof op === 'object' && 'responses' in op
+              ? (op as { responses?: Record<string, unknown> }).responses
+              : undefined;
+          if (responses) responseSets.push([`${method.toUpperCase()} ${route}`, responses]);
+        }
+      }
+      const shared = (swaggerSpec.components as { responses?: Record<string, unknown> } | undefined)
+        ?.responses;
+      if (shared) responseSets.push(['components.responses', shared]);
+      // Hundreds of responses are documented; an empty walk would pass vacuously.
+      expect(responseSets.length).toBeGreaterThan(50);
+
+      const silent: string[] = [];
+      for (const [where, responses] of responseSets) {
+        for (const [status, response] of Object.entries(responses)) {
+          // A `$ref` borrows the description of the response it names.
+          if (response && typeof response === 'object' && '$ref' in response) continue;
+          const description =
+            response && typeof response === 'object' && 'description' in response
+              ? (response as { description?: unknown }).description
+              : undefined;
+          if (typeof description !== 'string' || description.trim() === '') {
+            silent.push(`${where} ${status}`);
+          }
+        }
+      }
+      expect(silent).toEqual([]);
+    });
   });
 
   // ──────────────────────────────────────────────────────────────────────────

@@ -523,6 +523,20 @@ describe('VaultItem passwordHistory maxlength validation', () => {
     expect(err).toBeDefined();
   });
 
+  it('refuses a passwordHistory entry that carries no encryptedPassword, naming that field', async () => {
+    // The route schemas refuse it first; this is the model's own line, the one a
+    // write that bypassed them would meet. An entry with an IV and a tag but no
+    // ciphertext is a previous password nothing can ever show.
+    const item = new VaultItem({
+      ...validItemData,
+      passwordHistory: [{ iv: 'test-iv', tag: 'test-tag', changedAt: new Date() }],
+    });
+    const err = await getValidationError(item);
+    expect(err?.errors['passwordHistory.0.encryptedPassword']?.kind).toBe('required');
+    // Only that field: the rest of the entry and the item are valid.
+    expect(Object.keys(err?.errors ?? {})).toEqual(['passwordHistory.0.encryptedPassword']);
+  });
+
   it('should accept passwordHistory entry with encryptedPassword at MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH', async () => {
     const item = new VaultItem({
       ...validItemData,

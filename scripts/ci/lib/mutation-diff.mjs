@@ -36,9 +36,24 @@
  *     the budget's upward ratchet a meaning.
  *
  *  c. THE SAMPLE IS STRATIFIED: every changed file first, core modules next.
- *     The lowest-hash candidate of EVERY file that has one is taken whatever the
+ *     One LOCATION of EVERY file that has a candidate is taken whatever the
  *     budget says, so no changed file can go unmeasured behind a large neighbour;
  *     then the candidates inside the declared core modules; then everything else.
+ *
+ *     That location is a LEAF — a candidate span with no other candidate
+ *     strictly inside it — picked by the lowest hash among the leaf candidates.
+ *     It is what keeps the one guaranteed measurement per file at the cost of
+ *     one span's mutants, as the budget's own definition promises
+ *     (`MUTATION_DIFF_BUDGETS`): a range at a block or an object literal selects
+ *     everything nested in it (d), and taking whichever candidate hashed lowest
+ *     made the per-file stratum alone 83 mutants on a 32-file server change
+ *     whose budget is 20. Everything a candidate contains is itself a candidate
+ *     (a), so a leaf among the candidates is a leaf among all of the file's
+ *     mutants, and every file with a candidate has one. Mutants that share one
+ *     span (`a < b` is replaced more than one way) are one location: they do not
+ *     disqualify each other, and the seed's range selects all of them. The
+ *     budget phase is untouched, so a container is still sampled, with its whole
+ *     closure, whenever its hash comes up there.
  *
  *  d. THE PLAN IS EXACT, AND IT IS VERIFIED. Stryker mutates a node when its
  *     location lies inside a `mutate` range, so the range of a chosen mutant also
@@ -104,6 +119,30 @@ export function locationIncluded(haystack, needle) {
     haystack.end.line > needle.end.line ||
     (haystack.end.line === needle.end.line && haystack.end.column >= needle.end.column);
   return startIncluded && endIncluded;
+}
+
+/** Do two locations cover exactly the same span? */
+const sameSpan = (a, b) =>
+  a.start.line === b.start.line &&
+  a.start.column === b.start.column &&
+  a.end.line === b.end.line &&
+  a.end.column === b.end.column;
+
+/**
+ * (c) The candidates at LEAF locations: those with no other candidate STRICTLY
+ * inside them. Candidates sharing one span do not disqualify each other.
+ *
+ * @param {readonly ApiMutant[]} candidates of ONE file
+ * @returns {ApiMutant[]} in the given order
+ */
+export function leafCandidates(candidates) {
+  return candidates.filter(
+    (m) =>
+      !candidates.some(
+        (other) =>
+          locationIncluded(m.location, other.location) && !sameSpan(m.location, other.location),
+      ),
+  );
 }
 
 /** The 1-based lines a mutant spans. */
@@ -209,7 +248,7 @@ export function planSample({ files, budget, isCore }) {
   const withCandidates = files.filter((entry) => entry.candidates.length > 0);
   const stratumFiles = [...withCandidates]
     .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
-    .map((entry) => /** @type {ApiMutant} */ ([...entry.candidates].sort(byRank)[0]));
+    .map((entry) => /** @type {ApiMutant} */ (leafCandidates(entry.candidates).sort(byRank)[0]));
   const everyCandidate = withCandidates.flatMap((entry) => entry.candidates);
   const stratumCore = everyCandidate.filter((m) => isCore(m.fileName)).sort(byRank);
   const stratumRest = everyCandidate.filter((m) => !isCore(m.fileName)).sort(byRank);
