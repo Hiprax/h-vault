@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-25
+
 ### Added
 
 - **A vault-key rotation stopped by a crash or a lost connection can now be finished.** Rotating your vault key re-encrypts everything under a new key, and until now an interruption part way through left the account in a state nothing could resolve: any entry already re-encrypted was sealed under the new key, the rest were still under the old one, and the new key itself was thrown away the next time you signed in — so those entries were unreadable for good, by anyone. The key is now kept, your Settings page says an interrupted rotation is outstanding, and the **Finish Rotation** button completes it using that same key rather than generating yet another one, reading each entry with whichever of the two keys opens it. Until it is finished the server refuses to rotate to any other key, because it cannot see which entries the interrupted rotation had already moved and rotating past them would make them unreadable for ever behind an apparent success. Abandoning the interrupted rotation is still possible, and it has to be: the server refuses every other rotation while one is outstanding, so a stored key that can no longer open what it was moving would otherwise block rotation for good. It is a separate action that says plainly what it costs.
@@ -813,7 +815,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/Hiprax/h-vault/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Hiprax/h-vault/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Hiprax/h-vault/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Hiprax/h-vault/compare/v0.10.1...v0.11.0
