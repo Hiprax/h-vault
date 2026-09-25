@@ -287,7 +287,13 @@ describe('Task 2.8: Import validates itemType', () => {
     );
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 5, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 5,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(5);
 
     const stored = await VaultItem.find({ userId: user.id }).lean();
     expect(stored.map((item) => item.itemType).sort()).toEqual([...validTypes].sort());

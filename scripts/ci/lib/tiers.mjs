@@ -64,6 +64,12 @@ export const TIER_SELECTOR = { 0: [0], 1: [0, 1], 2: [0, 1, 2], full: [0, 1, 2] 
  * too and REFUSED: see
  * `.testfortress/suppressions.json`'s `SUP-0025`, which records why, and note that
  * these budgets are not gates, so the saving would buy nothing a gate can see.
+ * `sandbox` joined T1 on 2026-09-24 and was measured before it was placed there,
+ * rather than parked in T2 to protect this number: 22.9 s end to end on an idle
+ * machine (artifact staged, mongod and the storage container up, indexes built,
+ * and two specs opening twelve documents, eleven of them rendered, in 17.7 s),
+ * because the built bundle needs no on-demand transform and the dev-server
+ * gates' 60-90 s route budgets are spent in Vite, not in the application.
  * T2 is unbounded on purpose — `mutation` re-runs the suite once per mutant, and
  * any number written here would be fiction.
  */

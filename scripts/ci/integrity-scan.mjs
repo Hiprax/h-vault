@@ -325,6 +325,21 @@ const RULES = [
     msg: 'code excluded from coverage',
   },
   {
+    // A Stryker directive comment. A mutant it disables is reported as `Ignored`,
+    // and `Ignored` is excluded from BOTH halves of the mutation score by design,
+    // so one comment shrinks the oracle's denominator with nothing in the diff
+    // that reads as a weakening — the mutation-side twin of COV-EXCLUDE, and the
+    // "narrowed mutation scope" the doctrine lists beside `pragma: no cover`. It
+    // is ledgerable, as an equivalent mutant can be; it is never invisible.
+    // Anchored to a comment opener so prose and this regex do not match.
+    id: 'MUTANT-DISABLE',
+    kind: 'coverage-exclusion',
+    severity: 'high',
+    forbidden: false,
+    re: /(?:^|\s)(?:\/\/|\/\*)\s*Stryker\s+disable\b/,
+    msg: 'mutants excluded from the mutation score',
+  },
+  {
     id: 'VULN-MUTE',
     kind: 'vulnerability-acceptance',
     severity: 'high',

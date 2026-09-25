@@ -161,6 +161,13 @@ export const MAX_LOGIN_BACKUP_CODES_INPUT_LENGTH = 20_000;
 export const MAX_LOGIN_USERNAME_LENGTH = 500;
 export const MAX_LOGIN_PASSWORD_LENGTH = 10_000;
 export const MAX_LOGIN_TOTP_LENGTH = 500;
+// The stored ciphertext of ONE retained previous password: the base64 length of
+// the largest password a login can hold, at the worst case of three UTF-8 bytes
+// per UTF-16 code unit (AES-GCM ciphertext is as long as its plaintext; the tag
+// is stored apart). Derived, never restated, so a raised password bound raises
+// this with it: a history cap below it refuses the password change itself.
+export const MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH =
+  4 * Math.ceil((MAX_LOGIN_PASSWORD_LENGTH * 3) / 3);
 // Measured POST-transform, on the value that is actually STORED: `uriEntrySchema`
 // prepends a scheme to a bare domain and only then applies this bound, through the
 // exported `isValidUriLength` that `VaultItemForm` calls too. It used to be measured
@@ -376,6 +383,86 @@ export const MAX_DOCUMENTS_PER_ROTATION =
 // so its ceiling is 64 MiB across the pair. Raising this raises that product, so
 // it is a memory budget before it is a throughput knob.
 export const MAX_IN_FLIGHT_PART_UPLOADS = 4;
+// ONE IDENTITY's share of the budget above, and the reason it exists is not
+// fairness in the abstract: the slot is taken BEFORE the body parser runs, so a
+// request that declares a Content-Length and then sends nothing holds one without
+// spending a byte, a valid upload id or a single unit of quota. Without a share,
+// MAX_IN_FLIGHT_PART_UPLOADS such requests from ONE account hold the whole
+// process budget for as long as the server will wait for a body, and every other
+// account's part uploads queue behind them.
+//
+// Three, because that is what a CONFORMING client can have in flight at once and
+// not one more: a transfer sends its parts sequentially, and
+// MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER is how many transfers the server lets
+// one account hold open. So the refusal is unreachable for the browser this
+// application ships, and reachable only by a client doing something it was never
+// able to do.
+//
+// It must stay strictly BELOW MAX_IN_FLIGHT_PART_UPLOADS, which is what makes the
+// guarantee "one identity can never take every slot" true rather than aspirational
+// — raising MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER therefore means raising the
+// process budget too, and that product is memory (see above).
+export const MAX_IN_FLIGHT_PART_UPLOADS_PER_USER = 3;
+
+// Requests the SERVER admits concurrently, PER WORKER PROCESS, across all users,
+// to the two routes that accept a 30 MB JSON body: POST /backup/restore and POST
+// /vault/items/bulk-reencrypt. The slot is taken before that body is read and held
+// until the handler has finished with it, so this is the number of whole large
+// operations resident at once. Like MAX_IN_FLIGHT_PART_UPLOADS it is a MEMORY
+// budget before it is a throughput knob, and the two figures it is sized against
+// are recorded in docker-compose.yml beside the app's `mem_limit: 1g`:
+//
+//   * the V8 HEAP ceiling Node picks under that limit is 560 MB, and parsing a
+//     full 25 MiB restore payload measures 57 MB of heap, on top of the ~30 MB body
+//     string it was parsed from: roughly 90-110 MB of heap per operation;
+//   * the whole-process RSS growth of one 26 MB restore measures 111-143 MB and a
+//     10,000-item rotation 67-126 MB (scripts/ci/lib/resource-budgets.mjs), and
+//     RSS is what counts against the 1 GB cgroup limit.
+//
+// Two is therefore ~220 MB of heap against 560 and ~290 MB of RSS against 1 GB,
+// leaving room for the process's own baseline, the HIBP range cache, the parts
+// above and ordinary traffic. Three would put ~330 MB of heap in these alone.
+// Two is also the floor, not only the ceiling: with the per-user share below at
+// one, a budget of one would let a single account hold all of it.
+export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS = 2;
+// ONE IDENTITY's share of the budget above: a second concurrent large-body request
+// from an account that already has one in flight is REFUSED, not queued. Without
+// it, two requests that declare a Content-Length and then send nothing hold every
+// slot for as long as the server will wait for a body, and every other account's
+// restore and key rotation waits behind them. It bounds ONE account: two accounts
+// can still hold both slots that way, each for up to the server's whole-request
+// receive deadline.
+//
+// One, because two can never both proceed: both handlers take the per-account
+// vault-rotation lock, so the second of two concurrent requests (two tabs, say)
+// was already refused with 409, after its 30 MB had been parsed. The share refuses the
+// same request with the same status before a byte of it is read. It must stay
+// strictly BELOW MAX_IN_FLIGHT_LARGE_BODY_REQUESTS, for the same reason the part
+// share must.
+export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER = 1;
+
+// The slowest sustained uplink this deployment stands behind, in bytes per second
+// (128 KiB/s is about 1 Mbit/s). It is not a throttle and nothing measures against
+// it: it is the DIVISOR that turns a byte budget into a deadline, and it is named
+// once because two deadlines are derived from it and they must not drift apart.
+//
+//   * the server's whole-request receive deadline, from the largest body any route
+//     accepts (30 MB, the backup-restore and key-rotation parser): 240 seconds;
+//   * the part route's own body deadline, from one sealed segment
+//     (DOCUMENT_CIPHERTEXT_CHUNK_BYTES): 64 seconds. That one is only the DEFAULT
+//     of the server's `DOCUMENT_PART_BODY_TIMEOUT_MS` setting, which an operator
+//     whose users upload over slow links may raise (never past the whole-request
+//     deadline), so the derivation lives in the server's config beside it.
+//
+// The second is the tighter one on purpose. A part upload holds one of
+// MAX_IN_FLIGHT_PART_UPLOADS slots from before its body is read, so the time the
+// server is prepared to wait for THAT body is the time one account can deny a slot
+// to everybody else. A restore or rotation body also holds a slot from before it is
+// read (MAX_IN_FLIGHT_LARGE_BODY_REQUESTS), but the deadline for it IS the
+// whole-request one: that deadline was derived from exactly this body, so a
+// route-scoped copy would restate the same number. What bounds one account's hold
+// there is its share of one slot, not a tighter clock.
+export const MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND = 128 * 1024;
 
 // Plaintext metadata bounds. These live inside the ENCRYPTED metadata blob, so
 // they are enforced by a shared schema that runs in both directions (on the
@@ -550,17 +637,34 @@ export const REPAIRABLE_TRANSFORM_SYNTAXES: readonly TransformSyntax[] = Object.
   'jsonl',
 ]);
 
-// The two free-text fields a transform FAILURE carries across the port. Both are
-// built by the frame from the document's own bytes, so both are bounded: they are
-// displayed by the application's chrome, and an unbounded string chosen by the
-// least-trusted component in the system is a denial-of-service on the very panel
-// that has to explain what went wrong.
-//
-// The message is a formatter's or a repairer's own wording (Prettier's syntax
-// errors run to several lines with a source snippet); the excerpt is ONE line of
-// the offending document, which is what makes "line 4, column 12" actionable.
-export const MAX_TRANSFORM_MESSAGE_LENGTH = 2_000;
+// The ONE free-text field a transform FAILURE carries across the port: ONE line
+// of the offending document, which is what makes "line 4, column 12" actionable.
+// It is bounded because it is displayed in the application's chrome, and an
+// unbounded string chosen by the least-trusted component in the system is a
+// denial-of-service on the very panel that has to explain what went wrong. (The
+// failure's SENTENCE is not a field at all: the frame sends a code and the
+// application words it, so there is no tool wording to bound.)
 export const MAX_TRANSFORM_EXCERPT_LENGTH = 200;
+
+// The two tool versions a transform records as provenance, sealed into the
+// document's encrypted metadata as the only record of what rewrote the bytes.
+//
+// Written down rather than read at runtime, and that is a deliberate trade with
+// a gate behind it. `jsonrepair` publishes no version at all; Prettier publishes
+// one on its standalone module but does not declare it in `standalone.d.ts`, so
+// reading it would take a cast and a fallback branch that nothing can reach.
+// `packages/client/tests/document-format.test.ts` reads both packages' own
+// `package.json` and asserts they agree with these, so a dependency bump that
+// forgets them is a failing test rather than a metadata record that quietly
+// describes the wrong software.
+//
+// HERE rather than beside the engine, because BOTH programs need them: the
+// sandbox's engine stamps its reply with them, and the application refuses any
+// reply whose labels are not exactly what its own request can produce (see
+// `transformToolLabels`). A label the frame chose would be shown beside the
+// upload button and sealed into the document for good.
+export const JSONREPAIR_VERSION = '3.15.0';
+export const PRETTIER_VERSION = '3.9.8';
 
 // HKDF `info` prefixes, concatenated with the document id to bind every derived
 // key to ONE document: the stream key, the metadata key and the DEK wrapping key.
@@ -571,6 +675,68 @@ export const MAX_TRANSFORM_EXCERPT_LENGTH = 200;
 export const DOCUMENT_STREAM_INFO_PREFIX = 'hvault/doc/stream/v1|';
 export const DOCUMENT_META_INFO_PREFIX = 'hvault/doc/meta/v1|';
 export const DOCUMENT_DEK_WRAP_INFO_PREFIX = 'hvault/doc/dek-wrap/v1|';
+
+// Vault-field ciphertext format v2: an item's name, its data, each of its
+// password-history entries and a folder's name, sealed under the vault key with
+// AES-GCM additional data that names WHICH row and WHICH field the bytes belong
+// to. Format v1 (every field written before v2 existed) carries no additional
+// data, so a v1 triple opens wherever a server chooses to place it.
+//
+// The additional data is `VAULT_FIELD_AAD_PREFIX + role + '|' + rowId`, and for
+// `item.data` only, `VAULT_FIELD_AAD_PREFIX + 'item.data|' + itemType + '|' +
+// rowId`. The role and the item type come from closed lists without a `|`, and
+// the row id is 24 hex characters, so no two bindings concatenate to the same
+// bytes. The item type is bound into the data and nowhere else because it
+// decides which schema the data is read under, and it is immutable after create.
+//
+// The marker prefixes the stored IV STRING, never the ciphertext. `:` is outside
+// the base64 alphabet, so no v1 IV can start with it; and the IV is the one
+// field with room for it: every IV bound is 24 characters against a 16-character
+// value, while the ciphertext bounds are exact and v1 rows already sit on them.
+//
+// FORMAT constants: changing one makes every v2 field already stored
+// undecryptable, which is why a committed known-answer vector pins them.
+export const VAULT_FIELD_AAD_PREFIX = 'hvault/vault-field/v2|';
+export const VAULT_FIELD_V2_IV_MARKER = 'v2:';
+export const VAULT_FIELD_ROLES = [
+  'item.name',
+  'item.data',
+  'item.password-history',
+  'folder.name',
+] as const;
+export type VaultFieldRole = (typeof VAULT_FIELD_ROLES)[number];
+
+// ---------------------------------------------------------------------------
+// ROW IDS KNOWN BEFORE THE ROW EXISTS
+// ---------------------------------------------------------------------------
+// A format-v2 field is bound to its row's id, so a row the client CREATES has to
+// know that id before anything is sealed. The client sends a nonce and both
+// sides derive the id from it and from the caller's own user id:
+//
+//   _id = nonce[0..8] || hex(SHA-256(ROW_ID_DERIVATION_PREFIX || userId || "|" || nonce))[0..16]
+//
+// The first eight hex characters are the nonce's own seconds timestamp, so the id
+// is still a well-formed ObjectId that sorts roughly by creation time. The other
+// sixteen are bound to the caller's user id, which is the point of deriving rather
+// than accepting an id: a caller cannot name an id another account's row already
+// has (and so cannot probe whether one exists), and cannot occupy the id a
+// server-minted row will get later. The nonce is 40 lower-case hex characters:
+// eight of timestamp and thirty-two of randomness.
+//
+// FORMAT constant: the derivation is computed independently on both sides, so a
+// change on one side alone makes every created row unreadable. Pinned by a vector.
+export const ROW_ID_DERIVATION_PREFIX = 'hvault/row-id/v1|';
+export const ROW_ID_NONCE_PATTERN = /^[0-9a-f]{40}$/;
+
+// ---------------------------------------------------------------------------
+// VAULT SEARCH KEY
+// ---------------------------------------------------------------------------
+// An item's `searchHash` is HMAC-SHA256 of its normalised name under a SUBKEY of
+// the vault key, `HKDF-SHA256(ikm = vault key, salt = empty, info = this)`, and
+// never under the vault key itself: the vault key is an AES-GCM key, and using the
+// same bytes as an HMAC key as well is exactly the key reuse NIST SP 800-108
+// separates. FORMAT constant: changing it changes every hash written afterwards.
+export const VAULT_SEARCH_KEY_INFO = 'hvault/item/search/v1';
 
 // ---------------------------------------------------------------------------
 // DOCUMENT PREVIEW

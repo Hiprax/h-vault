@@ -204,13 +204,13 @@ export function BackupCodeList({
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <h3
+          <h2
             ref={headingRef}
             tabIndex={-1}
             className="text-sm font-medium text-[hsl(var(--foreground))]"
           >
             {LABEL}
-          </h3>
+          </h2>
           {codes.length > 0 && (
             <span
               aria-hidden="true"

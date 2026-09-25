@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { MAX_SANDBOX_QR_IMAGE_BYTES } from '@hvault/shared';
+import { QrImageRefusedError } from '../../src/services/totpImport/qrSandbox';
 
 /**
  * The scan panel's three ways in.
@@ -26,13 +28,43 @@ vi.mock('../../src/services/totpImport/camera', async () => {
 });
 
 const scan = vi.fn();
+/** Every scanner ever closed, however many were created. */
 const close = vi.fn();
+/**
+ * One close spy PER SCANNER, so a test can say WHICH scanner was closed.
+ *
+ * The shared `close` above cannot: with one object returned for every call, "it
+ * was closed once" is true whether the upload's scanner or the camera's was the
+ * one taken down, and those are opposite outcomes. Each entry here is the close
+ * of the correspondingly-numbered `openQrScanner` call.
+ */
+const closes: ReturnType<typeof vi.fn>[] = [];
 // Typed with its parameter, so the test can read back the callback the panel
 // handed it rather than casting an untyped tuple.
-const openQrScanner = vi.fn((_onUnavailable: (reason: string) => void) => ({ scan, close }));
-vi.mock('../../src/services/totpImport/qrSandbox', () => ({
-  openQrScanner: (onUnavailable: (reason: string) => void) => openQrScanner(onUnavailable),
-}));
+const openQrScanner = vi.fn((_onUnavailable: (reason: string) => void) => {
+  const own = vi.fn();
+  closes.push(own);
+  return {
+    scan,
+    close: () => {
+      own();
+      close();
+    },
+  };
+});
+// Spreads the REAL module, so `QrImageRefusedError` keeps its identity: the
+// panel distinguishes a refused image from every other failure with
+// `instanceof`, and a factory that returned only `openQrScanner` would leave
+// that operator with an undefined right-hand side.
+vi.mock('../../src/services/totpImport/qrSandbox', async () => {
+  const actual = await vi.importActual<typeof import('../../src/services/totpImport/qrSandbox')>(
+    '../../src/services/totpImport/qrSandbox',
+  );
+  return {
+    ...actual,
+    openQrScanner: (onUnavailable: (reason: string) => void) => openQrScanner(onUnavailable),
+  };
+});
 
 const { TotpScanPanel } = await import('../../src/components/tools/TotpScanPanel');
 const { CameraError } = await import('../../src/services/totpImport/camera');
@@ -46,6 +78,7 @@ function renderPanel(overrides: Partial<Parameters<typeof TotpScanPanel>[0]> = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  closes.length = 0;
   vi.stubGlobal(
     'createImageBitmap',
     vi.fn(async () => ({ width: 10, height: 10, close: vi.fn() })),
@@ -330,6 +363,248 @@ describe('an uploaded photo', () => {
     await waitFor(() => {
       expect(onError).toHaveBeenCalledWith('That image could not be read.');
     });
+    // The scanner this call created belongs to this call: it is closed however
+    // the call ended, or its hidden frame stays attached for ever. A close that
+    // sits after the `await` inside the `try` never runs on the path that needs
+    // it most.
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('closes the scanner it created even when the photo simply held no code', async () => {
+    scan.mockResolvedValue(null);
+    renderPanel();
+
+    const input = document.querySelector('input[type="file"]');
+    await act(async () => {
+      fireEvent.change(input!, {
+        target: { files: [new File([new Uint8Array(4)], 'code.png', { type: 'image/png' })] },
+      });
+    });
+
+    await waitFor(() => {
+      expect(close).toHaveBeenCalled();
+    });
+  });
+
+  it('leaves a RUNNING camera scanner open after an upload, rather than closing it', async () => {
+    // The mirror of the rule above: the panel closes what IT created and never
+    // the session the camera loop is still pumping. Closing that one would stop
+    // the camera dead the first time somebody also tried a photo.
+    openCamera.mockResolvedValue({
+      stream: { getTracks: () => [], getVideoTracks: () => [] },
+      width: 1920,
+      height: 1080,
+      stop: vi.fn(),
+    });
+    scan.mockResolvedValue('otpauth-migration://offline?data=AA');
+    renderPanel();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /use camera/i }));
+    });
+    await screen.findByRole('button', { name: /stop camera/i });
+    expect(openQrScanner).toHaveBeenCalledTimes(1);
+
+    const input = document.querySelector('input[type="file"]');
+    await act(async () => {
+      fireEvent.change(input!, {
+        target: { files: [new File([new Uint8Array(4)], 'code.png', { type: 'image/png' })] },
+      });
+    });
+
+    // No second scanner was created, and the live one was not closed.
+    expect(openQrScanner).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /stop camera/i }));
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('closes the scanner IT created even when a camera started mid-decode', async () => {
+    // The question the close is keyed on is "did I create this one", not "is
+    // there a scanner now". Reading the ref back AFTER the await asks the second
+    // question, and a camera that started while the photo was decoding answers
+    // it wrongly: the ad-hoc frame is stranded, with nothing left holding a
+    // reference that could ever close it.
+    openCamera.mockResolvedValue({
+      stream: { getTracks: () => [], getVideoTracks: () => [] },
+      width: 1920,
+      height: 1080,
+      stop: vi.fn(),
+    });
+    let finishScan: (text: string | null) => void = () => undefined;
+    scan.mockImplementationOnce(
+      () =>
+        new Promise<string | null>((resolve) => {
+          finishScan = resolve;
+        }),
+    );
+    const { onDecoded } = renderPanel();
+
+    const input = document.querySelector('input[type="file"]');
+    await act(async () => {
+      fireEvent.change(input!, {
+        target: { files: [new File([new Uint8Array(4)], 'code.png', { type: 'image/png' })] },
+      });
+    });
+    expect(openQrScanner).toHaveBeenCalledTimes(1);
+
+    // The camera starts while that decode is still in flight, which is what puts
+    // a DIFFERENT scanner in the ref.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /use camera/i }));
+    });
+    await screen.findByRole('button', { name: /stop camera/i });
+    expect(openQrScanner).toHaveBeenCalledTimes(2);
+
+    scan.mockResolvedValue(null);
+    await act(async () => {
+      finishScan('otpauth-migration://offline?data=AA');
+    });
+
+    expect(onDecoded).toHaveBeenCalledWith('otpauth-migration://offline?data=AA');
+    // Named precisely: the FIRST scanner is the upload's and was closed; the
+    // SECOND is the camera's and is still running. A count alone cannot tell
+    // those two apart, and they are opposite outcomes.
+    expect(closes[0]).toHaveBeenCalled();
+    expect(closes[1]).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /stop camera/i }));
+    });
+    expect(closes[1]).toHaveBeenCalled();
+  });
+
+  it('refuses a photo over the size bound WITHOUT asking the frame', async () => {
+    // The frame answers an oversized image with a failure it cannot attribute to
+    // one request, so the host must read it as the session dying — which would
+    // stop a running camera because somebody picked a 20 MB photo. Refusing
+    // first keeps a bad file to itself, and names the limit.
+    const { onError, onDecoded } = renderPanel();
+
+    const huge = new File([new Uint8Array(4)], 'huge.png', { type: 'image/png' });
+    Object.defineProperty(huge, 'size', { value: MAX_SANDBOX_QR_IMAGE_BYTES + 1 });
+
+    const input = document.querySelector('input[type="file"]');
+    await act(async () => {
+      fireEvent.change(input!, { target: { files: [huge] } });
+    });
+
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('too large to read'));
+    // Derived from the constant rather than spelled out, so the sentence cannot
+    // drift away from the bound it is describing — including "or smaller",
+    // which is the `>` boundary stated in words.
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('12 MB or smaller'));
+    // The negatives, and the whole reason the check sits here: no frame was
+    // stood up, nothing was sent, and nothing was decoded.
+    expect(openQrScanner).not.toHaveBeenCalled();
+    expect(scan).not.toHaveBeenCalled();
+    expect(onDecoded).not.toHaveBeenCalled();
+  });
+
+  it('reads a photo exactly ON the bound, which is the largest allowed', async () => {
+    // `n`, not just `n+1`: a `>=` here would refuse a file the frame accepts.
+    scan.mockResolvedValue('otpauth-migration://offline?data=AA');
+    const { onDecoded } = renderPanel();
+
+    const exact = new File([new Uint8Array(4)], 'exact.png', { type: 'image/png' });
+    Object.defineProperty(exact, 'size', { value: MAX_SANDBOX_QR_IMAGE_BYTES });
+
+    const input = document.querySelector('input[type="file"]');
+    await act(async () => {
+      fireEvent.change(input!, { target: { files: [exact] } });
+    });
+
+    await waitFor(() => {
+      expect(onDecoded).toHaveBeenCalledWith('otpauth-migration://offline?data=AA');
+    });
+  });
+
+  it("shows the DRIVER's sentence for one refused image, not its own generic one", async () => {
+    // "That image could not be read." cannot say which limit was crossed. The
+    // driver's sentence for the frame's code can, and it is the one worth
+    // showing. (It is the application's own wording: the frame sends a code.)
+    scan.mockRejectedValue(new QrImageRefusedError('That image is too large to read.'));
+    const { onError } = renderPanel();
+
+    const input = document.querySelector('input[type="file"]');
+    await act(async () => {
+      fireEvent.change(input!, {
+        target: { files: [new File([new Uint8Array(4)], 'code.png', { type: 'image/png' })] },
+      });
+    });
+
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalledWith('That image is too large to read.');
+    });
+    // The negative that makes this a precedence test: the vaguer sentence must
+    // never follow and overwrite it, because both land on one status line.
+    expect(onError).not.toHaveBeenCalledWith('That image could not be read.');
+  });
+
+  it('stays silent when the SCANNER has already reported a reason with a remedy', async () => {
+    // MEASURED ordering, and it cannot be fixed by reordering: a dying session
+    // rejects the outstanding scan and THEN reports its reason synchronously,
+    // but the rejection is delivered a microtask later — so the generic sentence
+    // always lands second and erases the remedy. The catch has to know to keep
+    // quiet.
+    let reject: (error: Error) => void = () => undefined;
+    scan.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, rejectScan) => {
+          reject = rejectScan;
+        }),
+    );
+    const { onError } = renderPanel();
+
+    const input = document.querySelector('input[type="file"]');
+    await act(async () => {
+      fireEvent.change(input!, {
+        target: { files: [new File([new Uint8Array(4)], 'code.png', { type: 'image/png' })] },
+      });
+    });
+
+    // The driver reports, then the scan it had already rejected settles.
+    const onUnavailable = openQrScanner.mock.calls[0]?.[0];
+    await act(async () => {
+      onUnavailable?.('The scanner could not start. Paste your export link instead.');
+      reject(new Error('the frame is gone'));
+    });
+
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('Paste your export link'));
+    expect(onError).not.toHaveBeenCalledWith('That image could not be read.');
+    // Exactly one sentence reached the single status line this panel writes to.
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('will not start a second upload while one is still decoding', async () => {
+    // With the camera running an upload shares ITS session, so unbounded
+    // overlapping uploads would put an unbounded number of requests on one
+    // channel. The "Read link" button is gated the same way.
+    let finish: (text: string | null) => void = () => undefined;
+    scan.mockImplementationOnce(
+      () =>
+        new Promise<string | null>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    renderPanel();
+
+    const input = document.querySelector('#totp-photo-input');
+    await act(async () => {
+      fireEvent.change(input!, {
+        target: { files: [new File([new Uint8Array(4)], 'code.png', { type: 'image/png' })] },
+      });
+    });
+
+    expect(input).toBeDisabled();
+
+    await act(async () => {
+      finish(null);
+    });
+    expect(input).not.toBeDisabled();
   });
 
   it('suggests a better photo when nothing was found, rather than blaming the file', async () => {

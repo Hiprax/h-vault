@@ -10,12 +10,18 @@ import { PwnedRangeCache } from '../models/PwnedRangeCache.js';
 import { createAuditLog } from '../services/auditService.js';
 import { config } from '../config/index.js';
 import {
+  StaleVaultKeyError,
+  acquireVaultRotationLock,
+  assertVaultKeyVersion,
   assertVaultNotRotating,
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  releaseVaultRotationLock,
+  sendStaleVaultKey,
   vaultImportLockName,
 } from '../utils/controllerHelpers.js';
+import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils/rowIds.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
@@ -680,6 +686,8 @@ interface ImportOperationsParams {
   format: ImportInput['format'];
   conflictStrategy: ImportInput['conflictStrategy'];
   operations: ImportInput['operations'];
+  /** The vault-key generation every ciphertext field in `operations` was sealed under. */
+  vaultKeyVersion: number | undefined;
 }
 
 /**
@@ -707,7 +715,7 @@ interface ImportOperationsParams {
 async function executeImportOperations(
   req: Request,
   res: Response,
-  { userId, format, conflictStrategy, operations }: ImportOperationsParams,
+  { userId, format, conflictStrategy, operations, vaultKeyVersion }: ImportOperationsParams,
 ): Promise<void> {
   const { inserts, updates } = operations;
 
@@ -736,13 +744,21 @@ async function executeImportOperations(
   // Every insert is mapped through the FIXED `ALLOWED_ITEM_FIELDS` projection,
   // never a spread, so an injected or prototype-polluting key on an import row
   // is inert even if the schema's unknown-key stripping is ever relaxed.
-  const insertDocs = inserts.map((item) => {
+  //
+  // The derived `_id` is spread in by name, past that projection, for the reason
+  // `createdRowId` gives: an insert whose fields were sealed to the id its nonce
+  // derives must be stored under exactly that id.
+  const insertDocs: Record<string, unknown>[] = [];
+  for (const item of inserts) {
     const doc = pickAllowedFields(item, ALLOWED_ITEM_FIELDS);
     if (typeof doc.folderId === 'string' && !ownedFolderIds.has(doc.folderId)) {
       delete doc.folderId;
     }
-    return { ...doc, userId };
-  });
+    insertDocs.push({ ...doc, ...(await createdRowId(userId, item.idNonce)), userId });
+  }
+  const derivedIds = insertDocs
+    .map((doc) => doc._id)
+    .filter((id): id is string => typeof id === 'string');
 
   // 3 ── Update-target ownership. The lookup is scoped to LIVE items of this
   // user so it mirrors the client resolver's own matching scope (non-trashed,
@@ -794,13 +810,52 @@ async function executeImportOperations(
 
   let insertedCount = 0;
   let updatedCount = 0;
+  let insertedIds: string[] = [];
+  let rotationLockId: string | null = null;
 
   try {
+    // ── The vault-key exclusion lock ───────────────────────────────────────
+    //
+    // The generation check below is a READ, and a read is only worth the
+    // distance to the write that trusts it. From here to `insertMany` lie the
+    // cap count, a transaction start and, on the way in, everything already
+    // done above; a rotation that raises its fence anywhere inside that span is
+    // one both the fence read and the generation read have already decided does
+    // not exist, and every row this handler then commits is sealed under a key
+    // the rotation is in the middle of replacing. Those rows are stranded the
+    // instant they land — the rotation enumerated the account before they
+    // existed — and nothing tells the importer.
+    //
+    // This is the lock `bulkReEncrypt` takes BEFORE it raises that fence and
+    // releases AFTER it lowers it, so holding it here means no rotation can
+    // start: the two genuinely exclude each other instead of merely being
+    // unlikely to interleave. A conditional filter cannot do the job on this
+    // endpoint, because the write is an `insertMany` into another collection
+    // and there is nothing on those documents to condition.
+    //
+    // Taken INSIDE this `try`, after the import lock, so the one `finally`
+    // below releases both and in the reverse order. Acquisition order is fixed
+    // — import lock outside, exclusion lock inside, never the other way — and
+    // it is documented at `acquireVaultRotationLock`; every acquisition is
+    // non-blocking, so no ordering can deadlock, but a stable order keeps that
+    // reviewable rather than merely true today.
+    rotationLockId = await acquireVaultRotationLock(userId);
+
     // Cap measured against NET-NEW inserts only (updates rewrite rows that
     // already exist), before any write, so a rejected import leaves nothing.
     const existingItemCount = await VaultItem.countDocuments({ userId });
     if (existingItemCount + insertDocs.length > MAX_ITEMS_PER_USER) {
       throw httpErrors.badRequest(importCapExceededMessage(existingItemCount, insertDocs.length));
+    }
+
+    // A derived id that is already stored, refused BEFORE the first insert. The
+    // standalone path has no transaction, and an ordered `insertMany` that meets a
+    // duplicate `_id` keeps every row ahead of it, so leaving this to the
+    // duplicate-key error would half-apply a batch. Under the import lock, so no
+    // second import can store one of these ids in between; a create from another
+    // endpoint still can, and that hairline is caught at the insert below.
+    if (derivedIds.length > 0 && (await VaultItem.exists({ _id: { $in: derivedIds } }))) {
+      throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
     }
 
     const execute = async (session?: mongoose.ClientSession): Promise<void> => {
@@ -820,14 +875,39 @@ async function executeImportOperations(
         throw httpErrors.badRequest(importCapExceededMessage(liveItemCount, insertDocs.length));
       }
 
+      // The vault-key generation, checked HERE rather than at the top of the
+      // handler. Between the two lie the field-length checks, the folder
+      // lookups, the update-target lookups, `acquireJobLock` and the cap count
+      // — hundreds of milliseconds in which a rotation can commit and leave
+      // every row below sealed under a key the account has already replaced.
+      // Inside the callback rather than merely inside the lock because
+      // `withTransaction` may RE-RUN this after a transient error, and a guard
+      // outside would not be re-evaluated on that second attempt.
+      //
+      // It THROWS rather than answering the 409 here, and that is the whole
+      // reason `resolveVaultKeyVersion` is not used: answering and returning
+      // normally from inside this callback would let the transaction COMMIT.
+      // The refusal is rendered outside, where the transaction has unwound.
+      await assertVaultKeyVersion(userId, vaultKeyVersion);
+
       // Reset per attempt: `withTransaction` may re-run this callback after a
       // transient error, and the aborted attempt's rows no longer exist.
       insertedCount = 0;
       updatedCount = 0;
+      insertedIds = [];
 
       if (insertDocs.length > 0) {
-        const created = await VaultItem.insertMany(insertDocs, sessionOpt);
+        let created;
+        try {
+          created = await VaultItem.insertMany(insertDocs, sessionOpt);
+        } catch (err: unknown) {
+          if (isDuplicateIdError(err)) throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
+          throw err;
+        }
         insertedCount = created.length;
+        // In insertion order, which `insertMany` preserves: the client checks each
+        // against the id it sealed that row to.
+        insertedIds = created.map((doc) => String(doc._id));
       }
 
       for (const update of updates) {
@@ -877,10 +957,15 @@ async function executeImportOperations(
       await execute();
     }
   } finally {
+    // Reverse acquisition order, and the exclusion lock first because it is the
+    // one whose loss blocks four other operations rather than one.
+    if (rotationLockId !== null) {
+      await releaseVaultRotationLock(userId, rotationLockId);
+    }
     await releaseJobLock(lockName, lockId);
   }
 
-  // The lock is released BEFORE the response is written, deliberately. The
+  // Both locks are released BEFORE the response is written, deliberately. The
   // client sends its batches sequentially and fires batch n+1 the moment
   // batch n's response lands; responding while the release round-trip is still
   // in flight would 409 a legitimate multi-batch migration against its own lock.
@@ -897,19 +982,41 @@ async function executeImportOperations(
 
   res.status(201).json({
     success: true,
-    data: { insertedCount, updatedCount },
+    data: { insertedCount, updatedCount, insertedIds },
     message: `${String(insertedCount)} items imported, ${String(updatedCount)} items updated`,
   });
 }
 
 export const importVault = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
-  const { format, conflictStrategy, operations } = req.body as ImportInput;
+  const { format, conflictStrategy, operations, vaultKeyVersion } = req.body as ImportInput;
 
   // Every imported row carries ciphertext encrypted with the caller's current
   // vault key — a rotation in flight would strand all of it. Fence before any
   // validation or writing, so the rejection is cheap.
   await assertVaultNotRotating(userId);
 
-  await executeImportOperations(req, res, { userId, format, conflictStrategy, operations });
+  try {
+    await executeImportOperations(req, res, {
+      userId,
+      format,
+      conflictStrategy,
+      operations,
+      vaultKeyVersion,
+    });
+  } catch (error) {
+    // The stale-generation refusal, rendered HERE rather than where it is
+    // raised. It is raised deep inside the transaction callback so that it
+    // aborts the transaction; by the time it reaches this frame the transaction
+    // has unwound, nothing has been written, and the per-user lock has already
+    // been released by `executeImportOperations`'s own `finally` — which keeps
+    // the release AHEAD of the response, the ordering that function's comment
+    // calls deliberate. Uncaught it would still refuse with a 409; catching it
+    // is what attaches the NUMBER the client re-seals under.
+    if (error instanceof StaleVaultKeyError) {
+      sendStaleVaultKey(res, error);
+      return;
+    }
+    throw error;
+  }
 });

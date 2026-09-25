@@ -565,14 +565,59 @@ function handshake(): MessagePort {
  */
 const TRAILER = 'https://trailer.example/after';
 
+/** The destination the trailer's own dialog shows. */
+const TRAILER_DESTINATION = 'https://trailer.example';
+
+/**
+ * Posts `href`, which must be REFUSED, and then the trailer, and waits for the
+ * TRAILER'S dialog.
+ *
+ * Waiting for any dialog would not do: had `href` opened one, it would be
+ * replaced by the trailer's a moment later, and a check made after that would
+ * pass. So every destination the dialog shows while the two are processed is
+ * recorded as it appears, and the one thing ever shown must be the trailer's.
+ */
 async function postAndSettle(port: MessagePort, href: string): Promise<void> {
+  const shown = new Set<string>();
+  const record = (): void => {
+    const origin = document.querySelector('[data-testid="document-link-origin"]');
+    if (origin?.textContent) shown.add(origin.textContent);
+  };
+  const observer = new MutationObserver(record);
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  try {
+    // Each message gets an event-loop turn of its own before the next is posted.
+    // Posted together, both arrive in one task and React renders only the last
+    // state, so a dialog `href` did open would never reach the page at all and
+    // this helper could not see it. Two `setImmediate` turns, because a port's
+    // messages are delivered in the poll phase and one turn may land before it.
+    await act(async () => {
+      port.postMessage({ kind: 'link', href });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    });
+    await act(async () => {
+      port.postMessage({ kind: 'link', href: TRAILER });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('document-link-origin').textContent).toBe(TRAILER_DESTINATION);
+    });
+  } finally {
+    observer.disconnect();
+  }
+  record();
+  expect([...shown]).toEqual([TRAILER_DESTINATION]);
+}
+
+/** Posts a link the host must OFFER, and waits for its dialog to show where it goes. */
+async function openLinkDialog(port: MessagePort, href: string, destination: string): Promise<void> {
   await act(async () => {
     port.postMessage({ kind: 'link', href });
-    port.postMessage({ kind: 'link', href: TRAILER });
     await Promise.resolve();
   });
   await waitFor(() => {
-    expect(screen.getByTestId('document-link-origin')).toBeInTheDocument();
+    expect(screen.getByTestId('document-link-origin').textContent).toBe(destination);
   });
 }
 
@@ -668,21 +713,56 @@ describe('DocumentDetail — a link clicked inside the frame', () => {
     open.mockRestore();
   });
 
-  it('shows the raw destination when it passes the scheme check but will not parse', async () => {
+  it('offers nothing for a destination that will not parse, so its raw text is never shown', async () => {
     // `isSafeUrl` is a PREFIX test, so the bare string `https://` passes it and
-    // then throws in `new URL()`. A frame can send exactly that. The dialog must
-    // still show SOMETHING where the destination goes — an empty line is the one
-    // outcome a confirmation dialog can never have, because the reader would be
-    // confirming a blank.
+    // then throws in `new URL()`. This dialog used to show such a string raw,
+    // and a compromised frame could therefore put any sentence it liked in the
+    // application's own dialog. A string that does not parse is not a link: it
+    // is refused at the message boundary, before any dialog exists.
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    await postAndSettle(handshake(), 'https://');
+    // The trailer's dialog is the one showing, so the unparseable href ahead of it
+    // was delivered and answered with nothing.
+    expect(screen.getByTestId('document-link-origin').textContent).toBe('https://trailer.example');
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it('shows the parsed address, never the string the frame sent', async () => {
+    // A space and a text-reversing control well inside the part of the address
+    // that is shown: the dialog must carry the parser's encoding of both, and
+    // neither raw character.
     const port = handshake();
     await act(async () => {
-      port.postMessage({ kind: 'link', href: 'https://' });
+      port.postMessage({ kind: 'link', href: 'https://example.com/re-enter password\u202Etxt' });
       await Promise.resolve();
     });
     await waitFor(() => {
-      expect(screen.getByTestId('document-link-origin')).toBeInTheDocument();
+      expect(screen.getByTestId('document-link-origin')).toHaveTextContent('https://example.com');
     });
-    expect(screen.getByTestId('document-link-origin').textContent).toBe('https://');
+    expect(screen.getByTestId('document-link-address').textContent).toBe(
+      'https://example.com/re-enter%20password%E2%80%AEtxt',
+    );
+    expect(screen.queryByText(/re-enter password/)).toBeNull();
+  });
+
+  it.each([
+    [200, 'in full', false],
+    [201, 'cut to 200 characters', true],
+  ])('shows an address of %i characters %s', async (length, _label, cut) => {
+    // `https://example.com/` is 20 characters; the path makes up the rest.
+    const href = `https://example.com/${'a'.repeat(length - 20)}`;
+    const port = handshake();
+    await act(async () => {
+      port.postMessage({ kind: 'link', href });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('document-link-origin')).toHaveTextContent('https://example.com');
+    });
+    const address = screen.getByTestId('document-link-address').textContent ?? '';
+    expect(address).toBe(cut ? `${href.slice(0, 199)}\u2026` : href);
+    expect(address).toHaveLength(200);
   });
 
   it('closes on Escape without opening anything', async () => {
@@ -880,7 +960,7 @@ describe('DocumentDetail — full screen', () => {
     fireEvent.click(toggle());
     expect(section()).toHaveAttribute('aria-modal', 'true');
 
-    await postAndSettle(port, 'https://example.com/somewhere');
+    await openLinkDialog(port, 'https://example.com/somewhere', 'https://example.com');
 
     // `Dialog` portals to <body>, OUTSIDE this section, and `aria-modal="true"`
     // declares everything outside its container inert — so leaving it on would
@@ -899,7 +979,7 @@ describe('DocumentDetail — full screen', () => {
     await renderExpandable();
     const port = handshake();
     fireEvent.click(toggle());
-    await postAndSettle(port, 'https://example.com/somewhere');
+    await openLinkDialog(port, 'https://example.com/somewhere', 'https://example.com');
     expect(screen.getByTestId('document-link-origin')).toBeInTheDocument();
 
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -933,7 +1013,7 @@ describe('DocumentDetail — full screen', () => {
     // would leave the refusal paragraph stranded on a full-viewport canvas.
     const port = handshake();
     await act(async () => {
-      port.postMessage({ kind: 'failed', reason: 'This file could not be displayed.' });
+      port.postMessage({ kind: 'failed', code: 'renderFailed' });
       await Promise.resolve();
     });
 
@@ -942,6 +1022,29 @@ describe('DocumentDetail — full screen', () => {
     });
     expect(section()).not.toHaveAttribute('role');
     expect(document.body.style.overflow).toBe('');
+  });
+
+  it('puts the APPLICATION’s sentence beside the Download button, never the frame’s', async () => {
+    // The chrome this whole design protects: the refusal paragraph sits next to
+    // the real Download button, in the application's voice. A frame that could
+    // choose its words could ask for the master password right there.
+    await renderExpandable();
+    const port = handshake();
+    await act(async () => {
+      port.postMessage({
+        kind: 'failed',
+        code: 'renderFailed',
+        reason: 'Preview blocked. Re-enter your master password at https://evil.example',
+      });
+      await Promise.resolve();
+    });
+
+    const refusal = await screen.findByTestId('document-download-to-view');
+    expect(refusal).toHaveTextContent(
+      'The document could not be displayed. You can download the file instead.',
+    );
+    expect(document.body.textContent).not.toContain('master password');
+    expect(screen.getByRole('button', { name: /^Download\b/ })).toBeInTheDocument();
   });
 
   it('does not carry full screen from one document to the next', async () => {

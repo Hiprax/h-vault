@@ -2,6 +2,16 @@ import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Shield } from 'lucide-react';
 import { logger } from '../../lib/logger';
+import { StandalonePage } from './StandalonePage';
+
+/** The default card's frame inside a page: the same centring, no landmark. */
+function EmbeddedShell({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))]">
+      {children}
+    </div>
+  );
+}
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -12,6 +22,16 @@ interface ErrorBoundaryProps {
    * over the whole viewport and hiding the surrounding controls.
    */
   fallback?: ReactNode;
+  /**
+   * Whether this boundary is the TOP of the tree, so its default card replaces
+   * the whole page rather than one part of it. Then the card is the page's
+   * `<main>` and its title the page's `h1`. Only `App`'s own boundaries pass it:
+   * the same default card also renders inside `AppLayout`'s `<main>` (the vault
+   * list and the create dialog), where a second `main` would be a nested
+   * landmark and an `h1` a second page title — there it stays an `h2` under the
+   * page's own.
+   */
+  standalone?: boolean;
 }
 
 interface ErrorBoundaryState {
@@ -42,16 +62,18 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       if (this.props.fallback !== undefined) {
         return this.props.fallback;
       }
+      const Shell = this.props.standalone === true ? StandalonePage : EmbeddedShell;
+      const Title = this.props.standalone === true ? 'h1' : 'h2';
       return (
-        <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))]">
+        <Shell>
           <div className="w-full max-w-md space-y-6 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-8 shadow-lg">
             <div className="flex flex-col items-center space-y-3">
               <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[hsl(var(--destructive)/0.1)]">
                 <Shield className="h-7 w-7 text-[hsl(var(--destructive))]" />
               </div>
-              <h2 className="text-xl font-semibold text-[hsl(var(--card-foreground))]">
+              <Title className="text-xl font-semibold text-[hsl(var(--card-foreground))]">
                 Something went wrong
-              </h2>
+              </Title>
               <p className="text-center text-sm text-[hsl(var(--muted-foreground))]">
                 An unexpected error occurred. Your data is safe. Please reload the page to continue.
               </p>
@@ -73,7 +95,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
               Reload
             </button>
           </div>
-        </div>
+        </Shell>
       );
     }
 

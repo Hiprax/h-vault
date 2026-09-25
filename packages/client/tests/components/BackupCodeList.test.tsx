@@ -156,7 +156,7 @@ describe('BackupCodeList rendering and masking', () => {
   it('renders nothing but the heading when there are no codes', () => {
     render(<Harness initial={[]} />);
     expect(screen.queryByRole('list')).toBeNull();
-    expect(screen.getByRole('heading', { name: 'Backup codes' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Backup codes' })).toBeInTheDocument();
   });
 });
 

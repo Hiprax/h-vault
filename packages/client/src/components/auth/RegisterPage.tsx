@@ -5,15 +5,17 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../../lib/lazyZxcvbn';
-import { Eye, EyeOff, AlertCircle, AlertTriangle } from 'lucide-react';
+import { Eye, EyeOff, AlertTriangle } from 'lucide-react';
 import { BrandLogo } from '../ui/BrandLogo';
 import { useAuthStore } from '../../stores/authStore';
-import { getApiErrorMessage, hasValidEmailTld } from '../../lib/utils';
+import { cn, getApiErrorMessage } from '../../lib/utils';
+import { accountEmailSchema } from '../../lib/accountEmail';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
+import { FormAlert } from '../ui/FormAlert';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
-import { cn } from '../../lib/utils';
+import { StandalonePage } from '../layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schema                                                                    */
@@ -21,11 +23,7 @@ import { cn } from '../../lib/utils';
 
 const registerFormSchema = z
   .object({
-    email: z
-      .string()
-      .min(1, 'Email is required')
-      .pipe(z.email('Enter a valid email address'))
-      .refine(hasValidEmailTld, 'Enter a valid email address'),
+    email: accountEmailSchema,
     masterPassword: z.string().min(12, 'Master password must be at least 12 characters'),
     confirmPassword: z.string().min(1, 'Please confirm your password'),
     acceptTerms: z.literal(true, {
@@ -123,27 +121,19 @@ export function RegisterPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4 py-8">
+    <StandalonePage className="py-8">
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Create Account</CardTitle>
+          <CardTitle as="h1">Create Account</CardTitle>
           <CardDescription>Set up your H-Vault account</CardDescription>
         </CardHeader>
 
         <form onSubmit={(e) => void form.handleSubmit(handleRegister)(e)}>
           <CardContent className="space-y-4">
-            {apiError && (
-              <div
-                role="alert"
-                className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
-              >
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{apiError}</span>
-              </div>
-            )}
+            {apiError && <FormAlert message={apiError} />}
 
             {/* Email */}
             <div className="space-y-2">
@@ -318,6 +308,6 @@ export function RegisterPage() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

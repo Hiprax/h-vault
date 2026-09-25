@@ -1,13 +1,22 @@
 import express from 'express';
 import type { Request, RequestHandler, Response, NextFunction } from 'express';
-import { ErrorHandler } from '@hiprax/errors';
-import { DOCUMENT_CIPHERTEXT_CHUNK_BYTES } from '@hvault/shared';
-import { partUploadSemaphore } from '../utils/partSemaphore.js';
+import { ErrorHandler, httpErrors } from '@hiprax/errors';
+import {
+  DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
+  MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
+} from '@hvault/shared';
+import { config } from '../config/index.js';
+import { createModuleLogger } from '../utils/logger.js';
+import { partUploadSemaphore, partUploadUserQuota } from '../utils/partSemaphore.js';
+import { admitWithinBudget, createHandlerSettledRelease } from './admission.js';
+import type { SlotHandler } from './admission.js';
+
+const logger = createModuleLogger('document-part-body');
 
 /**
  * The three middlewares that stand in front of `PUT /documents/uploads/:id/parts/:n`,
  * in the order they must run: the length guard, the concurrency slot, then the body
- * parser.
+ * parser; and the wrapper the route's handler is mounted through, last.
  *
  * THE ORDER IS THE WHOLE POINT, and each step is here because the step after it
  * cannot do its job otherwise:
@@ -19,12 +28,16 @@ import { partUploadSemaphore } from '../utils/partSemaphore.js';
  *      to check the received bytes against, which is a number this handler's ledger
  *      and quota arithmetic depend on. Both are refused here, cheaply, and neither
  *      consumes a concurrency slot.
- *   2. {@link holdPartUploadSlot} takes one of `MAX_IN_FLIGHT_PART_UPLOADS` slots
- *      and holds it until the response closes — so across the parser AND across the
- *      storage call. It must sit AHEAD of the parser: Express runs a route's parser
- *      before its handler, so a slot taken in the handler is taken after 8 MiB has
- *      already been buffered and bounds nothing.
+ *   2. {@link holdPartUploadSlot} charges this identity's share of the budget and
+ *      takes one of `MAX_IN_FLIGHT_PART_UPLOADS` slots, holding both until the
+ *      response has closed AND the handler has settled — so across the parser AND
+ *      across the storage call, including for a client that has already gone away.
+ *      It must sit AHEAD of the parser: Express runs a route's parser before its
+ *      handler, so a slot taken in the handler is taken after 8 MiB has already been
+ *      buffered and bounds nothing.
  *   3. {@link parsePartUploadBody} buffers the part.
+ *   4. {@link holdingPartUploadSlot} wraps the handler, which is what lets the slot
+ *      outlive a response that closed while the handler was still running.
  */
 
 // ---------------------------------------------------------------------------
@@ -67,8 +80,68 @@ export function requirePartContentLength(req: Request, _res: Response, next: Nex
 // 2. The concurrency slot
 // ---------------------------------------------------------------------------
 
+/** How soon a refused client may try again. One second: the condition is a peer's part. */
+const PART_SLOT_RETRY_AFTER_SECONDS = '1';
+
+/** When a part's slot comes back: once the response closed AND the handler settled. */
+const settledRelease = createHandlerSettledRelease();
+
 /**
- * Holds one {@link partUploadSemaphore} slot for the whole request/response cycle.
+ * How long the server will wait for ONE part's body once that part holds a slot:
+ * `DOCUMENT_PART_BODY_TIMEOUT_MS`.
+ *
+ * Its default is derived, never chosen (`DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS` in
+ * `config/index.ts`): one sealed segment at `MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND`,
+ * which is 64 seconds at today's numbers. That is a floor on upload speed PER
+ * TRANSFER, and a user uploading several files at once splits one uplink between
+ * them, so an operator whose users upload over slow links raises it; raising it
+ * also lengthens how long one account can hold a slot with a body it never sends,
+ * and the config refuses a value above `HTTP_REQUEST_TIMEOUT_MS`. By default it is
+ * far tighter than `HTTP_REQUEST_TIMEOUT_MS`, and it has to be,
+ * because the two bound different things. The server-wide deadline is sized to the
+ * largest body ANY route accepts (a 30 MB restore), since Node has no per-route
+ * form of it; this one is sized to the largest body THIS route accepts — and here
+ * waiting costs more than a socket, because the slot was taken before the body was
+ * read and every other account's parts queue behind it. (The two 30 MB routes hold
+ * a slot from before their body is read too, but their body IS the one the
+ * server-wide deadline was derived from, so a tighter copy of it would be a
+ * different number for the same body; see `middleware/largeBodyAdmission.ts`.)
+ *
+ * ARMED WHEN THE SLOT IS GRANTED AND CLEARED WHEN THE BODY ARRIVES, which is what
+ * keeps it a deadline on RECEIPT rather than on the request. Time spent queued for
+ * a slot is not the client's fault, and the storage call that follows the body is
+ * deliberately left unbounded here: `partSemaphore.ts` records why a slow engine is
+ * allowed to hold a slot, and turning this into a deadline on the whole request
+ * would cap a healthy upload to protect against an unhealthy engine.
+ */
+export const PART_UPLOAD_BODY_DEADLINE_MS = config.DOCUMENT_PART_BODY_TIMEOUT_MS;
+
+/**
+ * The identity a part upload is charged to.
+ *
+ * `authenticate` is mounted at ROUTER level in `routes/documents.ts`, so through
+ * the mounted chain `req.user` is always set and the fallback below is
+ * unreachable. It is a single shared bucket rather than a per-request free pass
+ * because that is the direction that fails CLOSED: if some future chain ever
+ * reached this middleware without an authenticated user, those requests would
+ * share ONE share instead of each getting an unbounded one.
+ */
+function partUploadIdentity(req: Request): string {
+  return req.user?._id ?? 'anonymous';
+}
+
+/**
+ * Charges this identity's share of the budget, then holds one
+ * {@link partUploadSemaphore} slot for the whole request/response cycle.
+ *
+ * THE SHARE IS CHARGED FIRST, and before the slot is even requested, so it bounds
+ * QUEUED requests as well as granted ones. That ordering is the point: the hazard
+ * is a client that declares a `Content-Length` and then sends nothing, which costs
+ * it a socket and costs the process a slot, and an identity allowed to queue
+ * without limit could convert its own refusal into a growing pile of them. An
+ * identity at its share is answered 503 immediately — never 429, which the browser
+ * treats as "the fifteen-minute budget is spent, stop retrying", while this
+ * condition clears as soon as one of that account's own parts finishes.
  *
  * The `close` listener is registered BEFORE the slot is requested, and that is
  * load-bearing rather than tidy. A queued request whose client disconnects would
@@ -81,26 +154,115 @@ export function requirePartContentLength(req: Request, _res: Response, next: Nex
  * an aborted connection would leak the same way. Node emits `close` on the response
  * in both cases, and the release is idempotent, so wiring the one event that always
  * fires is enough.
+ *
+ * REGISTERING FIRST IS NOT ENOUGH ON ITS OWN, because `close` may ALREADY have
+ * fired. TWO middlewares ahead of this one await a MongoDB round trip: the router's
+ * `authenticate`, which reads the user on EVERY request in every environment, and
+ * `documentPartLimiter`, which writes its counter in production. A client that
+ * disconnects during either arrives here with a response that is already destroyed,
+ * and a listener added afterwards never runs (measured: `res.destroyed` and
+ * `res.closed` are both true at that point, and a late `close` handler is never
+ * called). Nothing is charged or taken in that case, and the chain deliberately
+ * stops here — there is nobody to answer. The check is BEFORE the charge and before
+ * `acquire`, not a take-then-hand-back: a slot handed to a dead request is a slot
+ * taken from the live one waiting behind it.
+ *
+ * Those mechanics live ONCE, in `middleware/admission.ts` (`admitWithinBudget`),
+ * shared with the large-body slot holder, and so does WHEN the slot comes back
+ * (`createHandlerSettledRelease`): once the response has closed AND the handler has
+ * settled. Express does not cancel a handler whose client went away, so a part whose
+ * client disconnects during the storage call still has its 8 MiB buffer resident
+ * until that call returns, and a slot handed back on `close` would let one account
+ * send a whole part, drop the connection and send the next, with every one of them
+ * in memory at once. What is part-specific here is the 503 refusal and the body
+ * deadline.
+ *
+ * Built by a FACTORY over `bodyDeadlineMs` rather than reading
+ * {@link PART_UPLOAD_BODY_DEADLINE_MS} directly, so the deadline can be exercised
+ * at a tenth of a second by a test that drives a real socket through the real
+ * chain. The mounted handler below is the same code at the shipped number; a test
+ * that had to wait 64 seconds for it would be a test that gets deleted.
  */
-export function holdPartUploadSlot(req: Request, res: Response, next: NextFunction): void {
-  let release: (() => void) | undefined;
-  let closed = false;
+export function createPartSlotHolder(bodyDeadlineMs: number): RequestHandler {
+  return function holdPartUploadSlot(req: Request, res: Response, next: NextFunction): void {
+    let deadline: NodeJS.Timeout | undefined;
 
-  res.once('close', () => {
-    closed = true;
-    release?.();
-  });
+    admitWithinBudget(res, next, {
+      semaphore: partUploadSemaphore,
+      quota: partUploadUserQuota,
+      identity: partUploadIdentity(req),
+      refuse(refused, fail) {
+        // Logged, because on the wire this refusal is indistinguishable from the 503
+        // an unreachable storage engine produces (both are redacted to their status
+        // text in production), and those two call for opposite operator responses.
+        // The identity is deliberately NOT logged, exactly as the rate limiters'
+        // handlers omit their key.
+        logger.warn('Document part refused: the account is at its in-flight share', {
+          limit: MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
+        });
+        refused.setHeader('Retry-After', PART_SLOT_RETRY_AFTER_SECONDS);
+        fail(
+          httpErrors.serviceUnavailable(
+            'Too many document part uploads are already in flight for this account',
+          ),
+        );
+      },
+      granted() {
+        settledRelease.admit(res);
+        // The body deadline, armed at the moment this request starts costing the
+        // process memory. The socket is DESTROYED rather than answered: the parser
+        // below is mid-stream by then, so writing a response would race a body that
+        // is still arriving — and the client treats a reset on a part exactly as it
+        // treats the 408 the server-wide deadline produces, as a transfer to retry.
+        deadline = setTimeout(() => {
+          logger.warn('Document part destroyed: its body did not arrive inside the deadline', {
+            deadlineMs: bodyDeadlineMs,
+          });
+          res.destroy();
+        }, bodyDeadlineMs);
+        // Never a reason to keep the process alive: a shutdown that is draining
+        // connections does not need to wait for this to fire.
+        deadline.unref();
+        // `end` fires when the parser has consumed the whole body, which is the
+        // moment this stops being a deadline the client can miss. Without it the
+        // timer would still be armed across the storage call and would destroy a
+        // healthy upload whose engine was merely slow.
+        req.once('end', () => {
+          if (deadline !== undefined) clearTimeout(deadline);
+        });
+      },
+      closed(release) {
+        // Nothing is left for the deadline to protect once the response has closed;
+        // the slot and the share are another matter, and stay held while the
+        // handler still holds the part.
+        if (deadline !== undefined) clearTimeout(deadline);
+        settledRelease.closed(res, release);
+      },
+    });
+  };
+}
 
-  partUploadSemaphore.acquire((grantedRelease) => {
-    release = grantedRelease;
-    if (closed) {
-      // The response ended while this request was queued. Hand the slot straight
-      // back and do NOT continue down the chain: there is nobody to answer.
-      grantedRelease();
-      return;
-    }
-    next();
-  });
+/** The mounted holder, at this deployment's {@link PART_UPLOAD_BODY_DEADLINE_MS}. */
+export const holdPartUploadSlot: RequestHandler = createPartSlotHolder(
+  PART_UPLOAD_BODY_DEADLINE_MS,
+);
+
+/**
+ * Wraps the part route's handler so the slot {@link holdPartUploadSlot} took is held
+ * until the handler has SETTLED, not merely until the response closed. A handler
+ * reached with no slot is refused with 500 rather than run: it would be buffering and
+ * forwarding a part that no budget counted.
+ */
+export function holdingPartUploadSlot(handler: SlotHandler): RequestHandler {
+  return async function partUploadHandler(req, res, next): Promise<void> {
+    await settledRelease.run(
+      handler,
+      req,
+      res,
+      next,
+      'Part upload handler reached without an admission slot',
+    );
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -126,17 +288,19 @@ export const PART_BODY_LIMIT_BYTES = DOCUMENT_CIPHERTEXT_CHUNK_BYTES + PART_BODY
  * Buffers the part as a `Buffer`.
  *
  * MOUNTED AT ROUTE LEVEL, NEVER APP LEVEL, and the reason is not body size — it is
- * the MongoDB injection sanitizer in `app.ts`. That sanitizer rebuilds any object
- * body key by key to strip `$`-prefixed operators, and a `Buffer` is an object that
- * is not an Array, so it would be rewritten into a plain object of numeric keys:
+ * the MongoDB injection sanitizer that `app.ts` mounts app-wide
+ * (`sanitizeRequestBody`, `middleware/sanitizeBody.ts`). That sanitizer rebuilds
+ * any object body key by key to strip `$`-prefixed operators, and a `Buffer` is an
+ * object that is not an Array, so it would be rewritten into a plain object of numeric keys:
  * `{0: 137, 1: 80, …}`. The part would then fail its own digest check, or worse be
  * forwarded as something that is not the bytes the client sealed. Mounted here, the
  * parser runs after the sanitizer, after `hppx` and after the request logger, none
  * of which ever see a Buffer.
  *
  * There is deliberately NO entry added to `CUSTOM_BODY_LIMIT_PATHS` for this route.
- * That Set is matched by exact `req.path` equality, so a parameterised path can
- * never match it and the entry would do nothing; and adding a dead entry would read
+ * That Set is matched against the literal path (lowercased, one trailing slash
+ * dropped, as the router matches), so a parameterised path can never match it and
+ * the entry would do nothing; and adding a dead entry would read
  * as though the global JSON parser were the hazard here, when the hazard is the
  * sanitizer. The global parser is inert on this route anyway: it only parses
  * `application/json`, and `body-parser` leaves `req.body` undefined when it skips.

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
 
-import { cn, getApiErrorMessage, isSafeUrl } from '../src/lib/utils';
+import { cn, getApiErrorMessage, isSafeUrl, parseDocumentLink } from '../src/lib/utils';
+import { ACCOUNT_LOCKED_MESSAGE } from '../src/services/auth/sessionFailure';
 
 // ---------------------------------------------------------------------------
 // cn() — class name merging via clsx + tailwind-merge
@@ -111,6 +112,33 @@ describe('getApiErrorMessage', () => {
     // so the function falls through to `error instanceof Error`.
     const err = makeAxiosError({ message: '' });
     expect(getApiErrorMessage(err)).toBe('Request failed with status code 400');
+  });
+
+  it('translates the ACCOUNT_LOCKED code rather than putting it in a toast', () => {
+    // The refresh handler answers a locked account with the machine constant as
+    // its `message`, and a lockout no longer ends the session — so that rejection
+    // now reaches whatever made the original request instead of being swallowed
+    // by a logout. Quoted verbatim it would read `ACCOUNT_LOCKED` in a toast.
+    const err = makeAxiosError({ message: 'ACCOUNT_LOCKED' }, 403);
+    const message = getApiErrorMessage(err);
+    expect(message).toBe(ACCOUNT_LOCKED_MESSAGE);
+    expect(message).not.toBe('ACCOUNT_LOCKED');
+    expect(message).toMatch(/unlock link/i);
+  });
+
+  it('leaves every other error code quoted, including one that only mentions the lockout', () => {
+    // The narrowness is the point: this is a fix for the one code that newly
+    // escapes, not a rewrite of every error surface. A 401 carrying the same
+    // string, and any other 403, still reach the caller as the server wrote them.
+    expect(getApiErrorMessage(makeAxiosError({ message: 'ACCOUNT_LOCKED' }, 401))).toBe(
+      'ACCOUNT_LOCKED',
+    );
+    expect(getApiErrorMessage(makeAxiosError({ message: 'TOKEN_INVALID' }, 403))).toBe(
+      'TOKEN_INVALID',
+    );
+    expect(getApiErrorMessage(makeAxiosError({ message: 'reason: ACCOUNT_LOCKED' }, 403))).toBe(
+      'reason: ACCOUNT_LOCKED',
+    );
   });
 
   it('returns Error.message for a non-Axios Error instance', () => {
@@ -255,5 +283,86 @@ describe('isSafeUrl', () => {
 
   it('rejects protocol-relative URLs', () => {
     expect(isSafeUrl('//example.com')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseDocumentLink() — a link a document carries, as the confirmation dialog shows it
+// ---------------------------------------------------------------------------
+
+describe('parseDocumentLink', () => {
+  // The href comes from the isolated document, i.e. from whoever wrote the file,
+  // and it is shown inside the application's own dialog. So it is re-serialised
+  // by the URL parser, and what the reader is asked to check is taken from the
+  // PARSED URL, never from the string the frame sent.
+
+  it('offers an ordinary https link unchanged, with its origin as the destination', () => {
+    expect(parseDocumentLink('https://example.com/docs?x=1#top')).toEqual({
+      href: 'https://example.com/docs?x=1#top',
+      destination: 'https://example.com',
+    });
+  });
+
+  it('percent-encodes spaces, controls and bidirectional overrides, so no prose survives', () => {
+    // A control in the MIDDLE: the URL parser strips leading and trailing C0
+    // controls and spaces outright, which is no less safe.
+    const link = parseDocumentLink('https://example.com/Your session\u0007expired\u202Egnp.exe');
+    expect(link?.href).toBe('https://example.com/Your%20session%07expired%E2%80%AEgnp.exe');
+    // Nothing outside printable ASCII reaches the dialog.
+    expect(link?.href).toMatch(/^[\x21-\x7e]+$/);
+    expect(link?.destination).toBe('https://example.com');
+  });
+
+  it('shows a lookalike host in punycode, the way the address bar would', () => {
+    expect(parseDocumentLink('https://ex\u0430mple.com/')?.destination).toBe(
+      'https://xn--exmple-4nf.com',
+    );
+  });
+
+  it('names the real host when credentials are dressed up as one', () => {
+    expect(parseDocumentLink('https://bank.example@evil.example/login')?.destination).toBe(
+      'https://evil.example',
+    );
+  });
+
+  it('offers a mailto link with its address as the destination, never "null"', () => {
+    expect(parseDocumentLink('mailto:someone@example.com?subject=Hello there')).toEqual({
+      href: 'mailto:someone@example.com?subject=Hello%20there',
+      destination: 'mailto:someone@example.com',
+    });
+  });
+
+  it.each([
+    [
+      'a sentence where the address should be',
+      'mailto:Your session expired, re-enter your password',
+    ],
+    ['an address with no domain', 'mailto:someone'],
+    ['a single-label domain', 'mailto:someone@localhost'],
+    ['two recipients', 'mailto:a@example.com,b@example.com'],
+    ['two at-signs', 'mailto:a@b@example.com'],
+    ['an empty local part', 'mailto:@example.com'],
+    // A known limitation: `mailto:` is an opaque URL, so the parser
+    // percent-encodes a non-ASCII domain instead of writing it in punycode.
+    ['an internationalised domain written in Unicode', 'mailto:user@b\u00fccher.de'],
+  ])('refuses a mailto link carrying %s', (_label, href) => {
+    expect(parseDocumentLink(href)).toBeNull();
+  });
+
+  it('offers the same internationalised address once it is written in punycode', () => {
+    expect(parseDocumentLink('mailto:user@xn--bcher-kva.de')).toEqual({
+      href: 'mailto:user@xn--bcher-kva.de',
+      destination: 'mailto:user@xn--bcher-kva.de',
+    });
+  });
+
+  it.each([
+    ['a scheme with nothing after it', 'https://'],
+    ['a host that is not a host', 'https://exa mple.com/'],
+    ['a javascript: URL', 'javascript:alert(1)'],
+    ['a data: URL', 'data:text/html,<b>x</b>'],
+    ['a relative path', '/docs'],
+  ])('refuses %s', (_label, href) => {
+    expect(parseDocumentLink(href)).toBeNull();
   });
 });

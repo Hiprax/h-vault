@@ -10,6 +10,11 @@ export default tseslint.config(
     ignores: [
       '**/node_modules/**',
       '**/dist/**',
+      // The isolated render document's own build output, emitted OUTSIDE every
+      // static root by `vite.config.sandbox.ts`. A sibling of `dist/` rather than
+      // a child, so the glob above does not cover it; listed here for the same
+      // reason it is listed in `.gitignore`, `.dockerignore` and `.prettierignore`.
+      '**/dist-sandbox/**',
       '**/build/**',
       '**/coverage/**',
       // Machine-local pipeline scratch (scripts/ci): the unpacked CodeQL bundle

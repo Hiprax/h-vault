@@ -1,8 +1,5 @@
 import express from 'express';
 import crypto from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import helmet from 'helmet';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -15,12 +12,19 @@ import { createRequestLogger } from '@hiprax/logger';
 import { createModuleLogger } from './utils/logger.js';
 import { config } from './config/index.js';
 import {
+  CLIENT_PUBLIC_DIR,
+  readApplicationShell,
+  readSandboxDocument,
+} from './config/clientArtifacts.js';
+import {
   applySandboxAssetHeaders,
   createSandboxDocumentHandler,
   requireBuildArtifact,
 } from './config/sandboxCsp.js';
+import { APPLICATION_PERMISSIONS_POLICY } from './config/permissionsPolicy.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
+import { sanitizeRequestBody } from './middleware/sanitizeBody.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './config/swagger.js';
 import { warnIfSwaggerEnabledInProduction } from './utils/swaggerWarning.js';
@@ -128,6 +132,18 @@ app.use(
   }),
 );
 
+// The Permissions-Policy helmet cannot send (it has no option for one). Set on
+// every response, before any route and before the static mount, because both
+// nginx layers in front of a deployment add the golden floor (which denies the
+// camera) to any response that arrives without one, and the authenticator
+// import's camera scan runs in the documents this server renders. Why this value,
+// and why the isolated document gets a stricter one of its own:
+// `config/permissionsPolicy.ts`.
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Permissions-Policy', APPLICATION_PERMISSIONS_POLICY);
+  next();
+});
+
 app.use(
   cors({
     origin: config.CORS_ORIGIN,
@@ -140,16 +156,29 @@ app.use(
 // Body parsing — 2 MB default limit. Routes that need larger payloads (e.g., backup
 // restore, vault key rotation) apply a route-specific body parser with a higher
 // limit. The global parser skips those routes so the route-level parser can handle
-// them instead. Keep this set in sync with the route-level parsers that own each path
-// (see routes/backup.ts and routes/vault.ts).
+// them instead. Keep this set in sync with the route-level parser that owns each path
+// (`parseLargeJsonBody` in middleware/largeBodyAdmission.ts, mounted by routes/backup.ts
+// and routes/vault.ts behind their limiter and admission slot, and followed there by
+// `sanitizeRequestBody`, because the app-level sanitizer below runs before it).
 const CUSTOM_BODY_LIMIT_PATHS = new Set<string>([
   '/api/v1/backup/restore',
   '/api/v1/vault/items/bulk-reencrypt',
 ]);
 const globalJsonParser = express.json({ limit: '2mb' });
+/**
+ * `req.path` the way the router MATCHES it: case-insensitively, with one optional
+ * trailing slash, which is how an Express router matches unless told otherwise.
+ * Compared raw, `/api/v1/Backup/Restore/` reaches the restore handler while missing
+ * the set above, and its body is parsed here, before authentication and the route's
+ * own limiter.
+ */
+function routedPath(path: string): string {
+  const lower = path.toLowerCase();
+  return lower.length > 1 && lower.endsWith('/') ? lower.slice(0, -1) : lower;
+}
 app.use((req: Request, res: Response, next: NextFunction) => {
   // Skip global body parsing for routes with custom body size limits
-  if (CUSTOM_BODY_LIMIT_PATHS.has(req.path)) {
+  if (CUSTOM_BODY_LIMIT_PATHS.has(routedPath(req.path))) {
     next();
     return;
   }
@@ -160,53 +189,13 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Cookie parsing
 app.use(cookieParser());
 
-// MongoDB injection prevention (custom middleware — express-mongo-sanitize is incompatible with Express 5)
-function sanitizeValue(val: unknown): unknown {
-  if (typeof val === 'string') return val;
-  if (val === null || val === undefined) return val;
-  if (Array.isArray(val)) return val.map(sanitizeValue);
-  if (typeof val === 'object') {
-    const obj = val as Record<string, unknown>;
-    const clean: Record<string, unknown> = {};
-    for (const key of Object.keys(obj)) {
-      // Strip MongoDB operator injection keys and prototype pollution vectors
-      if (
-        key.startsWith('$') ||
-        key === '__proto__' ||
-        key === 'constructor' ||
-        key === 'prototype'
-      )
-        continue;
-      clean[key] = sanitizeValue(obj[key]);
-    }
-    return clean;
-  }
-  return val;
-}
-app.use((_req: Request, _res: Response, next: NextFunction) => {
-  if (_req.body && typeof _req.body === 'object') {
-    _req.body = sanitizeValue(_req.body);
-  }
-  // Note: We only sanitize req.body because it is the only source of nested
-  // user-controlled objects.
-  //
-  // - Route params are always plain strings (no nested objects possible).
-  // - Query params CAN contain nested objects via bracket syntax in Express 4
-  //   (e.g. ?tags[$ne]=foo), but Express 5's default query parser ("simple")
-  //   does NOT parse bracket notation — it treats them as literal characters,
-  //   so operator injection via query strings is not possible.
-  // - Zod validation on all endpoints catches any unexpected shapes downstream
-  //   as a defense-in-depth measure.
-  // - COOKIES are the one other source, and they are handled elsewhere rather
-  //   than here: `cookieParser()` below JSON-decodes any `j:`-prefixed value, so
-  //   `req.cookies[x]` really can be an object or a number. Nothing reads one
-  //   except through `utils/cookies.ts` `readStringCookie`, which yields a value
-  //   only when it is a non-empty string, so no cookie ever reaches a query as an
-  //   operand. Narrow there, not here — see that file for why.
-  //
-  // Additionally, req.query and req.params are read-only getters in Express 5.
-  next();
-});
+// MongoDB operator injection and prototype-pollution prevention, over every body the
+// global parser above produced. This mount does NOT cover the routes in
+// `CUSTOM_BODY_LIMIT_PATHS`: their body is still unparsed here, so each of them
+// mounts the same middleware again straight after its own parser, and
+// `tests/route-table.test.ts` fails any route-level JSON parser that is not followed
+// by it. See `middleware/sanitizeBody.ts` for why only the body is filtered.
+app.use(sanitizeRequestBody);
 
 // HTTP Parameter Pollution protection
 app.use(
@@ -230,6 +219,11 @@ app.use(
     // busiest logger in the process, exactly what `utils/logger.ts` exists to
     // route through one place.
     logger: createModuleLogger('http'),
+    // Every credential and every piece of wrapped key material a request body can
+    // carry. This list is NOT maintained by hand-audit alone:
+    // `tests/request-logger-masking.test.ts` reads every schema the routes validate
+    // a body with and fails on any field that is neither listed here nor named, with
+    // a reason, as not secret. Adding a request field means deciding which it is.
     maskBodyKeys: [
       'password',
       'authHash',
@@ -241,12 +235,33 @@ app.use(
       'newAuthHash',
       'currentAuthHash',
       'newEncryptedVaultKey',
+      // The rotation wrapper a password change carries across: a vault key sealed
+      // under the new MEK, exactly as `newEncryptedVaultKey` is.
+      'newPendingEncryptedVaultKey',
       'encryptedBWK',
+      'newEncryptedBWK',
+      // The vault key sealed under the backup key, which is what a cross-account
+      // restore unwraps, in both the setup and the backup-password-change bodies.
+      'bwkEncryptedVaultKey',
+      'newBwkEncryptedVaultKey',
       // The wrapped document key. It crosses the wire TWICE — at upload init and
       // again at completion, which is what makes a stale-vault-key 409
-      // recoverable without re-sending the file — so it is the one new secret
-      // this feature puts in a request body, and it is logged nowhere.
+      // recoverable without re-sending the file — and it is logged nowhere.
       'encryptedDek',
+      // The password-reset / email-verification / account-unlock JWT, the signed
+      // 2FA challenge, and a TOTP or backup code: each completes an
+      // authentication step on its own.
+      'token',
+      'tempToken',
+      'code',
+      // A restore's entire backup file, as ONE JSON string. It carries
+      // `encryptedVaultKey`, `encryptedBWK` and `bwkEncryptedVaultKey` inside it,
+      // near the start, where key-by-key masking cannot reach: the string is masked
+      // whole. Today that is a second line of defence, not the first: the logger
+      // takes `req.body` when the request ARRIVES, and the restore body is parsed
+      // later, by its own route-level parser, so no restore body is captured at all.
+      // The mask is what keeps that true if the parser ever moves ahead of it.
+      'data',
     ],
     skip: (req) => {
       // Skip request logging for health probes. The logger's LoggableRequest
@@ -300,49 +315,62 @@ if (config.METRICS_TOKEN) {
 
 // Serve static files in production
 if (config.NODE_ENV === 'production') {
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const publicPath = path.resolve(__dirname, '..', 'public');
-
   // Read both HTML documents once at startup, BEFORE anything is mounted, so a
   // build missing either of them fails loudly at boot rather than 404ing one
   // route in production. `sandbox.html` is emitted by its own Vite build
-  // (`packages/client/vite.config.sandbox.ts`), which runs after the app build.
+  // (`packages/client/vite.config.sandbox.ts`), which runs after the app build
+  // and writes OUTSIDE the static root — see `config/clientArtifacts.ts`, which
+  // owns both locations, both reads, and the reason they are two directories.
   const indexHtml = requireBuildArtifact(
-    () => readFileSync(path.join(publicPath, 'index.html'), 'utf-8'),
+    readApplicationShell,
     'Production build missing client dist. Run: npm run build:client',
   );
   const sandboxHtml = requireBuildArtifact(
-    () => readFileSync(path.join(publicPath, 'sandbox.html'), 'utf-8'),
-    'Production build missing the document sandbox (sandbox.html). Run: npm run build:client',
+    readSandboxDocument,
+    // Names the STAGING step and not just the build, because on the pm2 path the
+    // build is almost certainly not what is missing: `npm run build:client`
+    // writes the document to `packages/client/dist-sandbox/`, and something has to
+    // copy it to `packages/server/sandbox-document/` (the Dockerfile does; a
+    // bare-metal deployment does it by hand, exactly as it already copies
+    // `packages/client/dist` to `packages/server/public`). Telling an operator to
+    // re-run a build they have just run, while the file sits on disk one
+    // directory away, is a message that sends them the wrong way.
+    'Production build missing the document sandbox (sandbox.html). Run: npm run build:client, ' +
+      'then copy packages/client/dist-sandbox to packages/server/sandbox-document',
   );
 
-  // The isolated render document, mounted BEFORE `express.static` and therefore
-  // before the SPA fallback.
+  // The isolated render document.
   //
   // Its whole isolation is a per-RESPONSE policy: a copy of this file answered
   // off disk by the static middleware would carry helmet's application policy
   // instead, which permits `connect-src 'self'` and a nonce'd script — i.e. the
   // isolation would quietly stop existing while every renderer kept working.
-  // Registering the route first is also what stops a case-insensitive
-  // filesystem answering `/SANDBOX.HTML` from static: Express's own matching is
-  // case-insensitive by default, so the route claims that spelling too. (It
-  // claims only the spellings Express matches, and the encoded `/sandbox%2Ehtml`
-  // is NOT one of them — that request falls through to static, which decodes it.
-  // Nothing is lost there: the SPA catch-all below already serves every
-  // non-`/api/` path with helmet's policy, so an encoded spelling grants a
-  // caller nothing it could not have had. The Docker `web-root` stage removes
-  // the file from Nginx's document root for the same class of reason.)
+  //
+  // What makes that impossible is the LAYOUT, not this line's position. The
+  // document is read from a directory `express.static` does not serve, so
+  // static cannot answer for it under any spelling. That distinction is
+  // measured, not defensive: Express 5 matches the RAW pathname while `send`
+  // decodes and normalises it, so `/sandbox%2Ehtml`, `//sandbox.html`,
+  // `/sandbox.htm%6C` and `/%73andbox.html` all MISS this route — and while the
+  // file sat in the static root, all four were answered off disk with helmet's
+  // policy instead of the sandbox's. (An earlier comment here claimed the SPA
+  // catch-all absorbed them; it does not get the chance while static holds a
+  // copy. It does now, and that is what those four spellings reach.) The route
+  // still claims `/SANDBOX.HTML` for free, because Express matches
+  // case-insensitively. Nginx has always had the same argument made for it, the
+  // other way round: the Docker `web-root` stage DELETED the file from its
+  // document root. With the build no longer emitting it there, that deletion is
+  // defence in depth against a stale copy, and this is the Express side.
   //
   // The handler and the asset-header hook below both live in `config/
-  // sandboxCsp.ts`. That is not tidiness: this whole block is unreachable under
-  // test — `app.ts` can only be imported with `NODE_ENV=test`, because the
-  // production branch reads a client build a checkout does not have — so
-  // anything written inline here is production code that no fast-tier assertion
-  // can reach. Extracted, the policy, the three response headers and the
-  // directory predicate are all pinned directly.
+  // sandboxCsp.ts`. That is not tidiness: this whole block is unreachable from
+  // an ordinary server test — `app.ts` is imported with `NODE_ENV=test` — so
+  // anything written inline here is production code that no assertion in that
+  // tier can reach. Extracted, the policy, the three response headers, the
+  // directory predicate and now both artifact locations are pinned directly.
   app.get('/sandbox.html', createSandboxDocumentHandler(sandboxHtml));
 
-  app.use(express.static(publicPath, { setHeaders: applySandboxAssetHeaders }));
+  app.use(express.static(CLIENT_PUBLIC_DIR, { setHeaders: applySandboxAssetHeaders }));
 
   app.get(/^(?!\/api\/).*/, (_req, res) => {
     const nonce = res.locals.cspNonce as string;

@@ -190,19 +190,28 @@ describe('comparing a document’s bytes with what its name claims', () => {
   });
 
   it('refuses a file whose bytes disagree with an extension that has a signature', () => {
-    const refusal = previewRefusal('image', 'png', bytesOf('this is plainly not a PNG'));
-    expect(refusal).toContain('.png');
-    expect(refusal).toContain('PNG');
-    expect(refusal).toContain('Download it');
+    // A CODE, and no sentence: the application words it, because it is shown in
+    // the application's chrome. Nothing the bytes resemble, so no format either.
+    expect(previewRefusal('image', 'png', bytesOf('this is plainly not a PNG'))).toEqual({
+      code: 'contentMismatch',
+    });
+  });
+
+  it('names what a mislabelled file looks like instead, when the bytes say', () => {
+    expect(previewRefusal('image', 'png', fileLookingLike('jpg'))).toEqual({
+      code: 'contentMismatch',
+      detectedFormat: 'jpg',
+    });
   });
 
   it('refuses a PDF renamed .md, and says what it actually is', () => {
     // The case Rule A alone cannot reach: `md` has no signature of its own, so a
     // check that only ever validated the CLAIM would hand a PDF to the markdown
     // parser.
-    const refusal = previewRefusal('markdown', 'md', fileLookingLike('pdf'));
-    expect(refusal).toContain('PDF');
-    expect(refusal).toContain('.md');
+    expect(previewRefusal('markdown', 'md', fileLookingLike('pdf'))).toEqual({
+      code: 'contentImpostor',
+      detectedFormat: 'pdf',
+    });
   });
 
   it('refuses a JPEG renamed .txt, which no length-based guard would catch', () => {
@@ -210,7 +219,10 @@ describe('comparing a document’s bytes with what its name claims', () => {
     // the single commonest real-world mislabelling there is fall through to the
     // text renderer as mojibake. `0xFF` cannot begin valid UTF-8, which is what
     // makes the signature decisive despite its length.
-    expect(previewRefusal('text', 'txt', fileLookingLike('jpg'))).toContain('JPG');
+    expect(previewRefusal('text', 'txt', fileLookingLike('jpg'))).toEqual({
+      code: 'contentImpostor',
+      detectedFormat: 'jpg',
+    });
   });
 
   it('lets a four-byte printable signature contradict, which is the threshold’s other side', () => {
@@ -220,8 +232,8 @@ describe('comparing a document’s bytes with what its name claims', () => {
     // it. Without this the threshold could be raised from four to five and
     // nothing would notice; the `n-1` side is pinned by the `ID3,name,album`
     // case below.
-    expect(previewRefusal('text', 'txt', fileLookingLike('ogg'))).toContain('OGG');
-    expect(previewRefusal('markdown', 'md', fileLookingLike('flac'))).toContain('FLAC');
+    expect(previewRefusal('text', 'txt', fileLookingLike('ogg'))?.detectedFormat).toBe('ogg');
+    expect(previewRefusal('markdown', 'md', fileLookingLike('flac'))?.detectedFormat).toBe('flac');
   });
 
   it('lets a text file that merely BEGINS like a short signature through', () => {
@@ -261,15 +273,14 @@ describe('comparing a document’s bytes with what its name claims', () => {
     // Ahead of every other check: an empty file matches no signature, so without
     // this it would be refused with a sentence about its contents disagreeing
     // with its name — true, and useless.
-    const refusal = previewRefusal('image', 'png', new ArrayBuffer(0));
-    expect(refusal).toContain('empty');
-    expect(refusal).not.toContain('PNG');
+    // No format named: there is nothing for the bytes to look like.
+    expect(previewRefusal('image', 'png', new ArrayBuffer(0))).toEqual({ code: 'emptyFile' });
   });
 
   it('names the more specific format when a file satisfies two signatures', () => {
     // An AVIF satisfies the generic ISO base-media signature that `mp4` carries
     // as well as its own; nine constrained bytes beat five.
-    expect(previewRefusal('markdown', 'md', fileLookingLike('avif'))).toContain('AVIF');
+    expect(previewRefusal('markdown', 'md', fileLookingLike('avif'))?.detectedFormat).toBe('avif');
   });
 
   it('is not fooled by an extension that names an inherited property', () => {

@@ -2,10 +2,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_TRANSFORM_EXCERPT_LENGTH,
+  SANDBOX_TRANSFORM_FAILURE_CODES,
   documentExtension,
   transformSyntaxForExtension,
 } from '@hvault/shared';
 import { runTransform } from '../../src/sandbox/transform/formatEngine';
+import {
+  TRANSFORM_FAILURE_FALLBACK,
+  describeTransformFailure,
+} from '../../src/lib/sandboxRefusals';
 import {
   decodeTransformSource,
   transformReplySchema,
@@ -129,14 +134,20 @@ describe('every corpus entry, under every combination of transforms', () => {
       // than inferred — and an entry expected to SUCCEED that quietly stopped is
       // the regression nobody would otherwise notice.
       const mustFail = (entry.failing ?? []).includes(combination);
-      expect(
-        result.kind,
-        `${label}: ${result.kind === 'transformFailed' ? result.message : ''}`,
-      ).toBe(mustFail ? 'transformFailed' : 'transformed');
+      expect(result.kind, `${label}: ${result.kind === 'transformFailed' ? result.code : ''}`).toBe(
+        mustFail ? 'transformFailed' : 'transformed',
+      );
 
       if (result.kind === 'transformFailed') {
-        // CLAUSE 4: a failure is describable.
-        expect(result.message.length, label).toBeGreaterThan(0);
+        // CLAUSE 4: a failure is describable — by a code the HOST has its own
+        // sentence for. The engine never sends wording; a code outside the list
+        // would reach the reader as the generic fallback, which describes
+        // nothing.
+        expect(SANDBOX_TRANSFORM_FAILURE_CODES, label).toContain(result.code);
+        expect(describeTransformFailure(result.stage, result.code, result.detail), label).not.toBe(
+          TRANSFORM_FAILURE_FALLBACK,
+        );
+        expect(result, label).not.toHaveProperty('message');
         if (result.line !== null) expect(result.line, label).toBeGreaterThan(0);
         if (result.column !== null) {
           expect(result.column, label).toBeGreaterThan(0);
@@ -259,7 +270,7 @@ describe('a JSON Lines record too long to stay on one line is refused, not corru
     if (result.kind !== 'transformFailed') return;
     expect(result.stage).toBe('format');
     expect(result.line).toBe(2);
-    expect(result.message).toContain('may not be split across lines');
+    expect(result.code).toBe('recordTooLong');
     // The alternative — writing it out anyway — turns one valid record into
     // several invalid ones, silently, in a format defined line by line.
     expect(transformReplySchema.safeParse(result).success).toBe(true);

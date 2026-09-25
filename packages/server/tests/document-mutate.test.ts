@@ -289,8 +289,8 @@ async function send(
   body?: Record<string, unknown>,
 ): Promise<request.Response> {
   const agent = request.agent(app);
-  const pending = agent[method](path).set('Authorization', authHeader(user.accessToken));
   const pair = await getCsrf(agent);
+  const pending = agent[method](path).set('Authorization', authHeader(user.accessToken));
   const authorized = pending.set('Cookie', pair.cookie).set('x-csrf-token', pair.token);
   return body === undefined ? authorized.send() : authorized.send(body);
 }

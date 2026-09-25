@@ -636,16 +636,29 @@ describe('the gate-side restatement of the sandbox serving contract', () => {
     // helmet's same-origin CORP), so a "must not be present" assertion would be
     // false on a correct build — and the tempting way to make it pass is to
     // delete the negative, which is the whole check. Nginx serves the directory
-    // from disk and sends neither, so the expected pair is the caller's to
-    // declare.
-    const nginx = (): string | null => null;
-    expect(appAssetProblems('/assets/main-abc.js', nginx, { acao: null, corp: null })).toEqual([]);
+    // from disk with no CORS header and the golden header floor's same-origin
+    // CORP (`location ^~ /assets/` includes `snippets/headers.conf`), so the
+    // expected pair is the caller's to declare — and the drill declares exactly
+    // that pair, which a run of the stack measured.
+    const nginxExpects = { acao: null, corp: 'same-origin' };
+    const nginx = (name: string): string | null =>
+      name === 'cross-origin-resource-policy' ? 'same-origin' : null;
+    expect(appAssetProblems('/assets/main-abc.js', nginx, nginxExpects)).toEqual([]);
 
     const leaked = (name: string): string | null =>
       name === 'access-control-allow-origin' ? '*' : 'cross-origin';
-    const problems = appAssetProblems('/assets/main-abc.js', leaked, { acao: null, corp: null });
-    expect(problems).toHaveLength(2);
-    expect(problems[0]).toContain('must stay inside sandbox-assets/');
+    const problems = appAssetProblems('/assets/main-abc.js', leaked, nginxExpects);
+    expect(problems).toEqual([
+      '/assets/main-abc.js Access-Control-Allow-Origin=*, expected null — the sandbox widening must stay inside sandbox-assets/',
+      '/assets/main-abc.js Cross-Origin-Resource-Policy=cross-origin, expected same-origin — the sandbox widening must stay inside sandbox-assets/',
+    ]);
+
+    // An Nginx whose `/assets/` block lost the floor is a finding too, not a
+    // pass: nothing then stops the directory being embedded cross-origin.
+    const floorless = (): string | null => null;
+    expect(appAssetProblems('/assets/main-abc.js', floorless, nginxExpects)).toEqual([
+      '/assets/main-abc.js Cross-Origin-Resource-Policy=null, expected same-origin — the sandbox widening must stay inside sandbox-assets/',
+    ]);
   });
 
   it('refuses a probe that was answered by anything other than the asset itself', () => {

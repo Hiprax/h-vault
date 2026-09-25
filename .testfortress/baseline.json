@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-09-21",
-  "commit": "54f472d",
+  "recordedAt": "2026-09-25",
+  "commit": "877a818",
   "tests": {
-    "count": 10334
+    "count": 11640
   },
   "coverage": {
     "diff": 100
@@ -17,20 +17,21 @@
   "a11y": {
     "critical": 0,
     "serious": 0,
-    "viewsScanned": 34
+    "viewsScanned": 34,
+    "moderate": 0
   },
   "suppressions": {
-    "count": 19,
-    "totalHits": 26
+    "count": 18,
+    "totalHits": 25
   },
   "packages": {
     "packages/shared": {
       "coverage": {
         "line": 100,
-        "branch": 98.94,
+        "branch": 99.04,
         "function": 100,
-        "linesTotal": 661,
-        "branchesTotal": 379,
+        "linesTotal": 713,
+        "branchesTotal": 418,
         "filesMeasured": [
           "src/constants/index.ts",
           "src/index.ts",
@@ -42,25 +43,28 @@
           "src/schemas/user.ts",
           "src/schemas/vault.ts",
           "src/utils/backupCodes.ts",
-          "src/utils/index.ts"
+          "src/utils/index.ts",
+          "src/utils/rowId.ts"
         ]
       },
       "tests": {
-        "count": 1294
+        "count": 1381
       }
     },
     "packages/server": {
       "coverage": {
-        "line": 98.86,
-        "branch": 93.2,
-        "function": 98.37,
-        "linesTotal": 4128,
-        "branchesTotal": 2117,
+        "line": 98.98,
+        "branch": 93.49,
+        "function": 98.56,
+        "linesTotal": 4519,
+        "branchesTotal": 2352,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/seedBreachesArgs.ts",
+          "src/config/clientArtifacts.ts",
           "src/config/database.ts",
           "src/config/index.ts",
+          "src/config/permissionsPolicy.ts",
           "src/config/sandboxCsp.ts",
           "src/config/swagger.ts",
           "src/constants/index.ts",
@@ -79,12 +83,15 @@
           "src/jobs/documentCleanup.ts",
           "src/jobs/tokenCleanup.ts",
           "src/jobs/trashCleanup.ts",
+          "src/middleware/admission.ts",
           "src/middleware/auth.ts",
           "src/middleware/csrf.ts",
           "src/middleware/documentPartBody.ts",
+          "src/middleware/largeBodyAdmission.ts",
           "src/middleware/rateLimitStore.ts",
           "src/middleware/rateLimiter.ts",
           "src/middleware/requireStorage.ts",
+          "src/middleware/sanitizeBody.ts",
           "src/middleware/validate.ts",
           "src/middleware/validateObjectId.ts",
           "src/models/AuditLog.ts",
@@ -114,6 +121,7 @@
           "src/services/storage/index.ts",
           "src/services/storage/s3Provider.ts",
           "src/services/storage/types.ts",
+          "src/utils/accountStatus.ts",
           "src/utils/breachSeed.ts",
           "src/utils/cascadeDelete.ts",
           "src/utils/controllerHelpers.ts",
@@ -125,32 +133,35 @@
           "src/utils/folderGraph.ts",
           "src/utils/gracefulShutdown.ts",
           "src/utils/hibp.ts",
+          "src/utils/httpTimeouts.ts",
           "src/utils/jobLock.ts",
           "src/utils/jobTracker.ts",
           "src/utils/logger.ts",
           "src/utils/loginThrottle.ts",
           "src/utils/migrations.ts",
           "src/utils/partSemaphore.ts",
+          "src/utils/rowIds.ts",
           "src/utils/sizeEstimator.ts",
           "src/utils/storageBreaker.ts",
           "src/utils/storageHealth.ts",
           "src/utils/swaggerWarning.ts",
           "src/utils/token.ts",
           "src/utils/transactionSupport.ts",
-          "src/utils/trustedDevices.ts"
+          "src/utils/trustedDevices.ts",
+          "src/utils/vaultFieldFormat.ts"
         ]
       },
       "tests": {
-        "count": 3990
+        "count": 4581
       }
     },
     "packages/client": {
       "coverage": {
-        "line": 99.23,
-        "branch": 93.3,
-        "function": 98.89,
-        "linesTotal": 10126,
-        "branchesTotal": 7116,
+        "line": 99.28,
+        "branch": 93.76,
+        "function": 98.93,
+        "linesTotal": 10604,
+        "branchesTotal": 7517,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -173,6 +184,7 @@
           "src/components/layout/PublicOnlyRoute.tsx",
           "src/components/layout/RailLayout.tsx",
           "src/components/layout/ReloadPrompt.tsx",
+          "src/components/layout/StandalonePage.tsx",
           "src/components/tools/FileDecryptPanel.tsx",
           "src/components/tools/FileEncryptPanel.tsx",
           "src/components/tools/TotpAttachDialog.tsx",
@@ -186,6 +198,7 @@
           "src/components/ui/Card.tsx",
           "src/components/ui/Dialog.tsx",
           "src/components/ui/DropdownMenu.tsx",
+          "src/components/ui/FormAlert.tsx",
           "src/components/ui/Input.tsx",
           "src/components/ui/Label.tsx",
           "src/components/ui/OtpInput.tsx",
@@ -220,7 +233,9 @@
           "src/hooks/useVaultFolderScope.ts",
           "src/hooks/useVaultFolders.ts",
           "src/lib/accessToken.ts",
+          "src/lib/accountEmail.ts",
           "src/lib/address.ts",
+          "src/lib/backupSignature.ts",
           "src/lib/documentSearch.ts",
           "src/lib/download.ts",
           "src/lib/lazySha256.ts",
@@ -229,6 +244,7 @@
           "src/lib/passwordGenerator.ts",
           "src/lib/sandboxFrame.ts",
           "src/lib/sandboxHandshake.ts",
+          "src/lib/sandboxRefusals.ts",
           "src/lib/secureRandom.ts",
           "src/lib/textDiff.ts",
           "src/lib/totp.ts",
@@ -275,6 +291,7 @@
           "src/services/api/client.ts",
           "src/services/api/configApi.ts",
           "src/services/api/documentsApi.ts",
+          "src/services/api/staleVaultKey.ts",
           "src/services/api/userApi.ts",
           "src/services/api/vaultApi.ts",
           "src/services/auth/sessionFailure.ts",
@@ -284,6 +301,7 @@
           "src/services/crypto/documentCryptoService.ts",
           "src/services/crypto/fileCryptoService.ts",
           "src/services/crypto/passwordHistory.ts",
+          "src/services/crypto/vaultField.ts",
           "src/services/documents/download.ts",
           "src/services/documents/downloadAll.ts",
           "src/services/documents/transform.ts",
@@ -334,12 +352,12 @@
         ]
       },
       "tests": {
-        "count": 4827
+        "count": 5454
       }
     },
     "e2e": {
       "tests": {
-        "count": 223
+        "count": 224
       }
     }
   },
@@ -371,10 +389,12 @@
     "test:fuzz",
     "test:integration",
     "test:mutation",
+    "test:mutation:diff",
     "test:observability",
     "test:property",
     "test:recovery",
     "test:resource",
+    "test:sandbox",
     "test:security",
     "test:smoke",
     "test:snapshot",
@@ -390,12 +410,13 @@
   "integrity": {
     "excludeHash": "4cb96b90dcc7465c",
     "gateFilesHash": "81179afcb986fb6a",
-    "selfHash": "0e3a89e73eb0ea2d",
-    "gitignoreHash": "47d310512d28d77e"
+    "selfHash": "e601794df3542bdb",
+    "gitignoreHash": "5affd6c6ae901727"
   },
   "meta": {
     "fields": [
       "a11y.critical",
+      "a11y.moderate",
       "a11y.serious",
       "a11y.viewsScanned",
       "bundle.budgetKb.VaultItemForm",
@@ -455,6 +476,14 @@
       "integrity.gateFilesHash",
       "integrity.gitignoreHash",
       "integrity.selfHash",
+      "mutation.legs.shared.filesMutated",
+      "mutation.legs.shared.modules.packages/shared/src/schemas/",
+      "mutation.legs.shared.overall",
+      "mutation.legs.shared.totalMutants",
+      "mutationDiff.budget.client",
+      "mutationDiff.budget.server",
+      "mutationDiff.budget.shared",
+      "mutationDiff.floor",
       "openapi.snapshotHash",
       "openapi.snapshotOperations",
       "openapi.snapshotPaths",
@@ -517,9 +546,9 @@
     ]
   },
   "duplication": {
-    "percentage": 1.78,
-    "clones": 120,
-    "duplicatedLines": 1450,
+    "percentage": 1.38,
+    "clones": 102,
+    "duplicatedLines": 1242,
     "totalLines": 52849,
     "ceiling": 2.89,
     "sources": 190
@@ -553,7 +582,7 @@
       "spectral": 1
     }
   },
-  "reason": "Authenticator import and generator minimums: 34th a11y view, one suppression removed, coverage and test counts raised by the new suites",
+  "reason": "validate-23-32: new tests for the mutation file order (mutation-sequencer, ci-duration-format) and the static-survivor kills; measured by the green npm run ci of 2026-09-25 11:24",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -626,6 +655,38 @@
   "flake": {
     "runs": 10,
     "failures": 0,
-    "e2eExecutions": 654
+    "e2eExecutions": 672
+  },
+  "mutation": {
+    "legs": {
+      "shared": {
+        "filesMutated": [
+          "packages/shared/src/constants/index.ts",
+          "packages/shared/src/schemas/auth.ts",
+          "packages/shared/src/schemas/common.ts",
+          "packages/shared/src/schemas/config.ts",
+          "packages/shared/src/schemas/document.ts",
+          "packages/shared/src/schemas/folder.ts",
+          "packages/shared/src/schemas/user.ts",
+          "packages/shared/src/schemas/vault.ts",
+          "packages/shared/src/utils/backupCodes.ts",
+          "packages/shared/src/utils/index.ts",
+          "packages/shared/src/utils/rowId.ts"
+        ],
+        "modules": {
+          "packages/shared/src/schemas/": 87.31
+        },
+        "overall": 88.64,
+        "totalMutants": 2633
+      }
+    }
+  },
+  "mutationDiff": {
+    "budget": {
+      "client": 120,
+      "server": 20,
+      "shared": 200
+    },
+    "floor": 85
   }
 }

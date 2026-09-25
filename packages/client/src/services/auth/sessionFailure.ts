@@ -20,9 +20,17 @@
  * The rule, stated once:
  *
  *   - **401 / 403 — authoritative.** The server looked at the credential and
- *     rejected it: the refresh token is unknown, expired, replayed (reuse
- *     detection has already revoked the family), or the account is locked. The
- *     session really is over; log out.
+ *     rejected it: the refresh token is unknown, expired, or replayed (reuse
+ *     detection has already revoked the family). The session really is over; log
+ *     out.
+ *   - **403 `ACCOUNT_LOCKED` — authoritative, but about the ACCOUNT, not the
+ *     session.** A lockout is a thirty-minute condition the owner can discharge
+ *     right now with the emailed unlock link, and the server no longer rotates or
+ *     clears the refresh cookie to answer one — so the session on the other side
+ *     of it is the same session, with the same days or weeks left on it. Logging
+ *     out here would `POST /auth/logout` and DELETE that row: the client would
+ *     finish destroying exactly what the server was careful not to. See
+ *     {@link isAccountLocked}.
  *   - **Everything else — transient.** 429 (a rate limit we will be under again
  *     shortly), any 5xx, a network error with no `response` at all (offline, DNS,
  *     a restarting container), a timeout, or a non-Axios throw from our own code.
@@ -35,6 +43,7 @@
  */
 
 import { isAxiosError } from 'axios';
+import { ERROR_CODES } from '@hvault/shared';
 
 /**
  * Whether a 403 came from the CSRF middleware rather than from a handler that
@@ -44,9 +53,8 @@ import { isAxiosError } from 'axios';
  * statusText }` with no code field — so the message is the only signal, and
  * `middleware/csrf.ts` emits exactly one: `'invalid csrf token'`. Matched
  * case-insensitively on the substring `csrf` so a rewording of that sentence
- * does not silently change behaviour. Every other 403 the API can produce
- * (`ACCOUNT_LOCKED`, and the refresh endpoint's locked-account branch) carries an
- * `ERROR_CODES` constant as its message and contains no such token.
+ * does not silently change behaviour. Every other 403 the API can produce carries
+ * an `ERROR_CODES` constant as its message and contains no such token.
  *
  * Two callers depend on this, for opposite reasons: the Axios interceptor replays
  * only a CSRF 403, and {@link isSessionGone} refuses to call one a dead session.
@@ -56,6 +64,51 @@ export function isCsrfRejection(error: unknown): boolean {
   if (error.response?.status !== 403) return false;
   const message: unknown = (error.response.data as Record<string, unknown> | undefined)?.message;
   return typeof message === 'string' && message.toLowerCase().includes('csrf');
+}
+
+/**
+ * Whether `error` is the server refusing an otherwise-valid credential because
+ * the ACCOUNT is temporarily locked.
+ *
+ * `POST /auth/refresh` evaluates the account BEFORE it claims the presented
+ * token, so a lockout leaves the refresh row unspent and the cookie in place:
+ * the same cookie works again the moment the lockout is discharged, by the
+ * emailed unlock link or by the thirty-minute deadline passing. That is what
+ * makes this a state the client must SHOW rather than a session it must end.
+ *
+ * Matched by EXACT equality against the `ERROR_CODES` constant, unlike
+ * {@link isCsrfRejection}'s substring test. The two are deliberately different:
+ * the CSRF middleware's message is an English sentence that may be reworded,
+ * while this one is a machine-readable constant shared with the server — so a
+ * substring test here would buy nothing and would misclassify any future message
+ * that merely quoted the code.
+ */
+/**
+ * The one sentence this client says about a lockout.
+ *
+ * It lives here, beside {@link isAccountLocked}, because the two must move
+ * together, and it has two renderers: {@link describeTransientFailure}, and
+ * `lib/utils.ts`'s `getApiErrorMessage` for every toast that never consults this
+ * module. The server's message on that refusal is the machine constant
+ * `ACCOUNT_LOCKED`, which is not something to show anybody.
+ *
+ * `ProtectedRoute`'s full-screen state deliberately does NOT use it: a screen has
+ * a heading and a body where a toast has one line, so it says the same two things
+ * split across both. Its test pins the remedy, which is the half that must not
+ * quietly disappear from either.
+ *
+ * It names both exits deliberately. Waiting is not the only one: the lockout also
+ * ends the moment the owner follows the link already in their inbox, and a
+ * sentence that said only "try again later" would hide the faster remedy.
+ */
+export const ACCOUNT_LOCKED_MESSAGE =
+  'Your account is temporarily locked. Use the unlock link we emailed you, or try again later.';
+
+export function isAccountLocked(error: unknown): boolean {
+  if (!isAxiosError(error)) return false;
+  if (error.response?.status !== 403) return false;
+  const message: unknown = (error.response.data as Record<string, unknown> | undefined)?.message;
+  return message === ERROR_CODES.ACCOUNT_LOCKED;
 }
 
 /**
@@ -70,15 +123,74 @@ export function isCsrfRejection(error: unknown): boolean {
  * condition — the interceptor's job is to fetch a fresh one and replay. Treating
  * it as authoritative would mean that a CSRF token which failed to refresh (the
  * token endpoint briefly unreachable or rate-limited) logged the user out and
- * revoked a session that was never in question. The generic 403s that DO mean the
- * session is over — a locked account from `/auth/refresh` — are unaffected,
- * because their message is an `ERROR_CODES` constant, not a CSRF complaint.
+ * revoked a session that was never in question.
+ *
+ * **A locked account is excluded for the same reason**, and it is the second
+ * thing this predicate got wrong in a destructive direction: `ACCOUNT_LOCKED` is
+ * a temporary condition on the ACCOUNT, the refresh token behind it is untouched,
+ * and calling it a dead session made the client delete a session the server had
+ * just declined to. Everything else — an unknown, expired or replayed token, a
+ * deleted or unverified user, a 401 from any authenticated route — is unaffected.
  */
 export function isSessionGone(error: unknown): boolean {
   if (!isAxiosError(error)) return false;
   if (isCsrfRejection(error)) return false;
+  if (isAccountLocked(error)) return false;
   const status = error.response?.status;
   return status === 401 || status === 403;
+}
+
+/**
+ * The refusals that mean a 2FA temp token is spent: resubmitting the same code,
+ * or a corrected one, against the same token can never succeed.
+ *
+ * `POST /auth/2fa/login` answers an expired, malformed, purpose-mismatched or
+ * device-mismatched temp token — and an account that no longer exists, or is
+ * mid-erasure — with `TOKEN_INVALID`; an account that locked between the
+ * password step and this one with `ACCOUNT_LOCKED`. `TOKEN_EXPIRED` is listed
+ * because this predicate lives in the module the refresh consumers share and
+ * `/auth/refresh` does emit it; the 2FA route itself does not.
+ *
+ * Deliberately NOT here: `TWO_FA_INVALID` (a mistyped code, correctable on the
+ * same token, which is the case the split exists to protect) and
+ * `TWO_FA_NOT_ENABLED` (a 400, and the abandon timer still reaps behind it).
+ */
+const DEAD_2FA_SESSION_MESSAGES: readonly string[] = [
+  ERROR_CODES.TOKEN_EXPIRED,
+  ERROR_CODES.TOKEN_INVALID,
+  ERROR_CODES.ACCOUNT_LOCKED,
+];
+
+/**
+ * Whether `error` proves the 2FA temp token behind an in-flight sign-in is dead.
+ *
+ * The consequence is narrower than {@link isSessionGone}'s and points the other
+ * way: there is no session yet to destroy, and what is at stake is the
+ * master-password-derived MEK that `login()` left resident so the user could
+ * finish the second factor. A dead temp token means nothing will finish, and the
+ * five-minute abandon timer is the ONLY reaper, so `authStore.verify2fa` clears
+ * the key immediately rather than leaving it in memory for five minutes.
+ *
+ * It reads `data.message`, the flat envelope `createErrorMiddleware` actually
+ * emits — `{ success, message, statusCode, statusText }` — which is the whole
+ * reason this lives here rather than at the call site. The call site read
+ * `data.error.code`, a NESTED shape the API has never emitted, so the code was
+ * always `undefined`, every Axios failure was classified retryable, and the
+ * teardown branch was unreachable. Three tests fabricated that shape and so
+ * pinned nothing.
+ *
+ * Corroborated by status, exactly like {@link isAccountLocked}: 401 for the two
+ * token verdicts, 403 for the lockout. A body alone is not enough — a proxy or a
+ * captive portal can return any JSON it likes with a 200 — and a status alone is
+ * not either, because a 401 `TWO_FA_INVALID` is the retryable case.
+ */
+export function is2faSessionDead(error: unknown): boolean {
+  if (!isAxiosError(error)) return false;
+  const response = error.response;
+  if (response === undefined) return false;
+  if (response.status !== 401 && response.status !== 403) return false;
+  const message: unknown = (response.data as Record<string, unknown> | undefined)?.message;
+  return typeof message === 'string' && DEAD_2FA_SESSION_MESSAGES.includes(message);
 }
 
 /**
@@ -136,6 +248,14 @@ export function retryAfterSeconds(error: unknown): number | null {
  * "Request failed with status code 429" reads to the user as "wrong password".
  */
 export function describeTransientFailure(error: unknown): string | null {
+  // First, because it is the most specific: a locked account is a 403 and would
+  // otherwise fall through to `getApiErrorMessage`, which renders the raw
+  // `ACCOUNT_LOCKED` constant at the user. It belongs here rather than in a
+  // caller: a lockout ends the same way a rate limit does — by waiting, or by
+  // acting on the mail — so every site that already speaks for the transient
+  // failures should speak for this one too.
+  if (isAccountLocked(error)) return ACCOUNT_LOCKED_MESSAGE;
+
   if (isRateLimited(error)) {
     const wait = retryAfterSeconds(error);
     return wait === null

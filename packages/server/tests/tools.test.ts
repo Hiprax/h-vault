@@ -3,6 +3,7 @@ import request from 'supertest';
 import axios from 'axios';
 import {
   MAX_ENCRYPTED_DATA_LENGTH,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   MAX_IMPORT_ITEMS,
   PASSWORD_HISTORY_MAX,
   HIBP_BATCH_MAX_PREFIXES,
@@ -521,7 +522,13 @@ describe('Tools routes', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toEqual({ insertedCount: 3, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 3,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(3);
 
       const stored = await rawItems(user.id);
       expect(stored.map((item) => item.encryptedName).sort()).toEqual([
@@ -547,7 +554,7 @@ describe('Tools routes', () => {
         .send({ format: 'json', operations: { updates: [updateRow(String(existing._id))] } });
 
       expect(res.status).toBe(201);
-      expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+      expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
 
       const stored = await rawItems(user.id);
       expect(stored).toHaveLength(1);
@@ -576,7 +583,13 @@ describe('Tools routes', () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.data).toEqual({ insertedCount: 2, updatedCount: 1 });
+      expect(res.body.data).toEqual({
+        insertedCount: 2,
+        updatedCount: 1,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(2);
 
       const stored = await rawItems(user.id);
       expect(stored).toHaveLength(3);
@@ -645,7 +658,13 @@ describe('Tools routes', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(1);
 
       // The row lands under the CALLER's id with its ciphertext and metadata
       // intact — the response counts alone would not prove either.
@@ -728,7 +747,13 @@ describe('Tools routes', () => {
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
       // The response reports exactly the two counts and nothing else.
-      expect(res.body.data).toEqual({ insertedCount: 2, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 2,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(2);
       expect(res.body.message).not.toMatch(/skipped/i);
       expect(await VaultItem.countDocuments({ userId: user.id })).toBe(2);
     });
@@ -769,7 +794,13 @@ describe('Tools routes', () => {
           .send({ format, operations: { inserts: [insertRow(index)] } });
 
         expect(res.status, format).toBe(201);
-        expect(res.body.data, format).toEqual({ insertedCount: 1, updatedCount: 0 });
+        expect(res.body.data, format).toEqual({
+          insertedCount: 1,
+          updatedCount: 0,
+          insertedIds: expect.any(Array),
+        });
+        // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+        expect(res.body.data.insertedIds).toHaveLength(1);
       }
 
       // One audit entry per request, each stamped with its own format and the
@@ -1458,7 +1489,13 @@ describe('Tools routes', () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(1);
 
       // The row lands at the vault root rather than failing the import.
       const stored = await rawItems(user.id);
@@ -1553,7 +1590,13 @@ describe('Tools routes', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(1);
 
       // Object.prototype must be untouched (prototype-pollution guard).
       expect(({} as Record<string, unknown>)['isAdmin']).toBeUndefined();
@@ -1653,7 +1696,7 @@ describe('Tools routes', () => {
         });
 
       expect(res.status).toBe(201);
-      expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+      expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
 
       const persisted = await VaultItem.findOne({ _id: String(existing._id) }).lean();
       expect(persisted).not.toBeNull();
@@ -1711,7 +1754,14 @@ describe('Tools routes', () => {
           operations: {
             updates: [
               updateRow(String(existing._id), {
-                passwordHistory: [historyEntry({ encryptedPassword: 'x'.repeat(5_001) })],
+                // One past the named bound (the model's `maxlength`), never a
+                // literal: the bound was raised to hold any storable login
+                // password, and a literal below it stopped exercising the refusal.
+                passwordHistory: [
+                  historyEntry({
+                    encryptedPassword: 'x'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH + 1),
+                  }),
+                ],
               }),
             ],
           },

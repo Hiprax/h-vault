@@ -59,6 +59,9 @@
  *
  * Covers:
  *   • the stale-read interleaving above: one rotation, one audit row, one bump
+ *     (across two WORKERS: in one process the account's large-body share refuses the
+ *     retry at admission, and that is pinned as its own case)
+ *   • the same retry in one process: 409 before the handler, still one rotation
  *   • a failure of that under-lock read releases the lock instead of stranding it
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -70,6 +73,10 @@ import { JobLock } from '../src/models/JobLock.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { vaultKeyVersionOf, vaultRotationLockName } from '../src/utils/controllerHelpers.js';
+import {
+  LARGE_BODY_BUSY_MESSAGE,
+  largeBodyUserQuota,
+} from '../src/middleware/largeBodyAdmission.js';
 import { authHeader, createTestUser, getCsrf, seedItem, type TestUser } from './helpers.js';
 
 const ROTATE_PATH = '/api/v1/vault/items/bulk-reencrypt';
@@ -255,6 +262,17 @@ describe('Phase 11 — the rotation idempotency check is answered under the lock
     );
     await parked;
 
+    // ── Stand in for a SECOND WORKER ──
+    // In one process the second request no longer gets this far: both requests
+    // share this account's large-body share of one (`largeBodyAdmission.ts`), so
+    // it is refused with 409 before its body is even read — the case below pins
+    // that. The interleaving this case constructs is therefore reachable only
+    // ACROSS processes, which is exactly how production runs it: pm2 starts two
+    // workers, and each counts shares in its own memory. So the second request is
+    // given the share a second worker would give it, and nothing else is changed:
+    // it still takes a real slot here, reaches the real handler, and meets the real
+    // lock. `mockImplementationOnce`, so it applies to this one request only.
+    vi.spyOn(largeBodyUserQuota, 'charge').mockImplementationOnce(() => () => undefined);
     const second = sendSecond();
     await secondRead;
 
@@ -308,6 +326,68 @@ describe('Phase 11 — the rotation idempotency check is answered under the lock
     expect(
       await VaultItem.countDocuments({ userId: user.id, encryptedData: /^rotated-data-/ }),
     ).toBe(ITEM_COUNT);
+  });
+
+  it('refuses the same retry in ONE process before it reads anything, and still rotates once', async () => {
+    // The single-process half of the case above. With the account's large-body
+    // share held by the first request, the retry is refused with 409 at admission:
+    // it never reaches the handler, so it never takes the read that went stale, and
+    // there is nothing for the lock to arbitrate.
+    const body = {
+      authHash: user.rawPassword,
+      idempotencyKey: IDEMPOTENCY_KEY,
+      items: itemIds.map((id) => ({
+        id,
+        encryptedName: `rotated-name-${id}`,
+        nameIv: 'rotated-name-iv',
+        nameTag: 'rotated-name-tag',
+        encryptedData: `rotated-data-${id}`,
+        dataIv: 'rotated-data-iv',
+        dataTag: 'rotated-data-tag',
+      })),
+      folders: [],
+      ...NEW_KEY,
+    };
+
+    // Park the first request at its password check, inside the handler.
+    let announceParked!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      announceParked = resolve;
+    });
+    let releasePark!: () => void;
+    const park = new Promise<void>((resolve) => {
+      releasePark = resolve;
+    });
+    const realCompare = bcrypt.compare.bind(bcrypt) as unknown as (
+      ...args: unknown[]
+    ) => Promise<boolean>;
+    let compares = 0;
+    vi.spyOn(bcrypt, 'compare').mockImplementation(((...args: unknown[]) => {
+      compares += 1;
+      announceParked();
+      return park.then(() => realCompare(...args));
+    }) as never);
+
+    const sendFirst = await prepareRotation(user, body);
+    const sendSecond = await prepareRotation(user, body);
+
+    const first = sendFirst();
+    await parked;
+
+    const secondRes = await sendSecond();
+    expect(secondRes.status, JSON.stringify(secondRes.body)).toBe(409);
+    expect(secondRes.body.message).toBe(LARGE_BODY_BUSY_MESSAGE);
+    // Refused before the handler: the only compare so far is the first request's.
+    expect(compares).toBe(1);
+
+    releasePark();
+    const firstRes = await first;
+    expect(firstRes.status, JSON.stringify(firstRes.body)).toBe(200);
+
+    expect(await rotationAuditRows(user.id), 'the rotation ran twice').toHaveLength(1);
+    const rotated = await User.findById(user.id).lean();
+    expect(vaultKeyVersionOf(rotated), 'the vault key generation moved twice').toBe(1);
+    expect(rotated?.lastRotationKey).toBe(IDEMPOTENCY_KEY);
   });
 
   it('releases the rotation lock when the check under it cannot be answered', async () => {

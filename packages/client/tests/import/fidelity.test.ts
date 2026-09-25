@@ -18,6 +18,9 @@ import {
 
 let vaultKey: CryptoKey;
 
+/** This session's user id, which every insert's row id is derived from (an ObjectId). */
+const USER_ID = '64b7f0c2a1d3e4f5a6b7c8d9';
+
 beforeAll(async () => {
   vaultKey = await globalThis.crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
     'encrypt',
@@ -62,6 +65,7 @@ describe('import fidelity clamp — logins', () => {
     const { inserts: items, failedCount: skipped } = await buildImportOperations({
       inserts: [item],
       updates: [],
+      userId: USER_ID,
       vaultKey,
     });
     expect(skipped).toBe(0);
@@ -88,6 +92,7 @@ describe('import fidelity clamp — logins', () => {
     const { failedCount: skipped } = await buildImportOperations({
       inserts: [item],
       updates: [],
+      userId: USER_ID,
       vaultKey,
     });
     expect(skipped).toBe(0);
@@ -122,6 +127,7 @@ describe('import fidelity clamp — logins', () => {
     const { failedCount: skipped } = await buildImportOperations({
       inserts: [item],
       updates: [],
+      userId: USER_ID,
       vaultKey,
     });
     expect(skipped).toBe(0);
@@ -279,6 +285,7 @@ describe('import fidelity clamp — cards, identities and notes', () => {
     const { inserts, failedCount } = await buildImportOperations({
       inserts: [item],
       updates: [],
+      userId: USER_ID,
       vaultKey,
     });
     expect(failedCount).toBe(0);
@@ -477,6 +484,7 @@ describe('backup codes on import', () => {
     const { inserts, failedCount: skipped } = await buildImportOperations({
       inserts: [item],
       updates: [],
+      userId: USER_ID,
       vaultKey,
     });
     expect(skipped).toBe(0);

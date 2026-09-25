@@ -174,7 +174,7 @@ async function main(): Promise<void> {
     MONGODB_URI: MONGO_URI,
     // The four connection variables the server validates ALL-OR-NONE, plus the two
     // that have defaults. They are spread AFTER the developer's own environment on
-    // purpose: `config/index.ts` calls `dotenv.config()` without `override`, so
+    // purpose: `config/index.ts` calls `dotenv.config()` with `override: false`, so
     // process.env wins over the repository's `.env`, and a developer who points
     // `S3_*` at a real bucket does not have this suite write to it.
     S3_ENDPOINT: engine.endpoint,

@@ -4,6 +4,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import mongoose from 'mongoose';
+import { MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH } from '@hvault/shared';
 
 /**
  * Mongoose 9 deprecated `Document.prototype.validateSync()` (removed in v10) in
@@ -506,12 +507,12 @@ describe('VaultItem passwordHistory maxlength validation', () => {
     nameTag: 'test-tag',
   };
 
-  it('should reject passwordHistory entry with encryptedPassword exceeding 5,000 characters', async () => {
+  it('should reject passwordHistory entry with encryptedPassword one past MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH', async () => {
     const item = new VaultItem({
       ...validItemData,
       passwordHistory: [
         {
-          encryptedPassword: 'a'.repeat(5_001),
+          encryptedPassword: 'a'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH + 1),
           iv: 'test-iv',
           tag: 'test-tag',
           changedAt: new Date(),
@@ -522,12 +523,26 @@ describe('VaultItem passwordHistory maxlength validation', () => {
     expect(err).toBeDefined();
   });
 
-  it('should accept passwordHistory entry with encryptedPassword at 5,000 characters', async () => {
+  it('refuses a passwordHistory entry that carries no encryptedPassword, naming that field', async () => {
+    // The route schemas refuse it first; this is the model's own line, the one a
+    // write that bypassed them would meet. An entry with an IV and a tag but no
+    // ciphertext is a previous password nothing can ever show.
+    const item = new VaultItem({
+      ...validItemData,
+      passwordHistory: [{ iv: 'test-iv', tag: 'test-tag', changedAt: new Date() }],
+    });
+    const err = await getValidationError(item);
+    expect(err?.errors['passwordHistory.0.encryptedPassword']?.kind).toBe('required');
+    // Only that field: the rest of the entry and the item are valid.
+    expect(Object.keys(err?.errors ?? {})).toEqual(['passwordHistory.0.encryptedPassword']);
+  });
+
+  it('should accept passwordHistory entry with encryptedPassword at MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH', async () => {
     const item = new VaultItem({
       ...validItemData,
       passwordHistory: [
         {
-          encryptedPassword: 'a'.repeat(5_000),
+          encryptedPassword: 'a'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH),
           iv: 'test-iv',
           tag: 'test-tag',
           changedAt: new Date(),

@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { openQrScanner } from '../../src/services/totpImport/qrSandbox';
+import {
+  completeSandboxHandshake,
+  postAsFrame,
+  stubFrameWindow,
+} from '../support/sandboxHandshake';
 
 /**
  * The scanner driver over the REAL handshake.
@@ -12,37 +17,6 @@ import { openQrScanner } from '../../src/services/totpImport/qrSandbox';
  * suite would notice.
  */
 
-interface StubWindow {
-  postMessage: ReturnType<typeof vi.fn>;
-}
-
-/**
- * What a real `contentWindow` gives the host, and nothing more. jsdom leaves
- * `iframe.contentWindow` as a real about:blank Window that never loads the
- * document, and a `MessageEvent` built in a test cannot name a cross-document
- * window, so the identity has to be substituted.
- */
-function stubFrameWindow(frame: HTMLIFrameElement): StubWindow {
-  const stub: StubWindow = { postMessage: vi.fn() };
-  Object.defineProperty(frame, 'contentWindow', { configurable: true, get: () => stub });
-  return stub;
-}
-
-function handshake(): { host: MessagePort; stub: StubWindow } {
-  const frame = document.querySelector('iframe');
-  if (frame === null) throw new Error('the driver did not attach a frame');
-  const stub = stubFrameWindow(frame);
-
-  const event = new MessageEvent('message', { data: { kind: 'ready' }, origin: 'null' });
-  Object.defineProperty(event, 'source', { configurable: true, get: () => stub });
-  window.dispatchEvent(event);
-
-  const port = stub.postMessage.mock.calls[0]?.[2]?.[0] as MessagePort | undefined;
-  if (port === undefined) throw new Error('the host transferred no port');
-  port.start();
-  return { host: port, stub };
-}
-
 afterEach(() => {
   document.body.innerHTML = '';
 });
@@ -50,7 +24,7 @@ afterEach(() => {
 describe('the scanner over the real handshake', () => {
   it('transfers the image on the port, rather than copying it', async () => {
     const scanner = openQrScanner(vi.fn());
-    const { host } = handshake();
+    const { host } = completeSandboxHandshake();
 
     const received = new Promise<MessageEvent>((resolve) => {
       host.addEventListener('message', (event) => resolve(event as MessageEvent), { once: true });
@@ -73,6 +47,71 @@ describe('the scanner over the real handshake', () => {
     scanner.close();
   });
 
+  it('posts an uploaded photo BY COPY, because a Blob is not transferable', async () => {
+    // THE DEFECT THIS PINS. `scan` accepts `ImageBitmap | Blob`, and a `Blob` is
+    // SERIALIZABLE but not TRANSFERABLE. Naming one in a transfer list throws
+    // `DataCloneError: Found invalid value in transferList.` synchronously,
+    // inside the promise executor, so before this was fixed EVERY "upload a
+    // photo" attempt failed and the feature could never have worked once.
+    //
+    // The type checker cannot catch it: `Transferable` is a union that includes
+    // `MediaSourceHandle`, which is an EMPTY interface, so every object is
+    // structurally assignable to it.
+    const scanner = openQrScanner(vi.fn());
+    const { host } = completeSandboxHandshake();
+
+    const received = new Promise<MessageEvent>((resolve) => {
+      host.addEventListener('message', (event) => resolve(event as MessageEvent), { once: true });
+    });
+
+    const photo = new File([new Uint8Array([1, 2, 3, 4])], 'export.png', { type: 'image/png' });
+    const pending = scanner.scan(photo);
+
+    const event = await received;
+    const message = event.data as { kind: string; requestId: number; image: unknown };
+    // Arriving at all IS the assertion: before the fix the post threw inside the
+    // promise executor and no message was ever queued, so this `await` timed out.
+    expect(message.kind).toBe('qrScan');
+    expect(typeof message.requestId).toBe('number');
+    // The negative that makes this a transfer-list test rather than a plumbing
+    // test: the sender's own Blob is NOT detached, because nothing was moved.
+    // Transferring it would have thrown; transferring the ArrayBuffer above
+    // empties it, and that contrast is the point of running both cases here.
+    expect(photo.size).toBe(4);
+    // MEASURED, and the reason the far side's TYPE is not asserted here: jsdom's
+    // structured clone flattens a Blob to a plain `{}` with no keys. Whether a
+    // real engine delivers a readable Blob to the frame is a question only a real
+    // engine can answer, and `e2e/totp-import.spec.ts` asks it by uploading an
+    // actual PNG and expecting the accounts inside it to appear.
+
+    host.postMessage({ kind: 'qrFound', requestId: message.requestId, text: 'otpauth://totp/a' });
+    await expect(pending).resolves.toBe('otpauth://totp/a');
+    scanner.close();
+  });
+
+  it('sends a photo uploaded BEFORE the handshake, which is the real upload order', async () => {
+    // The order every real upload actually happens in: the scanner is created
+    // and scanned in the same breath, long before the frame has loaded its
+    // document and posted its handshake. Refusing at that moment reported "That
+    // image could not be read." for every photograph, and the camera hid it by
+    // simply trying again 120 ms later.
+    const scanner = openQrScanner(vi.fn());
+    const photo = new File([new Uint8Array([1, 2, 3, 4])], 'export.png', { type: 'image/png' });
+    const pending = scanner.scan(photo);
+
+    const { host } = completeSandboxHandshake();
+    const received = new Promise<MessageEvent>((resolve) => {
+      host.addEventListener('message', (event) => resolve(event as MessageEvent), { once: true });
+    });
+
+    const message = (await received).data as { kind: string; requestId: number };
+    expect(message.kind).toBe('qrScan');
+
+    host.postMessage({ kind: 'qrFound', requestId: message.requestId, text: 'otpauth://totp/a' });
+    await expect(pending).resolves.toBe('otpauth://totp/a');
+    scanner.close();
+  });
+
   it('gives up on a frame that never completes its handshake', () => {
     vi.useFakeTimers();
     try {
@@ -91,11 +130,8 @@ describe('the scanner over the real handshake', () => {
     const unavailable = vi.fn();
     openQrScanner(unavailable);
     const frame = document.querySelector('iframe');
-    const stub = stubFrameWindow(frame!);
-
-    const event = new MessageEvent('message', { data: { kind: 'qrFound' }, origin: 'null' });
-    Object.defineProperty(event, 'source', { configurable: true, get: () => stub });
-    window.dispatchEvent(event);
+    if (frame === null) throw new Error('the driver did not attach a frame');
+    postAsFrame(stubFrameWindow(frame), { kind: 'qrFound' });
 
     expect(unavailable).toHaveBeenCalledWith(expect.stringContaining('behaved unexpectedly'));
   });

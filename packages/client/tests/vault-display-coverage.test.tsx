@@ -270,10 +270,20 @@ vi.mock('../src/components/layout/OnboardingGuide', () => ({
 
 // Mock VaultItemForm for VaultItemPage tests
 vi.mock('../src/components/vault/VaultItemForm', () => ({
-  VaultItemForm: ({ onCancel, onSaved }: { onCancel?: () => void; onSaved?: () => void }) =>
+  VaultItemForm: ({
+    onCancel,
+    onSaved,
+    titleLevel,
+  }: {
+    onCancel?: () => void;
+    onSaved?: () => void;
+    titleLevel?: string;
+  }) =>
     React.createElement(
       'div',
-      { 'data-testid': 'vault-item-form' },
+      // The level the page asks for, exposed so the page's half of that contract
+      // is observable; the form's own half is pinned in VaultItemForm.test.tsx.
+      { 'data-testid': 'vault-item-form', 'data-title-level': titleLevel ?? 'default' },
       React.createElement('button', { onClick: onCancel }, 'Cancel Form'),
       React.createElement('button', { onClick: onSaved }, 'Save Form'),
     ),
@@ -1492,7 +1502,7 @@ describe('VaultItemDetail', () => {
       fireEvent.click(screen.getByText('Delete'));
 
       expect(screen.getByRole('alertdialog')).toBeInTheDocument();
-      expect(screen.getByText('Delete Item')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { level: 2, name: 'Delete Item' })).toBeInTheDocument();
     });
 
     it('closes confirmation dialog on Cancel', () => {
@@ -1574,7 +1584,9 @@ describe('VaultItemDetail', () => {
 
       fireEvent.click(screen.getByText('Delete Forever'));
 
-      expect(screen.getByText('Permanently Delete Item')).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { level: 2, name: 'Permanently Delete Item' }),
+      ).toBeInTheDocument();
     });
   });
 
@@ -2574,6 +2586,7 @@ describe('VaultList', () => {
       fireEvent.click(screen.getByText('Empty Trash'));
 
       expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { level: 2, name: 'Empty Trash' })).toBeInTheDocument();
       expect(screen.getByText(/permanently delete all/i)).toBeInTheDocument();
     });
 
@@ -2764,8 +2777,44 @@ describe('VaultItemPage', () => {
       );
     });
 
-    expect(screen.getByText('Item Not Found')).toBeInTheDocument();
+    // The page's only heading, so it is the page's h1: this route renders no other.
+    expect(screen.getByRole('heading', { level: 1, name: 'Item Not Found' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading')).toHaveLength(1);
     expect(screen.getByText('Back to Vault')).toBeInTheDocument();
+  });
+
+  it('asks the form for an h1 title on the edit view, where the form is the page', async () => {
+    useVaultStore.setState({
+      items: [makeDecryptedItem({ id: 'item-42', name: 'Found Item' })] as never[],
+      loading: false,
+      itemsLoading: false,
+      trashLoading: false,
+    });
+
+    const { default: VaultItemPage } = await import('../src/pages/VaultItemPage');
+
+    await act(async () => {
+      render(
+        <MemoryRouter initialEntries={['/vault/item-42']}>
+          <Routes>
+            <Route path="/vault/:id" element={<VaultItemPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+
+    // The detail view's h1 is the item's name…
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Found Item');
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Edit'));
+    });
+
+    // …and in its place the form, told that its title is the page's h1 (the form
+    // is mocked here; that it honours the level is pinned in its own suite).
+    expect(screen.getByTestId('vault-item-form')).toHaveAttribute('data-title-level', 'h1');
+    // The detail view, and its h1, are gone: the form is the page now.
+    expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
   });
 
   it('displays item detail when item is found', async () => {

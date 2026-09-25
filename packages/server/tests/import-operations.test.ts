@@ -25,6 +25,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import {
   MAX_ENCRYPTED_NAME_LENGTH,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   MAX_ITEMS_PER_USER,
   PASSWORD_HISTORY_MAX,
 } from '@hvault/shared';
@@ -34,7 +35,11 @@ import { AuditLog } from '../src/models/AuditLog.js';
 import { User } from '../src/models/User.js';
 import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
 import { JobLock } from '../src/models/JobLock.js';
-import { pickAllowedFields, vaultImportLockName } from '../src/utils/controllerHelpers.js';
+import {
+  pickAllowedFields,
+  vaultImportLockName,
+  vaultRotationLockName,
+} from '../src/utils/controllerHelpers.js';
 import { ALLOWED_ITEM_FIELDS, ALLOWED_UPDATE_FIELDS } from '../src/controllers/toolsController.js';
 import {
   createTestUser,
@@ -127,7 +132,17 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 3, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 3,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, each naming a stored row (the exact ids are
+    // pinned in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(3);
+    for (const id of res.body.data.insertedIds as string[]) {
+      expect(await VaultItem.exists({ _id: id, userId: user.id })).not.toBeNull();
+    }
 
     const stored = await rawItems(user.id);
     expect(stored).toHaveLength(3);
@@ -152,7 +167,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
 
     const stored = await rawItems(user.id);
     expect(stored).toHaveLength(1);
@@ -175,7 +190,17 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 2, updatedCount: 1 });
+    expect(res.body.data).toEqual({
+      insertedCount: 2,
+      updatedCount: 1,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, each naming a stored row (the exact ids are
+    // pinned in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(2);
+    for (const id of res.body.data.insertedIds as string[]) {
+      expect(await VaultItem.exists({ _id: id, userId: user.id })).not.toBeNull();
+    }
 
     const stored = await rawItems(user.id);
     expect(stored).toHaveLength(3);
@@ -206,7 +231,17 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 1,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, each naming a stored row (the exact ids are
+    // pinned in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(1);
+    for (const id of res.body.data.insertedIds as string[]) {
+      expect(await VaultItem.exists({ _id: id, userId: user.id })).not.toBeNull();
+    }
 
     const stored = await rawItems(user.id);
     const history = stored[0]!.passwordHistory as { encryptedPassword: string }[];
@@ -399,13 +434,39 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(stored[0]!.passwordHistory).toBeUndefined();
   });
 
+  it('accepts a passwordHistory entry exactly at the bound, and stores it whole', async () => {
+    // The bound is the ciphertext of the longest password a login can hold, so a
+    // re-import carrying one must land; the +1 case below is the other half.
+    const existing = await seedItem(user.id, { encryptedData: 'original-data' });
+    const atBound = 'x'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH);
+
+    const res = await postOperations(user.accessToken, {
+      updates: [
+        updateRow(String(existing._id), {
+          passwordHistory: [historyEntry({ encryptedPassword: atBound })],
+        }),
+      ],
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
+    const stored = await rawItems(user.id);
+    const history = stored[0]!.passwordHistory as { encryptedPassword: string }[];
+    expect(history.map((entry) => entry.encryptedPassword)).toEqual([atBound]);
+    expect(stored[0]!.encryptedData).not.toBe('original-data');
+  });
+
   it('rejects an over-length passwordHistory entry', async () => {
     const existing = await seedItem(user.id, { encryptedData: 'original-data' });
 
     const res = await postOperations(user.accessToken, {
       updates: [
         updateRow(String(existing._id), {
-          passwordHistory: [historyEntry({ encryptedPassword: 'x'.repeat(5_001) })],
+          passwordHistory: [
+            historyEntry({
+              encryptedPassword: 'x'.repeat(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH + 1),
+            }),
+          ],
         }),
       ],
     });
@@ -552,7 +613,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1 });
+    expect(res.body.data).toEqual({ insertedCount: 0, updatedCount: 1, insertedIds: [] });
     expect((await rawItems(user.id))[0]!.encryptedData).toBe('updated-data');
   });
 
@@ -729,20 +790,27 @@ describe('an update whose target moves mid-request', () => {
   });
 });
 
-describe('the import lock is released before the response is written', () => {
+describe("both of the import's locks are released before the response is written", () => {
   // The spy below replaces a model method, so restore it rather than relying on
   // this staying the last block in the file.
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('has already freed the lock by the time the client sees 201', async () => {
+  it('has already freed BOTH by the time the client sees 201, innermost first', async () => {
     // PLAN Task 6.2 calls this ordering load-bearing: the client fires batch n+1
     // the moment batch n's response lands, so responding while the release is
     // still in flight would 409 a legitimate multi-batch migration against its
     // own lock. Move `releaseJobLock` after `res.json(...)` and every other test
     // in this file still passes — each one's next request is separated by a full
     // CSRF round-trip. This asserts the order directly instead.
+    //
+    // An import now holds TWO locks: `vault-import:<userId>` for the cap, and
+    // `vault-rotation:<userId>` so the vault-key checks stay true all the way to
+    // `insertMany`. Both are named here rather than counted, because the release
+    // order is itself the contract — the exclusion lock is acquired last and
+    // released first, the reverse of acquisition, and it goes first because its
+    // loss blocks four other operations rather than one.
     const user = await createTestUser({ email: 'release-order@example.com' });
     const order: string[] = [];
 
@@ -753,7 +821,7 @@ describe('the import lock is released before the response is written', () => {
       return (async () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         const result = await realDeleteOne(filter);
-        order.push('lock-released');
+        order.push(`released:${String(filter.jobName)}`);
         return result;
       })();
     }) as never);
@@ -762,6 +830,86 @@ describe('the import lock is released before the response is written', () => {
     order.push('response-received');
 
     expect(res.status).toBe(201);
-    expect(order).toEqual(['lock-released', 'response-received']);
+    expect(order).toEqual([
+      `released:${vaultRotationLockName(user.id)}`,
+      `released:${vaultImportLockName(user.id)}`,
+      'response-received',
+    ]);
+  });
+});
+
+describe('the vault-key generation is checked inside the lock, not at the top', () => {
+  let user: TestUser;
+
+  beforeEach(async () => {
+    user = await createTestUser({ email: 'stale-generation-order@example.com' });
+    // The number's PROVENANCE is covered in `stale-vault-key-writes.test.ts`,
+    // which drives a real `POST /vault/items/bulk-reencrypt` so the generation is
+    // moved by the product's own `$inc`. What is under test HERE is the order the
+    // handler evaluates its guards in, so the account is simply placed on a later
+    // generation than anything this request will name.
+    await User.updateOne({ _id: user.id }, { $set: { vaultKeyVersion: 5 } });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('lets the pre-lock update-target check answer first, with 400 and not 409', async () => {
+    // An id that is well-formed, unknown, and therefore rejected by step 3 of
+    // `executeImportOperations` — a handler-level check that runs before
+    // `acquireJobLock`. A field-length violation would NOT discriminate here:
+    // `assertImportFieldLengths` is defence-in-depth behind the Zod bounds, so
+    // over-length ciphertext never reaches the handler at all.
+    const res = await postOperations(
+      user.accessToken,
+      { updates: [updateRow('507f1f77bcf86cd799439011')] },
+      { vaultKeyVersion: 4 },
+    );
+
+    // 409 here would mean the generation was checked at the top of the handler,
+    // hundreds of milliseconds and several round-trips before the first write —
+    // exactly the span this phase exists to close.
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/update target/i);
+    expect(res.body.data).toBeUndefined();
+    expect(await rawItems(user.id)).toHaveLength(0);
+  });
+
+  it('lets the lock answer first when another import already holds it', async () => {
+    const lockName = vaultImportLockName(user.id);
+    const heldBy = await acquireJobLock(lockName, 60_000);
+    expect(heldBy).not.toBeNull();
+
+    try {
+      const res = await postOperations(
+        user.accessToken,
+        { inserts: [insertRow(1)] },
+        { vaultKeyVersion: 4 },
+      );
+
+      // Both refusals are 409, so the status alone proves nothing: the MESSAGE
+      // and the absent `data` are what say the lock was reached first, and
+      // therefore that the generation is checked INSIDE it.
+      expect(res.status).toBe(409);
+      expect(res.body.message).toMatch(/import is already in progress/i);
+      expect(res.body.data).toBeUndefined();
+      expect(await rawItems(user.id)).toHaveLength(0);
+    } finally {
+      await releaseJobLock(lockName, heldBy!);
+    }
+  });
+
+  it('refuses a well-formed request that names a superseded generation', async () => {
+    const res = await postOperations(
+      user.accessToken,
+      { inserts: [insertRow(1)] },
+      { vaultKeyVersion: 4 },
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.data).toEqual({ vaultKeyVersion: 5 });
+    expect(await rawItems(user.id)).toHaveLength(0);
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'import' })).toBe(0);
   });
 });

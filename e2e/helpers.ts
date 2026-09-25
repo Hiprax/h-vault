@@ -1,13 +1,17 @@
 import {
   test,
   type BrowserContext,
+  type Frame,
+  type FrameLocator,
   type Page,
   type APIRequestContext,
   expect,
 } from '@playwright/test';
 import { AxeBuilder } from '@axe-core/playwright';
+import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { seededRandom } from '../tests/harness/determinism.js';
 import { A11Y_BLOCKING_IMPACTS } from './a11yViews.js';
 import { MongoClient, type Db } from 'mongodb';
@@ -15,6 +19,7 @@ import { MongoClient, type Db } from 'mongodb';
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const MONGODB_URI = process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/hvault';
+const execFileAsync = promisify(execFile);
 export const TEST_PASSWORD = 'E2E-Test-P@ssword-2025!';
 
 /**
@@ -128,8 +133,59 @@ export async function testDb(): Promise<Db> {
  * full-UI sign-in flow (which registers and logs in through the real pages).
  */
 async function markEmailVerified(email: string): Promise<void> {
+  const container = process.env['E2E_DB_CONTAINER'];
+  if (container) {
+    await markEmailVerifiedInContainer(container, email);
+    return;
+  }
   const db = await getMongoDb();
   await db.collection('users').updateOne({ email }, { $set: { emailVerified: true } });
+}
+
+/**
+ * The same write, made INSIDE a database container that publishes no port.
+ *
+ * `scripts/ci/deploy-drill.mjs` runs the sandbox specs against the Compose
+ * stack's single published port, and that stack's database is deliberately
+ * unreachable from the host — the drill asserts as much, so publishing it for a
+ * test would be the drill disproving its own claim. The write therefore goes
+ * through `docker exec … mongosh`, the way the drill verifies its own account,
+ * selected by the drill setting `E2E_DB_CONTAINER` and the root credential beside
+ * it. Every other run leaves that unset and takes the direct client above.
+ *
+ * The credential reaches the container as `-e NAME` with NO value, which docker
+ * reads from this process's environment: the secret is never on an argument
+ * vector, where every process on the machine could read it. And the result is
+ * CHECKED — one document matched and modified — because a verification that
+ * silently matched nothing surfaces two steps later as a sign-in refused with
+ * `EMAIL_NOT_VERIFIED`, a symptom that points at the login page instead of here.
+ */
+async function markEmailVerifiedInContainer(container: string, email: string): Promise<void> {
+  const script =
+    "db.getSiblingDB('admin').auth(process.env.E2E_DB_ROOT_USERNAME, process.env.E2E_DB_ROOT_PASSWORD);" +
+    "const r = db.getSiblingDB('hvault').users.updateOne({ email: process.env.E2E_VERIFY_EMAIL }, { $set: { emailVerified: true } });" +
+    "print('matched=' + r.matchedCount + ' modified=' + r.modifiedCount);";
+  const { stdout } = await execFileAsync(
+    'docker',
+    [
+      'exec',
+      '-e',
+      'E2E_DB_ROOT_USERNAME',
+      '-e',
+      'E2E_DB_ROOT_PASSWORD',
+      '-e',
+      'E2E_VERIFY_EMAIL',
+      container,
+      'mongosh',
+      '--quiet',
+      '--host',
+      '127.0.0.1',
+      '--eval',
+      script,
+    ],
+    { env: { ...process.env, E2E_VERIFY_EMAIL: email }, encoding: 'utf8' },
+  );
+  expect(stdout, `verifying ${email} inside ${container}`).toContain('matched=1 modified=1');
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -574,6 +630,30 @@ export async function gotoTotpImportTool(page: Page): Promise<void> {
   });
 }
 
+/**
+ * A photograph of that same export, as a QR code.
+ *
+ * RECORDED, like every other file in `e2e/fixtures`, and never regenerated from
+ * the code under test. Provenance, so it can be rebuilt if it ever has to be:
+ * it is `SAMPLE_AUTHENTICATOR_EXPORT_URI` encoded by `qrcode` (soldair) at
+ * error-correction level M, `scale: 8`, `margin: 4` — a 53-module version-9
+ * symbol rendered 488 x 488. The decoder inside the sandbox is `qr`
+ * (paulmillr), which shares no code with the encoder, so reading it back is a
+ * round trip across two independent implementations rather than one library
+ * agreeing with itself.
+ *
+ * MEASURED against the sandbox's OWN budget (`effort: 2`, `timeLimit: 120`, the
+ * settings tuned for a live camera rather than a still): it decodes in 32 ms, so
+ * the margin is not marginal.
+ *
+ * Why a committed file rather than a buffer minted in the test: `knip` runs with
+ * no `ignoreDependencies`, so importing an encoder here would have to be paid
+ * for with a root dependency that ships nothing. The drift risk a recorded
+ * artefact carries is answered by the test itself, which asserts the accounts
+ * the paste path produces from the constant above.
+ */
+export const AUTHENTICATOR_EXPORT_QR = 'authenticator-export.png';
+
 export async function readSampleExport(page: Page): Promise<void> {
   await page.getByText(/Paste an export link instead/i).click();
   await page.locator('#totp-paste').fill(SAMPLE_AUTHENTICATOR_EXPORT_URI);
@@ -705,7 +785,7 @@ export interface A11yScan {
   url: string;
   /** Every violation axe reported, whatever its impact. */
   violations: A11yViolation[];
-  /** The subset that fails the gate: `serious` and `critical`. */
+  /** The subset that fails the gate: every impact in `A11Y_BLOCKING_IMPACTS`. */
   blocking: A11yViolation[];
   /**
    * Checks axe COULD NOT DECIDE, recorded and not gated.
@@ -820,7 +900,7 @@ async function settleTransitions(page: Page): Promise<void> {
  * unique), and scanning only the dialog cannot see any of that.
  *
  * Nothing is disabled and no rule set is narrowed. axe's default rules run, all
- * findings are recorded, and only `serious`/`critical` fail — see
+ * findings are recorded, and everything from `moderate` up fails — see
  * {@link A11Y_BLOCKING_IMPACTS}. Narrowing the rules would raise the pass rate
  * without changing the application, which is the coverage-scope cheat wearing an
  * accessibility hat.
@@ -862,8 +942,8 @@ export async function scanA11y(page: Page, view: string): Promise<A11yScan> {
  * sends them back to the browser to find out what.
  */
 export function describeA11y(scan: A11yScan): string {
-  if (scan.blocking.length === 0) return `${scan.view}: no serious or critical violations`;
-  return `${scan.view} (${scan.url}) has ${String(scan.blocking.length)} serious/critical axe violation(s): ${scan.blocking
+  if (scan.blocking.length === 0) return `${scan.view}: no blocking violations`;
+  return `${scan.view} (${scan.url}) has ${String(scan.blocking.length)} blocking axe violation(s): ${scan.blocking
     .map(
       (violation) =>
         `${violation.id} [${violation.impact}] at ${violation.nodes.map((node) => node.target).join(', ')}`,
@@ -998,13 +1078,36 @@ export async function gotoDocuments(page: Page): Promise<void> {
  * and a re-listing, on a machine that is also running a Vite dev server, an
  * in-memory mongod and a storage container.
  */
-export async function uploadDocument(page: Page, fixture: string): Promise<void> {
-  await page.locator('#document-upload-input').setInputFiles(documentFixture(fixture));
+export async function uploadDocument(
+  page: Page,
+  fixture: string,
+  directory: string = DOCUMENT_FIXTURES,
+): Promise<void> {
+  await page.locator('#document-upload-input').setInputFiles(path.join(directory, fixture));
   await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await expect(page.getByTestId('document-name').filter({ hasText: fixture })).toBeVisible({
     timeout: LAZY_ROUTE_TIMEOUT_MS,
   });
 }
+
+/**
+ * The committed corpus of hostile documents the renderer suites are built on.
+ *
+ * The client's own copy, read in place rather than duplicated into `fixtures/`:
+ * `packages/client/tests/sandbox-markup.test.ts` asserts on these two files in
+ * jsdom, and a second copy here would be free to drift from the one the unit tier
+ * pins, which is exactly the pair of claims the browser gate exists to join.
+ * Pass it as {@link uploadDocument}'s `directory`.
+ */
+export const SANDBOX_HOSTILE_CORPUS = path.resolve(
+  __dirname,
+  '..',
+  'packages',
+  'client',
+  'tests',
+  'sandbox',
+  'corpus',
+);
 
 /** Open a listed document's detail view and wait for its own heading. */
 export async function openDocument(page: Page, fixture: string): Promise<void> {
@@ -1013,6 +1116,51 @@ export async function openDocument(page: Page, fixture: string): Promise<void> {
   await expect(page.getByRole('heading', { name: fixture, level: 1 })).toBeVisible({
     timeout: LAZY_ROUTE_TIMEOUT_MS,
   });
+}
+
+/**
+ * How long a preview may take to appear.
+ *
+ * Bound by the DEV SERVER rather than by the renderer: each mode is a dynamic
+ * import, so the first document of a given kind is the request that makes Vite
+ * transform that renderer and its dependencies on demand — the syntax
+ * highlighter alone is some 890 KiB of language grammars. The same contention
+ * `LAZY_ROUTE_TIMEOUT_MS` exists for, one layer further in. Against the built
+ * artifact the chunks already exist, so the budget is generous there, never
+ * tight.
+ */
+export const PREVIEW_TIMEOUT_MS = 90_000;
+
+/** The preview frame's locator, for reading its DOM. */
+export function previewFrame(page: Page): FrameLocator {
+  return page.frameLocator('iframe[title^="Preview of "]');
+}
+
+/**
+ * The preview frame's `Frame` handle, for asking the isolated document about its
+ * OWN globals — the one question a DOM locator cannot answer.
+ */
+export async function sandboxFrame(page: Page): Promise<Frame> {
+  await expect(page.locator('iframe[title^="Preview of "]')).toBeVisible({
+    timeout: PREVIEW_TIMEOUT_MS,
+  });
+  const frame = page.frames().find((candidate) => candidate.url().includes('/sandbox.html'));
+  expect(frame, 'no frame is loaded from /sandbox.html').toBeTruthy();
+  return frame as Frame;
+}
+
+/** Wait until a renderer has put its shell on screen inside the frame. */
+export async function waitForRendered(page: Page, mode: string): Promise<void> {
+  await expect(previewFrame(page).locator(`.hv-doc-${mode}`)).toBeVisible({
+    timeout: PREVIEW_TIMEOUT_MS,
+  });
+}
+
+/** Back to the list, then open the next document. */
+export async function openNext(page: Page, fixture: string): Promise<void> {
+  await page.getByRole('link', { name: 'Back to documents' }).click();
+  await expect(page).toHaveURL(/\/documents$/);
+  await openDocument(page, fixture);
 }
 
 /**
@@ -1027,13 +1175,14 @@ export async function openDocument(page: Page, fixture: string): Promise<void> {
  * message can be posted.
  *
  * WHY THIS IS AVAILABLE AT ALL, stated because it is a dev-server property and
- * not a claim about production. Both Playwright gates drive `npm run dev`, which
- * serves `/sandbox.html` with no Content-Security-Policy; the Express route that
- * serves it in production attaches a policy carrying the `sandbox allow-scripts`
- * DIRECTIVE, which makes the document opaque even at top level. This is
- * therefore a way to exercise the RENDERERS, never evidence about the isolation
- * — the isolation is proven against the real embedded frame in
- * `document-viewer.spec.ts`.
+ * not a claim about production. `test:e2e` and `test:a11y` drive `npm run dev`,
+ * which serves `/sandbox.html` with no Content-Security-Policy; the Express route
+ * that serves it in production attaches a policy carrying the `sandbox
+ * allow-scripts` DIRECTIVE, which makes the document opaque even at top level.
+ * This is therefore a way to exercise the RENDERERS, never evidence about the
+ * isolation — the isolation is proven against the real embedded frame in
+ * `document-viewer.spec.ts`, and under the production policy by
+ * `sandbox-policy.prod.ts`, which `test:sandbox` runs against the built artifact.
  */
 export interface SandboxRenderOptions {
   /** A `PreviewMode` value. Passed as a string, exactly as the host posts it. */

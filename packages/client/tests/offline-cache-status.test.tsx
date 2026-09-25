@@ -69,6 +69,7 @@ describe('vaultStore records WHY the offline cache failed', () => {
   const CAUSES: readonly OfflineCacheErrorType[] = [
     'quota_exceeded',
     'permission_denied',
+    'version_conflict',
     'unavailable',
     'unknown',
   ];

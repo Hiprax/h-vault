@@ -65,7 +65,14 @@ security posture, not a disclaimer.
   wrapped key and a set of sizes. **A hostile server cannot reorder, truncate, or splice one
   document into another either** — a segment's position and an end-of-file marker are inside
   its nonce, and the document's id is inside every key derivation, so each of those
-  tamperings makes the decryption fail rather than producing plausible bytes.
+  tamperings makes the decryption fail rather than producing plausible bytes. **Vault
+  entries are bound the same way**: every entry field the app writes (a restore is the one
+  exception, below) is sealed to its entry,
+  its field and its item type, so one moved elsewhere is refused (the limits of that are under
+  _What it cannot protect against_). The keyed hash of each item's name that the server stores
+  is computed under a separate subkey derived from the vault key and held by the browser as
+  non-extractable, so the vault key is never used as a hashing key, and its raw bytes are
+  exported once per vault key to derive that subkey rather than on every save.
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
 - **Credential stuffing and online guessing.** Rate limiting, account lockout with progressive
@@ -75,14 +82,44 @@ security posture, not a disclaimer.
   it is discharged only by a sign-in that actually **completes** — never merely by a correct
   password, which would let anyone already holding one reset the second factor's only brake
   between batches of guesses. A lockout that has genuinely been waited out is the single
-  exception, and reaching it costs the full lockout duration. The credential budget is kept
+  exception, and reaching it costs the full lockout duration. **A lockout is itself a
+  denial-of-service anyone who knows an address can impose**, so its own bound is part of the
+  design and not an afterthought: it expires on its own, and the emailed unlock link is tied to
+  the **lock episode** rather than to the moment the lockout is due to end. Extending a lockout
+  extends the episode, so the link already sent keeps working however long an attacker grinds,
+  and a fresh one is sent only when the outstanding link would expire before the lockout it
+  covers — at most one new link about every half hour, which is what stops that guarantee from
+  becoming a mail-flood vector of its own. The honest bound is per **window** rather than per
+  episode: a link lives an hour and a lockout lasts thirty minutes, so an attacker who keeps an
+  episode alive indefinitely can cause a new link to be sent roughly every half hour. That is
+  the price of the guarantee it replaces — a locked-out owner whose only link had been killed by
+  the attacker's next attempt, with no replacement ever sent — and it is bounded and stated here
+  rather than left to be discovered. The link a replacement supersedes stays valid until its own hour
+  is up, so two can verify at once; that is harmless, because links naming one episode are one
+  capability, and spending either ends the episode and kills the rest. A lockout also costs
+  nothing but the wait: refreshing a session while one stands is refused **before** the
+  presented refresh token is spent, so the sessions the account already had are all still
+  there when it lifts, and the browser keeps the cookie it arrived with. A thirty-minute
+  condition anyone who knows an address can impose must not be able to end a thirty-day one.
+  This matters
+  more here than it would elsewhere, because resetting the master password mints a new vault key,
+  so "just reset it" is not a recovery path but total data loss. The credential budget is kept
   separate from the budgets for token refresh and vault unlock, so that ordinary use of the app
   can never spend the allowance you need in order to sign in. A caller-supplied value (a
   header, a cookie, a rotating token) appears in a rate-limit key only where an IP-keyed tier
   bounds the same route regardless — the per-account tier keys on the submitted email for that
-  reason, and the refresh tier, which has no such companion, keys on the address alone. Getting
-  either wrong turns a limiter into a lockout of the legitimate user, an open door for the
-  attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
+  reason, and the refresh tier, which has no such companion, keys on the address alone. Every tier
+  on an authenticated route keys on the account instead, because the account id comes from a
+  verified token: neighbours behind one address never spend each other's budget, and an attacker
+  holding a session cannot buy a fresh budget by moving to another address. That covers the
+  heavy-operation tier and the confirmation of a new 2FA setup. It also covers every vault-item
+  and folder write: each one leaves an audit row that is kept for a year, so each is bounded per
+  account, at a ceiling sized for the app's own one-request-per-item bulk actions. That bounds how
+  fast one account can grow the log, not how large it gets: at the two ceilings it is 21,000 rows
+  per quarter hour, about two million a day, each kept for the year. Ceilings much lower than that
+  need the bulk actions to become single requests first. Getting the key wrong on any of these
+  tiers turns a limiter into a lockout of the legitimate user, an open door for the attacker, or
+  both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
   the individual address, because a single routed IPv6 allocation hands one attacker 18
   quintillion addresses: keyed on the full `/128`, an IP-keyed limiter is not a limiter at all,
   it is a counter that never reaches two. That aggregation happens inside the library that
@@ -102,10 +139,43 @@ security posture, not a disclaimer.
   that narrowing has exactly one definition that every reader goes through. A cookie the server
   cannot read behaves **exactly as an absent one**, everywhere: not as a server error, and not as a
   distinguishable rejection that would confirm the probe was understood.
-- **Backup theft.** Emailed and downloaded backups are encrypted under a _separate_
-  backup password and carry an HMAC-SHA256 integrity signature that is verified on restore.
-- **Tampered backup files.** Restore validates the signature, rejects dangling and
-  self-referential folder links, and breaks any folder cycle a malicious file plants.
+- **Backup theft.** Emailed and downloaded backups carry no plaintext: every row in them is
+  ciphertext under the vault key, and the copy of that vault key they carry for a
+  cross-account restore is sealed under a _separate_ backup password. A backup you
+  **download from the browser** additionally carries an HMAC-SHA256 integrity signature,
+  computed under a key separated from the backup wrapping key by HKDF. A backup that
+  **arrives by email** — the scheduled one, and the one the Back Up Now button sends — does
+  not: it is assembled on the server, which has neither the backup password nor the key
+  derived from it, so there is nothing there to sign with. That is why restoring an emailed
+  backup asks for confirmation; see the next bullet for what the confirmation means.
+- **Tampered backup files.** Restore rejects dangling and self-referential folder links,
+  and breaks any folder cycle a malicious file plants. It also checks the integrity
+  signature before anything is sent — but the sentence that matters is **which key it is
+  checked against**, because a signature is only evidence if the key that verifies it is
+  one the file did not supply. A backup file carries a copy of the wrapping-key block it
+  was written with, and restore genuinely needs that copy — a backup from another account
+  seals its vault key under it and nothing else can open that — so both are unwrapped
+  wherever the entered password opens them, and **the order the signature is offered to
+  them is the control**: the account's own stored key first, and the copy carried inside
+  the file only after the account's key has disagreed. That gives three outcomes, and only
+  the first is silent.
+  A signature that verifies under the account's own key restores unremarked. A file
+  carrying **no** signature, and a file whose signature verifies **only** under key
+  material the file itself carried — a backup from another account, or one taken before
+  the backup password was changed — are both restored only after an **explicit
+  confirmation** that names which of the two it is; until that is answered, nothing is
+  sent. A signature that no available key agrees with is refused outright, and the refusal
+  deliberately does not claim tampering, because a file signed under a backup password
+  other than the one entered fails in exactly the same way and nothing in the browser can
+  tell those two apart. Two limits, stated rather than implied. The account's key anchors
+  this only because the **file** cannot influence it: it reaches the browser from the
+  server over an authenticated session, so a server that is itself hostile is outside what
+  this defends — see the first bullet under "What it cannot protect against". And the whole
+  control is **client-side** by necessity, because the restore request carries only a
+  conflict strategy, the rows and the vault-key generation, and a server that cannot see
+  your backup password cannot verify a signature keyed from it. What it protects is a file
+  you were handed; what it does not protect is an account whose credentials someone else is
+  already driving the API with.
 - **Irreversible loss of your own data through the app itself.** This is an availability
   property, and zero knowledge is precisely what makes it a security concern: because the
   server holds no plaintext, a decrypted blob the client overwrites incorrectly is gone —
@@ -129,6 +199,51 @@ security posture, not a disclaimer.
   deliberately do not inspect its format, because they must carry through content this
   version may not understand. And none of it substitutes for the encrypted backups
   described above — keep them.
+- **One account denying the file store to every other account.** An upload is sent in 8 MiB
+  pieces, and the server buffers only a small fixed number of them at a time, because that
+  product is the memory a single process spends on uploads and it has to fit the container it
+  runs in. The slot is taken **before** the piece is read, which is the only order in which
+  the bound means anything — a slot taken after 8 MiB has been buffered bounds nothing — and
+  it was also what made the budget cheap to exhaust: a request that declared a length and
+  then sent nothing held a slot without a file, an upload, a byte of storage or a unit of
+  quota, and enough of them from one account made every other account's uploads wait. Two
+  bounds now stand in the way, and they are different in kind. **A share**: one account may
+  hold at most three of the four slots, so it can never be every other account's reason for
+  waiting; anything past its share is refused at once with a retry-in-a-second rather than
+  queued, because queueing a caller past its own share is how one account turns a refusal it
+  earned into a pile of sockets. That share is the number of transfers the server lets one
+  account open, and a transfer sends its pieces one at a time, so the app can never reach it.
+  **And a deadline**: a piece whose bytes have not all arrived within sixty-four seconds by
+  default is dropped (one piece at the slowest upload speed this deployment stands behind;
+  operators can raise it with `DOCUMENT_PART_BODY_TIMEOUT_MS`, never past the server-wide
+  receive deadline) rather than being waited on for the runtime's five-minute default. The
+  deadline covers only the **arrival** of the data; a piece already delivered is never
+  interrupted while it is being stored, so a slow storage service costs throughput rather than
+  transfers. A piece's slot is given back only when the server has **finished** with it, not
+  when the connection closes: a piece whose sender disconnects while it is being stored is
+  still in memory until the storage call returns, and releasing its slot at that point would
+  let one account keep more pieces in memory than its share by disconnecting. The share is per
+  account, so it does not stop **two accounts acting together**: at three slots each they can
+  hold all four between them, one piece after another for as long as their rate limits allow.
+  Neither bound is a substitute for the reverse proxy in front of the application, and neither
+  is a defence against a distributed flood: what they bound is what **one authenticated
+  account** can cost everyone else.
+- **One account exhausting the server's memory through the two large uploads.** A backup
+  restore and a vault-key rotation each accept a body of up to 30 MB, which the server must
+  hold and parse whole. Both were rate limited to five attempts per account per fifteen
+  minutes, but the limit ran **after** the body had been read, so it bounded how many were
+  answered rather than how many were buffered. The limit now runs first, and the process
+  admits only **two** of these requests at a time, sized against the container's measured
+  memory, with the rest waiting before their body is read. **One account may hold one** of
+  those two, so one account's request that declares a length and sends nothing cannot keep
+  every other account from restoring or rotating. **Two accounts acting together can**: each
+  holding one slot with a body it never finishes sending, they keep everyone else waiting for
+  as long as the server-wide receive deadline allows, four minutes by default. A second
+  request from the same account is refused at once, with the same status the per-account
+  rotation lock gave it after the fact. A slot is
+  given back only when the operation has **finished**, not when the connection closes: the
+  server keeps working on a request whose client has gone away, and releasing its slot at
+  that point would let one account keep many of them in memory at once by disconnecting.
 
 ### What it cannot protect against
 
@@ -138,7 +253,47 @@ security posture, not a disclaimer.
   compromised host, a hostile CDN, a malicious dependency, a stored XSS) can exfiltrate
   the master password or the vault key at the moment they are in memory. This is inherent
   to every browser-based zero-knowledge application, H-Vault included. Self-host it, pin
-  the version you deploy, and treat the served bundle as security-critical.
+  the version you deploy, and treat the served bundle as security-critical. A modified
+  build can do anything the genuine one can, so nothing below holds against one. What the
+  genuine build does narrow is script injected into its page: the master encryption key
+  derived from your master password is held by the browser as non-extractable, so such
+  script can use it while the vault is unlocked but cannot read it out. That matters because
+  a vault-key rotation seals the new vault key under that same key, so a copy of it would
+  open every later vault key until the master password changed; a copy of the vault key
+  itself is retired by a rotation. Script still present when you next unlock can capture the
+  master password as you type it and derive the key again.
+- **A hostile server rearranging your vault items, beyond what the binding refuses.** A vault
+  item's name, its contents, each of its previous passwords and a folder's name are each sealed
+  with AES-256-GCM, and every one of them the app writes is sealed to the entry and the field it
+  belongs to (and an item's contents to its item type): the entry's id, the field's role and the
+  type are part of what the authentication tag covers. So a server that moves one entry's sealed
+  bytes onto another entry, into another field of the same entry, or under another item type is
+  **refused**: the field does not decrypt, and the app shows it as unreadable rather than showing
+  you the wrong password under the right name. This is the property already claimed for
+  **documents** above. Four things it does not refuse, stated so it is not taken for more:
+  - **Putting back an older version of the same field.** Every version of an entry's name, say,
+    is sealed to the same place, so a server that replays a superseded copy onto the entry it came
+    from is not refused (you would see the password you already replaced, under a modification
+    date the server chose). Refusing it needs a version the client can check, which the format
+    does not carry.
+  - **Removing an entry, or reordering, dropping or repeating an entry's previous passwords.** They
+    share one binding on purpose: their positions move every time a password changes.
+  - **Entries still in the older, unbound format, and copies of them.** An entry written before
+    this release, or by a restore (whose entries the server stores under ids it chooses, so they
+    are written unbound and bound at the next re-seal), or by a page loaded before this release,
+    is unbound and opens wherever it is placed. **Settings → Re-seal Entries** rewrites every
+    entry bound, under the key you already have; but a server that kept copies of the unbound
+    versions (an earlier database snapshot, a downloaded backup) can still present them, because
+    they are genuine ciphertext under that same key. **Rotating the vault key** also writes every
+    entry bound, and in addition makes every copy from before it useless, since none of them
+    opens under the new key. Rotate when it matters to you that no older copy can be substituted.
+  - **Plain metadata.** Which folder an entry is in, its tags, whether it is a favorite and when
+    each previous password was replaced are stored in the clear (see _Metadata_ below), so a server
+    can change them.
+
+  An entry you did not change but that now reads differently, or says it cannot be read, is
+  something to check against a backup rather than something to trust.
+
 - **A weak master password.** It is the root of the entire key hierarchy. PBKDF2 at
   600,000 iterations raises the cost of an offline attack against a stolen auth hash; it
   does not rescue a guessable password.
@@ -291,7 +446,12 @@ packages/server`, or inside the production image (which has no `npm`) with
   Vault Health page are cached in the browser (IndexedDB) **encrypted with your vault key**,
   so they survive a page refresh or browser close without forcing a re-scan. They stay
   encrypted at rest across a lock — exactly as safe as the wrapped vault key already
-  persisted for unlock — and are erased on logout.
+  persisted for unlock — and are erased on logout when the browser allows it. They are
+  not erased when the browser refuses or cannot complete the clear, for example when
+  another tab is holding the database up or the browser never answers: logout then
+  finishes without erasing them rather than hanging, and the encrypted results stay
+  until a later logout clears them. The same holds for the encrypted offline copy of
+  the vault. Neither is readable without the vault key, which logout discards.
 
 ### Portable plaintext export ("Leave H-Vault")
 
@@ -362,6 +522,16 @@ isolated document, embedded as
   together — that pair lets the framed document remove its own sandbox and is worth nothing. No
   other flag is granted: no popups, forms, modals, downloads or top-level navigation, and `allow=""`
   denies every delegated permission.
+- **It is served from outside every document root, so only that route can hand it out.** Its
+  containment IS the policy below, and a policy attached by a route is only as good as the route
+  being the one thing that answers. It is not, on its own: Express matches the raw URL while the
+  static file server underneath it decodes and normalises first, so `/sandbox%2Ehtml`,
+  `//sandbox.html`, `/sandbox.htm%6C` and `/%73andbox.html` each missed the route and were answered
+  off disk under the application's own, far more permissive policy — the viewer working perfectly
+  while the isolation was simply absent. The document is therefore built into a directory that is
+  neither the application's static root nor Nginx's document root, so no spelling of any URL can
+  reach a copy of it; those addresses now return the ordinary SPA shell, like any other unknown
+  path. Nginx has been handled the same way from the start, by deleting the file from its root.
 - **It carries its own, far stricter policy.** A document fetched from an `http(s)` URL does not
   inherit its embedder's CSP, so the route that serves it attaches one of its own:
   `default-src 'none'`, `connect-src 'none'`, `worker-src 'none'`, `object-src 'none'`,
@@ -412,7 +582,19 @@ correctness, and these are the things it does not buy:
    renderer painting something that looks like a prompt. This is why the master password is asked
    for **only on the full-page lock screen** and nowhere else, and why the document's title, its
    toolbar and its download button are drawn by the application _outside_ the frame, where a
-   renderer cannot forge them.
+   renderer cannot forge them. It cannot put words _outside_ its rectangle either: every refusal
+   the frame reports — for a preview, a format-and-repair, or a photo read by the authenticator
+   import — is a code from a closed list, the application writes every sentence shown for it, and
+   a code it does not recognise is described generically and never repeated. The provenance labels
+   of a reformatted upload are required to be exactly the pair the application's own request
+   produces. The one frame-supplied string the application shows about a refusal is a transform
+   failure's excerpt: at most 200 characters of the offending line, shown as a quotation, and
+   taken from the application's own copy of the file whenever the line refers to text it holds —
+   so only a formatter failure _after_ a repair, which points into repaired text only the frame
+   has, quotes the frame. (What a frame returns as its RESULT is a different thing — the
+   transformed document you review as a diff before it is uploaded, or the export link a photo
+   contained — and is treated as data: compared, parsed and validated, never shown as the
+   application's own words.)
 3. **Isolation does nothing about a renderer that displays something other than the file.** A bug
    that renders the wrong text is invisible to every boundary described here, and it matters most
    for exactly the documents someone reads in order to act on them — a recovery sheet, a set of
@@ -430,13 +612,150 @@ elsewhere goes on holding the key it was given when it signed in, and nothing te
 account has moved past that key.
 
 Everything encrypted under the vault key is re-encrypted by the rotation itself, so an older
-session only matters when it writes something new. Uploading a document is that case, because a
-document's own key is wrapped in the browser under the vault key the browser holds. Each sign-in
-is therefore told which generation of the vault key it received, and an upload says which one it
-used; if that is no longer the current one the upload is refused, the browser fetches the current
-key, re-wraps the document's key and finishes — without re-sending the file. A document is never
-stored under a key the account no longer has. If you would rather not rely on that at all, sign
-out of your other devices from the Sessions page before rotating.
+session only matters when it writes something new. Each sign-in is therefore told which
+generation of the vault key it received, and a write that seals anything under that key says
+which one it used; if that is no longer the current one the write is refused and the browser is
+handed the current generation so it can recover rather than guess.
+
+Every such write is that case: creating or editing an item, creating or renaming a folder,
+importing, restoring a backup, uploading a document, setting up backup encryption or changing
+the backup password (both store a copy of the vault key sealed under the backup key), and
+changing your master password. The
+check fails closed — a request that names no generation at all is refused too, on any account
+that has rotated at least once, because a client that cannot say which key it used may be
+holding the superseded one. An account that has never rotated has no superseded key for anyone
+to hold and is unaffected. Operations with an endpoint of their own that seal nothing are
+deliberately left alone, because a rotation neither reads nor rewrites what they touch: moving
+several entries at once, trashing, restoring from the trash, reordering folders and deleting a
+folder all continue to work. Changing one entry's folder, favourite or tags is not among them —
+it is sent to the same address as changing that entry's contents, and is refused with the rest.
+The check belongs to the address rather than to which fields a request happens to carry, because
+a check decided from the sender's own choice of fields is one the sender can step around. For an
+import and for a restore the check is made immediately before the first entry is written rather
+than when the request arrives, because both spend a noticeable time being validated first and a
+rotation can commit inside that gap.
+
+Without it, such a write was stranded the instant it landed rather than refused: the rotation had
+listed the account's entries before that one existed, so no key the account holds can open it and
+no later rotation can repair it. It read back afterwards as an entry whose content could not be
+recovered, and nothing at the time said so.
+
+Two of those writes are worth naming separately, because their remedy differs from the rest.
+
+Uploading a document is the first, because a document's own key is wrapped in the browser under
+the vault key the browser holds. A refused upload is retried after the browser fetches the
+current key and re-wraps the document's key — without re-sending the file. A document is never
+stored under a key the account no longer has.
+
+**Changing your master password is the second, and it is the one that could cost the whole
+vault.** That operation does not create a wrapper beside the existing one; it replaces it. It
+re-wraps the vault key the browser is holding under a key derived from the new password, and the
+result becomes the account's only stored copy. A wrapper is opaque to the server, so a wrapper
+built from a superseded vault key is indistinguishable from a correct one by inspection: stored,
+it destroys the only copy of the live key and every item, folder, note and document in the
+account becomes permanently undecryptable, with no recovery anywhere. The generation check is
+what makes that refusable. A change attempted while a rotation is still being processed is
+refused as well, and the two controls in the interface hold each other back so neither can be
+started while the other runs.
+
+The two also replace the same stored value from opposite directions — one re-wraps the existing
+vault key under a new password, the other stores a new vault key wrapped under the current one —
+so started together they could once interleave such that whichever finished second overwrote the
+other's work. They are now held apart for their whole duration by a per-user lock, and because a
+rotation reads the account before it takes that lock, it also checks at the moment it stores the
+key that the master password has not moved since; if it has, it undoes what it re-encrypted and
+asks you to sign in again. Whichever of the two loses is told so and can be retried. The cost of
+that lock is that a rotation interrupted by a crash holds it until its timeout lapses, during
+which a master password cannot be changed — which is not a new limit, because the same crash also
+leaves the write fence raised, and only signing in lowers that, which cannot happen any sooner.
+
+### Where the key is held steady, and what it costs
+
+The generation check is a read, and a read is only worth the distance to the write that trusts it.
+Four operations have real work between the two: an import parses and validates a whole file, a
+restore does the same and then counts four collections, a document upload waits for the storage
+service to assemble the file, and a master-password change revokes every session. A rotation
+starting inside one of those gaps had already listed the vault without the arriving entries, so
+they were sealed under a key the account was in the middle of replacing — unreadable from the
+moment they landed, and silent about it. For a document the consequence went further: an
+unreadable document cannot be re-keyed, and a rotation refuses to run unless it covers every
+entry, so one badly timed upload permanently ended that account's ability to rotate at all.
+
+All four now hold the account's vault key steady, with the same per-user lock, from their check
+until their last write, and a rotation arriving meanwhile is asked to wait. The cost is stated
+rather than left to be discovered: of several document uploads finishing at the very same
+instant, one goes through and the others are refused, to be retried. An upload refused this way
+keeps every byte it has already uploaded; retrying re-reads the staging ledger, skips the parts the server already holds, and
+re-sends none of them. A document completion takes that lock a step earlier than its key check
+needs, before it measures the account's storage quota, so the quota's read and the insert it
+permits are one decision per account: uploads finishing together can no longer each see room
+for themselves and all be kept past the limit.
+
+For every other write the remedy is deliberately blunter. The refusal carries the generation the
+account is on, but the application does not use it to fetch the current key and carry on: the
+entries already on screen were read with the key this session holds, so adopting a different one
+partway through a session would leave it working with two. It says instead that your vault key
+was changed on another device, and offers to sign out — which starts again from a single
+consistent state. Reloading the page is deliberately not what that button does: the browser keeps
+its own copy of the replaced key, so a reload would ask for your master password and then hand
+you the same superseded key, with the same notice back in front of it. That notice cannot be
+dismissed, because a session in which nothing can be saved and nothing says so is the state it
+exists to prevent.
+
+If you would rather not rely on any of this, sign out of your other devices from the Sessions
+page before rotating.
+
+### A rotation stopped part way through
+
+A rotation re-encrypts every entry and then swaps the vault key, and on a database that cannot
+give it a transaction it does so one entry at a time. A crash, a lost connection or a restart in
+the middle therefore leaves entries on both sides of the swap: some sealed under the key the
+rotation was moving to, the rest under the key the account still uses.
+
+An interruption at the very last step — after the entries were re-encrypted, while the new key was
+being stored — is a case of its own, because the server cannot tell whether that write landed. It
+used to assume it had not and restore every entry to its previous encryption, which was the right
+answer half the time and, the other half, was itself what destroyed the vault: the key HAD been
+swapped, so the restored entries were readable only with a key the account no longer had. It now
+asks what actually landed before undoing anything, undoes nothing when it cannot tell, and still
+restores in full when the key genuinely was not stored.
+
+That key is kept. It is stored wrapped under your master password, exactly as the live one is, so
+the server holds something it cannot open and nobody else can either — and it is the only copy
+there is, because the browser that generated it is gone. Your account reports that an
+interrupted rotation is outstanding, and finishing it re-encrypts everything under that same key
+rather than generating a third one. Until a rotation commits, nothing removes the stored key: not
+signing in, and not a rotation that fails or is refused. The one exception is a password reset,
+which replaces the vault key outright, so the old key and anything sealed under the outstanding
+one were beyond reach already.
+
+Two consequences follow, and both are deliberate:
+
+- **While that key is outstanding, the server refuses a rotation to any other key.** It cannot see
+  which entries are sealed under the outstanding one, and neither can your browser, so a rotation
+  to a third key would leave them unreadable for ever behind an apparent success. Abandoning the
+  interrupted rotation is still possible, but it has to be asked for in so many words and the
+  interface says what it costs.
+- **Changing your master password while one is outstanding carries it across.** The stored key
+  is wrapped under the password that was in force when the rotation ran, so the browser re-wraps
+  it under the new password and sends it with the change, and the server stores both wrappers in
+  the same write. A change that does not carry it is refused and nothing is written, so a
+  password change cannot leave that key sealed under a password nobody has. A password _reset_ is
+  different: it replaces the vault key outright and drops the outstanding key with it.
+
+An entry that cannot be decrypted at all — by the live key or by an outstanding one — no longer
+stops a rotation. Its stored ciphertext is carried across untouched and the result says how many entries of
+each kind were left unchanged,
+because such an entry is already unreadable and letting one of them block every future rotation
+would leave the whole account unable to change its key.
+
+**A re-seal stopped part way through has nothing to finish.** Settings → Re-seal Entries runs the
+same machinery under the key the vault already uses, so an interruption leaves some entries in the
+new format and the rest in the old one, all of them under the key the account still stores, and
+no second key is kept, because there is none. The next sign-in lowers the write fence as it does
+after any interrupted rotation, and running the re-seal again completes it. The server refuses a
+re-seal that names a key or a key generation other than the account's current one, so a page that
+has not seen a rotation made elsewhere cannot rewrite entries under a key the account has retired.
 
 ### Deleting a document, and why it cannot be undone
 
@@ -465,6 +784,21 @@ orders look interchangeable and are not:
   as complete in that case — it is — and the failure is logged for the operator, with the
   remainder reclaimed by the scheduled clean-up. On a deployment with no document store
   configured the sweep does nothing at all.
+
+An account whose erasure did not finish keeps the marker that says so, and that marker is the
+only durable record that its data still needs removing — which is why nothing clears it before
+the erasure it guards is done. For as long as it stands, **the account cannot be served**: an
+existing session is refused, a token refresh is refused, and signing in afresh is refused too,
+with the same answer a wrong password gets so that nothing new is revealed about the address.
+No session row and no audit row is written by any of those three, because the scheduled clean-up
+must find the record exactly as the failed erasure left it. What the marker does **not** stop is
+the four unauthenticated recovery routes, which are reached with an emailed token rather than a
+session: verifying an address, requesting a password reset, completing one, and spending an
+unlock link. Each of those still writes — a reset rewrites the stored credential and the wrapped
+vault key, and two of them write an audit row. They are left open deliberately, because gating
+them would remove the account's last self-service exit for the sake of a record the clean-up is
+about to delete anyway; but "nothing is written" is true of the three doors a session goes
+through, not of the whole account.
 
 Neither deletion is recoverable, and neither is undone by restoring a backup. The same fact
 has an operational consequence that belongs to whoever runs the server rather than to whoever
@@ -547,6 +881,55 @@ moment of use and not kept. Auto-lock is deliberately not suspended while the pa
 long import can be interrupted by the lock, and the page says so rather than holding the vault
 open for convenience.
 
+### The file encryption tool
+
+The file encryption tool turns any file and a password into a self-contained `.enc` file, and
+back, entirely in your browser: neither the file nor the password is sent anywhere, and neither
+touches your vault key. It works signed in or signed out, and a file it produces opens with the
+same password on any machine.
+
+**What an encrypted file controls before its password is checked.** An `.enc` file records the
+key-derivation settings that sealed it (how much memory and how many passes the password
+stretching used), and those bytes have to be read before the password can be tried, so at that
+moment nothing has authenticated them. Until the cryptography library this project uses added a
+bound, a crafted file of a few hundred bytes could demand far more memory-hard work than any
+legitimate file needs, enough to freeze a browser tab for a very long time, and the only way to
+find out was to start. The server's stored two-factor secrets record their iteration count the
+same way; the server only ever reads rows it wrote itself, so its bound is defence in depth
+against a tampered database rather than a path an outsider can feed.
+
+**Both of H-Vault's decryption paths are now bounded before any key derivation starts.** The
+file tool and the server's encrypted two-factor secrets each check the recorded settings against
+a fixed budget first, and refuse anything above it without deriving a key. The browser budget is
+deliberately tighter than the server's, because in the browser the memory-hard derivation runs on
+the page's own thread: a file over budget would not merely be slow, it would freeze the tab until
+the derivation finished. A named refusal is the better outcome, so a foreign `.enc` sealed above
+the browser budget is refused with a message saying so, rather than a "try again" that can never
+succeed. H-Vault's own settings sit comfortably inside both budgets, and every budget widens to
+cover whatever the reading side itself would use to write, so **no file this tool has produced,
+and no two-factor secret this server has stored, is affected**. Files made elsewhere with
+unusually heavy settings are the only ones refused; a file sealed with the library's default Node
+profile still opens.
+
+The budgets are the library's defaults and H-Vault does not configure them in either direction.
+Widening one would trade the refusal for a frozen tab. Narrowing one toward H-Vault's own cost
+would refuse files that other runtimes legitimately produce, which would break exactly the
+cross-machine use the tool exists for.
+
+**A minimum must never be configured on the server's two-factor decryption.** The library also
+supports a floor, refusing ciphertext sealed more cheaply than a set cost (on this path the
+iteration floor is the one that binds; the memory-work floor is excluded as well, so that the
+rule stays one rule), and from its 1.9.0
+release that floor applies to ciphertext with no recorded settings as well. Two-factor secrets
+stored by releases before the header format existed have no recorded settings and decrypt at a
+fixed fallback cost, so a floor above that cost makes every one of them unreadable and locks the
+accounts that hold them out of two-factor sign-in, and a floor above the lower count current releases
+write does the same to every secret stored at that count. Raising the fallback cost to meet the floor
+does not help: it changes the derived key, so the old secrets then fail their authentication tag
+instead. Nothing in the running code prevents a floor from being added; the project's tests pin
+both floors at zero next to a genuine pre-header ciphertext, and this paragraph exists so the
+reason is not rediscovered the hard way.
+
 ### Your password generator settings are stored in the clear
 
 The length, character types and minimum counts the generator uses are saved on your account as
@@ -564,9 +947,11 @@ read between the lines.
 ### Auto-lock
 
 The vault locks after `autoLockTimeout` minutes without interaction (1 to 1440, default 15).
-Locking zeroes the vault key and the master encryption key and clears decrypted data from
-memory and from the offline cache; the session itself stays alive, so unlocking needs only the
-master password, not a full sign-in.
+Locking discards the vault key and the master encryption key and clears decrypted data from
+memory and from the offline cache. Discarding means dropping every reference the app holds, not
+overwriting the key: a browser-held key does not live in memory page script can write to, so the
+app lets go of it rather than claiming to zero it. The session itself stays alive, so unlocking
+needs only the master password, not a full sign-in.
 
 Two properties of that timer are worth stating plainly, because the obvious implementation
 gets both wrong:
@@ -637,7 +1022,7 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 
 ## Security practices in this repository
 
-- Every push runs `npm run ci` locally through the `pre-push` hook — twenty-nine gates,
+- Every push runs `npm run ci` locally through the `pre-push` hook — thirty-one gates,
   including a dependency audit at moderate and above over the production tree, ESLint with
   `eslint-plugin-security`, static analysis (CodeQL where the CLI is installed, otherwise
   Semgrep CE or OpenGrep, and the gate reports which engine answered), container builds
@@ -645,9 +1030,11 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   **and every blob in git history**, the cross-user authorization matrix over the whole
   route table, a conformance run of the storage port against the real object-storage engine
   in a container, and a redaction suite that asserts no request value, audit row or
-  production error body carries a secret. Eight further gates run before a release, among them a fuzz
-  run over the seven import parsers, a crash-consistency drill that SIGKILLs a real process
-  mid-write, the mutation oracle, and the deployment clean room.
+  production error body carries a secret. Eight further gates form the release tier, run on
+  demand with `npm run verify:full` rather than by the release workflow, among them a fuzz run
+  over the seven import parsers, a crash-consistency drill that SIGKILLs a real process
+  mid-write, the mutation oracle (which today holds a floor for the `shared` leg only), and the
+  deployment clean room.
 - The gates are themselves guarded, because a security gate that can be edited to pass is
   not a control. Every marker that weakens a check — a skipped test, a silenced analyzer, a
   swallowed error — must be absent or written down in `.testfortress/suppressions.json`
@@ -657,11 +1044,22 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   attributes to that defect. A gate whose prerequisite is missing on the machine — an
   absent CodeQL CLI, a stopped Docker daemon — is reported BLOCKED and counted separately,
   never as proven.
-- Production images run non-root on read-only root filesystems, drop all Linux
-  capabilities, and set `no-new-privileges`. The Compose stack publishes exactly one
+- Every container sets `no-new-privileges` and drops all Linux capabilities, and every
+  one but the database runs on a read-only root filesystem; the application, Nginx and
+  bootstrap images run as a numeric non-root user. The database container is the exception,
+  because its entrypoint starts as root to fix volume ownership, adds back exactly five
+  capabilities and keeps a writable root filesystem. The Compose stack publishes exactly one
   loopback-bound port; the database has no published port and no route to the internet.
 - Secrets are validated at boot: the app refuses to start in production with a
   placeholder secret, a non-HTTPS origin, or a partial mail configuration.
+- Dependency install scripts are reviewed rather than trusted by default: the root
+  `package.json` `allowScripts` list approves the two the tooling needs, each pinned to the
+  reviewed version, and denies the rest, including an install-telemetry script, which
+  `scarfSettings` also opts out of. Be precise about its strength: current npm releases treat
+  the list as advisory, still running every install script, denied ones included, and only
+  reporting the ones it does not cover; a later npm release enforces it. That is why the
+  telemetry opt-out is set separately. The production images install with scripts disabled
+  either way.
 
 ## Hardening your own deployment
 

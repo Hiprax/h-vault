@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { AxiosError } from 'axios';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router';
 import React from 'react';
@@ -70,6 +71,7 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     vaultKeyEqualsRaw: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
+    decryptDataWithAad: vi.fn(),
     generateSearchHash: vi.fn().mockResolvedValue('hash'),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
@@ -137,6 +139,7 @@ vi.mock('zxcvbn', () => ({
 }));
 
 import { useAuthStore } from '../src/stores/authStore';
+import { useUIStore } from '../src/stores/uiStore';
 import { cryptoService } from '../src/services/crypto/cryptoService';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
 
@@ -204,6 +207,49 @@ const SAMPLE_FOLDER = {
   nameTag: 'ft',
 };
 
+/**
+ * DISTINGUISHABLE stand-ins for the two unwrapped backup wrapping keys, keyed on
+ * the wrapper ciphertext — the only field that differs between the account's
+ * block and the file's.
+ *
+ * Load-bearing, and the reason is a defect this suite could not previously see.
+ * Restore unwraps BOTH wrappers and hands them to different consumers: the
+ * account's decides the integrity verdict, the file's opens the file's own
+ * BWK-wrapped vault key. A `decryptBWK` that resolved one buffer for every input
+ * — which is what this file used to mock — passes whichever key the page plumbs
+ * wherever, so the cross-account plumbing could be wrong and still green.
+ *
+ * ASSERT ON THESE BY IDENTITY (`toBe`), NEVER WITH `toHaveBeenCalledWith` OR
+ * `toEqual`. Measured: Vitest's structural equality reports two same-length
+ * `ArrayBuffer`s as equal whatever bytes they hold, so
+ * `toHaveBeenCalledWith(…, ACCOUNT_BWK)` passes when the FILE's key was used —
+ * which is precisely the defect these two constants exist to catch. Read the key
+ * out of `mock.calls` and compare it with `toBe`.
+ */
+const ACCOUNT_BWK = new Uint8Array([0xa0, 0xa1]).buffer;
+const FILE_BWK = new Uint8Array([0xf0, 0xf1]).buffer;
+
+/**
+ * Every buffer handed to `cryptoService.clearKey`, BY REFERENCE.
+ *
+ * Returned as a raw array rather than asserted with `toHaveBeenCalledWith`, for
+ * the reason in the note above: `ArrayBuffer`s compare equal to each other under
+ * Vitest's structural equality, so only `toContain`/`toBe` — which use identity
+ * — can say WHICH key was zeroed. The mocked salt goes through here too, which
+ * is exactly why counting calls would prove nothing.
+ */
+function zeroedKeys(): unknown[] {
+  return vi.mocked(cryptoService.clearKey).mock.calls.map(([buffer]) => buffer);
+}
+
+function bwkFor(encryptedBWK: unknown): ArrayBuffer {
+  if (encryptedBWK === CONFIGURED_BACKUP.encryptedBWK) return ACCOUNT_BWK;
+  if (encryptedBWK === FILE_ENCRYPTION_META.encryptedBWK) return FILE_BWK;
+  // A wrapper this file did not name: still its own buffer, so an unexpected
+  // third key cannot be mistaken for either of the two above.
+  return new Uint8Array([0x99]).buffer;
+}
+
 async function renderBackup() {
   const { default: BackupSettingsPage } = await import('../src/pages/BackupSettingsPage');
   let result: ReturnType<typeof render>;
@@ -235,10 +281,25 @@ function restoredPayload(): {
   };
 }
 
-/** Opens the restore form, attaches `fileData` as the backup file and submits. */
+/** The label of the control that carries an unverifiable restore past the prompt. */
+const CONFIRM_UNVERIFIED = 'Restore Unverified Backup';
+const CANCEL_UNVERIFIED = 'Cancel Restore';
+
+/**
+ * Opens the restore form, attaches `fileData` as the backup file and submits.
+ *
+ * A file whose signature this account cannot verify — which, since the policy
+ * changed, is every unsigned file and every foreign one — stops at a prompt, and
+ * this helper ANSWERS IT AFFIRMATIVELY by default. That is deliberate: the cases
+ * below are about re-encryption, row filtering and the notices, not about the
+ * gate, and a gate answered in the helper keeps them saying what they were
+ * written to say. The gate itself is pinned by its own cases further down, which
+ * pass `unverified: 'cancel'` or `'leave'` and assert the negative, so a
+ * regression that stopped raising the prompt at all still fails there.
+ */
 async function performRestore(
   fileData: Record<string, unknown>,
-  opts: { sizeOverride?: number } = {},
+  opts: { sizeOverride?: number; unverified?: 'confirm' | 'cancel' | 'leave' } = {},
 ) {
   const { container } = await renderBackup();
   await waitFor(() => screen.getByText('Restore from File'));
@@ -255,6 +316,39 @@ async function performRestore(
   fireEvent.change(passwordInput, { target: { value: 'BackupPass!' } });
   await act(async () => {
     fireEvent.click(screen.getByText('Restore'));
+  });
+
+  const answer = opts.unverified ?? 'confirm';
+  if (answer === 'leave') return;
+  const control = screen.queryByText(answer === 'confirm' ? CONFIRM_UNVERIFIED : CANCEL_UNVERIFIED);
+  if (control) {
+    await act(async () => {
+      fireEvent.click(control);
+    });
+  }
+}
+
+/**
+ * The recoverable refusal the two vault-key-sealing backup writes answer with:
+ * a 409 whose `data` carries the account's CURRENT generation. Discriminated on
+ * the presence of that number and never on the message, which is what
+ * `staleVaultKeyVersion` does.
+ */
+function staleVaultKeyRejection(): AxiosError {
+  // A REAL `AxiosError`, because `staleVaultKeyVersion` gates on `isAxiosError`
+  // before it looks at anything else — a hand-rolled `{ response: … }` would be
+  // ignored and this case would assert that the notice stays silent while
+  // believing it asserts the opposite.
+  return new AxiosError('conflict', 'ERR_BAD_REQUEST', undefined, undefined, {
+    status: 409,
+    statusText: 'Conflict',
+    headers: {},
+    config: { headers: {} } as never,
+    data: {
+      success: false,
+      message: 'The vault key was rotated elsewhere. Reload to pick up vault key version 9.',
+      data: { vaultKeyVersion: 9 },
+    },
   });
 }
 
@@ -274,7 +368,14 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
       encryptedVaultKeyData: null,
       twoFactorRequired: false,
       tempToken: null,
+      // Deliberately NOT zero: every restored row is re-encrypted to THIS key,
+      // and the request names the generation that goes with it. A base of zero
+      // would let a hardcoded default pass as the real number.
+      vaultKeyVersion: 7,
     });
+    // The notice is app-wide state that no mock reset clears, so it is reset
+    // here: a case that leaves it set would decide the next case's assertion.
+    useUIStore.setState({ staleVaultKeyVersion: null });
 
     mockGetProfileApi.mockResolvedValue(profileWith(CONFIGURED_BACKUP));
     mockApiGet.mockImplementation((url: string) => {
@@ -301,7 +402,9 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     vi.mocked(cryptoService.deriveBEK).mockResolvedValue(
       new Uint8Array(32) as unknown as CryptoKey,
     );
-    vi.mocked(cryptoService.decryptBWK).mockResolvedValue(new Uint8Array(32).buffer);
+    vi.mocked(cryptoService.decryptBWK).mockImplementation((encryptedBWK: string) =>
+      Promise.resolve(bwkFor(encryptedBWK)),
+    );
     vi.mocked(cryptoService.verifyBackupHmac).mockResolvedValue(true);
     vi.mocked(cryptoService.computeBackupHmac).mockResolvedValue('hmac-signature');
     vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new Uint8Array(32).buffer);
@@ -751,6 +854,51 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
   });
 
+  it('names the generation every restored row was re-encrypted to', async () => {
+    // A restore never replaces the account's vault key: the client re-encrypts
+    // every backup row to the key it currently holds. Which is exactly why the
+    // generation matters here as much as on a create — a rotation that commits
+    // between that re-encryption and this request strands every row it sends.
+    await performRestore({ items: [SAMPLE_ITEM], folders: [] });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(restoreBody()).toMatchObject({ vaultKeyVersion: 7 });
+    // The negative this endpoint has always carried: no vault-key adoption and
+    // no master-password re-auth ride along with it.
+    expect(restoreBody()).not.toHaveProperty('adoptVaultKey');
+    expect(restoreBody()).not.toHaveProperty('authHash');
+  });
+
+  it('raises the reload notice when the restore is refused for a superseded key', async () => {
+    mockApiPost.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: {
+          success: false,
+          message: 'The vault key was rotated elsewhere.',
+          data: { vaultKeyVersion: 11 },
+        },
+      },
+    });
+
+    await performRestore({ items: [SAMPLE_ITEM], folders: [] });
+
+    await waitFor(() => {
+      expect(useUIStore.getState().staleVaultKeyVersion).toBe(11);
+    });
+    // The negatives: the failure is reported rather than swallowed, nothing is
+    // retried, and this session's generation is untouched — adopting the number
+    // the server named would move the whole session onto a key it chose.
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to restore backup' }),
+    );
+    expect(mockApiPost.mock.calls.filter((c) => c[0] === '/backup/restore')).toHaveLength(1);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(7);
+  });
+
   it('falls back to the account profile encryption metadata when the file carries none', async () => {
     await performRestore({ items: [SAMPLE_ITEM], folders: [] });
 
@@ -764,6 +912,39 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
       'server-btag',
       expect.anything(),
     );
+  });
+
+  it('treats a wrapper missing any one of its four fields as no wrapper at all', async () => {
+    // A partial block is not a usable key, and the completeness test has to be
+    // all-or-nothing on every field individually — a wrapper accepted without
+    // its tag or its salt would be carried to a derivation that cannot work.
+    // Driven one dropped field at a time, so no single field can stop being
+    // checked without this failing.
+    for (const dropped of ['encryptedBWK', 'bwkIv', 'bwkTag', 'bwkSalt'] as const) {
+      vi.clearAllMocks();
+      mockGetProfileApi.mockResolvedValue(
+        profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
+      );
+      // Rebuilt without the field rather than deleted from a copy: a dynamic
+      // `delete` is a lint error here, and omission is what a real partial
+      // block looks like anyway.
+      const partial = Object.fromEntries(
+        Object.entries(FILE_ENCRYPTION_META).filter(([field]) => field !== dropped),
+      );
+
+      await performRestore({ items: [SAMPLE_ITEM], folders: [], backupEncryption: partial });
+
+      await waitFor(() => {
+        expect(mockToast, `dropped ${dropped}`).toHaveBeenCalledWith({
+          title: 'Backup encryption is not configured and backup file has no encryption metadata',
+          type: 'error',
+        });
+      });
+      // Never carried to a derivation, and never sent.
+      expect(cryptoService.deriveBEK, `dropped ${dropped}`).not.toHaveBeenCalled();
+      expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+      cleanup();
+    }
   });
 
   it('aborts the restore when neither the file nor the account has encryption metadata', async () => {
@@ -829,23 +1010,401 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
   it('rejects a tampered backup whose integrity signature does not verify', async () => {
     vi.mocked(cryptoService.verifyBackupHmac).mockResolvedValue(false);
 
+    // `unverified: 'leave'` so the helper does not answer a prompt on the way
+    // out: without it, "the prompt is absent" below could equally mean "the
+    // prompt appeared for a misclassified verdict and the helper clicked it
+    // away", which is the one thing this case must be able to tell apart.
+    await performRestore(
+      {
+        items: [SAMPLE_ITEM],
+        folders: [],
+        backupEncryption: FILE_ENCRYPTION_META,
+        integrity: 'forged',
+      },
+      { unverified: 'leave' },
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'This backup’s integrity signature does not match its contents.',
+          type: 'error',
+        }),
+      );
+    });
+    // BOTH available keys were asked, so the refusal means "nothing here agrees
+    // with it" rather than "the first key I tried disagreed".
+    expect(cryptoService.verifyBackupHmac).toHaveBeenCalledTimes(2);
+    // A refusal is not a question: the prompt must not be offered as a way past it.
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('does not accuse a signature no key agrees with of being tampered with', async () => {
+    // The old copy asserted tampering as fact. It cannot be known here: a file
+    // signed under a backup password other than the one entered fails in exactly
+    // the same way, and telling a user their own file was tampered with is a lie
+    // they have no way to check.
+    vi.mocked(cryptoService.verifyBackupHmac).mockResolvedValue(false);
+
     await performRestore({
       items: [SAMPLE_ITEM],
       folders: [],
       backupEncryption: FILE_ENCRYPTION_META,
-      integrity: 'forged',
+      integrity: 'signed-under-another-password',
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: expect.stringContaining(
+            'signed under a different backup password',
+          ) as string,
+        }),
+      );
+    });
+    const refusal = mockToast.mock.calls.find(
+      (call) =>
+        (call[0] as { title?: string }).title ===
+        'This backup’s integrity signature does not match its contents.',
+    );
+    // Case-INSENSITIVE, and on the stem rather than one inflection: "Tampered"
+    // at the start of a sentence, or "tampering", is the same accusation and a
+    // `toContain('tampered')` would let either through.
+    expect(String((refusal?.[0] as { description?: string }).description)).not.toMatch(/tamper/i);
+  });
+
+  // ---- The restore-signature gate -----------------------------------------
+  //
+  // These cases replace one that asserted the opposite: an unsigned backup used
+  // to raise a warning toast and RESTORE ANYWAY, and that test pinned the
+  // fall-through as intended behaviour. `SECURITY.md` documented the opposite,
+  // and a notice the reader does not have to answer is not a control, so the
+  // expectation is what changed rather than the code being bent to fit it.
+
+  it('does not restore an unsigned backup while the prompt is still unanswered', async () => {
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+
+    // The prompt is up, and names the reason it is up.
+    expect(screen.getByText(CONFIRM_UNVERIFIED)).toBeInTheDocument();
+    expect(screen.getByText(/carries no integrity signature at all/)).toBeInTheDocument();
+    // Nothing was verified, because there was nothing to verify...
+    expect(cryptoService.verifyBackupHmac).not.toHaveBeenCalled();
+    // ...and, the whole point, nothing was sent.
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+    // The passive notice this replaced is gone; one event, one notice.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining('no integrity signature') }),
+    );
+  });
+
+  it('sends nothing when an unsigned restore is cancelled, and says nothing was changed', async () => {
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'cancel' },
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Restore cancelled. Nothing was changed.',
+        type: 'info',
+      });
+    });
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+  });
+
+  it('restores an unsigned backup once the prompt is answered, and only then', async () => {
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      backupEncryption: FILE_ENCRYPTION_META,
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+  });
+
+  it('dismissing the prompt with Escape cancels the restore', async () => {
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' });
     });
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith({
-        title: 'Backup integrity check failed. The file may have been tampered with.',
-        type: 'error',
+        title: 'Restore cancelled. Nothing was changed.',
+        type: 'info',
       });
     });
     expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
   });
 
-  it('warns when an old backup carries no integrity signature but still restores it', async () => {
+  it("dismissing the prompt with the dialog's own close control cancels the restore", async () => {
+    // The third way out of this prompt, and each way is its OWN function:
+    // Escape and the overlay go through `onOpenChange`, `Cancel Restore` has its
+    // own inline handler, and the corner control is `DialogContent`'s `onClose`
+    // — a prop the component renders NOTHING for when it is absent. Only this
+    // case reaches the third, so a prompt that silently lost its close control,
+    // or gained one wired to something that does not answer, is visible here
+    // and nowhere else.
+    //
+    // And the assertion that carries the weight is not "no request was sent" —
+    // a promise nobody settles sends nothing either, so that passes on the
+    // broken version. It is that the awaiting `handleRestore` REACHED ITS
+    // `finally` and released both wrapping keys.
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+    expect(zeroedKeys()).not.toContain(FILE_BWK);
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Close'));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Restore cancelled. Nothing was changed.',
+        type: 'info',
+      });
+    });
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+    expect(zeroedKeys()).toContain(FILE_BWK);
+    expect(zeroedKeys()).toContain(ACCOUNT_BWK);
+  });
+
+  it('zeroes the wrapping keys when the page is unmounted with the prompt still open', async () => {
+    // An auto-lock unmounts this route. The assertion that matters is NOT "no
+    // request was sent" — that passes whether or not the resolver exists, since
+    // a promise nobody settles sends nothing either. What the resolver actually
+    // buys is that `handleRestore` REACHES ITS `finally`, so the unwrapped
+    // wrapping keys are zeroed instead of being held for the life of the tab.
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+    expect(screen.getByText(CONFIRM_UNVERIFIED)).toBeInTheDocument();
+    // Still held while the question stands.
+    expect(zeroedKeys()).not.toContain(FILE_BWK);
+
+    await act(async () => {
+      cleanup();
+    });
+
+    expect(zeroedKeys()).toContain(FILE_BWK);
+    expect(zeroedKeys()).toContain(ACCOUNT_BWK);
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('zeroes the wrapping keys when the page is unmounted BEFORE the prompt is raised', async () => {
+    // The window the resolver ref cannot see. Registration happens late — after
+    // a profile read and up to two 600k-iteration derivations — so an auto-lock
+    // landing inside it unmounts the page while the ref is still null. The
+    // cleanup then has nothing to settle, and a resolver registered a moment
+    // later is one nothing can ever reach: the promise never settles, the
+    // `finally` never runs, and both wrapping keys stay in memory with no
+    // outcome reported. Held open here by stalling the profile read, then
+    // unmounting, then letting it through.
+    let releaseProfile: (() => void) | undefined;
+    mockGetProfileApi.mockResolvedValueOnce(profileWith(CONFIGURED_BACKUP)).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseProfile = () => resolve(profileWith(CONFIGURED_BACKUP));
+        }),
+    );
+
+    const { container } = await renderBackup();
+    await waitFor(() => screen.getByText('Restore from File'));
+    fireEvent.click(screen.getByText('Restore from File'));
+    fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: {
+        files: [
+          new File(
+            [
+              JSON.stringify({
+                items: [SAMPLE_ITEM],
+                folders: [],
+                backupEncryption: FILE_ENCRYPTION_META,
+              }),
+            ],
+            'backup.enc',
+            { type: 'application/json' },
+          ),
+        ],
+      },
+    });
+    fireEvent.change(container.querySelector('#restore-password') as HTMLInputElement, {
+      target: { value: 'BackupPass!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Restore'));
+    });
+
+    // Unmounted while the restore is still inside the profile read.
+    await act(async () => {
+      cleanup();
+    });
+    await act(async () => {
+      releaseProfile?.();
+      await Promise.resolve();
+    });
+
+    // No prompt was ever raised, and the restore still finished and cleaned up.
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+    await waitFor(() => expect(zeroedKeys()).toContain(FILE_BWK));
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('restores a backup signed under the ACCOUNT’s key with no prompt at all', async () => {
+    // What a same-account restore looks like: the server copies the account's own
+    // block into every download, so the file's wrapper and the account's are the
+    // same wrapper and the signature verifies under key material the file did not
+    // supply. This is the only arrangement that restores unremarked.
+    await performRestore(
+      {
+        items: [SAMPLE_ITEM],
+        folders: [],
+        backupEncryption: {
+          encryptedBWK: CONFIGURED_BACKUP.encryptedBWK,
+          bwkIv: CONFIGURED_BACKUP.bwkIv,
+          bwkTag: CONFIGURED_BACKUP.bwkTag,
+          bwkSalt: CONFIGURED_BACKUP.bwkSalt,
+        },
+        integrity: 'sig-from-download',
+      },
+      { unverified: 'leave' },
+    );
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(screen.queryByText(CONFIRM_UNVERIFIED)).toBeNull();
+    // Identical wrappers are one key, derived once: the common path did not pay
+    // for a second 600k-iteration derivation.
+    expect(cryptoService.deriveBEK).toHaveBeenCalledTimes(1);
+    expect(cryptoService.verifyBackupHmac).toHaveBeenCalledTimes(1);
+    const [signedPayload, signature, keyUsed] = vi.mocked(cryptoService.verifyBackupHmac).mock
+      .calls[0]!;
+    expect(signature).toBe('sig-from-download');
+    expect(signedPayload).not.toContain('integrity');
+    expect(keyUsed).toBe(ACCOUNT_BWK);
+  });
+
+  it('checks a signature against the ACCOUNT’s key before the file’s own, never after', async () => {
+    // The finding: preferring the file's own block let anyone handing you a file
+    // plus "its" backup password supply the message AND the key that
+    // authenticates it. The order is the control, so it is asserted directly.
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      backupEncryption: FILE_ENCRYPTION_META,
+      integrity: 'sig',
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    const firstKeyTried = vi.mocked(cryptoService.verifyBackupHmac).mock.calls[0]?.[2];
+    expect(firstKeyTried).toBe(ACCOUNT_BWK);
+    expect(firstKeyTried).not.toBe(FILE_BWK);
+  });
+
+  it('asks before restoring a file whose signature only its OWN key could check', async () => {
+    // A foreign backup: the account's key disagrees, the file's own agrees. The
+    // signature is real and proves only that the file agrees with itself, so the
+    // restore is offered rather than refused — and offered, not performed.
+    vi.mocked(cryptoService.verifyBackupHmac).mockImplementation((_data, _hmac, bwk) =>
+      Promise.resolve(bwk === FILE_BWK),
+    );
+
+    await performRestore(
+      {
+        items: [SAMPLE_ITEM],
+        folders: [],
+        backupEncryption: FILE_ENCRYPTION_META,
+        integrity: 'signed-by-the-other-account',
+      },
+      { unverified: 'leave' },
+    );
+
+    expect(screen.getByText(CONFIRM_UNVERIFIED)).toBeInTheDocument();
+    expect(
+      screen.getByText(/could only be checked against key material the file itself/),
+    ).toBeInTheDocument();
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('opens the file’s own wrapped vault key with the FILE’s key, not the account’s', async () => {
+    // The two unwrapped keys have different jobs. `bwkEncryptedVaultKey` lives in
+    // the file and is sealed under the FILE's key by construction, so plumbing
+    // the account's key here would fail to recover the backup's vault key and
+    // drop every row of a legitimate cross-account restore behind a warning.
+    vi.mocked(cryptoService.decryptVaultKey).mockRejectedValue(new Error('MEK mismatch'));
+    vi.mocked(cryptoService.vaultKeyEqualsRaw).mockResolvedValue(false);
+
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      encryptedVaultKey: 'evk',
+      vaultKeyIv: 'vkiv',
+      vaultKeyTag: 'vktag',
+      backupEncryption: FILE_ENCRYPTION_META,
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(cryptoService.decryptVaultKeyWithBWK).toHaveBeenCalledTimes(1);
+    const [wrapped, wrappedIv, wrappedTag, keyUsed] = vi.mocked(
+      cryptoService.decryptVaultKeyWithBWK,
+    ).mock.calls[0]!;
+    expect([wrapped, wrappedIv, wrappedTag]).toEqual(['file-bevk', 'file-bvkiv', 'file-bvktag']);
+    // Identity, not equality: the two stand-ins are the same length and Vitest
+    // would call them equal. See the note beside their declarations.
+    expect(keyUsed).toBe(FILE_BWK);
+    expect(keyUsed).not.toBe(ACCOUNT_BWK);
+    // ...and the rows survived, which is what the wrong key would have cost.
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining('Could not recover') }),
+    );
+  });
+
+  it('still offers the restore when the profile cannot be read but the file carries a wrapper', async () => {
+    // The profile read is the TRUST ANCHOR and is unconditional now. A profile
+    // that will not load costs the restore its anchor — answered by the prompt —
+    // and must not cost it the restore itself, which it did not before.
+    mockGetProfileApi
+      .mockResolvedValueOnce(profileWith(CONFIGURED_BACKUP))
+      .mockRejectedValueOnce(new Error('network down'));
+
+    await performRestore(
+      { items: [SAMPLE_ITEM], folders: [], backupEncryption: FILE_ENCRYPTION_META },
+      { unverified: 'leave' },
+    );
+
+    expect(screen.getByText(CONFIRM_UNVERIFIED)).toBeInTheDocument();
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to restore backup' }),
+    );
+  });
+
+  it('reports a key-derivation failure as a failure, never as a wrong backup password', async () => {
+    // `deriveBEK` throwing is Web Crypto refusing, or a hostile file's
+    // unparseable salt. Only a wrapper that will not OPEN means a wrong password,
+    // and conflating the two would tell a user to retype a correct password.
+    vi.mocked(cryptoService.deriveBEK).mockRejectedValue(new Error('SubtleCrypto unavailable'));
+
     await performRestore({
       items: [SAMPLE_ITEM],
       folders: [],
@@ -853,13 +1412,62 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     });
 
     await waitFor(() => {
-      expect(mockToast).toHaveBeenCalledWith({
-        title: 'This backup has no integrity signature. It may be an older backup.',
-        type: 'warning',
-      });
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to restore backup' }),
+      );
     });
-    expect(cryptoService.verifyBackupHmac).not.toHaveBeenCalled();
-    expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Incorrect backup password' }),
+    );
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
+  });
+
+  it('abandons a confirmed restore whose vault key changed while the prompt was open', async () => {
+    // The answer has no time limit. A rotation in another tab does not unmount
+    // this page, and every row below would be re-encrypted to the key captured
+    // AFTER the answer — so the key is re-read rather than assumed.
+    const rotatedKey = new Uint8Array(32) as unknown as CryptoKey;
+    const { container } = await renderBackup();
+    await waitFor(() => screen.getByText('Restore from File'));
+    fireEvent.click(screen.getByText('Restore from File'));
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(
+            [
+              JSON.stringify({
+                items: [SAMPLE_ITEM],
+                folders: [],
+                backupEncryption: FILE_ENCRYPTION_META,
+              }),
+            ],
+            'backup.enc',
+            { type: 'application/json' },
+          ),
+        ],
+      },
+    });
+    fireEvent.change(container.querySelector('#restore-password') as HTMLInputElement, {
+      target: { value: 'BackupPass!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Restore'));
+    });
+
+    useAuthStore.setState({ vaultKey: rotatedKey });
+    await act(async () => {
+      fireEvent.click(screen.getByText(CONFIRM_UNVERIFIED));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Your vault key changed while the restore was waiting to be confirmed.',
+        }),
+      );
+    });
+    expect(mockApiPost).not.toHaveBeenCalledWith('/backup/restore', expect.anything());
   });
 
   it('recovers a cross-account vault key from the BWK-wrapped copy and re-encrypts the rows', async () => {
@@ -894,6 +1502,116 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     const raw = restoreBody().data as string;
     expect(raw).not.toContain('encryptedVaultKey');
     expect(raw).not.toContain('backupEncryption');
+  });
+
+  it('re-seals every format-v2 field of a same-key restore, and leaves v1 rows verbatim', async () => {
+    // Same account, same key: v1 rows travel verbatim, as they always have. A
+    // bound field cannot, because the server decides the restored row's id (a row
+    // this account no longer owns, or a `keep_both` copy, gets a fresh one) and
+    // the field would be stored under an id it can never open under. So it is
+    // opened against the row it was backed up from and re-sealed first.
+    const ITEM_ID = 'cccccccccccccccccccccccc';
+    const FOLDER_ID = 'dddddddddddddddddddddddd';
+    const boundItem = {
+      _id: ITEM_ID,
+      itemType: 'login',
+      encryptedData: 'bd',
+      dataIv: 'v2:bdi',
+      dataTag: 'bdt',
+      encryptedName: 'bn',
+      nameIv: 'v2:bni',
+      nameTag: 'bnt',
+      passwordHistory: [
+        {
+          encryptedPassword: 'bp',
+          iv: 'v2:bpi',
+          tag: 'bpt',
+          changedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+    // v1 name and data, with ONE bound history entry: that alone makes it bound.
+    const historyOnlyItem = {
+      ...SAMPLE_ITEM,
+      _id: 'eeeeeeeeeeeeeeeeeeeeeeee',
+      itemType: 'note',
+      passwordHistory: [
+        {
+          encryptedPassword: 'hp',
+          iv: 'v2:hpi',
+          tag: 'hpt',
+          changedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+    const boundFolder = { _id: FOLDER_ID, encryptedName: 'bfn', nameIv: 'v2:bfi', nameTag: 'bft' };
+    vi.mocked(cryptoService.decryptDataWithAad).mockResolvedValue('bound-plaintext');
+
+    await performRestore({
+      items: [boundItem, SAMPLE_ITEM, historyOnlyItem],
+      folders: [boundFolder, SAMPLE_FOLDER],
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    const payload = restoredPayload();
+    expect(payload.items?.[0]).toMatchObject({
+      _id: ITEM_ID,
+      encryptedData: 'reenc',
+      dataIv: 'reiv',
+      encryptedName: 'reenc',
+      nameIv: 'reiv',
+      passwordHistory: [{ encryptedPassword: 'reenc', iv: 'reiv', tag: 'retag' }],
+    });
+    // The v1 row is untouched, byte for byte.
+    expect(payload.items?.[1]).toEqual(SAMPLE_ITEM);
+    expect(payload.items?.[2]).toMatchObject({
+      _id: 'eeeeeeeeeeeeeeeeeeeeeeee',
+      dataIv: 'reiv',
+      passwordHistory: [{ encryptedPassword: 'reenc', iv: 'reiv' }],
+    });
+    expect(payload.folders?.[0]).toMatchObject({
+      _id: FOLDER_ID,
+      encryptedName: 'reenc',
+      nameIv: 'reiv',
+    });
+    expect(payload.folders?.[1]).toEqual(SAMPLE_FOLDER);
+    // Nothing bound reaches the server.
+    expect(String(restoreBody().data)).not.toContain('v2:');
+
+    // Each bound field was opened against the ROW it was backed up from.
+    const bindings = vi
+      .mocked(cryptoService.decryptDataWithAad)
+      .mock.calls.map(([enc, iv, , , aad]) => [enc, iv, new TextDecoder().decode(aad)]);
+    expect(bindings).toEqual([
+      ['bd', 'bdi', `hvault/vault-field/v2|item.data|login|${ITEM_ID}`],
+      ['bn', 'bni', `hvault/vault-field/v2|item.name|${ITEM_ID}`],
+      ['bp', 'bpi', `hvault/vault-field/v2|item.password-history|${ITEM_ID}`],
+      ['hp', 'hpi', 'hvault/vault-field/v2|item.password-history|eeeeeeeeeeeeeeeeeeeeeeee'],
+      ['bfn', 'bfi', `hvault/vault-field/v2|folder.name|${FOLDER_ID}`],
+    ]);
+  });
+
+  it('drops only the restored row whose format-v2 field will not open', async () => {
+    // A server that moved a bound field between two rows of a backup gets the
+    // same answer the live vault gives: that row does not restore.
+    vi.mocked(cryptoService.decryptDataWithAad).mockRejectedValue(
+      Object.assign(new Error('The operation failed'), { name: 'OperationError' }),
+    );
+
+    await performRestore({
+      items: [
+        { ...SAMPLE_ITEM, itemType: 'login', dataIv: 'v2:di' },
+        { ...SAMPLE_ITEM, _id: 'ffffffffffffffffffffffff' },
+      ],
+      folders: [],
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith('/backup/restore', expect.anything());
+    });
+    expect(restoredPayload().items?.map((item) => item._id)).toEqual(['ffffffffffffffffffffffff']);
   });
 
   it('re-encrypts a restored row without altering one byte of its plaintext', async () => {
@@ -1263,6 +1981,191 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
       expect(mockToast).toHaveBeenCalledWith({ title: 'Passwords do not match', type: 'error' });
     });
     expect(mockApiPost).not.toHaveBeenCalledWith('/backup/setup', expect.anything());
+  });
+
+  /**
+   * Both of these endpoints store the account's VAULT KEY, wrapped under the
+   * backup key — the copy a cross-account restore unwraps. The server refuses
+   * either unless the request says which vault key it sealed, so a session on a
+   * superseded generation cannot silently replace the re-wrap a rotation
+   * performed. The number must come from the SAME `getState()` read as the key.
+   */
+  it('names the vault-key generation when it configures backup encryption', async () => {
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
+    );
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Backup encryption password'));
+
+    fireEvent.change(screen.getByPlaceholderText('Backup encryption password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Confirm backup password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Setup Encryption'));
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith(
+        '/backup/setup',
+        expect.objectContaining({ vaultKeyVersion: 7 }),
+      );
+    });
+    // And the wrapper it guards really is in the same body, so this is not a
+    // number attached to a request that seals nothing.
+    const body = mockApiPost.mock.calls.find((call) => call[0] === '/backup/setup')?.[1] as Record<
+      string,
+      unknown
+    >;
+    expect(body.bwkEncryptedVaultKey).toBeDefined();
+  });
+
+  it('names the vault-key generation when it re-keys backup encryption', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByText('Change backup encryption password'));
+
+    fireEvent.click(screen.getByText('Change backup encryption password'));
+
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('New backup password'), {
+      target: { value: 'BrandNewBackupPass1!' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Change Password'));
+    });
+
+    await waitFor(() => {
+      expect(mockApiPut).toHaveBeenCalledWith(
+        '/backup/change-password',
+        expect.objectContaining({ vaultKeyVersion: 7 }),
+      );
+    });
+    const body = mockApiPut.mock.calls.find(
+      (call) => call[0] === '/backup/change-password',
+    )?.[1] as Record<string, unknown> | undefined;
+    expect(body?.newBwkEncryptedVaultKey).toBeDefined();
+  });
+
+  it('names the generation even when this session holds no key and the wrapper is CLEARED', async () => {
+    // The `$unset` branch: a body with no wrapper triple clears the stored one,
+    // which is how a client legitimately drops a wrapper a rotation superseded.
+    // It is the same guarded address, so it carries the generation too — and the
+    // guard must not be decided from which fields the body happens to carry.
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
+    );
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Backup encryption password'));
+
+    useAuthStore.setState({ vaultKey: null });
+
+    fireEvent.change(screen.getByPlaceholderText('Backup encryption password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Confirm backup password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Setup Encryption'));
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith(
+        '/backup/setup',
+        expect.objectContaining({ vaultKeyVersion: 7 }),
+      );
+    });
+    const body = mockApiPost.mock.calls.find((call) => call[0] === '/backup/setup')?.[1] as Record<
+      string,
+      unknown
+    >;
+    expect(body).not.toHaveProperty('bwkEncryptedVaultKey');
+  });
+
+  /**
+   * The refusal has to REACH the user, and on this page nothing else can tell
+   * them: `authStore.vaultKeyVersion` is never refreshed here, so a naive retry
+   * resends the same stale number for ever. The restore driver on this same page
+   * already raises the app-wide notice; these two now do too.
+   */
+  it('raises the reload notice when backup setup is refused for a superseded key', async () => {
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({ enabled: false, scheduleHour: 3, backupEmails: [], isConfigured: false }),
+    );
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Backup encryption password'));
+    expect(useUIStore.getState().staleVaultKeyVersion).toBeNull();
+
+    mockApiPost.mockRejectedValueOnce(staleVaultKeyRejection());
+    fireEvent.change(screen.getByPlaceholderText('Backup encryption password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Confirm backup password'), {
+      target: { value: 'StrongBackupPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Setup Encryption'));
+    });
+
+    await waitFor(() => {
+      // The NUMBER the server reported, not a boolean: the banner is DERIVED by
+      // comparing it against this session's own generation, so a re-login or a
+      // rotation driven here clears it with nothing to remember.
+      expect(useUIStore.getState().staleVaultKeyVersion).toBe(9);
+    });
+    // And the server's own sentence reaches the user rather than a generic one.
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Failed to setup backup encryption',
+        description: expect.stringMatching(/rotated elsewhere/i) as unknown as string,
+        type: 'error',
+      }),
+    );
+  });
+
+  it('raises the reload notice when a backup re-key is refused for a superseded key', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByText('Change backup encryption password'));
+    expect(useUIStore.getState().staleVaultKeyVersion).toBeNull();
+
+    mockApiPut.mockRejectedValueOnce(staleVaultKeyRejection());
+    fireEvent.click(screen.getByText('Change backup encryption password'));
+    fireEvent.change(screen.getByPlaceholderText('Current master password'), {
+      target: { value: 'MasterPass1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('New backup password'), {
+      target: { value: 'BrandNewBackupPass1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Change Password'));
+    });
+
+    await waitFor(() => {
+      expect(useUIStore.getState().staleVaultKeyVersion).toBe(9);
+    });
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Failed to change backup password',
+        description: expect.stringMatching(/rotated elsewhere/i) as unknown as string,
+        type: 'error',
+      }),
+    );
   });
 
   it('refuses to change the backup password when no user is loaded', async () => {

@@ -62,6 +62,7 @@ import {
   AUDIT_LOG_MAX_LIMIT,
   BACKUP_HISTORY_PAGE_LIMIT,
   BACKUP_HISTORY_MAX_LIMIT,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
 } from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
@@ -3163,12 +3164,35 @@ describe('restoreBackupSchema', () => {
     expect(result.conflictStrategy).toBe('skip');
   });
 
-  it('defines only { conflictStrategy, data } — no vault-key-adoption / re-auth keys', () => {
+  it('defines only { conflictStrategy, data, vaultKeyVersion } — no vault-key-adoption / re-auth keys', () => {
     // Guards the regression the sibling test guards against, but non-vacuously:
     // asserting the schema's own key set fails the moment `adoptVaultKey` or
     // `authHash` is re-added, whereas a `not.toHaveProperty` on a parsed result
     // (which never supplied those keys) cannot.
-    expect(Object.keys(restoreBackupSchema.shape).sort()).toEqual(['conflictStrategy', 'data']);
+    //
+    // `vaultKeyVersion` joined the set deliberately, and it is the OPPOSITE of
+    // the thing this case forbids: it lets the caller NAME the vault key its
+    // rows were re-encrypted under so the server can refuse a superseded one.
+    // It carries no key material and grants no authority — the forbidden keys
+    // are the ones that would let a restore REPLACE the vault key or stand in
+    // for the master password.
+    expect(Object.keys(restoreBackupSchema.shape).sort()).toEqual([
+      'conflictStrategy',
+      'data',
+      'vaultKeyVersion',
+    ]);
+    // Named explicitly as well, so that widening the set above can never
+    // quietly re-admit one of them: the exact-set assertion is what fails today,
+    // and this is what still fails if somebody "fixes" it by listing the new key.
+    for (const forbidden of [
+      'adoptVaultKey',
+      'authHash',
+      'encryptedVaultKey',
+      'vaultKeyIv',
+      'vaultKeyTag',
+    ]) {
+      expect(Object.keys(restoreBackupSchema.shape)).not.toContain(forbidden);
+    }
   });
 });
 
@@ -3468,19 +3492,23 @@ describe('importSchema operations contract', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects an over-length encryptedPassword in passwordHistory', () => {
-    const result = importSchema.safeParse({
-      format: 'json',
-      operations: {
-        updates: [
-          {
-            ...validUpdate,
-            passwordHistory: [{ ...validHistoryEntry, encryptedPassword: 'x'.repeat(5_001) }],
-          },
-        ],
-      },
-    });
-    expect(result.success).toBe(false);
+  it('rejects an over-length encryptedPassword in passwordHistory, one past the named bound', () => {
+    // Pinned to the bound, never a literal: the bound was raised to hold any storable
+    // login password, and a literal left below it stopped exercising the refusal.
+    const withHistory = (length: number) =>
+      importSchema.safeParse({
+        format: 'json',
+        operations: {
+          updates: [
+            {
+              ...validUpdate,
+              passwordHistory: [{ ...validHistoryEntry, encryptedPassword: 'x'.repeat(length) }],
+            },
+          ],
+        },
+      });
+    expect(withHistory(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH + 1).success).toBe(false);
+    expect(withHistory(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH).success).toBe(true);
   });
 
   it('strips unknown keys from operation items (.strip semantics preserved)', () => {

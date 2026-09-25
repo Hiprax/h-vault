@@ -18,13 +18,16 @@
  *     alternate run, which costs the whole speedup and looks, from outside, exactly
  *     like the feature working;
  *   * `incremental` on a config that EMITS is worse than useless. A non-build `tsc`
- *     never checks whether its outputs still exist (typescript 6.0.3 guards that
- *     loop with `if (!isIncremental)`, and only in build mode), so `dist/` removed
- *     while the build info survived makes `npm run build` exit 0 having emitted
- *     nothing — and the same flag silences `tsc -b`'s own output check for the
- *     client. Both measured. That is why the three build configs carry neither key
- *     and the three `tsc --noEmit` passes take theirs from a `--tsBuildInfoFile`
- *     flag in the `type-check` script instead.
+ *     never checks whether its outputs still exist (TypeScript 6.0.3's JavaScript
+ *     compiler guards that loop with `if (!isIncremental)`, and only in build
+ *     mode), so `dist/` removed while the build info survived makes `npm run
+ *     build` exit 0 having emitted nothing — and the same flag silences `tsc -b`'s
+ *     own output check for the client. Both measured, and both measured AGAIN on
+ *     the native TypeScript 7.0.2 compiler the build now runs, which behaves
+ *     identically in both cases: a rewrite of the compiler is not a reason to
+ *     assume the hazard went with it. That is why the three build configs carry
+ *     neither key and the three `tsc --noEmit` passes take theirs from a
+ *     `--tsBuildInfoFile` flag in the `type-check` script instead.
  *
  * The invocation list is DERIVED from the `type-check` scripts rather than
  * hard-coded, so an invocation added to the gate is checked here the moment it is

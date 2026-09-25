@@ -167,6 +167,14 @@ export interface CsrfPair {
  *
  * Optionally accepts `extraCookies` to include additional cookies (e.g. a
  * refresh token cookie) alongside the CSRF cookie on the initial request.
+ *
+ * Call it BEFORE building the request the pair is for, never between building
+ * that request and sending it. An agent over an app starts one server for all
+ * of its requests and, since supertest 7.3, closes it as soon as no request it
+ * has SENT is still in flight; a request that has been built but not yet sent
+ * is not counted. So `pending = agent.put(...)`, then `await getCsrf(agent)`,
+ * then `pending.send()` sends to a port that has just been closed, and fails
+ * with ECONNREFUSED before the route under test ever runs.
  */
 export async function getCsrf(agent: request.Agent, extraCookies?: string): Promise<CsrfPair> {
   const req = agent.get('/api/v1/csrf-token');

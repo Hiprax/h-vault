@@ -252,12 +252,29 @@ function prepareWorkspace() {
   // `test:smoke`, which runs the emitted JavaScript rather than the sources: a
   // workspace without them makes that gate exit "no built artifact", which is a
   // non-zero exit that has nothing to do with the planted defect — and a case
-  // that cannot be attributed proves nothing. All three are gitignored, so the
+  // that cannot be attributed proves nothing. All four are gitignored, so the
   // `git ls-files` enumeration above never sees them.
+  //
+  // `packages/client/dist-sandbox` is the fourth because the isolated render
+  // document is emitted OUTSIDE `dist/`, so that no static root can serve it
+  // without its per-response policy. Both `test:smoke` and `audit:bundle` refuse
+  // to run without it, and while it was missing from this list both cases failed
+  // in their first step with "missing — build the client first", reported as
+  // unproven: two gates whose planted defects were never reached.
+  //
+  // `packages/shared/src/generated` is the fifth, and the only one inside a
+  // source tree: `scripts/inject-version.js` writes `version.ts` there during the
+  // shared build, `src/constants` imports it, and it is gitignored. Without it
+  // every shared test fails to import its subject, so a gate that runs the
+  // shared SOURCE suite — `test:mutation:diff`'s Stryker dry run — found no
+  // runnable test at all and reported "could not run" instead of the planted
+  // survivors, which is how its case was first measured unproven.
   for (const rel of [
     join('packages', 'shared', 'dist'),
     join('packages', 'server', 'dist'),
     join('packages', 'client', 'dist'),
+    join('packages', 'client', 'dist-sandbox'),
+    join('packages', 'shared', 'src', 'generated'),
   ]) {
     const from = join(ROOT, rel);
     if (existsSync(from)) cpSync(from, join(dir, rel), { recursive: true });

@@ -519,7 +519,12 @@ describe('Concurrent Operations Safety', () => {
       expect(postUser).not.toBeNull();
       expect(postUser!.encryptedVaultKey).toBe(originalEncryptedVaultKey);
       expect(postUser!.rotationInProgress).not.toBe(true);
-      expect(postUser!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(postUser!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
 
       // CRITICAL: every item and folder must carry its ORIGINAL ciphertext,
       // not the new one. This is what the rollback guarantees.

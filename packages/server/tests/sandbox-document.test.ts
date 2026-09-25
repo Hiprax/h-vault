@@ -25,6 +25,14 @@
  * alone would pass while the route sent something else; a served-header test
  * alone would leave the constant free to drift. Both halves are needed and
  * neither substitutes for the other.
+ *
+ * One thing this file used to be the only home of is now reachable in this tier:
+ * `app-production-client.test.ts` drives the production block itself, over a
+ * temporary directory that re-roots the real artifact layout, which is what makes
+ * the WIRING assertable — including that no URL spelling serves the document
+ * without this policy. It reaches production mode by mocking the config module
+ * and both artifact paths, which is the constraint above being routed around
+ * rather than lifted.
  */
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
@@ -39,6 +47,7 @@ import {
   createSandboxDocumentHandler,
   isSandboxAssetPath,
 } from '../src/config/sandboxCsp.js';
+import { SANDBOX_PERMISSIONS_POLICY } from '../src/config/permissionsPolicy.js';
 
 /** A response double that records what a handler did to it, and nothing else. */
 function recordingResponse() {
@@ -179,15 +188,20 @@ describe('the route that serves the sandbox document', () => {
     expect(res.sent).toEqual(['<!doctype html><html></html>']);
     expect(res.sent[0]).not.toContain('nonce');
 
-    // Exactly three headers, and the policy is THE constant rather than a copy
+    // Exactly four headers, and the policy is THE constant rather than a copy
     // of it. This is the pin that would fail if the route were ever pointed at
     // a second, hand-written policy string.
     expect([...res.headers.keys()].sort()).toEqual([
       'cache-control',
       'content-security-policy',
       'content-type',
+      'permissions-policy',
     ]);
     expect(res.headers.get('content-security-policy')).toBe(SANDBOX_CSP_HEADER);
+    // The golden list with the camera denied too, REPLACING the application's
+    // own value (which allows the camera for the authenticator import): the
+    // isolated document never needs a device.
+    expect(res.headers.get('permissions-policy')).toBe(SANDBOX_PERMISSIONS_POLICY);
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     // Revalidated, never held: the document names content-hashed
     // `/sandbox-assets/` URLs that change on every deploy, so a cached copy is a

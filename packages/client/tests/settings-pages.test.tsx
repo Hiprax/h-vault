@@ -20,10 +20,12 @@
  *  - Backup history display
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
+import { deriveRowId } from '@hvault/shared';
+import { firstSkippedHeadingLevel, headingLevels } from './support/documentOutline';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia for jsdom
@@ -97,56 +99,81 @@ vi.mock('../src/stores/encryptedStorage', () => ({
   isStorageDegraded: vi.fn().mockReturnValue(false),
 }));
 
-vi.mock('../src/services/crypto/cryptoService', () => ({
-  cryptoService: {
-    deriveKeys: vi.fn().mockResolvedValue({
+/**
+ * The cryptoService stub's defaults, in ONE place: the factory arms each stub with
+ * them once, and `resetCryptoServiceStub()` resets and re-arms every stub before
+ * each test. `vi.clearAllMocks()` alone clears calls but KEEPS an implementation a
+ * test installed, and this file runs shuffled, so a test's `decryptData` or
+ * `vaultKeyEqualsRaw` override used to decide what whichever test the seed ran
+ * next saw (measured under `test:flake`: seeds 1338, 1344 and 1346 failed "seals
+ * a native item again..." on the previous test's decryptor).
+ */
+const cryptoServiceDefaults = vi.hoisted(() => ({
+  deriveKeys: (fn: Mock) =>
+    fn.mockResolvedValue({
       masterEncryptionKey: new Uint8Array(32),
       authKey: new Uint8Array(32),
     }),
-    getAuthHash: vi.fn().mockReturnValue('mock-auth-hash'),
-    generateVaultKey: vi.fn(),
-    encryptVaultKey: vi.fn().mockResolvedValue({
+  getAuthHash: (fn: Mock) => fn.mockReturnValue('mock-auth-hash'),
+  generateVaultKey: (fn: Mock) => fn,
+  encryptVaultKey: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'enc',
       iv: 'iv',
       tag: 'tag',
     }),
-    decryptVaultKey: vi.fn(),
-    importVaultKey: vi.fn().mockResolvedValue(new Uint8Array(32)),
-    vaultKeyEqualsRaw: vi.fn().mockResolvedValue(true),
-    encryptData: vi.fn().mockResolvedValue({
+  decryptVaultKey: (fn: Mock) => fn,
+  importVaultKey: (fn: Mock) => fn.mockResolvedValue(new Uint8Array(32)),
+  vaultKeyEqualsRaw: (fn: Mock) => fn.mockResolvedValue(true),
+  encryptData: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'enc',
       iv: 'iv',
       tag: 'tag',
     }),
-    decryptData: vi.fn().mockResolvedValue('decrypted'),
-    generateSearchHash: vi.fn().mockResolvedValue('hash'),
-    clearKey: vi.fn(),
-    clearCryptoKey: vi.fn().mockResolvedValue(undefined),
-    rotateVaultKey: vi.fn().mockResolvedValue({
+  decryptData: (fn: Mock) => fn.mockResolvedValue('decrypted'),
+  encryptDataWithAad: (fn: Mock) =>
+    fn.mockResolvedValue({
+      encrypted: 'bound',
+      iv: 'iv',
+      tag: 'tag',
+    }),
+  generateSearchHash: (fn: Mock) => fn.mockResolvedValue('hash'),
+  clearKey: (fn: Mock) => fn,
+  clearCryptoKey: (fn: Mock) => fn.mockResolvedValue(undefined),
+  rotateVaultKey: (fn: Mock) =>
+    fn.mockResolvedValue({
       newVaultKey: new Uint8Array(32),
       encrypted: 'newEnc',
       iv: 'newIv',
       tag: 'newTag',
     }),
-    generateSalt: vi.fn().mockReturnValue(new Uint8Array(16)),
-    deriveBEK: vi.fn().mockResolvedValue(new Uint8Array(32)),
-    generateBWK: vi.fn().mockReturnValue(new Uint8Array(32)),
-    encryptBWK: vi.fn().mockResolvedValue({
+  generateSalt: (fn: Mock) => fn.mockReturnValue(new Uint8Array(16)),
+  deriveBEK: (fn: Mock) => fn.mockResolvedValue(new Uint8Array(32)),
+  generateBWK: (fn: Mock) => fn.mockReturnValue(new Uint8Array(32)),
+  encryptBWK: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'encBWK',
       iv: 'bwkIv',
       tag: 'bwkTag',
     }),
-    encryptVaultKeyWithBWK: vi.fn().mockResolvedValue({
+  encryptVaultKeyWithBWK: (fn: Mock) =>
+    fn.mockResolvedValue({
       encrypted: 'bwkEncVK',
       iv: 'bwkVKIv',
       tag: 'bwkVKTag',
     }),
-    decryptVaultKeyWithBWK: vi.fn().mockResolvedValue(new Uint8Array(32)),
-    decryptBWK: vi.fn().mockResolvedValue(new Uint8Array(32)),
-    computeBackupHmac: vi.fn().mockResolvedValue('mock-integrity-hmac'),
-    base64ToArrayBuffer: vi.fn().mockReturnValue(new Uint8Array(16)),
-    arrayBufferToBase64: vi.fn().mockReturnValue('base64salt'),
-  },
+  decryptVaultKeyWithBWK: (fn: Mock) => fn.mockResolvedValue(new Uint8Array(32)),
+  decryptBWK: (fn: Mock) => fn.mockResolvedValue(new Uint8Array(32)),
+  computeBackupHmac: (fn: Mock) => fn.mockResolvedValue('mock-integrity-hmac'),
+  base64ToArrayBuffer: (fn: Mock) => fn.mockReturnValue(new Uint8Array(16)),
+  arrayBufferToBase64: (fn: Mock) => fn.mockReturnValue('base64salt'),
+}));
+
+vi.mock('../src/services/crypto/cryptoService', () => ({
+  cryptoService: Object.fromEntries(
+    Object.entries(cryptoServiceDefaults).map(([name, arm]) => [name, arm(vi.fn())]),
+  ),
 }));
 
 vi.mock('../src/services/api/authApi', () => ({
@@ -308,6 +335,17 @@ import { useAuthStore } from '../src/stores/authStore';
 import { useUIStore } from '../src/stores/uiStore';
 import { cryptoService } from '../src/services/crypto/cryptoService';
 import { clearSettingsCache } from '../src/hooks/useUserSettings';
+import { settleImportFlow } from './support/settleImport';
+
+/** Resets every cryptoService stub and re-arms its default (see `cryptoServiceDefaults`). */
+function resetCryptoServiceStub(): void {
+  const stubs = cryptoService as unknown as Record<string, Mock>;
+  for (const [name, arm] of Object.entries(cryptoServiceDefaults)) {
+    const stub = stubs[name];
+    if (stub === undefined) throw new Error(`cryptoService has no stub named ${name}`);
+    arm(stub.mockReset());
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -346,6 +384,28 @@ function setupDefaultProfileMock(overrides: Record<string, unknown> = {}) {
 // ==========================================================================
 // 1 - SettingsPage
 // ==========================================================================
+
+/** This session's own account: every imported row's id is derived from it. */
+const USER_ID = '65a1b2c3d4e5f60718293a4b';
+
+/**
+ * A server that stores every insert where its nonce says, answering with the ids
+ * `deriveRowId` gives them, in insert order, exactly as the real one does. The
+ * page refuses an import whose answer names any other id.
+ */
+function acceptImport(counts: { insertedCount: number; updatedCount: number }) {
+  return async (body: { operations: { inserts: { idNonce?: string }[] } }) => ({
+    data: {
+      success: true,
+      data: {
+        ...counts,
+        insertedIds: await Promise.all(
+          body.operations.inserts.map((insert) => deriveRowId(USER_ID, insert.idNonce ?? '')),
+        ),
+      },
+    },
+  });
+}
 
 /** An empty, well-formed first page — enough for `fetchItems()` to complete. */
 const EMPTY_ITEMS_PAGE = {
@@ -386,6 +446,7 @@ function answerConfigWithoutDocuments(): void {
 describe('SettingsPage', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    resetCryptoServiceStub();
     setupDefaultProfileMock();
     // Import resolves conflicts client-side against the WHOLE vault, so it loads
     // the item list before deciding anything. Without a well-formed page here the
@@ -398,12 +459,16 @@ describe('SettingsPage', () => {
 
     useAuthStore.setState({
       accessToken: 'test-token',
-      user: { userId: 'u1', email: 'test@example.com' },
+      user: { userId: USER_ID, email: 'test@example.com' },
       isAuthenticated: true,
       isLocked: false,
       vaultKey: new Uint8Array(32) as unknown as CryptoKey,
       mek: new Uint8Array(32) as unknown as CryptoKey,
       encryptedVaultKeyData: null,
+      // Deliberately NOT zero: the generation a write claims has to be the one
+      // this session recorded with its key, and a base of 0 would let a
+      // hard-coded or defaulted number pass as correct.
+      vaultKeyVersion: 2,
       twoFactorRequired: false,
       tempToken: null,
     });
@@ -411,6 +476,10 @@ describe('SettingsPage', () => {
     // Store setTheme mock - do not delegate to real implementation to avoid recursion
     useUIStore.setState({ theme: 'system', setTheme: mockSetTheme });
   });
+
+  // An import's tail (summary toast, `fetchItems()`) must run inside the test that
+  // started it, never inside the next one: see `settleImportFlow`.
+  afterEach(settleImportFlow);
 
   async function renderSettings() {
     const { default: SettingsPage } = await import('../src/pages/SettingsPage');
@@ -574,6 +643,11 @@ describe('SettingsPage', () => {
       newEncryptedVaultKey: 'enc-mek-new',
       newVaultKeyIv: 'new-iv',
       newVaultKeyTag: 'new-tag',
+      // And it MUST say which vault key that wrapper was built from. Without it
+      // the server cannot tell a wrapper for the live key from one for a key a
+      // rotation elsewhere has already replaced, and storing the latter destroys
+      // the only copy of the live one.
+      vaultKeyVersion: 2,
     });
   });
 
@@ -1084,9 +1158,20 @@ describe('SettingsPage', () => {
       },
     };
 
-    mockGetProfileApi
-      .mockResolvedValueOnce({ data: backupProfile })
-      .mockResolvedValueOnce({ data: backupProfile });
+    // The SECOND read is the one the rotation takes after it commits, and it
+    // reports a generation that is neither the store's (2) nor absent. That makes
+    // the send site below discriminable three ways: the profile's number is 3,
+    // `useAuthStore.getState().vaultKeyVersion` is 2, and a deleted line sends
+    // nothing at all. Without that spread this assertion would pass against the
+    // wrong source — which matters, because the whole block is wrapped in a
+    // `catch` that treats a failure as non-critical, so the server's 409 would be
+    // swallowed and the stale BWK-wrapped vault key would simply never be updated.
+    mockGetProfileApi.mockResolvedValueOnce({ data: backupProfile }).mockResolvedValueOnce({
+      data: {
+        ...backupProfile,
+        data: { ...backupProfile.data, vaultKeyVersion: 3 },
+      },
+    });
 
     answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
@@ -1116,6 +1201,11 @@ describe('SettingsPage', () => {
           bwkEncryptedVaultKey: 'bwkEncVK',
           bwkVaultKeyIv: 'bwkVKIv',
           bwkVaultKeyTag: 'bwkVKTag',
+          // FROM THE PROFILE re-read after the rotation committed, never from
+          // `authStore` — whose own number does not move until the step AFTER
+          // this call, so it still names the generation the rotation replaced and
+          // the server would refuse the write.
+          vaultKeyVersion: 3,
         }),
       );
     });
@@ -1158,9 +1248,20 @@ describe('SettingsPage', () => {
       },
     };
 
-    mockGetProfileApi
-      .mockResolvedValueOnce({ data: backupProfile })
-      .mockResolvedValueOnce({ data: backupProfile });
+    // The SECOND read is the one the rotation takes after it commits, and it
+    // reports a generation that is neither the store's (2) nor absent. That makes
+    // the send site below discriminable three ways: the profile's number is 3,
+    // `useAuthStore.getState().vaultKeyVersion` is 2, and a deleted line sends
+    // nothing at all. Without that spread this assertion would pass against the
+    // wrong source — which matters, because the whole block is wrapped in a
+    // `catch` that treats a failure as non-critical, so the server's 409 would be
+    // swallowed and the stale BWK-wrapped vault key would simply never be updated.
+    mockGetProfileApi.mockResolvedValueOnce({ data: backupProfile }).mockResolvedValueOnce({
+      data: {
+        ...backupProfile,
+        data: { ...backupProfile.data, vaultKeyVersion: 3 },
+      },
+    });
 
     answerConfigWithoutDocuments();
     mockApiPost.mockResolvedValue({ data: { success: true } });
@@ -1178,10 +1279,13 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByText('Confirm Rotation'));
 
     await waitFor(() => {
-      // Should send without bwkEncryptedVaultKey fields
+      // Should send without bwkEncryptedVaultKey fields — but WITH the
+      // generation, because this branch CLEARS the stored wrapper and clearing is
+      // as guarded as writing: the check belongs to the address, not to which
+      // fields the body happens to carry.
       expect(mockApiPost).toHaveBeenCalledWith(
         '/backup/setup',
-        expect.objectContaining({ authHash: 'mock-auth-hash' }),
+        expect.objectContaining({ authHash: 'mock-auth-hash', vaultKeyVersion: 3 }),
       );
       // Verify bwkEncryptedVaultKey is NOT in the call
       const setupCall = mockApiPost.mock.calls.find((c: unknown[]) => c[0] === '/backup/setup');
@@ -1381,10 +1485,11 @@ describe('SettingsPage', () => {
     expect(select.querySelectorAll('option')).toHaveLength(8);
   });
 
-  it('re-sends the ORIGINAL ciphertext of a native item rather than re-encrypting it', async () => {
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+  it('seals a native item again to the NEW row it is inserted as, never re-sending its ciphertext', async () => {
+    // Premise changed: a native row's file ciphertext is bound to the row it was
+    // exported from (or to nothing), so it is no longer forwarded verbatim; it is
+    // opened and sealed again (format v2) to the id the insert's nonce derives.
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
 
@@ -1417,11 +1522,39 @@ describe('SettingsPage', () => {
     };
     expect(payload.operations.inserts).toHaveLength(1);
     expect(payload.operations.updates).toEqual([]);
-    // The row is already encrypted under the current vault key, so its bytes are
-    // forwarded verbatim (a re-encrypt would show the mocked `enc:` prefix).
-    expect(payload.operations.inserts[0]).toMatchObject(nativeItem);
-    // Only the search hash is recomputed — it is a deterministic HMAC of the name.
-    expect(payload.operations.inserts[0]?.searchHash).toBe('hash');
+    const insert = payload.operations.inserts[0] ?? {};
+    // Sealed again and marked v2; none of the file's ciphertext is on the wire.
+    expect(insert).toMatchObject({
+      itemType: 'login',
+      encryptedName: 'bound',
+      nameIv: 'v2:iv',
+      nameTag: 'tag',
+      encryptedData: 'bound',
+      dataIv: 'v2:iv',
+      dataTag: 'tag',
+    });
+    const wire = JSON.stringify(payload);
+    for (const fileValue of ['"ed"', '"di"', '"dt"', '"en"', '"ni"', '"nt"']) {
+      expect(wire).not.toContain(fileValue);
+    }
+    // Bound to the row the server will store: the id this insert's nonce derives.
+    expect(insert.idNonce).toMatch(/^[0-9a-f]{40}$/);
+    // The page's post-import tail settles first, so nothing of it runs
+    // outside act() while this test does its own asynchronous work.
+    await settleImportFlow();
+    const rowId = await deriveRowId(USER_ID, insert.idNonce ?? '');
+    const { vaultKey } = useAuthStore.getState();
+    const sealed = vi
+      .mocked(cryptoService.encryptDataWithAad)
+      .mock.calls.map(([plain, key, aad]) => [plain, key, new TextDecoder().decode(aad)]);
+    expect(sealed).toEqual([
+      ['decrypted', vaultKey, `hvault/vault-field/v2|item.name|${rowId}`],
+      ['decrypted', vaultKey, `hvault/vault-field/v2|item.data|login|${rowId}`],
+    ]);
+    // Nothing is sealed unbound (v1).
+    expect(cryptoService.encryptData).not.toHaveBeenCalled();
+    // The search hash is recomputed — it is a deterministic HMAC of the name.
+    expect(insert.searchHash).toBe('hash');
   });
 
   it('shows CSV field mapping UI when CSV format is selected', async () => {
@@ -1443,6 +1576,28 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Map CSV Columns')).toBeInTheDocument();
     });
+  });
+
+  it('keeps the CSV mapping panel inside the page outline: its headings sit one level below the card', async () => {
+    await renderSettings();
+    await waitFor(() => screen.getByText('Import Vault'));
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue('H-Vault (.enc / JSON)'), {
+      target: { value: 'csv' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: 'Name,Username,Password\nTest,user1,pass1' },
+    });
+    await waitFor(() => screen.getByText('Map CSV Columns'));
+
+    // The page names itself once, each card is a section of it, and the two
+    // panels inside the Data card are sub-sections of THAT card.
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { level: 2, name: /Data/ })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 3, name: 'Map CSV Columns' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 3, name: /^Preview/ })).toBeInTheDocument();
+    // …and no heading anywhere on the page skips a level to get there.
+    expect(firstSkippedHeadingLevel(headingLevels())).toBeNull();
   });
 
   it('shows an error when a generic CSV maps no identifying column', async () => {
@@ -1982,9 +2137,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce('decrypted-name') // item 1 name
       .mockRejectedValueOnce(new Error('Decryption failed')); // item 2 data fails
 
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
 
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
@@ -2096,9 +2249,7 @@ describe('SettingsPage', () => {
       .mockResolvedValueOnce('decrypted-data')
       .mockResolvedValueOnce('decrypted-name');
 
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
 
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
@@ -2162,9 +2313,7 @@ describe('SettingsPage', () => {
       Promise.resolve(`plain:${encrypted}`),
     );
 
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 2, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 2, updatedCount: 0 }));
 
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
@@ -2211,9 +2360,7 @@ describe('SettingsPage', () => {
   });
 
   it('skips validation for non-JSON import formats', async () => {
-    mockImportVaultApi.mockResolvedValue({
-      data: { success: true, data: { insertedCount: 1, updatedCount: 0 } },
-    });
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
 
     await renderSettings();
     await waitFor(() => screen.getByText('Import Vault'));
@@ -2249,6 +2396,7 @@ describe('SettingsPage', () => {
 describe('BackupSettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetCryptoServiceStub();
 
     useAuthStore.setState({
       accessToken: 'test-token',
@@ -2850,6 +2998,15 @@ describe('BackupSettingsPage', () => {
     backupEncryption: backupFileWithVaultKey.backupEncryption,
   };
 
+  /**
+   * These fixtures carry no `integrity` signature, so each one stops at the
+   * unverified-restore prompt before anything is sent. The prompt is answered
+   * here rather than in each case: what this block is about is re-encryption,
+   * verbatim `_id` forwarding and the server's error surfacing, none of which the
+   * gate changes. The gate itself is pinned in
+   * `coverage-backup-settings.test.tsx`, which asserts the negative — that
+   * nothing is sent while the prompt stands.
+   */
   async function performRestore(fileData: Record<string, unknown> = backupFileWithVaultKey) {
     const { container } = await renderBackup();
     await waitFor(() => screen.getByText('Restore from File'));
@@ -2866,6 +3023,13 @@ describe('BackupSettingsPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('Restore'));
     });
+
+    const confirmUnverified = screen.queryByText('Restore Unverified Backup');
+    if (confirmUnverified) {
+      await act(async () => {
+        fireEvent.click(confirmUnverified);
+      });
+    }
   }
 
   function restoreBody() {
@@ -2990,9 +3154,6 @@ describe('BackupSettingsPage', () => {
     // The item survived (not dropped) and only the good history entry remains.
     expect(parsed.items).toHaveLength(1);
     expect(parsed.items[0]!.passwordHistory).toHaveLength(1);
-
-    // Restore the shared decryptData mock default for later tests.
-    vi.mocked(cryptoService.decryptData).mockResolvedValue('decrypted');
   });
 
   it('forwards item and folder _id values verbatim (client never strips ids)', async () => {

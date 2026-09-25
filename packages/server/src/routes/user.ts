@@ -4,7 +4,7 @@ import { validate } from '../middleware/validate.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 import {
   passwordVerifyLimiter,
-  tokenVerifyLimiter,
+  twoFactorVerifyLimiter,
   generalAuthLimiter,
 } from '../middleware/rateLimiter.js';
 import {
@@ -57,7 +57,9 @@ router.put(
 // ── Two-Factor Authentication ────────────────────────────────────────
 
 router.post('/2fa/setup', passwordVerifyLimiter, validate(setup2faSchema, 'body'), setup2fa);
-router.post('/2fa/verify', tokenVerifyLimiter, validate(verify2faSchema, 'body'), verify2fa);
+// Per user rather than the IP-keyed `tokenVerifyLimiter` the public verification
+// links use: this route is authenticated, so the account is the identity to bound.
+router.post('/2fa/verify', twoFactorVerifyLimiter, validate(verify2faSchema, 'body'), verify2fa);
 router.delete('/2fa', passwordVerifyLimiter, validate(disable2faSchema, 'body'), disable2fa);
 router.post(
   '/2fa/regenerate-backup-codes',

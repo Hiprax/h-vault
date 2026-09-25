@@ -95,6 +95,10 @@ import {
   MAX_DOCUMENT_CHUNK_COUNT,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
   MAX_IN_FLIGHT_PART_UPLOADS,
+  MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
+  MAX_IN_FLIGHT_LARGE_BODY_REQUESTS,
+  MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER,
+  MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
   MAX_DOCUMENT_NAME_LENGTH,
   MAX_DOCUMENT_MIME_LENGTH,
   MAX_DOCUMENT_EXT_LENGTH,
@@ -106,7 +110,8 @@ import {
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
   MAX_FORMATTABLE_SIZE_BYTES,
   MAX_TRANSFORM_EXCERPT_LENGTH,
-  MAX_TRANSFORM_MESSAGE_LENGTH,
+  JSONREPAIR_VERSION,
+  PRETTIER_VERSION,
   REPAIRABLE_TRANSFORM_SYNTAXES,
   TRANSFORM_SYNTAXES,
   TRANSFORM_SYNTAX_NAMES,
@@ -120,6 +125,13 @@ import {
   DOCUMENT_STREAM_INFO_PREFIX,
   DOCUMENT_META_INFO_PREFIX,
   DOCUMENT_DEK_WRAP_INFO_PREFIX,
+  VAULT_FIELD_AAD_PREFIX,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
+  VAULT_FIELD_ROLES,
+  VAULT_FIELD_V2_IV_MARKER,
+  ROW_ID_DERIVATION_PREFIX,
+  ROW_ID_NONCE_PATTERN,
+  VAULT_SEARCH_KEY_INFO,
 } from '../src/constants/index.js';
 import {
   cardDataSchema,
@@ -132,8 +144,10 @@ import {
 import {
   canRepairSyntax,
   previewModeForName,
+  transformExcerpt,
   transformSyntaxForExtension,
   transformSyntaxForName,
+  transformToolLabels,
 } from '../src/utils/index.js';
 
 // ---------------------------------------------------------------------------
@@ -412,6 +426,10 @@ describe('Document-store constants', () => {
     ['MAX_DOCUMENT_CHUNK_COUNT', MAX_DOCUMENT_CHUNK_COUNT, 10_000],
     ['MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER', MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER, 3],
     ['MAX_IN_FLIGHT_PART_UPLOADS', MAX_IN_FLIGHT_PART_UPLOADS, 4],
+    ['MAX_IN_FLIGHT_PART_UPLOADS_PER_USER', MAX_IN_FLIGHT_PART_UPLOADS_PER_USER, 3],
+    ['MAX_IN_FLIGHT_LARGE_BODY_REQUESTS', MAX_IN_FLIGHT_LARGE_BODY_REQUESTS, 2],
+    ['MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER', MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER, 1],
+    ['MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND', MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND, 131_072],
     ['MAX_DOCUMENT_NAME_LENGTH', MAX_DOCUMENT_NAME_LENGTH, 255],
     ['MAX_DOCUMENT_MIME_LENGTH', MAX_DOCUMENT_MIME_LENGTH, 255],
     ['MAX_DOCUMENT_EXT_LENGTH', MAX_DOCUMENT_EXT_LENGTH, 32],
@@ -422,7 +440,6 @@ describe('Document-store constants', () => {
     ['MAX_DOCUMENT_META_JSON_BYTES', MAX_DOCUMENT_META_JSON_BYTES, 36_864],
     ['MAX_ENCRYPTED_DOCUMENT_META_LENGTH', MAX_ENCRYPTED_DOCUMENT_META_LENGTH, 49_152],
     ['MAX_FORMATTABLE_SIZE_BYTES', MAX_FORMATTABLE_SIZE_BYTES, 5_242_880],
-    ['MAX_TRANSFORM_MESSAGE_LENGTH', MAX_TRANSFORM_MESSAGE_LENGTH, 2_000],
     ['MAX_TRANSFORM_EXCERPT_LENGTH', MAX_TRANSFORM_EXCERPT_LENGTH, 200],
   ])('%s is %i', (_name, actual, expected) => {
     expect(actual).toBe(expected);
@@ -460,6 +477,33 @@ describe('Document-store constants', () => {
       1024 * 1024 * 1024,
     );
     expect(MAX_DOCUMENT_CHUNK_COUNT).toBe(10_000);
+  });
+
+  it('shares the in-flight part budget so one account can never hold all of it, or be refused early', () => {
+    // THE TWO RELATIONS, neither of which is either literal above.
+    //
+    // Strictly BELOW the process budget, because "one identity cannot wedge the
+    // process" is what the share is for: set the two equal and the share is inert
+    // while every test that mentions it still passes.
+    expect(MAX_IN_FLIGHT_PART_UPLOADS_PER_USER).toBeLessThan(MAX_IN_FLIGHT_PART_UPLOADS);
+    // …and at least what a CONFORMING client presents: a transfer sends its parts
+    // one at a time, so an account can have one part in flight per transfer the
+    // server let it open. Below this, the server refuses what its own init cap
+    // authorised — and the client's retry ladder is three steps long, so the third
+    // transfer would exhaust it and fail rather than merely wait.
+    expect(MAX_IN_FLIGHT_PART_UPLOADS_PER_USER).toBeGreaterThanOrEqual(
+      MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
+    );
+  });
+
+  it('shares the in-flight large-body budget so one account can never hold all of it', () => {
+    // The same relation as the part share, and for the same reason: equal, the
+    // share is inert and one account's two stalled restores hold every slot.
+    expect(MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER).toBeLessThan(
+      MAX_IN_FLIGHT_LARGE_BODY_REQUESTS,
+    );
+    // …and at least one, or no account could ever restore or rotate at all.
+    expect(MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER).toBeGreaterThanOrEqual(1);
   });
 
   it('lets a rotation name every row an account can actually hold, not just the advertised limit', () => {
@@ -555,6 +599,69 @@ describe('Document-store constants', () => {
       // hex characters of an ObjectId, so the last one is unambiguous.
       expect(prefix.indexOf('|')).toBe(prefix.length - 1);
     }
+  });
+
+  it('pins the vault-field v2 format constants, which no stored bound field may outlive', () => {
+    // FORMAT constants, exactly like the document prefixes above: a rename makes
+    // every v2 field already stored undecryptable, so it has to be a visible edit
+    // here as well as in the client's committed known-answer vector.
+    expect(VAULT_FIELD_AAD_PREFIX).toBe('hvault/vault-field/v2|');
+    expect(VAULT_FIELD_V2_IV_MARKER).toBe('v2:');
+    expect(VAULT_FIELD_ROLES).toEqual([
+      'item.name',
+      'item.data',
+      'item.password-history',
+      'folder.name',
+    ]);
+    // One separator, at the end, as for the document prefixes: a second `|` inside
+    // the prefix would let two different (role, id) pairs meet in the same bytes.
+    expect(VAULT_FIELD_AAD_PREFIX.indexOf('|')).toBe(VAULT_FIELD_AAD_PREFIX.length - 1);
+    // Every token a binding joins with `|` must be unable to hold one; the row id
+    // is hex, so these two closed lists are the only other place one could hide.
+    for (const token of [...VAULT_FIELD_ROLES, ...ITEM_TYPES]) {
+      expect(token, token).not.toContain('|');
+    }
+    // A role is never a prefix of another, so `item.data|login|…` can only be read
+    // one way even before the fixed-width id is considered.
+    for (const a of VAULT_FIELD_ROLES) {
+      for (const b of VAULT_FIELD_ROLES) {
+        if (a !== b) expect(`${b}|`.startsWith(`${a}|`), `${a} vs ${b}`).toBe(false);
+      }
+    }
+  });
+
+  it('marks a v2 IV with a prefix no base64 string can begin with', () => {
+    // The whole dispatch rests on this: a v1 IV is standard base64 by
+    // construction, so a marker that could be the start of one would send a
+    // legacy row down the bound path and it would never open again. The marker
+    // need not be foreign from its first character, only somewhere in it.
+    expect(/^[A-Za-z0-9+/=]*$/.test(VAULT_FIELD_V2_IV_MARKER)).toBe(false);
+    // And it fits: a 12-byte IV is 16 base64 characters, every IV bound on the
+    // wire and in both models is 24, so the marker costs no bound anywhere.
+    expect(16 + VAULT_FIELD_V2_IV_MARKER.length).toBeLessThanOrEqual(24);
+  });
+
+  it('pins the row-id derivation and the search-key label as format constants', () => {
+    // Both sides compute a created row's id from these bytes independently, so a
+    // change on one side alone stores every new row under an id its fields were
+    // not sealed to; and the search label decides every stored `searchHash`.
+    expect(ROW_ID_DERIVATION_PREFIX).toBe('hvault/row-id/v1|');
+    expect(ROW_ID_DERIVATION_PREFIX.indexOf('|')).toBe(ROW_ID_DERIVATION_PREFIX.length - 1);
+    expect(VAULT_SEARCH_KEY_INFO).toBe('hvault/item/search/v1');
+    // Distinct from every other HKDF label in the app, so no two purposes share a key.
+    for (const other of [
+      DOCUMENT_STREAM_INFO_PREFIX,
+      DOCUMENT_META_INFO_PREFIX,
+      DOCUMENT_DEK_WRAP_INFO_PREFIX,
+    ]) {
+      expect(other.startsWith(VAULT_SEARCH_KEY_INFO)).toBe(false);
+    }
+    // The nonce alphabet: exactly 40 lower-case hex characters, at 39, 40 and 41.
+    expect(ROW_ID_NONCE_PATTERN.test('a'.repeat(40))).toBe(true);
+    expect(ROW_ID_NONCE_PATTERN.test('a'.repeat(39))).toBe(false);
+    expect(ROW_ID_NONCE_PATTERN.test('a'.repeat(41))).toBe(false);
+    expect(ROW_ID_NONCE_PATTERN.test('A'.repeat(40))).toBe(false);
+    expect(ROW_ID_NONCE_PATTERN.test(`${'a'.repeat(39)}|`)).toBe(false);
   });
 
   it('does not restate either chunk size as an inline decimal literal in any source file', () => {
@@ -1204,6 +1311,51 @@ describe('TRANSFORM_SYNTAXES, transformSyntaxForName and canRepairSyntax', () =>
     expect(transformSyntaxForName('bundle.yaml.gz')).toBeNull();
   });
 
+  it('labels each combination of transforms with exactly one fixed pair', () => {
+    // The ONE definition both programs read: the engine stamps its reply with
+    // it and the application refuses any reply whose labels differ. Every
+    // combination is spelled out, so swapping two branches is caught.
+    expect(transformToolLabels(true, true)).toEqual({
+      tool: 'jsonrepair+prettier',
+      toolVersion: `${JSONREPAIR_VERSION}+${PRETTIER_VERSION}`,
+    });
+    expect(transformToolLabels(true, false)).toEqual({
+      tool: 'jsonrepair',
+      toolVersion: JSONREPAIR_VERSION,
+    });
+    expect(transformToolLabels(false, true)).toEqual({
+      tool: 'prettier',
+      toolVersion: PRETTIER_VERSION,
+    });
+    // Both labels land in the metadata schema, which caps each at 64.
+    for (const [repaired, formatted] of [
+      [true, true],
+      [true, false],
+      [false, true],
+    ] as const) {
+      const labels = transformToolLabels(repaired, formatted);
+      expect(labels.tool.length).toBeLessThanOrEqual(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH);
+      expect(labels.toolVersion.length).toBeLessThanOrEqual(MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH);
+    }
+  });
+
+  it('quotes one line of a document, bounded, and nothing for a line it does not have', () => {
+    expect(transformExcerpt('one\ntwo\nthree', 2)).toBe('two');
+    // The CR of a CRLF file would spend a character of the bound on nothing.
+    expect(transformExcerpt('one\r\ntwo', 1)).toBe('one');
+    expect(transformExcerpt('one', null)).toBe('');
+    expect(transformExcerpt('one', 0)).toBe('');
+    expect(transformExcerpt('one', -1)).toBe('');
+    expect(transformExcerpt('one', 2)).toBe('');
+    // At the bound it is untouched; one past it, cut and marked.
+    const atBound = 'x'.repeat(MAX_TRANSFORM_EXCERPT_LENGTH);
+    expect(transformExcerpt(atBound, 1)).toBe(atBound);
+    const cut = transformExcerpt(`${atBound}y`, 1);
+    expect(cut).toHaveLength(MAX_TRANSFORM_EXCERPT_LENGTH);
+    expect(cut.endsWith('…')).toBe(true);
+    expect(cut.startsWith('x'.repeat(MAX_TRANSFORM_EXCERPT_LENGTH - 1))).toBe(true);
+  });
+
   it('offers repair for the JSON family and NOTHING else', () => {
     // A decision rather than a gap, and the reason is that the alternative is
     // silent: guessing at YAML indentation changes what a document MEANS, and
@@ -1401,5 +1553,20 @@ describe('TRANSFORM_SYNTAXES, transformSyntaxForName and canRepairSyntax', () =>
     expect(MAX_PREVIEW_TABLE_CELLS).toBeLessThan(
       MAX_PREVIEW_TEXT_LINES * MAX_PREVIEW_TABLE_COLUMNS,
     );
+  });
+});
+
+describe('Vault item bounds', () => {
+  it('sizes a retained previous password for the largest password a login can hold', () => {
+    // The worst case measured, not asserted: three UTF-8 bytes per UTF-16 code
+    // unit, then base64. A cap below this made changing such a password fail,
+    // because the old one is kept in the history.
+    const worstPassword = '\u20ac'.repeat(MAX_LOGIN_PASSWORD_LENGTH);
+    const bytes = new TextEncoder().encode(worstPassword);
+    expect(bytes.length).toBe(MAX_LOGIN_PASSWORD_LENGTH * 3);
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    expect(btoa(binary).length).toBe(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH);
+    expect(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH).toBe(40_000);
   });
 });

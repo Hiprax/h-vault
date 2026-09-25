@@ -3,25 +3,24 @@ import { Link } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { ArrowLeft, CheckCircle, AlertCircle, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, CheckCircle, AlertTriangle } from 'lucide-react';
 import { BrandLogo } from '../ui/BrandLogo';
 import { forgotPasswordApi } from '../../services/api/authApi';
-import { getApiErrorMessage, hasValidEmailTld } from '../../lib/utils';
+import { getApiErrorMessage } from '../../lib/utils';
+import { accountEmailSchema } from '../../lib/accountEmail';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
+import { FormAlert } from '../ui/FormAlert';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
+import { StandalonePage } from '../layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schema                                                                    */
 /* -------------------------------------------------------------------------- */
 
 const forgotPasswordSchema = z.object({
-  email: z
-    .string()
-    .min(1, 'Email is required')
-    .pipe(z.email('Enter a valid email address'))
-    .refine(hasValidEmailTld, 'Enter a valid email address'),
+  email: accountEmailSchema,
 });
 
 type ForgotPasswordFormValues = z.infer<typeof forgotPasswordSchema>;
@@ -63,7 +62,7 @@ export function ForgotPasswordPage() {
   /* ---- Success view ---- */
   if (isSubmitted) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <Card className="w-full max-w-md">
           <CardHeader className="items-center text-center">
             {emailSent ? (
@@ -71,7 +70,7 @@ export function ForgotPasswordPage() {
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-100 dark:bg-green-950">
                   <CheckCircle className="h-6 w-6 text-green-600 dark:text-green-400" />
                 </div>
-                <CardTitle>Check Your Email</CardTitle>
+                <CardTitle as="h1">Check Your Email</CardTitle>
                 <CardDescription>
                   If an account exists with that email address, we&apos;ve sent password reset
                   instructions. Please check your inbox and spam folder.
@@ -82,7 +81,7 @@ export function ForgotPasswordPage() {
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-yellow-100 dark:bg-yellow-950">
                   <AlertTriangle className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
                 </div>
-                <CardTitle>Email Could Not Be Sent</CardTitle>
+                <CardTitle as="h1">Email Could Not Be Sent</CardTitle>
                 <CardDescription>
                   We were unable to send the password reset email. This may be due to a server
                   configuration issue. Please try again later or contact support.
@@ -101,19 +100,19 @@ export function ForgotPasswordPage() {
             </Link>
           </CardFooter>
         </Card>
-      </div>
+      </StandalonePage>
     );
   }
 
   /* ---- Form view ---- */
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+    <StandalonePage>
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Forgot Password</CardTitle>
+          <CardTitle as="h1">Forgot Password</CardTitle>
           <CardDescription>
             Enter the email address associated with your account and we&apos;ll send you a link to
             reset your password.
@@ -122,15 +121,7 @@ export function ForgotPasswordPage() {
 
         <form onSubmit={(e) => void form.handleSubmit(handleSubmit)(e)}>
           <CardContent className="space-y-4">
-            {apiError && (
-              <div
-                role="alert"
-                className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
-              >
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{apiError}</span>
-              </div>
-            )}
+            {apiError && <FormAlert message={apiError} />}
 
             <div className="space-y-2">
               <Label htmlFor="forgot-email" error={!!form.formState.errors.email}>
@@ -167,6 +158,6 @@ export function ForgotPasswordPage() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

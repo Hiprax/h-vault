@@ -246,11 +246,16 @@ describe('Password Reset Flow', () => {
     it('should clear failed login attempts and lockout after reset', async () => {
       const user = await createTestUser();
 
-      // Simulate a locked-out user
+      // Simulate a locked-out user, WHOLE: a lockout is four fields, and the
+      // episode identity is the one the emailed unlock link is bound to. Leaving
+      // it behind would keep that link working against an account whose password
+      // has since been changed by somebody else.
       await User.findByIdAndUpdate(user.id, {
         $set: {
           failedLoginAttempts: 10,
           lockoutUntil: new Date(Date.now() + 30 * 60 * 1000),
+          lockoutEpisodeId: 'seeded-lock-episode',
+          lockoutNotifiedAt: new Date(),
         },
       });
 
@@ -278,9 +283,65 @@ describe('Password Reset Flow', () => {
         });
       expect(res.status).toBe(200);
 
-      const updatedUser = await User.findById(user.id);
+      const updatedUser = await User.findById(user.id).select(
+        '+lockoutEpisodeId +lockoutNotifiedAt',
+      );
       expect(updatedUser!.failedLoginAttempts).toBe(0);
       expect(updatedUser!.lockoutUntil).toBeUndefined();
+      expect(updatedUser!.lockoutEpisodeId).toBeUndefined();
+      expect(updatedUser!.lockoutNotifiedAt).toBeUndefined();
+    });
+
+    it('drops an interrupted rotation the reset has just made unfinishable', async () => {
+      // A crashed rotation leaves the key it was moving to wrapped under the MEK
+      // in force at the time. A RESET is reached without the old master password,
+      // so that MEK is gone and the client mints a brand-new vault key: the
+      // wrapper is no longer a key, just ciphertext nothing can open.
+      //
+      // Keeping it is not neutral, which is why this is asserted rather than left
+      // to tidiness. `getProfile` derives `interruptedRotation` from its presence,
+      // so the Settings page would offer to finish a rotation that can never be
+      // finished; and `bulkReEncrypt`'s outstanding-rotation guard reads the same
+      // field, so every future rotation would be refused until the user discarded
+      // a wrapper nothing had told them about.
+      const user = await createTestUser();
+      await User.findByIdAndUpdate(user.id, {
+        $set: {
+          pendingEncryptedVaultKey: 'the-interrupted-rotations-key',
+          pendingVaultKeyIv: 'pending-iv',
+          pendingVaultKeyTag: 'pending-tag',
+          rotationInProgress: true,
+        },
+      });
+
+      const dbUser = await User.findById(user.id).select('+authHash');
+      const resetToken = jwt.sign(
+        {
+          userId: user.id,
+          purpose: 'password_reset',
+          stateHash: generateStateHash(dbUser!.authHash),
+        },
+        deriveTestPurposeKey('password_reset'),
+        { algorithm: 'HS256', expiresIn: '1h' },
+      );
+
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const res = await agent
+        .post(`${API}/auth/reset-password`)
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ token: resetToken, email: user.email, ...resetPayload() });
+      expect(res.status).toBe(200);
+
+      const after = await User.findById(user.id).lean();
+      expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+      expect(after!.pendingVaultKeyIv).toBeUndefined();
+      expect(after!.pendingVaultKeyTag).toBeUndefined();
+      // The write fence goes down with it: a reset that left it raised would make
+      // the account refuse its own writes until the next login lowered it.
+      expect(after!.rotationInProgress).toBe(false);
+      // And the reset still did its own job.
+      expect(after!.encryptedVaultKey).toBe(resetPayload().newEncryptedVaultKey);
     });
   });
 

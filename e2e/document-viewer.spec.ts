@@ -1,5 +1,15 @@
-import { test, expect, type Frame, type FrameLocator, type Page } from '@playwright/test';
-import { gotoDocuments, openDocument, registerAndSignInViaUI, uploadDocument } from './helpers';
+import { test, expect } from '@playwright/test';
+import {
+  PREVIEW_TIMEOUT_MS,
+  gotoDocuments,
+  openDocument,
+  openNext,
+  previewFrame,
+  registerAndSignInViaUI,
+  sandboxFrame,
+  uploadDocument,
+  waitForRendered,
+} from './helpers';
 
 /**
  * The document viewer, and the isolation around it, against a real browser.
@@ -23,15 +33,26 @@ import { gotoDocuments, openDocument, registerAndSignInViaUI, uploadDocument } f
  * at all. `page.evaluate` in the PARENT still cannot reach in — that is the
  * boundary the application depends on — and nothing below uses it for that.
  *
+ * ## Two servers run this file
+ *
+ * `test:e2e` runs it against `npm run dev`. `test:sandbox`
+ * (`playwright.sandbox.config.ts`) runs it again against the BUILT artifact in
+ * production mode, and `test:deploy` a third time behind the Compose stack's own
+ * Nginx — the only runs in which the frame is served under the policy
+ * `packages/server/src/config/sandboxCsp.ts` attaches. Nothing below may
+ * therefore assume either server; what only the production headers make true is
+ * asserted in `sandbox-policy.prod.ts`, which the dev-server run never loads.
+ *
  * ## The dependency that will bite first if these fail
  *
- * The suite drives `npm run dev`, and a module script is fetched in CORS mode
- * unconditionally; the frame's opaque origin sends `Origin: null`, which Vite's
- * default `server.cors` allowlist rejects. `packages/client/vite.config.ts` adds
- * `'null'` to it for exactly this reason. Without that, every module the frame
- * imports is refused, the frame is blank, and every assertion here fails for a
- * reason that has nothing to do with a renderer. Check that header before
- * suspecting the sanitizer.
+ * A module script is fetched in CORS mode unconditionally; the frame's opaque
+ * origin sends `Origin: null`. On the dev server, Vite's default `server.cors`
+ * allowlist rejects that, and `packages/client/vite.config.ts` adds `'null'` to
+ * it for exactly this reason; in production the same permission is the
+ * `Access-Control-Allow-Origin: *` scoped to `sandbox-assets/`. Without it, every
+ * module the frame imports is refused, the frame is blank, and every assertion
+ * here fails for a reason that has nothing to do with a renderer. Check that
+ * header before suspecting the sanitizer.
  */
 
 const README = 'README.md';
@@ -40,49 +61,6 @@ const CSV = 'contacts.csv';
 const JSON_DOC = 'settings.json';
 const PDF = 'handbook.pdf';
 const HOSTILE = 'hostile.md';
-
-/**
- * How long a preview may take to appear.
- *
- * Bound by the DEV SERVER rather than by the renderer: each mode is a dynamic
- * import, so the first document of a given kind is the request that makes Vite
- * transform that renderer and its dependencies on demand — the syntax
- * highlighter alone is some 890 KiB of language grammars. The same contention
- * `LAZY_ROUTE_TIMEOUT_MS` exists for in `helpers.ts`, one layer further in.
- */
-const PREVIEW_TIMEOUT_MS = 90_000;
-
-/** The preview frame's locator, for reading its DOM. */
-function previewFrame(page: Page): FrameLocator {
-  return page.frameLocator('iframe[title^="Preview of "]');
-}
-
-/**
- * The preview frame's `Frame` handle, for asking the isolated document about its
- * OWN globals — the one question a DOM locator cannot answer.
- */
-async function sandboxFrame(page: Page): Promise<Frame> {
-  await expect(page.locator('iframe[title^="Preview of "]')).toBeVisible({
-    timeout: PREVIEW_TIMEOUT_MS,
-  });
-  const frame = page.frames().find((candidate) => candidate.url().includes('/sandbox.html'));
-  expect(frame, 'no frame is loaded from /sandbox.html').toBeTruthy();
-  return frame as Frame;
-}
-
-/** Wait until a renderer has put its shell on screen inside the frame. */
-async function waitForRendered(page: Page, mode: string): Promise<void> {
-  await expect(previewFrame(page).locator(`.hv-doc-${mode}`)).toBeVisible({
-    timeout: PREVIEW_TIMEOUT_MS,
-  });
-}
-
-/** Back to the list, then open the next document. */
-async function openNext(page: Page, fixture: string): Promise<void> {
-  await page.getByRole('link', { name: 'Back to documents' }).click();
-  await expect(page).toHaveURL(/\/documents$/);
-  await openDocument(page, fixture);
-}
 
 test.describe('document viewer: rendering inside the isolated frame', () => {
   test('renders each supported format, refuses a PDF, and neutralises a hostile document', async ({

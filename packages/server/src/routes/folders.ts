@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth.js';
-import { generalAuthLimiter } from '../middleware/rateLimiter.js';
+import { folderWriteLimiter, generalAuthLimiter } from '../middleware/rateLimiter.js';
 import { validate } from '../middleware/validate.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 import {
@@ -22,9 +22,30 @@ const router = Router();
 router.use(authenticate);
 
 router.get('/', generalAuthLimiter, listFolders);
-router.post('/', validate(createFolderSchema, 'body'), createFolder);
-router.put('/:id', validateObjectId(), validate(updateFolderSchema, 'body'), updateFolder);
-router.delete('/:id', validateObjectId(), validate(deleteFolderQuerySchema, 'query'), deleteFolder);
-router.put('/:id/sort', validateObjectId(), validate(reorderFolderSchema, 'body'), reorderFolder);
+// Every folder mutation writes an audit row that is kept for 365 days, so each one
+// carries `folderWriteLimiter` (per user, and sized for a drag that re-sorts every
+// sibling, which the client sends as one `/sort` request per moved folder).
+router.post('/', folderWriteLimiter, validate(createFolderSchema, 'body'), createFolder);
+router.put(
+  '/:id',
+  folderWriteLimiter,
+  validateObjectId(),
+  validate(updateFolderSchema, 'body'),
+  updateFolder,
+);
+router.delete(
+  '/:id',
+  folderWriteLimiter,
+  validateObjectId(),
+  validate(deleteFolderQuerySchema, 'query'),
+  deleteFolder,
+);
+router.put(
+  '/:id/sort',
+  folderWriteLimiter,
+  validateObjectId(),
+  validate(reorderFolderSchema, 'body'),
+  reorderFolder,
+);
 
 export default router;

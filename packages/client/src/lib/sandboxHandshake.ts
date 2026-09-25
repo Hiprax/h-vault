@@ -76,10 +76,19 @@ interface SandboxConnection {
    * `transfer` is OPTIONAL and every caller but one leaves it out, deliberately.
    * A render request's bytes are COPIED, because that buffer is a prop the host
    * was lent and must still own afterwards; transferring would detach it and the
-   * second post of the same document would throw. The scanner is the exception:
-   * it mints one image per request, never looks at it again, and moves megabytes
-   * per camera frame across what is in Chromium a separate process, so there the
-   * copy is the thing worth avoiding.
+   * second post of the same document would throw. The scanner is the exception,
+   * and only for its CAMERA frames: it mints one bitmap per request, never looks
+   * at it again, and moves megabytes per frame across what is in Chromium a
+   * separate process, so there the copy is the thing worth avoiding. It passes
+   * NO transfer list for an uploaded photo, because a `Blob` is serializable but
+   * not transferable and naming one here throws.
+   *
+   * WHAT THIS PARAMETER'S TYPE DOES NOT BUY YOU: `Transferable` is a union that
+   * includes `MediaSourceHandle`, declared in the DOM library as an EMPTY
+   * interface, so EVERY object is structurally assignable to it. A transfer list
+   * holding something that cannot be transferred type-checks perfectly clean and
+   * throws at run time. The caller owns that check; the compiler will not make
+   * it.
    */
   readonly post: (message: unknown, transfer?: Transferable[]) => void;
   /**

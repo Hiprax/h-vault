@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { TRASH_AUTO_PURGE_DAYS } from '@hvault/shared';
 import { cn } from '../../lib/utils';
-import { useVaultStore, type DecryptedFolder } from '../../stores/vaultStore';
+import { sendPaced, useVaultStore, type DecryptedFolder } from '../../stores/vaultStore';
 import { reorderFolderApi } from '../../services/api/vaultApi';
 import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
@@ -120,6 +120,47 @@ const FOLDER_COLORS = [
   '#06b6d4',
   '#f97316',
 ];
+
+// ---------------------------------------------------------------------------
+// Helper: apply a reorder
+// ---------------------------------------------------------------------------
+
+/**
+ * Sends one reorder, waits for every re-sort request in it to SETTLE, re-reads
+ * the folders whatever happened, and reports the outcome in one toast. The
+ * requests are paced and a short 429 is waited out (`sendPaced`): a drag across a
+ * long list moves every folder between the two positions, and fired all at once
+ * those requests outran a rate-limiting proxy in front of the app.
+ *
+ * A reorder is one request per folder whose position moved, and any of them can
+ * be refused on its own: the folder-write budget running out part-way through a
+ * large drag, or a dropped connection. `Promise.all` would reject on the first
+ * refusal while the rest were still in flight, and the order read back then
+ * could still be changing; so every request is waited out first. The server's
+ * order may then be HALF applied, which is why it is re-read on failure as well
+ * as on success: otherwise the rail keeps showing an order the server does not
+ * have.
+ *
+ * `sendUpdates` lists the requests rather than issuing them, so they can be paced,
+ * and a request that cannot even be issued is reported like one the server
+ * refused.
+ */
+async function applyFolderReorder(
+  sendUpdates: () => readonly (() => Promise<unknown>)[],
+  toast: ReturnType<typeof useToast>['toast'],
+): Promise<void> {
+  try {
+    const results = await sendPaced(sendUpdates());
+    await useVaultStore.getState().fetchFolders();
+    toast(
+      results.every((result) => result.status === 'fulfilled')
+        ? { title: 'Folder reordered', type: 'success' }
+        : { title: 'Failed to reorder', type: 'error' },
+    );
+  } catch {
+    toast({ title: 'Failed to reorder', type: 'error' });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: build tree
@@ -559,21 +600,17 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
       const insertIndex = isDraggingDown ? newTargetIndex + 1 : newTargetIndex;
       reordered.splice(insertIndex, 0, sourceFolder);
 
-      try {
+      await applyFolderReorder(() => {
         // Update sortOrder for all folders whose position changed
-        const updates: Promise<unknown>[] = [];
+        const updates: (() => Promise<unknown>)[] = [];
         for (let i = 0; i < reordered.length; i++) {
           const folder = reordered[i];
           if (folder && folder.sortOrder !== i) {
-            updates.push(reorderFolderApi(folder.id, i));
+            updates.push(() => reorderFolderApi(folder.id, i));
           }
         }
-        await Promise.all(updates);
-        await useVaultStore.getState().fetchFolders();
-        toast({ title: 'Folder reordered', type: 'success' });
-      } catch {
-        toast({ title: 'Failed to reorder', type: 'error' });
-      }
+        return updates;
+      }, toast);
     },
     [folders, toast],
   );
@@ -603,17 +640,14 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
       const swapFolder = siblings[swapIndex];
       if (!swapFolder) return;
 
-      try {
-        // Swap sortOrder values
-        await Promise.all([
-          reorderFolderApi(folderId, swapFolder.sortOrder),
-          reorderFolderApi(swapFolder.id, folder.sortOrder),
-        ]);
-        await useVaultStore.getState().fetchFolders();
-        toast({ title: 'Folder reordered', type: 'success' });
-      } catch {
-        toast({ title: 'Failed to reorder', type: 'error' });
-      }
+      // Swap sortOrder values
+      await applyFolderReorder(
+        () => [
+          () => reorderFolderApi(folderId, swapFolder.sortOrder),
+          () => reorderFolderApi(swapFolder.id, folder.sortOrder),
+        ],
+        toast,
+      );
     },
     [folders, toast],
   );
@@ -792,9 +826,9 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
             aria-modal="true"
             aria-label="Create new folder"
           >
-            <h3 className="mb-4 text-lg font-semibold text-[hsl(var(--card-foreground))]">
+            <h2 className="mb-4 text-lg font-semibold text-[hsl(var(--card-foreground))]">
               New Folder
-            </h3>
+            </h2>
             <input
               type="text"
               value={newFolderName}
@@ -847,9 +881,9 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
             aria-modal="true"
             aria-label="Rename folder"
           >
-            <h3 className="mb-4 text-lg font-semibold text-[hsl(var(--card-foreground))]">
+            <h2 className="mb-4 text-lg font-semibold text-[hsl(var(--card-foreground))]">
               Rename Folder
-            </h3>
+            </h2>
             <input
               type="text"
               value={renameValue}
@@ -905,7 +939,7 @@ export function FolderRail({ scope, className, onClose }: FolderRailProps) {
             aria-modal="true"
             aria-label="Delete folder confirmation"
           >
-            <h3 className="text-lg font-semibold text-[hsl(var(--destructive))]">Delete Folder</h3>
+            <h2 className="text-lg font-semibold text-[hsl(var(--destructive))]">Delete Folder</h2>
             <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
               Are you sure you want to delete the folder{' '}
               <strong>&quot;{folders.find((f) => f.id === deletingFolderId)?.name}&quot;</strong>?

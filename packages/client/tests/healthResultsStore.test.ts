@@ -135,6 +135,45 @@ describe('healthResultsStore', () => {
     expect(await loadHealthResults(userId, keyB)).toBeNull();
   });
 
+  it('lets a save REPLACE a snapshot the current key cannot open (vault-key rotation)', async () => {
+    // After a rotation the stored snapshot is sealed under a key this session no
+    // longer holds. Nothing in it can be merged, so the next save must start
+    // from empty and overwrite it. Treating that as a refused read and skipping
+    // would leave health results never persisting again until logout.
+    const userId = nextUser();
+    const keyA = await makeKey();
+    const keyB = await makeKey();
+    await saveBreachResults(userId, keyA, [{ id: 'a', v: 'v1', breach: 1 }], 0, 1);
+
+    await saveStrengthScores(userId, keyB, [{ id: 'b', v: 'v2', strength: 4 }]);
+
+    const payload = await loadHealthResults(userId, keyB);
+    expect(payload).toEqual({
+      perItem: { b: { v: 'v2', strength: 4 } },
+      scanCompletedAt: null,
+      breachFailedCount: 0,
+    });
+    // The old snapshot is gone, not merely unreadable alongside the new one.
+    expect(await loadHealthResults(userId, keyA)).toBeNull();
+  });
+
+  it.each([
+    ['content that is not JSON', 'not-json-at-all'],
+    ['a payload of the wrong shape', JSON.stringify({ nope: true })],
+  ])('lets a save REPLACE a snapshot holding %s', async (_name, plaintext) => {
+    const userId = nextUser();
+    const key = await makeKey();
+    await putRawRecord(userId, await cryptoService.encryptData(plaintext, key));
+
+    await saveBreachResults(userId, key, [{ id: 'a', v: 'v1', breach: 2 }], 0, 7);
+
+    expect(await loadHealthResults(userId, key)).toEqual({
+      perItem: { a: { v: 'v1', breach: 2 } },
+      scanCompletedAt: 7,
+      breachFailedCount: 0,
+    });
+  });
+
   it('returns null on undecryptable-to-JSON content', async () => {
     const userId = nextUser();
     const key = await makeKey();

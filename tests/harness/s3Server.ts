@@ -32,12 +32,39 @@
  *     against a differently-configured engine would prove nothing about the
  *     deployment, and the framing is precisely what it is there to check.
  *
- *  c. THE PORT IS ASSIGNED BY DOCKER, NOT PROBED. `-p 127.0.0.1:0:3900` makes the
- *     daemon pick a free port and bind it before `docker run` returns, and
- *     `docker port` reports which one. Probing for a free port and then binding
- *     it leaves a window in which a sibling worker takes it — the race
- *     `tests/mongoHarness.ts` needs whole port bands to work around. There is no
- *     window here, so there is nothing to work around.
+ *  c. THE PORT IS ASSIGNED BY DOCKER, NOT PROBED, AND A LOST ALLOCATION IS
+ *     RETRIED. `-p 127.0.0.1:0:3900` makes the daemon pick the host port, and
+ *     `docker port` reports which one. Probing for a free port here and then
+ *     binding it would leave a window in which a sibling worker takes it — the
+ *     race `packages/server/tests/mongoHarness.ts` needs whole port bands to
+ *     work around — so nothing probes.
+ *
+ *     What this file used to claim next was that the daemon binds the port
+ *     before `docker run` returns, so there is no window at all. That is FALSE,
+ *     and it was measured here rather than reasoned about: `docker run` failed
+ *     with `RootlessKit PortManager.AddPort(): listen tcp4 127.0.0.1:33498:
+ *     bind: address already in use`, taking the conformance gate down with it.
+ *     Two things make it false. Docker's allocator draws its dynamic range from
+ *     `/proc/sys/net/ipv4/ip_local_port_range` and tracks only its OWN bitmap,
+ *     so it hands out numbers the kernel is simultaneously handing to every
+ *     outbound socket on the machine — and this suite owns a great many of them.
+ *     And under ROOTLESS Docker the daemon is namespaced inside RootlessKit,
+ *     while the real host `listen()` happens afterwards, outside it, in
+ *     `PortManager.AddPort` — so the allocation has no visibility of host port
+ *     usage whatsoever.
+ *
+ *     The answer is {@link withHostPortRetry}, and what makes it sufficient is a
+ *     property of the allocator rather than optimism: dynamic allocation walks a
+ *     monotonically advancing cursor that releasing a port does NOT rewind, so a
+ *     retry is offered a DIFFERENT number, not the one that just lost. This is
+ *     deliberately weaker than what `mongoHarness.ts` does for mongod, which is
+ *     band-FIRST (a range below the ephemeral floor, so the systematic cause is
+ *     gone) and retry-second. A band cannot be shared with it from here:
+ *     `gate-surface.test.ts` restricts this file to `node:` builtins and
+ *     relative paths inside this directory, so `PORT_BAND_START` would have to
+ *     be copied, and the sub-ephemeral window is already spoken for by hand.
+ *     A second, unenforced copy of that constant is a worse failure than the one
+ *     being fixed, so the band stays in reserve.
  *
  *  d. READINESS IS POLLED, AND THE PROBE IS THE CALLER'S. `test:flake` runs every
  *     suite ten times, so a fixed sleep is either ten times too long or a race
@@ -100,6 +127,18 @@ const RPC_SECRET = createHash('sha256').update('hvault-storage-harness-rpc').dig
 
 /** How long to wait for a freshly started engine before giving up. */
 const READY_TIMEOUT_MS = 60_000;
+
+/**
+ * Attempts at standing the container up before the harness gives up.
+ *
+ * Five, matching `mongoHarness.ts`'s `PORT_ATTEMPTS` for the same class of
+ * failure. Each attempt is a fresh allocation from a cursor that has moved on
+ * (see decision (c)), so five consecutive losses are worth REPORTING rather than
+ * retrying around — not because they prove the host has nothing free, which on a
+ * contended ephemeral range they do not, but because past that point a louder
+ * failure is more use than a sixth attempt.
+ */
+const PORT_ATTEMPTS = 5;
 
 /** How long to wait between readiness probes. */
 const READY_POLL_INTERVAL_MS = 100;
@@ -189,7 +228,9 @@ function runArguments(image: string): string[] {
     // concurrent runs could collide on.
     '--label',
     'hvault-test=storage-harness',
-    // (c) The daemon picks the host port and has bound it before this returns.
+    // (c) The daemon picks the host port. It has NOT necessarily bound it by the
+    // time this returns — that is the claim decision (c) measured false — so the
+    // call this list feeds is wrapped in `withHostPortRetry`.
     '-p',
     `127.0.0.1:0:${String(CONTAINER_S3_PORT)}`,
     // The image's own CMD is `/garage server` with an empty entrypoint, exactly as
@@ -234,6 +275,90 @@ function runArguments(image: string): string[] {
     '--single-node',
     '--default-bucket',
   ];
+}
+
+/**
+ * Whether a `docker run` failure is a LOST HOST-PORT ALLOCATION rather than
+ * anything about this harness, this image or this daemon.
+ *
+ * Both `stderr` and the message are read. `promisify(execFile)` rejects with an
+ * error whose message is `Command failed: <argv>\n<stderr>`, so the message
+ * alone does carry the daemon's words today — but that is a formatting
+ * convention, and the property is the contract.
+ *
+ * Exported for its own test, and narrow in BOTH directions on purpose. One that
+ * answered `true` for everything would turn a single readable "that image
+ * cannot be pulled" into five slow identical failures; one that did not match
+ * the spelling this host actually produces would leave the gate a coin toss
+ * again. Both spellings are matched because the harness runs under either
+ * daemon: rootless Docker reports the kernel's own words from the `listen()`
+ * RootlessKit performs itself, and rootful Docker reports its allocator's.
+ */
+export function isHostPortCollision(error: unknown): boolean {
+  const parts: string[] = [];
+  if (error instanceof Error) {
+    parts.push(error.message);
+    // `ExecFileException` carries the streams as their own properties. Read
+    // defensively rather than by cast: this predicate is handed whatever the
+    // rejection was, and a harness that threw on inspecting a failure would
+    // replace one clear error with a useless one.
+    const stderr = (error as { stderr?: unknown }).stderr;
+    if (typeof stderr === 'string') parts.push(stderr);
+  } else {
+    parts.push(String(error));
+  }
+  return /bind: address already in use|port is already allocated/i.test(parts.join('\n'));
+}
+
+/**
+ * Runs `start` again while it loses the host port, and ONLY while it loses the
+ * host port.
+ *
+ * Generic and exported so its own test can drive it without a daemon: the loop
+ * is the part that has to be right, and a test that needed real containers to
+ * reach the give-up path would cost five container starts to assert one
+ * sentence. It wraps the `docker run` call alone rather than the whole of
+ * {@link startStorageEngine}, because the exit and signal hooks are registered
+ * after that call — a retry placed any wider would register one per attempt and
+ * remove a container a later attempt still owned.
+ *
+ * A LOST ATTEMPT LEAVES NOTHING TO RECLAIM, and that was measured rather than
+ * assumed, because a retry that stranded a container per attempt would be worse
+ * than the flake it removes. With a host port held by a listener, `docker run -d
+ * --rm` exits 125 with `PortManager.AddPort(): … bind: address already in use`,
+ * and `docker ps -a` is unchanged: the daemon force-removes an `AutoRemove`
+ * container whose start failed, and a lost attempt never yields an id anyway.
+ *
+ * That placement is the ONE thing here no test pins, and honestly so: nothing
+ * fires the retry on a healthy run, and a seam that let a test fail `docker run`
+ * on demand would be a seam production never has. `harness-teardown.test.ts`
+ * catches a widened retry only on a run that actually loses a port, so this
+ * paragraph is the control.
+ */
+export async function withHostPortRetry<T>(start: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < PORT_ATTEMPTS; attempt += 1) {
+    try {
+      return await start();
+    } catch (error) {
+      // Anything else is rethrown on the FIRST attempt, for the reason
+      // `mongoHarness.ts` gives about mongod: retrying a configuration error
+      // turns one readable failure into five identical slow ones.
+      if (!isHostPortCollision(error)) throw error;
+      lastError = error;
+    }
+  }
+
+  throw new Error(
+    `Could not start the storage engine: ${String(PORT_ATTEMPTS)} host-port allocations in a ` +
+      'row were taken before the daemon could bind them. Last error: ' +
+      `${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    // The daemon's words are quoted above so a reader sees them without digging;
+    // the rejection itself is carried so nothing (its `stderr`, its exit code)
+    // is lost to the summary.
+    { cause: lastError },
+  );
 }
 
 /** Removes a container, ignoring the case where it is already gone. */
@@ -287,7 +412,12 @@ export async function startStorageEngine(
   const image = resolveComposeImage();
   const deadlineMs = options.readyTimeoutMs ?? READY_TIMEOUT_MS;
 
-  const { stdout: idOut } = await execFileAsync('docker', runArguments(image));
+  // (c) The allocation can lose a race with the rest of the machine, so it is
+  // retried — and NOTHING below is inside the retry, because the reclaim hooks
+  // start at the next statement.
+  const { stdout: idOut } = await withHostPortRetry(() =>
+    execFileAsync('docker', runArguments(image)),
+  );
   const containerId = idOut.trim();
   if (containerId === '') {
     throw new Error(`docker run returned no container id for ${image}`);

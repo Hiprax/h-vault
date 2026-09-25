@@ -12,6 +12,7 @@ import {
 } from '../middleware/rateLimiter.js';
 import {
   holdPartUploadSlot,
+  holdingPartUploadSlot,
   parsePartUploadBody,
   requirePartContentLength,
 } from '../middleware/documentPartBody.js';
@@ -81,7 +82,7 @@ router.get('/usage', generalAuthLimiter, getUsage);
 // `heavyOpLimiter`, the only route in this file that carries it, and the only one
 // that deserves it: this is one genuinely unbounded operation (up to
 // `MAX_DOCUMENTS_PER_USER` rows, each with an object delete), which is exactly
-// what that IP-keyed budget of 10 per 15 minutes exists for. Every per-row
+// what that per-user budget of 10 per 15 minutes exists for. Every per-row
 // document route deliberately avoids it — see `purgeDocument`.
 router.delete('/trash/empty', heavyOpLimiter, emptyDocumentTrash);
 
@@ -120,11 +121,20 @@ router.delete('/uploads/:id', documentUploadLimiter, validateObjectId(), abortUp
 //   * `holdPartUploadSlot` sits AHEAD of the parser, never inside the handler:
 //     Express runs a route's parser before its handler, so a slot taken in the
 //     handler is taken after 8 MiB has already been buffered and bounds nothing.
-//     It is held across the storage call and released when the response closes.
+//     It is held across the storage call and released once the response has closed
+//     AND the handler has settled, so a client that disconnects mid-call does not
+//     hand back a slot whose part is still in memory.
+//     It also charges this account's SHARE of that budget, refusing with 503 past
+//     it so one identity cannot hold every slot, and arms the deadline by which
+//     this part's body must have arrived — the part route is the one place where
+//     waiting for a client costs every other account something.
 //   * `parsePartUploadBody` is mounted HERE, at route level, and must never move to
 //     `app.ts`: the Mongo-injection sanitizer there rewrites any object body key by
 //     key, and a Buffer is an object — mounted app-level, the parser would run
 //     first and the part would arrive as `{0: 137, 1: 80, …}`.
+//   * `holdingPartUploadSlot(uploadPart)` is LAST, and pairs with the slot holder:
+//     it is what defers the release to the handler's end, and a handler reached
+//     without a slot is refused with 500 rather than run.
 router.put(
   '/uploads/:id/parts/:partNumber',
   documentPartLimiter,
@@ -133,7 +143,7 @@ router.put(
   requirePartContentLength,
   holdPartUploadSlot,
   parsePartUploadBody,
-  uploadPart,
+  holdingPartUploadSlot(uploadPart),
 );
 
 // Turn a finished transfer into a document.
@@ -178,7 +188,7 @@ router.put(
 // The trash lifecycle: in, out, and gone.
 //
 // All three carry `generalAuthLimiter` rather than `heavyOpLimiter`, including
-// the permanent delete. That limiter is IP-keyed at 10 per 15 minutes and is
+// the permanent delete. That limiter allows a user 10 per 15 minutes and is
 // shared with export, backup download and every bulk vault operation, so on a
 // per-row route it would 429 a user who purged eleven documents and then lock
 // them out of emptying their vault trash. It stays on `/trash/empty` above,

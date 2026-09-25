@@ -3,12 +3,14 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
+import type { HydratedDocument, UpdateQuery } from 'mongoose';
 import { TOTP, Secret } from 'otpauth';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createModuleLogger } from '../utils/logger.js';
 import { config, isProduction, isTest, twoFactorEncryptionKey } from '../config/index.js';
 import { REFRESH_COOKIE_NAME, TRUSTED_DEVICE_COOKIE_NAME } from '../constants/index.js';
 import { User } from '../models/User.js';
+import type { IUser } from '../models/User.js';
 import { RefreshToken } from '../models/RefreshToken.js';
 import { TrustedDevice } from '../models/TrustedDevice.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
@@ -36,6 +38,7 @@ import {
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 import { readStringCookie } from '../utils/cookies.js';
+import { evaluateAccountStatus } from '../utils/accountStatus.js';
 import { clearCsrfCookie } from '../middleware/csrf.js';
 import {
   ERROR_CODES,
@@ -58,6 +61,24 @@ const logger = createModuleLogger('auth');
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LOCKOUT_DURATION_MS = LOCKOUT_DURATION_MINUTES * 60 * 1000;
 const MAX_FAILED_ATTEMPTS = MAX_LOGIN_ATTEMPTS;
+
+/**
+ * How long an emailed unlock link stays usable.
+ *
+ * ONE definition, because three things have to agree on it: the JWT's own
+ * `expiresIn`, the re-mail decision in {@link registerFailedAuthAttempt} (which
+ * asks whether the outstanding token will still verify when the new lockout
+ * ends), and the sentence a user reads in `utils/email.ts` — "This link will
+ * expire in 1 hour". The last of those is prose and no test can pin it, so the
+ * value must not be changed here without changing it there.
+ *
+ * It must stay STRICTLY GREATER than `LOCKOUT_DURATION_MS`. The link is the
+ * shortcut out of a lockout, so a token that expires before the lockout it was
+ * minted for would leave the owner waiting out the full window with a dead link
+ * in their inbox — the failure this whole mechanism exists to prevent.
+ */
+const UNLOCK_TOKEN_TTL_MINUTES = 60;
+const UNLOCK_TOKEN_TTL_MS = UNLOCK_TOKEN_TTL_MINUTES * 60 * 1000;
 
 // Pre-computed bcrypt hash used for timing-safe dummy comparisons when a user
 // is not found. This ensures the login endpoint takes approximately the same
@@ -150,6 +171,209 @@ interface JwtUnlockPayload {
  */
 function generateStateHash(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * The update that ends a lock episode, as ONE definition.
+ *
+ * A lockout is four fields, not one — the counter, the deadline, the episode
+ * identity the emailed link is bound to, and the timestamp of the link that was
+ * mailed for it — and every site that discharges a lockout has to clear all four.
+ * Leaving `lockoutEpisodeId` behind would keep a spent unlock link alive; leaving
+ * `lockoutNotifiedAt` behind would suppress the next episode's mail. Four sites
+ * discharge a lockout through THIS update — `login`'s served-lockout discharge,
+ * `finishLogin`, `login2fa`'s post-verify reset and `unlockAccount` — and a fifth,
+ * `resetPassword`, discharges it through the document-shaped twin below because it
+ * is already saving other fields in the same write. `login`'s served-lockout
+ * discharge uses BOTH, since it must correct the in-memory copy it goes on to read.
+ * Those two functions are the only two spellings there are; a hand-written copy at
+ * a sixth site is the drift this pair exists to prevent.
+ *
+ * A fresh object per call: Mongoose may annotate the update it is handed, and a
+ * shared literal would carry that annotation into the next caller.
+ */
+function lockoutClearUpdate(): UpdateQuery<IUser> {
+  return {
+    $set: { failedLoginAttempts: 0 },
+    $unset: { lockoutUntil: 1, lockoutEpisodeId: 1, lockoutNotifiedAt: 1 },
+  };
+}
+
+/**
+ * The same discharge applied to a loaded document: for `resetPassword`, which is
+ * already saving other fields in the same write and must not split them across
+ * two round trips, and for `login`'s served-lockout discharge, which persists
+ * through {@link lockoutClearUpdate} and then has to correct the copy it loaded
+ * before the bcrypt compare. Change it together with {@link lockoutClearUpdate}.
+ */
+function clearLockoutStateOnDocument(user: HydratedDocument<IUser>): void {
+  user.failedLoginAttempts = 0;
+  user.lockoutUntil = undefined;
+  user.lockoutEpisodeId = undefined;
+  user.lockoutNotifiedAt = undefined;
+}
+
+/**
+ * Records ONE failed authentication attempt against the durable, cross-step
+ * counter, locks the account when it crosses the threshold, and guarantees that a
+ * usable unlock link is outstanding for the resulting lock EPISODE. Returns the
+ * counter after the increment, which the 2FA step feeds to its progressive delay.
+ *
+ * Shared by both doors — a wrong password and a wrong second factor — because the
+ * counter and the lockout are one brake across both, and two copies of this logic
+ * is how the two steps came to differ in the first place.
+ *
+ * ## The three writes, and why each is a conditional update rather than a read
+ *
+ * 1. **The increment.** Atomic, so concurrent failures cannot both read the same
+ *    stale count.
+ * 2. **Start-or-extend the episode, in ONE statement.** An aggregation-pipeline
+ *    update, so the deadline and the episode identity are decided in a single
+ *    atomic write and the account is never observable as locked with no episode.
+ *    `$ifNull` keeps a running episode's identity and mints one only when the
+ *    field is null or missing, so exactly ONE of N concurrent threshold-crossing
+ *    requests starts the episode and every other one inherits it. The deadline is
+ *    always pushed out — that is the brake still working — but the IDENTITY is
+ *    never replaced, which is precisely what makes the link already in the
+ *    owner's inbox survive the re-lock. A conditional `findOneAndUpdate` pair
+ *    (start-if-absent, else extend) would decide the same thing, but a discharge
+ *    landing between its two halves would write a deadline onto an account with
+ *    no episode — locked, with no link, for the rest of the window, since the next
+ *    failed attempt is turned away by the live lockout before it reaches this
+ *    helper and never gets the chance to repair it. The pipeline has no such
+ *    gap. It is `updateOne` rather than `findOneAndUpdate` because Mongoose types
+ *    only `updateOne`/`updateMany` to accept `UpdateWithAggregationPipeline`;
+ *    reaching it through `findOneAndUpdate` would need a cast.
+ * 3. **Claim the mail.** A link is "outstanding" only while it will still verify
+ *    at the moment the new lockout ends, i.e. while
+ *    `lockoutNotifiedAt >= lockoutUntil - UNLOCK_TOKEN_TTL_MS`. Expressing the
+ *    claim as a filter rather than a read-then-write is what keeps the
+ *    anti-flood property the old `newAttempts === MAX_FAILED_ATTEMPTS` guard was
+ *    written for: the filter matches for exactly one concurrent request.
+ *
+ * The replaced equality guard had the right goal and the wrong test. It suppressed
+ * a duplicate mail by suppressing EVERY mail after the first crossing, and since
+ * `failedLoginAttempts` is cleared only where an authentication completes, an
+ * abandoned lockout never crossed the threshold again — so the victim was mailed
+ * once, ever, and every subsequent attempt silently invalidated that one link.
+ *
+ * Several live tokens can name one episode and that is harmless: they are the same
+ * capability, and the first one spent clears the episode and kills the rest. More
+ * than one can be live at once — a replacement is sent while the token it replaces
+ * still has up to half an hour to run — and that is by design; what is bounded is
+ * how often a new one is SENT, not how many remain valid.
+ *
+ * A discharge landing after write 2 but before the read that follows it leaves no
+ * episode and no lockout, so this returns without mailing. That is the right
+ * answer and not a missed one: the account is unlocked, and a link is only worth
+ * sending to an account that is locked.
+ */
+async function registerFailedAuthAttempt(
+  userId: mongoose.Types.ObjectId,
+  email: string,
+  step: 'password' | '2fa',
+): Promise<number> {
+  const incremented = await User.findOneAndUpdate(
+    { _id: userId },
+    { $inc: { failedLoginAttempts: 1 } },
+    { returnDocument: 'after' },
+  );
+
+  const attempts = incremented?.failedLoginAttempts ?? 1;
+  if (attempts < MAX_FAILED_ATTEMPTS) return attempts;
+
+  const now = new Date();
+  const lockoutUntil = new Date(now.getTime() + LOCKOUT_DURATION_MS);
+
+  await User.updateOne(
+    { _id: userId },
+    [
+      {
+        $set: {
+          lockoutUntil,
+          lockoutEpisodeId: { $ifNull: ['$lockoutEpisodeId', crypto.randomUUID()] },
+        },
+      },
+    ],
+    // Mongoose refuses an update pipeline unless it is asked for by name, because
+    // it does not cast one. Nothing here needs casting: `lockoutUntil` is already
+    // a `Date` and the minted identity is already a string.
+    { updatePipeline: true },
+  );
+
+  // `updateOne` cannot return the post-image, so the episode is read back. The
+  // read is not part of the decision above — that was settled atomically — it only
+  // reports which identity won. `lockoutEpisodeId` is `select: false`, so it is
+  // asked for by name; without the `+` this mails no link at all, which is what
+  // every test in `lockout-unlock-token-survival.test.ts` would say.
+  //
+  // Pinned to the PRIMARY, and that is not belt-and-braces. `MONGODB_URI` is the
+  // operator's, and a deployment that sets `readPreference=secondaryPreferred` on
+  // it makes this a read that may legitimately predate the write two lines above:
+  // it would answer `undefined`, take the bail below, and the account would be
+  // locked for thirty minutes with NO unlock link ever mailed — the exact silence
+  // this whole mechanism exists to end, reachable by a connection-string option
+  // nothing else in the code would object to. Read-your-own-write is a property
+  // of the primary, so it is asked for by name rather than assumed.
+  const locked = await User.findById(userId).read('primary').select('+lockoutEpisodeId');
+
+  // The account was deleted, or its lockout discharged, since that write. There is
+  // no episode to name, so there is nothing a link could unlock; mailing one bound
+  // to the empty string would produce a token that matches every account with no
+  // episode running.
+  const episodeId = locked?.lockoutEpisodeId;
+  if (!episodeId) return attempts;
+
+  const claimed = await User.findOneAndUpdate(
+    {
+      _id: userId,
+      // Scoped to the episode this mail would be FOR. Without it, an unlock link
+      // spent (or a sign-in completed) in the gap between the write above and
+      // this one would leave `lockoutNotifiedAt` stamped on an account with no
+      // episode — which would then suppress the mail for the NEXT lockout for up
+      // to half an hour, reproducing in miniature the silence this phase exists
+      // to end. With it, a discharged episode simply declines the claim.
+      lockoutEpisodeId: episodeId,
+      $or: [
+        { lockoutNotifiedAt: null },
+        { lockoutNotifiedAt: { $lt: new Date(lockoutUntil.getTime() - UNLOCK_TOKEN_TTL_MS) } },
+      ],
+    },
+    { $set: { lockoutNotifiedAt: now } },
+  );
+  if (!claimed) return attempts;
+
+  logger.warn('Account locked due to too many failed attempts', {
+    userId: userId.toString(),
+    email: maskEmail(email),
+    step,
+  });
+
+  const unlockToken = jwt.sign(
+    {
+      userId: userId.toString(),
+      purpose: 'account_unlock',
+      // Bound to the EPISODE, never to `lockoutUntil`: the deadline moves on
+      // every re-lock and the identity does not.
+      stateHash: generateStateHash(episodeId),
+    } satisfies JwtUnlockPayload,
+    derivePurposeKey(config.JWT_REFRESH_SECRET, 'account_unlock'),
+    { algorithm: 'HS256', expiresIn: UNLOCK_TOKEN_TTL_MS / 1000 },
+  );
+
+  // Fire-and-forget: the response must not wait on SMTP, and a send failure must
+  // not turn a 401 into a 500.
+  void sendAccountUnlockEmail(email, unlockToken).then((result) => {
+    if (!result.success) {
+      logger.error('Failed to send account unlock email', {
+        userId: userId.toString(),
+        email: maskEmail(email),
+        error: result.message,
+      });
+    }
+  });
+
+  return attempts;
 }
 
 /**
@@ -494,6 +718,29 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
 
   const isMatch = await bcrypt.compare(authHash, user.authHash);
 
+  // The three account-level refusals, evaluated once against one instant. The
+  // ORDER they are applied in below is this handler's own and differs from the
+  // refresh handler's deliberately; only the predicates are shared
+  // (`utils/accountStatus.ts`).
+  const status = evaluateAccountStatus(user);
+
+  // An account whose cascade delete is still outstanding is served nothing, and
+  // is served it identically whether or not the password was right. `deletionPending`
+  // survives only a FAILED cascade, so such a record is a zombie mid-erasure: the
+  // Passport strategy and the refresh handler already refuse it, and this door did
+  // not, which let one complete a full sign-in — writing a `RefreshToken` row and
+  // an audit row under an account being deleted — for the whole six-hour
+  // `tokenCleanup` window. The refusal is the generic 401 with the shared delay
+  // rather than anything specific, because a distinguishable answer here would tell
+  // an attacker that the address is registered AND being closed; and it is applied
+  // before the lockout branch so a dying account can never be handed the
+  // `ACCOUNT_LOCKED` signal either. Nothing is written, deliberately: the point is
+  // that no row is created under an account mid-erasure.
+  if (status.deletionPending) {
+    await applyFailedLoginDelay(email);
+    throw httpErrors.unauthorized('Invalid email or password');
+  }
+
   // Handle account lockout AFTER the bcrypt compare so a locked account is
   // indistinguishable from invalid credentials to anyone who does not already
   // know the password. Returning 403 ACCOUNT_LOCKED *before* the compare (the
@@ -504,8 +751,8 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // (the legitimate owner); a wrong/guessed password on a locked account
   // returns the same generic 401 as a non-existent email. Lockout state is not
   // mutated on this path, so any unlock email already issued (its token bound
-  // to the current lockoutUntil) stays valid.
-  if (user.lockoutUntil && user.lockoutUntil > new Date()) {
+  // to the current lock episode) stays valid.
+  if (status.lockedOut) {
     if (isMatch) {
       throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
     }
@@ -515,7 +762,7 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     // seconds — "fast" would then mean "this account exists and is locked",
     // an inverse oracle worse than the one being closed. The throttle only
     // sleeps; lockout state is still left untouched here, so an unlock email
-    // already issued (its token bound to lockoutUntil) stays valid.
+    // already issued (its token bound to the current lock episode) stays valid.
     await applyFailedLoginDelay(email);
     throw httpErrors.unauthorized('Invalid email or password');
   }
@@ -524,7 +771,7 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // an email is registered and unverified. Return the same 401 status and
   // message as invalid credentials, with a hint in the data field so the
   // client can show a helpful message without exposing this in the error code.
-  if (isMatch && !user.emailVerified) {
+  if (isMatch && status.emailUnverified) {
     // The password was correct, so this is not a brute-force attempt.
     resetLoginAttempts(email);
     res.status(401).json({
@@ -536,51 +783,12 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   }
 
   if (!isMatch) {
-    // Atomically increment failedLoginAttempts first, then check the result
-    // to prevent race conditions where concurrent requests read stale counts
-    const updatedUser = await User.findOneAndUpdate(
-      { _id: user._id },
-      { $inc: { failedLoginAttempts: 1 } },
-      { returnDocument: 'after' },
-    );
-
-    const newAttempts = updatedUser?.failedLoginAttempts ?? 1;
-    const shouldLock = newAttempts >= MAX_FAILED_ATTEMPTS;
-
-    if (shouldLock) {
-      // Set lockout in a separate atomic update based on the actual count
-      // (idempotent — safe to re-set if multiple concurrent requests exceed the threshold)
-      const lockoutUntil = new Date(Date.now() + LOCKOUT_DURATION_MS);
-      await User.updateOne({ _id: user._id }, { $set: { lockoutUntil } });
-
-      // Only send the unlock email when we are the request that crossed the
-      // threshold (exactly equal), preventing duplicate emails from concurrent
-      // failed logins that both exceed MAX_FAILED_ATTEMPTS.
-      if (newAttempts === MAX_FAILED_ATTEMPTS) {
-        logger.warn('Account locked due to too many failed attempts', { email: maskEmail(email) });
-
-        // Send unlock email - use lockoutUntil (stable) instead of failedLoginAttempts (can change)
-        const unlockToken = jwt.sign(
-          {
-            userId: user._id.toString(),
-            purpose: 'account_unlock',
-            stateHash: generateStateHash(lockoutUntil.toISOString()),
-          } satisfies JwtUnlockPayload,
-          derivePurposeKey(config.JWT_REFRESH_SECRET, 'account_unlock'),
-          { algorithm: 'HS256', expiresIn: '1h' },
-        );
-
-        // Send email asynchronously (don't block the response)
-        void sendAccountUnlockEmail(email, unlockToken).then((result) => {
-          if (!result.success) {
-            logger.error('Failed to send account unlock email', {
-              email: maskEmail(email),
-              error: result.message,
-            });
-          }
-        });
-      }
-    }
+    // Counts the attempt, locks at the threshold, and keeps a usable unlock link
+    // outstanding for the lock episode. Shared with the 2FA step, which enforces
+    // the same single counter. The returned count is unused here: this step's
+    // progressive delay comes from the per-email throttle, not the durable
+    // counter, so that a non-existent email is delayed identically.
+    await registerFailedAuthAttempt(user._id, email, 'password');
 
     await createAuditLog(
       user._id.toString(),
@@ -644,19 +852,44 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // bcrypt compare, mirroring `login2fa`: a concurrent `$inc` must not be
   // clobbered by a stale in-memory zero. The in-memory copy is corrected too, so
   // `finishLogin`'s own guarded reset below does not repeat the write.
-  if (user.lockoutUntil && user.lockoutUntil <= new Date()) {
-    await User.updateOne(
-      { _id: user._id },
-      { $set: { failedLoginAttempts: 0 }, $unset: { lockoutUntil: 1 } },
-    );
-    user.failedLoginAttempts = 0;
-    user.lockoutUntil = undefined;
+  //
+  // No second clock read: reaching this line means `status.lockedOut` was false,
+  // so any `lockoutUntil` still present was already in the past when the status
+  // was evaluated. Re-asking `new Date()` here could only disagree with the
+  // branch that let this request through.
+  if (user.lockoutUntil) {
+    await User.updateOne({ _id: user._id }, lockoutClearUpdate());
+    // The in-memory copy is corrected through the SAME helper the persisted form
+    // uses, so `finishLogin`'s own guarded reset below does not repeat the write
+    // and no half of the episode is left behind to keep a spent unlock link
+    // alive. Spelling the four assignments out here instead would be a fifth
+    // copy of the discharge — exactly the drift this pair of helpers exists to
+    // prevent.
+    clearLockoutStateOnDocument(user);
   }
 
   // Detect and recover from interrupted vault key rotation. If rotationInProgress
-  // is true, the server crashed mid-rotation. Clear the flag and pending fields so
-  // the user can log in normally. Items partially re-encrypted with the new key
-  // will be undecryptable, but the user can trigger a fresh rotation to fix it.
+  // is true, the server crashed mid-rotation; lowering the flag lets the account
+  // write again.
+  //
+  // The FLAG is all that is cleared, and that is the whole point. The sequential
+  // rotation path commits `rotationInProgress: true` in the same update as the new
+  // vault key wrapped under the account's MEK (`pendingEncryptedVaultKey` and its
+  // IV/tag), expressly so a crash is recoverable: rows written before the crash are
+  // sealed under THAT key and no other copy of it exists anywhere — not on the
+  // client, which minted it in memory and has long since navigated away, and not in
+  // a backup, which stores ciphertext rather than the key. Destroying the wrapper
+  // here, as this handler used to, is therefore the one irreversible act available
+  // at this point: a flag can be recomputed, a key cannot. It is kept, reported by
+  // `GET /user/profile` as `interruptedRotation`, and cleared by the next rotation
+  // that COMMITS (both commit paths `$unset` it; `lowerRotationFence`, which runs on
+  // every ABORT, deliberately does not),
+  // which is the only event that makes it redundant.
+  //
+  // The transactional path never writes the wrapper at all: it rolls back atomically,
+  // so a crash there leaves nothing half-done to finish and nothing outstanding to
+  // report. Whether the wrapper is present is exactly the discriminator, which is
+  // why it is derived rather than stored as a second flag.
   //
   // `rotationInProgress` doubles as the LIVE write-fence read by
   // `assertVaultNotRotating`, raised at the start of `bulkReEncrypt` and cleared
@@ -668,31 +901,47 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // would lower the fence mid-run and readmit a second session's stale-key write
   // that the rotation's client-enumerated set does not cover — stranding that row
   // under the superseded key, the exact data loss the fence prevents. A crashed
-  // rotation's lock TTL-expires (ROTATION_LOCK_TTL_MS), after which the next
-  // login clears the stuck flag; a live rotation clears it itself on
+  // rotation's lock TTL-expires (VAULT_ROTATION_LOCK_TTL_MS), after which the
+  // next login clears the stuck flag; a live rotation clears it itself on
   // commit/abort, so nothing is left wedged either way.
+  //
+  // That lock now has four holders besides the rotation — the import, the
+  // restore, the document completion and the master-password change all take it
+  // across their own check-to-commit spans — so a `true` answer no longer means
+  // "a rotation is live". It means "somebody is mid-span", and the effect here is
+  // that the cleanup of a stuck flag is DEFERRED to the next login rather than
+  // performed during someone else's span. Deferring costs nothing: every one of
+  // those holders is itself refused by the stuck flag it would be racing, so none
+  // can hold the lock for more than the round trip it takes to be told so, and
+  // lowering a fence has never been urgent. The error in the other direction —
+  // clearing the flag out from under a live rotation — is the one that strands a
+  // row, and this predicate still cannot make it.
   if (user.rotationInProgress && !(await isVaultRotationLockHeld(user._id.toString()))) {
-    logger.warn('Interrupted vault key rotation detected during login — clearing rotation state', {
+    // Read from the document this handler already loaded rather than re-reading:
+    // the fence is down only for a rotation with no live lock, so nothing can be
+    // writing this field concurrently.
+    const rotationOutstanding = Boolean(user.pendingEncryptedVaultKey);
+
+    logger.warn('Interrupted vault key rotation detected during login — lowering the write fence', {
       userId: user._id.toString(),
       email: maskEmail(email),
+      // The wrapper itself is never logged; only whether one is outstanding.
+      interruptedRotation: rotationOutstanding,
     });
 
-    await User.updateOne(
-      { _id: user._id },
-      {
-        $set: { rotationInProgress: false },
-        $unset: {
-          pendingEncryptedVaultKey: 1,
-          pendingVaultKeyIv: 1,
-          pendingVaultKeyTag: 1,
-        },
-      },
-    );
+    await User.updateOne({ _id: user._id }, { $set: { rotationInProgress: false } });
 
     await createAuditLog(
       user._id.toString(),
       'rotation_recovery',
-      { detail: 'Interrupted vault key rotation detected and cleared during login' },
+      {
+        detail: rotationOutstanding
+          ? 'Interrupted vault key rotation detected during login: the write fence was lowered and the pending vault key was retained so the rotation can be finished'
+          : 'Interrupted vault key rotation detected during login: the write fence was lowered; no pending vault key was stored, so nothing is outstanding',
+        // The same fact `GET /user/profile` reports, under the same name, so the
+        // audit trail and the profile can never be read as saying different things.
+        interruptedRotation: rotationOutstanding,
+      },
       ip,
       userAgent,
     );
@@ -752,10 +1001,7 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     // clobbered by a stale in-memory zero, and a login is not the place to run
     // whole-document validators.
     if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
-      await User.updateOne(
-        { _id: user._id },
-        { $set: { failedLoginAttempts: 0 }, $unset: { lockoutUntil: 1 } },
-      );
+      await User.updateOne({ _id: user._id }, lockoutClearUpdate());
     }
 
     const accessToken = generateAccessToken(user._id.toString());
@@ -939,11 +1185,24 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
 
+  const status = evaluateAccountStatus(user);
+
+  // The same zombie refusal the password step applies. A temp token is minted
+  // only by `login`, which now refuses a `deletionPending` account outright — but
+  // one issued in the five minutes BEFORE the deletion request is still valid, and
+  // spending it here would complete exactly the sign-in that refusal exists to
+  // prevent: a session row and an audit row written under an account mid-erasure.
+  // Answered as `TOKEN_INVALID`, matching the refresh handler and this handler's
+  // own treatment of a user that no longer exists.
+  if (status.deletionPending) {
+    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
+  }
+
   // Defense-in-depth: reject 2FA completion if the account became locked
   // between the password step and the 2FA step (e.g. a concurrent brute-force
   // attempt on another session triggered the lockout). The temp token alone
   // must not bypass an active lockout.
-  if (user.lockoutUntil && user.lockoutUntil > new Date()) {
+  if (status.lockedOut) {
     throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
   }
 
@@ -1033,47 +1292,10 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     // counts as a failed authentication attempt. Without this the 2FA step —
     // the last line of defense once the password is known or phished — could be
     // brute-forced for the full 5-minute life of the (reusable, IP-keyed-only)
-    // temp token. Atomically increment, then lock at the threshold, mirroring
-    // the password-step logic so the shared lockout applies across both steps.
-    const updatedUser = await User.findOneAndUpdate(
-      { _id: user._id },
-      { $inc: { failedLoginAttempts: 1 } },
-      { returnDocument: 'after' },
-    );
-
-    const newAttempts = updatedUser?.failedLoginAttempts ?? 1;
-    if (newAttempts >= MAX_FAILED_ATTEMPTS) {
-      const lockoutUntil = new Date(Date.now() + LOCKOUT_DURATION_MS);
-      await User.updateOne({ _id: user._id }, { $set: { lockoutUntil } });
-
-      // Only the request that crosses the threshold (exactly equal) sends the
-      // unlock email, preventing duplicate mail from concurrent failures.
-      if (newAttempts === MAX_FAILED_ATTEMPTS) {
-        logger.warn('Account locked due to too many failed 2FA attempts', {
-          userId: user._id.toString(),
-        });
-
-        const unlockToken = jwt.sign(
-          {
-            userId: user._id.toString(),
-            purpose: 'account_unlock',
-            stateHash: generateStateHash(lockoutUntil.toISOString()),
-          } satisfies JwtUnlockPayload,
-          derivePurposeKey(config.JWT_REFRESH_SECRET, 'account_unlock'),
-          { algorithm: 'HS256', expiresIn: '1h' },
-        );
-
-        // Send email asynchronously (don't block the response)
-        void sendAccountUnlockEmail(user.email, unlockToken).then((result) => {
-          if (!result.success) {
-            logger.error('Failed to send account unlock email', {
-              userId: user._id.toString(),
-              error: result.message,
-            });
-          }
-        });
-      }
-    }
+    // temp token. The counter, the lockout and the unlock link are the SAME
+    // mechanism as the password step's, so both go through one helper: two copies
+    // is how the two doors came to differ.
+    const newAttempts = await registerFailedAuthAttempt(user._id, user.email, '2fa');
 
     await createAuditLog(
       user._id.toString(),
@@ -1104,10 +1326,7 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   // credential check). Uses an atomic update rather than saving the loaded doc
   // so a concurrent increment is not clobbered.
   if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
-    await User.updateOne(
-      { _id: user._id },
-      { $set: { failedLoginAttempts: 0 }, $unset: { lockoutUntil: 1 } },
-    );
+    await User.updateOne({ _id: user._id }, lockoutClearUpdate());
   }
 
   // Atomically persist the TOTP time step to prevent replay — including the
@@ -1231,6 +1450,90 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
 
 // ─── Refresh ─────────────────────────────────────────────────────────────────
 
+/**
+ * Which of the two account-level refusals a refresh hit.
+ *
+ * They are kept apart because their COOKIE treatment is opposite, and that is the
+ * whole point of the distinction:
+ *
+ *  - `invalid` — the account is gone, mid-erasure, or never verified. Nothing will
+ *    ever make this cookie work again, so the browser should stop carrying it: the
+ *    refusal clears it.
+ *  - `locked` — a `LOCKOUT_DURATION_MINUTES` (30) condition on an account that is
+ *    otherwise perfectly healthy, and one the owner can discharge right now with
+ *    the emailed unlock link. The cookie may be the only copy of a remembered
+ *    family with `REFRESH_TOKEN_REMEMBER_DAYS` (30) on it, so clearing it would
+ *    spend a month of session to answer half an hour of lockout. It is KEPT.
+ */
+type RefreshRefusal = 'invalid' | 'locked';
+
+/**
+ * The account-level policy for a refresh, as a value: the refusal it earns, or
+ * `null` when the account may be served.
+ *
+ * ## Why the caller runs this BEFORE the claim
+ *
+ * The refresh handler's claim is destructive by design: it marks the presented row
+ * `usedAt` and commits a successor whose raw value exists only in the response
+ * about to be written. Evaluating the account AFTER that — which is what this
+ * handler used to do — meant the refusal threw between the commit and
+ * `setRefreshCookie`, so the presented cookie was spent, its successor was
+ * unreachable, and the session was gone. For `ACCOUNT_LOCKED` that traded a
+ * thirty-minute condition for a thirty-day remembered session, irreversibly, and
+ * the user's natural next move — retrying with the cookie they still hold — was a
+ * *reuse* event that revoked the whole family and every trusted device with it.
+ *
+ * @param session binds the read to an open transaction, so a caller inside one
+ *   reads what that transaction sees.
+ */
+async function accountRefreshRefusal(
+  userId: mongoose.Types.ObjectId,
+  session?: mongoose.ClientSession,
+): Promise<RefreshRefusal | null> {
+  const user = await User.findById(userId, null, session ? { session } : {});
+  const status = user && evaluateAccountStatus(user);
+
+  // Collapsed into one refusal on purpose: a refresh cookie is not a credential
+  // the caller chose, so distinguishing "no such account" from "mid-erasure" from
+  // "never verified" tells a holder of a stolen cookie something it should not.
+  if (!status || status.deletionPending || status.emailUnverified) return 'invalid';
+  if (status.lockedOut) return 'locked';
+  return null;
+}
+
+/**
+ * {@link accountRefreshRefusal} carried by an exception, which exists for exactly
+ * one caller: the transactional branch, where a throw is the only thing that
+ * ABORTS the claim it has already made. The standalone branch reads the value
+ * directly instead, because a gate that runs before the claim has nothing to undo.
+ *
+ * The exception carries the refusal rather than an HTTP error so that nothing
+ * writes to `res` from inside the transaction callback — `withTransaction` is free
+ * to re-run that callback, and a `Set-Cookie` header appended twice is a header
+ * sent twice.
+ */
+class RefreshRefusedError extends Error {
+  constructor(readonly refusal: RefreshRefusal) {
+    super(`refresh refused: ${refusal}`);
+    this.name = 'RefreshRefusedError';
+  }
+}
+
+/**
+ * Renders a {@link RefreshRefusal} as its HTTP refusal, from ONE place, so the two
+ * topology branches cannot drift on which refusal clears the cookie. Never returns.
+ */
+function throwRefreshRefusal(res: Response, refusal: RefreshRefusal): never {
+  if (refusal === 'locked') {
+    // Deliberately no `clearRefreshCookie`: see {@link RefreshRefusal}. The CSRF
+    // cookie is left alone too — it is an HMAC over the refresh token that was NOT
+    // rotated here, so it is still the right one when the lockout ends.
+    throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
+  }
+  clearRefreshCookie(res);
+  throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
+}
+
 export const refresh = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const token = readStringCookie(req, REFRESH_COOKIE_NAME);
 
@@ -1273,6 +1576,15 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
+        // Reset FIRST, every attempt. `withTransaction` re-runs this callback on a
+        // transient error, and an aborted attempt's writes are gone while this
+        // variable's assignment is not: an attempt that claimed, then lost its
+        // commit, then found nothing to claim on the retry (a sibling tab got
+        // there first) would leave `claimed` pointing at a successor row that was
+        // never committed — and the handler would answer 200 and set a cookie for
+        // a token that does not exist, costing the session on the next refresh.
+        claimed = null;
+
         const storedToken = await RefreshToken.findOneAndUpdate(
           { tokenHash, usedAt: null, expiresAt: { $gt: new Date() } },
           { $set: { usedAt: new Date() } },
@@ -1283,6 +1595,13 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
           // Leave claimed=null; handled after the transaction completes.
           return;
         }
+
+        // The account gate, inside the transaction and on its session. A refusal
+        // THROWS here rather than returning, because that is what makes
+        // `withTransaction` abort: the claim above is undone together with the
+        // successor below, so a refused refresh spends nothing at all.
+        const refusal = await accountRefreshRefusal(storedToken.userId, session);
+        if (refusal) throw new RefreshRefusedError(refusal);
 
         // Rotation carries any absolute family deadline forward unchanged; a row
         // without one slides to now + REFRESH_TOKEN_DAYS (today's behaviour).
@@ -1313,6 +1632,10 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
           maxAgeMs: lifetime.maxAgeMs,
         };
       });
+    } catch (err) {
+      // Converted OUT here, after the abort and before anything touches `res`.
+      if (err instanceof RefreshRefusedError) throwRefreshRefusal(res, err.refusal);
+      throw err;
     } finally {
       await session.endSession();
     }
@@ -1322,6 +1645,24 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
     // a crash between the two leaves the user having to log in again. This
     // is a mild inconvenience, not a security issue: the old token is
     // already invalidated and cannot be reused.
+    // There is no transaction to join, so the gate takes the only other position
+    // that cannot burn the token: ahead of the claim, with nothing yet to undo.
+    // The read carries the claim's OWN filter, and that is load-bearing — a row
+    // that is already spent or expired must fall straight through to the reuse and
+    // expiry branches below, or a locked account would be the one state in which a
+    // replayed cookie escaped family revocation.
+    const claimable = await RefreshToken.findOne({
+      tokenHash,
+      usedAt: null,
+      expiresAt: { $gt: new Date() },
+    })
+      .select('userId')
+      .lean();
+    if (claimable) {
+      const refusal = await accountRefreshRefusal(claimable.userId);
+      if (refusal) throwRefreshRefusal(res, refusal);
+    }
+
     const storedToken = await RefreshToken.findOneAndUpdate(
       { tokenHash, usedAt: null, expiresAt: { $gt: new Date() } },
       { $set: { usedAt: new Date() } },
@@ -1399,18 +1740,13 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
 
   const claimedMeta: ClaimedTokenMeta = claimed;
 
-  // Look up user for new access token and verify account status
-  const user = await User.findById(claimedMeta.userId);
-  if (!user || user.deletionPending || !user.emailVerified) {
-    clearRefreshCookie(res);
-    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
-  }
-  if (user.lockoutUntil && user.lockoutUntil > new Date()) {
-    clearRefreshCookie(res);
-    throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
-  }
-
-  const accessToken = generateAccessToken(user._id.toString());
+  // No account check here, and no second `User` read to make it with: the gate ran
+  // BEFORE the claim (and, on the transactional path, inside the very transaction
+  // that committed it), so reaching this line already means the account may be
+  // served. Re-checking here is precisely what was removed — a refusal at this
+  // point arrives after the presented token has been spent and its successor
+  // committed, which is how a thirty-minute lockout destroyed a thirty-day session.
+  const accessToken = generateAccessToken(claimedMeta.userId.toString());
 
   setRefreshCookie(res, newRefreshTokenRaw, claimedMeta.maxAgeMs);
   clearCsrfCookie(res);
@@ -1688,8 +2024,30 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   user.encryptedVaultKey = newEncryptedVaultKey;
   user.vaultKeyIv = newVaultKeyIv;
   user.vaultKeyTag = newVaultKeyTag;
-  user.failedLoginAttempts = 0;
-  user.lockoutUntil = undefined;
+  // An interrupted rotation's wrapper is dropped HERE, and this is the one place
+  // dropping it is correct rather than destructive.
+  //
+  // `changePassword` re-wraps that key under the new MEK because the key is still
+  // the only way to read the rows the crashed rotation had already re-sealed. A
+  // RESET cannot: it is reached without the old master password, so the old MEK
+  // does not exist anywhere and the client mints a brand-new vault key. Every row
+  // in the account is already unreadable at this point — `ResetPasswordPage` says
+  // so before the user confirms — so the pending wrapper is not a key any more,
+  // just ciphertext nothing can open.
+  //
+  // Keeping it is not neutral. `getProfile` derives `interruptedRotation` from
+  // its presence, so the Settings page would offer to finish a rotation that can
+  // never be finished, for ever; and `bulkReEncrypt`'s outstanding-rotation guard
+  // reads the same field, so every future rotation on the account would be
+  // refused until the user discarded a wrapper nothing had told them about.
+  user.pendingEncryptedVaultKey = undefined;
+  user.pendingVaultKeyIv = undefined;
+  user.pendingVaultKeyTag = undefined;
+  // Same reasoning for the write fence: a reset that lands while a rotation was
+  // still flagged would otherwise leave the account refusing its own writes until
+  // the next login lowered it, over a rotation whose subject no longer exists.
+  user.rotationInProgress = false;
+  clearLockoutStateOnDocument(user);
   user.passwordChangedAt = new Date();
   await user.save();
 
@@ -1729,20 +2087,37 @@ export const unlockAccount = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
-  const user = await User.findById(payload.userId);
+  // `lockoutEpisodeId` is `select: false`; without the `+` every link would be
+  // compared against `undefined` and rejected.
+  const user = await User.findById(payload.userId).select('+lockoutEpisodeId');
   if (!user) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
-  // Verify the token was generated for the current lockout state using lockoutUntil
-  // (invalidates the token once the account has been unlocked, since lockoutUntil is cleared)
-  if (payload.stateHash !== generateStateHash(user.lockoutUntil?.toISOString() ?? '')) {
+  // Verify the token names the lock episode that is still running.
+  //
+  // Binding to the EPISODE rather than to `lockoutUntil` is the whole fix: the
+  // deadline is rewritten by every re-lock, so a token bound to it died on the
+  // victim's next failed attempt while the mail guard refused to send a
+  // replacement. The episode identity is minted once per lockout and carried
+  // through every extension, so one link covers the whole episode however long an
+  // attacker grinds.
+  //
+  // Clearing the episode on discharge is what keeps the link SINGLE-USE, exactly
+  // as clearing `lockoutUntil` used to. The explicit "no episode, no unlock" arm
+  // matters: without it the comparison would fall back to the hash of the empty
+  // string, which is a fixed value that every account with no episode running
+  // would match — and an unlock link for an account that is not locked has
+  // nothing to do anyway.
+  const episodeId = user.lockoutEpisodeId;
+  if (!episodeId || payload.stateHash !== generateStateHash(episodeId)) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
-  user.failedLoginAttempts = 0;
-  user.lockoutUntil = undefined;
-  await user.save();
+  // An atomic update rather than `user.save()`: this clears four fields and
+  // nothing else, and it must not run whole-document validators against a record
+  // an unauthenticated caller reached.
+  await User.updateOne({ _id: user._id }, lockoutClearUpdate());
 
   const unlockCtx = getRequestContext(req);
   await createAuditLog(

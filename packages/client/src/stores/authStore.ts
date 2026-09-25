@@ -21,10 +21,12 @@ import { endScanSession } from '../services/totpImport/scanSession.js';
 import { logger } from '../lib/logger.js';
 import { decodeJwtPayload } from '../lib/accessToken.js';
 import { useVaultStore } from './vaultStore.js';
+import { useUIStore } from './uiStore.js';
 import { useDocumentsStore } from './documentsStore.js';
 import { isAxiosError } from 'axios';
 import type { SuccessfulLoginResponse } from '@hvault/shared';
-import { KDF_ITERATIONS, KDF_ALGORITHM, ENCRYPTION_VERSION, ERROR_CODES } from '@hvault/shared';
+import { KDF_ITERATIONS, KDF_ALGORITHM, ENCRYPTION_VERSION } from '@hvault/shared';
+import { is2faSessionDead } from '../services/auth/sessionFailure.js';
 import { getDeviceFingerprint } from '../utils/deviceFingerprint.js';
 
 /**
@@ -452,30 +454,25 @@ export const useAuthStore = create<AuthState>()(
         } catch (error) {
           // Decide whether the same temp token can be retried:
           //   Retryable     → a wrong-but-correctable 2FA code or a transient
-          //     network error (an Axios error whose code is NOT in
-          //     NON_RETRYABLE_CODES). Keep the MEK and the abandon-cleanup
-          //     timer so the user can resubmit and the 5-minute reaper still
-          //     fires if they walk away.
+          //     network error (an Axios failure {@link is2faSessionDead} does
+          //     not speak for). Keep the MEK and the abandon-cleanup timer so
+          //     the user can resubmit and the 5-minute reaper still fires if
+          //     they walk away.
           //   Non-retryable → the temp token / session is dead (expired,
           //     invalid, locked) OR a post-verification crypto/parse failure
           //     (corrupt or rotated vault key, malformed JWT) that surfaced as
           //     a plain, non-Axios Error. A resubmit cannot fix any of these,
           //     and the abandon timer was the only reaper, so clear the MEK
           //     immediately instead of leaving it resident with no cleanup.
-          const NON_RETRYABLE_CODES: string[] = [
-            ERROR_CODES.TOKEN_EXPIRED,
-            ERROR_CODES.TOKEN_INVALID,
-            ERROR_CODES.ACCOUNT_LOCKED,
-          ];
-          let retryable = false;
-          if (isAxiosError(error)) {
-            const errorCode = (error.response?.data as Record<string, unknown> | undefined)?.error;
-            const code =
-              typeof errorCode === 'object' && errorCode !== null
-                ? (errorCode as Record<string, unknown>).code
-                : undefined;
-            retryable = !(typeof code === 'string' && NON_RETRYABLE_CODES.includes(code));
-          }
+          //
+          // The classification lives in `services/auth/sessionFailure.ts`, which
+          // already reads the FLAT `{ success, message, statusCode, statusText }`
+          // envelope the API actually emits. It was inlined here against a NESTED
+          // `data.error.code` the server has never produced, so the code was
+          // always `undefined`, every Axios failure read as retryable, and this
+          // teardown was dead: a dead 2FA session left the master-password-derived
+          // MEK resident for the full five minutes.
+          const retryable = isAxiosError(error) && !is2faSessionDead(error);
           if (!retryable) {
             const { mek: currentMek, _2faTimeoutId: tid } = get();
             if (tid) clearTimeout(tid);
@@ -683,6 +680,18 @@ export const useAuthStore = create<AuthState>()(
         // Clear decrypted vault data from the vault store
         useVaultStore.getState().clearStore();
 
+        // And the superseded-vault-key notice, which is DERIVED from the number
+        // above and cannot clear itself across an account switch. It compares the
+        // generation the server last refused a write with against
+        // `vaultKeyVersion`, and that self-clears on a re-login to the SAME
+        // account — the two land on the same number. A logout followed by a
+        // sign-in to a DIFFERENT account does not: the reset above puts this at
+        // generation 0 while the recorded number is whatever the previous account
+        // was on, so an undismissable "reload to continue" would sit over a
+        // session in which every save works. `lock()` deliberately does NOT do
+        // this: a lock keeps the session, and its key is still the superseded one.
+        useUIStore.getState().setStaleVaultKeyVersion(null);
+
         // Then zero the actual key material using the captured references
         if (vaultKey) {
           await cryptoService.clearCryptoKey(vaultKey);
@@ -696,10 +705,16 @@ export const useAuthStore = create<AuthState>()(
         // reset user scope so the next login starts fresh.
         try {
           await offlineCache.clear();
-          await offlineCache.setUser(null);
         } catch (err) {
           logger.warn('Failed to clear offline cache during logout', err);
         }
+        // Reset the scope whether or not that clear worked. It used to sit in the
+        // same `try`, so a clear the engine refused (a realistic outcome: another
+        // tab on a different version holding the database is refused as a
+        // `version_conflict`) left the module pointing at the signed-out
+        // account's database for whatever ran next. `setUser(null)` touches no
+        // storage and cannot fail.
+        await offlineCache.setUser(null);
 
         // Clear the per-user encrypted Vault Health snapshot (breach + strength).
         // Logout ONLY — NOT lock: the snapshot is encrypted at rest under the

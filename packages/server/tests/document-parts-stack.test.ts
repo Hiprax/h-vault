@@ -128,10 +128,10 @@ describe('an 8 MiB octet-stream body through the whole app', () => {
     const expectedDigest = digestOf(body);
 
     const agent = request.agent(app);
+    const pair = await getCsrf(agent);
     const pending = agent
       .put(`/api/v1/documents/uploads/${uploadId.toHexString()}/parts/1`)
       .set('Authorization', authHeader(user.accessToken));
-    const pair = await getCsrf(agent);
     const res = await pending
       .set('Cookie', pair.cookie)
       .set('x-csrf-token', pair.token)
@@ -197,10 +197,10 @@ describe('an 8 MiB octet-stream body through the whole app', () => {
     });
 
     const agent = request.agent(app);
+    const pair = await getCsrf(agent);
     const pending = agent
       .put(`/api/v1/documents/uploads/${uploadId.toHexString()}/parts/1`)
       .set('Authorization', authHeader(user.accessToken));
-    const pair = await getCsrf(agent);
     const res = await pending
       .set('Cookie', pair.cookie)
       .set('x-csrf-token', pair.token)

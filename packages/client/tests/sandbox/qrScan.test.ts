@@ -109,19 +109,90 @@ describe('what the frame refuses to decode at all', () => {
     const huge = new Blob([new Uint8Array(10)]);
     Object.defineProperty(huge, 'size', { value: MAX_SANDBOX_QR_IMAGE_BYTES + 1 });
     const reply = await scanImage(1, huge, 2, 120);
-    expect(reply.kind).toBe('failed');
+    // `qrFailed`, NOT `failed`, and carrying the request it answers. The host
+    // cannot attribute a bare `failed` to one image, so it has to read it as the
+    // session dying — which stopped a running camera because somebody picked one
+    // oversized photograph. Saying WHICH request lets it refuse just that image.
+    // A CODE, never a sentence: the host words it, because its status line is
+    // the application's chrome. `toEqual` over the whole reply is what pins that
+    // no `reason` rides along.
+    expect(reply).toEqual({ kind: 'qrFailed', requestId: 1, code: 'imageTooLarge' });
     expect(globalThis.createImageBitmap).not.toHaveBeenCalled();
   });
 
   it('refuses an image whose decoded dimensions are enormous', async () => {
     // A small file can still declare a huge canvas, which is why the check
     // happens on both sides of the decode.
-    const reply = await scanImage(1, bitmap(MAX_SANDBOX_QR_IMAGE_SIDE + 1, 10), 2, 120);
-    expect(reply.kind).toBe('failed');
+    const reply = await scanImage(7, bitmap(MAX_SANDBOX_QR_IMAGE_SIDE + 1, 10), 2, 120);
+    // The case that makes the byte bound insufficient on its own: a 48 MP
+    // photograph is 8000 x 6000 and routinely UNDER twelve mebibytes, so it
+    // reaches the frame and is refused here. Attributable, so it costs one
+    // image rather than the session.
+    expect(reply).toEqual({ kind: 'qrFailed', requestId: 7, code: 'imageTooLarge' });
   });
 
   it('refuses something that is not an image at all', async () => {
-    expect((await scanImage(1, { nope: true }, 2, 120)).kind).toBe('failed');
+    expect(await scanImage(4, { nope: true }, 2, 120)).toEqual({
+      kind: 'qrFailed',
+      requestId: 4,
+      code: 'imageUnreadable',
+    });
+  });
+
+  it('answers a photo the engine cannot decode per-REQUEST, not per-session', async () => {
+    // A HEIC on a non-Safari engine, or a corrupt PNG: `accept="image/*"` admits
+    // both, and `createImageBitmap` rejects. This is the trigger the host-side
+    // byte bound cannot see at all, and the one that used to stop the camera.
+    vi.mocked(globalThis.createImageBitmap).mockRejectedValueOnce(
+      new Error('The source image could not be decoded.'),
+    );
+    // The browser's own message is NOT forwarded: it is words the application
+    // did not write, bound for the application's status line.
+    expect(await scanImage(9, new Blob([new Uint8Array(4)]), 2, 120)).toEqual({
+      kind: 'qrFailed',
+      requestId: 9,
+      code: 'imageUnreadable',
+    });
+  });
+
+  it('ends the SESSION when the engine itself cannot read images, not one request', async () => {
+    // An engine with no usable 2D context refuses every frame it is ever handed,
+    // so a per-image refusal leaves a running camera looping in silence: the
+    // panel's pump swallows those by design, because at eight frames a second it
+    // must. Answering `failed` is what puts a sentence on screen and stops the
+    // camera, which is the honest outcome when no later image can improve.
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        getContext() {
+          return null;
+        }
+      },
+    );
+    const reply = await scanImage(11, bitmap(), 2, 120);
+    expect(reply).toEqual({ kind: 'failed', code: 'engineUnavailable' });
+    // The negative: NOT attributed to this one image, because the next one would
+    // fail identically.
+    expect(reply).not.toHaveProperty('requestId');
+  });
+
+  it('ends the session when the engine has no OffscreenCanvas at all', async () => {
+    // The same fault one step earlier. Named rather than left to throw a bare
+    // `ReferenceError`, so the host gets the specific code instead of reading
+    // it as the decoder failing to load, which would be false.
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    const reply = await scanImage(12, bitmap(), 2, 120);
+    expect(reply).toEqual({ kind: 'failed', code: 'engineUnavailable' });
+    expect(reply).not.toHaveProperty('requestId');
+  });
+
+  it('still releases the decoded pixels when the engine refuses', async () => {
+    // The `finally` that closes the bitmap must survive the new throw path, or an
+    // engine fault leaks one decoded frame on its way out.
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    const source = new FakeImageBitmap(100, 100);
+    await scanImage(13, source as unknown as ImageBitmap, 2, 120);
+    expect(source.close).toHaveBeenCalledTimes(1);
   });
 
   it('decodes an uploaded file by way of the browser, in the frame', async () => {

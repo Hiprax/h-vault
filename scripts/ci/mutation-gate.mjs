@@ -10,12 +10,14 @@
  *   node scripts/ci/mutation-gate.mjs          the gate (what the pipeline runs)
  *   npm run test:mutation                      the same thing
  *   npm run test:mutation -- --full            rebuild, ignoring incremental state
- *   npm run test:mutation -- --leg=shared      one leg, while iterating
+ *   npm run test:mutation -- --leg=shared      one leg: to iterate, or to bank it
  *
- * `--leg` is a DEVELOPMENT flag and is deliberately absent from the registered
- * command: a committed filter that runs part of a gate and reports the whole
- * gate's name is the narrowing this project's doctrine forbids. A `--leg` run
- * therefore refuses to write the merged report at all (see (d)).
+ * `--leg` is deliberately absent from the registered command: a committed filter
+ * that runs part of a gate and reports the whole gate's name is the narrowing
+ * this project's doctrine forbids. A `--leg` run therefore never writes the
+ * merged report (see (d)); it writes that leg's OWN evidence and holds the leg
+ * to the leg's OWN floor (see (f)), which is a different claim under a different
+ * name and cannot be mistaken for the whole.
  *
  * ---------------------------------------------------------------------------
  * LOAD-BEARING DECISIONS
@@ -43,11 +45,12 @@
  *     regression it is, at the moment it happens, rather than at the end of a
  *     `verify:full` an hour later.
  *
- *  d. A PARTIAL RUN NEVER WRITES THE REPORT. `--leg` runs one package; its
- *     numbers describe a fraction of the declared scope, and a `mutation.json`
- *     containing them would be read by the ratchet as the whole thing — with a
- *     smaller file set (a scope regression) and a score over different code.
- *     So a partial run prints and exits, leaving the last complete report alone.
+ *  d. A PARTIAL RUN NEVER WRITES THE MERGED REPORT. `--leg` runs one package;
+ *     its numbers describe a fraction of the declared scope, and a
+ *     `mutation.json` containing them would be read by the ratchet as the whole
+ *     thing — with a smaller file set (a scope regression) and a score over
+ *     different code. So a partial run leaves the last complete merged report
+ *     alone, and so does a full run in which any leg failed.
  *
  *  e. THERE IS NO WALL-CLOCK DEADLINE, unlike `fuzz`, `upgrade` and `recovery`.
  *     A full run over ~53,000 lines is hours; a deadline that could fire on a
@@ -57,6 +60,20 @@
  *     `timeoutMS`/`timeoutFactor`, and a wedged mutant is reported as Timeout,
  *     which counts as killed because a test suite that hangs on a mutation has
  *     detected it.
+ *
+ *  f. EVERY LEG IS BANKED, AND HELD, ON ITS OWN. The merged floor is
+ *     all-or-nothing across three legs by design (d), and one of those legs is
+ *     measured in DAYS on the reference machine, so while the merged figures were
+ *     the only floor the oracle never held one at all. Each leg that completes
+ *     therefore writes `mutation-<leg>.json` — its own evidence, over exactly the
+ *     code it mutated — and is compared against `mutation.legs.<leg>.*` in the
+ *     baseline: the same four checks as the merged floor (lost files, a smaller
+ *     denominator, a lower score, a lower or unmeasured core module), in a full
+ *     run and in a `--leg` run alike. A leg with NO recorded floor is reported
+ *     UNBANKED and fails the run; it never passes silently, and its evidence is
+ *     still written, because that file is what records its first floor. The
+ *     merged figures keep their own floor, checked only when all three legs
+ *     completed in one run, and a per-leg floor never stands in for it.
  */
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -70,8 +87,18 @@ import {
   MUTATION_SCOPE_GLOBS,
   incrementalFileFor,
   jsonReportFor,
-  moduleKey,
+  legReportFor,
+  legSelects,
 } from './lib/mutation-scope.mjs';
+import {
+  createTally,
+  evidenceFiles,
+  floorFailures,
+  isBanked,
+  sortedSurvivors,
+  summariseTally,
+  tallyReport,
+} from './lib/mutation-evidence.mjs';
 
 const REPORT = 'mutation.json';
 const BASELINE = path.join(repoRoot, '.testfortress', 'baseline.json');
@@ -88,50 +115,64 @@ if (legFilter && !MUTATION_LEG_IDS.includes(legFilter)) {
 }
 const legs = MUTATION_LEGS.filter((leg) => !legFilter || leg.id === legFilter);
 
-/** Statuses that count as a kill, and the ones that count against you. */
-const KILLED = new Set(['Killed', 'Timeout']);
-const ALIVE = new Set(['Survived', 'NoCoverage']);
-const pct = (killed, total) => (total > 0 ? +((killed / total) * 100).toFixed(2) : 0);
-
 ensureReportDir();
 
 const baseline = existsSync(BASELINE) ? JSON.parse(readFileSync(BASELINE, 'utf8')) : null;
+/** The merged floor and every per-leg floor, as recorded. Either may be absent. */
 const recorded = baseline?.mutation;
+const recordedLegs = recorded?.legs ?? {};
+
+/** Does any leg's declared scope still select this file? */
+const inDeclaredScope = (file) => MUTATION_LEGS.some((leg) => legSelects(leg, file));
 
 /**
- * Does any leg's declared scope still select this file? Last match wins, which
- * is Stryker's own rule for a `mutate` list mixing patterns and `!` negations.
+ * The exact command that records a floor nobody has recorded yet. `--seed` names
+ * the narrowest family that is actually absent, because the ratchet refuses to
+ * seed a family that is partly present: once one leg is banked, `mutation` is
+ * partly present and the next leg has to be named on its own.
  */
-function inDeclaredScope(file) {
-  for (const leg of MUTATION_LEGS) {
-    let selected = false;
-    for (const glob of leg.mutate) {
-      if (glob.startsWith('!')) {
-        if (path.matchesGlob(file, glob.slice(1))) selected = false;
-      } else if (path.matchesGlob(file, glob)) {
-        selected = true;
-      }
-    }
-    if (selected) return true;
-  }
-  return false;
+function seedCommand(family, legId) {
+  // The ratchet records a floor only from a from-scratch run (its decision (i)):
+  // a report this run wrote incrementally would be refused, so the steps start
+  // with a `--full` re-run whenever this run was not already one.
+  //
+  // SEPARATE steps, never chained with `&&`: the re-run of a leg that holds no
+  // floor exits 1 by design (it is UNBANKED until the accept records it), and
+  // so does `audit:ratchet:full` while a field is absent, so a chain would stop
+  // before the one step that records anything — after hours of mutation.
+  const steps = [
+    ...(full ? [] : [`npm run test:mutation -- ${legId ? `--leg=${legId} ` : ''}--full`]),
+    'npm run audit:ratchet:full   (review what it reports; a failure here is expected only for the absent floor)',
+    `node scripts/ci/ratchet-check.mjs --accept --seed ${family} --reason "..."`,
+  ];
+  return steps.map((step, index) => `\n        ${String(index + 1)}. ${step}`).join('');
 }
+const seedFamilyFor = (legId) =>
+  recorded && Object.keys(recorded).length > 0 ? `mutation.legs.${legId}` : 'mutation';
 
 /**
  * (c), the cheap half — run BEFORE Stryker, because the answer takes
  * milliseconds and the run takes hours.
  *
- * Every file the baseline says was mutated must still be selected by the
- * declared globs. A file that has been DELETED is not a narrowing: its code is
- * gone, so there is nothing left to assert about it, and the ratchet's superset
- * check is where that reduction is argued for with a `BASELINE-REDUCTION` entry.
- * A file that still exists but is no longer selected is the Forbidden Action
- * this gate exists to make expensive, and waiting an hour to say so would mean
- * nobody ever runs the gate that says it.
+ * Every file ANY recorded floor says was mutated — the merged campaign's or one
+ * leg's — must still be selected by the declared globs. A file that has been
+ * DELETED is not a narrowing: its code is gone, so there is nothing left to
+ * assert about it, and the ratchet's superset check is where that reduction is
+ * argued for with a `BASELINE-REDUCTION` entry. A file that still exists but is
+ * no longer selected is the Forbidden Action this gate exists to make expensive,
+ * and waiting an hour to say so would mean nobody ever runs the gate that says it.
+ *
+ * The UNION, not the merged set alone: until the slowest leg completes there is
+ * no merged set, and a pre-flight that consulted only it would check nothing at
+ * all while two legs held floors.
  */
-const narrowed = (recorded?.filesMutated ?? []).filter(
-  (file) => existsSync(path.join(repoRoot, file)) && !inDeclaredScope(file),
-);
+const everRecorded = new Set([
+  ...(recorded?.filesMutated ?? []),
+  ...Object.values(recordedLegs).flatMap((leg) => leg?.filesMutated ?? []),
+]);
+const narrowed = [...everRecorded]
+  .sort()
+  .filter((file) => existsSync(path.join(repoRoot, file)) && !inDeclaredScope(file));
 if (narrowed.length > 0) {
   warn(`scope narrowed: ${String(narrowed.length)} file(s) left the declared mutation scope`);
   for (const file of narrowed.slice(0, 10)) console.error(color.red(`      ${file}`));
@@ -146,18 +187,19 @@ if (narrowed.length > 0) {
 
 const started = Date.now();
 const legResults = [];
-/** @type {Map<string, {killed: number, total: number, ignored: number}>} */
-const perFile = new Map();
-/** @type {{file: string, line: number, mutator: string, replacement: string, status: string}[]} */
-const alive = [];
-const byStatus = {};
+/** Every completed leg, accumulated: what the merged report describes. */
+const merged = createTally();
+/** Floor failures, per leg as each completes and then for the merged figures. */
+const failures = [];
 
 for (const leg of legs) {
   console.log(color.bold(`\n  mutation: ${leg.package}`));
   const reportFile = path.join(repoRoot, jsonReportFor(leg.id));
   // A stale report would let a leg that crashed before writing anything be read
-  // as if it had run — the same rule every other gate here follows.
+  // as if it had run — the same rule every other gate here follows. The leg's
+  // own evidence file goes for the same reason: it must describe THIS run.
   rmSync(reportFile, { force: true });
+  rmSync(path.join(repoRoot, '.testfortress', 'reports', legReportFor(leg.id)), { force: true });
   if (full) rmSync(path.join(repoRoot, incrementalFileFor(leg.id)), { force: true });
 
   const legStarted = Date.now();
@@ -183,47 +225,54 @@ for (const leg of legs) {
   }
 
   const report = JSON.parse(readFileSync(reportFile, 'utf8'));
-  let killed = 0;
-  let scored = 0;
-  let ignored = 0;
-  for (const [file, entry] of Object.entries(report.files ?? {})) {
-    const stats = perFile.get(file) ?? { killed: 0, total: 0, ignored: 0 };
-    for (const mutant of entry.mutants ?? []) {
-      byStatus[mutant.status] = (byStatus[mutant.status] ?? 0) + 1;
-      if (KILLED.has(mutant.status)) {
-        killed++;
-        scored++;
-        stats.killed++;
-        stats.total++;
-      } else if (ALIVE.has(mutant.status)) {
-        scored++;
-        stats.total++;
-        alive.push({
-          file,
-          line: mutant.location?.start?.line ?? 0,
-          mutator: mutant.mutatorName,
-          replacement: String(mutant.replacement ?? '').slice(0, 120),
-          status: mutant.status,
-        });
-      } else {
-        ignored++;
-        stats.ignored++;
-      }
-    }
-    perFile.set(file, stats);
-  }
+  const legTally = tallyReport(report);
+  tallyReport(report, merged);
+  const measured = summariseTally(legTally, CORE_MODULES);
   legResults.push({
     ...legSummary(leg, durationMs),
     exitCode: code,
     status: 'pass',
-    mutants: scored,
-    killed,
-    ignored,
-    score: pct(killed, scored),
+    mutants: measured.totalMutants,
+    killed: measured.killed,
+    ignored: [...legTally.perFile.values()].reduce((n, f) => n + f.ignored, 0),
+    score: measured.overall,
   });
+
+  // (f) The leg's own evidence, written the moment the leg completes and
+  // whichever way the rest of the run goes, because a leg that ran completely
+  // measured its package completely.
+  writeJsonReport(legReportFor(leg.id), {
+    version: 1,
+    task: 'test:mutation',
+    leg: leg.id,
+    package: leg.package,
+    checkedAt: new Date().toISOString(),
+    durationMs,
+    incremental: !full,
+    files: evidenceFiles(legTally),
+    overall: measured.overall,
+    totalMutants: measured.totalMutants,
+    filesMutated: measured.filesMutated,
+    modules: measured.modules,
+    scopeGlobs: leg.mutate,
+    byStatus: legTally.byStatus,
+    survivors: sortedSurvivors(legTally),
+  });
+
+  // (f) …and the leg's own floor, checked against the leg's own record.
+  const legFloor = recordedLegs[leg.id];
+  if (!isBanked(legFloor)) {
+    failures.push(
+      `${leg.id}: UNBANKED — no floor is recorded for this leg, so it held nothing. ` +
+        `Record it with: ${seedCommand(seedFamilyFor(leg.id), leg.id)}`,
+    );
+  } else {
+    failures.push(...floorFailures(leg.id, legFloor, measured));
+  }
+
   console.log(
     color.green(
-      `  ✔ ${leg.package} — ${String(pct(killed, scored))}% of ${String(scored)} mutants killed in ${String(Math.round(durationMs / 1000))}s`,
+      `  ✔ ${leg.package} — ${String(measured.overall)}% of ${String(measured.totalMutants)} mutants killed in ${String(Math.round(durationMs / 1000))}s`,
     ),
   );
 }
@@ -240,47 +289,41 @@ function legSummary(leg, durationMs) {
 
 const brokenLegs = legResults.filter((leg) => leg.status !== 'pass');
 
-// (d) A partial run reports and stops. Nothing downstream may read a fraction of
-// the declared scope as if it were the whole of it, and there are two ways to
-// end up with one: asking for a single leg, or having a leg fail. A leg that
-// dies in its dry run — which is how a broken configuration presents — would
-// otherwise leave a `mutation.json` describing the other two packages, and the
-// ratchet reads that file as the whole declared scope.
+/** Prints the floor failures collected so far and exits 1, or returns when there are none. */
+function reportFailures() {
+  if (failures.length === 0) return;
+  warn(`${String(failures.length)} mutation failure(s)`);
+  for (const line of failures) console.error(color.red(`      ${line}`));
+  process.exit(1);
+}
+
+// (d) A partial run never writes the merged report. Nothing downstream may read
+// a fraction of the declared scope as if it were the whole of it, and there are
+// two ways to end up with one: asking for a single leg, or having a leg fail. A
+// leg that dies in its dry run — which is how a broken configuration presents —
+// would otherwise leave a `mutation.json` describing the other two packages, and
+// the ratchet reads that file as the whole declared scope. The legs that DID
+// complete have already written, and been held to, their own floors above.
 if (legFilter || brokenLegs.length > 0) {
   for (const leg of legResults) {
     note(`${leg.package}: ${String(leg.score ?? 0)}% of ${String(leg.mutants ?? 0)} mutants`);
   }
   warn(
     legFilter
-      ? `--leg=${legFilter} is a partial run: ${REPORT} was NOT written and no floor was checked.`
+      ? `--leg=${legFilter} is a partial run: ${REPORT} was NOT written; the leg's own ` +
+          `${legReportFor(legFilter)} was, and its own floor was checked.`
       : `${String(brokenLegs.length)} leg(s) failed: ${REPORT} was NOT written, because a report ` +
           'missing a package would be read as a shrunken scope rather than as a broken run.',
   );
   for (const leg of brokenLegs) {
-    console.error(color.red(`      ${leg.package} — exit ${String(leg.exitCode)}`));
+    failures.push(`${leg.id}: stryker exited ${String(leg.exitCode)} — the leg did not complete`);
   }
-  process.exit(brokenLegs.length > 0 ? 1 : 0);
+  reportFailures();
+  process.exit(0);
 }
 
-const totalKilled = [...perFile.values()].reduce((n, f) => n + f.killed, 0);
-const totalScored = [...perFile.values()].reduce((n, f) => n + f.total, 0);
-const filesMutated = [...perFile.keys()].sort();
-
-/** Per-core-module scores, by PATH PREFIX over the measured file set. */
-const modules = {};
-for (const modulePath of CORE_MODULES) {
-  let killed = 0;
-  let total = 0;
-  for (const [file, stats] of perFile) {
-    if (file.startsWith(modulePath)) {
-      killed += stats.killed;
-      total += stats.total;
-    }
-  }
-  if (total > 0) modules[moduleKey(modulePath)] = pct(killed, total);
-}
-
-const overall = pct(totalKilled, totalScored);
+const measured = summariseTally(merged, CORE_MODULES);
+const survivors = sortedSurvivors(merged);
 const payload = {
   version: 1,
   task: 'test:mutation',
@@ -290,55 +333,41 @@ const payload = {
   // The shape `ratchet-check.mjs` reads. It recomputes the score from these
   // statuses rather than trusting the headline above, so a report that claims a
   // number it did not measure is caught by the gate that reads it.
-  files: Object.fromEntries(
-    filesMutated.map((file) => {
-      const stats = perFile.get(file);
-      return [
-        file,
-        {
-          mutants: [
-            ...Array.from({ length: stats.killed }, () => ({ status: 'Killed' })),
-            ...Array.from({ length: stats.total - stats.killed }, () => ({ status: 'Survived' })),
-            ...Array.from({ length: stats.ignored }, () => ({ status: 'Ignored' })),
-          ],
-        },
-      ];
-    }),
-  ),
-  overall,
-  totalMutants: totalScored,
-  filesMutated,
-  modules,
+  files: evidenceFiles(merged),
+  overall: measured.overall,
+  totalMutants: measured.totalMutants,
+  filesMutated: measured.filesMutated,
+  modules: measured.modules,
   scopeGlobs: MUTATION_SCOPE_GLOBS,
   coreModules: CORE_MODULES,
-  byStatus,
+  byStatus: merged.byStatus,
   legs: legResults,
   // Every survivor, with enough to find it. This list IS the triage queue: the
   // doctrine allows three answers per entry — write the assertion, ledger it as
   // EQUIV-MUTANT with a reason, or delete the code — and no fourth.
-  survivors: alive.sort(
-    (a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.mutator.localeCompare(b.mutator),
-  ),
+  survivors,
 };
 writeJsonReport(REPORT, payload);
 
 // ---------------------------------------------------------------------------
-// the floor (b) and the scope (c)
+// the merged floor (b) and the scope (c)
 // ---------------------------------------------------------------------------
-const failures = [];
-
-if (!recorded) {
+if (!isBanked(recorded)) {
   // THE BOOTSTRAP, AND IT FAILS. This branch used to pass with a warning, on the
   // stated grounds that `ratchet-check.mjs` listed `mutation.overall` and
   // `mutation.filesMutated` among its REQUIRED_FIELDS so a missing block would
   // be caught there instead. That was true when it was written and is not true
-  // now: those two live in MUTATION_REQUIRED_FIELDS, which is applied only
-  // `...(baselineRaw.mutation ? MUTATION_REQUIRED_FIELDS : [])` — conditional on
-  // the very block whose absence it was supposed to report. So the safety net
-  // this comment promised had been removed from under it, and a registered gate
-  // spent hours mutating the whole codebase and then exited 0 having held
-  // nothing. A judge found it by reading both files; the hash pinned nothing,
-  // because deleting a check deletes its comparison too.
+  // now: those two are required only once the baseline carries them, so the
+  // safety net this comment promised had been removed from under it, and a
+  // registered gate spent hours mutating the whole codebase and then exited 0
+  // having held nothing. A judge found it by reading both files; the hash pinned
+  // nothing, because deleting a check deletes its comparison too.
+  //
+  // `isBanked`, not `!recorded`, and the difference became load-bearing the day
+  // legs could be banked on their own: a baseline holding only
+  // `mutation.legs.*` is a `mutation` block, and the old test treated it as a
+  // recorded MERGED floor and compared every merged figure against `undefined`
+  // — which is to say, passed them all.
   //
   // It is a FAILURE rather than a hard exit at the top of the file on purpose:
   // the legs still run and `mutation.json` is still written above, because that
@@ -346,61 +375,35 @@ if (!recorded) {
   // baseline. A gate that refused to run could never be bootstrapped; a gate
   // that passes with no floor is not a gate.
   //
-  // `--seed mutation` is part of that command and not a decoration. `--accept`
-  // alone CANNOT create this block: the ratchet's comparison loop is driven by
-  // the baseline's own keys, so a family it has never carried is measured and
-  // then never compared, and only `improvements` are written. That was true for
-  // as long as this message has existed, and the message used to omit the flag —
-  // so the documented way out of this failure did not work, and the first
-  // campaign to reach this line would have been followed by an accept that
-  // silently recorded nothing.
+  // `--seed` is part of that command and not a decoration. `--accept` alone
+  // CANNOT create this block: the ratchet's comparison loop is driven by the
+  // baseline's own keys, so a family it has never carried is measured and then
+  // never compared, and only `improvements` are written.
+  const mergedFamily =
+    recorded && Object.keys(recorded).length > 0
+      ? 'mutation.overall,mutation.totalMutants,mutation.filesMutated,mutation.modules'
+      : 'mutation';
   failures.push(
-    'no mutation block in baseline.json — this run held no floor. ' +
-      'Record it with: npm run audit:ratchet:full && node scripts/ci/ratchet-check.mjs ' +
-      '--accept --seed mutation --reason "..."',
+    'merged: no merged mutation floor in baseline.json — this run held no floor over the whole ' +
+      `declared scope. Record it with: ${seedCommand(mergedFamily)}`,
   );
 } else {
-  const lost = (recorded.filesMutated ?? []).filter((file) => !filesMutated.includes(file));
-  if (lost.length > 0) {
-    failures.push(
-      `scope narrowed: ${String(lost.length)} file(s) are no longer mutated, e.g. ${lost.slice(0, 3).join(', ')}`,
-    );
-  }
-  if (typeof recorded.totalMutants === 'number' && totalScored < recorded.totalMutants) {
-    failures.push(
-      `denominator shrank: ${String(totalScored)} mutants tested, baseline ${String(recorded.totalMutants)}`,
-    );
-  }
-  if (typeof recorded.overall === 'number' && overall < recorded.overall) {
-    failures.push(`overall ${String(overall)}% is below the recorded ${String(recorded.overall)}%`);
-  }
-  for (const [key, want] of Object.entries(recorded.modules ?? {})) {
-    const got = modules[key];
-    if (got === undefined) {
-      failures.push(`core module ${key} was not measured at all`);
-    } else if (got < want) {
-      failures.push(`core module ${key}: ${String(got)}% is below the recorded ${String(want)}%`);
-    }
-  }
+  failures.push(...floorFailures('merged', recorded, measured));
 }
 
 console.log(
   color.bold(
-    `\n  mutation: ${String(overall)}% overall — ${String(totalKilled)}/${String(totalScored)} killed, ` +
-      `${String(alive.length)} survivor(s) across ${String(filesMutated.length)} file(s)`,
+    `\n  mutation: ${String(measured.overall)}% overall — ${String(measured.killed)}/${String(measured.totalMutants)} killed, ` +
+      `${String(survivors.length)} survivor(s) across ${String(measured.filesMutated.length)} file(s)`,
   ),
 );
-for (const [key, score] of Object.entries(modules)) {
+for (const [key, score] of Object.entries(measured.modules)) {
   console.log(color.gray(`      core ${key}: ${String(score)}%`));
 }
 
-if (failures.length > 0) {
-  warn(`${String(failures.length)} mutation failure(s)`);
-  for (const line of failures) console.error(color.red(`      ${line}`));
-  process.exit(1);
-}
+reportFailures();
 
 note(
-  `${REPORT} — ${String(overall)}% over ${String(totalScored)} mutants, ${String(alive.length)} survivor(s), ` +
+  `${REPORT} — ${String(measured.overall)}% over ${String(measured.totalMutants)} mutants, ${String(survivors.length)} survivor(s), ` +
     `${String(Math.round(payload.durationMs / 1000))}s`,
 );

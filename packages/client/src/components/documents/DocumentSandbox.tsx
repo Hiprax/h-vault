@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
-import type { PreviewMode, SandboxTheme } from '@hvault/shared';
-import { isSafeUrl } from '../../lib/utils';
+import { MAX_SANDBOX_CODE_LENGTH, type PreviewMode, type SandboxTheme } from '@hvault/shared';
+import { parseDocumentLink } from '../../lib/utils';
 import { connectSandbox } from '../../lib/sandboxHandshake';
+import { describeRenderFailure } from '../../lib/sandboxRefusals';
 
 /**
  * The application's half of the document-preview protocol.
@@ -48,7 +49,19 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
  */
 const frameMessageSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('rendered') }),
-  z.object({ kind: z.literal('failed'), reason: z.string().max(500) }),
+  // A CODE, never a sentence. What the reader is told is decided by
+  // `describeRenderFailure`, because the words land beside the real Download
+  // button and a frame that could choose them could say anything there in the
+  // application's voice. The code is read as a bounded STRING rather than an
+  // enum on purpose: an unrecognised one is answered with the generic sentence
+  // instead of tearing a frame down for being newer than this host. Any other
+  // key the frame sends — a `reason` from an older frame, or prose from a
+  // hostile one — is stripped here and never reaches the chrome.
+  z.object({
+    kind: z.literal('failed'),
+    code: z.string().max(MAX_SANDBOX_CODE_LENGTH),
+    detectedFormat: z.string().max(MAX_SANDBOX_CODE_LENGTH).optional(),
+  }),
   z.object({ kind: z.literal('link'), href: z.string().max(4096) }),
 ]);
 
@@ -64,7 +77,8 @@ export interface DocumentSandboxProps {
   readonly ext: string;
   readonly theme: SandboxTheme;
   /**
-   * Called with an href whose scheme has ALREADY passed `isSafeUrl`.
+   * Called with an href that has ALREADY passed `parseDocumentLink`: an http,
+   * https or single-address mailto URL, re-serialised by the URL parser.
    *
    * Validation happens here, at the message boundary, and not in whatever
    * renders the confirmation dialog. An arrangement where this host forwarded a
@@ -78,6 +92,10 @@ export interface DocumentSandboxProps {
    * frame that spoke out of turn, or a renderer that reported failure. The
    * caller degrades to its download affordance; an empty rectangle forever is
    * the one outcome that is never acceptable.
+   *
+   * The sentence is ALWAYS this application's own: a frame's refusal arrives as
+   * a code and is worded by `describeRenderFailure`, so the caller may show it
+   * as chrome without any of it having been chosen by the renderer.
    */
   readonly onUnavailable: (reason: string) => void;
   readonly title?: string;
@@ -191,17 +209,22 @@ export function DocumentSandbox({
         }
         const message = parsed.data;
         if (message.kind === 'failed') {
-          fail(message.reason);
+          fail(describeRenderFailure(message.code, message.detectedFormat, ext));
           return;
         }
         if (message.kind === 'link') {
           // AT THE MESSAGE BOUNDARY, before any dialog and before this reaches
-          // any presentation code. `isSafeUrl` admits http, https and mailto
-          // only; a `javascript:`, `data:` or `blob:` href opens nothing and
-          // shows nothing, silently, because there is no user intent worth
-          // confirming for a scheme the application will never open.
-          if (!isSafeUrl(message.href)) return;
-          onLinkRef.current(message.href);
+          // any presentation code. `parseDocumentLink` admits http, https and
+          // mailto only; a `javascript:`, `data:` or `blob:` href opens nothing
+          // and shows nothing, silently, because there is no user intent worth
+          // confirming for a scheme the application will never open. It also
+          // refuses a string that does not parse, or a `mailto:` that is not one
+          // plain address, and hands on the RE-SERIALISED URL: the href is the
+          // one piece of this message the application displays, so a frame must
+          // not be able to put prose, spaces or bidi controls in it.
+          const link = parseDocumentLink(message.href);
+          if (link === null) return;
+          onLinkRef.current(link.href);
         }
         // 'rendered' needs no action: the frame is visible either way, and the
         // host draws no "loading" state a renderer could keep hostage.

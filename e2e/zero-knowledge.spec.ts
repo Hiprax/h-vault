@@ -1,5 +1,5 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
-import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
+import { createDecipheriv, createHash, pbkdf2Sync } from 'node:crypto';
 import { open, readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import * as OTPAuth from 'otpauth';
@@ -292,9 +292,44 @@ interface SealedValue {
   readonly tag: string;
 }
 
-/** AES-256-GCM open, in the split ciphertext/tag encoding `cryptoService` emits. */
-function open256Gcm(key: Buffer, sealed: SealedValue): Buffer {
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(sealed.iv, 'base64'));
+/**
+ * Vault-field format v2, restated here INDEPENDENTLY of the client for the same
+ * reason the key derivation above is: this spec is an oracle, and importing the
+ * code under test would let one mistake agree with itself. A v2 field carries
+ * `v2:` in front of its IV and is sealed with additional data naming its role
+ * and its row, so it opens only where it was written; the row id is derived from
+ * the create's `idNonce` and the account id (`deriveRowId` in the shared package).
+ */
+const V2_IV_MARKER = 'v2:';
+const V2_AAD_PREFIX = 'hvault/vault-field/v2|';
+
+function derivedRowId(userId: string, idNonce: string): string {
+  const digest = createHash('sha256').update(`hvault/row-id/v1|${userId}|${idNonce}`).digest('hex');
+  return `${idNonce.slice(0, 8)}${digest.slice(0, 16)}`;
+}
+
+/** The account id a recorded request was authorised as, read from its Bearer token. */
+function userIdOf(record: WireRecord): string {
+  const headers = JSON.parse(record.text.split('\n')[1] ?? '{}') as Record<string, string>;
+  const token = (headers['authorization'] ?? '').replace(/^Bearer /, '');
+  const payload = JSON.parse(
+    Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8'),
+  ) as { userId?: string };
+  if (!payload.userId) throw new Error(`no account id in the token of ${record.url}`);
+  return payload.userId;
+}
+
+/**
+ * AES-256-GCM open, in the split ciphertext/tag encoding `cryptoService` emits.
+ * A v2 field REQUIRES its additional data: a marked IV opened without one is a
+ * test bug, not a field to guess at.
+ */
+function open256Gcm(key: Buffer, sealed: SealedValue, aad?: string): Buffer {
+  const bound = sealed.iv.startsWith(V2_IV_MARKER);
+  if (bound && aad === undefined) throw new Error('a v2 field was opened without its binding');
+  const iv = bound ? sealed.iv.slice(V2_IV_MARKER.length) : sealed.iv;
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'));
+  if (bound) decipher.setAAD(Buffer.from(aad!, 'utf8'));
   decipher.setAuthTag(Buffer.from(sealed.tag, 'base64'));
   return Buffer.concat([
     decipher.update(Buffer.from(sealed.encrypted, 'base64')),
@@ -609,14 +644,30 @@ test.describe('zero-knowledge boundary', () => {
       for (const record of created) {
         const body = jsonBodyOf(record);
         if (!body) continue;
+        // Every create is written row-bound, to the id both sides derive.
+        const nameSealed = sealedFrom(body, 'encryptedName', 'nameIv', 'nameTag');
+        const dataSealed = sealedFrom(body, 'encryptedData', 'dataIv', 'dataTag');
+        expect(nameSealed.iv.startsWith(V2_IV_MARKER), 'item name is row-bound').toBe(true);
+        expect(dataSealed.iv.startsWith(V2_IV_MARKER), 'item data is row-bound').toBe(true);
+        const rowId = derivedRowId(userIdOf(record), String(body['idNonce']));
         const name = open256Gcm(
           vaultKey,
-          sealedFrom(body, 'encryptedName', 'nameIv', 'nameTag'),
+          nameSealed,
+          `${V2_AAD_PREFIX}item.name|${rowId}`,
         ).toString('utf8');
         const data = open256Gcm(
           vaultKey,
-          sealedFrom(body, 'encryptedData', 'dataIv', 'dataTag'),
+          dataSealed,
+          `${V2_AAD_PREFIX}item.data|${String(body['itemType'])}|${rowId}`,
         ).toString('utf8');
+        // And the binding is real: the same data under another row's binding fails.
+        expect(() =>
+          open256Gcm(
+            vaultKey,
+            dataSealed,
+            `${V2_AAD_PREFIX}item.data|${String(body['itemType'])}|${'0'.repeat(24)}`,
+          ),
+        ).toThrow();
         byName.set(name, data);
       }
 

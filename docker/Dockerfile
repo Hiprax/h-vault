@@ -219,7 +219,20 @@ ENV NODE_ENV=production
 # cwd = /app/packages/server; the WORKDIR below supplies that cwd, which is
 # load-bearing twice over — the script's own relative path, and @hiprax/logger's
 # eager `<cwd>/logs` mkdir described below.
-RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+#
+# THIS IMAGE SHIPS NO TYPESCRIPT COMPILER EITHER, for the same reason. It inherits
+# every dev dependency from `build-server`, and since the build moved to
+# TypeScript 7 that includes a NATIVE compiler (`@typescript/typescript-linux-x64`,
+# a Go binary) whose embedded Go standard library the image scan reports as
+# carrying fixable HIGH findings. Nothing here runs it: `tsx` transpiles through
+# esbuild and never loads the `typescript` package, and the compile already
+# happened in the stage this one derives from. So `@typescript/*`, the
+# `typescript` compatibility package and their three `.bin` links are removed in
+# the same layer as npm, and the image scan judges what the container can
+# actually execute.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+      /app/node_modules/@typescript /app/node_modules/typescript \
+      /app/node_modules/.bin/tsc /app/node_modules/.bin/tsc6 /app/node_modules/.bin/tsserver
 
 # The log directory MUST exist and be owned by `node` before the drop to that user.
 # This is the difference between a stack that comes up on a fresh clone and one
@@ -245,8 +258,9 @@ RUN mkdir -p /app/packages/server/logs && chown -R node:node /app/packages/serve
 # node:24-alpine3.23). Written numerically because that is the form the OTHER
 # half of this contract is written in: docker-compose.yml pins every tmpfs this
 # container mounts to `uid=1000,gid=1000`, and a tmpfs whose owner disagrees with
-# the process is the failure CLAUDE.md records as an app that exits 0 silently
-# and never restarts. Two spellings of one uid is how those two drift apart.
+# the process is the failure the app service's tmpfs comment in docker-compose.yml
+# records as an app that exits 0 silently and never restarts. Two spellings of
+# one uid is how those two drift apart.
 # hadolint DL3066 asks for the same thing for its own reason: a name has to be
 # resolvable, a number always is.
 USER 1000:1000
@@ -286,6 +300,20 @@ COPY --from=build-server /app/packages/server/dist ./packages/server/dist
 # own copy of this identical build; this one is both the SPA-shell source and a
 # complete standalone fallback if the app is ever run without Nginx in front.
 COPY --from=build-client /app/packages/client/dist ./packages/server/public
+# The isolated render document, and it lands OUTSIDE the directory above on
+# purpose. `packages/server/public` is the `express.static` root, and the
+# sandbox document's entire containment is the per-response
+# Content-Security-Policy Express attaches to it
+# (packages/server/src/config/sandboxCsp.ts). A copy inside the static root is
+# one `express.static` could answer off disk under helmet's APPLICATION policy
+# instead — measured: Express 5 matches the raw pathname while `send` decodes
+# and normalises it, so /sandbox%2Ehtml, //sandbox.html, /sandbox.htm%6C and
+# /%73andbox.html all miss the route that was supposed to claim the document.
+# The client build therefore emits it into its own `dist-sandbox/`, and this is
+# where that directory lands. `packages/server/src/config/clientArtifacts.ts`
+# is the one place the server names either path. Same argument as the `web-root`
+# stage below makes for Nginx, from the other side.
+COPY --from=build-client /app/packages/client/dist-sandbox ./packages/server/sandbox-document
 
 EXPOSE 5000
 
@@ -319,14 +347,23 @@ CMD ["node", "packages/server/dist/server.js"]
 # the app one URL away, so the file is removed here: Nginx cannot serve what it
 # does not have, no matter how a future `try_files` edit is worded.
 #
-# sandbox.html goes for the same reason and with a sharper consequence. It is the
-# isolated document every stored file is rendered inside, and its whole isolation
-# IS the per-response policy Express attaches to it (packages/server/src/config/
-# sandboxCsp.ts). Served off this disk it would instead carry the doc-root's
-# `default-src 'self'` and none of the sandbox's own directives — no
-# `connect-src 'none'`, no `worker-src 'none'`, no `sandbox allow-scripts` — which
-# is the one way this isolation quietly stops existing while every renderer keeps
-# working. With the file absent, `try_files` falls through to `@app`.
+# sandbox.html is removed for the same reason and with a sharper consequence. It
+# is the isolated document every stored file is rendered inside, and its whole
+# isolation IS the per-response policy Express attaches to it
+# (packages/server/src/config/sandboxCsp.ts). Served off this disk it would
+# instead carry the doc-root's `default-src 'self'` and none of the sandbox's own
+# directives — no `connect-src 'none'`, no `worker-src 'none'`, no `sandbox
+# allow-scripts` — which is the one way this isolation quietly stops existing
+# while every renderer keeps working. With the file absent, `try_files` falls
+# through to `@app`.
+#
+# That deletion is now DEFENCE IN DEPTH, and saying so is the point of this
+# paragraph: the client build no longer emits the document into `dist/` at all
+# (it writes `dist-sandbox/sandbox.html`, see the app stage above), so there is
+# normally nothing here to remove. It is kept because `emptyOutDir` is false for
+# that build — a stale copy from a tree built before the split survives every
+# later build — and because the whole class of defect is a file reappearing in a
+# document root where nothing would notice it.
 FROM build-client AS web-root
 RUN rm -f /app/packages/client/dist/index.html /app/packages/client/dist/sandbox.html
 
@@ -337,77 +374,22 @@ RUN rm -f /app/packages/client/dist/index.html /app/packages/client/dist/sandbox
 # neither root nor NET_BIND_SERVICE. The routing config is BAKED IN rather than
 # bind-mounted, which keeps the image self-contained and portable across host OSes
 # (no Windows/WSL bind-mount permission or line-ending surprises).
-FROM nginxinc/nginx-unprivileged:1.29-alpine AS web
-
-# Patch the base image's OS packages before serving anything from it. The
-# nginx-unprivileged:1.29-alpine base ships fixable HIGH CVEs in c-ares, openssl
-# (libcrypto3 / libssl3), libexpat and libxml2 — exactly the kind the Trivy gate
-# refuses to let through. Upgrading pulls the patched packages from its pinned
-# Alpine release (3.23, matching the node base above). The base runs as the
-# unprivileged uid 101, so switch to root ONLY for the apk transaction and drop
-# straight back; the final runtime user is unchanged, and --no-cache leaves no apk
-# index behind in the layer.
-# `0`, not `root`: the same uid, written the way the `USER 101` below it is
-# written, so the pair reads as one decision rather than two conventions.
+FROM nginxinc/nginx-unprivileged:1.30.5-alpine3.24@sha256:4714e0b1b2577eaa1a6131d07c958b67f0eb68e6d0521e90c6e5287db8cf0bc5 AS web
+# Digest-pinned: the tag alone is re-published in place, so two builds of one tag are two images.
+# The OS packages are still upgraded (Trivy gates fixable HIGH/CRITICAL in `audit:image`), as root,
+# because apk needs it; the runtime user is put back before anything else happens.
 USER 0
-# ONE RUN, and the order inside it is load-bearing rather than cosmetic. The
-# upgrade must precede the edit, because an nginx package upgrade would overwrite
-# /etc/nginx/nginx.conf and take the worker count with it; `&&` fixes that order
-# in a way two instructions never did. It also collapses two layers into one and
-# clears hadolint DL3059, which is what `development` above already does for the
-# same reason.
-#
-# The second command bounds the worker count to this container's CPU budget, not
-# the host's core count. nginx ships `worker_processes auto`, which resolves
-# through sysconf(_SC_NPROCESSORS_ONLN) — that reports the HOST's cores and is
-# blind to the CFS quota, so on a 32-core machine nginx forks 32 workers inside a
-# service capped at `cpus: '0.5'` / `mem_limit: 256m`, and past ~99 cores it
-# cannot fork them all under `pids_limit: 100`. Two workers comfortably saturate
-# half a core for a reverse proxy while leaving a spare if one blocks on a
-# static-file read. This is baked at build time on purpose: the runtime
-# alternative (NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE) rewrites nginx.conf on
-# boot, which cannot work against this service's `read_only: true` root
-# filesystem.
-RUN apk upgrade --no-cache \
- && sed -i 's/^worker_processes .*/worker_processes 2;/' /etc/nginx/nginx.conf
+RUN apk upgrade --no-cache
 USER 101
-
-# The bundle is served from /srv/hvault, NOT from the base image's
-# /usr/share/nginx/html. That directory already contains nginx's own stock
-# index.html (the "Welcome to nginx!" page), and COPY overlays rather than
-# replaces — so serving from there means a request for /index.html is answered
-# with the stock page instead of falling through to Express, and it comes back
-# with none of helmet's security headers. Owning the document root outright means
-# nothing can be served from it that this repo did not put there.
 COPY --from=web-root /app/packages/client/dist /srv/hvault
-
-# 0444 is set explicitly rather than inherited, for the same reason
-# docker/mongo.Dockerfile sets it: COPY PRESERVES the source file's mode, so on a
-# checkout whose files are 0600 (any `umask 077` machine) the config lands in the
-# image as -rw------- owned by root while nginx serves as uid 101, and the config
-# test dies with
-#   open() "/etc/nginx/conf.d/default.conf" failed (13: Permission denied)
-# — an unbootable stack whose cause is the developer's umask rather than anything
-# in this repository. Read-only is also the right runtime mode: nothing in the
-# stack should be able to rewrite the routing config.
-#
-# Note that these two lines must NOT be collapsed with the directory COPY above.
-# --chmod=0444 on a DIRECTORY strips its execute bit, and mongo.Dockerfile
-# documents where that leads.
+# The ecosystem's golden nginx: nginx.conf REPLACES the image's own (it carries the explicit
+# worker count the `cpus: '0.5'` service needs, the /tmp paths a read-only rootfs needs, the JSON
+# access log, the MIME fixes and the header-floor maps); internal.conf is this project's routing.
+# Every file gets an explicit mode: COPY preserves the source mode, and a 0600 checkout would
+# leave uid 101 unable to read its own configuration.
+COPY --chmod=0444 docker/nginx/nginx.conf     /etc/nginx/nginx.conf
 COPY --chmod=0444 docker/nginx/internal.conf  /etc/nginx/conf.d/default.conf
-
-# Deliberately NOT under conf.d/: the stock nginx.conf globs conf.d/*.conf into
-# the http{} context, which would apply this fragment's proxy headers globally.
-#
-# The directory is created FIRST, exactly as mongo.Dockerfile does and for the
-# identical reason: /etc/nginx/hvault does not exist in the nginx-unprivileged
-# base, so a `COPY --chmod=0444` into it makes BuildKit create the parent with
-# THAT mode — dr--r--r--, which uid 101 cannot traverse, so the file inside is
-# unreadable while `ls` as root still shows it world-readable. Creating it up
-# front leaves it 0755 and the COPY then sets only the file's mode. This mkdir is
-# harmless without the --chmod and load-bearing with it, so the two belong
-# together.
-RUN mkdir -p /etc/nginx/hvault
-COPY --chmod=0444 docker/nginx/proxy_app.conf /etc/nginx/hvault/proxy_app.conf
-
+# The directory first, or `COPY --chmod=0444` creates it 0444 and nginx cannot traverse it.
+RUN mkdir -p /etc/nginx/snippets
+COPY --chmod=0444 docker/nginx/snippets/headers.conf docker/nginx/snippets/proxy.conf /etc/nginx/snippets/
 EXPOSE 8080

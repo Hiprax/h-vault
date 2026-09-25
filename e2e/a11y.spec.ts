@@ -113,11 +113,12 @@ const AUDIT_PAGE_SIZE = 20;
  * would. That number is not a hedge, it is the reason this file is written the
  * way it is: the gate is a FLOOR, not a compliance claim. Nothing here says the
  * application is WCAG 2.1 AA conformant, and nobody should quote it as though it
- * did. What it does say is that no view in the list below carries a serious or
- * critical machine-detectable violation — a control with no accessible name, an
- * input with no label, text below the contrast threshold, a broken ARIA
- * relationship — and that class of defect is exactly what a refactor
- * reintroduces without anyone noticing.
+ * did. What it does say is that no view in the list below carries a moderate,
+ * serious or critical machine-detectable violation — a control with no
+ * accessible name, an input with no label, text below the contrast threshold, a
+ * broken ARIA relationship, a page with no `main` landmark or no `h1`, content
+ * outside every landmark, a heading that skips a level — and that class of
+ * defect is exactly what a refactor reintroduces without anyone noticing.
  *
  * The judgements a machine cannot make are pinned separately, by
  * `a11y-keyboard.spec.ts`: whether focus goes somewhere USEFUL, whether a
@@ -145,7 +146,7 @@ const AUDIT_PAGE_SIZE = 20;
  */
 
 test.describe('accessibility: every primary view and modal', () => {
-  test('has no serious or critical axe violations', async ({ page }, testInfo) => {
+  test('has no moderate, serious or critical axe violations', async ({ page }, testInfo) => {
     // Two 600k-iteration derivations for the sign-in, thirty-four axe runs over a
     // fully rendered SPA, and three real documents uploaded through the browser's
     // own AES-GCM to the storage engine the harness starts.

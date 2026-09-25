@@ -35,6 +35,7 @@ import { buildObjectKey, expectedPartSize, segmentRange } from '../utils/documen
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { createStorageBreaker } from '../utils/storageBreaker.js';
 import {
+  acquireVaultRotationLock,
   assertFolderOwned,
   assertVaultNotRotating,
   buildFolderAwareUpdate,
@@ -43,6 +44,7 @@ import {
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  releaseVaultRotationLock,
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 
@@ -201,7 +203,14 @@ async function committedBytesFor(userId: string): Promise<number> {
   const [row] = await Document.aggregate<{ total: number }>([
     { $match: { userId: new mongoose.Types.ObjectId(userId) } },
     { $group: { _id: null, total: { $sum: '$plaintextBytes' } } },
-  ]);
+  ])
+    // From the PRIMARY whatever the connection string prefers. A completion's quota
+    // read is serialized against every other completion's insert by the exclusion
+    // lock, and that only holds if the read can see the insert the previous holder
+    // made: a deployment whose `MONGODB_URI` sets `readPreference=secondaryPreferred`
+    // would otherwise hand it a lagging secondary that has not seen the winner's row
+    // yet, and the overshoot the lock closes would come straight back.
+    .read('primary');
   return row?.total ?? 0;
 }
 
@@ -218,7 +227,11 @@ async function inFlightBytesFor(userId: string, now: Date): Promise<number> {
   const [row] = await DocumentUpload.aggregate<{ total: number }>([
     { $match: { userId: new mongoose.Types.ObjectId(userId), expiresAt: { $gt: now } } },
     { $group: { _id: null, total: { $sum: '$declaredPlaintextBytes' } } },
-  ]);
+  ])
+    // From the PRIMARY, for the reason `committedBytesFor` gives: init decides
+    // under a per-user lock, and that only holds if this read sees the staging row
+    // the previous holder wrote.
+    .read('primary');
   return row?.total ?? 0;
 }
 
@@ -720,24 +733,33 @@ async function openTransferUnderLock(
   // `MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER`, which is
   // `MAX_DOCUMENTS_PER_ROTATION` exactly and leaves that constant no slack at all.
   const now = new Date();
-  const openUploads = await DocumentUpload.countDocuments({ userId, expiresAt: { $gt: now } });
+  // Both counts from the PRIMARY, like the byte totals below: the init lock
+  // serialises the decisions only if each one sees the row the one before wrote.
+  const openUploads = await DocumentUpload.countDocuments(
+    { userId, expiresAt: { $gt: now } },
+    { readPreference: 'primary' },
+  );
   if (openUploads >= MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER) {
     throw httpErrors.badRequest(
       `Too many uploads in progress. You can run ${String(MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER)} at a time.`,
     );
   }
 
-  const documentCount = await Document.countDocuments({ userId });
+  const documentCount = await Document.countDocuments({ userId }, { readPreference: 'primary' });
   if (documentCount >= MAX_DOCUMENTS_PER_USER) {
     throw httpErrors.badRequest(
       `Document limit reached. You can have a maximum of ${String(MAX_DOCUMENTS_PER_USER)} documents.`,
     );
   }
 
-  const [committedBytes, inFlightBytes] = await Promise.all([
-    committedBytesFor(userId),
-    inFlightBytesFor(userId, now),
-  ]);
+  // The byte totals follow the same rule as the counts, for the same reason: a
+  // completion landing between the two reads moves bytes from the live total to
+  // the committed one. Read live transfers FIRST and a landing can only be counted
+  // twice, which refuses a transfer that would have fit (the caller retries);
+  // read in the other order, or in parallel, and it can be counted by NEITHER read,
+  // which admits one that does not.
+  const inFlightBytes = await inFlightBytesFor(userId, now);
+  const committedBytes = await committedBytesFor(userId);
   if (committedBytes + inFlightBytes + body.declaredPlaintextBytes > storageQuotaBytes()) {
     throw httpErrors.badRequest(
       `Storage quota exceeded. Your limit is ${String(config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER)} MB.`,
@@ -855,17 +877,42 @@ export const getUpload = catchAsync(async (req: Request, res: Response): Promise
 /**
  * `DELETE /documents/uploads/:id` — abandon a transfer.
  *
- * The engine-side upload is aborted FIRST and the row deleted second, never the
- * other way round: a crash between the two then leaves a staging row that still
- * names the upload, which the garbage collector can finish, rather than an open
- * multipart upload nothing in the database knows about.
+ * The two modes release their storage in OPPOSITE orders, and each order is the
+ * one that is safe for what that mode holds.
  *
- * A single-segment transfer has no `s3UploadId` and nothing is aborted. If its
- * one part had already been stored, the object it wrote is reclaimed by the
- * collector's orphan sweep — a key that parses to a document id with no row.
- * Deleting it here instead would be one request cheaper and one race worse, since
- * this handler cannot yet tell an abandoned single-segment upload from one whose
- * completion is committing the very same key.
+ * A MULTIPART transfer has its engine-side upload aborted FIRST and its row deleted
+ * second: a crash between the two then leaves a staging row that still names the
+ * upload, which the garbage collector can finish, rather than an open multipart
+ * upload nothing in the database knows about. Nothing can race it into harm either,
+ * because a completion assembles the object from the parts it names and the engine
+ * refuses that once the upload is aborted.
+ *
+ * A SINGLE-SEGMENT transfer has no `s3UploadId` and nothing to abort, but its one
+ * part may already be a whole object: `PutObject` writes it straight to the FINAL
+ * key. Leaving that object for the collector's orphan sweep kept the bytes in the
+ * bucket for at least `max(ORPHAN_MIN_AGE_MS, DOCUMENT_UPLOAD_TTL_HOURS + 1h)`,
+ * 25 hours at the defaults, while this handler released both the concurrency slot
+ * and the quota reservation, so they were charged to nobody. It is deleted here, and
+ * the row is CLAIMED FIRST, with one atomic `findOneAndDelete`, because the object
+ * key is also the key a completion commits: deleting the bytes of a transfer whose
+ * completion had already claimed the row would leave a document that lists, counts
+ * against the quota and never opens. The claim decides which of the two wins.
+ * `completeUnderLock` claims a single-segment row the same way, so exactly one of
+ * the two deletes it: an abort that claims first makes the completion's claim fail
+ * with its existing 409 before any document exists, and a completion that claims
+ * first leaves this handler nothing to claim, so it answers 404 and never touches
+ * the object.
+ *
+ * The delete after the claim is best-effort, the policy `releaseTransfer` takes for
+ * the same reason: the row is gone by then, so a failure there has nothing left to
+ * retry against, and a 503 would only be followed by a 404. What remains is an
+ * orphan for the collector, which is the case its sweep exists for. The one window
+ * the claim cannot close is closed by the PART instead: an upload already past its
+ * own row lookup and inside its storage write when the claim lands stores the object
+ * again after this delete, its ledger update then finds no row, and it deletes what
+ * it wrote unless a completion holds the upload's lock or a document names the key
+ * (`reclaimUnownedPartObject`). Serialising every part against a cancel would have
+ * closed it too, at the cost of a lock round trip on every part.
  *
  * An engine that answers 404 has ALREADY done what this request asked, and the row
  * is deleted anyway. S3's abort is idempotent by contract, and the alternative is
@@ -888,7 +935,31 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
     throw httpErrors.notFound('Upload not found');
   }
 
-  if (upload.s3UploadId !== undefined) {
+  // The mode is read from `s3UploadId`, where the part handler reads
+  // `declaredChunkCount`. The two agree on every row `initUpload` writes; a corrupt
+  // row claiming several segments but naming no engine upload lands in the
+  // single-segment branch, whose object delete is the one that cannot strand
+  // engine-side parts.
+  if (upload.s3UploadId === undefined) {
+    // Claim, THEN delete. The read above only decided the mode, which cannot change
+    // (`s3UploadId` is written once, at init); whether this request still owns the
+    // transfer is decided here, atomically, against a completion's own claim.
+    const claimed = await DocumentUpload.findOneAndDelete({ _id: id, userId })
+      .select('objectKey')
+      .lean();
+    if (!claimed) {
+      throw httpErrors.notFound('Upload not found');
+    }
+    try {
+      await getStorage().deleteObject(claimed.objectKey);
+    } catch (error) {
+      logger.error('Failed to delete the object of a cancelled single-segment transfer', {
+        userId,
+        uploadId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  } else {
     try {
       await getStorage().abortMultipartUpload(upload.objectKey, upload.s3UploadId);
     } catch (error) {
@@ -898,9 +969,9 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
         uploadId: id,
       });
     }
-  }
 
-  await DocumentUpload.deleteOne({ _id: id, userId });
+    await DocumentUpload.deleteOne({ _id: id, userId });
+  }
 
   logger.info('Document upload aborted', { userId, uploadId: id });
 
@@ -943,10 +1014,25 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
  * part. The overshoot is at most one chunk per transfer, times
  * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER`, and completion re-checks BOTH the
  * per-document cap and the quota against the bytes actually received before
- * anything is committed — so the transient over-reservation is bounded and never
- * becomes a stored document. Re-checking here instead would mean refusing a part
+ * anything is committed. Re-checking here instead would mean refusing a part
  * mid-transfer for a total the client can still bring back under the cap by
  * finishing, and would not remove the need for the check at completion anyway.
+ *
+ * What completion's re-check guarantees, and on what it rests. The per-document cap
+ * is measured on one transfer's own bytes, which nothing else can move, so it holds
+ * outright. The QUOTA is a read of `committedBytesFor(userId)` followed by an
+ * insert, and a read-then-write holds only while nothing else inserts in between:
+ * two completions of DIFFERENT transfers could once each measure a total that fit
+ * and both commit. `completeUnderLock` therefore takes the per-user vault-key
+ * exclusion lock BEFORE the quota read and holds it through the insert, so one
+ * account's completions are decided one at a time, each against every document
+ * committed before it. That guarantee lasts as long as the lock does: a holder that
+ * outlives `VAULT_ROTATION_LOCK_TTL_MS` loses the exclusion, the one failure every
+ * holder of that lock shares and the reason its TTL is generous.
+ *
+ * A single-segment part whose staging row vanished while it was being stored
+ * (a cancel claimed it, or its TTL fired) deletes the object it just wrote unless a
+ * document owns it: see `reclaimUnownedPartObject`.
  */
 export const uploadPart = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -1151,12 +1237,15 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
   ).lean();
 
   if (!updated) {
-    // The staging row was removed while this part was being stored — its TTL fired,
-    // or the caller cancelled the transfer from another tab. The bytes are already
-    // in the bucket and are left there for the collector's orphan sweep rather than
-    // deleted here, because a completion committing the very same key may be in
-    // flight; what must NOT happen is recreating the row this update would have
-    // resurrected, which `findOneAndUpdate` without an upsert guarantees.
+    // The staging row was removed while this part was being stored: its TTL fired,
+    // the caller cancelled the transfer, or a completion claimed it. What must NOT
+    // happen is recreating the row this update would have resurrected, which
+    // `findOneAndUpdate` without an upsert guarantees. A multipart part needs
+    // nothing more, since an aborted engine upload refuses it; a single segment is
+    // already a whole object at the final key.
+    if (upload.declaredChunkCount === 1) {
+      await reclaimUnownedPartObject(userId, id, upload.objectKey);
+    }
     throw httpErrors.notFound('Upload not found');
   }
 
@@ -1165,6 +1254,73 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
     data: { partNumber, bytes: partBytes, receivedBytes: updated.receivedBytes },
   });
 });
+
+/**
+ * Deletes the object a single-segment part stored after its staging row had gone,
+ * unless a document owns it.
+ *
+ * One segment is written straight to the FINAL key, so when the ledger update finds
+ * no row the bytes may belong to nobody. A cancel claims the row and deletes the
+ * object, and a part still inside `putObject` at that moment then stores it again:
+ * left alone, that object stayed in the bucket until the collector's orphan sweep,
+ * 25 hours at the defaults, charged to no quota, and a client repeating it held
+ * storage nothing counted. The same bytes may also belong to a DOCUMENT: a
+ * completion claims the row the same way and then commits a row naming this key.
+ *
+ * So the object is deleted only when both of these hold, and neither is a guess:
+ *
+ *   * this request holds the upload's COMPLETION lock (`documentCompleteLockName`),
+ *     taken NON-BLOCKING. Every completion holds it from its claim to its insert,
+ *     so holding it means no completion is between the two. A lock somebody else
+ *     holds means one may be, and the object is left: that completion either
+ *     commits it or deletes it itself when its insert fails. The guarantee lasts
+ *     as long as the lock does: a completion still running when
+ *     `COMPLETE_LOCK_TTL_MS` lapses (a storage call retried to its limit can take
+ *     minutes) has lost the exclusion, and a part landing in that gap could delete
+ *     bytes it is about to commit. That is the one way this delete can be wrong,
+ *     and it needs a completion to outlive its own lock first.
+ *   * no `documents` row names the key, IN ANY STATE (a trashed or purge-pending
+ *     document still owns its object), read from the PRIMARY so a lagging
+ *     secondary cannot hide a completion that has just committed.
+ *
+ * Best-effort, like every delete that follows a vanished row: a failure is logged
+ * and the part is still answered 404, because nothing is left to retry against and
+ * the orphan sweep is the backstop for exactly this. The lock is released before the
+ * response is written.
+ */
+async function reclaimUnownedPartObject(
+  userId: string,
+  uploadId: string,
+  objectKey: string,
+): Promise<void> {
+  const lockName = documentCompleteLockName(userId, uploadId);
+  let lockId: string | null = null;
+  try {
+    lockId = await acquireJobLock(lockName, COMPLETE_LOCK_TTL_MS);
+    if (lockId === null) {
+      logger.info('Left the object of a vanished transfer: a completion holds its lock', {
+        userId,
+        uploadId,
+      });
+      return;
+    }
+    const owned = await Document.exists({ objectKey }).read('primary');
+    if (owned !== null) return;
+    await getStorage().deleteObject(objectKey);
+    logger.info('Deleted the object a part stored after its transfer was gone', {
+      userId,
+      uploadId,
+    });
+  } catch (error) {
+    logger.error('Failed to reclaim the object of a transfer that vanished mid-part', {
+      userId,
+      uploadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    if (lockId !== null) await releaseJobLock(lockName, lockId);
+  }
+}
 
 /**
  * `POST /documents/uploads/:id/complete` — turn a finished transfer into a
@@ -1186,9 +1342,9 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
  * 409 below hands back the current version, the browser rewraps the DEK it still
  * holds in memory, and retries THIS request alone — no byte crosses the wire twice.
  *
- * ## Why a lock AND a rotation fence AND a version check
+ * ## Why two locks AND a rotation fence AND a version check
  *
- * They are three different guards against three different races, and none
+ * They are four different guards against four different races, and none
  * substitutes for another.
  *
  *   * The **per-upload JobLock** stops a completion racing ITSELF. The unique `_id`
@@ -1208,22 +1364,53 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
  *     init would agree with itself no matter which key the client actually held,
  *     so a session still holding a superseded key would sail through, and the row
  *     it committed would list, charge the quota and never open.
+ *   * The **per-user vault-key exclusion lock** (`acquireVaultRotationLock`) makes
+ *     the two checks above stay true until the row is written, which neither can do
+ *     on its own because both are reads; and, taken just before the quota's read
+ *     of the committed total, makes that read and the insert one decision per
+ *     account as well. See below.
  *
- * The lock and the rotation lock are DISJOINT — one is keyed by upload, the other
- * by user — so holding this one says nothing whatever about whether a rotation is
- * running. That is precisely why the fence is here and not assumed.
+ * The per-upload lock and the exclusion lock are DISJOINT — one is keyed by upload,
+ * the other by user — so holding the first says nothing whatever about whether a
+ * rotation is running. That is precisely why the fence is here and not assumed.
  *
- * What the pair does NOT do is close the window between the version read and the
- * insert, and it is worth saying so rather than implying otherwise. A rotation that
+ * ## What the reads could not do on their own, and what closes it
+ *
+ * The fence and the version check are reads, and the distance from them to
+ * `Document.create` is not a statement or two: for a multipart transfer it contains
+ * the engine's own completion call, seconds for a large object. A rotation that
  * begins and commits entirely inside that span enumerates an account this document
- * is not yet part of, so its own completeness check has nothing to catch, and the
- * row lands wrapped under a superseded key. The span is narrowed to as little as the
- * work allows and no further: for a multipart transfer it contains the engine's
- * completion call, because moving the version check after that call is what would
- * make the 409 unretryable — the engine invalidates the upload id on success, so a
- * client told to rewrap would find nothing left to complete. The same class of gap
- * is pre-existing for vault items and folders; it is wider here, and this is where
- * it is written down.
+ * is not yet part of, so its completeness check has nothing to catch, and the row
+ * lands wrapped under a superseded key.
+ *
+ * That row is worse than a lost upload, and naming the consequence is the point:
+ * the client cannot unwrap its DEK, so it can never re-key it; and
+ * `assertRotationCoversEveryRow` refuses any rotation payload that does not name
+ * every row the account holds. So the account cannot rotate its vault key again —
+ * not until that document is permanently deleted, and it will not be, because it
+ * looks like an ordinary document that merely fails to open. One completion in the
+ * wrong millisecond ends rotation for that account.
+ *
+ * The version check cannot simply move past the engine call to shorten the span:
+ * the engine invalidates the upload id on success, so a client told to rewrap would
+ * find nothing left to complete. The span is therefore made ATOMIC instead. This
+ * handler holds the per-user exclusion lock — the one `bulkReEncrypt` takes BEFORE
+ * it raises the fence and releases AFTER it lowers it — from before the late pair
+ * until after the insert, so a rotation either loses that acquisition and is
+ * refused, or wins it and this completion is refused with its transfer intact.
+ *
+ * The same lock is taken a little EARLIER than the late pair needs, before the
+ * quota's read of the committed total, because that read is the other half of a
+ * read-then-insert. Every completion takes it and `Document.create` has no other
+ * caller, so holding it across both makes the quota one decision per account:
+ * two completions of different uploads can no longer each measure a total that
+ * fits and then both commit.
+ *
+ * The price is that two completions of DIFFERENT uploads for one account no longer
+ * overlap, which the per-upload lock's own docblock had deliberately allowed. The
+ * loser is refused with a 409 that releases nothing — staging row, ledger and
+ * stored bytes all untouched — so it retries for the cost of one request, which is
+ * the same shape every other refusal here takes.
  *
  * ## Why the transfer is claimed before the row is inserted, and differently per mode
  *
@@ -1431,195 +1618,257 @@ async function completeUnderLock(
     );
   }
 
-  // The quota, measured on the bytes that actually arrived rather than on the size
-  // the transfer reserved at init — the two differ whenever a client sends a fuller
-  // final segment than it declared. Other transfers still in flight are deliberately
-  // NOT counted: their reservations exist to stop init from over-committing, and init
-  // has already checked this transfer against them, so charging them again here would
-  // refuse the last of three legitimate uploads.
-  const committedBytes = await committedBytesFor(userId);
-  if (committedBytes + plaintextBytes > storageQuotaBytes()) {
-    // The OTHER refusal here that releases the transfer instead of leaving it
-    // retryable. See `releaseTransfer`: the bytes in the bucket are precisely the
-    // bytes this account cannot hold.
-    await releaseTransfer(upload, engine);
-    throw httpErrors.badRequest(
-      `Storage quota exceeded. Your limit is ${String(config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER)} MB.`,
-    );
-  }
-
-  // The late pair, as close to the insert as the work allows. Everything above this
-  // point is arithmetic over bytes that are already stored; everything below commits
-  // a key. The fence catches a rotation that is IN PROGRESS — its flag is raised
-  // before it enumerates, so a row inserted now is one the new key will not cover —
-  // and the version catches one that has already committed, which the fence cannot
-  // see because the flag is cleared by then.
-  await assertVaultNotRotating(userId);
-  const user = await User.findById(userId).select('vaultKeyVersion').lean();
-  const currentVaultKeyVersion = vaultKeyVersionOf(user);
-  // ABOVE the current version is named separately from merely different, even
-  // though the comparison below would refuse it anyway, because the two mean
-  // opposite things and only one of them is a rotation. The number in this body
-  // is the client's own record of which vault key it holds — not an echo of
-  // something this server said — and no client can hold a generation the account
-  // has never reached. So this is a bookkeeping fault or a forged body, it is
-  // worth saying so in the log, and it must stay refused if anyone ever decides
-  // the comparison below should only look for a version that is BEHIND.
+  // ── The vault-key exclusion lock ───────────────────────────────────────
   //
-  // Answered with the same recoverable refusal rather than a hard 400: what
-  // matters is that nothing is committed, and handing back the current number
-  // lets a confused client rewrap and finish instead of losing a transfer that
-  // has already crossed the network in full.
-  if (body.vaultKeyVersion > currentVaultKeyVersion) {
-    logger.warn('A completion claimed a vault key version this account has never reached', {
-      userId,
-      uploadId: id,
-      claimed: body.vaultKeyVersion,
-      current: currentVaultKeyVersion,
-    });
-    return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion, reason: 'unreached' };
-  }
-  if (body.vaultKeyVersion !== currentVaultKeyVersion) {
-    return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion, reason: 'rotated' };
-  }
-
-  // Re-checked because the init-to-completion window is as long as the transfer. A
-  // folder deleted in the meantime would leave the document filed under an id that
-  // appears in no listing, which is worse than unfiled; stripping it mirrors what an
-  // import does with a folder it cannot own, and refusing the completion instead
-  // would destroy a finished upload over a folder.
+  // Held from here to the insert, and it guards TWO decisions that are both reads
+  // followed, some distance later, by `Document.create`: the quota, and the
+  // vault-key pair.
   //
-  // It runs HERE, before anything is finalised, because it is a pure read: below the
-  // claim it would sit in the one span where a datastore fault leaves a stored object
-  // with no row and no compensation.
-  const folderId =
-    upload.folderId !== undefined && (await Folder.exists({ _id: upload.folderId, userId }))
-      ? upload.folderId
-      : undefined;
-
-  if (engine.mode === 'multipart') {
-    // BEFORE the staging row is claimed, and that ordering is the difference between
-    // a retry and a re-upload. If this call fails — a timeout, or a 5xx the SDK's own
-    // attempts could not ride out — the transfer must still be completable: every part
-    // is present and correct, and asking for eight hundred megabytes again because one
-    // metadata call did not answer is not a recovery. With the row already deleted
-    // there is nothing left to retry against, and the engine holds an upload nothing
-    // in the database names.
-    //
-    // Nothing is at risk in the other direction, which is why the single-segment
-    // ordering below does not apply here: the object is assembled from exactly the
-    // parts listed above and named back by their etags, so it cannot disagree with the
-    // framing already derived. A part re-sent in the meantime either carries a new
-    // number this call does not name, or replaces one it does and the engine refuses
-    // the whole completion.
-    await getStorage().completeMultipartUpload(
-      upload.objectKey,
-      engine.s3UploadId,
-      // From the ENGINE's ledger, never from the staging row: these etags are the
-      // engine's own receipts and the staging copy is a record of them, not a
-      // source.
-      engine.parts.map((part) => ({ partNumber: part.partNumber, etag: part.etag })),
-    );
-  }
-
-  // Claim the transfer, atomically, and the two modes claim it differently because
-  // only one of them can still be undermined.
+  // The QUOTA first, because it is the one a second completion can break. It is a
+  // read of every committed byte followed by an insert that adds more, and the
+  // per-upload lock around this function is keyed by upload, so on its own it lets
+  // completions of DIFFERENT transfers each read a total that still fits before
+  // either has inserted, and then both commit, leaving the account over quota by
+  // up to one document per transfer it runs at once. `Document.create` has exactly
+  // one caller, below, and every completion takes this lock before its quota read,
+  // so holding it across read and insert makes the pair one decision per account:
+  // a second completion is refused at the acquisition, before it has read anything,
+  // with its transfer intact, and when it retries it reads a total that includes
+  // the winner's row.
   //
-  // A SINGLE-SEGMENT transfer is stored with `PutObject`, straight to the FINAL
-  // object key, and the part route takes neither this lock nor the rotation fence. So
-  // a part re-sent while this completion was doing its arithmetic would leave a
-  // committed `ciphertextBytes` that no longer describes the object, and the response
-  // schema's size identity then refuses that row on EVERY read: the document lists,
-  // counts against the quota and never opens. Conditioning the delete on
-  // `receivedBytes` — which the part handler recomputes as the sum of the ledger —
-  // makes this a CHECK as well as a claim, and once the row is gone no new part can
-  // start, because the part handler looks the row up first.
+  // The vault-key pair is two READS for the same reason, and there the distance to
+  // the insert is not a statement or two: for a multipart transfer it contains the
+  // engine's own completion call, which is seconds for a large object (S3 allows
+  // it several minutes). A rotation that begins and commits entirely inside that
+  // span enumerates an account this document is not yet part of, so its
+  // completeness check has nothing to catch, and the row lands wrapped under a key
+  // the account has already replaced. That row is worse than lost: the
+  // client cannot unwrap its DEK, so it can never re-key it, and
+  // `assertRotationCoversEveryRow` refuses a payload that omits it — one
+  // completion in the wrong millisecond ends the account's ability to rotate at
+  // all.
   //
-  // A MULTIPART transfer has no such exposure: its object was assembled a few lines
-  // above from the parts this completion named. Conditioning the claim there would
-  // only invent a way to strand a finished object behind a 409 that no retry could
-  // clear, since the engine has already invalidated the upload id.
-  if (engine.mode === 'object') {
-    const claimed = await DocumentUpload.findOneAndDelete({
-      _id: id,
-      userId,
-      receivedBytes: ciphertextBytes,
-    }).lean();
-    if (!claimed) {
-      throw httpErrors.conflict(
-        'This transfer changed while it was being completed. Please retry the completion.',
+  // Moving the version check after the engine call instead is the option this
+  // handler's own docblock rules out: the engine invalidates the upload id on
+  // success, so a client told to rewrap would find nothing left to complete. So
+  // the span is made ATOMIC rather than short. `bulkReEncrypt` takes this same
+  // lock before it raises the fence and releases it after lowering it, so the two
+  // now exclude each other outright.
+  //
+  // What it costs, stated rather than discovered: two completions of DIFFERENT
+  // uploads for one account no longer overlap. That is a real change — the
+  // per-upload lock was deliberately keyed by upload so they would not queue —
+  // and it is accepted because the loser is refused with a 409 that leaves its
+  // staging row, its ledger and its stored bytes untouched, which is the same
+  // retryable shape every other refusal here already takes. One consequence of
+  // taking it ahead of the quota: a completion that would NOT fit, arriving while
+  // another holder has the lock, is told to retry rather than refused, and meets
+  // the quota's 400 on the retry. That is the honest order, since the total it
+  // would have been refused against was still moving.
+  //
+  // Taken BEFORE the fence read, the order `acquireVaultRotationLock` documents:
+  // holding it means no rotation can START, which leaves the read below exactly
+  // one case to catch, a rotation that CRASHED and whose lock has lapsed.
+  const rotationLockId = await acquireVaultRotationLock(userId);
+  try {
+    // The quota, measured on the bytes that actually arrived rather than on the size
+    // the transfer reserved at init — the two differ whenever a client sends a fuller
+    // final segment than it declared. Other transfers still in flight are deliberately
+    // NOT counted: their reservations exist to stop init from over-committing, and init
+    // has already checked this transfer against them, so charging them again here would
+    // refuse the last of three legitimate uploads.
+    const committedBytes = await committedBytesFor(userId);
+    if (committedBytes + plaintextBytes > storageQuotaBytes()) {
+      // The OTHER refusal here that releases the transfer instead of leaving it
+      // retryable. See `releaseTransfer`: the bytes in the bucket are precisely the
+      // bytes this account cannot hold. Released under the lock, and nothing is lost
+      // by that: the release creates no ciphertext, and the `finally` below frees the
+      // lock on the way past this throw.
+      await releaseTransfer(upload, engine);
+      throw httpErrors.badRequest(
+        `Storage quota exceeded. Your limit is ${String(config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER)} MB.`,
       );
     }
-  } else {
-    await DocumentUpload.deleteOne({ _id: id, userId });
-  }
 
-  let document: HydratedDocument<IDocument>;
-  try {
-    document = await Document.create({
-      // The staging row's id, because it is the id the browser bound its key
-      // derivation to before it sealed the first byte.
-      _id: upload._id,
-      userId,
-      ...(folderId === undefined ? {} : { folderId }),
-      objectKey: upload.objectKey,
-      // FROM THE COMPLETION BODY, not from the staging row. See the handler's note.
-      encryptedDek: body.encryptedDek,
-      dekIv: body.dekIv,
-      dekTag: body.dekTag,
-      // From the staging row: the framing parameters were chosen at init and are
-      // baked into every segment already stored.
-      streamSalt: upload.streamSalt,
-      noncePrefix: upload.noncePrefix,
-      encryptedMeta: body.encryptedMeta,
-      metaIv: body.metaIv,
-      metaTag: body.metaTag,
-      chunkPlaintextBytes: upload.chunkPlaintextBytes,
-      chunkCount,
-      ciphertextBytes,
-      plaintextBytes,
-    });
-  } catch (error) {
-    // A repeat completion that got past both existence checks lands here on the
-    // unique `_id`, and it is a success: the row the other attempt committed is the
-    // answer.
-    const duplicate =
-      typeof error === 'object' && error !== null && 'code' in error && error.code === 11000;
-    if (duplicate) {
-      const existing = await Document.findOne({ _id: id, userId });
-      if (existing !== null) {
-        return { kind: 'document', document: existing };
-      }
-    }
-
-    // Anything else and the object is now stored with no row naming it. Delete it
-    // here rather than leaving the collector to find it an hour later: until it
-    // does, the user is charged bucket space for a document that does not exist and
-    // cannot be seen, let alone removed.
-    try {
-      await getStorage().deleteObject(upload.objectKey);
-    } catch (deleteError) {
-      logger.error('Failed to delete the object of a document row that was not written', {
+    // The late pair, as close to the insert as the work allows. Everything above this
+    // point is arithmetic over bytes that are already stored; everything below commits
+    // a key. The fence catches a rotation that is IN PROGRESS — its flag is raised
+    // before it enumerates, so a row inserted now is one the new key will not cover —
+    // and the version catches one that has already committed, which the fence cannot
+    // see because the flag is cleared by then.
+    await assertVaultNotRotating(userId);
+    const user = await User.findById(userId).select('vaultKeyVersion').lean();
+    const currentVaultKeyVersion = vaultKeyVersionOf(user);
+    // ABOVE the current version is named separately from merely different, even
+    // though the comparison below would refuse it anyway, because the two mean
+    // opposite things and only one of them is a rotation. The number in this body
+    // is the client's own record of which vault key it holds — not an echo of
+    // something this server said — and no client can hold a generation the account
+    // has never reached. So this is a bookkeeping fault or a forged body, it is
+    // worth saying so in the log, and it must stay refused if anyone ever decides
+    // the comparison below should only look for a version that is BEHIND.
+    //
+    // Answered with the same recoverable refusal rather than a hard 400: what
+    // matters is that nothing is committed, and handing back the current number
+    // lets a confused client rewrap and finish instead of losing a transfer that
+    // has already crossed the network in full.
+    if (body.vaultKeyVersion > currentVaultKeyVersion) {
+      logger.warn('A completion claimed a vault key version this account has never reached', {
         userId,
         uploadId: id,
-        error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+        claimed: body.vaultKeyVersion,
+        current: currentVaultKeyVersion,
       });
+      return {
+        kind: 'staleVaultKey',
+        vaultKeyVersion: currentVaultKeyVersion,
+        reason: 'unreached',
+      };
     }
-    throw error;
+    if (body.vaultKeyVersion !== currentVaultKeyVersion) {
+      return { kind: 'staleVaultKey', vaultKeyVersion: currentVaultKeyVersion, reason: 'rotated' };
+    }
+
+    // Re-checked because the init-to-completion window is as long as the transfer. A
+    // folder deleted in the meantime would leave the document filed under an id that
+    // appears in no listing, which is worse than unfiled; stripping it mirrors what an
+    // import does with a folder it cannot own, and refusing the completion instead
+    // would destroy a finished upload over a folder.
+    //
+    // It runs HERE, before anything is finalised, because it is a pure read: below the
+    // claim it would sit in the one span where a datastore fault leaves a stored object
+    // with no row and no compensation.
+    const folderId =
+      upload.folderId !== undefined && (await Folder.exists({ _id: upload.folderId, userId }))
+        ? upload.folderId
+        : undefined;
+
+    if (engine.mode === 'multipart') {
+      // BEFORE the staging row is claimed, and that ordering is the difference between
+      // a retry and a re-upload. If this call fails — a timeout, or a 5xx the SDK's own
+      // attempts could not ride out — the transfer must still be completable: every part
+      // is present and correct, and asking for eight hundred megabytes again because one
+      // metadata call did not answer is not a recovery. With the row already deleted
+      // there is nothing left to retry against, and the engine holds an upload nothing
+      // in the database names.
+      //
+      // Nothing is at risk in the other direction, which is why the single-segment
+      // ordering below does not apply here: the object is assembled from exactly the
+      // parts listed above and named back by their etags, so it cannot disagree with the
+      // framing already derived. A part re-sent in the meantime either carries a new
+      // number this call does not name, or replaces one it does and the engine refuses
+      // the whole completion.
+      await getStorage().completeMultipartUpload(
+        upload.objectKey,
+        engine.s3UploadId,
+        // From the ENGINE's ledger, never from the staging row: these etags are the
+        // engine's own receipts and the staging copy is a record of them, not a
+        // source.
+        engine.parts.map((part) => ({ partNumber: part.partNumber, etag: part.etag })),
+      );
+    }
+
+    // Claim the transfer, atomically, and the two modes claim it differently because
+    // only one of them can still be undermined.
+    //
+    // A SINGLE-SEGMENT transfer is stored with `PutObject`, straight to the FINAL
+    // object key, and the part route takes neither this lock nor the rotation fence. So
+    // a part re-sent while this completion was doing its arithmetic would leave a
+    // committed `ciphertextBytes` that no longer describes the object, and the response
+    // schema's size identity then refuses that row on EVERY read: the document lists,
+    // counts against the quota and never opens. Conditioning the delete on
+    // `receivedBytes` — which the part handler recomputes as the sum of the ledger —
+    // makes this a CHECK as well as a claim, and once the row is gone no new part can
+    // start, because the part handler looks the row up first.
+    //
+    // A MULTIPART transfer has no such exposure: its object was assembled a few lines
+    // above from the parts this completion named. Conditioning the claim there would
+    // only invent a way to strand a finished object behind a 409 that no retry could
+    // clear, since the engine has already invalidated the upload id.
+    if (engine.mode === 'object') {
+      const claimed = await DocumentUpload.findOneAndDelete({
+        _id: id,
+        userId,
+        receivedBytes: ciphertextBytes,
+      }).lean();
+      if (!claimed) {
+        throw httpErrors.conflict(
+          'This transfer changed while it was being completed. Please retry the completion.',
+        );
+      }
+    } else {
+      await DocumentUpload.deleteOne({ _id: id, userId });
+    }
+
+    let document: HydratedDocument<IDocument>;
+    try {
+      document = await Document.create({
+        // The staging row's id, because it is the id the browser bound its key
+        // derivation to before it sealed the first byte.
+        _id: upload._id,
+        userId,
+        ...(folderId === undefined ? {} : { folderId }),
+        objectKey: upload.objectKey,
+        // FROM THE COMPLETION BODY, not from the staging row. See the handler's note.
+        encryptedDek: body.encryptedDek,
+        dekIv: body.dekIv,
+        dekTag: body.dekTag,
+        // From the staging row: the framing parameters were chosen at init and are
+        // baked into every segment already stored.
+        streamSalt: upload.streamSalt,
+        noncePrefix: upload.noncePrefix,
+        encryptedMeta: body.encryptedMeta,
+        metaIv: body.metaIv,
+        metaTag: body.metaTag,
+        chunkPlaintextBytes: upload.chunkPlaintextBytes,
+        chunkCount,
+        ciphertextBytes,
+        plaintextBytes,
+      });
+    } catch (error) {
+      // A repeat completion that got past both existence checks lands here on the
+      // unique `_id`, and it is a success: the row the other attempt committed is the
+      // answer.
+      const duplicate =
+        typeof error === 'object' && error !== null && 'code' in error && error.code === 11000;
+      if (duplicate) {
+        const existing = await Document.findOne({ _id: id, userId });
+        if (existing !== null) {
+          return { kind: 'document', document: existing };
+        }
+      }
+
+      // Anything else and the object is now stored with no row naming it. Delete it
+      // here rather than leaving the collector to find it an hour later: until it
+      // does, the user is charged bucket space for a document that does not exist and
+      // cannot be seen, let alone removed.
+      try {
+        await getStorage().deleteObject(upload.objectKey);
+      } catch (deleteError) {
+        logger.error('Failed to delete the object of a document row that was not written', {
+          userId,
+          uploadId: id,
+          error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+        });
+      }
+      throw error;
+    }
+
+    const completeCtx = getRequestContext(req);
+    await createAuditLog(
+      userId,
+      'document_create',
+      { documentId: String(document._id), chunkCount, plaintextBytes },
+      completeCtx.ip,
+      completeCtx.userAgent,
+    );
+
+    logger.info('Document upload completed', { userId, uploadId: id, chunkCount, plaintextBytes });
+
+    return { kind: 'document', document };
+  } finally {
+    await releaseVaultRotationLock(userId, rotationLockId);
   }
-
-  const completeCtx = getRequestContext(req);
-  await createAuditLog(
-    userId,
-    'document_create',
-    { documentId: String(document._id), chunkCount, plaintextBytes },
-    completeCtx.ip,
-    completeCtx.userAgent,
-  );
-
-  logger.info('Document upload completed', { userId, uploadId: id, chunkCount, plaintextBytes });
-
-  return { kind: 'document', document };
 }
 
 // ── Reads ────────────────────────────────────────────────────────────
@@ -2208,11 +2457,12 @@ export const restoreDocument = catchAsync(async (req: Request, res: Response): P
  *
  * ## Why `generalAuthLimiter` and not `heavyOpLimiter`
  *
- * `heavyOpLimiter` is IP-keyed at 10 per 15 minutes and is shared with export,
+ * `heavyOpLimiter` allows a user 10 per 15 minutes and is shared with export,
  * backup download, bulk delete, bulk move and empty-trash. On a PER-ROW route it
  * would 429 a user who purged eleven documents and then lock them out of emptying
- * their vault trash for a quarter of an hour. The per-item equivalent carries no
- * limiter at all; this one carries the ordinary authenticated budget.
+ * their vault trash for a quarter of an hour. The per-item equivalent carries
+ * `vaultItemWriteLimiter`, sized for the client's one-request-per-row trash purge;
+ * this one carries the ordinary authenticated budget.
  */
 export const purgeDocument = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);

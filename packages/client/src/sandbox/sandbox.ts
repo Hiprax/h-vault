@@ -103,7 +103,14 @@ function requestKind(data: unknown): 'transform' | 'qrScan' | 'render' {
 async function qrScanRequest(port: MessagePort, data: unknown): Promise<void> {
   const request = parseQrScanRequest(data);
   if (!request) {
-    port.postMessage(frameMessage.failed('The scan request was not understood.'));
+    // BOTH failures here stay `failed` rather than `qrFailed`, and both are
+    // meant to end the session. A request this frame cannot parse names no
+    // `requestId` to answer with, and a decoder chunk that will not load will
+    // not load for the next image either — so there is nothing for the host to
+    // retry, and pretending otherwise would leave a camera running against a
+    // frame that can never answer. Everything that IS about one image is
+    // answered by `scanImage` with a `qrFailed` that says which.
+    port.postMessage(frameMessage.failed('requestNotUnderstood'));
     return;
   }
   try {
@@ -112,7 +119,7 @@ async function qrScanRequest(port: MessagePort, data: unknown): Promise<void> {
       await scanImage(request.requestId, request.image, QR_EFFORT, QR_TIME_LIMIT_MS),
     );
   } catch {
-    port.postMessage(frameMessage.failed('The scanner could not be loaded.'));
+    port.postMessage(frameMessage.failed('scannerUnavailable'));
   }
 }
 
@@ -207,7 +214,7 @@ async function renderFor(doc: Document, request: SandboxRenderRequest): Promise<
 async function renderRequest(doc: Document, port: MessagePort, data: unknown): Promise<void> {
   const request = parseRenderRequest(data);
   if (!request) {
-    port.postMessage(frameMessage.failed('The preview request was not understood.'));
+    port.postMessage(frameMessage.failed('requestNotUnderstood'));
     return;
   }
   // The resolved theme, never the user's `'system'` preference — the sandbox
@@ -222,24 +229,24 @@ async function renderRequest(doc: Document, port: MessagePort, data: unknown): P
     const refusal = previewRefusal(request.mode, request.ext, request.bytes);
     if (refusal !== null) {
       target.replaceChildren();
-      port.postMessage(frameMessage.failed(refusal));
+      port.postMessage(frameMessage.failed(refusal.code, refusal.detectedFormat));
       return;
     }
     const rendered = await renderFor(doc, request);
     if (rendered === null) {
       target.replaceChildren();
-      port.postMessage(frameMessage.failed('No renderer for this document type.'));
+      port.postMessage(frameMessage.failed('noRenderer'));
       return;
     }
     target.replaceChildren(rendered);
     port.postMessage(frameMessage.rendered());
   } catch {
     // A renderer that threw has left the target in an unknown state, so it is
-    // emptied before the host is told. The message carries NO detail from the
-    // error: it would be built from the document's own bytes, and it is
-    // displayed by the application's chrome.
+    // emptied before the host is told. The reply is a CODE with NO detail from
+    // the error: the detail would be built from the document's own bytes, and
+    // the host's sentence for it is displayed in the application's chrome.
     target.replaceChildren();
-    port.postMessage(frameMessage.failed('The document could not be displayed.'));
+    port.postMessage(frameMessage.failed('renderFailed'));
   }
 }
 
@@ -264,7 +271,7 @@ async function renderRequest(doc: Document, port: MessagePort, data: unknown): P
 async function transformRequest(port: MessagePort, data: unknown): Promise<void> {
   const request = parseTransformRequest(data);
   if (!request) {
-    port.postMessage(frameMessage.failed('The transform request was not understood.'));
+    port.postMessage(frameMessage.failed('requestNotUnderstood'));
     return;
   }
   try {
@@ -272,13 +279,14 @@ async function transformRequest(port: MessagePort, data: unknown): Promise<void>
     port.postMessage(await runTransform(request));
   } catch {
     // A formatter that threw something the engine could not classify — a chunk
-    // that failed to load, an out-of-memory on a pathological document. The
-    // message carries NO detail from the error, exactly as the render path's
-    // does: it would be built from the document's own bytes.
+    // that failed to load, an out-of-memory on a pathological document. A CODE
+    // and NO detail from the error, exactly as the render path's: the detail
+    // would be built from the document's own bytes, and `engineFailed` is what
+    // keeps the host from telling the reader their file has a syntax error.
     port.postMessage(
       frameMessage.transformFailed({
         stage: 'format',
-        message: 'The document could not be formatted.',
+        code: 'engineFailed',
         line: null,
         column: null,
         excerpt: '',

@@ -14,6 +14,7 @@ import {
   getCsrf as getCsrfBase,
 } from './helpers.js';
 import type { TestUser } from './helpers.js';
+import { MAX_LOGIN_PASSWORD_LENGTH } from '@hvault/shared';
 
 // Re-export with { csrfToken, csrfCookie } naming used throughout this file
 async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
@@ -1518,6 +1519,67 @@ describe('Vault API', () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.passwordHistory).toHaveLength(2);
       expect(res.body.data.passwordHistory[0].encryptedPassword).toBe('old-pass-1');
+    });
+
+    it('keeps the previous password of the longest password a login can hold', async () => {
+      // A login password is bounded at MAX_LOGIN_PASSWORD_LENGTH UTF-16 code
+      // units, at most three UTF-8 bytes each, and AES-GCM ciphertext is as long
+      // as its plaintext, so the largest history entry a real password change can
+      // produce is that many bytes in base64. Derived here from the password bound
+      // rather than read from the constant under test.
+      const worstCaseBytes = MAX_LOGIN_PASSWORD_LENGTH * 3;
+      const largest = 'A'.repeat(4 * Math.ceil(worstCaseBytes / 3));
+      const { id } = await createItemViaApi(user.accessToken);
+      const agent = request.agent(app);
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .put(`/api/v1/vault/items/${id}`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('Cookie', csrfCookie)
+        .set('x-csrf-token', csrfToken)
+        .send({
+          passwordHistory: [
+            {
+              encryptedPassword: largest,
+              iv: 'iv-1',
+              tag: 'tag-1',
+              changedAt: new Date().toISOString(),
+            },
+          ],
+        });
+
+      expect(res.status).toBe(200);
+      const stored = await VaultItem.findById(id).lean();
+      expect(stored?.passwordHistory?.[0]?.encryptedPassword).toHaveLength(largest.length);
+    });
+
+    it('refuses a history entry one character past that, and writes nothing', async () => {
+      const worstCaseBytes = MAX_LOGIN_PASSWORD_LENGTH * 3;
+      const overLong = 'A'.repeat(4 * Math.ceil(worstCaseBytes / 3) + 1);
+      const { id } = await createItemViaApi(user.accessToken);
+      const agent = request.agent(app);
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .put(`/api/v1/vault/items/${id}`)
+        .set('Authorization', authHeader(user.accessToken))
+        .set('Cookie', csrfCookie)
+        .set('x-csrf-token', csrfToken)
+        .send({
+          passwordHistory: [
+            {
+              encryptedPassword: overLong,
+              iv: 'iv-1',
+              tag: 'tag-1',
+              changedAt: new Date().toISOString(),
+            },
+          ],
+        });
+
+      expect(res.status).toBe(400);
+      const stored = await VaultItem.findById(id).lean();
+      expect(stored?.passwordHistory ?? []).toEqual([]);
     });
 
     it('should update item and grow passwordHistory', async () => {

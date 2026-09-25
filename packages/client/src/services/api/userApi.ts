@@ -175,8 +175,15 @@ export function exportVaultApi(
  * `chunkImportOperations`; batching is transport only and cannot change the
  * outcome.
  */
-export function importVaultApi(
-  data: ImportInput,
-): Promise<AxiosResponse<ApiResponse<{ insertedCount: number; updatedCount: number }>>> {
+export function importVaultApi(data: ImportInput): Promise<
+  AxiosResponse<
+    ApiResponse<{
+      insertedCount: number;
+      updatedCount: number;
+      /** The id each insert was stored under, in order; absent from an older server. */
+      insertedIds?: string[];
+    }>
+  >
+> {
   return api.post('/tools/import', data);
 }

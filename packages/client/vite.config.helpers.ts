@@ -3,8 +3,13 @@
  *
  * These are kept in a standalone module (importing no Vite plugins) so the
  * dev-host and chunking logic can be unit-tested in isolation, without having
- * to evaluate the full Vite config and its plugin chain.
+ * to evaluate the full Vite config and its plugin chain. The filesystem is
+ * reached only by {@link relocateSandboxDocument}, and that one is written as an
+ * ordinary function over an explicit directory for the same reason: it is
+ * testable without a build.
  */
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 
 /**
  * Resolves the Vite dev-server bind address.
@@ -201,6 +206,114 @@ export const SANDBOX_HTML = 'sandbox.html';
 export const SANDBOX_ASSETS_DIR = 'sandbox-assets';
 
 /**
+ * Where the isolated render document is written — a SIBLING of `dist/`, never a
+ * file inside it.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS DIRECTORY IS A SECURITY CONTROL, NOT A TIDY-UP
+ * ---------------------------------------------------------------------------
+ *
+ * `dist/` becomes two document roots: `packages/server/public` behind
+ * `express.static`, and `/srv/hvault` behind Nginx. The sandbox document's
+ * ENTIRE containment is the per-response Content-Security-Policy Express
+ * attaches to it — `default-src 'none'`, `connect-src 'none'`, `worker-src
+ * 'none'`, `sandbox allow-scripts` — so a copy served off either of those roots
+ * carries the surrounding application's policy instead, and the isolation stops
+ * existing while every renderer keeps working.
+ *
+ * Nginx was already handled by deleting the file from its root (`docker/
+ * Dockerfile`, the `web-root` stage). Express was NOT, and ordering was the
+ * reason it looked handled: the route is registered before the static mount, but
+ * Express 5 matches the RAW pathname while `send` decodes and normalises it
+ * before touching disk, so `/sandbox%2Ehtml`, `//sandbox.html`,
+ * `/sandbox.htm%6C` and `/%73andbox.html` all missed the route and were answered
+ * off disk under the wrong policy (measured). Emitting the document outside every
+ * static root makes it structural on both sides: a server cannot serve a file it
+ * does not have, under any spelling.
+ *
+ * The chunks and the stylesheet STAY in `dist/sandbox-assets/`. They are public
+ * build artefacts the frame must be able to fetch, they carry the ACAO and CORP
+ * headers an opaque origin needs, and nothing about them is policy-bearing.
+ */
+export const SANDBOX_DOCUMENT_OUT_DIR = 'dist-sandbox';
+
+/**
+ * Write the isolated render document beside the build output rather than into
+ * it, and clear any copy a previous build left behind.
+ *
+ * `emptyOutDir` is `false` for the sandbox build (it must not delete the
+ * application it sits beside), so a stale `dist/sandbox.html` from a build made
+ * before this split would survive every later build and keep being served by
+ * `express.static` — the exact defect, resurrected by an upgrade rather than by
+ * an edit. Removing it is therefore part of writing the new one, not a separate
+ * courtesy.
+ *
+ * @param outDir absolute path to the build's `outDir` (i.e. `dist`)
+ * @param html the document's contents, as the bundle produced them
+ * @returns the absolute path the document was written to
+ */
+export function relocateSandboxDocument(outDir: string, html: string): string {
+  const documentDir = path.resolve(outDir, '..', SANDBOX_DOCUMENT_OUT_DIR);
+  mkdirSync(documentDir, { recursive: true });
+  const target = path.join(documentDir, SANDBOX_HTML);
+  writeFileSync(target, html);
+  rmSync(path.join(outDir, SANDBOX_HTML), { force: true });
+  return target;
+}
+
+/** The subset of a Rollup/Rolldown plugin {@link sandboxDocumentPlugin} uses. */
+interface SandboxDocumentPlugin {
+  name: string;
+  enforce: 'post';
+  generateBundle: (options: unknown, bundle: Record<string, unknown>) => void;
+  writeBundle: (options: { dir?: string }) => void;
+}
+
+/**
+ * The plugin that puts {@link SANDBOX_DOCUMENT_OUT_DIR} into effect.
+ *
+ * It DELETES the document from the bundle rather than moving the file after the
+ * fact, so the document is never written into the static root at all — not even
+ * for the milliseconds between `writeBundle` and a rename. `writeBundle` is
+ * where it lands on disk, because that is the first hook with a resolved,
+ * absolute `outDir`.
+ *
+ * A missing document is a THROW, not a shrug. This build exists to produce that
+ * one file; a configuration change that stopped emitting it would otherwise
+ * leave a green build and a server that refuses to boot, one deploy later.
+ */
+export function sandboxDocumentPlugin(): SandboxDocumentPlugin {
+  let html: string | null = null;
+
+  return {
+    name: 'hvault:sandbox-document-outside-static-root',
+    // AFTER Vite's own HTML handling, which is what injects the built script and
+    // stylesheet tags into the document; taking it out of the bundle earlier
+    // would relocate a half-finished file.
+    enforce: 'post',
+    generateBundle(_options, bundle) {
+      const asset = bundle[SANDBOX_HTML] as { source?: string | Uint8Array } | undefined;
+      if (!asset || typeof asset.source !== 'string') {
+        throw new Error(
+          `the sandbox build emitted no ${SANDBOX_HTML}; it exists to produce exactly that document`,
+        );
+      }
+      html = asset.source;
+      delete bundle[SANDBOX_HTML];
+    },
+    writeBundle(options) {
+      if (html === null || !options.dir) {
+        throw new Error(
+          `cannot place ${SANDBOX_HTML} outside the static root: ` +
+            `document=${String(html !== null)}, outDir=${String(options.dir)}`,
+        );
+      }
+      relocateSandboxDocument(options.dir, html);
+    },
+  };
+}
+
+/**
  * What the service worker precaches: everything the application build emits.
  *
  * Unchanged in substance from the literal it replaces; it lives here so the
@@ -235,13 +348,24 @@ export const WORKBOX_GLOB_IGNORES = [SANDBOX_HTML, `${SANDBOX_ASSETS_DIR}/**`];
 /**
  * Navigations the service worker must NOT answer with the application shell.
  *
- * MANDATORY rather than conditional. `vite-plugin-pwa` ships
+ * Kept unconditionally. `vite-plugin-pwa` ships
  * `defaultWorkbox = { …, navigateFallback: 'index.html' }` and this project sets
- * none of its own, so a NavigationRoute covers every navigation — and AN IFRAME
- * LOAD IS A NAVIGATION. Without this the service worker answers `/sandbox.html`
- * with the app shell: the frame boots the application instead of the sandbox,
- * never completes a handshake, and the viewer degrades to "download to view"
- * with no failing request anywhere to explain it.
+ * none of its own, so a NavigationRoute covers every navigation the worker is
+ * handed, and without this entry it would answer `/sandbox.html` with the app
+ * shell: a frame would boot the application instead of the sandbox, never
+ * complete a handshake, and the viewer would degrade to "download to view" with
+ * no failing request anywhere to explain it.
+ *
+ * WHICH navigations the worker is handed was MEASURED rather than assumed, and
+ * the answer makes this defence in depth for the viewer on Chromium: with the
+ * page under the worker's control and this entry neutralised in the built
+ * `sw.js`, `test:sandbox` still rendered every preview from the network under the
+ * sandbox policy, because Chromium does not route a sandboxed frame's navigation
+ * (no `allow-same-origin`) through the embedding page's worker. The entry still
+ * governs whatever navigation to the URL the worker IS handed, on any engine;
+ * and were a frame's ever handed to it without the entry, `test:sandbox` would
+ * refuse the shell, because it compares the policy each frame was actually
+ * served under with the server's own.
  *
  * Anchored with `(?:\?|$)` rather than a bare `$`, because workbox tests a
  * denylist entry against `pathname + search`. A bare `$` stops matching the

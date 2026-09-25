@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import ts from 'typescript';
 import { NUMBER_WORDS } from './support/numberWords';
 import {
@@ -60,13 +61,28 @@ import clientSnapshotConfig, { CLIENT_SNAPSHOT_SUITE } from '../../client/vitest
 import sharedMutationConfig from '../../shared/vitest.mutation.config';
 import serverMutationConfig from '../vitest.mutation.config';
 import clientMutationConfig from '../../client/vitest.mutation.config';
+import { MutationRunLedger, MutationSequencer } from '../../../tests/harness/mutationSequencer';
 import sharedFlakeConfig from '../../shared/vitest.flake.config';
 import serverFlakeConfig from '../vitest.flake.config';
 import clientFlakeConfig from '../../client/vitest.flake.config';
-import { CORE_MODULES, MUTATION_LEGS } from '../../../scripts/ci/lib/mutation-scope.mjs';
+import {
+  CORE_MODULES,
+  MUTATION_LEGS,
+  legReportFor,
+  legSelects,
+} from '../../../scripts/ci/lib/mutation-scope.mjs';
 import playwrightConfig, { FIREFOX_SUITE } from '../../../playwright.config';
 import a11yPlaywrightConfig, { A11Y_SUITE } from '../../../playwright.a11y.config';
 import flakePlaywrightConfig, { FLAKE_REPEAT_EACH } from '../../../playwright.flake.config';
+import sandboxPlaywrightConfig, {
+  SANDBOX_JUNIT_REPORTS,
+  SANDBOX_SUITE,
+} from '../../../playwright.sandbox.config';
+import {
+  SANDBOX_JUNIT,
+  SANDBOX_NGINX_JUNIT,
+  SANDBOX_SUITE as GATE_SANDBOX_SUITE,
+} from '../../../scripts/ci/lib/sandbox-browser.mjs';
 import { A11Y_BLOCKING_IMPACTS, A11Y_VIEWS, A11Y_VIEW_IDS } from '../../../e2e/a11yViews';
 import { DST_TZ, PINNED_TZ, RUN_TZ, resolveRunTz } from '../../../tests/harness/determinism';
 import {
@@ -351,12 +367,12 @@ describe('tiers', () => {
     //
     //   `mutation` — the oracle, and the longest-running gate in the repository
     //   by an order of magnitude: it re-runs the suite once per mutant over
-    //   ~53,000 lines of source. Unlike every other member it has no cheap
-    //   sibling on the push tier, and that is stated rather than hidden: what
-    //   guards it between runs is `ratchet-check.mjs`'s DEFERRABLE rule, which
-    //   keeps `mutation.*` in the baseline as a floor the gate enforces itself
-    //   and turns the fields back into hard failures the moment this task stops
-    //   being a registered tier-2 gate.
+    //   ~53,000 lines of source. Its cheap sibling on the push tier is
+    //   `mutation-diff`, which mutates only the lines a change touched; what
+    //   guards the campaign's own floors between runs is `ratchet-check.mjs`'s
+    //   DEFERRABLE rule, which keeps `mutation.*` in the baseline as floors the
+    //   gate enforces itself (merged and per leg) and turns the fields back into
+    //   hard failures the moment this task stops being a registered tier-2 gate.
     //
     //   `dst` — the whole suite, once, in America/New_York. Like `fuzz`,
     //   `upgrade` and `recovery` it narrows nothing and every one of its tests
@@ -1098,17 +1114,7 @@ describe('machine-readable reports', () => {
     for (const modulePath of CORE_MODULES) {
       const file = probes[modulePath] ?? modulePath;
       expect(existsSync(path.join(repoRoot, file)), file).toBe(true);
-      const selected = MUTATION_LEGS.some((leg) => {
-        let hit = false;
-        for (const glob of leg.mutate) {
-          if (glob.startsWith('!')) {
-            if (path.matchesGlob(file, glob.slice(1))) hit = false;
-          } else if (path.matchesGlob(file, glob)) {
-            hit = true;
-          }
-        }
-        return hit;
-      });
+      const selected = MUTATION_LEGS.some((leg) => legSelects(leg, file));
       expect(selected, `${file} must be inside the declared mutation scope`).toBe(true);
     }
   });
@@ -1167,13 +1173,71 @@ describe('machine-readable reports', () => {
     },
   );
 
-  it("declares only the mutation gate's merged report, and defers it to its own tier", () => {
-    // `mutation.json` and nothing else. There is no JUnit here to declare — the
-    // legs are Stryker runs, not vitest runs with a reporter — but the rule that
-    // shaped `test:fuzz` still applies to the JSON: `test:mutation` is tier 2 and
-    // does not run during `npm run ci`, so the ratchet must be able to defer the
-    // fields it supplies rather than reporting them stale on every push.
-    expect(reportsOf(manifest.tasks['test:mutation']!)).toEqual(['mutation.json']);
+  it.each([
+    ['shared', sharedMutationConfig, sharedVitestConfig],
+    ['server', serverMutationConfig, serverVitestConfig],
+    ['client', clientMutationConfig, clientVitestConfig],
+  ])(
+    'runs the %s mutation leg killer-first, and only the FILE order differs from the base suite',
+    (name, mutation, base) => {
+      // Stryker drives one vitest worker that bails at the first failure, so the
+      // file order is the cost of every static mutant. Under the base config's
+      // seeded FILE shuffle a static mutant walked a random share of the suite
+      // before its killer (tests/harness/mutationSequencer.ts has the numbers).
+      const sequence = mutation.test?.sequence;
+      expect(sequence?.sequencer, `${name} sequencer`).toBe(MutationSequencer);
+      expect(sequence?.shuffle, `${name} shuffle`).toEqual({ files: false, tests: true });
+      // Everything else about the order is the base suite's own: the seed that
+      // shuffles the tests inside each file, and the hook order that
+      // `mongoHarness.test.ts` observes.
+      expect(sequence?.seed).toBe(base.test?.sequence?.seed);
+      expect(sequence?.hooks).toBe(base.test?.sequence?.hooks);
+      // The order learns only from this process: vitest's per-machine results
+      // file is neither read nor written, and the reporter that measures each
+      // run is installed.
+      expect(mutation.test?.cache).toBe(false);
+      const reporters = (mutation.test?.reporters ?? []) as unknown[];
+      expect(reporters.filter((reporter) => reporter instanceof MutationRunLedger)).toHaveLength(1);
+      // And NOTHING else differs from the base suite: every key the mutation
+      // config sets differently is one of these five, each accounted for in its
+      // header. A sixth would be a change to what the oracle asks, made where
+      // nothing names it.
+      const baseTestConfig = (base.test ?? {}) as Record<string, unknown>;
+      const mutationTestConfig = (mutation.test ?? {}) as Record<string, unknown>;
+      const differing = [
+        ...new Set([...Object.keys(baseTestConfig), ...Object.keys(mutationTestConfig)]),
+      ]
+        .filter((key) => !isDeepStrictEqual(baseTestConfig[key], mutationTestConfig[key]))
+        .sort();
+      expect(differing, `${name} keys that differ from the base`).toEqual([
+        'cache',
+        'coverage',
+        'reporters',
+        'root',
+        'sequence',
+      ]);
+      // And the check this order is NOT: the base suite still measures order
+      // independence by shuffling FILES, with no sequencer of its own.
+      expect(base.test?.sequence?.shuffle, `${name} base shuffle`).toBe(true);
+      expect(base.test?.sequence?.sequencer, `${name} base sequencer`).toBeUndefined();
+    },
+  );
+
+  it("declares the mutation gate's merged report and one per leg, and defers them to its own tier", () => {
+    // `mutation.json` plus exactly one evidence file per declared leg, named by
+    // `legReportFor` — the name the gate writes and the name the ratchet reads.
+    // A leg missing here would still be written, but never cleared before a run
+    // (so a stale one could pass for fresh evidence) and never required on a pass.
+    // There is no JUnit to declare — the legs are Stryker runs, not vitest runs
+    // with a reporter — but the rule that shaped `test:fuzz` still applies to the
+    // JSON: `test:mutation` is tier 2 and does not run during `npm run ci`, so the
+    // ratchet must be able to defer the fields it supplies rather than reporting
+    // them stale on every push.
+    expect(reportsOf(manifest.tasks['test:mutation']!)).toEqual([
+      'mutation.json',
+      ...MUTATION_LEGS.map((leg) => legReportFor(leg.id)),
+    ]);
+    expect(MUTATION_LEGS.map((leg) => leg.id)).toEqual(['shared', 'client', 'server']);
     expect(manifest.tasks['test:mutation']!.tier).toBe(2);
     // The deferral is conditional on exactly that tier, which is what stops a
     // gate being retired by moving it somewhere it never runs.
@@ -1233,6 +1297,9 @@ describe('machine-readable reports', () => {
     // Shuffling is what makes a differently-seeded run a different ORDER. It is
     // inherited rather than restated, so assert it survived the spread.
     expect(flake.test?.sequence?.shuffle).toBe(true);
+    // The kill-seeking order belongs to the mutation configs alone: a flake leg
+    // that inherited it would run every seed in one order.
+    expect(flake.test?.sequence?.sequencer).toBeUndefined();
     // And the parallelism the gate claims to inherit. `flake-run.mjs` states
     // "parallelism is inherited, never reduced" as a load-bearing decision, and
     // until this line nothing enforced it: pinning either config to one worker
@@ -1339,7 +1406,8 @@ describe('machine-readable reports', () => {
     // regression in its own right.
     expect(ratchet).toContain('const FLAKE_REQUIRED_FIELDS = [');
     expect(ratchet).toContain("'flake.runs', 'flake.failures', 'flake.e2eExecutions'");
-    expect(ratchet).toContain('...(baselineRaw.flake ? FLAKE_REQUIRED_FIELDS : []),');
+    expect(ratchet).toContain('...(raw.flake ? FLAKE_REQUIRED_FIELDS : []),');
+    expect(ratchet).toContain('for (const req of absentRequiredFields(baselineRaw)) {');
 
     // And once the record does exist, its CONTENT is checked — this half is
     // conditional on presence only, never on the numbers, so a sample that shrank
@@ -1499,16 +1567,82 @@ describe('machine-readable reports', () => {
     }
   });
 
+  it('points the sandbox specs at a server the config never starts, on one engine, into their own report', () => {
+    // `test:sandbox` exists to render the isolated document under the headers the
+    // BUILT artifact sends, so the one outcome it must never have is a green run
+    // against the Vite dev server, which sends no policy at all. The base config
+    // carries a `webServer` in THIS process (no `E2E_BASE_URL` is set here), which
+    // is what makes the absence below a statement about the derived config rather
+    // than an accident of the environment.
+    expect(playwrightConfig.webServer).toBeDefined();
+    expect(sandboxPlaywrightConfig.webServer).toBeUndefined();
+
+    // The suite, in both of its homes, and every file on disk. Playwright errors
+    // only when NOTHING matches, so a half-stale `testMatch` shrinks the gate in
+    // silence; the gate script's own restatement is what reads the JUnit report.
+    expect([...SANDBOX_SUITE]).toEqual([...GATE_SANDBOX_SUITE]);
+    expect(sandboxPlaywrightConfig.testMatch).toEqual([...SANDBOX_SUITE]);
+    for (const file of SANDBOX_SUITE) {
+      expect(existsSync(path.join(repoRoot, 'e2e', file)), file).toBe(true);
+    }
+
+    // The policy file is SELECTED here and nowhere else. It asserts a header the
+    // dev server does not send, so it must sit outside Playwright's default
+    // `*.spec.*`/`*.test.*` pattern — which is what the E2E, a11y and flake gates
+    // use, because the base config names no `testMatch` of its own.
+    expect(playwrightConfig.testMatch).toBeUndefined();
+    const policyFile = SANDBOX_SUITE.find((file) => file.endsWith('.prod.ts'));
+    expect(policyFile).toBe('sandbox-policy.prod.ts');
+    expect(policyFile).not.toMatch(/\.(?:spec|test)\.[cm]?[jt]sx?$/);
+
+    // Chromium alone, and by NAME: a project-level `testMatch` replaces the
+    // top-level one, so inheriting the base's Firefox project would run the
+    // clipboard and auto-lock specs against the production server in this gate.
+    expect(sandboxPlaywrightConfig.projects?.map((project) => project.name)).toEqual(['chromium']);
+    expect(sandboxPlaywrightConfig.projects?.[0]?.testMatch).toBeUndefined();
+
+    // Its own report, attributable by engine, and no HTML report to overwrite the
+    // E2E run's.
+    const junit = playwrightReporter('junit', sandboxPlaywrightConfig);
+    expect(junit).toBeDefined();
+    expect(path.resolve(repoRoot, String(junit!['outputFile']))).toBe(
+      path.join(repoRoot, '.testfortress', 'reports', SANDBOX_JUNIT),
+    );
+    expect(junit!['includeProjectInTestName']).toBe(true);
+    expect(playwrightReporter('html', sandboxPlaywrightConfig)).toBeUndefined();
+    // Both legs' names, against the ones the two gates read back: the Nginx leg
+    // inside `test:deploy` selects the second with `HVAULT_SANDBOX_LEG=nginx`, and
+    // a drift between the two literals would leave that gate reading no report.
+    expect(
+      Object.fromEntries(
+        Object.entries(SANDBOX_JUNIT_REPORTS).map(([leg, file]) => [leg, path.basename(file)]),
+      ),
+    ).toEqual({ express: SANDBOX_JUNIT, nginx: SANDBOX_NGINX_JUNIT });
+
+    // Everything else inherited: the same pinned zone and locale, the same retries.
+    expect(sandboxPlaywrightConfig.use).toEqual(playwrightConfig.use);
+    expect(sandboxPlaywrightConfig.retries).toBe(0);
+
+    // And the manifest declares what the runner needs to call this COULD NOT RUN
+    // rather than red: the artifact, and the daemon for the storage engine.
+    const task = manifest.tasks['test:sandbox']!;
+    expect(reportsOf(task)).toEqual(['sandbox.json', SANDBOX_JUNIT]);
+    expect(task.requires).toEqual(['build:shared', 'build:server', 'build:client', 'docker']);
+    // `document-viewer.spec.ts` is already counted by the E2E gate.
+    expect(task.countsTests).toBe(false);
+  });
+
   it('resolves every Playwright config to one worker, and names the gates a raise would move', () => {
     // `workers: 1` is a FLAKE-HIDE marker — `scripts/ci/integrity-scan.mjs` matches the
     // literal `1` inside any runner config — so it is ledgered, dated and expiring
     // rather than treated as settled. What this test pins is the thing that makes
     // raising it a larger act than the one-character diff looks like:
-    // `playwright.a11y.config.ts` and `playwright.flake.config.ts` both spread the base
-    // config and override only `testMatch` / `projects` / `reporter` / `repeatEach`, so
-    // `workers` and `fullyParallel` reach them by INHERITANCE. One edit to the base
-    // therefore changes the concurrency model of THREE gates — `e2e`, `a11y` and
-    // `flake` — two of which nobody raising it would think to re-measure.
+    // `playwright.a11y.config.ts`, `playwright.flake.config.ts` and
+    // `playwright.sandbox.config.ts` all spread the base config and override only
+    // `testMatch` / `projects` / `reporter` / `repeatEach` / `webServer`, so `workers`
+    // and `fullyParallel` reach them by INHERITANCE. One edit to the base therefore
+    // changes the concurrency model of FOUR gates — `e2e`, `a11y`, `flake` and
+    // `sandbox` — three of which nobody raising it would think to re-measure.
     //
     // The constraint is not costless and was measured rather than assumed. On the
     // reference machine (four cores), `--workers=2` ran the whole suite 218 of 218
@@ -1527,7 +1661,7 @@ describe('machine-readable reports', () => {
     // measurements and the removal condition are in
     // `.testfortress/phase-logs/e2e-worker-measurements.md`.
     //
-    // Hence all three, labelled — and SOFT, for the reason `e2e/a11y.spec.ts` gives for
+    // Hence all four, labelled — and SOFT, for the reason `e2e/a11y.spec.ts` gives for
     // the same choice: one failing arm must not hide the state of the others. A hard
     // `expect` aborts on the first, so a raise would report the E2E gate and say nothing
     // about the two that were converted along with it, which is precisely the silence
@@ -1536,6 +1670,7 @@ describe('machine-readable reports', () => {
       ['the E2E gate', playwrightConfig],
       ['the accessibility gate', a11yPlaywrightConfig],
       ['the flake gate', flakePlaywrightConfig],
+      ['the sandbox gate', sandboxPlaywrightConfig],
     ] as const) {
       expect.soft(config.workers, gate).toBe(1);
       expect.soft(config.fullyParallel, gate).toBe(false);
@@ -1561,11 +1696,12 @@ describe('machine-readable reports', () => {
     // package.json`, which is ALREADY set and is the wrong fix. That misdirection
     // is the real cost, and it is why a guard here is worth more than a comment.
     //
-    // A REGEX IS REFUSED, and that is measured too: `s3Server.ts` holds nine
-    // legitimate `await`s, four of them at the start of a line, all inside async
-    // functions. So this parses. `typescript` is a root devDependency and a
-    // sibling suite already imports it the same way
-    // (`tsconfig-incremental.test.ts`).
+    // A REGEX IS REFUSED, and that is measured too: `s3Server.ts` holds ten
+    // matches for the word, four of them at the start of a line — nine
+    // legitimate `await`s, all inside async functions, and ONE inside a comment,
+    // which is precisely the distinction a regex cannot draw. So this parses.
+    // `typescript` is a root devDependency and a sibling suite already imports
+    // it the same way (`tsconfig-incremental.test.ts`).
     const harnessDir = path.join(repoRoot, 'tests/harness');
     const files = readdirSync(harnessDir).filter((name) => name.endsWith('.ts'));
 
@@ -1770,13 +1906,18 @@ describe('machine-readable reports', () => {
     // description is what makes a report readable a year later.
     expect(new Set(A11Y_VIEW_IDS).size).toBe(A11Y_VIEW_IDS.length);
     for (const view of A11Y_VIEWS) expect(view.description, view.id).toBeTruthy();
-    // The threshold is the gate. Widening it to `moderate` would be a stricter
-    // gate; narrowing it to `critical` alone would silently drop colour contrast,
-    // missing labels and broken ARIA relationships, which are all `serious`.
-    // `unknown` is the nullable-impact case `scanA11y` maps: blocking, because a
-    // violation axe could not grade is not thereby a minor one, and dropping it
-    // left a finding that appeared in no number the gate publishes.
-    expect([...A11Y_BLOCKING_IMPACTS]).toEqual(['serious', 'critical', 'unknown']);
+    // The threshold is the gate. `moderate` joined it once the structural debt
+    // it grades (a page with no `main` or no `h1`, content outside every
+    // landmark, two landmarks a menu cannot tell apart, a skipped heading level)
+    // had been paid down to zero across every scanned view; dropping it again
+    // would let that debt return in silence. Narrowing further, to `critical`
+    // alone, would drop colour contrast, missing labels and broken ARIA
+    // relationships, which are all `serious`. `unknown` is the nullable-impact
+    // case `scanA11y` maps: blocking, because a violation axe could not grade is
+    // not thereby a minor one, and dropping it left a finding that appeared in
+    // no number the gate publishes. `minor` is the one impact still recorded
+    // rather than gated.
+    expect([...A11Y_BLOCKING_IMPACTS]).toEqual(['moderate', 'serious', 'critical', 'unknown']);
     // The gate is a plain `.mjs` and cannot import the TypeScript constant, so it
     // RESTATES the list — and its docblock claimed this test held the two
     // together, which it did not: only `A11Y_SUITE` was pinned. A narrowed copy

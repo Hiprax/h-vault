@@ -44,11 +44,25 @@
  *   the single `get` has already resolved it, and `db.transaction(…)` throwing
  *   synchronously rejects from inside the `new Promise` executor. The same shape,
  *   for the same reason, is `offlineCache`'s three readers.
+ * - The database is opened through `offlineCache`'s `openVersionedDatabase`, the
+ *   one shared open, so the OPEN always settles as well: an upgrade another tab
+ *   on an older bundle is holding up is refused after a grace period, and an open
+ *   the engine never answers at all (one queued behind another tab's upgrade) is
+ *   given up after `OPEN_RESPONSE_DEADLINE_MS`, rather than either being left
+ *   pending, which for this module would wedge the write queue above for the
+ *   tab's life. And a saver whose READ is refused writes nothing (see
+ *   {@link snapshotToMerge}), since both write the whole record.
  */
 import { cryptoService } from '../crypto/cryptoService';
-import { deriveUserHash, transactionFailureError } from '../offlineCache';
+import { deriveUserHash, openVersionedDatabase, transactionFailureError } from '../offlineCache';
 
 const DB_NAME_PREFIX = 'hvault-health';
+/**
+ * Bumping this runs an upgrade in every tab that opens the database afterwards.
+ * Keep whatever that upgrade does FAR inside `OPEN_RESPONSE_DEADLINE_MS`
+ * (`services/offlineCache.ts`): a tab whose open is queued behind another tab's
+ * upgrade hears nothing until it ends, and gives up once that deadline passes.
+ */
 const DB_VERSION = 1;
 const RESULTS_STORE = 'results';
 /** Single-record key: the whole health snapshot lives in one encrypted blob. */
@@ -133,17 +147,10 @@ async function openDb(userId: string): Promise<IDBDatabase> {
     throw new Error('IndexedDB is not available');
   }
   const hash = await deriveUserHash(userId);
-  const dbName = `${DB_NAME_PREFIX}-${hash}`;
-  return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(dbName, DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(RESULTS_STORE)) {
-        db.createObjectStore(RESULTS_STORE, { keyPath: 'key' });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
+  return openVersionedDatabase(`${DB_NAME_PREFIX}-${hash}`, DB_VERSION, (db) => {
+    if (!db.objectStoreNames.contains(RESULTS_STORE)) {
+      db.createObjectStore(RESULTS_STORE, { keyPath: 'key' });
+    }
   });
 }
 
@@ -166,11 +173,14 @@ function putStoredRecord(db: IDBDatabase, record: StoredRecord): Promise<void> {
 }
 
 /**
- * Load and decrypt the health snapshot. Returns null on ANY failure (no record,
- * decrypt failure after a vault-key rotation, corruption, invalid shape, or
- * IndexedDB being unavailable) — all of which are treated as a clean cache miss.
+ * Read and decrypt the stored snapshot. Resolves `null` for a snapshot that is
+ * ABSENT or UNUSABLE (no record, a decrypt failure after a vault-key rotation,
+ * corruption, an invalid shape): there is nothing a merge could preserve, so a
+ * saver starts from empty. REJECTS when storage refused the read itself (the
+ * database would not open, the request failed): the snapshot may be perfectly
+ * good, and the caller simply could not see it.
  */
-export async function loadHealthResults(
+async function readPayload(
   userId: string,
   vaultKey: CryptoKey,
 ): Promise<HealthResultsPayload | null> {
@@ -179,18 +189,61 @@ export async function loadHealthResults(
     db = await openDb(userId);
     const record = await getStoredRecord(db);
     if (!record) return null;
-    const json = await cryptoService.decryptData(
-      record.blob.encrypted,
-      record.blob.iv,
-      record.blob.tag,
-      vaultKey,
-    );
-    const parsed: unknown = JSON.parse(json);
-    return isValidPayload(parsed) ? parsed : null;
-  } catch {
-    return null;
+    try {
+      const json = await cryptoService.decryptData(
+        record.blob.encrypted,
+        record.blob.iv,
+        record.blob.tag,
+        vaultKey,
+      );
+      const parsed: unknown = JSON.parse(json);
+      return isValidPayload(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   } finally {
     db?.close();
+  }
+}
+
+/**
+ * Load and decrypt the health snapshot. Returns null on ANY failure (no record,
+ * decrypt failure after a vault-key rotation, corruption, invalid shape, or
+ * IndexedDB being unavailable) — all of which are treated as a clean cache miss.
+ */
+export async function loadHealthResults(
+  userId: string,
+  vaultKey: CryptoKey,
+): Promise<HealthResultsPayload | null> {
+  try {
+    return await readPayload(userId, vaultKey);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The snapshot a saver merges into, or `undefined` when it could not be read.
+ *
+ * Both savers write the WHOLE record, so a saver that merged into "nothing"
+ * after a failed read would replace a snapshot it never saw: every breach
+ * datum, or every strength score, gone. A read storage refused therefore skips
+ * the save (persistence degrades to session-only, as for any failed write)
+ * rather than being mistaken for an empty snapshot. This is reachable in
+ * ordinary use: while another tab holds the database at an older version, a
+ * read can be refused and the write straight after it allowed, the moment that
+ * tab lets go. The cost, accepted: a record the engine itself can never read
+ * (a request that fails every time) now blocks every save until logout clears
+ * the database, where a save used to overwrite it.
+ */
+async function snapshotToMerge(
+  userId: string,
+  vaultKey: CryptoKey,
+): Promise<HealthResultsPayload | undefined> {
+  try {
+    return (await readPayload(userId, vaultKey)) ?? emptyPayload();
+  } catch {
+    return undefined;
   }
 }
 
@@ -225,7 +278,8 @@ export function saveBreachResults(
   scanCompletedAt: number,
 ): Promise<void> {
   return enqueueWrite(async () => {
-    const existing = (await loadHealthResults(userId, vaultKey)) ?? emptyPayload();
+    const existing = await snapshotToMerge(userId, vaultKey);
+    if (!existing) return;
     const perItem: Record<string, HealthPerItem> = {};
 
     // Preserve strength for items not part of this breach scan.
@@ -259,7 +313,8 @@ export function saveStrengthScores(
   entries: readonly StrengthSaveEntry[],
 ): Promise<void> {
   return enqueueWrite(async () => {
-    const existing = (await loadHealthResults(userId, vaultKey)) ?? emptyPayload();
+    const existing = await snapshotToMerge(userId, vaultKey);
+    if (!existing) return;
     const perItem: Record<string, HealthPerItem> = { ...existing.perItem };
 
     for (const entry of entries) {

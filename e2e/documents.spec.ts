@@ -222,11 +222,16 @@ test.describe('documents: the encrypted document store', () => {
     const failure = page.getByTestId('transform-failure');
     await expect(failure).toBeVisible({ timeout: 60_000 });
     await expect(failure).toContainText('it could not be repaired or formatted');
-    // The repairer's own words, the POSITION it reported, and the source line it
-    // points at. A refusal that named no line would send the reader back to a
-    // file with no idea where to look, which is the difference this assertion
-    // pins: `broken.json` carries an elided array element on its third line.
-    await expect(page.getByTestId('transform-failure-message')).toContainText('Colon expected');
+    // The APPLICATION's sentence for the repairer's complaint, the POSITION it
+    // reported, and the source line it points at. A refusal that named no line
+    // would send the reader back to a file with no idea where to look, which is
+    // the difference this assertion pins: `broken.json` carries an elided array
+    // element on its third line. The repairer's own wording is never shown —
+    // the frame sends a code, and every sentence in this panel is the
+    // application's — which the negative below pins through the real frame.
+    const message = page.getByTestId('transform-failure-message');
+    await expect(message).toHaveText('The repairer expected a colon.');
+    await expect(message).not.toContainText('Colon expected');
     await expect(page.getByTestId('transform-failure-position')).toHaveText('Line 3, column 21');
     await expect(page.getByTestId('transform-failure-excerpt')).toContainText('[1, 2,, 3]');
 

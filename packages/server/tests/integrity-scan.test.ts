@@ -899,6 +899,31 @@ describe('the measured false positives stay false', () => {
     expect(twoCovered.summary.suppressions.totalHits).toBe(2);
   });
 
+  it('MUTANT-DISABLE catches a Stryker directive, which hides mutants from the score', () => {
+    // A disabled mutant is reported `Ignored`, and `Ignored` is in neither half of
+    // the score, so this one comment shrinks the oracle's denominator invisibly.
+    for (const directive of [
+      m('// Stry', 'ker disable next-line all'),
+      m('/* Stry', 'ker disable EqualityOperator */'),
+    ]) {
+      const result = scan({
+        ...CLEAN,
+        'src/index.ts': `${directive}\nexport const bound = (n: number): boolean => n > 1;\n`,
+      });
+      expect(at(result, 'src/index.ts')[0]).toMatchObject({
+        rule: 'MUTANT-DISABLE',
+        violation: 'UNLEDGERED',
+      });
+      expect(result.exitCode).toBe(1);
+    }
+    // Prose that merely NAMES the directive is not one: it needs a comment opener.
+    const prose = scan({
+      ...CLEAN,
+      'src/index.ts': `export const note = 'use ${m('Stry', 'ker disable')} sparingly';\n`,
+    });
+    expect(at(prose, 'src/index.ts')).toEqual([]);
+  });
+
   it('COV-EXCLUDE catches an inline coverage pragma', () => {
     const result = scan({
       ...CLEAN,

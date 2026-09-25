@@ -3,7 +3,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 import dotenv from 'dotenv';
 import { z } from 'zod';
-import { MAX_DOCUMENT_EXT_LENGTH } from '@hvault/shared';
+import {
+  DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
+  MAX_DOCUMENT_EXT_LENGTH,
+  MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
+} from '@hvault/shared';
 import { createModuleLogger } from '../utils/logger.js';
 
 // Resolve .env from the monorepo root (4 levels up from packages/server/src/config/).
@@ -14,13 +18,24 @@ const configDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(configDir, '..', '..', '..', '..');
 const rootEnvPath = path.join(rootDir, '.env');
 
-if (fs.existsSync(rootEnvPath)) {
-  dotenv.config({ path: rootEnvPath });
-} else {
-  // Fallback: load from CWD (standalone deployment without .env at the
-  // monorepo root, e.g. inside a Docker container).
-  dotenv.config();
-}
+// Every option that decides WHAT is loaded, pinned. dotenv also reads its options
+// from `DOTENV_*` (and `DOTENV_CONFIG_*`) environment variables on every
+// `config()` call, with the options passed here taking precedence, so anything
+// left unpinned is something an ambient variable can change. `override: false` is
+// the load-bearing one: a variable the environment already holds must win over
+// the file (the server suite's pinned `test.env` beats a developer's root .env
+// only because of it, the E2E harness points storage at its own engine that way,
+// and a process-manager or shell export is expected to beat the file). The encoding and
+// the parser are pinned so the file is read the one way it has always been read.
+const DOTENV_LOAD_OPTIONS = { override: false, encoding: 'utf8', fast: false } as const;
+
+// The root .env when there is one, else the one in CWD (a standalone deployment
+// without .env at the monorepo root, e.g. inside a Docker container). The
+// fallback is named explicitly rather than left to dotenv's default, which
+// `DOTENV_PATH` would otherwise redirect.
+const envPath = fs.existsSync(rootEnvPath) ? rootEnvPath : path.resolve(process.cwd(), '.env');
+dotenv.config({ ...DOTENV_LOAD_OPTIONS, path: envPath });
+
 // NOTE: previously this used `dotenv-safe` to enforce the presence of
 // `.env.example` keys at boot. That guard is now redundant: the Zod schema
 // below validates every required env var (`z.string().min(32)` etc.) and
@@ -110,10 +125,64 @@ function isProductionStorageEndpoint(endpoint: string): boolean {
   return isLocalOrPrivateStorageHost(hostname);
 }
 
+/**
+ * The document part route's body deadline when `DOCUMENT_PART_BODY_TIMEOUT_MS` is
+ * not set: one sealed segment at the slowest sustained uplink this deployment
+ * stands behind, which is 64 seconds at today's numbers. Derived rather than
+ * written down, so a change to either constant moves it.
+ */
+export const DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS =
+  (DOCUMENT_CIPHERTEXT_CHUNK_BYTES / MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND) * 1_000;
+
 const envSchema = z
   .object({
     PORT: z.coerce.number().int().min(1).max(65535).default(5000),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+
+    // How long the server will spend RECEIVING one request, and how long it will
+    // spend on that request's headers alone. Both are applied to the HTTP server
+    // by `utils/httpTimeouts.ts`, and both are set EXPLICITLY rather than left to
+    // Node's defaults (300_000 and 60_000 on the pinned runtime) because Node's
+    // own documentation says they "must be set to a non-zero value (e.g. 120
+    // seconds) to protect against potential Denial-of-Service attacks in case the
+    // server is deployed without a reverse proxy in front" — and because a
+    // default is a number this deployment would silently inherit a change to.
+    //
+    // 240 seconds is the LARGEST BODY ANY ROUTE ACCEPTS divided by
+    // MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND: 30 MB (the backup-restore and
+    // key-rotation parser) at 128 KiB/s. It is deliberately NOT sized to a
+    // document part, even though the part route is the one holding a scarce
+    // resource while it waits, because this setting is SERVER-WIDE — Node has no
+    // per-route form of it — and a value that suited the part route would refuse a
+    // legitimate restore from anyone on a slower link. The part route carries its
+    // own, much tighter deadline instead (`middleware/documentPartBody.ts`), which
+    // is what actually bounds how long one account can hold an upload slot.
+    //
+    // NEITHER MAY BE ZERO, so there is deliberately no way to turn the protection
+    // off from configuration; the floor below is what enforces that. Note what
+    // these do NOT bound: the timeout is on RECEIPT, so a request whose body has
+    // arrived is not interrupted while its controller runs (measured — a handler
+    // sleeping past its server's requestTimeout still answered), which is what
+    // keeps a minutes-long rotation, restore or trash purge unaffected.
+    HTTP_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(600_000).default(240_000),
+    HTTP_HEADERS_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(60_000),
+
+    // How long ONE document part may take to arrive once it holds an upload slot:
+    // the route's own body deadline (`middleware/documentPartBody.ts`). The
+    // default is one sealed segment at the slowest uplink supported, 64 s, and that
+    // is a floor on upload speed PER TRANSFER: a user running several uploads at
+    // once shares one uplink between them, so each gets a fraction of it. Raise it
+    // for users on slow links. What that costs is stated plainly: it is also how
+    // long one account can hold one of the process's part-upload slots with a body
+    // it never sends. It may not exceed HTTP_REQUEST_TIMEOUT_MS (refused below),
+    // because the server-wide deadline would end the request first and this one
+    // would mean nothing. Like the pair above it cannot be zero.
+    DOCUMENT_PART_BODY_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(5_000)
+      .max(600_000)
+      .default(DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS),
 
     // Database
     MONGODB_URI: z.string().min(1).default('mongodb://localhost:27017/hvault'),
@@ -425,6 +494,22 @@ const envSchema = z
     // and only fails at MongoDB connect time, masked behind the retry loop.
     message: 'MONGO_MIN_POOL_SIZE cannot be greater than MONGO_MAX_POOL_SIZE',
     path: ['MONGO_MIN_POOL_SIZE'],
+  })
+  .refine((data) => data.HTTP_HEADERS_TIMEOUT_MS <= data.HTTP_REQUEST_TIMEOUT_MS, {
+    // NOT a tidiness rule. Node SWAPS the two when the headers timeout is the
+    // larger (`ConnectionsList::Expired` does it in C++, silently), so a
+    // configuration with a 60 s request timeout and a 120 s headers timeout gets a
+    // 120 s REQUEST timeout — the opposite of what the operator wrote, with
+    // nothing logged. Measured on the pinned runtime: request 2 s with headers
+    // 4 s killed a dribbling body at 4 s.
+    message: 'HTTP_HEADERS_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS',
+    path: ['HTTP_HEADERS_TIMEOUT_MS'],
+  })
+  .refine((data) => data.DOCUMENT_PART_BODY_TIMEOUT_MS <= data.HTTP_REQUEST_TIMEOUT_MS, {
+    // A part deadline past the server-wide one never fires: the request is ended
+    // with a 408 first. Refused rather than quietly meaning nothing.
+    message: 'DOCUMENT_PART_BODY_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS',
+    path: ['DOCUMENT_PART_BODY_TIMEOUT_MS'],
   })
   .refine((data) => data.REFRESH_TOKEN_REMEMBER_DAYS >= data.REFRESH_TOKEN_DAYS, {
     // "Remember me" must never shorten a session relative to a normal login.

@@ -575,7 +575,13 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
       });
 
       expect(res.status).toBe(201);
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 1 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+        updatedCount: 1,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(1);
 
       const log = await AuditLog.findOne({ userId: user.id, action: 'import' }).lean();
       expect(log).not.toBeNull();
@@ -590,7 +596,7 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
 
     it('counts the request against the per-user import budget, not the shared heavy-op one', async () => {
       // A migration arrives as several sequential batches. Sharing
-      // `heavyOpLimiter`'s 10-per-IP budget would stall it (or a prior export
+      // `heavyOpLimiter`'s 10-per-user budget would stall it (or a prior export
       // would burn a slot), so `/tools/import` owns a userId-keyed counter.
       const res = await post(agent, '/api/v1/tools/import', user.accessToken, {
         format: 'json',
@@ -612,7 +618,7 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
 
   // ── app.ts: MongoDB operator stripping walks ARRAYS, not just objects ──
 
-  describe('app.ts — request-body sanitization', () => {
+  describe('request-body sanitization (the app-level sanitizeRequestBody mount)', () => {
     it('passes an explicit null through untouched, so a null-valued field keeps its meaning', async () => {
       // `folderId: null` is the API's "move this item out of every folder"
       // signal. The sanitizer must return null verbatim: coerce it (e.g. into

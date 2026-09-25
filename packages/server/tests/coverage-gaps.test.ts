@@ -260,7 +260,13 @@ describe('import — format coverage', () => {
       });
 
     expect(res.status).toBe(201);
-    expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+    expect(res.body.data).toEqual({
+      insertedCount: 1,
+      updatedCount: 0,
+      insertedIds: expect.any(Array),
+    });
+    // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+    expect(res.body.data.insertedIds).toHaveLength(1);
 
     const log = await AuditLog.findOne({ userId: user.id, action: 'import' }).lean();
     expect(log).not.toBeNull();
@@ -601,17 +607,24 @@ describe('TOTP window consistency', () => {
 // ═══════════════════════════════════════════════════════════════════════
 
 describe('Backup controller edge cases', () => {
-  it('setupBackup returns 404 when the user vanishes between auth and the update write', async () => {
+  it('setupBackup answers the recoverable 409 when its conditional write matches nothing', async () => {
     const user = await createTestUser();
     const { token: csrf, cookie } = await getCsrf();
 
     // Keep the user alive so the JWT strategy AND the authHash re-check pass,
-    // then force the FINAL `findByIdAndUpdate(...).select('-__v').lean()` to
-    // resolve null — the exact race the controller's `if (!user) throw
-    // notFound(...)` guards. Deleting the user instead (as this test used to)
-    // makes the JWT strategy reject with 401 before the controller runs, so the
-    // named branch was never exercised and removing the guard would not fail it.
-    vi.spyOn(User, 'findByIdAndUpdate').mockReturnValue({
+    // then force the FINAL `findOneAndUpdate(...).select('-__v').lean()` to
+    // resolve null. Deleting the user instead (as this test used to) makes the
+    // JWT strategy reject with 401 before the controller runs, so the named
+    // branch is never exercised and removing it would not fail this.
+    //
+    // WHAT A MISS MEANS CHANGED, and so did the expected value. The write used
+    // to be `findByIdAndUpdate(userId, …)`, whose only way to miss was an account
+    // that no longer existed — hence a 404. It is now conditioned on the vault-key
+    // generation the guard resolved, so on an account the password proof above has
+    // just read, a miss means a rotation committed between that guard and this
+    // write. The recoverable 409 carrying the current generation is the answer to
+    // that, and a 404 would tell the user their account had vanished.
+    vi.spyOn(User, 'findOneAndUpdate').mockReturnValue({
       select: () => ({ lean: () => Promise.resolve(null) }),
     } as never);
 
@@ -629,9 +642,12 @@ describe('Backup controller edge cases', () => {
           bwkSalt: 'test-salt',
         });
 
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(409);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain('User not found');
+      expect(res.body.message).toContain('rotated elsewhere');
+      // The NUMBER is what makes it recoverable: with it the client re-reads its
+      // key, re-seals the wrapper and retries instead of guessing.
+      expect(res.body.data).toEqual({ vaultKeyVersion: 0 });
     } finally {
       vi.restoreAllMocks();
     }
@@ -712,15 +728,16 @@ describe('Backup controller edge cases', () => {
     expect(res.headers['content-type']).toContain('application/json');
   });
 
-  it('changeBackupPassword returns 404 when the update write finds no user', async () => {
+  it('changeBackupPassword answers the recoverable 409 when its conditional write matches nothing', async () => {
     const user = await createTestUser();
     const { token: csrf, cookie } = await getCsrf();
 
     // As with setupBackup: leave the user alive so auth + the current-password
-    // bcrypt check pass, then force the final `findByIdAndUpdate` to resolve
-    // null so the controller's `if (!user) throw notFound(...)` branch actually
-    // runs (deleting the user would 401 at the JWT strategy first).
-    vi.spyOn(User, 'findByIdAndUpdate').mockReturnValue({
+    // bcrypt check pass, then force the final `findOneAndUpdate` to resolve null
+    // so the controller's miss branch actually runs (deleting the user would 401
+    // at the JWT strategy first). The expected value moved with the write's
+    // filter — see the setup case above for why a 404 is now the wrong answer.
+    vi.spyOn(User, 'findOneAndUpdate').mockReturnValue({
       select: () => ({ lean: () => Promise.resolve(null) }),
     } as never);
 
@@ -738,9 +755,10 @@ describe('Backup controller edge cases', () => {
           newBwkSalt: 'new-salt',
         });
 
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(409);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain('User not found');
+      expect(res.body.message).toContain('rotated elsewhere');
+      expect(res.body.data).toEqual({ vaultKeyVersion: 0 });
     } finally {
       vi.restoreAllMocks();
     }

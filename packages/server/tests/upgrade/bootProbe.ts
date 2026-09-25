@@ -103,8 +103,15 @@ export interface BootResult {
  * `envFile` is the literal text of a `.env`: the probe writes it unchanged, so a
  * fixture can carry comments, blank keys and stale variables exactly as an
  * operator's file does.
+ *
+ * `ambient` is what the process environment already holds when the server
+ * starts, the way `docker compose` `environment:` or a shell export would set
+ * it. Empty by default, so every other case boots on the file alone.
  */
-export async function bootWithEnvFile(envFile: string): Promise<BootResult> {
+export async function bootWithEnvFile(
+  envFile: string,
+  ambient: Readonly<Record<string, string>> = {},
+): Promise<BootResult> {
   const root = createTestTempDir('hv-upgrade-boot-');
 
   mkdirSync(path.join(root, 'packages', 'server'), { recursive: true });
@@ -172,7 +179,9 @@ export async function bootWithEnvFile(envFile: string): Promise<BootResult> {
         // stand in for a variable the fixture `.env` is meant to supply — or,
         // worse, for one a test is deliberately withholding. Only what a shell
         // genuinely needs is passed through.
+        // `ambient` is spread FIRST so it cannot displace the pins below.
         env: {
+          ...ambient,
           PATH: process.env['PATH'] ?? '',
           HOME: process.env['HOME'] ?? root,
           // The determinism pins travel with the child. Nothing in

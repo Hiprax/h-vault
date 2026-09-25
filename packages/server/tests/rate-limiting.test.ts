@@ -13,6 +13,7 @@ import {
   healthLimiter,
   generalAuthLimiter,
   unlockLimiter,
+  twoFactorVerifyLimiter,
 } from '../src/middleware/rateLimiter.js';
 import { createTestUser, authHeader, sampleVaultItem, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
@@ -192,7 +193,13 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(1);
     });
 
     it('should still enforce auth before rate limiter on import', async () => {
@@ -482,14 +489,14 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
     });
   });
 
-  // ── MISSING-4 — POST /user/2fa/verify has tokenVerifyLimiter ────
+  // ── MISSING-4 — POST /user/2fa/verify has twoFactorVerifyLimiter ────
 
-  describe('MISSING-4 — POST /api/v1/user/2fa/verify (tokenVerifyLimiter)', () => {
+  describe('MISSING-4 — POST /api/v1/user/2fa/verify (twoFactorVerifyLimiter)', () => {
     it('should accept 2FA verify requests through rate limiter middleware', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      // 2FA is not set up for the test user, so the controller returns 409.
-      // This verifies the middleware chain (tokenVerifyLimiter) does not block.
+      // 2FA has not been started for the test user, so the controller refuses with
+      // 400. This verifies the middleware chain (twoFactorVerifyLimiter) does not block.
       const res = await agent
         .post('/api/v1/user/2fa/verify')
         .set('Authorization', authHeader(user.accessToken))
@@ -497,8 +504,11 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
         .set('Cookie', csrfCookie)
         .send({ code: '123456', secret: 'some-secret' });
 
-      // Reaches controller — returns 400 or 409 (no pending 2FA setup / already enabled)
-      expect([400, 409]).toContain(res.status);
+      // Reached the controller: its own refusal, not the limiter's.
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe(
+        'No pending 2FA setup found. Please start the setup process first.',
+      );
     });
 
     it('should still enforce auth before rate limiter on 2FA verify', async () => {
@@ -644,7 +654,12 @@ describe('Rate limiter route wiring (structural)', () => {
     ['heavyOpLimiter on GET /backup/download', 'get', '/download', heavyOpLimiter],
     ['passwordVerifyLimiter on POST /backup/setup', 'post', '/setup', passwordVerifyLimiter],
     ['passwordVerifyLimiter on POST /backup/restore', 'post', '/restore', passwordVerifyLimiter],
-    ['tokenVerifyLimiter on POST /user/2fa/verify', 'post', '/2fa/verify', tokenVerifyLimiter],
+    [
+      'twoFactorVerifyLimiter on POST /user/2fa/verify',
+      'post',
+      '/2fa/verify',
+      twoFactorVerifyLimiter,
+    ],
     ['passwordVerifyLimiter on DELETE /user/2fa', 'delete', '/2fa', passwordVerifyLimiter],
     // Audit-writing DELETE endpoints must carry generalAuthLimiter, matching
     // their GET siblings — a missing one here is the exact regression a

@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import React from 'react';
+import { AxiosError, AxiosHeaders } from 'axios';
 
 // ---------------------------------------------------------------------------
 // Polyfill matchMedia for jsdom
@@ -889,7 +890,7 @@ describe('FolderRail - edit/rename folder', () => {
     fireEvent.click(screen.getByText('Rename'));
 
     // Rename dialog should open
-    expect(screen.getByText('Rename Folder')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Rename Folder' })).toBeInTheDocument();
     const renameInput = screen.getByPlaceholderText('New name');
     expect(renameInput).toHaveValue('Work');
 
@@ -1031,6 +1032,9 @@ describe('FolderRail - delete folder', () => {
     // Confirm in the confirmation dialog
     const dialog = screen.getByRole('alertdialog');
     expect(dialog).toBeInTheDocument();
+    expect(dialog).toContainElement(
+      screen.getByRole('heading', { level: 2, name: 'Delete Folder' }),
+    );
     fireEvent.click(screen.getAllByText('Delete').find((el) => dialog.contains(el))!);
 
     await waitFor(() => {
@@ -1465,14 +1469,33 @@ describe('FolderRail - additional edge cases', () => {
 
     renderWithRouter(<VaultRail />);
 
+    // The second request is still in flight when the first is refused.
+    let releaseSecond!: () => void;
+    mockReorderFolderApi.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (releaseSecond = resolve)),
+    );
+
     const secondBtn = screen.getByText('Second').closest('button')!;
     fireEvent.keyDown(secondBtn, { key: 'ArrowUp', ctrlKey: true });
+
+    // Nothing is read back while a request can still change the server's order.
+    await waitFor(() => {
+      expect(mockReorderFolderApi).toHaveBeenCalledTimes(2);
+    });
+    expect(fetchFolders).not.toHaveBeenCalled();
+    releaseSecond();
 
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({ title: 'Failed to reorder', type: 'error' }),
       );
     });
+    // Half the swap may have landed, so the rail re-reads the order rather than
+    // showing one the server does not have; and it never claims success.
+    expect(fetchFolders).toHaveBeenCalledTimes(1);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Folder reordered' }),
+    );
   });
 
   it('handles drag-and-drop reorder error gracefully', async () => {
@@ -1501,6 +1524,143 @@ describe('FolderRail - additional edge cases', () => {
       getData: vi.fn(),
     };
 
+    let releaseSecond!: () => void;
+    mockReorderFolderApi.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (releaseSecond = resolve)),
+    );
+
+    fireEvent.dragStart(firstBtn, { dataTransfer });
+    fireEvent.dragOver(secondBtn, { dataTransfer });
+    fireEvent.drop(secondBtn, { dataTransfer });
+
+    await waitFor(() => {
+      expect(mockReorderFolderApi).toHaveBeenCalledTimes(2);
+    });
+    expect(fetchFolders).not.toHaveBeenCalled();
+    releaseSecond();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to reorder', type: 'error' }),
+      );
+    });
+    // A drag refused part-way through (the folder-write budget, a lost
+    // connection) leaves the server's order half-applied: re-read it.
+    expect(fetchFolders).toHaveBeenCalledTimes(1);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Folder reordered' }),
+    );
+  });
+
+  it('reports a reorder whose read-back fails as ONE failure, never as a success', async () => {
+    const mockToast = vi.fn();
+    vi.mocked(useToast).mockReturnValue({ toast: mockToast, dismiss: vi.fn(), update: vi.fn() });
+    // Both re-sort requests are accepted; only re-reading the order fails.
+    const fetchFolders = vi.fn().mockRejectedValue(new Error('offline'));
+
+    useVaultStore.setState({
+      folders: [
+        makeFolder({ id: 'f1', name: 'First', sortOrder: 0 }),
+        makeFolder({ id: 'f2', name: 'Second', sortOrder: 1 }),
+      ] as never[],
+      fetchFolders,
+    });
+
+    renderWithRouter(<VaultRail />);
+
+    const secondBtn = screen.getByText('Second').closest('button')!;
+    fireEvent.keyDown(secondBtn, { key: 'ArrowUp', ctrlKey: true });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to reorder', type: 'error' }),
+      );
+    });
+    expect(mockReorderFolderApi).toHaveBeenCalledTimes(2);
+    expect(fetchFolders).toHaveBeenCalledTimes(1);
+    // The rail cannot show the order it just asked for, so it does not claim it.
+    const reorderToasts = mockToast.mock.calls.filter(([options]) =>
+      /reorder/i.test((options as { title: string }).title),
+    );
+    expect(reorderToasts).toHaveLength(1);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Folder reordered' }),
+    );
+  });
+
+  it('waits out a short 429 from a proxy in front of the app and finishes the reorder', async () => {
+    // A drag moves every folder between the two positions, one request each;
+    // fired at once they outran a rate-limiting proxy. Now they are paced and a
+    // 429 asking for a short wait is waited out and sent again.
+    const refusal = new AxiosError('Request failed with status code 429');
+    refusal.response = {
+      status: 429,
+      statusText: '',
+      data: '',
+      headers: new AxiosHeaders({ 'retry-after': '1' }),
+      config: { headers: new AxiosHeaders() },
+    };
+    mockReorderFolderApi.mockRejectedValueOnce(refusal);
+    const mockToast = vi.fn();
+    vi.mocked(useToast).mockReturnValue({ toast: mockToast, dismiss: vi.fn(), update: vi.fn() });
+    const fetchFolders = vi.fn().mockResolvedValue(undefined);
+
+    useVaultStore.setState({
+      folders: [
+        makeFolder({ id: 'f1', name: 'First', sortOrder: 0 }),
+        makeFolder({ id: 'f2', name: 'Second', sortOrder: 1 }),
+      ] as never[],
+      fetchFolders,
+    });
+
+    renderWithRouter(<VaultRail />);
+
+    const firstBtn = screen.getByText('First').closest('button')!;
+    const secondBtn = screen.getByText('Second').closest('button')!;
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn(), getData: vi.fn() };
+
+    fireEvent.dragStart(firstBtn, { dataTransfer });
+    fireEvent.dragOver(secondBtn, { dataTransfer });
+    fireEvent.drop(secondBtn, { dataTransfer });
+
+    await waitFor(
+      () => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ title: 'Folder reordered', type: 'success' }),
+        );
+      },
+      { timeout: 5_000 },
+    );
+    // Two moved folders, and the refused one sent a second time.
+    expect(mockReorderFolderApi).toHaveBeenCalledTimes(3);
+    expect(fetchFolders).toHaveBeenCalledTimes(1);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to reorder' }),
+    );
+  });
+
+  it('reports a drag whose requests cannot even be issued as a failure', async () => {
+    mockReorderFolderApi.mockImplementationOnce(() => {
+      throw new Error('request could not be built');
+    });
+    const mockToast = vi.fn();
+    vi.mocked(useToast).mockReturnValue({ toast: mockToast, dismiss: vi.fn(), update: vi.fn() });
+    const fetchFolders = vi.fn().mockResolvedValue(undefined);
+
+    useVaultStore.setState({
+      folders: [
+        makeFolder({ id: 'f1', name: 'First', sortOrder: 0 }),
+        makeFolder({ id: 'f2', name: 'Second', sortOrder: 1 }),
+      ] as never[],
+      fetchFolders,
+    });
+
+    renderWithRouter(<VaultRail />);
+
+    const firstBtn = screen.getByText('First').closest('button')!;
+    const secondBtn = screen.getByText('Second').closest('button')!;
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn(), getData: vi.fn() };
+
     fireEvent.dragStart(firstBtn, { dataTransfer });
     fireEvent.dragOver(secondBtn, { dataTransfer });
     fireEvent.drop(secondBtn, { dataTransfer });
@@ -1510,6 +1670,9 @@ describe('FolderRail - additional edge cases', () => {
         expect.objectContaining({ title: 'Failed to reorder', type: 'error' }),
       );
     });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Folder reordered' }),
+    );
   });
 
   it('handles color change error gracefully', async () => {
@@ -1663,7 +1826,7 @@ describe('AppLayout - comprehensive coverage', () => {
   // class: `translate-x-0` when open, `-translate-x-full` when closed. The overlay
   // (a button with aria-label "Close sidebar" and class `fixed inset-0`) only
   // renders while open. These helpers let each close test assert the actual result.
-  const getAside = () => screen.getByText('H-Vault').closest('aside')!;
+  const getAside = () => screen.getByText('H-Vault').closest('header')!;
   const getOverlay = () =>
     screen.queryAllByLabelText('Close sidebar').find((b) => b.className.includes('fixed'));
   const getCloseX = () =>
@@ -1858,7 +2021,7 @@ describe('AppLayout - comprehensive coverage', () => {
     renderAppLayout();
 
     // Hover over the sidebar to trigger temporary expansion
-    const sidebar = screen.getByText('H-Vault').closest('aside')!;
+    const sidebar = screen.getByText('H-Vault').closest('header')!;
     fireEvent.mouseEnter(sidebar);
 
     // aria-label remains "Expand sidebar" (based on sidebarCollapsed state),

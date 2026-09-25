@@ -39,8 +39,57 @@ export function varint(value: number | bigint): number[] {
   return out;
 }
 
+/**
+ * An `int32` field's varint, as protobuf spells it: a non-negative value as an
+ * ordinary varint, a NEGATIVE one sign-extended to 64 bits and therefore always
+ * ten bytes long. That is how Google Authenticator's own encoder writes a
+ * negative `batch_id`, and it is why `int32` fields cannot share the five-byte
+ * rule tags and lengths follow.
+ */
+export function int32Varint(value: number): number[] {
+  if (!Number.isInteger(value) || value < -(2 ** 31) || value > 2 ** 31 - 1) {
+    throw new Error('int32Varint: not an int32');
+  }
+  return varint(BigInt.asUintN(64, BigInt(value)));
+}
+
+/**
+ * `value` spelled in EXACTLY `width` bytes, padding with continuation bytes that
+ * carry zeros. No real encoder writes this; readers disagree about what it
+ * means once it runs past five bytes, which is the shape a test here needs.
+ */
+export function paddedVarint(value: number | bigint, width: number): number[] {
+  const minimal = varint(value);
+  if (!Number.isInteger(width) || width < minimal.length || width > 10) {
+    throw new Error('paddedVarint: width must be between the minimal spelling and ten bytes');
+  }
+  const out = minimal.map((byte) => byte | 0x80);
+  while (out.length < width) out.push(0x80);
+  out[width - 1] = (out[width - 1] ?? 0) & 0x7f;
+  return out;
+}
+
+/**
+ * A tag for ANY field number, as the raw varint of `(fieldNumber << 3) | wireType`
+ * computed in `bigint`.
+ *
+ * The shapes this exists for are the ones a real encoder can never produce: a
+ * field number of zero, one above protobuf's 2^29 - 1 ceiling, or one so large
+ * its tag no longer fits in 32 bits. JavaScript's `<<` and `|` work on 32-bit
+ * integers, so computing such a tag with them quietly yields a DIFFERENT, small
+ * tag, which is exactly the aliasing a test here has to be able to express.
+ */
+export function bigTag(fieldNumber: bigint, wireType: number): number[] {
+  if (fieldNumber < 0n) throw new Error('bigTag: negative field number');
+  if (!Number.isInteger(wireType) || wireType < 0 || wireType > 7) {
+    throw new Error('bigTag: a wire type is three bits');
+  }
+  return varint((fieldNumber << 3n) | BigInt(wireType));
+}
+
+/** The tag of an ordinary field. Exact for every field number, via {@link bigTag}. */
 export function tag(fieldNumber: number, wireType: number): number[] {
-  return varint((fieldNumber << 3) | wireType);
+  return bigTag(BigInt(fieldNumber), wireType);
 }
 
 function lengthDelimited(fieldNumber: number, bytes: ArrayLike<number>): number[] {
@@ -56,9 +105,10 @@ export function encodeEntry(entry: EncodableEntry): number[] {
   if (entry.secret !== undefined) out.push(...lengthDelimited(1, entry.secret));
   if (entry.name !== undefined) out.push(...lengthDelimited(2, utf8(entry.name)));
   if (entry.issuer !== undefined) out.push(...lengthDelimited(3, utf8(entry.issuer)));
-  if (entry.algorithm !== undefined) out.push(...tag(4, 0), ...varint(entry.algorithm));
-  if (entry.digits !== undefined) out.push(...tag(5, 0), ...varint(entry.digits));
-  if (entry.type !== undefined) out.push(...tag(6, 0), ...varint(entry.type));
+  // The three enums are `int32` on the wire, like the payload's own numbers.
+  if (entry.algorithm !== undefined) out.push(...tag(4, 0), ...int32Varint(entry.algorithm));
+  if (entry.digits !== undefined) out.push(...tag(5, 0), ...int32Varint(entry.digits));
+  if (entry.type !== undefined) out.push(...tag(6, 0), ...int32Varint(entry.type));
   if (entry.counter !== undefined) out.push(...tag(7, 0), ...varint(entry.counter));
   return out;
 }
@@ -66,10 +116,10 @@ export function encodeEntry(entry: EncodableEntry): number[] {
 export function encodePayload(payload: EncodablePayload): Uint8Array {
   const out: number[] = [];
   for (const entry of payload.entries) out.push(...lengthDelimited(1, encodeEntry(entry)));
-  if (payload.version !== undefined) out.push(...tag(2, 0), ...varint(payload.version));
-  if (payload.batchSize !== undefined) out.push(...tag(3, 0), ...varint(payload.batchSize));
-  if (payload.batchIndex !== undefined) out.push(...tag(4, 0), ...varint(payload.batchIndex));
-  if (payload.batchId !== undefined) out.push(...tag(5, 0), ...varint(payload.batchId));
+  if (payload.version !== undefined) out.push(...tag(2, 0), ...int32Varint(payload.version));
+  if (payload.batchSize !== undefined) out.push(...tag(3, 0), ...int32Varint(payload.batchSize));
+  if (payload.batchIndex !== undefined) out.push(...tag(4, 0), ...int32Varint(payload.batchIndex));
+  if (payload.batchId !== undefined) out.push(...tag(5, 0), ...int32Varint(payload.batchId));
   return Uint8Array.from(out);
 }
 

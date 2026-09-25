@@ -18,12 +18,12 @@ import { useAuthStore } from '../../src/stores/authStore';
  * `new Error()` is never session-gone, so using one would make every status case
  * pass for the wrong reason.
  */
-function axiosStatusError(status: number): AxiosError {
+function axiosStatusError(status: number, data: unknown = {}): AxiosError {
   const err = new AxiosError('Request failed with status code ' + String(status));
   err.response = {
     status,
     statusText: '',
-    data: {},
+    data,
     headers: new AxiosHeaders(),
     config: { headers: new AxiosHeaders() },
   };
@@ -229,6 +229,65 @@ describe('ProtectedRoute', () => {
     await waitFor(() => {
       expect(state.logout).toHaveBeenCalled();
     });
+  });
+
+  it('shows a locked-account screen instead of logging out on 403 ACCOUNT_LOCKED', async () => {
+    // A lockout is a thirty-minute condition and `/auth/refresh` refuses it
+    // WITHOUT claiming the presented token, so the cookie behind this screen is
+    // still good. Logging out would `POST /auth/logout` and delete it for real —
+    // turning a condition the owner clears from their inbox into a session they
+    // can never get back.
+    const state = setupAuthStore({
+      isAuthenticated: true,
+      accessToken: null,
+      isLocked: false,
+    });
+
+    mockRefreshTokenApi.mockRejectedValue(
+      axiosStatusError(403, { message: 'ACCOUNT_LOCKED', success: false }),
+    );
+
+    renderProtected();
+
+    await waitFor(() => {
+      expect(screen.getByText(/account temporarily locked/i)).toBeInTheDocument();
+    });
+
+    expect(state.logout).not.toHaveBeenCalled();
+    expect(screen.getByText(/unlock link we emailed you/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+    // The negative that distinguishes this from the stalled-connection screen:
+    // sending someone to debug their network over a lockout the server named
+    // outright is the failure this branch exists to prevent.
+    expect(screen.queryByText(/could not reach the server/i)).not.toBeInTheDocument();
+    // And the protected content stays hidden — there is no access token.
+    expect(screen.queryByTestId('protected-content')).not.toBeInTheDocument();
+  });
+
+  it('lets the user retry out of the locked screen once the account is unlocked', async () => {
+    const state = setupAuthStore({
+      isAuthenticated: true,
+      accessToken: null,
+      isLocked: false,
+    });
+
+    mockRefreshTokenApi
+      .mockRejectedValueOnce(axiosStatusError(403, { message: 'ACCOUNT_LOCKED' }))
+      .mockResolvedValueOnce('recovered-token');
+
+    renderProtected();
+
+    const retry = await screen.findByRole('button', { name: /try again/i });
+    fireEvent.click(retry);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+    });
+    // The whole point: the same session came back. Nothing was destroyed on the
+    // way through the lockout.
+    expect(mockRefreshTokenApi).toHaveBeenCalledTimes(2);
+    expect(state.logout).not.toHaveBeenCalled();
+    expect(screen.queryByText(/account temporarily locked/i)).not.toBeInTheDocument();
   });
 
   /**

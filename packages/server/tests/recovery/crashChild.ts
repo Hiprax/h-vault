@@ -111,6 +111,22 @@ function arm(scenario: CrashScenario): void {
       });
       return;
 
+    case 'reseal-after-first-item-write':
+      // A same-key RE-SEAL, killed once its first row is rewritten and before its
+      // second. What must hold is what makes a re-seal crash-benign rather than
+      // merely recoverable: every row, rewritten or not, is still under the key
+      // the account stores, no pending wrapper was written (there is no new key
+      // to lose), and the fence is up until login's recovery lowers it.
+      patchStatic(VaultItem, 'updateOne', (original) => {
+        let calls = 0;
+        return (...args: unknown[]) => {
+          calls += 1;
+          if (calls === 2) die();
+          return original(...args);
+        };
+      });
+      return;
+
     case 'import-before-insert':
       // After the lock is held and the per-user cap has been checked, before any
       // row exists. What must hold: nothing was written, and the lock the dead

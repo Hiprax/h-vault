@@ -27,7 +27,7 @@ import { hasAnyValue, isUndecodableData } from '../../lib/vaultData';
 import { ErrorBoundary } from '../layout/ErrorBoundary';
 import { useVaultStore, type DecryptedVaultItem } from '../../stores/vaultStore';
 import { useAuthStore } from '../../stores/authStore';
-import { cryptoService } from '../../services/crypto/cryptoService';
+import { decryptVaultField } from '../../services/crypto/vaultField';
 import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
 import { BackupCodesSection } from './BackupCodesSection';
@@ -195,10 +195,16 @@ function CopyField({
 // ---------------------------------------------------------------------------
 
 interface PasswordHistoryProps {
+  /**
+   * The item the entries belong to. Required: a format-v2 entry is bound to its
+   * row, so an entry opened without knowing which row it came from could not be
+   * told apart from one a server moved here from another item.
+   */
+  itemId: string;
   entries: IPasswordHistoryEntry[];
 }
 
-function PasswordHistorySection({ entries }: PasswordHistoryProps) {
+function PasswordHistorySection({ itemId, entries }: PasswordHistoryProps) {
   const vaultKey = useAuthStore((s) => s.vaultKey);
   const [decrypted, setDecrypted] = useState<{ password: string; changedAt: string }[]>([]);
   const [loading, setLoading] = useState(false);
@@ -214,10 +220,9 @@ function PasswordHistorySection({ entries }: PasswordHistoryProps) {
     try {
       const results = await Promise.allSettled(
         entries.map(async (entry) => {
-          const password = await cryptoService.decryptData(
-            entry.encryptedPassword,
-            entry.iv,
-            entry.tag,
+          const password = await decryptVaultField(
+            { encrypted: entry.encryptedPassword, iv: entry.iv, tag: entry.tag },
+            { role: 'item.password-history', rowId: itemId },
             vaultKey,
           );
           return { password, changedAt: entry.changedAt };
@@ -236,7 +241,7 @@ function PasswordHistorySection({ entries }: PasswordHistoryProps) {
     } finally {
       setLoading(false);
     }
-  }, [expanded, entries, vaultKey]);
+  }, [expanded, entries, itemId, vaultKey]);
 
   if (entries.length === 0) return null;
 
@@ -1027,7 +1032,7 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
 
       {/* Password history for login items */}
       {item.itemType === 'login' && item._raw.passwordHistory && (
-        <PasswordHistorySection entries={item._raw.passwordHistory} />
+        <PasswordHistorySection itemId={item.id} entries={item._raw.passwordHistory} />
       )}
 
       {/* Metadata */}
@@ -1059,9 +1064,9 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
             aria-modal="true"
             aria-label="Rename item"
           >
-            <h3 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
+            <h2 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
               Rename Item
-            </h3>
+            </h2>
             <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
               Only the name is changed. The item&rsquo;s stored contents are left exactly as they
               are.
@@ -1123,9 +1128,9 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
             aria-modal="true"
             aria-label="Confirm delete"
           >
-            <h3 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
+            <h2 className="text-lg font-semibold text-[hsl(var(--card-foreground))]">
               {isTrashed ? 'Permanently Delete Item' : 'Delete Item'}
-            </h3>
+            </h2>
             <p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">
               {isTrashed ? (
                 <>

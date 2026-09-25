@@ -129,7 +129,8 @@ export const nMinusOneVault = JSON.parse(
   readFileSync(path.join(here, '..', 'fixtures', 'v0.7.0-vault.json'), 'utf-8'),
 ) as NMinusOneFixture;
 
-const decodeBase64 = (value: string): Uint8Array => new Uint8Array(Buffer.from(value, 'base64'));
+const decodeBase64 = (value: string): Uint8Array<ArrayBuffer> =>
+  new Uint8Array(Buffer.from(value, 'base64'));
 
 /**
  * Derives the master encryption key and the transmitted auth hash from a master

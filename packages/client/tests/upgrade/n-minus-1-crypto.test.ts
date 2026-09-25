@@ -27,13 +27,16 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ItemType } from '@hvault/shared';
 import { cryptoService } from '../../src/services/crypto/cryptoService';
+import { decryptVaultField } from '../../src/services/crypto/vaultField';
 
 /** Anchored on this module's own URL, never `process.cwd()`. */
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 interface FixtureItem {
   id: string;
+  itemType: ItemType;
   name: string;
   plaintext: string;
   encryptedName: string;
@@ -43,6 +46,19 @@ interface FixtureItem {
   encryptedData: string;
   dataIv: string;
   dataTag: string;
+}
+
+/** HMAC-SHA256 of `message` under raw key bytes, as lower-case hex. */
+async function hmacHex(key: ArrayBuffer, message: string): Promise<string> {
+  const hmacKey = await crypto.subtle.importKey(
+    'raw',
+    key,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(message));
+  return Array.from(new Uint8Array(signature), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 const fixture = JSON.parse(
@@ -143,11 +159,63 @@ describe("the current client opens the previous release's vault", () => {
         await cryptoService.decryptData(item.encryptedName, item.nameIv, item.nameTag, vaultKey),
       ).toBe(item.name);
 
-      // And the HMAC the server matches duplicates on. This is the assertion
-      // that would catch a change to the trim/lowercase normalisation inside
-      // `generateSearchHash`: every stored hash would be orphaned, and the only
-      // symptom would be duplicate detection quietly ceasing to detect.
-      expect(await cryptoService.generateSearchHash(item.name, vaultKey)).toBe(item.searchHash);
+      // The search hash. 0.7.0 keyed it with the raw vault key; this release keys
+      // it with an HKDF subkey (key separation), so the recorded hash is NOT what
+      // `generateSearchHash` produces any more, deliberately, and asserting it was
+      // would pin the key reuse the change removed. Nothing is lost by that: the
+      // server never matches ITEMS by this hash (import identity is computed from
+      // decrypted content, `toolsController` performs no hash matching), and a
+      // rotation or re-seal recomputes every item's hash.
+      //
+      // What still has to hold is the NORMALISATION, which both schemes share and
+      // which a later change could break silently. So the recorded 0.7.0 hash is
+      // reproduced from the 0.7.0 construction over `normalised`, and the current
+      // hash is reproduced from the current construction over the SAME string:
+      // together they tie today's normalisation to the one the fixture recorded.
+      const normalised = item.name.trim().toLowerCase();
+      const raw = await crypto.subtle.exportKey('raw', vaultKey);
+      expect(await hmacHex(raw, normalised)).toBe(item.searchHash);
+      const searchKey = await crypto.subtle.deriveBits(
+        {
+          name: 'HKDF',
+          hash: 'SHA-256',
+          salt: new Uint8Array(0),
+          info: new TextEncoder().encode('hvault/item/search/v1'),
+        },
+        await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveBits']),
+        256,
+      );
+      const current = await cryptoService.generateSearchHash(item.name, vaultKey);
+      expect(current).toBe(await hmacHex(searchKey, normalised));
+      expect(current).not.toBe(item.searchHash);
+    },
+    60_000,
+  );
+
+  it.each(items.map((item) => [item.id, item] as const))(
+    'opens %s through the dual-read path the vault reads every row with',
+    async (id, item) => {
+      // `decryptItem` no longer calls `decryptData`: every row field goes through
+      // `decryptVaultField`, which must route a 0.7.0 field (no marker, no
+      // additional data) down the unchanged v1 path. The fixture's ids are labels,
+      // not ObjectIds, so no v2 binding could even be built from them: a reader
+      // that consulted the binding for an unmarked field would refuse all of
+      // these, which is exactly the regression this case exists to catch.
+      expect(item.dataIv.startsWith('v2:')).toBe(false);
+      expect(
+        await decryptVaultField(
+          { encrypted: item.encryptedData, iv: item.dataIv, tag: item.dataTag },
+          { role: 'item.data', rowId: id, itemType: item.itemType },
+          vaultKey,
+        ),
+      ).toBe(item.plaintext);
+      expect(
+        await decryptVaultField(
+          { encrypted: item.encryptedName, iv: item.nameIv, tag: item.nameTag },
+          { role: 'item.name', rowId: id },
+          vaultKey,
+        ),
+      ).toBe(item.name);
     },
     60_000,
   );

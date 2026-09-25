@@ -220,6 +220,7 @@ type FileCryptoErrorKind =
   | 'integrity'
   | 'engine-unavailable'
   | 'too-large'
+  | 'kdf-cost-refused'
   | 'weak-password'
   | 'unknown';
 
@@ -244,6 +245,55 @@ const NOT_A_FILE_CODES = new Set<string>([
   'CONTAINER_KDF_PARAMS_OUT_OF_BOUNDS',
 ]);
 
+/**
+ * Pre-authentication KDF-policy refusals. A container carries the Argon2id
+ * parameters that sealed it, unauthenticated at the moment they are read, so
+ * the package checks them against the manager's decrypt budget BEFORE deriving
+ * anything. This module passes no `decryptKdfLimits`, so the budget is the
+ * browser default, whose every ceiling widens to cover the manager's own cost:
+ * no file this tool ever produced is refused. What IS refused is a foreign
+ * `.enc` sealed above that budget, and retrying can never succeed.
+ *
+ * Only the first code is reachable from here today:
+ *   - `CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS`: raised by `decryptContainer`
+ *     for a container over a ceiling. The live path.
+ *   - `CONTAINER_KDF_COST_BELOW_DECRYPT_MINIMUM`: the same check against a
+ *     floor. Both floors default to 0 and none is configured, so this is
+ *     defence in depth against a future floor, not a live path.
+ *   - `FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM`, `KDF_COST_EXCEEDS_DECRYPT_LIMITS`,
+ *     `KDF_COST_BELOW_DECRYPT_MINIMUM`: STRUCTURALLY unreachable, not merely
+ *     unconfigured. In the browser build they come only from `decryptBytes`,
+ *     inherited from the package core (and from the exported
+ *     `assertKdfWithinDecryptLimits` helper), and this module calls
+ *     `encryptContainer` and `decryptContainer` and nothing else; the container format has no
+ *     headerless fallback for the first to police. Mapped so a later call to
+ *     `decryptBytes` inherits a true sentence instead of "try again".
+ *
+ * Never make one of these go away by passing `decryptKdfLimits`. Widening the
+ * budget trades a clear refusal for a frozen tab, since `hash-wasm` derives on
+ * the UI thread; narrowing it toward this tool's own cost would refuse
+ * containers other runtimes legitimately produce (a Node `HIGH`-profile file
+ * fits today's budget).
+ */
+const KDF_COST_REFUSED_CODES = new Set<string>([
+  'CONTAINER_KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+  'CONTAINER_KDF_COST_BELOW_DECRYPT_MINIMUM',
+  'FALLBACK_KDF_COST_BELOW_DECRYPT_MINIMUM',
+  'KDF_COST_EXCEEDS_DECRYPT_LIMITS',
+  'KDF_COST_BELOW_DECRYPT_MINIMUM',
+]);
+
+/**
+ * Oversize `CryptoError.code`s, which read the same as {@link FileTooLargeError}.
+ *   - `CONTAINER_DATA_TOO_LARGE`: `encryptContainer`'s own payload cap
+ *     (`0xffffffff` bytes), the oversize code the container path raises.
+ *   - `DATA_TOO_LARGE_FOR_GCM`: STRUCTURALLY unreachable here. The AES-GCM
+ *     per-invocation bound is asserted in `encryptBytes`/`decryptBytes`, which
+ *     this module never calls, and the container's own cap sits below that
+ *     bound whatever size limit H-Vault configures. Mapped for completeness.
+ */
+const TOO_LARGE_CODES = new Set<string>(['CONTAINER_DATA_TOO_LARGE', 'DATA_TOO_LARGE_FOR_GCM']);
+
 const MESSAGES: Record<FileCryptoErrorKind, string> = {
   'not-a-file': "This isn't a valid H-Vault encrypted file.",
   'wrong-password-or-corrupt': 'Incorrect password, or the file is corrupted.',
@@ -251,6 +301,8 @@ const MESSAGES: Record<FileCryptoErrorKind, string> = {
   'engine-unavailable':
     'The encryption engine could not start in this browser. Try a newer browser over HTTPS.',
   'too-large': 'This file is too large to process in your browser.',
+  'kdf-cost-refused':
+    'This file was encrypted with key-derivation settings this browser will not run, so it cannot be opened here. Files encrypted with H-Vault are not affected.',
   'weak-password':
     'This password is too weak. Use at least 20 characters, or 8+ with an uppercase letter, a lowercase letter, a digit, and a symbol.',
   unknown: 'Something went wrong. Please try again.',
@@ -294,6 +346,12 @@ function classifyCryptoErrorCode(code: string): FileCryptoErrorKind {
   }
   if (NOT_A_FILE_CODES.has(code)) {
     return 'not-a-file';
+  }
+  if (KDF_COST_REFUSED_CODES.has(code)) {
+    return 'kdf-cost-refused';
+  }
+  if (TOO_LARGE_CODES.has(code)) {
+    return 'too-large';
   }
   return 'unknown';
 }

@@ -182,4 +182,44 @@ describe('ErrorBoundary', () => {
 
     spy.mockRestore();
   });
+
+  // -------------------------------------------------------------------------
+  // Where the fallback sits in the page outline
+  // -------------------------------------------------------------------------
+  it('as the top-level boundary (standalone) is the page: one main landmark and its h1', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { container } = render(
+      <ErrorBoundary standalone>
+        <ThrowingComponent message="boom" />
+      </ErrorBoundary>,
+    );
+    const main = screen.getByRole('main');
+    // The whole fallback is the landmark: nothing it draws sits outside it.
+    expect(container.childElementCount).toBe(1);
+    expect(container.firstElementChild).toBe(main);
+    expect(main).toContainElement(
+      screen.getByRole('heading', { level: 1, name: 'Something went wrong' }),
+    );
+    expect(main).toContainElement(screen.getByRole('button', { name: 'Reload' }));
+    expect(screen.queryByRole('heading', { level: 2 })).toBeNull();
+    spy.mockRestore();
+  });
+
+  it('inside a page (the default) adds no second main and sits one level below the page h1', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(
+      <main>
+        <h1>Vault</h1>
+        <ErrorBoundary>
+          <ThrowingComponent message="boom" />
+        </ErrorBoundary>
+      </main>,
+    );
+    expect(screen.getAllByRole('main')).toHaveLength(1);
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'Something went wrong' }),
+    ).toBeInTheDocument();
+    spy.mockRestore();
+  });
 });

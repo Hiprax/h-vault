@@ -574,7 +574,13 @@ describe('Additional Coverage', () => {
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+        updatedCount: 0,
+        insertedIds: expect.any(Array),
+      });
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+      expect(res.body.data.insertedIds).toHaveLength(1);
     });
 
     it('should reject a row with missing encryption fields', async () => {

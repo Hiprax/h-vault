@@ -61,16 +61,16 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 
 ### Vault
 
-|                        |                                                                                                                                                                                                                                                                                                                                                          |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Five item types**    | Logins (with optional 2FA recovery codes), secrets, notes, cards (with Luhn validation, notes and an optional two-line billing address) and identities (a two-line address with courier delivery notes, plus company, Social Security and passport numbers — both masked — notes and custom fields) — with search, folders, tags, favorites and a trash. |
-| **Reuse an address**   | A card's billing address can be filled from any identity that has one, chosen from a searchable list with an undo. Delivery notes stay on the identity — a card cannot hold them. Runs entirely on already-decrypted items in the browser; nothing is sent anywhere.                                                                                     |
-| **Client-side crypto** | AES-256-GCM under a vault key the server never sees. Item and folder names are ciphertext too — so search runs entirely in the browser, over data only you can decrypt.                                                                                                                                                                                  |
-| **Password generator** | Character-set and passphrase modes (2048-word EFF-based list, exactly 11 bits per word). Strength is reported as **exact entropy**, not a heuristic score — see [below](#honest-strength-metering).                                                                                                                                                      |
-| **Vault health**       | Finds weak, reused, old (90+ days) and breached passwords, and logins with no TOTP configured.                                                                                                                                                                                                                                                           |
-| **Password history**   | The last 10 passwords per login, each individually encrypted, decrypted on demand.                                                                                                                                                                                                                                                                       |
-| **Built-in TOTP**      | Generate 2FA codes for your stored logins, with a clipboard that clears itself.                                                                                                                                                                                                                                                                          |
-| **Key rotation**       | Re-key the entire vault on demand. The server raises a write fence for the duration, so a second session can't write ciphertext under the old key and silently lose it.                                                                                                                                                                                  |
+|                        |                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Five item types**    | Logins (with optional 2FA recovery codes), secrets, notes, cards (with Luhn validation, notes and an optional two-line billing address) and identities (a two-line address with courier delivery notes, plus company, Social Security and passport numbers — both masked — notes and custom fields) — with search, folders, tags, favorites and a trash.                          |
+| **Reuse an address**   | A card's billing address can be filled from any identity that has one, chosen from a searchable list with an undo. Delivery notes stay on the identity — a card cannot hold them. Runs entirely on already-decrypted items in the browser; nothing is sent anywhere.                                                                                                              |
+| **Client-side crypto** | AES-256-GCM under a vault key the server never sees. Item and folder names are ciphertext too — so search runs entirely in the browser, over data only you can decrypt.                                                                                                                                                                                                           |
+| **Password generator** | Character-set and passphrase modes (2048-word EFF-based list, exactly 11 bits per word). Strength is reported as **exact entropy**, not a heuristic score — see [below](#honest-strength-metering).                                                                                                                                                                               |
+| **Vault health**       | Finds weak, reused, old (90+ days) and breached passwords, and logins with no TOTP configured.                                                                                                                                                                                                                                                                                    |
+| **Password history**   | The last 10 passwords per login, each individually encrypted, decrypted on demand.                                                                                                                                                                                                                                                                                                |
+| **Built-in TOTP**      | Generate 2FA codes for your stored logins, with a clipboard that clears itself.                                                                                                                                                                                                                                                                                                   |
+| **Key rotation**       | Re-key the entire vault on demand. The server raises a write fence for the duration, so a second session can't write ciphertext under the old key and silently lose it. A rotation cut short by a crash is kept, and Settings offers to finish it with the key it was moving to. **Re-seal Entries** rewrites every entry under the key you already have, bound to its own entry. |
 
 ### Security
 
@@ -81,7 +81,7 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 | **Remember me / trusted devices** | Opt-in per login. A remembered session lasts 30 days across a browser restart, and on a 2FA account the device may skip the _2FA step_ — never the master password, which is still typed on every unlock. Trust is granted only against a TOTP code: completing the 2FA step with a single-use _backup code_ signs you in and still gives you the 30-day session, but registers no device, because a recovery credential is kept where the authenticator app is not. Trust is a server-side record (only a SHA-256 of an opaque token, revocable centrally), checked strictly _after_ the password succeeds, rotated on use, and dropped on password change/reset, 2FA enable/disable, backup-code regeneration, "log out everywhere", stolen-token reuse detection, and account deletion. Manage or revoke devices from the Sessions page. |
 | **No enumeration oracles**        | Registration, login, lockout, password reset and verification-resend are all built so that response body _and_ response time are identical whether or not the account exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Account lockout**               | 30 minutes after 10 failed attempts, with progressive delays and an unlock email — and evaluated _after_ the password check, so it never reveals that an account exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **CSRF + rate limiting**          | HMAC-SHA256 double-submit tokens with constant-time verification, and [seventeen rate-limit tiers](#rate-limiting) backed by MongoDB, keyed per IP, email, user or session, with IPv6 `/64` aggregation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **CSRF + rate limiting**          | HMAC-SHA256 double-submit tokens with constant-time verification, and [twenty rate-limit tiers](#rate-limiting), all but two backed by MongoDB, keyed per IP, email or user, with IPv6 `/64` aggregation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | **Breach detection**              | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | **Audit log**                     | A searchable security log covering **47 distinct operations**, with TTL-based retention.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | **Account deletion**              | GDPR-complete, password-confirmed, and cascaded atomically across every collection.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -90,7 +90,9 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 
 - **Encrypted backups.** Scheduled or on-demand backups, encrypted under a _separate_ backup
   password so they stay opaque even to a server that holds them. Downloads are signed with
-  HMAC-SHA256 and the signature is verified on restore, so a tampered file is rejected.
+  HMAC-SHA256 and restore checks the signature against your account's own backup key: a file it
+  verifies restores directly, a file that is unsigned or verifies only under the key it carries
+  itself restores only once you confirm it, and a file no key verifies is refused.
   Restores are safe to repeat: a restore **never replaces your vault key** — the client
   re-encrypts incoming rows to the key you already have — and previously-restored content is
   matched by provenance, so re-running the same backup doesn't accumulate duplicates. Any
@@ -218,7 +220,11 @@ the sidebar and nothing to switch off.
   vault key, an access token, the document's id or even its name. The title, the toolbar and the
   download button are drawn outside the frame, so nothing a document renders can forge them, and
   a link inside a document asks for confirmation and shows you the destination's origin before it
-  opens. **Full screen expands the whole panel, never the frame alone** — the name and the
+  opens. **The frame never writes a word of the app's interface either**: when it declines a
+  preview, a format-and-repair or a photo, it names which of a fixed set of refusals it is and the
+  app supplies every sentence you read, so a compromised parser cannot put text of its own beside
+  the Download button. The one exception is quoting the line of your own file that a failed repair
+  or format points at. **Full screen expands the whole panel, never the frame alone** — the name and the
   Download button stay outside it in both states, and the browser keeps its own address bar, which
   is the one piece of chrome a document can never draw.
 
@@ -284,6 +290,9 @@ no user of a shared deployment is stuck inside it.
   cache and automatic re-sync when connectivity returns.
 - **Accessible by construction** — focus traps, `aria-activedescendant` roving focus in menus,
   live regions, and correct ARIA roles on virtualized lists (`react-window` above 50 items).
+  Every page has one `main` landmark and one `h1` (a loading screen has only the `main`), headings
+  never skip a level, and the `a11y` gate fails on any axe finding above minor (moderate, serious,
+  critical, or one axe gives no impact) in the thirty-four views it scans.
 - **Keyboard-first** — `Ctrl`+`L` lock, `Ctrl`+`N` new item, `Ctrl`+`K` search, `Ctrl`+`↑`/`↓`
   reorder folders (`Cmd` on macOS).
 - **Auto-lock on a wall-clock deadline** — the vault locks when your configured idle timeout has
@@ -321,7 +330,7 @@ flowchart TD
         VK["Vault Key<br/>random 256-bit"]
         MEK -->|"AES-256-GCM wraps"| EVK["Encrypted vault key"]
         VK --> EVK
-        VK -->|"AES-256-GCM<br/>unique IV per field"| CT["Encrypted items,<br/>names and folders"]
+        VK -->|"AES-256-GCM<br/>unique IV per field,<br/>bound to its entry"| CT["Encrypted items,<br/>names and folders"]
     end
 
     subgraph server["THE SERVER — only ever sees ciphertext"]
@@ -342,7 +351,18 @@ flowchart TD
 
 The server can verify you know your password (it bcrypts the auth hash) and hand back your
 encrypted vault key — but it cannot unwrap that key, because the MEK that wraps it is derived
-from a password it never receives.
+from a password it never receives. The browser holds the MEK as a non-extractable key, and it
+always derives it with its own iteration count, never one the server supplies, so a server cannot
+talk it into a weaker derivation.
+
+**Row binding.** Every vault field (an item's name, its data, each password-history entry, and a
+folder's name) is sealed with AES-GCM additional data naming the field and the entry's id, and for
+an item's data its type as well, so ciphertext a server moves to another entry or another field
+fails to decrypt instead of showing the wrong secret. A new entry's id is derived on both sides
+from a nonce the browser sends, so it can be bound before it exists. **Re-seal Entries** in
+Settings rewrites older entries in this format under the key you already have. What the binding
+cannot stop, a server putting back an older value of the same field or deleting an entry, is set
+out in [SECURITY.md](SECURITY.md).
 
 **Why the email is the salt.** The client must derive the _same_ MEK on every device before it
 has spoken to the server, so the salt has to be something it already knows. A per-user random
@@ -369,7 +389,11 @@ flowchart LR
 ```
 
 The backup file also carries an HMAC-SHA256 signature computed under a key separated from the
-BWK by HKDF, so tampering is detected at restore time rather than discovered later.
+BWK by HKDF, so tampering is detected at restore time rather than discovered later. Restore
+offers that signature to **your account's own** wrapping key first, and to the copy carried
+inside the file only after your own key has disagreed. A file this account cannot authenticate —
+one carrying no signature, or one only the file's own copy of the key accepts, which is what a
+backup from another account looks like — is restored only after you confirm it explicitly.
 
 ### Document encryption
 
@@ -430,20 +454,21 @@ metadata blob, under a freshly generated IV each time.
 
 ### Cryptographic parameters
 
-| Parameter                 | Value                                                                                                                                          |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)                                                               |
-| Master-key salt           | The account email — see the note above                                                                                                         |
-| Backup-key salt           | 16 random bytes                                                                                                                                |
-| Encryption                | AES-256-GCM                                                                                                                                    |
-| Key size                  | 256 bits                                                                                                                                       |
-| IV                        | 12 bytes, freshly random for **every** field                                                                                                   |
-| Authentication tag        | 16 bytes                                                                                                                                       |
-| Name hash                 | HMAC-SHA256 over the name, keyed by the vault key — folder-name uniqueness, not search                                                         |
-| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                                                                         |
-| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                                                                                     |
-| Document key              | Random 256-bit per document, wrapped under HKDF-SHA256(vault key, info bound to the document id)                                               |
-| Document segment          | AES-256-GCM over 8,388,592 bytes of plaintext, sealing to exactly 8 MiB; nonce = 7 random bytes ‖ big-endian segment index ‖ last-segment flag |
+| Parameter                 | Value                                                                                                                                                                |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)                                                                                     |
+| Master-key salt           | The account email — see the note above                                                                                                                               |
+| Backup-key salt           | 16 random bytes                                                                                                                                                      |
+| Encryption                | AES-256-GCM                                                                                                                                                          |
+| Key size                  | 256 bits                                                                                                                                                             |
+| IV                        | 12 bytes, freshly random for **every** field                                                                                                                         |
+| Authentication tag        | 16 bytes                                                                                                                                                             |
+| Name hash                 | HMAC-SHA256 over the trimmed, lower-cased name under a subkey, HKDF-SHA256(vault key, info `hvault/item/search/v1`), never the vault key itself; not used for search |
+| Field binding             | AES-GCM additional data naming the field and the entry's id (and an item's type), so ciphertext moved to another entry or field fails to decrypt                     |
+| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                                                                                               |
+| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                                                                                                           |
+| Document key              | Random 256-bit per document, wrapped under HKDF-SHA256(vault key, info bound to the document id)                                                                     |
+| Document segment          | AES-256-GCM over 8,388,592 bytes of plaintext, sealing to exactly 8 MiB; nonce = 7 random bytes ‖ big-endian segment index ‖ last-segment flag                       |
 
 ### Honest strength metering
 
@@ -469,7 +494,7 @@ the stored passwords the vault-health check grades.
 
 **Backend**
 
-- Node.js 24 · TypeScript 6 (strict)
+- Node.js 24 · TypeScript 7 (strict)
 - Express 5
 - MongoDB 7+ · Mongoose 9
 - Passport JWT (access + refresh rotation)
@@ -483,8 +508,8 @@ the stored passwords the vault-health check grades.
 **Frontend**
 
 - React 19 · Vite 8 (Rolldown)
-- TypeScript 6 (strict)
-- Zustand 5 (auth · vault · ui)
+- TypeScript 7 (strict)
+- Zustand 5 (auth · vault · ui · documents)
 - React Router 8, lazy-loaded
 - Tailwind CSS 4 · shadcn/ui-inspired
 - React Hook Form + Zod
@@ -658,16 +683,39 @@ Mongoose with `autoIndex` off, and the indexes are not merely a performance matt
 
 ### 3. Put your system Nginx in front
 
+The host's nginx is never hand-written: it is the ecosystem's golden nginx policy (TLS, HSTS,
+the security-header floor that yields to helmet's own headers, host-wide rate limits, the ACME
+path) rendered for this site. `docker/nginx/` holds that render for the placeholder
+`vault.example.com`: `system.docker.example.conf` (the site, with the policy inlined, proxying
+to `127.0.0.1:8080`) and the two files a host installs ONCE however many sites it carries
+(`00-newapp-http.conf`, the http-context names every site references, and
+`000-acme-catchall.conf`, the only `default_server` on :80 and :443, which also serves the ACME
+challenge for a name that has no site yet). Replace the domain, then install in this order, as
+root, from that directory (host files and the ACME path first, the certificate second, the site
+last):
+
 ```bash
-sudo cp docker/nginx/system.docker.example.conf /etc/nginx/sites-available/hvault.conf
-sudo ln -s /etc/nginx/sites-available/hvault.conf /etc/nginx/sites-enabled/
-# edit server_name + the ssl_certificate paths, then:
-sudo nginx -t && sudo systemctl reload nginx
+sed -i 's/vault\.example\.com/your-domain/g' system.docker.example.conf
+install -m 644 00-newapp-http.conf    /etc/nginx/conf.d/00-newapp-http.conf
+install -m 644 000-acme-catchall.conf /etc/nginx/sites-available/000-acme-catchall
+ln -sfn /etc/nginx/sites-available/000-acme-catchall /etc/nginx/sites-enabled/000-acme-catchall
+rm -f /etc/nginx/sites-enabled/default        # a second default_server on :80 is [emerg]
+mkdir -p /var/www/acme/.well-known/acme-challenge
+nginx -t && systemctl reload nginx
+certbot certonly --webroot -w /var/www/acme -d your-domain
+install -m 644 system.docker.example.conf /etc/nginx/sites-available/your-domain
+ln -sfn /etc/nginx/sites-available/your-domain /etc/nginx/sites-enabled/your-domain
+nginx -t && systemctl reload nginx
 ```
 
-Get certificates with `sudo certbot certonly --nginx -d vault.example.com`. Running under PM2
-instead? Use `docker/nginx/system.pm2.example.conf`, which proxies straight to Express on
-`127.0.0.1:5000` and sets `TRUST_PROXY=1`.
+On a host provisioned with the ecosystem's `provision.sh`, one command does the same:
+`sudo newapp your-domain --proxy 127.0.0.1:8080 --body-size 32M --read-timeout 300s --request-buffering off --gzip off`.
+Regenerate the rendered files rather than editing them (`--gzip off` is deliberate: every
+response from this stack is dynamic and secret-bearing, and the bundle is already compressed by
+the in-container nginx). Running under PM2 instead? Use `system.pm2.example.conf`, rendered the
+same way against Express on `127.0.0.1:5000`, after installing `includes/hvault-pm2.conf` (the
+bundle's one-year lifetime, from `hvault-pm2.locations.conf`) at
+`/etc/nginx/sites-local/hvault-pm2.conf`, and set `TRUST_PROXY=1`.
 
 > **Get `TRUST_PROXY_HOPS` right.** Express trusts the last _N_ entries of `X-Forwarded-For`. Too
 > high and any client can spoof its own IP by sending the header — defeating the IP-keyed rate
@@ -682,9 +730,14 @@ instead? Use `docker/nginx/system.pm2.example.conf`, which proxies straight to E
   none of the app's rate limiting, CSRF or session handling in front of it — is unreachable from
   anywhere but the app container.
 - **Security headers stay intact.** Nginx serves the content-hashed `/assets/*` straight from disk
-  (immutable caching, gzip, `nosniff`), but every **HTML document** is proxied to Express, so
-  helmet remains the single owner of the CSP, its per-request nonce, `X-Frame-Options` and
-  `Referrer-Policy`. HSTS belongs to the outer Nginx alone.
+  (immutable caching, gzip, `nosniff`), but every **HTML document** is proxied to Express, which
+  owns its CSP: helmet's, with a per-request nonce, `X-Frame-Options` and `Referrer-Policy`, for the
+  application, and a far stricter one of its own for the isolated document viewer, whose file is
+  kept outside every directory either server serves from disk. Express also sends its own
+  `Permissions-Policy` (the golden list, but with the camera allowed on this origin for the
+  authenticator import's scan; the viewer's document denies it too), because the Nginx header floor
+  it replaces denies the camera outright. HSTS belongs to the outer Nginx
+  alone.
 - **API responses are never compressed.** Gzipping a response that mixes a secret (a CSRF or
   bearer token) with attacker-influenced content is the precondition for a BREACH-style
   compression oracle. The payloads are base64 ciphertext, which barely compresses anyway.
@@ -846,7 +899,7 @@ password, but `TWO_FACTOR_ENCRYPTION_KEY` is what makes the stored 2FA secrets r
 
 | Symptom                                                                                                                      | Cause and fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MongoDB crash-loops on Ubuntu 26.04 / any Linux 6.19+ kernel                                                                 | SERVER-121912. MongoDB 8.0 moved TCMalloc to per-CPU caches that violate the rseq ABI as it changed in kernel 6.19, so mongod aborts at startup and `restart: unless-stopped` loops forever. The fix ships in the stack — `GLIBC_TUNABLES=glibc.pthread.rseq=1`, set at **every** mongod launch site (both compose files, the server test harness, the E2E harness and the smoke gate). If you hit this, something removed it. **Never set it to `0`**: that is mongod's own default, and precisely the value that breaks.                                                                  |
+| MongoDB crash-loops on Ubuntu 26.04 / any Linux 6.19+ kernel                                                                 | SERVER-121912. MongoDB 8.0 moved TCMalloc to per-CPU caches that violate the rseq ABI as it changed in kernel 6.19, so mongod aborts at startup and `restart: unless-stopped` loops forever. The fix ships in the stack — `GLIBC_TUNABLES=glibc.pthread.rseq=1`, set at **every** mongod launch site (both compose files, the server test harness, the E2E harness, the smoke gate and the sandbox gate). If you hit this, something removed it. **Never set it to `0`**: that is mongod's own default, and precisely the value that breaks.                                                |
 | `docker compose up` fails: "Pool overlaps with other one on this address space"                                              | Another Docker network already owns `172.31.240.0/24` or `172.31.241.0/24`. Set `HVAULT_EDGE_SUBNET` / `HVAULT_DATA_SUBNET` to free blocks, and give each stack its own `HVAULT_HTTP_PORT`. If free blocks keep getting taken, narrow Docker's own auto-allocation range instead — it carves bridges out of `172.17.0.0/12` from the bottom up — by setting `default-address-pools` in `/etc/docker/daemon.json`.                                                                                                                                                                           |
 | `up -d --wait` exits 1 saying `container hvault-nginx is unhealthy`, but the port answers `200`                              | Only after an app outage longer than ~75 s. Nginx's health probe runs **through** the proxy to `/api/v1/health`, so while the app is down nginx fails its five retries and is marked unhealthy; Compose treats an already-unhealthy container as terminal instead of waiting for its next probe. The stack is fine — confirm with `curl -fsS http://127.0.0.1:${HVAULT_HTTP_PORT:-8080}/api/v1/health`, then re-run the command (nginx clears itself on its first good probe, ≤15 s). The deep probe is deliberate: it is what proves the whole single-port path at deploy time.            |
 | Upgrading an **existing** deployment from `mongo:7.0`                                                                        | mongod 8.0 starts on a 7.0 data directory as-is. Then raise the compatibility version once, or 8.0 keeps behaving like 7.0: `docker compose exec hvault-db mongosh -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({setFeatureCompatibilityVersion:"8.0", confirm:true})'`. Take a `mongodump` first — it is not reversible without a restore.                                                                                                                                                                                   |
@@ -865,6 +918,8 @@ password, but `TWO_FACTOR_ENCRYPTION_KEY` is what makes the stored 2FA secrets r
 
 ```bash
 npm run build
+cp -r packages/client/dist/.        packages/server/public/          # the SPA
+cp -r packages/client/dist-sandbox/. packages/server/sandbox-document/ # the isolated viewer
 npm run create-indexes -w packages/server   # nothing does this for you here
 pm2 start ecosystem.config.cjs --env production
 ```
@@ -872,7 +927,18 @@ pm2 start ecosystem.config.cjs --env production
 512 MB memory restart limit, structured logs in `logs/`, cluster mode. Background jobs take
 distributed MongoDB locks, so they never double-run across instances. Express serves the SPA
 itself in this mode (there is no internal Nginx), so front it with
-`docker/nginx/system.pm2.example.conf` and set `TRUST_PROXY=1`.
+`docker/nginx/system.pm2.example.conf` (rendered from the ecosystem's golden nginx policy; install
+`docker/nginx/includes/hvault-pm2.conf` at `/etc/nginx/sites-local/hvault-pm2.conf` first) and set
+`TRUST_PROXY=1`.
+
+**The two copy steps are not optional and nothing else performs them.** The build writes the
+application into `packages/client/dist` and the document viewer into
+`packages/client/dist-sandbox`, and the server reads them from `packages/server/public` and
+`packages/server/sandbox-document`. They are two directories on purpose: the viewer is served with
+its own, far stricter policy, and keeping it outside every static root is what stops an alternative
+spelling of its URL being answered off disk under the application's policy instead. The Docker image
+does both copies for you; here, the server refuses to start until they are done, and says which one
+is missing.
 
 **There is no storage engine here**, so the document store is simply **off** unless you point
 `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` at storage of your own —
@@ -930,54 +996,57 @@ start** rather than run misconfigured.
 <details open>
 <summary><b>Application variables</b></summary>
 
-| Variable                             | Required | Default                            | Notes                                                                                                                                                                                                                                                  |
-| ------------------------------------ | -------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `JWT_ACCESS_SECRET`                  | **Yes**  | —                                  | Min 32 chars                                                                                                                                                                                                                                           |
-| `JWT_REFRESH_SECRET`                 | **Yes**  | —                                  | Min 32 chars. Use a different value from the access secret                                                                                                                                                                                             |
-| `SESSION_SECRET`                     | **Yes**  | —                                  | Min 32 chars. Signs the CSRF token; also the 2FA key fallback                                                                                                                                                                                          |
-| `PORT`                               | No       | `5000`                             | 1–65535                                                                                                                                                                                                                                                |
-| `NODE_ENV`                           | No       | `development`                      | `development` · `production` · `test`                                                                                                                                                                                                                  |
-| `APP_URL`                            | No       | `http://localhost:5000`            | Public base URL used in emailed links. Must be `http://` or `https://`                                                                                                                                                                                 |
-| `APP_NAME`                           | No       | `H-Vault`                          | Used in email subjects and the TOTP issuer                                                                                                                                                                                                             |
-| `MONGODB_URI`                        | No       | `mongodb://localhost:27017/hvault` | Overridden inside the Docker stack                                                                                                                                                                                                                     |
-| `JWT_ACCESS_EXPIRY`                  | No       | `5m`                               | Access token lifetime                                                                                                                                                                                                                                  |
-| `REFRESH_TOKEN_DAYS`                 | No       | `7`                                | Standard refresh-token (session) lifetime, in whole days. 1–90                                                                                                                                                                                         |
-| `REFRESH_TOKEN_REMEMBER_DAYS`        | No       | `30`                               | "Remember me" session lifetime, in whole days. 1–365, and must be ≥ `REFRESH_TOKEN_DAYS`                                                                                                                                                               |
-| `TRUSTED_DEVICE_DAYS`                | No       | `30`                               | How long a device may skip the 2FA step, in whole days. 1–365, and must be ≥ `REFRESH_TOKEN_REMEMBER_DAYS`                                                                                                                                             |
-| `CORS_ORIGIN`                        | No       | `http://localhost:5173`            | **Must be HTTPS in production** or the app will not boot                                                                                                                                                                                               |
-| `TWO_FACTOR_ENCRYPTION_KEY`          | No       | falls back to `SESSION_SECRET`     | Min 32 chars. An empty assignment is treated as unset                                                                                                                                                                                                  |
-| `BCRYPT_ROUNDS`                      | No       | `12`                               | 4–31                                                                                                                                                                                                                                                   |
-| `EMAIL_PROVIDER`                     | No       | `smtp`                             | `smtp` or `gmail`                                                                                                                                                                                                                                      |
-| `SMTP_HOST` / `USER` / `PASS`        | No       | —                                  | All three together, or none. Partial config is a startup error in production                                                                                                                                                                           |
-| `SMTP_PORT`                          | No       | `587`                              | —                                                                                                                                                                                                                                                      |
-| `SMTP_SECURE`                        | No       | auto                               | Auto-detected from the port (`true` for 465)                                                                                                                                                                                                           |
-| `SMTP_FROM`                          | No       | —                                  | Unset, the From address is derived: `APP_NAME <noreply@SMTP_HOST>`, or `APP_NAME <noreply@hvault.local>`                                                                                                                                               |
-| `GMAIL_USERNAME` / `PASSWORD`        | No       | —                                  | Both or neither. Use an [App Password](https://myaccount.google.com/apppasswords)                                                                                                                                                                      |
-| `BACKUP_MAX_SIZE_MB`                 | No       | `25`                               | 1–100                                                                                                                                                                                                                                                  |
-| `BACKUP_RETENTION_DAYS`              | No       | `30`                               | 1–365                                                                                                                                                                                                                                                  |
-| `EXPORT_MAX_SIZE_MB`                 | No       | `25`                               | 1–100                                                                                                                                                                                                                                                  |
-| `FILE_ENCRYPTION_MAX_SIZE_MB`        | No       | `100`                              | 1–1024. A client-side guardrail advertised via `GET /config` — the file is never uploaded, so it cannot be enforced server-side                                                                                                                        |
-| `S3_ENDPOINT`                        | No       | —                                  | S3-compatible endpoint URL, `http://` or `https://`. In production a plain `http://` endpoint is accepted only for a loopback address, an RFC 1918 private address or a single-label host (an in-stack service name); anything else must be `https://` |
-| `S3_REGION`                          | No       | `us-east-1`                        | Matches the bundled storage configuration, so the default works untouched                                                                                                                                                                              |
-| `S3_BUCKET`                          | No       | —                                  | The bucket that holds the encrypted documents                                                                                                                                                                                                          |
-| `S3_ACCESS_KEY_ID`                   | No       | —                                  | Min 8 chars (a shorter id is refused by the storage engine itself). All four `S3_*` connection variables together, or none: a partial set is a startup error in production, and a warning that disables the document store in development              |
-| `S3_SECRET_ACCESS_KEY`               | No       | —                                  | Min 16 chars                                                                                                                                                                                                                                           |
-| `S3_FORCE_PATH_STYLE`                | No       | `true`                             | Path-style addressing (bucket in the URL path). Only the exact value `false` turns it off                                                                                                                                                              |
-| `MAX_DOCUMENT_SIZE_MB`               | No       | `100`                              | 1–1024. Largest single document a client may upload                                                                                                                                                                                                    |
-| `DOCUMENT_STORAGE_QUOTA_MB_PER_USER` | No       | `2048`                             | 1–1048576, and must be ≥ `MAX_DOCUMENT_SIZE_MB` or the app will not boot. Counts stored documents plus the declared size of uploads in flight                                                                                                          |
-| `DOCUMENT_UPLOAD_TTL_HOURS`          | No       | `24`                               | 1–168. How long an unfinished upload is kept before it is abandoned                                                                                                                                                                                    |
-| `DOCUMENT_ALLOWED_EXTENSIONS`        | No       | — (all allowed)                    | Comma-separated extension allowlist, e.g. `pdf,md,png`. Advisory and enforced in the browser only: the server receives ciphertext and cannot see a filename                                                                                            |
-| `AUDIT_LOG_RETENTION_DAYS`           | No       | `365`                              | 1–3650                                                                                                                                                                                                                                                 |
-| `LOG_DIRECTORY`                      | No       | `<cwd>/logs`                       | Where the rotating log files go. Relative values resolve against the process's working directory; a blank value is treated as unset. No file transports under `NODE_ENV=test`                                                                          |
-| `BREACH_CACHE_TTL_DAYS`              | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries; seed-imported entries are TTL-exempt                                                                                                                                            |
-| `BREACH_SEED_AUTO`                   | No       | `false`                            | When `true`, the refresh cron may fetch missing/stale ranges from HIBP (tens of GB over a full corpus). Off by default                                                                                                                                 |
-| `BREACH_SEED_REFRESH_CRON`           | No       | —                                  | Cron expression (UTC) for the breach-range refresh job. Unset disables it. Requires `BREACH_SEED_AUTO=true` to fetch                                                                                                                                   |
-| `HIBP_CACHE_MAX_BYTES`               | No       | `67108864`                         | ≥ 1048576 (1 MiB). Byte ceiling for the in-memory HIBP range cache, per worker process (a real range is ~36 KB); the binding memory bound, alongside the 10,000-entry cap                                                                              |
-| `MONGO_MAX_POOL_SIZE`                | No       | `10`                               | 1–100, and must be ≥ the min pool size                                                                                                                                                                                                                 |
-| `MONGO_MIN_POOL_SIZE`                | No       | `2`                                | 0–50                                                                                                                                                                                                                                                   |
-| `TRUST_PROXY`                        | No       | `false`                            | `false` · `true` · `1` · a named range · a subnet list · a hop count (0–10)                                                                                                                                                                            |
-| `ENABLE_SWAGGER`                     | No       | `false`                            | Serves **unauthenticated** API docs in production when on. Always on in dev/test                                                                                                                                                                       |
-| `METRICS_TOKEN`                      | No       | —                                  | Min 16 chars. Enables `GET /api/v1/metrics`; unset, that endpoint 404s                                                                                                                                                                                 |
+| Variable                             | Required | Default                            | Notes                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------ | -------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `JWT_ACCESS_SECRET`                  | **Yes**  | —                                  | Min 32 chars                                                                                                                                                                                                                                                                                                       |
+| `JWT_REFRESH_SECRET`                 | **Yes**  | —                                  | Min 32 chars. Use a different value from the access secret                                                                                                                                                                                                                                                         |
+| `SESSION_SECRET`                     | **Yes**  | —                                  | Min 32 chars. Signs the CSRF token; also the 2FA key fallback                                                                                                                                                                                                                                                      |
+| `PORT`                               | No       | `5000`                             | 1–65535                                                                                                                                                                                                                                                                                                            |
+| `NODE_ENV`                           | No       | `development`                      | `development` · `production` · `test`                                                                                                                                                                                                                                                                              |
+| `HTTP_REQUEST_TIMEOUT_MS`            | No       | `240000`                           | 5000–600000, and must be ≥ `HTTP_HEADERS_TIMEOUT_MS` and `DOCUMENT_PART_BODY_TIMEOUT_MS` or the app will not boot. How long the server will spend RECEIVING one request (never handling one). 240 s is the largest body any route accepts, 30 MB, at 128 KiB/s                                                     |
+| `HTTP_HEADERS_TIMEOUT_MS`            | No       | `60000`                            | 1000–600000, and must be ≤ `HTTP_REQUEST_TIMEOUT_MS` or the app will not boot. The document part route carries its own, much tighter body deadline, `DOCUMENT_PART_BODY_TIMEOUT_MS`                                                                                                                                |
+| `DOCUMENT_PART_BODY_TIMEOUT_MS`      | No       | `64000`                            | 5000–600000, and must be ≤ `HTTP_REQUEST_TIMEOUT_MS`. How long the server waits for the body of ONE upload piece once that piece holds one of the few upload slots. 64 s is one 8 MiB piece at 128 KiB/s; raise it when users upload several files at once over slow links, since those transfers share one uplink |
+| `APP_URL`                            | No       | `http://localhost:5000`            | Public base URL used in emailed links. Must be `http://` or `https://`                                                                                                                                                                                                                                             |
+| `APP_NAME`                           | No       | `H-Vault`                          | Used in email subjects and the TOTP issuer                                                                                                                                                                                                                                                                         |
+| `MONGODB_URI`                        | No       | `mongodb://localhost:27017/hvault` | Overridden inside the Docker stack                                                                                                                                                                                                                                                                                 |
+| `JWT_ACCESS_EXPIRY`                  | No       | `5m`                               | Access token lifetime                                                                                                                                                                                                                                                                                              |
+| `REFRESH_TOKEN_DAYS`                 | No       | `7`                                | Standard refresh-token (session) lifetime, in whole days. 1–90                                                                                                                                                                                                                                                     |
+| `REFRESH_TOKEN_REMEMBER_DAYS`        | No       | `30`                               | "Remember me" session lifetime, in whole days. 1–365, and must be ≥ `REFRESH_TOKEN_DAYS`                                                                                                                                                                                                                           |
+| `TRUSTED_DEVICE_DAYS`                | No       | `30`                               | How long a device may skip the 2FA step, in whole days. 1–365, and must be ≥ `REFRESH_TOKEN_REMEMBER_DAYS`                                                                                                                                                                                                         |
+| `CORS_ORIGIN`                        | No       | `http://localhost:5173`            | **Must be HTTPS in production** or the app will not boot                                                                                                                                                                                                                                                           |
+| `TWO_FACTOR_ENCRYPTION_KEY`          | No       | falls back to `SESSION_SECRET`     | Min 32 chars. An empty assignment is treated as unset                                                                                                                                                                                                                                                              |
+| `BCRYPT_ROUNDS`                      | No       | `12`                               | 4–31                                                                                                                                                                                                                                                                                                               |
+| `EMAIL_PROVIDER`                     | No       | `smtp`                             | `smtp` or `gmail`                                                                                                                                                                                                                                                                                                  |
+| `SMTP_HOST` / `USER` / `PASS`        | No       | —                                  | All three together, or none. Partial config is a startup error in production                                                                                                                                                                                                                                       |
+| `SMTP_PORT`                          | No       | `587`                              | —                                                                                                                                                                                                                                                                                                                  |
+| `SMTP_SECURE`                        | No       | auto                               | Auto-detected from the port (`true` for 465)                                                                                                                                                                                                                                                                       |
+| `SMTP_FROM`                          | No       | —                                  | Unset, the From address is derived: `APP_NAME <noreply@SMTP_HOST>`, or `APP_NAME <noreply@hvault.local>`                                                                                                                                                                                                           |
+| `GMAIL_USERNAME` / `PASSWORD`        | No       | —                                  | Both or neither. Use an [App Password](https://myaccount.google.com/apppasswords)                                                                                                                                                                                                                                  |
+| `BACKUP_MAX_SIZE_MB`                 | No       | `25`                               | 1–100                                                                                                                                                                                                                                                                                                              |
+| `BACKUP_RETENTION_DAYS`              | No       | `30`                               | 1–365                                                                                                                                                                                                                                                                                                              |
+| `EXPORT_MAX_SIZE_MB`                 | No       | `25`                               | 1–100                                                                                                                                                                                                                                                                                                              |
+| `FILE_ENCRYPTION_MAX_SIZE_MB`        | No       | `100`                              | 1–1024. A client-side guardrail advertised via `GET /config` — the file is never uploaded, so it cannot be enforced server-side                                                                                                                                                                                    |
+| `S3_ENDPOINT`                        | No       | —                                  | S3-compatible endpoint URL, `http://` or `https://`. In production a plain `http://` endpoint is accepted only for a loopback address, an RFC 1918 private address or a single-label host (an in-stack service name); anything else must be `https://`                                                             |
+| `S3_REGION`                          | No       | `us-east-1`                        | Matches the bundled storage configuration, so the default works untouched                                                                                                                                                                                                                                          |
+| `S3_BUCKET`                          | No       | —                                  | The bucket that holds the encrypted documents                                                                                                                                                                                                                                                                      |
+| `S3_ACCESS_KEY_ID`                   | No       | —                                  | Min 8 chars (a shorter id is refused by the storage engine itself). All four `S3_*` connection variables together, or none: a partial set is a startup error in production, and a warning that disables the document store in development                                                                          |
+| `S3_SECRET_ACCESS_KEY`               | No       | —                                  | Min 16 chars                                                                                                                                                                                                                                                                                                       |
+| `S3_FORCE_PATH_STYLE`                | No       | `true`                             | Path-style addressing (bucket in the URL path). Only the exact value `false` turns it off                                                                                                                                                                                                                          |
+| `MAX_DOCUMENT_SIZE_MB`               | No       | `100`                              | 1–1024. Largest single document a client may upload                                                                                                                                                                                                                                                                |
+| `DOCUMENT_STORAGE_QUOTA_MB_PER_USER` | No       | `2048`                             | 1–1048576, and must be ≥ `MAX_DOCUMENT_SIZE_MB` or the app will not boot. Counts stored documents plus the declared size of uploads in flight                                                                                                                                                                      |
+| `DOCUMENT_UPLOAD_TTL_HOURS`          | No       | `24`                               | 1–168. How long an unfinished upload is kept before it is abandoned                                                                                                                                                                                                                                                |
+| `DOCUMENT_ALLOWED_EXTENSIONS`        | No       | — (all allowed)                    | Comma-separated extension allowlist, e.g. `pdf,md,png`. Advisory and enforced in the browser only: the server receives ciphertext and cannot see a filename                                                                                                                                                        |
+| `AUDIT_LOG_RETENTION_DAYS`           | No       | `365`                              | 1–3650                                                                                                                                                                                                                                                                                                             |
+| `LOG_DIRECTORY`                      | No       | `<cwd>/logs`                       | Where the rotating log files go. Relative values resolve against the process's working directory; a blank value is treated as unset. No file transports under `NODE_ENV=test`                                                                                                                                      |
+| `BREACH_CACHE_TTL_DAYS`              | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries; seed-imported entries are TTL-exempt                                                                                                                                                                                                        |
+| `BREACH_SEED_AUTO`                   | No       | `false`                            | When `true`, the refresh cron may fetch missing/stale ranges from HIBP (tens of GB over a full corpus). Off by default                                                                                                                                                                                             |
+| `BREACH_SEED_REFRESH_CRON`           | No       | —                                  | Cron expression (UTC) for the breach-range refresh job. Unset disables it. Requires `BREACH_SEED_AUTO=true` to fetch                                                                                                                                                                                               |
+| `HIBP_CACHE_MAX_BYTES`               | No       | `67108864`                         | ≥ 1048576 (1 MiB). Byte ceiling for the in-memory HIBP range cache, per worker process (a real range is ~36 KB); the binding memory bound, alongside the 10,000-entry cap                                                                                                                                          |
+| `MONGO_MAX_POOL_SIZE`                | No       | `10`                               | 1–100, and must be ≥ the min pool size                                                                                                                                                                                                                                                                             |
+| `MONGO_MIN_POOL_SIZE`                | No       | `2`                                | 0–50                                                                                                                                                                                                                                                                                                               |
+| `TRUST_PROXY`                        | No       | `false`                            | `false` · `true` · `1` · a named range · a subnet list · a hop count (0–10)                                                                                                                                                                                                                                        |
+| `ENABLE_SWAGGER`                     | No       | `false`                            | Serves **unauthenticated** API docs in production when on. Always on in dev/test                                                                                                                                                                                                                                   |
+| `METRICS_TOKEN`                      | No       | —                                  | Min 16 chars. Enables `GET /api/v1/metrics`; unset, that endpoint 404s                                                                                                                                                                                                                                             |
 
 </details>
 
@@ -1109,7 +1178,11 @@ authoritative.
 <summary><b>Documents</b> — <code>/api/v1/documents</code></summary>
 
 Available only where object storage is configured; every route answers **503** otherwise, and
-`GET /config` says which it is so the app can hide the feature rather than probe for it. A document
+`GET /config` says which it is so the app can hide the feature rather than probe for it. Behind the
+Docker stack's inner Nginx, any `502`, `503` or `504` from `/api/` (this one, and a part upload's
+`503` with `Retry-After`, among them) reaches the client as that Nginx's own JSON `502`, without
+`Retry-After`. The app retries an upload piece on any 5xx, so a transfer carries on; anywhere else it
+shows that Nginx's "the application is not reachable" in place of the server's own message. A document
 is encrypted in the browser before a byte leaves it: the server stores ciphertext, a wrapped key and
 sizes, and never sees a filename, a type, a tag or a note.
 
@@ -1155,16 +1228,20 @@ Treat it as a nudge for your own users, not as a control at the API boundary.
 | PUT    | `/backup/change-password`            | Change the backup password                             |
 | POST   | `/backup/restore`                    | Restore from an encrypted backup                       |
 
-`POST /tools/import` takes `{ format, conflictStrategy, operations: { inserts, updates } }` and
-answers `{ insertedCount, updatedCount }`. The client parses the source (Bitwarden, LastPass,
+`POST /tools/import` takes `{ format, conflictStrategy, operations: { inserts, updates } }`, plus
+an optional `vaultKeyVersion` and an `idNonce` on each insert, and answers
+`{ insertedCount, updatedCount, insertedIds }`, the ids in insertion order so the client can
+check that each entry landed under the id it was sealed to. The client parses the source (Bitwarden, LastPass,
 KeePass, Chrome, Firefox, 1Password, generic CSV, or a native H-Vault export), decides what is a
 duplicate against its own decrypted vault, and encrypts every item before the call — so each update
 names the id of the item it replaces and **the server matches nothing**. `format` and
 `conflictStrategy` are recorded for the audit log only. It answers `400` when the body fails schema
 validation or when an update names an item that is unknown, trashed or someone else's, and `409`
-while a vault-key rotation or another import for the same account is running, or when an item an
-update targeted was changed or removed mid-request. Nothing is written on any `400`, nor on the
-rotation or already-running `409` — those are all refused before the first write. The
+while a vault-key rotation or another import for the same account is running, when the client's
+vault key is out of date (the body then carries the current `vaultKeyVersion`), when an insert's
+derived id is already taken, or when an item an update targeted was changed or removed
+mid-request. Nothing is written on any `400`, nor on the rotation, already-running, out-of-date
+or id-taken `409`: those are all refused before the first write. The
 changed-mid-request `409` is the one exception: on a replica set the whole request rolls back, but
 on a standalone MongoDB (the default `MONGODB_URI`) earlier operations in that same request may
 already have committed. Re-running is safe under `skip` and `overwrite`, which re-resolve against
@@ -1213,11 +1290,11 @@ are replaced with the generic status text, so an internal failure cannot leak it
 
 ## Rate limiting
 
-Seventeen tiers, all backed by MongoDB so they hold across a PM2 cluster. IP-keyed limiters collapse
-an IPv6 address to its `/64` prefix, so rotating the source address inside one allocation does not
-buy an attacker a fresh bucket.
+Twenty tiers, all but the two diagnostic ones backed by MongoDB so they hold across a PM2
+cluster. IP-keyed limiters collapse an IPv6 address to its `/64` prefix, so rotating the source
+address inside one allocation does not buy an attacker a fresh bucket.
 
-Two rules govern where a limiter goes, and both were learned the hard way:
+Three rules govern where a limiter goes, and all three were learned the hard way:
 
 - **A budget for credential attempts is never shared with session maintenance.** The auth tier counts
   what a person deliberately submits — a password, or a request for an email link. Token refresh and
@@ -1230,30 +1307,52 @@ Two rules govern where a limiter goes, and both were learned the hard way:
   on the submitted email — the only way to bound one account across many addresses — and that is safe
   precisely because the auth tier bounds the IP on the same route regardless. The refresh tier has no
   such companion, so it keys on the address alone.
+- **A limiter runs before the body it protects is read.** Backup restore and vault-key rotation accept
+  up to 30 MB each, and their limiter once sat behind the parser, so a request past the budget was
+  refused only after the whole body had been received and parsed. The limiter now runs first, then a
+  slot in a small budget of each server process (two at a time, one per account), then the parser.
+  The route table test reads the real router stack and fails on any body parser that runs ahead of a
+  limiter or of its slot, because checking that a limiter is merely present on a route cannot see
+  this.
 
-| Tier            | Limit      | Window | Applied to                                                                                                                                                                                                                                                                                               |
-| --------------- | ---------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth            | 20 / IP    | 15 min | register, login, 2FA login, forgot-password, resend-verification — credential attempts only                                                                                                                                                                                                              |
-| Account         | 20 / email | 15 min | login (stacked on top of the auth tier)                                                                                                                                                                                                                                                                  |
-| Token verify    | 20 / IP    | 15 min | verify-email, reset-password, unlock-account, 2FA login, 2FA setup verification                                                                                                                                                                                                                          |
-| Refresh         | 200 / IP   | 15 min | token refresh — keyed by IP alone (the one identity an unauthenticated caller cannot forge), so it is shared by everyone behind one egress address; sized for ~60 open tabs                                                                                                                              |
-| Unlock          | 5 / user   | 5 min  | vault unlock verification                                                                                                                                                                                                                                                                                |
-| Password verify | 5 / user   | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password                                                                                                                                                 |
-| Breach check    | 30 / user  | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                                                                                                                                                                   |
-| Breach batch    | 300 / user | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                                                                                                                                                                   |
-| General auth    | 60 / user  | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, document list, document trash, document usage, one document's metadata, backup settings and history, lock, logout, logout-all                                                                                                      |
-| Heavy Ops       | 10 / IP    | 15 min | empty trash, bulk delete, bulk move, export, backup trigger, backup download                                                                                                                                                                                                                             |
-| Import          | 60 / user  | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                                                                                                                                                   |
-| Document upload | 120 / user | 15 min | opening, completing and cancelling a document transfer — three requests per document whatever its size                                                                                                                                                                                                   |
-| Document part   | derived    | 15 min | one sealed segment per request. Sized from the operator's own `MAX_DOCUMENT_SIZE_MB`: parts per document x 3 concurrent transfers x 4 attempts, floored at 120 (156 at the default 100 MB cap). A budget that ignored the concurrency or the retries would refuse a legitimate transfer part-way through |
-| Document read   | derived    | 15 min | one segment per request on the way back, at twice the part budget because a document is read more often than it is written (floor 240; 312 at the default cap)                                                                                                                                           |
-| CSRF            | 100 / IP   | 15 min | the CSRF token endpoint — every token refresh invalidates the token in every open tab, so re-fetches are routine                                                                                                                                                                                         |
-| Health          | 60 / IP    | 1 min  | health and public config — counted **in memory**, per process (see below)                                                                                                                                                                                                                                |
-| Metrics         | 60 / IP    | 1 min  | the metrics endpoint — counted **in memory**, per process (see below)                                                                                                                                                                                                                                    |
+| Tier             | Limit         | Window | Applied to                                                                                                                                                                                                                                                                                               |
+| ---------------- | ------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auth             | 20 / IP       | 15 min | register, login, 2FA login, forgot-password, resend-verification — credential attempts only                                                                                                                                                                                                              |
+| Account          | 20 / email    | 15 min | login (stacked on top of the auth tier)                                                                                                                                                                                                                                                                  |
+| Token verify     | 20 / IP       | 15 min | verify-email, reset-password, unlock-account, 2FA login                                                                                                                                                                                                                                                  |
+| Refresh          | 200 / IP      | 15 min | token refresh — keyed by IP alone (the one identity an unauthenticated caller cannot forge), so it is shared by everyone behind one egress address; sized for ~60 open tabs                                                                                                                              |
+| Unlock           | 5 / user      | 5 min  | vault unlock verification                                                                                                                                                                                                                                                                                |
+| Password verify  | 5 / user      | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password                                                                                                                                                 |
+| Breach check     | 30 / user     | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                                                                                                                                                                   |
+| Breach batch     | 300 / user    | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                                                                                                                                                                   |
+| General auth     | 60 / user     | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, document list, document trash, document usage, one document's metadata, backup settings and history, lock, logout, logout-all                                                                                                      |
+| Heavy Ops        | 10 / user     | 15 min | empty trash (vault and documents), bulk delete, bulk move, export, backup trigger, backup download; keyed by account, so two people behind one address never share it                                                                                                                                    |
+| Import           | 60 / user     | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                                                                                                                                                   |
+| Vault item write | 20,000 / user | 15 min | creating, editing, trashing, restoring and permanently deleting a vault item. Derived: two passes over the most items an account may hold, because the app sends one request per item for a bulk tag or a trash purge, and a smaller budget would stop one part-way through                              |
+| Folder write     | 1,000 / user  | 15 min | creating, renaming, deleting and re-sorting a folder. Derived the same way: two drags that re-sort every folder an account may hold                                                                                                                                                                      |
+| 2FA setup        | 20 / user     | 15 min | confirming the code that finishes 2FA setup                                                                                                                                                                                                                                                              |
+| Document upload  | 120 / user    | 15 min | opening, completing and cancelling a document transfer — three requests per document whatever its size                                                                                                                                                                                                   |
+| Document part    | derived       | 15 min | one sealed segment per request. Sized from the operator's own `MAX_DOCUMENT_SIZE_MB`: parts per document x 3 concurrent transfers x 4 attempts, floored at 120 (156 at the default 100 MB cap). A budget that ignored the concurrency or the retries would refuse a legitimate transfer part-way through |
+| Document read    | derived       | 15 min | one segment per request on the way back, at twice the part budget because a document is read more often than it is written (floor 240; 312 at the default cap)                                                                                                                                           |
+| CSRF             | 100 / IP      | 15 min | the CSRF token endpoint — every token refresh invalidates the token in every open tab, so re-fetches are routine                                                                                                                                                                                         |
+| Health           | 60 / IP       | 1 min  | health and public config — counted **in memory**, per process (see below)                                                                                                                                                                                                                                |
+| Metrics          | 60 / IP       | 1 min  | the metrics endpoint — counted **in memory**, per process (see below)                                                                                                                                                                                                                                    |
+
+Every tier on an authenticated route keys on the account, not the address: the account id comes
+from a verified token, so people sharing an office or household connection never spend each
+other's budget, and moving to another address buys nobody a fresh one.
 
 Exceeding a limit returns **429** with a JSON body. Responses carry the IETF standard headers —
 `RateLimit-Policy`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After`
 on a 429.
+
+In front of all of these, the golden host Nginx limits every address to 40 requests a second with a
+burst of 40, host-wide, and answers anything past that with its own 429 and `Retry-After: 5`. The
+app's bulk actions (tagging, permanent deletion and folder reordering, which send one request per
+row) therefore keep at most four requests in flight and wait out a 429 that asks for ten seconds or
+less by themselves, up to three times, which costs a large action about five seconds for every forty
+entries past the first forty; a longer wait is the app's own budget running out, and is reported.
+Where many people share one address, render the site with `newapp --burst N` to raise that burst.
 
 > Rate limiters are **pass-through no-ops outside production**, so development and the test suite
 > are never throttled. They are exercised against a real MongoDB by a dedicated test suite that
@@ -1277,22 +1376,25 @@ h-vault/
 │   ├── shared/                  # @hvault/shared — built FIRST, both others depend on it
 │   │   └── src/
 │   │       ├── constants/       #   Crypto parameters, limits, enums, audit actions
-│   │       ├── schemas/         #   Zod: auth, vault, folder, user, config, common
-│   │       ├── types/           #   TypeScript interfaces for every model
-│   │       ├── utils/           #   maskEmail, formatBytes, generateId
+│   │       ├── schemas/         #   Zod: auth, vault, folder, document, user, config, common
+│   │       ├── types/           #   TypeScript interfaces for every model + the sandbox protocol
+│   │       ├── utils/           #   maskEmail, formatBytes, generateId, deriveRowId
 │   │       └── generated/       #   APP_VERSION, injected from package.json at build time
 │   │
 │   ├── server/                  # @hvault/server
 │   │   ├── src/
 │   │   │   ├── config/          #   Zod-validated env, Mongo connection, OpenAPI spec
-│   │   │   ├── controllers/     #   auth, vault, folder, user, backup, tools, health, config, metrics
-│   │   │   ├── middleware/      #   JWT auth, validation, CSRF, rate limiting (+ its Mongo store)
-│   │   │   ├── models/          #   User, VaultItem, Folder, RefreshToken,
-│   │   │   │                    #   AuditLog, BackupLog, JobLock, Migration
+│   │   │   ├── controllers/     #   auth, vault, folder, document, user, backup, tools, health, config, metrics
+│   │   │   ├── middleware/      #   JWT auth, validation, CSRF, rate limiting (+ its Mongo store),
+│   │   │   │                    #   body sanitising, upload and 30 MB request admission
+│   │   │   ├── models/          #   User, VaultItem, Folder, Document, DocumentUpload,
+│   │   │   │                    #   RefreshToken, TrustedDevice, AuditLog, BackupLog,
+│   │   │   │                    #   JobLock, Migration, PwnedRangeCache
 │   │   │   ├── routes/          #   Express routers
 │   │   │   ├── services/        #   auditService
 │   │   │   ├── jobs/            #   backup scheduler, token cleanup, trash purge, document GC
 │   │   │   └── utils/           #   tokens, email, job locks, folder graph, graceful shutdown
+│   │   ├── sandbox-document/    #   (build output) the viewer document, copied from client/dist-sandbox
 │   │   └── tests/               #   Vitest + Supertest + mongodb-memory-server
 │   │
 │   └── client/                  # @hvault/client
@@ -1309,11 +1411,12 @@ h-vault/
 │       │   │   │                #   SearchBar, SavedAddressPicker, PasswordGenerator
 │       │   │   ├── tools/       #   FileEncryptPanel, FileDecryptPanel
 │       │   │   └── ui/          #   Button, Card, Input, Dialog, Toast, Tabs, Badge…
-│       │   ├── pages/           #   19 route pages, all lazy-loaded
+│       │   ├── sandbox/         #   the isolated viewer: renderers, decode/sniff, format-and-repair, QR scan
+│       │   ├── pages/           #   20 route pages, all lazy-loaded
 │       │   ├── hooks/           #   useAutoLock, useClipboardGuard, useClipboardCountdown,
 │       │   │                    #   useKeyboardShortcuts, useUserSettings,
 │       │   │                    #   useConnectionStatus, useFavicon
-│       │   ├── stores/          #   Zustand: auth, vault, ui + the encrypted storage adapter
+│       │   ├── stores/          #   Zustand: auth, vault, ui, documents + the encrypted storage adapter
 │       │   ├── services/
 │       │   │   ├── api/         #   Axios client (CSRF, refresh, retry interceptors)
 │       │   │   ├── clipboard/   #   clipboardService (copy + erase-deadline state machine)
@@ -1321,15 +1424,17 @@ h-vault/
 │       │   ├── utils/           #   passwordEntropy, deviceFingerprint, favicon
 │       │   ├── constants/       #   the 2048-word passphrase list
 │       │   └── lib/             #   logger, lazyZxcvbn, vaultSearch, cn
+│       ├── dist-sandbox/        #   (build output) the viewer document, outside every static root
 │       ├── public/              #   PWA icons and favicons
 │       └── tests/               #   Vitest + jsdom
 │
 ├── e2e/                         # Playwright specs + helpers + in-memory Mongo harness
+├── tests/harness/               # Shared test harness: seed/shuffle, clock, storage container
 ├── scripts/ci/                  # THE PIPELINE — local-ci, docker-gate, sast-gate, secret-scan
 ├── docker/
 │   ├── Dockerfile               # One file, four targets: app | web | bootstrap | development
 │   ├── mongo.Dockerfile         # MongoDB + the replica-set key file its entrypoint generates
-│   └── nginx/                   # internal.conf (in-container) + system.*.example.conf (the host's)
+│   └── nginx/                   # nginx.conf + internal.conf + snippets/ (in-container); system.*.example.conf + host files (the host's)
 ├── .github/workflows/release.yml  # The ONLY workflow: tag + publish a Release
 ├── .husky/                      # pre-commit: secret scan + lint-staged │ pre-push: the full pipeline
 ├── docker-compose.yml           # Production stack, one loopback port
@@ -1351,14 +1456,14 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Server** | 171   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
-| **Client** | 144   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
-| **Shared** | 13    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
-| **E2E**    | 21    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
+| **Server** | 195   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
+| **Client** | 183   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
+| **Shared** | 14    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
+| **E2E**    | 22    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
 
 **Files** counts every test file each suite owns on disk, which is not the same as the number the
 command above runs: the server's default Vitest config excludes `tests/resource/**` and
-`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 171 on disk and
+`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 195 on disk and
 those two directories run under their own gates (`test:resource`, `test:storage`). The number of
 test _cases_ is a third figure again, and it is ratcheted rather than written down here —
 `.testfortress/baseline.json`'s `tests.count` is a floor fed from the JUnit reports, and it only
@@ -1414,45 +1519,47 @@ not decoration either: every run records `budgetSeconds` beside its own `duratio
 measurement you can check rather than a claim from the day it was written. They live in
 `scripts/ci/lib/tiers.mjs`, and `docs-sync.test.ts` fails if this table and that file disagree.
 
-| Gate               | Tier | What it runs                                                                                                                                                                                                                                                 | Replaces                   |
-| ------------------ | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
-| `engines`          | T0   | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                                                                                                                                       | the CI Node matrix's floor |
-| `secrets`          | T0   | Every tracked **and untracked-not-ignored** file scanned for credential patterns                                                                                                                                                                             | _new_                      |
-| `lint`             | T0   | ESLint + `eslint-plugin-security`, `--max-warnings=0`, emitting SARIF                                                                                                                                                                                        | `ci` job                   |
-| `format`           | T0   | `prettier --check .`                                                                                                                                                                                                                                         | _new_                      |
-| `type-check`       | T0   | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                                                                                                                                                    | `ci` job                   |
-| `integrity`        | T0   | Every marker that weakens a check, against the suppression ledger                                                                                                                                                                                            | _new_                      |
-| `ratchet`          | T0   | The cheap numbers: suppression counts, the scan's own fingerprints, the registered task list                                                                                                                                                                 | _new_                      |
-| `build`            | T1   | `npm run build` (shared → server → client)                                                                                                                                                                                                                   | `ci` job                   |
-| `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                                                                                                                                              | `ci` job                   |
-| `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                                                                                                                                                    | `ci` job                   |
-| `storage`          | T1   | The storage port against the pinned engine in a container: the same contract the double passes, plus what only a real engine can answer                                                                                                                      | _new_                      |
-| `security`         | T1   | The cross-user authorization matrix over the whole route table                                                                                                                                                                                               | _new_                      |
-| `observability`    | T1   | Log, audit-row and error-body redaction                                                                                                                                                                                                                      | _new_                      |
-| `property`         | T1   | The generated-input invariants, run in two timezones                                                                                                                                                                                                         | _new_                      |
-| `snapshot`         | T1   | The three export formats against their verified goldens, and the export/import round trip                                                                                                                                                                    | _new_                      |
-| `smoke`            | T1   | Boots the **built artifact** in production mode and completes one vault journey against it                                                                                                                                                                   | _new_                      |
-| `audit`            | T1   | `npm audit --audit-level=moderate --omit=dev`                                                                                                                                                                                                                | `ci` job                   |
-| `licenses`         | T1   | Every production dependency against the committed licence allowlist; any copyleft fails                                                                                                                                                                      | _new_                      |
-| `secrets-full`     | T1   | The working tree **plus every blob in git history** scanned for credential patterns                                                                                                                                                                          | _new_                      |
-| `deadcode`         | T1   | `knip` (unused files, exports, types, dependencies) + `jscpd` duplication against a committed ceiling                                                                                                                                                        | _new_                      |
-| `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                                   | _new_                      |
-| `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                            | _new_                      |
-| `e2e`              | T1   | Playwright against an auto-started stack (dev server, in-memory MongoDB, the pinned storage engine in a container): Chromium over every spec, and a second Firefox project over the two whose answers depend on the engine — clipboard hygiene and auto-lock | `e2e` job                  |
-| `a11y`             | T1   | axe-core over thirty-four primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                           | _new_                      |
-| `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                                       | `docker-build` job         |
-| `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                                             | _new_                      |
-| `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline                                                                                                     | _new_                      |
-| `resource`         | T2   | Volume and memory budgets at the per-user ceilings: streaming backup collection, a full-vault key rotation, a 25 MiB restore, the cleanup sweeps' query plans, a max-size document sent part by part, a full document list walked page by page               | _new_                      |
-| `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a vault item and a document round-tripped through it, the render document served with its own policy, a restart, an idempotent redeploy, the storage credential trap               | _new_                      |
-| `upgrade`          | T2   | A vault and a `.env` written by the PREVIOUS release, read by this one: every item still decrypts and parses to what that release parsed it to                                                                                                               | _new_                      |
-| `recovery`         | T2   | A backup restored into a second, empty database, and a real process SIGKILLed mid-rotation, mid-import, mid-upload, mid-completion and mid-purge                                                                                                             | _new_                      |
-| `dst`              | T2   | The whole suite again in a DST-observing zone, so an assertion that is right only because local time and UTC agree fails here rather than on a user's machine                                                                                                | _new_                      |
-| `flake`            | T2   | Ten complete runs of every suite in ten different shuffled orders, plus the Playwright suite three times over with retries off                                                                                                                               | _new_                      |
-| `mutation`         | T2   | The oracle: Stryker mutates every file in the declared scope and the suite must kill the recorded share of them, per package and per core module                                                                                                             | _new_                      |
-| `sast`             | T1   | CodeQL `security-and-quality` suite, or Semgrep CE / OpenGrep when the CodeQL CLI is absent — the gate names the engine that answered                                                                                                                        | `sast` job                 |
-| `coverage`         | T1   | Each package against its recorded line/branch/function coverage, and 100% of the production lines the change touched                                                                                                                                         | _new_                      |
-| `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                                                                                                                                     | _new_                      |
+| Gate               | Tier | What it runs                                                                                                                                                                                                                                                                 | Replaces                   |
+| ------------------ | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `engines`          | T0   | Node satisfies `engines.node`; warns if it is not the `.nvmrc` version                                                                                                                                                                                                       | the CI Node matrix's floor |
+| `secrets`          | T0   | Every tracked **and untracked-not-ignored** file scanned for credential patterns                                                                                                                                                                                             | _new_                      |
+| `lint`             | T0   | ESLint + `eslint-plugin-security`, `--max-warnings=0`, emitting SARIF                                                                                                                                                                                                        | `ci` job                   |
+| `format`           | T0   | `prettier --check .`                                                                                                                                                                                                                                                         | _new_                      |
+| `type-check`       | T0   | `tsc --noEmit` across all three packages, **plus their tests and `e2e/`**                                                                                                                                                                                                    | `ci` job                   |
+| `integrity`        | T0   | Every marker that weakens a check, against the suppression ledger                                                                                                                                                                                                            | _new_                      |
+| `ratchet`          | T0   | The cheap numbers: suppression counts, the scan's own fingerprints, the registered task list                                                                                                                                                                                 | _new_                      |
+| `build`            | T1   | `npm run build` (shared → server → client)                                                                                                                                                                                                                                   | `ci` job                   |
+| `test`             | T1   | The shared and client Vitest suites + their coverage thresholds                                                                                                                                                                                                              | `ci` job                   |
+| `test-integration` | T1   | The server Vitest suite against a real `mongod` + its coverage thresholds                                                                                                                                                                                                    | `ci` job                   |
+| `storage`          | T1   | The storage port against the pinned engine in a container: the same contract the double passes, plus what only a real engine can answer                                                                                                                                      | _new_                      |
+| `security`         | T1   | The cross-user authorization matrix over the whole route table                                                                                                                                                                                                               | _new_                      |
+| `observability`    | T1   | Log, audit-row and error-body redaction                                                                                                                                                                                                                                      | _new_                      |
+| `property`         | T1   | The generated-input invariants, run in two timezones                                                                                                                                                                                                                         | _new_                      |
+| `snapshot`         | T1   | The three export formats against their verified goldens, and the export/import round trip                                                                                                                                                                                    | _new_                      |
+| `smoke`            | T1   | Boots the **built artifact** in production mode and completes one vault journey against it                                                                                                                                                                                   | _new_                      |
+| `audit`            | T1   | `npm audit --audit-level=moderate --omit=dev`                                                                                                                                                                                                                                | `ci` job                   |
+| `licenses`         | T1   | Every production dependency against the committed licence allowlist; any copyleft fails                                                                                                                                                                                      | _new_                      |
+| `secrets-full`     | T1   | The working tree **plus every blob in git history** scanned for credential patterns                                                                                                                                                                                          | _new_                      |
+| `deadcode`         | T1   | `knip` (unused files, exports, types, dependencies) + `jscpd` duplication against a committed ceiling                                                                                                                                                                        | _new_                      |
+| `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                                                   | _new_                      |
+| `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                                            | _new_                      |
+| `e2e`              | T1   | Playwright against an auto-started stack (dev server, in-memory MongoDB, the pinned storage engine in a container): Chromium over every spec, and a second Firefox project over the two whose answers depend on the engine — clipboard hygiene and auto-lock                 | `e2e` job                  |
+| `a11y`             | T1   | axe-core over thirty-four primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                                           | _new_                      |
+| `sandbox`          | T1   | A real browser renders every preview mode and the committed hostile corpus under the **built artifact's** own headers, and the engine refuses nothing but remote images                                                                                                      | _new_                      |
+| `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                                                       | `docker-build` job         |
+| `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                                                             | _new_                      |
+| `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline                                                                                                                     | _new_                      |
+| `resource`         | T2   | Volume and memory budgets at the per-user ceilings: streaming backup collection, a full-vault key rotation, a 25 MiB restore, the cleanup sweeps' query plans, a max-size document sent part by part, a full document list walked page by page                               | _new_                      |
+| `deploy`           | T2   | The Compose stack from nothing: every service healthy, one loopback port, a vault item and a document round-tripped through it, every preview rendered by a browser behind its Nginx under the served policy, a restart, an idempotent redeploy, the storage credential trap | _new_                      |
+| `upgrade`          | T2   | A vault and a `.env` written by the PREVIOUS release, read by this one: every item still decrypts and parses to what that release parsed it to                                                                                                                               | _new_                      |
+| `recovery`         | T2   | A backup restored into a second, empty database, and a real process SIGKILLed mid-rotation, mid-import, mid-upload, mid-completion and mid-purge                                                                                                                             | _new_                      |
+| `dst`              | T2   | The whole suite again in a DST-observing zone, so an assertion that is right only because local time and UTC agree fails here rather than on a user's machine                                                                                                                | _new_                      |
+| `flake`            | T2   | Ten complete runs of every suite in ten different shuffled orders, plus the Playwright suite three times over with retries off                                                                                                                                               | _new_                      |
+| `mutation`         | T2   | The oracle: Stryker mutates every file in the declared scope and the suite must kill the recorded share of them, per leg, overall and per core module                                                                                                                        | _new_                      |
+| `mutation-diff`    | T1   | The oracle's cheap half: the mutants on the lines this change touched, from scratch, held to a committed floor; a change owning more than a leg's committed budget is sampled, disclosed and verified                                                                        | _new_                      |
+| `sast`             | T1   | CodeQL `security-and-quality` suite, or Semgrep CE / OpenGrep when the CodeQL CLI is absent — the gate names the engine that answered                                                                                                                                        | `sast` job                 |
+| `coverage`         | T1   | Each package against its recorded line/branch/function coverage, and 100% of the production lines the change touched                                                                                                                                                         | _new_                      |
+| `ratchet-full`     | T1   | Every measured number against `baseline.json`, including coverage denominators and the measured file set                                                                                                                                                                     | _new_                      |
 
 Eight gates sit in **T2** — `fuzz`, `resource`, `upgrade`, `recovery`, `dst`, `deploy`, `flake` and
 `mutation` — so they run in `npm run verify:full` and before a release rather than on every push. Each
@@ -1491,7 +1598,7 @@ things guard the gates themselves.
 
 **`.testfortress/suppressions.json` is the complete, honest list of everything exempt from a gate.**
 The `integrity` gate scans every tracked and untracked file for the markers that weaken a check — a
-skipped or focused test, a silenced type checker or linter, an inline coverage pragma, a swallowed
+skipped or focused test, a silenced type checker or linter, an inline coverage pragma, a mutation-testing disable comment, a swallowed
 error, a retry that hides a race, a `sleep` used as synchronisation — and fails unless each one is
 either gone or written down with an owner, a reason, an expiry and the exact rule it excuses. Some
 patterns cannot be written down at all: a neutered exit code, a committed test filter, a strictness
@@ -1545,7 +1652,9 @@ own line, never folded into the proven total: the run says how many gates it act
 missing tool cannot read as a clean sheet. It is the release tier, not the push gate, because it
 runs the whole pipeline once per gate.
 
-**A full run takes 15–30 minutes.** That is the deliberate trade: time spent before the push
+**A full run takes 15–30 minutes, plus `mutation-diff`**, which adds seconds for a shared-only
+change, several minutes for each server or client leg it has to mutate, and about twenty
+minutes on a very large branch (21m 00s over this one's 104 changed files). That is the deliberate trade: time spent before the push
 instead of minutes billed after it. Two escape hatches exist:
 
 ```bash
@@ -1579,11 +1688,12 @@ git push --no-verify                    # skip the hook entirely
   the execute bit leaves the launcher unrunnable; `chmod +x .cache/codeql/codeql/codeql` fixes that
   one. The gate distinguishes the two and prints the applicable fix rather than a bare exit code.
 
-  CodeQL currently reports 27 accepted error-severity findings, every one of them reviewed:
+  CodeQL currently reports 29 accepted error-severity findings, every one of them reviewed:
 
-  - 23 `js/sql-injection` — request values reaching a Mongoose query, which it flags because it
+  - 25 `js/sql-injection` — request values reaching a Mongoose query, which it flags because it
     cannot see the Zod schema, the `$`-stripping middleware or the field allowlist standing in
-    front of them.
+    front of them. The two most recent are the vault re-seal's two commit filters, which match
+    the stored wrapped key and generation against the validated request's own values.
   - 1 `js/type-confusion-through-parameter-tampering` on `Number(req.headers['content-length'])`
     in the document part route, which the query flags because a header is typed as possibly an
     array. The number is never used as a length: it is only compared for strict equality against
@@ -1632,46 +1742,49 @@ on, and `engines.node` was tightened to `>=24` to say so honestly.
 
 ### Scripts
 
-| Command                        | Description                                              |
-| ------------------------------ | -------------------------------------------------------- |
-| `npm run dev`                  | Server + client together, hot-reloading                  |
-| `npm run build`                | Build all packages (shared → server → client)            |
-| `npm run start`                | Start the production server                              |
-| `npm run test`                 | Every workspace's tests                                  |
-| `npm run test:unit`            | The hermetic suites (shared, client)                     |
-| `npm run test:integration`     | The server suite, against a real `mongod`                |
-| `npm run test:e2e`             | Playwright E2E tests                                     |
-| `npm run lint`                 | ESLint, warnings are errors                              |
-| `npm run type-check`           | Type-check all packages, tests and `e2e/`                |
-| `npm run format`               | Prettier — write                                         |
-| `npm run format:check`         | Prettier — verify only                                   |
-| `npm run ci`                   | The whole pipeline (what `pre-push` runs)                |
-| `npm run verify:fast`          | The fast tier only (1m 18s idle, 1m 19s-2m 44s busy)     |
-| `npm run verify:full`          | The whole pipeline plus the release tier                 |
-| `npm run ci:list`              | List the pipeline's gates and their tiers                |
-| `npm run ci:docker`            | The container gate on its own                            |
-| `npm run ci:sast`              | The static-analysis gate on its own                      |
-| `npm run audit:bundle`         | The client bundle size budgets on their own              |
-| `npm run test:resource`        | The volume and memory budgets on their own               |
-| `npm run test:upgrade`         | The previous release's vault and `.env`, read            |
-| `npm run test:recovery`        | The backup-restore and crash-consistency drills          |
-| `npm run test:dst`             | The whole suite again, in a DST-observing zone           |
-| `npm run test:flake`           | Ten shuffled runs, plus E2E three times over             |
-| `npm run report`               | Collect the gates' warning counts                        |
-| `npm run verify:selftest`      | Prove every registered gate can still fail               |
-| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger           |
-| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline            |
-| `npm run audit:ratchet:full`   | Every gated number, against the baseline                 |
-| `npm run secret-scan`          | Scan every tracked file for committed secrets            |
-| `npm run audit:prod`           | Dependency audit, production deps only                   |
-| `npm run release:next-version` | Compute the next release tag                             |
-| `npm run clean`                | Remove `dist/`, `node_modules/`, `logs/`, tsc build info |
+| Command                        | Description                                                               |
+| ------------------------------ | ------------------------------------------------------------------------- |
+| `npm run dev`                  | Server + client together, hot-reloading                                   |
+| `npm run build`                | Build all packages (shared → server → client)                             |
+| `npm run start`                | Start the production server                                               |
+| `npm run test`                 | Every workspace's tests                                                   |
+| `npm run test:unit`            | The hermetic suites (shared, client)                                      |
+| `npm run test:integration`     | The server suite, against a real `mongod`                                 |
+| `npm run test:e2e`             | Playwright E2E tests                                                      |
+| `npm run test:sandbox`         | Every preview in a browser under the built app's headers                  |
+| `npm run test:mutation:diff`   | Mutants on the lines this change touched, vs its floor                    |
+| `npm run lint`                 | ESLint, warnings are errors                                               |
+| `npm run type-check`           | Type-check all packages, tests and `e2e/`                                 |
+| `npm run format`               | Prettier — write                                                          |
+| `npm run format:check`         | Prettier — verify only                                                    |
+| `npm run ci`                   | The whole pipeline (what `pre-push` runs)                                 |
+| `npm run verify:fast`          | The fast tier only (1m 18s idle, 1m 19s-2m 44s busy)                      |
+| `npm run verify:full`          | The whole pipeline plus the release tier                                  |
+| `npm run ci:list`              | List the pipeline's gates and their tiers                                 |
+| `npm run ci:docker`            | The container gate on its own                                             |
+| `npm run ci:sast`              | The static-analysis gate on its own                                       |
+| `npm run audit:bundle`         | The client bundle size budgets on their own                               |
+| `npm run test:resource`        | The volume and memory budgets on their own                                |
+| `npm run test:upgrade`         | The previous release's vault and `.env`, read                             |
+| `npm run test:recovery`        | The backup-restore and crash-consistency drills                           |
+| `npm run test:dst`             | The whole suite again, in a DST-observing zone                            |
+| `npm run test:flake`           | Ten shuffled runs, plus E2E three times over                              |
+| `npm run report`               | Collect the gates' warning counts                                         |
+| `npm run verify:selftest`      | Prove every registered gate can still fail                                |
+| `npm run audit:integrity`      | Markers that weaken a gate, against the ledger                            |
+| `npm run audit:ratchet`        | The cheap gated numbers, against the baseline                             |
+| `npm run audit:ratchet:full`   | Every gated number, against the baseline                                  |
+| `npm run secret-scan`          | Scan every tracked file for committed secrets                             |
+| `npm run audit:prod`           | Dependency audit, production deps only                                    |
+| `npm run release:next-version` | Compute the next release tag                                              |
+| `npm run clean`                | Remove `dist/`, `dist-sandbox/`, `node_modules/`, `logs/`, tsc build info |
 
 ---
 
 ## Running the whole gauntlet on a remote machine
 
-The push gate is a little over twenty minutes. The release tier is a working day, and most of
+The push gate is about half an hour on an ordinary change and close to an hour on a very large
+branch (49m 22s for this 104-file one), because `mutation-diff` grows with the change. The release tier is a working day, and most of
 that day is one gate: `mutation` re-runs the entire test suite once per mutant. That
 is not something to run on the machine you are working on, so the full gauntlet
 usually belongs on a spare box you can start and walk away from.
@@ -1687,13 +1800,17 @@ to do with the answer.
 
 ### What you are signing up for
 
-Measured on the reference machine, from the reports each run leaves behind:
+Measured on the reference machine, from the reports each run leaves behind. The `ci` row is one
+green `npm run ci` of this whole branch on 2026-09-25, after `mutation-diff` began visiting test
+files killer-first. The `verify:full` row comes from one run of it on 2026-09-24, and that run exited 1:
+`flake` failed 4 of its 10 shuffled runs on test-isolation defects fixed the same day, and
+`mutation-diff` was stopped by the flat guard this change replaced, at 74m 02s:
 
-| Command               | Gates | Measured                            | What dominates it                                                                                                                      |
-| --------------------- | ----- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info |
-| `npm run ci`          | 29    | **29m 07s**                         | Playwright at 10m 35s over two engines, then CodeQL at ~5, the client and shared suites at 4m 42s and the server suite at 3m 46s       |
-| `npm run verify:full` | 37    | **hours**                           | `flake`, then `mutation`, which has no honest estimate                                                                                 |
+| Command               | Gates | Measured                            | What dominates it                                                                                                                                                                                                                                                                                                                              |
+| --------------------- | ----- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info                                                                                                                                                                                                         |
+| `npm run ci`          | 31    | **49m 22s** of T0+T1 gate time      | `mutation-diff` at 21m 00s over a 104-file branch diff (63 to 67 minutes before; the killer-first file order alone made it 30m 26s, the one-location sample and four static survivors now killed did the rest), then Playwright at ~10.5 min and CodeQL at ~6 min, against a 12-minute design budget; 12m 01s for the other twenty-eight gates |
+| `npm run verify:full` | 39    | **232m 00s** without `mutation`     | `flake` at 112m 22s, then `mutation-diff`; `mutation` itself has no honest estimate (see below)                                                                                                                                                                                                                                                |
 
 **The fast tier fits its own budget on a machine doing nothing else, and not
 otherwise. The table is the honest number rather than the target.** T0's design
@@ -1731,18 +1848,21 @@ browser was open on the same four cores. Quote the range, run the gauntlet on a 
 doing nothing else, and treat any single number as the floor.
 
 `verify:full` is cumulative: it is `npm run ci` plus the eight release-tier gates, so
-those twenty-odd minutes are inside the number rather than beside it. Six of the
-release-tier gates are cheap, and two separate measurements of them are quoted for the
-same reason the push tier is quoted as a range — neither is a constant:
-`dst` 6m52s / 4m56s, `deploy` 1m25s / 1m33s, `resource` 1m06s / 47s, `fuzz` 41s / 32s,
-`recovery` 20s / 14s, `upgrade` 13s / 10s. Eight to eleven minutes for the six.
-`flake` is the seventh and it is an hour and a quarter by itself: **78m46s** measured,
-being ten shuffled runs of all three package suites and then the E2E suite three times
-over, 654 executions in all.
+the push tier's time is inside the number rather than beside it. Six of the
+release-tier gates are cheap, and three separate measurements of them are quoted for the
+same reason the push tier is quoted as a range — none is a constant:
+`dst` 6m52s / 4m56s / 7m56s, `deploy` 1m25s / 1m33s / 1m46s, `resource` 1m06s / 47s / 1m04s,
+`fuzz` 41s / 32s / 39s, `recovery` 20s / 14s / 21s, `upgrade` 13s / 10s / 17s. Eight to
+twelve minutes for the six. `flake` is the seventh and it is nearly two hours by itself:
+**112m22s** on the latest run (78m46s before the suites grew), being ten shuffled runs of
+all three package suites, about eight minutes each, and then the E2E suite three times
+over, 672 executions taking 31 minutes. (That run failed 4 of the 10 on test-isolation
+defects; the duration is what the gate costs either way.)
 
 `mutation` is the eighth, and it is the one gate this page will not give you a day for.
-Measured on the four-core reference machine, idle, on 2026-09-08: the `shared` leg
-finishes in **13m30s** (2,469 mutants, 88.09 % killed). The `server` leg is a different
+Measured on the four-core reference machine, idle: the `shared` leg finishes in
+**17m14s** from scratch (2,633 mutants, 88.64 % killed, banked on 2026-09-24; 13m30s over
+2,469 on 2026-09-08, before Stryker 10's extra mutators). The `server` leg is a different
 animal — 12,174 mutants of which **4,977, 41 %, are static**. A static mutant executes
 while its module is being loaded, so it has no per-test coverage and is run against the
 _whole_ suite; on that package the whole suite is 3,224 tests, each file booting a real
@@ -1761,33 +1881,53 @@ the other one: a suite starved of CPU fails on a 30-second test timeout that has
 do with the mutation, and Stryker records a timeout as a **kill**, so the floor you bank
 would be inflated by exactly the contention you introduced.
 
+**What the oracle holds between campaigns.** Each leg banks a floor of its own
+(`mutation.legs.<leg>` in the baseline), so a leg is held to its own floor without
+waiting for the others. Today the `shared` leg holds one (88.64 % of 2,633); the
+`client` leg (about 24,000 mutants, roughly twenty hours from scratch) and the `server`
+leg (120-130 hours) do not yet, because each needs an idle machine for longer than any
+unattended session here is allowed to run, and a leg measured beside other work banks a
+score inflated by its own timeouts. The merged floor waits for the first run in which
+all three complete. Between campaigns, `mutation-diff` runs on every push: the same Stryker
+configuration, from scratch, over only the mutants on the lines a change touched. Its
+cost is the dry run over the tests related to the changed files, plus the static mutants:
+seconds for a change inside `shared`, several minutes once a widely imported client or
+server module is involved, and **21m 00s** over the 104 changed files of this branch. A
+static mutant (module-scope code, which here means every Zod bound and every route table)
+has no per-test coverage, so it runs every test related to its file, one file at a time,
+until one fails. The mutation configs therefore visit those files killer-first: the file
+that killed the module's previous mutant, then the files that import it, then the cheapest.
+That order changes no verdict: on this branch it alone took the gate from 63 to 67 minutes
+down to 30m 26s on the same plans, and sampling one location per changed file and killing four
+static survivors did the rest. A static mutant that SURVIVES still runs every one of
+them, so the assertion that kills it is also what makes the gate fast. Each changed file's
+guaranteed sample is one code location's mutants, never the whole block nested under it.
+
 Two commands are **not registered gates**, so `verify:full` does not run them, and both are worth
 knowing about before you plan the day. `npm run verify:selftest` proves every gate can still fail,
 by planting one defect per gate into a temporary copy of the tree: one case per registered task,
-thirty-seven of them, each running that gate's real command until it fails for the declared reason.
+thirty-nine of them, each running that gate's real command until it fails for the declared reason.
 `npm run ci:local` is the clean room, and it is not a quick extra: its body **is** `verify:full`,
 run inside a fresh worktree after its own `npm ci`, so it costs a whole second run plus an install.
 Run either separately, and budget for it separately.
 
-**`verify:selftest` cannot pass while `mutation` holds no floor**, and the coupling is worth stating
-because it arrives looking like an unrelated failure. The `mutation` case plants an extra `!`
-pattern in the declared scope and expects the gate's cheap pre-flight to refuse it, naming the
-directory that left the scope. But that pre-flight compares the declared globs against the
-baseline's `mutation.filesMutated`, and with no `mutation` block there is nothing to compare
-against: the pre-flight passes, the case's failure comes from somewhere else, and the harness
-correctly refuses to credit it. Measured twice, and the verdict is the same both times: **36 proven,
-1 unproven**, in **33m 56s** and again in **50m** on a busier machine, the one being `mutation`,
-reported as _"exit 1, but its report never mentions the planted defect, so the failure is not
-attributable to it"_. The second sweep is also the run that found the `.cache` sandbox-copy defect
-described under `mutation` above, which is what a selftest is for: it exercises every gate's real
-command, so it finds the faults that only show up when a gate actually runs. Record the first floor (see below) and the case becomes the
-millisecond pre-flight check it was designed to be. Until then, read a selftest sweep as
-36-of-37 rather than as broken.
+**`verify:selftest`'s `mutation` case needs a recorded leg to compare against**, and the
+coupling is worth stating because it arrives looking like an unrelated failure. The case plants
+an extra `!` pattern in the shared leg's declared scope and expects the gate's cheap pre-flight
+to refuse it, naming the directory that left the scope. That pre-flight compares the declared
+globs against every file a recorded floor names — merged or per leg — so with no floor at all
+there is nothing to compare against: the pre-flight passes, the case's failure comes from
+somewhere else, and the harness correctly refuses to credit it. That is how every sweep before
+the shared leg was banked ended — **36 proven, 1 unproven**, in **33m 56s** and again in
+**50m** on a busier machine — and the second of those is also the run that found the `.cache`
+sandbox-copy defect described under `mutation` above, which is what a selftest is for. With the
+shared leg holding a floor, the case is the millisecond pre-flight it was designed to be.
 
 That is also the honest duration to plan against: the sweep is **34 to 50 minutes**, not the whole
-day `verify:full` needs, because each case runs its gate only until it fails. Two cases carry a time
-cap for the opposite reason, `flake` at five minutes and `mutation` at two, so that a defect which
-failed to land cannot leave the harness waiting on an hours-long gate.
+day `verify:full` needs, because each case runs its gate only until it fails. Three cases carry a
+time cap: `flake` at five minutes and `mutation` at two, so that a defect which failed to land
+cannot leave the harness waiting on an hours-long gate, and `mutation-diff` at ten, whose planted
+lines are measured by the cheap shared leg in well under a minute.
 
 ### Provision the machine, once
 
@@ -1811,17 +1951,22 @@ npm run build:shared       # T0 excludes `build`, so verify:fast consumes shared
 **Playwright's browser is the one prerequisite nothing checks**, and what makes it a trap
 is the classification rather than the message. Every other external tool is declared per
 gate and reports **could not run**, which is exit 2 and a verdict of "unknown". The
-browser is declared by nothing, so `e2e`, `a11y` and the E2E leg of `flake` report a
-**failure** instead, exit 1, the same verdict a real defect gets. Pointed at an empty
-browser cache, Playwright itself is clear enough:
+browser is declared by nothing, so `e2e`, `a11y`, `sandbox`, the E2E leg of `flake` and
+the browser step of `deploy` report a **failure** instead, exit 1, the same verdict a real
+defect gets. Declaring `docker` does not help here: those gates check the daemon, which
+is present, and then fail inside Playwright. Pointed at an empty browser cache, Playwright
+itself is clear enough (Playwright 1.63.0):
 
 ```text
 browserType.launch: Executable doesn't exist at
-  .../chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell
+  .../chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell
 ╔════════════════════════════════════════════════════════════╗
 ║ Looks like Playwright was just installed or updated.       ║
 ║ Please run the following command to download new browsers: ║
+║                                                            ║
 ║     npx playwright install                                 ║
+║                                                            ║
+║ <3 Playwright Team                                         ║
 ╚════════════════════════════════════════════════════════════╝
 ```
 
@@ -1829,7 +1974,9 @@ So the cost is not that the transcript is unreadable; it is that the summary tab
 `✖ e2e` and nothing there distinguishes a missing browser from broken code. **Two
 projects are declared, so two browsers are needed** — Chromium runs every spec, and a
 Firefox project runs the clipboard-hygiene and auto-lock specs, whose answers depend on
-the engine's clipboard and visibility rules rather than on this application:
+the engine's clipboard and visibility rules rather than on this application. (`a11y`,
+`sandbox` and the browser step of `deploy` pin Chromium alone, so a Chromium-only cache
+passes those three and still fails `e2e` and `flake`.)
 
 ```bash
 npx playwright install --with-deps chromium firefox
@@ -1884,14 +2031,15 @@ For the record, the durations published in this section were measured on a machi
 carrying hadolint **2.15.1**, one minor above the pin. Nothing in the run noticed, which
 is the point of the paragraph.
 
-**Docker, for six gates and no fallback.** `docker` (push tier) builds all four images
+**Docker, for seven gates and no fallback.** `docker` (push tier) builds all four images
 and Trivy-scans three of them — the database image is built and deliberately not scanned;
 `storage` (push tier) runs the storage port against the pinned engine in a container;
 `e2e` and `a11y` (push tier) drive a harness that starts that same engine, because the
 document store is switched off without it and its journeys and seven of its scanned views
-would fail for a reason that is not about them; `flake` (release tier) runs the Playwright
-suite three times over and so inherits the same need; and `deploy` (release tier) stands
-the whole Compose stack up from nothing. All six declare the daemon as a prerequisite and
+would fail for a reason that is not about them; `sandbox` (push tier) starts the same
+engine beside the built artifact for the same reason; `flake` (release tier) runs the
+Playwright suite three times over and so inherits the same need; and `deploy` (release
+tier) stands the whole Compose stack up from nothing. All seven declare the daemon as a prerequisite and
 report **could not run** without it, which is exit 2 and not a pass. Trivy is optional: absent from `PATH`, the container
 gate runs `aquasec/trivy:latest` against a named cache volume instead, which needs the
 daemon socket: under rootless Docker that is `$XDG_RUNTIME_DIR/docker.sock`, not
@@ -1901,13 +2049,13 @@ daemon socket: under rootless Docker that is `$XDG_RUNTIME_DIR/docker.sock`, not
 away rather than discovering it inside the first container gate. Four are needed for the
 image builds and the harnesses, and a fifth only when `trivy` is not on `PATH`:
 
-| Image                                     | Size    | Pulled for                                               |
-| ----------------------------------------- | ------- | -------------------------------------------------------- |
-| `mongo:8.0`                               | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
-| `aquasec/trivy:latest`                    | 252 MB  | only when `trivy` is absent from `PATH`                  |
-| `node:24-alpine3.23`                      | 235 MB  | the `base` stage every image built here is built through |
-| `dxflrs/garage:v2.3.0` (digest-pinned)    | 100 MB  | `storage`, `e2e`, `a11y`, `flake`, `deploy`              |
-| `nginxinc/nginx-unprivileged:1.29-alpine` | 82 MB   | the `web` stage                                          |
+| Image                                                           | Size    | Pulled for                                               |
+| --------------------------------------------------------------- | ------- | -------------------------------------------------------- |
+| `mongo:8.0`                                                     | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
+| `aquasec/trivy:latest`                                          | 252 MB  | only when `trivy` is absent from `PATH`                  |
+| `node:24-alpine3.23`                                            | 235 MB  | the `base` stage every image built here is built through |
+| `dxflrs/garage:v2.3.0` (digest-pinned)                          | 100 MB  | `storage`, `e2e`, `a11y`, `sandbox`, `flake`, `deploy`   |
+| `nginxinc/nginx-unprivileged:1.30.5-alpine3.24` (digest-pinned) | 81 MB   | the `web` stage                                          |
 
 Trivy's vulnerability database is a further download on its first scan, into the named
 cache volume the container gate keeps for it. Note what a warm cache does to one number
@@ -1944,15 +2092,19 @@ Semgrep CE or OpenGrep and says so in its report; with no analyser at all it rep
 **SKIPPED**, the one gate allowed to.
 
 **Budget about 20 GB on the filesystem holding the checkout.** Almost none of it is the
-project. Measured on this checkout immediately before a full pass: `.cache/` holds
-**3.7 GB** (the CodeQL bundle at 2.5 GB plus the database it builds at 1.1 GB, alongside
-the type-checker's incremental build info in `.cache/tsbuildinfo/` at 1.3 MB),
-`node_modules` is **759 MB**, the three `packages/*/dist` directories come to 8 MB, `.git`
-is 5.6 MB, and the whole working directory is **6.0 GB** before `mutation` runs. The
+project. Measured on this checkout after a full pass on 2026-09-24: `.cache/` holds
+**7.1 GB** (the CodeQL bundle at 2.5 GB plus the database it builds at 4.6 GB, alongside
+the type-checker's incremental build info in `.cache/tsbuildinfo/` at 1.8 MB),
+`node_modules` is **615 MB**, the three `packages/*/dist` directories come to 9 MB, `.git`
+is 8.5 MB, and the working directory is about **8.6 GB** before `mutation` runs. The
 mutation gate's Stryker sandboxes then land in `.stryker-tmp/` inside the repository and
 measured **8.9 GB** after one complete run, which is where the rest of the twenty
-gigabytes goes. A release-tier run's reports come to about 15 MB. All of it is gitignored
-and all of it is disposable, but it has to fit while the run is happening.
+gigabytes goes. A release-tier run's reports come to about 56 MB. All of it is gitignored
+and all of it is disposable, but it has to fit while the run is happening. One directory
+is reclaimed by nothing: the E2E suite's development server writes rotating log files into
+`packages/server/logs`, about 10 MB per pass of the suite, and `flake` makes three passes.
+It measured **6.2 GB** on this checkout, most of it dated from a single earlier day, so
+look at it before a run and empty it when it has grown.
 
 **Then give the run a `TMPDIR` on a real disk, and check it rather than assuming.** Two
 more large things go to `os.tmpdir()` instead: the clean room's worktree with its
@@ -1993,12 +2145,54 @@ publishes it as `-p 127.0.0.1:0:3900`, so the daemon picks the host port and has
 bound it by the time `docker run` returns. Nothing probes for a free one, so nothing
 collides, and 3900 on the host is not involved.
 
+**Leave the server's receive deadlines at their defaults, and out of the environment.**
+Three settings bound how long the server waits for a request to arrive:
+`HTTP_REQUEST_TIMEOUT_MS` (240000 by default, the whole request), `HTTP_HEADERS_TIMEOUT_MS`
+(60000, the headers alone) and `DOCUMENT_PART_BODY_TIMEOUT_MS` (64000, one document part's
+body). No gate reads or sets any of them, and a run needs none of them set: every gate runs
+on the defaults `.env.example` documents. The trap is inheriting one. The server refuses to
+start when either of the other two is greater than `HTTP_REQUEST_TIMEOUT_MS`, and the part
+deadline has a default of its own, so lowering `HTTP_REQUEST_TIMEOUT_MS` below 64 seconds
+on its own is enough. A value exported in the shell that starts the run reaches every gate
+that boots the server, `smoke` and `sandbox` included, because their production environment
+starts from the runner's. A value in a root `.env` on the box — which a machine that also
+hosts a deployment has — reaches the server suites and the E2E dev server, because the
+configuration reads that file for every key the environment leaves unset. Either way it
+arrives as ordinary test failures rather than as a missing prerequisite. Measured, with
+`HTTP_REQUEST_TIMEOUT_MS=60000` exported and one server suite run on its own:
+
+```text
+$ HTTP_REQUEST_TIMEOUT_MS=60000 npx vitest run tests/health.test.ts    # in packages/server
+ FAIL  tests/health.test.ts [ tests/health.test.ts ]
+Error: Invalid environment configuration:
+  DOCUMENT_PART_BODY_TIMEOUT_MS: DOCUMENT_PART_BODY_TIMEOUT_MS cannot be greater than HTTP_REQUEST_TIMEOUT_MS
+ ❯ loadConfig src/config/index.ts:574:11
+
+ Test Files  1 failed (1)
+      Tests  no tests
+```
+
+So check the environment you are about to launch from, and expect no output:
+
+```bash
+env | grep -E '^(HTTP_REQUEST_TIMEOUT_MS|HTTP_HEADERS_TIMEOUT_MS|DOCUMENT_PART_BODY_TIMEOUT_MS)='
+```
+
 **The first run needs outbound network.** The unit tier blocks egress on purpose, with
 exactly one hole punched: `mongodb-memory-server` fetching the `mongod` binary on a
 machine that has not cached it yet. Beyond that first fetch the run needs the network
 for `npm ci`, the Playwright download, `npm audit`, Trivy's vulnerability database and
-the Docker base images. After those are cached the gauntlet is offline apart from the
-dependency audit.
+the Docker base images. After those are cached the gauntlet is offline apart from three
+gates. The dependency audit asks the registry every time, and the two that build images
+(`ci:docker` and `test:deploy`) need Docker Hub on every run even with every layer cached:
+BuildKit asks the registry for image metadata before each build, the Dockerfiles'
+`# syntax=docker/dockerfile:1` frontend first. `ci:docker` also needs Trivy's database
+registry whenever its cached database has passed its `NextUpdate`, a day after it was
+built. A resolver that cannot answer therefore fails those gates at their first build
+(`resolve image config for docker-image://docker.io/docker/dockerfile:1`, then `failed
+to resolve source metadata for docker.io/docker/dockerfile:1`, with a `dial tcp: lookup
+registry-1.docker.io` error underneath); that is the network, not the images, and
+re-running once DNS answers again is the remedy.
 
 ### Confirm the machine before spending a day on it
 
@@ -2127,16 +2321,23 @@ rather than killing the run, and which deadlines that breaks is not obvious. The
 leg deadlines in the table below are Node timers on a **monotonic** clock, which stops
 while the machine is asleep, so none of them is charged for the nap. Three things are
 measured with `Date.now()` and are: the deployment drill's 120-second health and restart
-waits, the `smoke` gate's 45-second boot deadline, and every budget in `resource`. A
-suspend inside one of those fails a healthy run, and it does not even fail as a hang — it
-reports "no healthy response within 120000ms", or a blown volume budget, for a reason that
-is nowhere in the code. Run it under
+waits, the 45-second boot deadline the `smoke` and `sandbox` gates share, and every budget
+in `resource`. A suspend inside one of those fails a healthy run, and it does not even fail
+as a hang — it reports "no healthy response within 120000ms", or a blown volume budget,
+for a reason that is nowhere in the code. Run it under
 `systemd-inhibit --what=handle-lid-switch:sleep:idle`, or disable suspend for the
-duration.
+duration. A run you already started can be covered after the fact, by an inhibitor that
+lets go when the verdict is written:
+
+```bash
+setsid --fork systemd-inhibit --what=handle-lid-switch:sleep:idle --why="h-vault gauntlet" \
+  sh -c "until [ -f '$RUN/exit-code' ]; do sleep 30; done" < /dev/null > /dev/null 2>&1 &
+systemd-inhibit --list | grep h-vault     # the lock is held while the run is
+```
 
 ### Watch it from anywhere
 
-The runner streams. It prints a `[n/37]` step line for each gate as it starts, the
+The runner streams. It prints a `[n/39]` step line for each gate as it starts, the
 gate's own output beneath it, and a pass or fail line with a duration when it ends. A
 boxed summary table and the tier budget comparison come last.
 
@@ -2165,32 +2366,36 @@ one. Read its `startedAt` — or its mtime — before believing it. The `exit-co
 the launcher is the only unambiguous signal that this run is over.
 
 **The step counter is not a clock either.** Gates run in the order `npm run ci -- --list`
-prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the two
-longest gates in the repository sit at positions 33 and 34 of 37. A `verify:full` that has
-been on `[34/37]` for four hours is not stuck; it is doing the thing you asked for. The
-same run reaching `[31/37]` in half an hour is likewise normal, and tells you almost
-nothing about how much is left.
+prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the three
+longest gates in the repository sit at positions 34, 35 and 36 of 39 (`flake`, `mutation`,
+`mutation-diff`). A `verify:full` that has been on `[35/39]` for four hours is not stuck; it
+is doing the thing you asked for. The same run reaching `[32/39]` in half an hour is
+likewise normal, and tells you almost nothing about how much is left. A gate skipped by
+name prints no step line at all, so a run with `mutation` skipped goes straight from
+`[34/39]` to `[36/39]`; the skip appears in the summary table and in `summary.json`.
 
 **Distinguishing slow from stuck** needs one number: how long the gate named on the
-last step line is expected to take. Only these exceed half a minute; everything else
-in the run is seconds.
+last step line is expected to take. These are the longest, measured on one `verify:full`
+of the whole branch (`mutation-diff` on the `npm run ci` above, which is what it is expected to
+cost inside `verify:full` too); everything else in the run finishes within about half a minute.
 
-| Gate               | Measured | Its own deadline, if it has one              |
-| ------------------ | -------- | -------------------------------------------- |
-| `mutation`         | hours    | none, deliberately                           |
-| `flake`            | 84m 26s  | 30 min per suite leg, 90 min for the E2E leg |
-| `e2e`              | 8m 28s   | 180 s just to boot the stack                 |
-| `dst`              | 6m 52s   | 15 min per leg                               |
-| `test-integration` | 4m 53s   | none                                         |
-| `sast`             | 4m 46s   | none                                         |
-| `test`             | 3m 11s   | none                                         |
-| `type-check`       | 1m 24s   | none                                         |
-| `deploy`           | 1m 25s   | 120 s per health wait                        |
-| `resource`         | 1m 06s   | 15 min                                       |
-| `a11y`             | 1m 05s   | none                                         |
-| `lint`             | 48s      | none                                         |
-| `fuzz`             | 41s      | 5 min per leg                                |
-| `property`         | 31s      | none                                         |
+| Gate               | Measured | Its own deadline, if it has one                                                         |
+| ------------------ | -------- | --------------------------------------------------------------------------------------- |
+| `mutation`         | hours    | none, deliberately                                                                      |
+| `mutation-diff`    | 21m 00s  | per leg, the larger of an hour and 30 min + 2 min per planned mutant; a hang guard only |
+| `flake`            | 112m 22s | 30 min per suite leg, 90 min for the E2E leg                                            |
+| `e2e`              | 10m 57s  | 180 s just to boot the stack                                                            |
+| `dst`              | 7m 56s   | 15 min per leg                                                                          |
+| `test-integration` | 6m 29s   | none                                                                                    |
+| `sast`             | 5m 41s   | none                                                                                    |
+| `test`             | 5m 01s   | none                                                                                    |
+| `type-check`       | 1m 24s   | none                                                                                    |
+| `deploy`           | 1m 46s   | 120 s per health wait                                                                   |
+| `resource`         | 1m 04s   | 15 min                                                                                  |
+| `a11y`             | 1m 12s   | none                                                                                    |
+| `lint`             | 50s      | none                                                                                    |
+| `fuzz`             | 39s      | 5 min per leg                                                                           |
+| `property`         | 38s      | none                                                                                    |
 
 `type-check` is the one row that depends on what the machine already knows: **1m 24s is a
 COLD run**, which is what a fresh clone and the clean room always get. Every one of its
@@ -2201,7 +2406,7 @@ run over an unchanged tree measured **25s** when the gate was timed on its own, 
 Everything else in the run measured under half a minute, and three of those are worth
 a word. `docker` came in at 14.5 s only because its layer cache and Trivy's database
 were warm, as the pull table above says. `build` (24 s), `recovery` (20 s), `upgrade`
-(13 s) and `storage` (10 s) are genuinely that cheap. `format` at 25 s and the 48 s in
+(13 s) and `storage` (10 s) are genuinely that cheap. `format` at 25 s and the 50 s in
 the `lint` row above it are cheap **on a quiet machine only**: like `type-check`, both
 are single figures from one idle run, and on contended cores they measure 22 to 47 s and
 40 s to 1m 20s respectively — which is the whole reason the fast tier overruns its budget
@@ -2212,7 +2417,9 @@ on the same commit while something else was reading the tree, which is the whole
 for a machine doing nothing else.
 
 A gate that owns a deadline enforces it itself: exceeding it is a **SIGKILL and a
-failure**, reported as _a hang, not a slow machine_, never as a skip. A gate with no
+failure**, reported as _a hang, not a slow machine_, never as a skip. The one exception is
+`mutation-diff`, whose per-leg hang guard reports **could not run** (exit 2), because an
+expired leg says nothing either way about the change. A gate with no
 deadline can only be judged by whether the log is still growing:
 
 ```bash
@@ -2272,8 +2479,8 @@ which is always a failure.
 One more thing about a `1` on a first full run: read the failing gate names before
 reading the code as a verdict on your change. On the **earlier** reference run these
 numbers come from — kept because its three failures are three different lessons, and
-superseded on the counts by the 36-of-37 / 151m 54s run quoted under `mutation` above —
-34 of 37 gates passed and three did not. `mutation` was **stopped at a time limit**
+superseded on the counts by every later run —
+34 of the 37 gates it then had passed and three did not. `mutation` was **stopped at a time limit**
 after 114 seconds, so by the rule further down it is reported as **not run**, not as red,
 and the 2h 3m the run took therefore excludes a real mutation leg. `ratchet-full` failed
 because reports were invalidated by an edit made mid-run, which is the paragraph on a
@@ -2306,83 +2513,154 @@ Read `ratchet-full` last and read it properly. It runs after every other gate be
 it grades what they measured against `.testfortress/baseline.json`, and it is the gate
 that turns "green" into "green and not by having measured less".
 
-### The first full run will fail on `mutation`, and that is correct
+### Banking the `mutation` floor, one leg at a time
 
-`mutation`'s floor is `.testfortress/baseline.json`, not a threshold inside the tool.
-When that file carries no `mutation` block — which is its state until someone records
-one — the gate mutates the whole declared scope, writes `mutation.json`, and then
-**fails**, because a gate that passes while holding no floor is not a gate. It fails
-rather than refusing to start precisely so that the report you need in order to record
-the first floor exists by the time you read the failure.
+`mutation`'s floors live in `.testfortress/baseline.json`, not in a threshold inside the
+tool, and there are two kinds: one per **leg** (`mutation.legs.shared`, `.client`,
+`.server`) and one for the **merged** campaign over all three. Every leg that completes
+writes its own evidence to `.testfortress/reports/mutation-<leg>.json` and is held to its
+own floor; the merged figures are written to `mutation.json` only by a run in which all
+three legs completed, and are held to theirs. A leg, or the merged campaign, with **no**
+floor yet fails the run rather than passing — a gate that passes while holding no floor is
+not a gate — and it fails after writing its evidence, so the report you need in order to
+record the first floor exists by the time you read the failure. The failure message prints
+the exact commands.
 
-Record it from the machine that measured it, once the rest of the run is clean:
+Record a leg from the machine that measured it, from a **from-scratch** run, once the rest
+of the run is clean:
 
 ```bash
+npm run test:mutation -- --leg=shared --full
 npm run audit:ratchet:full
-node scripts/ci/ratchet-check.mjs --accept --seed mutation --reason "first mutation baseline, measured on <host> at <sha>"
+node scripts/ci/ratchet-check.mjs --accept --seed mutation --reason "shared leg, measured on <host> at <sha>"
 ```
 
-**`--seed mutation` is the load-bearing half of that second command, and leaving it off
-records nothing.** The ratchet's comparison loop is driven by the baseline's own keys —
-that is what makes every direction check work — so a family the baseline has never
-carried is measured, and then never compared against anything, and `--accept` writes only
-the fields it compared. Naming the family is what tells it to record a floor that has no
-predecessor. It is deliberately explicit: seeding is the one operation here that writes a
-number without comparing it, so it refuses a family that is only half present, refuses any
-path `meta.fields` still names (deleting a floor and re-seeding it from a worse run would
+The first leg ever recorded is seeded as `--seed mutation`. Every later one names itself —
+`--seed mutation.legs.client` — because once one leg is recorded the `mutation` family is
+partly present, and seeding refuses a partly present family by design. The merged figures
+are seeded the same way, from the first run in which all three legs complete:
+`--seed mutation.overall,mutation.totalMutants,mutation.filesMutated,mutation.modules`.
+
+**`--full` is not optional when banking.** Stryker's incremental mode reuses a mutant's
+earlier result whenever its code and its killing test are unchanged — including a timeout
+recorded while the machine was busy, which counts as a kill — so the ratchet refuses to
+record or raise any `mutation.*` field from a report that does not say
+`incremental: false`, which is what `--full` writes. An incremental run is still compared
+against the floor; it simply cannot move one.
+
+**`--seed` is the load-bearing half of the accept, and leaving it off records nothing.**
+The ratchet's comparison loop is driven by the baseline's own keys — that is what makes
+every direction check work — so a family the baseline has never carried is measured, and
+then never compared against anything, and `--accept` writes only the fields it compared.
+Naming the family is what tells it to record a floor that has no predecessor. It is
+deliberately explicit: seeding is the one operation here that writes a number without
+comparing it, so it refuses a family that is only half present, refuses any path
+`meta.fields` still names (deleting a floor and re-seeding it from a worse run would
 otherwise be a reduction with no `BASELINE-REDUCTION` entry and no sign-off), refuses a
-family this run measured nothing for, and blocks on a measured field with no declared
-direction. Seeded fields are reported under `seeded` rather than folded into
-`accepted`, because a floor compared against nothing and a floor that moved up are
-different claims.
+family this run measured nothing for, refuses to write a unit that would lack its measured
+file set, and blocks on a measured field with no declared direction. Seeded fields are
+reported under `seeded` rather than folded into `accepted`, because a floor compared
+against nothing and a floor that moved up are different claims.
 
 Everything else about `--accept` is unchanged: it moves every field in its improving
 direction only, refuses without a `--reason`, and refuses while anything is failing or
 unmeasured, so it can only ever be run from a tree that has just gone green. It also
 **refuses a `--tier` argument**: accepting demands the full comparison, because a partial
 one would write a floor from numbers it never looked at. Read the baseline back afterwards
-and confirm the block is there; if it is not, nothing was armed and the next run holds no
-floor either.
+and confirm the fields are there; if they are not, nothing was armed.
 
-Two things about that first run are easy to plan around badly, and both were measured
+Two things about a leg's first run are easy to plan around badly, and both were measured
 the hard way.
 
-**There is no incremental state until a leg finishes.** The Stryker configuration sets
-`incremental: true`, and the incremental file is what makes every later run re-test only
-the mutants whose code, or whose killing test, actually changed. It is written by a
-**completed** leg. So look for
-`.stryker-tmp/incremental-shared.json`, `-client.json` and `-server.json`, and not for
-`.stryker-tmp/` itself: the directory proves nothing, because a killed run leaves its
-sandbox copies behind and no incremental file. Measured on a run stopped after two
-minutes, that is 3.6 GB of sandboxes and three lines in the log reading
-`No incremental result file found`.
+**A leg banks nothing until it finishes.** Stryker writes its report — and, on an
+incremental run, its incremental file — only when a leg **completes**. A killed leg
+leaves its sandbox copies in `.stryker-tmp/` and nothing else: measured on a run stopped
+after two minutes, 3.6 GB of sandboxes and three lines in the log reading
+`No incremental result file found`. A leg that fails writes no `mutation-<leg>.json`, and
+a run in which any leg failed writes no `mutation.json`, because a report missing a
+package would be read as a shrunken scope rather than as a broken run. That is also why a
+`mutation` you stopped at a time limit must be reported as **not run**, never as red and
+never as a pass.
 
-Without them the first run is the entire scope from nothing, and the scope is what to
-budget against. Measured on that same run as each leg started: the shared leg is
-**2,469 mutants across 11 files**, the client leg **19,192 across 139**, and the server
-leg 79 files (its count was not reached before the leg was stopped). Stryker's own
-estimate for the shared leg is worth quoting because it explains where the hours go:
+**Budget each leg against its whole scope.** Measured as each leg started: the shared leg
+is about **2,500 mutants across 11 files** and finishes in minutes; the client leg
+**about 24,000**, whose last complete run (15,322 mutants, before the document store) took
+12h35m; the server leg **about 12,900**, of which roughly 41 % are static — run against
+the whole suite, every file of which boots a real mongod — which is **120-130 hours** on
+four cores. Stryker's own estimate for the shared leg explains where the hours go:
 _"Detected 1033 static mutants (42% of total) that are estimated to take 96% of the time
 running the tests"_, which is the price of `ignoreStatic: false` and the reason that
-setting is not negotiable. For calibration, the client leg last ran to completion at
-12h35m over 15,322 mutants, so scale that up by a quarter.
-
-**A partial run banks nothing, deliberately.** If any leg exits non-zero or writes no
-report, including because you killed it, the gate writes **no** `mutation.json` at all,
-on the stated grounds that a report missing a package would be read as a shrunken scope
-rather than as a broken run. There is therefore no way to accumulate a floor leg by leg,
-and equally no way for a killed run to leave behind a number `--accept` could bank. A
-floor comes from one complete run or from no run. That is also why a `mutation` you
-stopped at a time limit must be reported as **not run**, never as red and never as a
-pass.
+setting is not negotiable.
 
 > **`.testfortress/baseline.json` is the one file a run produces that belongs in git.**
 > Commit and push it from the machine that measured it, never after copying reports
 > between hosts.
 
+### When the machine is yours for hours, not a week
+
+Most spare machines are borrowed for an evening, not a week, and a `verify:full` that
+starts `mutation` cannot end inside an evening: the gate runs its three legs one after
+another, and after the shared leg's quarter of an hour comes the client leg's day and the
+server leg's week. Stopping it part-way is worse than not starting it. A leg you kill
+banks nothing, the gate records the kill as a **failure** — so the run exits 1, the verdict
+a real defect gets — and killing only the Stryker process does not even stop the gate: it
+counts that leg as failed and moves on to the next one, which is the server's.
+
+So in a bounded window, skip the gate by name and measure the leg that fits separately.
+Add one line to the launcher's `run.sh`, above the `npm run verify:full` line:
+
+```bash
+export HVAULT_SKIP_GATES=mutation
+```
+
+Three things follow from it, all by design. The skip is printed in the summary table and
+recorded in `summary.json` as `skip` with the detail `HVAULT_SKIP_GATES`, and it does not
+change the exit code, so report the run as "`verify:full` with `mutation` skipped", never as
+a full pass. The gate's reports are still cleared when the run starts, skipped or not, so
+the last `mutation-shared.json` is deleted with them. And `ratchet-full` then finds no
+mutation evidence, and **defers** every `mutation.*` field to the gate that owns it rather
+than failing on it. Once the `exit-code` file exists, give the one leg that fits the idle
+machine, from scratch, and let the ratchet compare it:
+
+```bash
+npm run test:mutation -- --leg=shared --full
+npm run audit:ratchet:full
+```
+
+Measured on the reference machine on 2026-09-24, from scratch, with another project's
+Compose stack and the desktop's file indexer running beside it: **88.64 % of 2,633
+mutants in 20m 06s**, exactly the banked floor, so `audit:ratchet:full` recorded no change
+and there was nothing to accept. The idle run that banked it took 17m 14s; the three
+extra minutes are the neighbours, and they are why a leg is banked only from an idle
+machine.
+
+The other two legs need the idle machine for longer than a bounded window has, so each is a
+campaign of its own, started with nothing else running and read the next day, or the next
+week. Use the same launcher with the command changed, one leg per run:
+
+```bash
+npm run test:mutation -- --leg=client --full     # about 24,000 mutants, about twenty hours
+npm run audit:ratchet:full
+node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.client --reason "client leg, measured on <host> at <sha>"
+
+npm run test:mutation -- --leg=server --full     # about 12,900 mutants, 41 % static, 120-130 hours
+npm run audit:ratchet:full
+node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.server --reason "server leg, measured on <host> at <sha>"
+```
+
+Each leg is seeded under its own name because the `mutation` family is already partly
+present. Seeding also refuses a family the run measured nothing for, so running the accept
+without the leg's evidence changes nothing; the refusal exits 2 and reads:
+
+```text
+ratchet-check: --seed mutation.legs.client: nothing under "mutation.legs.client" was measured by this run, so there is no evidence to record. Run the gate that produces it, then seed from the same tree.
+```
+
+The merged floor is seeded only by a run in which all three legs complete.
+
 ### Re-running only what failed
 
-Three failures out of thirty-seven should not cost another day. The runner takes an
+Three failures out of thirty-nine gates should not cost another day. The runner takes an
 explicit gate list, and it **overrides the tier filter** rather than intersecting with
 it, so a release-tier gate can be re-run on its own:
 
@@ -2455,8 +2733,8 @@ disjoint mongod port bands and separate coverage directories via `VITEST_COVERAG
 so a blind sweep can delete a live sibling's database.
 
 **A gate was SIGKILLed at its deadline (exit 124).** The message says to treat it as a
-hang rather than a slow machine, and on a dedicated box that is right — the deadlines
-carry an order of magnitude of headroom. On a shared box, check what else was running
+hang rather than a slow machine, and on a dedicated box that is usually right — the
+deadlines carry about three times the measured cost of what they bound. On a shared box, check what else was running
 before believing it.
 
 **Port 27017 was already answering.** The harness adopted it instead of starting its
@@ -2484,7 +2762,10 @@ whole checkout, measured at **8.9 GB** after one complete run and at **3.6 GB** 
 stopped two minutes in, and nothing reclaims it on the next run. Deleting it costs
 nothing a killed run had earned, because the incremental state a later run resumes from is
 written only by a leg that finished, and a killed leg leaves sandboxes without one:
-`rm -rf .stryker-tmp`.
+`rm -rf .stryker-tmp`. It does cost what FINISHED legs left there: each completed leg's
+`incremental-<leg>.json` and `report-<leg>.json`, and `mutation-diff`'s plans and reports.
+The next plain `test:mutation` of that leg then starts from scratch — which banking needs
+anyway, since a floor is only recorded from a `--full` run.
 
 **A killed `ci:local` left a registered worktree.** `git worktree list` shows it;
 `git worktree prune` clears the bookkeeping and `git worktree remove --force <path>`
@@ -2617,7 +2898,7 @@ are the only durable record that a given commit was measured on a given day.
 The first runs `npm run ci` — the same T0 + T1 gates the pre-push hook runs, not a narrower set —
 on a clean checkout. The second tags the commit and publishes the Release, and runs only if the
 first passed. The pipeline having already run locally is not a substitute: the hook has documented
-escape hatches (see below), so an unverified commit can reach `main`, and re-running the gauntlet
+escape hatches (see [The pipeline runs locally](#the-pipeline-runs-locally)), so an unverified commit can reach `main`, and re-running the gauntlet
 on a hosted runner costs nothing on a public repository.
 
 **A release happens when the version says so.** `package.json` is the version of truth —
@@ -2638,6 +2919,12 @@ Tags are ordered numerically, not lexically (`v1.10.0` is above `v1.9.0`). If HE
 tagged, no second tag is minted but the Release is still reconciled, so a run interrupted between
 the two heals on the retry. The workflow never commits back to the repository, and it cannot
 trigger itself.
+
+**Mind the job's 90-minute limit when merging a large branch.** On `main` the per-change gates
+measure `HEAD~1..HEAD`, so a merge or squash commit that carries a whole long-lived branch makes
+`mutation-diff` measure all of it: this 104-file branch measured 21m 00s for that gate alone and
+49m 22s for the whole `npm run ci` on a four-core machine, and a hosted runner may be slower. Merge such a branch fast-forward (its last commit is the subject),
+or raise `timeout-minutes` for that release, rather than letting the job be cut off mid-gate.
 
 Every user-visible change is recorded in the **[changelog](CHANGELOG.md)**
 ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/), [SemVer](https://semver.org/)).

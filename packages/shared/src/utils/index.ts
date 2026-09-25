@@ -1,4 +1,7 @@
 import {
+  JSONREPAIR_VERSION,
+  MAX_TRANSFORM_EXCERPT_LENGTH,
+  PRETTIER_VERSION,
   PREVIEW_MODES,
   REPAIRABLE_TRANSFORM_SYNTAXES,
   TRANSFORM_SYNTAXES,
@@ -167,4 +170,62 @@ export function transformSyntaxForExtension(extension: string): TransformSyntax 
  */
 export function canRepairSyntax(syntax: TransformSyntax): boolean {
   return REPAIRABLE_TRANSFORM_SYNTAXES.includes(syntax);
+}
+
+/**
+ * The provenance labels for whichever transforms ran — the ONE definition, read
+ * by both programs.
+ *
+ * The sandbox's engine stamps its reply with these, and the application refuses
+ * a reply whose labels are anything else. That refusal is why this is shared
+ * rather than written in the engine: the labels are shown beside the button that
+ * uploads the result and sealed into the document's metadata, so they must be a
+ * function of what the APPLICATION asked for, never of what the frame says about
+ * itself.
+ *
+ * Both fields are bounded by `MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH` (64) in the
+ * metadata schema, and the longest pair this can produce is
+ * `jsonrepair+prettier` with two semvers — comfortably inside it, and a test
+ * pins that rather than leaving it to arithmetic in a comment.
+ */
+export function transformToolLabels(
+  repaired: boolean,
+  formatted: boolean,
+): { tool: string; toolVersion: string } {
+  if (repaired && formatted) {
+    return {
+      tool: 'jsonrepair+prettier',
+      toolVersion: `${JSONREPAIR_VERSION}+${PRETTIER_VERSION}`,
+    };
+  }
+  if (repaired) return { tool: 'jsonrepair', toolVersion: JSONREPAIR_VERSION };
+  return { tool: 'prettier', toolVersion: PRETTIER_VERSION };
+}
+
+/**
+ * The source line a transform failure points at, bounded and marked when it was
+ * cut — the ONE definition, read by both programs.
+ *
+ * The frame builds its `excerpt` with this, and the application uses it to quote
+ * the line from its OWN copy of the document wherever it holds the text the line
+ * refers to, so the one free-text field the protocol still carries is taken from
+ * the frame only when nothing else can supply it. Splitting on `\n` is a
+ * charset-level operation, not a parse, so it is as safe in the application's
+ * origin as the decode that produced the text.
+ *
+ * An out-of-range line answers `''`, which the panel renders as "no excerpt"
+ * instead of an empty quotation.
+ */
+export function transformExcerpt(text: string, line: number | null): string {
+  // No separate guard for `null`, zero or a negative line: each indexes before
+  // the first element, which is `undefined`, the same answer as a line past the
+  // end. A guard in front of that lookup was measured as dead code — the
+  // mutation oracle could delete it four ways and no input told the difference.
+  const found = text.split('\n')[(line ?? 0) - 1];
+  if (found === undefined) return '';
+  // The trailing carriage return of a CRLF file is invisible on screen and would
+  // spend a character of the bound for nothing.
+  const cleaned = found.endsWith('\r') ? found.slice(0, -1) : found;
+  if (cleaned.length <= MAX_TRANSFORM_EXCERPT_LENGTH) return cleaned;
+  return `${cleaned.slice(0, MAX_TRANSFORM_EXCERPT_LENGTH - 1)}…`;
 }

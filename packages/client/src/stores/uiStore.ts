@@ -10,6 +10,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { OfflineCacheErrorType } from '../services/offlineCache';
+import { staleVaultKeyVersion } from '../services/api/staleVaultKey';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,20 +31,40 @@ interface UIState {
    *
    * ONE slot, written by BOTH of `vaultStore`'s cache writes (items and folders),
    * last write wins. That is deliberate rather than unnoticed: every cause this
-   * discriminant carries is an ORIGIN-level condition — quota, blocked site data,
-   * no IndexedDB at all — and both writes go through one `openDatabase()` against
-   * one database whose stores are created together, so there is no steady state in
-   * which one succeeds and the other fails. The reachable cost is a banner that
-   * clears one fetch early during a transient failure and returns on the next
-   * write; the alternative is two banners for one condition.
+   * discriminant carries is a condition of the ORIGIN or of the one database both
+   * writes share (quota, blocked site data, no IndexedDB at all, another tab
+   * holding it on a different version), and both writes go through one
+   * `openDatabase()` against that database, whose stores are created together, so
+   * there is no steady state in which one succeeds and the other fails. The
+   * reachable cost is a banner that clears one fetch early during a transient
+   * failure and returns on the next write; the alternative is two banners for one
+   * condition.
    */
   offlineCacheError: OfflineCacheErrorType | null;
+  /**
+   * The vault-key generation the SERVER last reported when it refused a write
+   * from this session, or `null` while no such refusal has been seen.
+   *
+   * It is the number the server said it is on, never the number this session
+   * holds. Whether the session is still stale is DERIVED by comparing the two —
+   * see {@link isHoldingSupersededVaultKey} — so nothing has to remember to
+   * clear this: a re-login or a rotation driven from this tab moves
+   * `authStore.vaultKeyVersion` onto the same number and the notice goes away
+   * on its own. A flag would have needed a clear at every one of those points,
+   * and the one that got missed would leave a permanent "reload" banner in
+   * front of a session that was perfectly healthy.
+   *
+   * Not persisted (`partialize` keeps theme and sidebar only): a reload is the
+   * remedy, so surviving one would be exactly wrong.
+   */
+  staleVaultKeyVersion: number | null;
 
   setTheme: (theme: ThemeValue) => void;
   toggleSidebar: () => void;
   toggleSidebarCollapsed: () => void;
   toggleCommandPalette: () => void;
   setOfflineCacheError: (error: OfflineCacheErrorType | null) => void;
+  setStaleVaultKeyVersion: (vaultKeyVersion: number | null) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +122,7 @@ export const useUIStore = create<UIState>()(
       sidebarCollapsed: false,
       commandPaletteOpen: false,
       offlineCacheError: null,
+      staleVaultKeyVersion: null,
 
       setTheme: (theme: ThemeValue): void => {
         applyThemeToDocument(theme);
@@ -121,6 +143,10 @@ export const useUIStore = create<UIState>()(
 
       setOfflineCacheError: (error: OfflineCacheErrorType | null): void => {
         set({ offlineCacheError: error });
+      },
+
+      setStaleVaultKeyVersion: (vaultKeyVersion: number | null): void => {
+        set({ staleVaultKeyVersion: vaultKeyVersion });
       },
     }),
     {
@@ -153,4 +179,54 @@ if (typeof window !== 'undefined') {
       applyThemeToDocument('system');
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// The superseded-vault-key notice
+// ---------------------------------------------------------------------------
+
+/**
+ * Records a write refused because this session's vault key has been superseded,
+ * and reports whether that is what the rejection was.
+ *
+ * Called from the catch of every write that seals ciphertext under the vault
+ * key. The rejection is RE-THROWN by those callers: this only notes the
+ * condition for the application chrome, and a caller that swallowed the error
+ * would be telling the user their change was saved when it was refused.
+ *
+ * ## What it must never do
+ *
+ * It must never adopt the number as this session's own generation, and it must
+ * never trigger a re-read of the vault key. This application is built on the
+ * premise that the server is untrusted, so a 409 carrying a number is the
+ * server ASKING this session to move to a key it did not choose. Everything in
+ * memory was decrypted under the current key, and re-deriving mid-session is a
+ * decision about the whole session rather than about one save — which is the
+ * same reason `documentsStore` uses its one rewrap key for a single completion
+ * and throws it away. The remedy offered to the user is therefore a reload,
+ * which re-reads everything from a single consistent starting point.
+ *
+ * Returns `true` when the rejection was this refusal, so a caller can tell it
+ * apart from an ordinary failure without parsing the error twice.
+ */
+export function noteStaleVaultKey(error: unknown): boolean {
+  const version = staleVaultKeyVersion(error);
+  if (version === null) return false;
+  useUIStore.getState().setStaleVaultKeyVersion(version);
+  return true;
+}
+
+/**
+ * Whether this session is still holding a vault key the account has replaced.
+ *
+ * `recorded` is what the server last said it was on; `current` is what this
+ * session believes it holds (`authStore.vaultKeyVersion`). Equal means the
+ * session has since caught up — by logging in again, or by driving a rotation
+ * of its own — and there is nothing left to warn about.
+ *
+ * Exported rather than inlined into the layout so the notice's CONDITION is one
+ * testable expression rather than a fragment of JSX.
+ */
+export function isHoldingSupersededVaultKey(recorded: number | null, current: number): boolean {
+  return recorded !== null && recorded !== current;
 }

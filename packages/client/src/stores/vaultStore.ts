@@ -9,11 +9,18 @@
 import { create } from 'zustand';
 import { cryptoService } from '../services/crypto/cryptoService.js';
 import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
+import {
+  assertStoredUnder,
+  decryptVaultField,
+  encryptVaultField,
+  newBoundRow,
+} from '../services/crypto/vaultField.js';
 import { offlineCache, offlineCacheErrorType } from '../services/offlineCache.js';
 import { clearScoreCache } from '../services/health/strengthCache.js';
 import { logger } from '../lib/logger.js';
+import { isRateLimited, retryAfterSeconds } from '../services/auth/sessionFailure.js';
 import { useAuthStore } from './authStore.js';
-import { useUIStore } from './uiStore.js';
+import { noteStaleVaultKey, useUIStore } from './uiStore.js';
 // Folders are ONE collection shared by vault items and documents, so deleting a
 // folder has to reach both stores. The cycle this closes (`documentsStore`
 // imports `mapWithConcurrency` from here) is the shape `authStore` already has
@@ -22,6 +29,7 @@ import { useUIStore } from './uiStore.js';
 import { useDocumentsStore } from './documentsStore.js';
 import {
   listItemsApi,
+  getItemApi,
   createItemApi,
   updateItemApi,
   deleteItemApi,
@@ -348,6 +356,84 @@ export async function mapWithConcurrency<T, R>(
   return results;
 }
 
+/** How many of one bulk action's requests are in flight at once. */
+export const BULK_REQUEST_CONCURRENCY = 4;
+
+/**
+ * The longest `Retry-After` a bulk action waits out by itself, in seconds. A
+ * rate-limiting proxy in front of the app asks for seconds (the golden host nginx
+ * sends `5`); the app's own per-account budgets answer with the rest of their
+ * window, up to fifteen minutes, and that is a refusal to report, not a pause.
+ */
+export const MAX_BULK_RETRY_AFTER_SECONDS = 10;
+
+/** How many times one request of a bulk action is sent again after such a 429. */
+export const MAX_BULK_RETRIES = 3;
+
+/** What a request a lock or sign-out overtook is rejected with, unsent. */
+export const BULK_ABANDONED_MESSAGE =
+  'The vault was locked, so the rest of this action was not sent.';
+
+const waitMs = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+/**
+ * Sends one request per row for a bulk action (tagging, permanent deletion, a
+ * folder reorder) PACED rather than all at once, and waits out a short 429.
+ *
+ * These actions have always been one request per row, which the app's own
+ * limiters are sized for, but they used to fire every request in the same
+ * instant. A rate-limiting proxy counts each one: the golden host nginx a
+ * deployment puts in front of the app allows each address 40 requests a second
+ * with a burst of 40, so a bulk tag of a hundred items applied to about forty of
+ * them and refused the rest. No burst setting fixes an unpaced fan-out, because
+ * its arrival rate grows with the selection; pacing and retrying does, behind any
+ * such proxy. So at most {@link BULK_REQUEST_CONCURRENCY} are in flight, and a
+ * request refused with a 429 whose `Retry-After` is at most
+ * {@link MAX_BULK_RETRY_AFTER_SECONDS} is sent again after that wait, up to
+ * {@link MAX_BULK_RETRIES} times. Resending is safe: a 429 is answered before the
+ * request's handler runs, and each of these writes sets a value rather than
+ * adding one. Any other failure, or a longer wait, is the request's result as
+ * before.
+ *
+ * Every request is attempted, and the results are settled and in order, so a
+ * caller reports failures exactly as it did before. A request that throws before
+ * it is even sent is reported as rejected, like one the server refused.
+ *
+ * Except after a lock or a sign-out. Pacing means requests are still QUEUED when
+ * one lands, where before every one was already on the wire, so each request
+ * checks the store's mutation generation (which `clearStore()` moves) before it
+ * is sent and again after every wait; once it has moved, the rest are rejected
+ * with {@link BULK_ABANDONED_MESSAGE} without being sent. A locked vault must not
+ * go on writing, and after a sign-out each would be a 401 into the refresh path.
+ */
+export async function sendPaced<R>(
+  requests: readonly (() => Promise<R>)[],
+  wait: (ms: number) => Promise<void> = waitMs,
+): Promise<PromiseSettledResult<R>[]> {
+  const generation = mutationGeneration;
+  return mapWithConcurrency(requests, BULK_REQUEST_CONCURRENCY, async (send) => {
+    for (let retries = 0; ; retries++) {
+      if (generation !== mutationGeneration) throw new Error(BULK_ABANDONED_MESSAGE);
+      try {
+        return await send();
+      } catch (error: unknown) {
+        const seconds = isRateLimited(error) ? retryAfterSeconds(error) : null;
+        if (
+          seconds === null ||
+          seconds > MAX_BULK_RETRY_AFTER_SECONDS ||
+          retries >= MAX_BULK_RETRIES
+        ) {
+          throw error;
+        }
+        await wait(seconds * 1000);
+      }
+    }
+  });
+}
+
 type DecryptionContext = 'vault items' | 'trash items' | 'folders';
 
 /**
@@ -514,13 +600,108 @@ function assertEncryptedSizes(
   }
 }
 
-function getVaultKey(): CryptoKey {
-  const { vaultKey } = useAuthStore.getState();
+/**
+ * The unlocked vault key together with the generation it belongs to, read from
+ * ONE `getState()`.
+ *
+ * One read and not two, for the reason `documentsStore.requireVaultKey` gives:
+ * the number is what the server matches the ciphertext against, so a key taken
+ * from one snapshot and a generation from another could name a pair that never
+ * existed at the same instant.
+ *
+ * The generation needs no vault key of its own, which is why
+ * {@link vaultKeyGeneration} exists beside this for the metadata-only path.
+ */
+function requireVaultKey(): { vaultKey: CryptoKey; vaultKeyVersion: number } {
+  const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
   if (!vaultKey) {
     throw new Error('Vault is locked. Unlock it before performing vault operations.');
   }
   // CryptoKey is an opaque handle — no need to copy (unlike ArrayBuffer).
-  return vaultKey;
+  return { vaultKey, vaultKeyVersion };
+}
+
+/**
+ * Refuses an update naming an item type other than the one the row is stored with.
+ *
+ * Read from this store when the row is in it (active or trashed), and otherwise
+ * from the server, because a caller the store cannot see is precisely the caller
+ * whose type nothing here has checked. Under format v1 a wrong type cost nothing
+ * at write time; under v2 the data is bound to the type it names, so a wrong one
+ * is a row whose data never opens again.
+ */
+async function assertStoredItemType(
+  id: string,
+  itemType: ItemType,
+  get: () => VaultState,
+): Promise<void> {
+  const { items, trashItems } = get();
+  let stored = (items.find((item) => item.id === id) ?? trashItems.find((item) => item.id === id))
+    ?.itemType;
+  if (stored === undefined) {
+    const response = await getItemApi(id);
+    if (response.data.success) stored = response.data.data.itemType;
+  }
+  if (stored !== itemType) {
+    throw new Error(
+      `This entry is stored as ${stored === undefined ? 'an unknown type' : `a ${stored}`}, so it cannot be saved as a ${itemType}.`,
+    );
+  }
+}
+
+/**
+ * This session's own user id, which a created row's id is derived from.
+ *
+ * Read beside the vault key rather than from a response, because it is the id
+ * the SERVER derives from too (the authenticated caller's), and the two must
+ * agree or the row is stored under an id its fields were not sealed to.
+ */
+function requireUserId(): string {
+  const userId = useAuthStore.getState().user?.userId;
+  if (!userId) {
+    throw new Error('Vault is locked. Unlock it before performing vault operations.');
+  }
+  return userId;
+}
+
+/** The unlocked vault key alone, for callers that seal nothing to a generation. */
+function getVaultKey(): CryptoKey {
+  return requireVaultKey().vaultKey;
+}
+
+/**
+ * This session's vault-key generation, WITHOUT requiring the key itself.
+ *
+ * `updateItemMeta` encrypts nothing and deliberately holds no key, yet it posts
+ * to the same endpoint as a full update — and that endpoint is guarded as a
+ * whole, because a server that decided from which fields the body happened to
+ * carry would be deciding a security control from a value the caller chooses.
+ * So the metadata path carries the generation too, and this is how it reads one
+ * without acquiring a key it has no use for.
+ */
+function vaultKeyGeneration(): number {
+  return useAuthStore.getState().vaultKeyVersion;
+}
+
+/**
+ * Runs a write that seals ciphertext under the vault key, recording the
+ * superseded-key refusal for the application chrome before re-throwing.
+ *
+ * Every rejection is RE-THROWN, including this one. The caller's own error
+ * handling is what tells the user their change did not land; this only raises
+ * the app-wide notice that explains WHY nothing from this tab will save until
+ * it is reloaded. Swallowing it would report a save that was refused.
+ *
+ * It never retries and never adopts the generation the server reported — see
+ * `noteStaleVaultKey`, where that rule and its reason live.
+ */
+async function withStaleVaultKeyNotice<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    noteStaleVaultKey(error);
+    throw error;
+  }
 }
 
 async function decryptItem(
@@ -535,17 +716,18 @@ async function decryptItem(
     throw new Error(`Invalid vault item response for item ${raw._id}`);
   }
 
-  const name = await cryptoService.decryptData(
-    raw.encryptedName,
-    raw.nameIv,
-    raw.nameTag,
+  // Each field is opened against the row it was served as, so a format-v2 field
+  // the server moved from another row, another slot or another item type is
+  // refused here (see `vaultField.ts`). A v1 field opens exactly as before.
+  const name = await decryptVaultField(
+    { encrypted: raw.encryptedName, iv: raw.nameIv, tag: raw.nameTag },
+    { role: 'item.name', rowId: raw._id },
     vaultKey,
   );
 
-  const dataJson = await cryptoService.decryptData(
-    raw.encryptedData,
-    raw.dataIv,
-    raw.dataTag,
+  const dataJson = await decryptVaultField(
+    { encrypted: raw.encryptedData, iv: raw.dataIv, tag: raw.dataTag },
+    { role: 'item.data', rowId: raw._id, itemType: raw.itemType },
     vaultKey,
   );
 
@@ -589,10 +771,9 @@ async function decryptFolder(raw: IFolderResponse, vaultKey: CryptoKey): Promise
     throw new Error(`Invalid folder response for folder ${raw._id}`);
   }
 
-  const name = await cryptoService.decryptData(
-    raw.encryptedName,
-    raw.nameIv,
-    raw.nameTag,
+  const name = await decryptVaultField(
+    { encrypted: raw.encryptedName, iv: raw.nameIv, tag: raw.nameTag },
+    { role: 'folder.name', rowId: raw._id },
     vaultKey,
   );
 
@@ -1089,7 +1270,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     data: Record<string, unknown>,
     options?: { folderId?: string; tags?: string[]; favorite?: boolean },
   ): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
     // Pre-flight schema check, BEFORE encryption: a payload the shared schema
@@ -1097,31 +1278,52 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // point it is the only copy that exists.
     assertValidItemData(itemType, data);
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
-    const encryptedData = await cryptoService.encryptData(JSON.stringify(data), vaultKey);
+    // The id the row WILL have, derived before it exists, so both fields can be
+    // sealed to it (format v2). The server stores the row under the id the same
+    // nonce derives on its side.
+    const row = await newBoundRow(requireUserId());
+    const encryptedName = await encryptVaultField(
+      name,
+      { role: 'item.name', rowId: row.rowId },
+      vaultKey,
+    );
+    const encryptedData = await encryptVaultField(
+      JSON.stringify(data),
+      { role: 'item.data', rowId: row.rowId, itemType },
+      vaultKey,
+    );
     // Pre-flight size check: the server enforces these via Mongoose validators,
     // so bail out early with a user-friendly error instead of round-tripping
     // to receive a cryptic 400.
     assertEncryptedSizes(encryptedName, encryptedData);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
-    const response = await createItemApi({
-      itemType,
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      encryptedData: encryptedData.encrypted,
-      dataIv: encryptedData.iv,
-      dataTag: encryptedData.tag,
-      searchHash,
-      ...(options?.folderId != null ? { folderId: options.folderId } : {}),
-      tags: options?.tags ?? [],
-      favorite: options?.favorite ?? false,
-    });
+    // `vaultKeyVersion` names the generation the six ciphertext fields above
+    // were sealed under. The server refuses the row rather than storing one
+    // nothing can ever decrypt, and on that refusal the notice tells the user to
+    // reload — this store never re-derives a key the server named.
+    const response = await withStaleVaultKeyNotice(() =>
+      createItemApi({
+        itemType,
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        encryptedData: encryptedData.encrypted,
+        dataIv: encryptedData.iv,
+        dataTag: encryptedData.tag,
+        searchHash,
+        ...(options?.folderId != null ? { folderId: options.folderId } : {}),
+        tags: options?.tags ?? [],
+        favorite: options?.favorite ?? false,
+        idNonce: row.idNonce,
+        vaultKeyVersion,
+      }),
+    );
 
     const createResult = response.data;
     if (createResult.success) {
       const rawItem = createResult.data;
+      assertStoredUnder(row.rowId, rawItem._id);
       const decrypted = await decryptItem(rawItem, vaultKey);
       // Skip the local plaintext write if a lock/logout landed while the
       // request was in flight — clearStore() bumped the generation and emptied
@@ -1145,7 +1347,7 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
       favorite?: boolean;
     },
   ): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
     // Pre-flight schema check, BEFORE encryption: same rationale as createItem, and
@@ -1160,8 +1362,18 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // caller can supply.
     const existingItem = get().items.find((item) => item.id === id);
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
-    const encryptedData = await cryptoService.encryptData(JSON.stringify(data), vaultKey);
+    // The data is sealed to the item type it will be READ under, so it must be the
+    // type the row actually has: data bound to any other type never opens again.
+    // Type is immutable after create, so a caller naming another is refused here,
+    // before anything is sealed.
+    await assertStoredItemType(id, itemType, get);
+
+    const encryptedName = await encryptVaultField(name, { role: 'item.name', rowId: id }, vaultKey);
+    const encryptedData = await encryptVaultField(
+      JSON.stringify(data),
+      { role: 'item.data', rowId: id, itemType },
+      vaultKey,
+    );
     // Pre-flight size check: same rationale as createItem.
     assertEncryptedSizes(encryptedName, encryptedData);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
@@ -1175,23 +1387,31 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
             existingRawHistory: existingItem._raw.passwordHistory,
             oldPassword: existingItem.data.password,
             newPassword: data.password,
+            rowId: id,
             vaultKey,
           })
         : undefined;
 
-    const response = await updateItemApi(id, {
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      encryptedData: encryptedData.encrypted,
-      dataIv: encryptedData.iv,
-      dataTag: encryptedData.tag,
-      searchHash,
-      ...(options?.folderId !== undefined ? { folderId: options.folderId } : {}),
-      ...(options?.tags !== undefined ? { tags: options.tags } : {}),
-      ...(options?.favorite !== undefined ? { favorite: options.favorite } : {}),
-      ...(passwordHistoryPayload !== undefined ? { passwordHistory: passwordHistoryPayload } : {}),
-    });
+    // The generation every ciphertext field here was sealed under — including
+    // the password-history entries, which are encrypted under the same key.
+    const response = await withStaleVaultKeyNotice(() =>
+      updateItemApi(id, {
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        encryptedData: encryptedData.encrypted,
+        dataIv: encryptedData.iv,
+        dataTag: encryptedData.tag,
+        searchHash,
+        ...(options?.folderId !== undefined ? { folderId: options.folderId } : {}),
+        ...(options?.tags !== undefined ? { tags: options.tags } : {}),
+        ...(options?.favorite !== undefined ? { favorite: options.favorite } : {}),
+        ...(passwordHistoryPayload !== undefined
+          ? { passwordHistory: passwordHistoryPayload }
+          : {}),
+        vaultKeyVersion,
+      }),
+    );
 
     const updateResult = response.data;
     if (updateResult.success) {
@@ -1238,9 +1458,18 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
       ...(meta.tags !== undefined ? { tags: meta.tags } : {}),
     };
     // Nothing to change: skip the round-trip rather than send an empty update.
+    // Counted BEFORE the generation is added, so an update carrying nothing but
+    // a generation is still recognised as empty and never sent.
     if (Object.keys(payload).length === 0) return;
 
-    const response = await updateItemApi(id, payload);
+    // This path encrypts nothing, yet it still names the generation: it posts to
+    // the same endpoint as a full update, and that endpoint is guarded as a
+    // whole rather than by inspecting which fields the body happens to carry.
+    // Reading the number needs no vault key, which is what lets this path keep
+    // its promise never to hold one.
+    const response = await withStaleVaultKeyNotice(() =>
+      updateItemApi(id, { ...payload, vaultKeyVersion: vaultKeyGeneration() }),
+    );
     const metaResult = response.data;
     if (!metaResult.success) return;
 
@@ -1291,19 +1520,24 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
   // just fail again and throw away a write that has already succeeded.
   // -----------------------------------------------------------------------
   renameItem: async (id: string, name: string): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
+    const encryptedName = await encryptVaultField(name, { role: 'item.name', rowId: id }, vaultKey);
     assertEncryptedNameSize(encryptedName);
     const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
-    const response = await updateItemApi(id, {
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      searchHash,
-    });
+    // Name-only, but still ciphertext: a rename sealed under a superseded key
+    // strands the one field this path exists to repair.
+    const response = await withStaleVaultKeyNotice(() =>
+      updateItemApi(id, {
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        searchHash,
+        vaultKeyVersion,
+      }),
+    );
 
     const renameResult = response.data;
     if (!renameResult.success) return;
@@ -1469,28 +1703,39 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     name: string,
     options?: { parentId?: string; icon?: string; color?: string },
   ): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
+    // Sealed to the id the folder WILL have; see `createItem`.
+    const row = await newBoundRow(requireUserId());
+    const encryptedName = await encryptVaultField(
+      name,
+      { role: 'folder.name', rowId: row.rowId },
+      vaultKey,
+    );
 
     // Assign a sortOrder higher than any existing folder so new folders appear at the end
     const existingFolders = get().folders;
     const maxSortOrder = existingFolders.reduce((max, f) => Math.max(max, f.sortOrder), -1);
 
-    const response = await createFolderApi({
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      sortOrder: maxSortOrder + 1,
-      ...(options?.parentId != null ? { parentId: options.parentId } : {}),
-      ...(options?.icon != null ? { icon: options.icon } : {}),
-      ...(options?.color != null ? { color: options.color } : {}),
-    });
+    const response = await withStaleVaultKeyNotice(() =>
+      createFolderApi({
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        sortOrder: maxSortOrder + 1,
+        ...(options?.parentId != null ? { parentId: options.parentId } : {}),
+        ...(options?.icon != null ? { icon: options.icon } : {}),
+        ...(options?.color != null ? { color: options.color } : {}),
+        idNonce: row.idNonce,
+        vaultKeyVersion,
+      }),
+    );
 
     const createFolderResult = response.data;
     if (createFolderResult.success) {
       const rawFolder = createFolderResult.data;
+      assertStoredUnder(row.rowId, rawFolder._id);
       const decrypted = await decryptFolder(rawFolder, vaultKey);
       // Skip the local plaintext write if a lock/logout superseded us (see
       // createItem).
@@ -1504,18 +1749,25 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     name: string,
     options?: { color?: string; sortOrder?: number },
   ): Promise<void> => {
-    const vaultKey = getVaultKey();
+    const { vaultKey, vaultKeyVersion } = requireVaultKey();
     const myGeneration = mutationGeneration;
 
-    const encryptedName = await cryptoService.encryptData(name, vaultKey);
+    const encryptedName = await encryptVaultField(
+      name,
+      { role: 'folder.name', rowId: id },
+      vaultKey,
+    );
 
-    const response = await updateFolderApi(id, {
-      encryptedName: encryptedName.encrypted,
-      nameIv: encryptedName.iv,
-      nameTag: encryptedName.tag,
-      ...(options?.color !== undefined ? { color: options.color } : {}),
-      ...(options?.sortOrder !== undefined ? { sortOrder: options.sortOrder } : {}),
-    });
+    const response = await withStaleVaultKeyNotice(() =>
+      updateFolderApi(id, {
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        ...(options?.color !== undefined ? { color: options.color } : {}),
+        ...(options?.sortOrder !== undefined ? { sortOrder: options.sortOrder } : {}),
+        vaultKeyVersion,
+      }),
+    );
 
     const updateFolderResult = response.data;
     if (updateFolderResult.success) {

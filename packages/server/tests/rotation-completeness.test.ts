@@ -398,13 +398,18 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
       const after = await User.findById(user.id).lean();
       expect(after!.rotationInProgress).toBe(false);
       // `vaultKeyVersion` is what an in-flight upload compares itself against, so a
-      // rotation that did not happen must not have moved it — the commit `$inc`s
-      // it — and `clearRotationState`'s `$unset` must have left no half-written
-      // pending wrap for login's crash-recovery to find. Both are negatives on the
-      // same footing as the one above, mirroring what the documents leg's twin
-      // asserts (`rotation-documents.test.ts`).
+      // rotation that did not happen must not have moved it — only the commit
+      // `$inc`s it. A negative on the same footing as the one above, mirroring what
+      // the documents leg's twin asserts (`rotation-documents.test.ts`). The
+      // pending wrapper is asserted separately below, and in the OPPOSITE
+      // direction: an abort keeps it.
       expect(after!.vaultKeyVersion).toBe(0);
-      expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(after!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
     } finally {
       vi.restoreAllMocks();
     }
@@ -465,13 +470,18 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
       expect(await vaultKeyOf(user.id)).toBe(ORIGINAL_KEY);
       const after = await User.findById(user.id).lean();
       expect(after!.rotationInProgress).toBe(false);
-      // Reinforcing, not unique: `clearRotationState` is one shared function, so
+      // Reinforcing, not unique: `lowerRotationFence` is one shared function, so
       // the documents leg's twin (`rotation-documents.test.ts`) already kills a
-      // mutant that neuters its `$unset`. Asserted here anyway, because a guard
-      // that cleared the fence for some legs and not others would show up only in
-      // the leg it skipped.
+      // mutant that neuters it. Asserted here anyway, because a guard that cleared
+      // the fence for some legs and not others would show up only in the leg it
+      // skipped.
       expect(after!.vaultKeyVersion).toBe(0);
-      expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(after!.pendingEncryptedVaultKey).toBe('rotated-vault-key');
     } finally {
       vi.restoreAllMocks();
     }
@@ -703,14 +713,23 @@ describe('Rotation completeness — transactional (replica-set) branch', () => {
     // re-encrypt rows it can no longer read. The handler logs and carries on, and
     // the fence it could not lower is left for login's crash-recovery.
     //
-    // Only `clearRotationState`'s write is made to fail. It is told apart from the
-    // in-transaction key write by its `$unset` — that one uses `$set` + `$inc` and
-    // carries a session — so the rotation itself still commits for real.
+    // Only `lowerRotationFence`'s write is made to fail. It is told apart from the
+    // in-transaction key write by being the ONE update whose whole body is
+    // `$set: { rotationInProgress: false }` — the commit carries `$inc` and
+    // `$unset` beside its `$set`, and the fence RAISE sets the flag to `true` — so
+    // the rotation itself still commits for real. Matching on `$unset` alone, as
+    // this used to, now selects the commit instead: dropping the crash-recovery
+    // markers moved into it, because an abort must not destroy the only stored
+    // copy of the key a crashed rotation was moving to.
     const item = await seedItem(user.id);
     const realUpdateOne = User.updateOne.bind(User);
+    const isFenceLowering = (update: Record<string, unknown> | undefined): boolean => {
+      if (!update || Object.keys(update).length !== 1) return false;
+      const set = update.$set as Record<string, unknown> | undefined;
+      return set !== undefined && Object.keys(set).length === 1 && set.rotationInProgress === false;
+    };
     vi.spyOn(User, 'updateOne').mockImplementation((...args: Parameters<typeof User.updateOne>) => {
-      const update = args[1] as Record<string, unknown> | undefined;
-      if (update && '$unset' in update) {
+      if (isFenceLowering(args[1] as Record<string, unknown> | undefined)) {
         return Promise.reject(new Error('fence-clear failed')) as ReturnType<typeof User.updateOne>;
       }
       return realUpdateOne(...args);
@@ -755,4 +774,273 @@ describe('Rotation completeness — transactional (replica-set) branch', () => {
     const trashedRow = await VaultItem.findById(trashed._id).lean();
     expect(trashedRow!.encryptedName).toBe(`rotated-name-${String(trashed._id)}`);
   });
+});
+
+// ── Re-seal: the rotation machinery with the SAME key ───────────────────────
+//
+// The format backfill rides this handler with `reseal: true`. What it must keep
+// from a rotation is the completeness guarantee, the fence and the lock; what it
+// must NOT do is anything that changes the key: store a wrapper, move the
+// generation, write a pending wrapper, or roll rewritten rows back. And because it
+// stores no key, it must refuse to run at all under a key that is no longer the
+// account's. Every case runs on both branches, since a check present in one alone
+// is the defect wearing a different hat.
+
+/** The account's stored wrapper, which a re-seal names as its own. */
+const CURRENT_KEY = {
+  newEncryptedVaultKey: ORIGINAL_KEY,
+  newVaultKeyIv: 'test-vault-key-iv',
+  newVaultKeyTag: 'test-vault-key-tag',
+};
+
+/** A v2 field's IV, as the browser writes it. */
+const BOUND_IV = 'v2:AAAAAAAAAAAAAAAA';
+
+function resealedItem(id: string): RotationItem {
+  return { ...rotatedItem(id), nameIv: BOUND_IV, dataIv: BOUND_IV };
+}
+
+async function reseal(user: TestUser, body: Record<string, unknown>): Promise<request.Response> {
+  return rotate(user, {
+    ...CURRENT_KEY,
+    reseal: true,
+    vaultFieldFormat: 2,
+    vaultKeyVersion: 0,
+    idempotencyKey: crypto.randomUUID(),
+    ...body,
+  });
+}
+
+function resealCases(branch: () => { user: TestUser }): void {
+  it('re-seals every row and leaves the key, the generation and the recovery markers alone', async () => {
+    const { user } = branch();
+    const active = await seedItem(user.id);
+    const trashed = await seedItem(user.id, { encryptedName: 'trashed', deletedAt: new Date() });
+    const folder = await seedFolder(user.id);
+    const doc = await seedDocument(user);
+
+    const res = await reseal(user, {
+      idempotencyKey: '5f0c6f86-6f0e-4a55-9a8f-2d8d8d3b2a11',
+      items: [resealedItem(String(active._id)), resealedItem(String(trashed._id))],
+      folders: [{ ...rotatedFolder(String(folder._id)), nameIv: BOUND_IV }],
+      // The document's own wrap, passed through: a re-seal does not rewrap a DEK.
+      documents: [
+        {
+          id: doc,
+          encryptedDek: ORIGINAL_DEK,
+          dekIv: 'dek-iv-original',
+          dekTag: 'dek-tag-original',
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message).toBe('Vault entries re-sealed successfully');
+    for (const row of [active, trashed]) {
+      const stored = await VaultItem.findById(row._id).lean();
+      expect(stored!.encryptedName).toBe(`rotated-name-${String(row._id)}`);
+      expect(stored!.nameIv).toBe(BOUND_IV);
+    }
+    expect((await Folder.findById(folder._id).lean())!.nameIv).toBe(BOUND_IV);
+    expect((await Document.findById(doc).lean())!.encryptedDek).toBe(ORIGINAL_DEK);
+
+    const after = await User.findById(user.id).lean();
+    // The negatives this mode exists for: the SAME key, the SAME generation, no
+    // pending wrapper and no rotation date, with the fence down and the retry
+    // key recorded.
+    expect(after!.encryptedVaultKey).toBe(ORIGINAL_KEY);
+    expect(after!.vaultKeyVersion).toBe(0);
+    expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+    expect(after!.lastRotationAt).toBeUndefined();
+    expect(after!.lastRotationKey).toBe('5f0c6f86-6f0e-4a55-9a8f-2d8d8d3b2a11');
+    expect(after!.rotationInProgress).toBe(false);
+  });
+
+  it('refuses a re-seal whose payload omits a row, naming each leg, and writes nothing', async () => {
+    const { user } = branch();
+    const named = await seedItem(user.id);
+    await seedItem(user.id, { encryptedName: 'created-after-enumeration' });
+    await seedFolder(user.id);
+
+    const res = await reseal(user, { items: [resealedItem(String(named._id))], folders: [] });
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/items: 1 supplied, 2 stored; folders: 0 supplied, 1 stored/);
+    expect((await VaultItem.findById(named._id).lean())!.encryptedName).toBe(ORIGINAL_ITEM_NAME);
+    const after = await User.findById(user.id).lean();
+    expect(after!.rotationInProgress).toBe(false);
+    expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+  });
+
+  it('refuses a re-seal sealed under a generation a rotation has since replaced, carrying the current one', async () => {
+    const { user } = branch();
+    const item = await seedItem(user.id);
+    // A rotation committed in another session after this client enumerated: the
+    // stored wrapper is the one the re-seal names (a same-key wrapper), but the
+    // generation moved. Without the generation check every row below would be
+    // rewritten under the key the rotation retired, behind a 200, and the
+    // completeness check would pass.
+    await User.updateOne({ _id: user.id }, { $set: { vaultKeyVersion: 1 } });
+
+    const res = await reseal(user, { items: [resealedItem(String(item._id))], folders: [] });
+
+    expect(res.status).toBe(409);
+    expect(res.body.data).toEqual({ vaultKeyVersion: 1 });
+    expect((await VaultItem.findById(item._id).lean())!.encryptedName).toBe(ORIGINAL_ITEM_NAME);
+    const after = await User.findById(user.id).lean();
+    expect(after!.rotationInProgress).toBe(false);
+    expect(after!.vaultKeyVersion).toBe(1);
+  });
+
+  it('refuses a re-seal naming a wrapper that is not the stored one, before the fence goes up', async () => {
+    const { user } = branch();
+    const item = await seedItem(user.id);
+    const raise = vi.spyOn(User, 'updateOne');
+
+    try {
+      const res = await reseal(user, {
+        ...NEW_KEY,
+        items: [resealedItem(String(item._id))],
+        folders: [],
+      });
+
+      expect(res.status).toBe(409);
+      expect(res.body.message).toMatch(/^Reload the app, then re-seal again/);
+      expect(String(res.body.message).length).toBeLessThanOrEqual(200);
+      // Refused before the fence: no account write happened at all.
+      expect(raise).not.toHaveBeenCalled();
+    } finally {
+      raise.mockRestore();
+    }
+    expect((await VaultItem.findById(item._id).lean())!.encryptedName).toBe(ORIGINAL_ITEM_NAME);
+    expect(await vaultKeyOf(user.id)).toBe(ORIGINAL_KEY);
+  });
+
+  it('refuses to commit a re-seal whose key was replaced while it ran, by a writer that takes no lock', async () => {
+    // `resetPassword` mints a new vault key without the rotation lock and without
+    // moving the generation. The proof before the fence has already passed by the
+    // time it lands here, so what catches it is the COMMIT's own condition: on the
+    // transactional branch a conditional write (a read inside the transaction
+    // would see its snapshot and miss the change), on the sequential one the
+    // filtered final update.
+    const { user } = branch();
+    const item = await seedItem(user.id);
+    const realUpdateOne = VaultItem.updateOne.bind(VaultItem);
+    let replaced = false;
+    const spy = vi.spyOn(VaultItem, 'updateOne').mockImplementation((async (
+      ...args: Parameters<typeof VaultItem.updateOne>
+    ) => {
+      if (!replaced) {
+        replaced = true;
+        // Straight to the collection: outside any session and past any spy.
+        await User.collection.updateOne(
+          { _id: new mongoose.Types.ObjectId(user.id) },
+          { $set: { encryptedVaultKey: 'key-minted-by-a-reset' } },
+        );
+      }
+      return realUpdateOne(...args);
+    }) as unknown as typeof VaultItem.updateOne);
+
+    let res: request.Response;
+    try {
+      res = await reseal(user, { items: [resealedItem(String(item._id))], folders: [] });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/^Reload the app, then re-seal again/);
+    const after = await User.findById(user.id).lean();
+    // The reset's key stands; nothing of the re-seal was committed as a success.
+    expect(after!.encryptedVaultKey).toBe('key-minted-by-a-reset');
+    expect(after!.vaultKeyVersion).toBe(0);
+    expect(after!.lastRotationKey).toBeUndefined();
+    expect(after!.rotationInProgress).toBe(false);
+    expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+  });
+
+  it('refuses a re-seal while an interrupted rotation is outstanding, with a remedy that applies to it', async () => {
+    const { user } = branch();
+    const item = await seedItem(user.id);
+    await User.updateOne(
+      { _id: user.id },
+      {
+        $set: {
+          pendingEncryptedVaultKey: 'pending-key',
+          pendingVaultKeyIv: 'pending-iv',
+          pendingVaultKeyTag: 'pending-tag',
+        },
+      },
+    );
+
+    const res = await reseal(user, { items: [resealedItem(String(item._id))], folders: [] });
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/^Finish the interrupted vault key rotation first/);
+    expect(String(res.body.message)).not.toMatch(/discardPendingVaultKey/);
+    expect(String(res.body.message).length).toBeLessThanOrEqual(200);
+    const after = await User.findById(user.id).lean();
+    expect(after!.pendingEncryptedVaultKey).toBe('pending-key');
+    expect((await VaultItem.findById(item._id).lean())!.encryptedName).toBe(ORIGINAL_ITEM_NAME);
+  });
+}
+
+describe('Re-seal — sequential (standalone) branch', () => {
+  const state = {} as { user: TestUser };
+
+  beforeEach(async () => {
+    expect(supportsTransactions(mongoose.connection)).toBe(false);
+    state.user = await createTestUser();
+  });
+
+  resealCases(() => state);
+
+  it('leaves the rows it already rewrote in place when a later row fails, and writes no pending wrapper', async () => {
+    const first = await seedItem(state.user.id);
+    const second = await seedItem(state.user.id, { encryptedName: 'second' });
+    const realUpdateOne = VaultItem.updateOne.bind(VaultItem);
+    let calls = 0;
+    const spy = vi
+      .spyOn(VaultItem, 'updateOne')
+      .mockImplementation((...args: Parameters<typeof VaultItem.updateOne>) => {
+        calls += 1;
+        if (calls === 2) {
+          return Promise.reject(new Error('disk full')) as ReturnType<typeof VaultItem.updateOne>;
+        }
+        return realUpdateOne(...args);
+      });
+
+    try {
+      const res = await reseal(state.user, {
+        items: [resealedItem(String(first._id)), resealedItem(String(second._id))],
+        folders: [],
+      });
+      expect(res.status).toBe(409);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The first row keeps its re-seal (it is under the unchanged key, so undoing it
+    // would only undo its binding); the second is untouched; nothing points at a
+    // key other than the one the account stores.
+    expect((await VaultItem.findById(first._id).lean())!.nameIv).toBe(BOUND_IV);
+    expect((await VaultItem.findById(second._id).lean())!.encryptedName).toBe('second');
+    const after = await User.findById(state.user.id).lean();
+    expect(after!.encryptedVaultKey).toBe(ORIGINAL_KEY);
+    expect(after!.pendingEncryptedVaultKey).toBeUndefined();
+    expect(after!.rotationInProgress).toBe(false);
+    expect(after!.vaultKeyVersion).toBe(0);
+  });
+});
+
+describe('Re-seal — transactional (replica-set) branch', () => {
+  useReplicaSetConnection({ timeoutMs: 60_000 });
+  const state = {} as { user: TestUser };
+
+  beforeEach(async () => {
+    expect(supportsTransactions(mongoose.connection)).toBe(true);
+    state.user = await createTestUser();
+  });
+
+  resealCases(() => state);
 });

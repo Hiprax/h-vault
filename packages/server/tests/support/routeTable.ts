@@ -51,6 +51,13 @@
  */
 import type { Express } from 'express';
 import * as rateLimiters from '../../src/middleware/rateLimiter.js';
+import {
+  holdPartUploadSlot,
+  parsePartUploadBody,
+  requirePartContentLength,
+} from '../../src/middleware/documentPartBody.js';
+import { holdLargeBodySlot, parseLargeJsonBody } from '../../src/middleware/largeBodyAdmission.js';
+import { sanitizeRequestBody } from '../../src/middleware/sanitizeBody.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
 
@@ -90,6 +97,18 @@ export interface RouteRow {
   readonly csrf: 'required' | 'exempt';
   /** Rate limiters mounted on this route, in the order they run. */
   readonly limiters: readonly string[];
+  /**
+   * EVERY named middleware in front of the handler, in the order it runs: the
+   * limiters, plus the body-admission middlewares (length guard, slot holder,
+   * route-level body parser, the large-body handler wrapper). Declared only on a
+   * route that carries admission middleware; absent, it is `limiters`, and
+   * `route-table.test.ts` asserts that such a route carries none.
+   *
+   * It exists because `limiters` cannot see a parser. The shipped defect it pins
+   * is ORDER, not membership: both 30 MB routes carried the right limiter AFTER
+   * their parser, so every assertion that the limiter was present stayed green.
+   */
+  readonly chain?: readonly string[];
   /** Non-null when the path carries an id whose owner the server must check. */
   readonly owned: { readonly param: string; readonly resource: OwnedResource } | null;
   readonly when: Registration;
@@ -168,11 +187,15 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     when: 'production',
     note:
       'The isolated document every stored file is rendered inside. Mounted only when ' +
-      'NODE_ENV === production, BEFORE express.static and the SPA fallback, because its ' +
-      'whole isolation is the per-response Content-Security-Policy the route attaches ' +
-      '(config/sandboxCsp.ts) — a copy answered off disk would carry helmet’s application ' +
-      'policy instead. It is unauthenticated by design: it holds no data, receives every ' +
-      'byte it renders over a MessagePort, and its own policy denies it any network access.',
+      'NODE_ENV === production. Its whole isolation is the per-response ' +
+      'Content-Security-Policy the route attaches (config/sandboxCsp.ts), so a copy ' +
+      'answered off disk would carry helmet’s application policy instead — which is why ' +
+      'the document is EMITTED OUTSIDE the express.static root (config/clientArtifacts.ts) ' +
+      'rather than merely routed ahead of it: Express 5 matches the raw pathname while ' +
+      'send decodes it, so /sandbox%2Ehtml, //sandbox.html, /sandbox.htm%6C and ' +
+      '/%73andbox.html all miss this route. It is unauthenticated by design: it holds no ' +
+      'data, receives every byte it renders over a MessagePort, and its own policy denies ' +
+      'it any network access.',
   },
   {
     method: 'get',
@@ -343,7 +366,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: null,
     when: 'always',
     note: 'Takes an owned folderId in the BODY; covered by phase7-cross-user-edge-cases.test.ts.',
@@ -353,7 +376,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: { param: 'id', resource: 'vaultItem' },
     when: 'always',
     note: 'Also takes an owned folderId in the BODY, which the matrix does not model; covered by cross-user-isolation.test.ts.',
@@ -363,7 +386,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: { param: 'id', resource: 'vaultItem' },
     when: 'always',
   },
@@ -372,7 +395,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/:id/permanent',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: { param: 'id', resource: 'trashedVaultItem' },
     when: 'always',
   },
@@ -381,7 +404,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/restore/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['vaultItemWriteLimiter'],
     owned: { param: 'id', resource: 'trashedVaultItem' },
     when: 'always',
   },
@@ -411,9 +434,18 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['passwordVerifyLimiter'],
+    // The limiter and the slot BEFORE the 30 MB parser, the sanitizer straight
+    // after it, and the handler wrapped so the slot outlives an aborted response.
+    chain: [
+      'passwordVerifyLimiter',
+      'holdLargeBodySlot',
+      'parseLargeJsonBody',
+      'sanitizeRequestBody',
+      'largeBodyHandler',
+    ],
     owned: null,
     when: 'always',
-    note: 'Takes owned ids in the BODY; covered by phase7-cross-user-edge-cases.test.ts. The 30 MB body parser ahead of the limiter is not one.',
+    note: 'Takes owned ids in the BODY; covered by phase7-cross-user-edge-cases.test.ts. Admission is pinned by large-body-admission.test.ts.',
   },
   {
     method: 'delete',
@@ -440,7 +472,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/folders/',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['folderWriteLimiter'],
     owned: null,
     when: 'always',
     note: 'Takes an owned parentId in the BODY; covered by phase7-cross-user-edge-cases.test.ts.',
@@ -450,7 +482,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/folders/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['folderWriteLimiter'],
     owned: { param: 'id', resource: 'folder' },
     when: 'always',
   },
@@ -459,7 +491,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/folders/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['folderWriteLimiter'],
     owned: { param: 'id', resource: 'folder' },
     when: 'always',
   },
@@ -468,7 +500,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/folders/:id/sort',
     auth: 'required',
     csrf: 'required',
-    limiters: [],
+    limiters: ['folderWriteLimiter'],
     owned: { param: 'id', resource: 'folder' },
     when: 'always',
   },
@@ -515,7 +547,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/user/2fa/verify',
     auth: 'required',
     csrf: 'required',
-    limiters: ['tokenVerifyLimiter'],
+    limiters: ['twoFactorVerifyLimiter'],
     owned: null,
     when: 'always',
   },
@@ -636,7 +668,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     // `importLimiter`, deliberately NOT `heavyOpLimiter`: a migration is sent
-    // as several batches and would exhaust the shared 10/IP heavy-op budget.
+    // as several batches and would exhaust the shared 10-per-user heavy-op budget.
     limiters: ['importLimiter'],
     owned: null,
     when: 'always',
@@ -704,9 +736,16 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['passwordVerifyLimiter'],
+    chain: [
+      'passwordVerifyLimiter',
+      'holdLargeBodySlot',
+      'parseLargeJsonBody',
+      'sanitizeRequestBody',
+      'largeBodyHandler',
+    ],
     owned: null,
     when: 'always',
-    note: 'The 30 MB body parser ahead of the limiter is not a limiter.',
+    note: 'Admission (limiter, slot, then the 30 MB parser) is pinned by large-body-admission.test.ts.',
   },
 
   // ── /api/v1/documents (router-level `authenticate`, then `requireStorage`) ──
@@ -754,7 +793,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     // should: it is one genuinely unbounded operation, up to
     // MAX_DOCUMENTS_PER_USER rows each with an object delete. Every per-row
     // document route deliberately carries `generalAuthLimiter` instead, because
-    // this IP-keyed budget of 10 per 15 minutes is shared with export, backup
+    // this per-user budget of 10 per 15 minutes is shared with export, backup
     // download and every bulk vault operation.
     limiters: ['heavyOpLimiter'],
     owned: null,
@@ -775,7 +814,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     // `documentUploadLimiter`, deliberately NOT `heavyOpLimiter`: init, complete
-    // and abort are three requests per transfer, and the IP-keyed heavy-op budget
+    // and abort are three requests per transfer, and the per-user heavy-op budget
     // of 10 per 15 minutes is shared with export, backup and every bulk vault
     // operation.
     limiters: ['documentUploadLimiter'],
@@ -809,10 +848,23 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     // The ONLY route in this application whose body is not JSON. It carries a
     // route-level `express.raw` for `application/octet-stream`, and two
     // middlewares ahead of it that are not limiters and so do not appear in the
-    // column: a 411 guard, and the process-wide part semaphore — which has to be
-    // AHEAD of the parser, because a slot taken after the body is buffered bounds
-    // no memory at all.
+    // column: a 411 guard, and the slot holder — which has to be AHEAD of the
+    // parser, because a slot taken after the body is buffered bounds no memory at
+    // all. The slot holder is THREE controls in one, and only the first is a
+    // budget over time: it charges this account's share of the process-wide
+    // in-flight budget (503 past it), takes one of `MAX_IN_FLIGHT_PART_UPLOADS`
+    // slots, and arms the deadline by which this part's body must have arrived.
+    // The handler is mounted through `holdingPartUploadSlot`, last, so the slot
+    // is handed back when the handler settles and not when a departed client's
+    // socket closes.
     limiters: ['documentPartLimiter'],
+    chain: [
+      'documentPartLimiter',
+      'requirePartContentLength',
+      'holdPartUploadSlot',
+      'parsePartUploadBody',
+      'partUploadHandler',
+    ],
     owned: { param: 'id', resource: 'documentUpload' },
     when: 'always',
     note: 'Takes a second path parameter, :partNumber, which authz-matrix.test.ts supplies through its scenario.',
@@ -873,7 +925,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     // `generalAuthLimiter`, NOT `heavyOpLimiter`: this is a per-row route, and
-    // that IP-keyed budget of 10 per 15 minutes would 429 a user who purged
+    // that per-user budget of 10 per 15 minutes would 429 a user who purged
     // eleven documents and then lock them out of emptying their vault trash.
     limiters: ['generalAuthLimiter'],
     owned: { param: 'id', resource: 'trashedDocument' },
@@ -930,7 +982,7 @@ export const isMountedUnderTest = (row: RouteRow): boolean =>
 /**
  * Every function exported by the rate-limiter module, by name.
  *
- * A namespace import rather than fifteen named ones on purpose: a limiter added
+ * A namespace import rather than one named import per limiter, on purpose: a limiter added
  * to `rateLimiter.ts` and mounted on a route is then named automatically, so
  * the table cannot silently omit it. With named imports, an unrecognised
  * middleware is indistinguishable from a validator closure and the new limiter
@@ -948,6 +1000,14 @@ interface ObservedRoute {
   readonly method: HttpMethod;
   readonly path: string;
   readonly limiters: readonly string[];
+  /** Every limiter and admission middleware on the route, in stack order. */
+  readonly chain: readonly string[];
+  /**
+   * EVERY handler on the route, in order, named as in `chain` where it can be and
+   * `<other>` where it cannot (a validator, a controller). `chain` drops the unnamed
+   * ones, so only this can say what sits directly after a given middleware.
+   */
+  readonly stack: readonly string[];
   /** The router prefix this route came from, or `null` when `app.ts` mounts it directly. */
   readonly mount: string | null;
 }
@@ -962,6 +1022,11 @@ export interface CollectedRoutes {
   readonly unknownMounts: readonly string[];
   /** Layers this reader cannot classify (a router nested inside a router). */
   readonly unsupported: readonly string[];
+  /**
+   * Body parsers mounted at ROUTER level (`router.use(express.json())`). One of
+   * those runs before every route's limiter in that router, so none may exist.
+   */
+  readonly routerLevelParsers: readonly string[];
 }
 
 /** The private shape of an Express 5 / router@2 layer, as far as this reader needs it. */
@@ -1018,6 +1083,118 @@ const limitersOf = (route: NonNullable<RouterLayer['route']>): string[] =>
     .map((entry) => LIMITER_NAMES.get(entry.handle))
     .filter((name): name is string => name !== undefined);
 
+/** The chain name of `sanitizeRequestBody`. */
+export const BODY_SANITIZER = 'sanitizeRequestBody';
+
+/**
+ * The body-admission middlewares, by FUNCTION IDENTITY, exactly as the limiters
+ * are named: each is a module-level export, so the one mounted is the one named.
+ * `sanitizeRequestBody` is not admission, but it belongs in the chain for the same
+ * reason the parsers do: WHERE it sits is the control (straight after a route's own
+ * parser), and a chain that could not show it could not pin that.
+ */
+const ADMISSION_NAMES = new Map<unknown, string>([
+  [requirePartContentLength, 'requirePartContentLength'],
+  [holdPartUploadSlot, 'holdPartUploadSlot'],
+  [parsePartUploadBody, 'parsePartUploadBody'],
+  [holdLargeBodySlot, 'holdLargeBodySlot'],
+  [parseLargeJsonBody, 'parseLargeJsonBody'],
+  [sanitizeRequestBody, BODY_SANITIZER],
+]);
+
+/** The route-level parsers named above. */
+const NAMED_BODY_PARSERS: ReadonlySet<string> = new Set([
+  'parsePartUploadBody',
+  'parseLargeJsonBody',
+]);
+
+/** The slot holders named above: what must stand between the limiters and a parser. */
+export const SLOT_HOLDERS: ReadonlySet<string> = new Set([
+  'holdPartUploadSlot',
+  'holdLargeBodySlot',
+]);
+
+/**
+ * The function names `body-parser` 2.x gives the middleware it returns
+ * (`lib/types/{json,raw,text,urlencoded}.js`). Matched BY NAME, as the fallback
+ * for a parser that is not one of the exports above: a fresh `express.json()`
+ * written inline on a route has no identity to look up, and it is exactly the
+ * mount that would reintroduce the defect. The limit of it, stated: a parser
+ * wrapped in another function carries that function's name and escapes this.
+ */
+const BODY_PARSER_FUNCTION_NAMES: ReadonlySet<string> = new Set([
+  'jsonParser',
+  'rawParser',
+  'textParser',
+  'urlencodedParser',
+]);
+
+/**
+ * The route-level parsers whose output is a parsed OBJECT, and so must be followed
+ * immediately by {@link BODY_SANITIZER}: the app-level sanitizer runs before any
+ * route-level parser, and sees nothing of what one produces.
+ *
+ * `parsePartUploadBody` is deliberately absent. It is a raw parser and its body is
+ * a `Buffer` of ciphertext: there are no keys in it to inject, and walking a
+ * `Buffer` as an object would replace the ciphertext with a map of its indices. An
+ * unnamed `jsonParser`/`urlencodedParser` is covered by {@link isStructuredBodyParser}.
+ */
+const STRUCTURED_BODY_PARSERS: ReadonlySet<string> = new Set(['parseLargeJsonBody']);
+
+/** The prefix an un-exported body parser is reported under. */
+export const UNNAMED_PARSER_PREFIX = 'unnamedBodyParser:';
+
+/** The name `holdingLargeBodySlot` gives the handler it wraps. */
+const LARGE_BODY_HANDLER = 'largeBodyHandler';
+
+/** The name `holdingPartUploadSlot` gives the handler it wraps. */
+const PART_UPLOAD_HANDLER = 'partUploadHandler';
+
+/**
+ * Each slot holder, and the wrapper its route's handler must be mounted through,
+ * last. The two come as a PAIR: the holder takes the slot, and only the wrapper
+ * hands it back when the handler settles rather than when the socket closes.
+ * Matched by the wrapper's FUNCTION NAME, because each call of a wrapper factory
+ * returns a fresh function with no identity to look up.
+ */
+export const SLOT_HANDLERS: ReadonlyMap<string, string> = new Map([
+  ['holdPartUploadSlot', PART_UPLOAD_HANDLER],
+  ['holdLargeBodySlot', LARGE_BODY_HANDLER],
+]);
+
+const SLOT_HANDLER_NAMES: ReadonlySet<string> = new Set(SLOT_HANDLERS.values());
+
+/** The chain name of one stack entry, or `undefined` for anything else (validators, handlers). */
+function chainNameOf(handle: unknown): string | undefined {
+  const named = LIMITER_NAMES.get(handle) ?? ADMISSION_NAMES.get(handle);
+  if (named !== undefined) return named;
+  if (typeof handle !== 'function') return undefined;
+  if (BODY_PARSER_FUNCTION_NAMES.has(handle.name)) return `${UNNAMED_PARSER_PREFIX}${handle.name}`;
+  if (SLOT_HANDLER_NAMES.has(handle.name)) return handle.name;
+  return undefined;
+}
+
+/** Whether a chain name is a body parser, named or not. */
+export const isBodyParser = (name: string): boolean =>
+  NAMED_BODY_PARSERS.has(name) || name.startsWith(UNNAMED_PARSER_PREFIX);
+
+/** Whether a chain name is a parser whose output must be sanitized before anything reads it. */
+export const isStructuredBodyParser = (name: string): boolean =>
+  STRUCTURED_BODY_PARSERS.has(name) ||
+  name === `${UNNAMED_PARSER_PREFIX}jsonParser` ||
+  name === `${UNNAMED_PARSER_PREFIX}urlencodedParser`;
+
+const chainOf = (route: NonNullable<RouterLayer['route']>): string[] =>
+  (route.stack ?? [])
+    .map((entry) => chainNameOf(entry.handle))
+    .filter((name): name is string => name !== undefined);
+
+/** The name every unclassified handler is reported under in {@link ObservedRoute.stack}. */
+const OTHER_HANDLER = '<other>';
+
+const stackOf = (route: NonNullable<RouterLayer['route']>): string[] =>
+  (route.stack ?? []).map((entry) => chainNameOf(entry.handle) ?? OTHER_HANDLER);
+
 /**
  * Walks the real Express app and reports every route it would answer, with the
  * limiters mounted on each.
@@ -1030,6 +1207,7 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
   const routes: ObservedRoute[] = [];
   const unknownMounts: string[] = [];
   const unsupported: string[] = [];
+  const routerLevelParsers: string[] = [];
 
   const stack = (app as unknown as { router: { stack: unknown[] } }).router.stack;
 
@@ -1042,6 +1220,8 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
           method,
           path: String(layer.route.path),
           limiters: limitersOf(layer.route),
+          chain: chainOf(layer.route),
+          stack: stackOf(layer.route),
           mount: null,
         });
       }
@@ -1075,6 +1255,8 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
             method,
             path: `${mount}${suffix}`,
             limiters: limitersOf(child.route),
+            chain: chainOf(child.route),
+            stack: stackOf(child.route),
             mount,
           });
         }
@@ -1085,9 +1267,14 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
       // resolve its mount — so it is reported rather than dropped.
       if (Array.isArray(child.handle?.stack)) {
         unsupported.push(`${mount} → nested router (${child.name})`);
+        continue;
+      }
+      const name = chainNameOf(child.handle);
+      if (name !== undefined && isBodyParser(name)) {
+        routerLevelParsers.push(`${mount} → router-level ${name}`);
       }
     }
   }
 
-  return { routes, unknownMounts, unsupported };
+  return { routes, unknownMounts, unsupported, routerLevelParsers };
 }

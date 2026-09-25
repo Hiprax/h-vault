@@ -10,6 +10,19 @@ import { TIER_BUDGET_SECONDS } from '../../../scripts/ci/lib/tiers.mjs';
 // written down twice is a count that drifts.
 import { A11Y_VIEW_IDS } from '../../../e2e/a11yViews.js';
 import { NUMBER_WORDS } from './support/numberWords';
+import * as rateLimiters from '../src/middleware/rateLimiter.js';
+import { swaggerSpec } from '../src/config/swagger.js';
+
+const { FOLDER_WRITE_RATE_LIMIT_MAX, VAULT_ITEM_WRITE_RATE_LIMIT_MAX } = rateLimiters;
+/**
+ * The limiters the middleware module exports: its MIDDLEWARE (three parameters)
+ * named `…Limiter`. The module also exports helpers (`resolveClientKey`,
+ * `buildAccountKey`, the `skipAccountLimiter` predicate, …), which is why a bare
+ * count of its functions is not the tier count.
+ */
+const LIMITER_EXPORTS = Object.entries(rateLimiters).filter(
+  ([name, value]) => typeof value === 'function' && name.endsWith('Limiter') && value.length === 3,
+);
 
 // Documentation-lint: the README API reference, rate-limit table, env table,
 // and counts must stay in sync with the code. Resolve the monorepo-root
@@ -97,6 +110,65 @@ describe('README documentation sync', () => {
     // The supported row, and the unsupported row that must move with it.
     expect(security).toMatch(new RegExp(`^\\|\\s*${line}\\.x\\s*\\|\\s*Yes\\s*\\|`, 'm'));
     expect(security).toMatch(new RegExp(`^\\|\\s*<\\s*${line}\\s*\\|\\s*No\\s*\\|`, 'm'));
+  });
+
+  describe('the rate-limit table', () => {
+    // The rows between the `| Tier | Limit |` header and the next blank line.
+    const lines = readme.split('\n');
+    const header = lines.findIndex((line) => /^\|\s*Tier\s*\|\s*Limit\s*\|/.test(line));
+    const end = lines.findIndex((line, index) => index > header && line.trim() === '');
+    const rows = lines.slice(header + 2, end);
+    const rowNamed = (tier: string): string | undefined =>
+      rows.find((row) => row.split('|')[1]?.trim() === tier);
+    const formatted = (count: number): string => count.toLocaleString('en-US');
+
+    it('has one row per rate limiter the middleware module exports', () => {
+      // A limiter added without a row, or a row left behind by a removed one,
+      // fails here.
+      expect(header).toBeGreaterThan(-1);
+      expect(rows.length).toBe(LIMITER_EXPORTS.length);
+      expect(rows.every((row) => row.startsWith('|'))).toBe(true);
+    });
+
+    it('states the tier count in words, wherever the README counts them', () => {
+      const word = NUMBER_WORDS[LIMITER_EXPORTS.length];
+      expect(word, `no word for ${String(LIMITER_EXPORTS.length)}`).toBeDefined();
+      expect(readme).toContain(`[${word!} rate-limit tiers](#rate-limiting)`);
+      expect(readme).toMatch(
+        new RegExp(`^${word![0]!.toUpperCase()}${word!.slice(1)} tiers,`, 'm'),
+      );
+    });
+
+    it('quotes the two derived write budgets from their constants, in the README and the API reference', () => {
+      // Both are DERIVED (two passes over the most rows an account may hold), so
+      // a change to the per-user caps moves them, and a hand-copied number would
+      // not move with it.
+      const limitCell = (tier: string): string | undefined => rowNamed(tier)?.split('|')[2]?.trim();
+      expect(limitCell('Vault item write')).toBe(
+        `${formatted(VAULT_ITEM_WRITE_RATE_LIMIT_MAX)} / user`,
+      );
+      expect(limitCell('Folder write')).toBe(`${formatted(FOLDER_WRITE_RATE_LIMIT_MAX)} / user`);
+
+      const descriptions = Object.values(
+        swaggerSpec.paths as Record<string, Record<string, { description?: unknown }>>,
+      )
+        .flatMap((methods) => Object.values(methods))
+        .map((operation) =>
+          typeof operation.description === 'string' ? operation.description : '',
+        );
+      const quoting = (scope: 'item' | 'folder'): string[] =>
+        descriptions.filter((text) => text.includes(`one budget across every ${scope} mutation`));
+      expect(quoting('item').length).toBeGreaterThan(0);
+      expect(quoting('folder').length).toBeGreaterThan(0);
+      for (const text of quoting('item')) {
+        expect(text).toContain(
+          `Rate limited: ${formatted(VAULT_ITEM_WRITE_RATE_LIMIT_MAX)} req/user`,
+        );
+      }
+      for (const text of quoting('folder')) {
+        expect(text).toContain(`Rate limited: ${formatted(FOLDER_WRITE_RATE_LIMIT_MAX)} req/user`);
+      }
+    });
   });
 
   it('the Heavy Ops rate-limit row reflects the real targets, not "password generation"', () => {
@@ -685,7 +757,7 @@ describe('the accessibility gate’s scanned-view count', () => {
     },
     {
       file: '.testfortress/verify.json',
-      pattern: /currently open across the ([a-z-]+) scanned views/,
+      pattern: /recorded without blocking across the ([a-z-]+) scanned views/,
       expected: total,
       what: 'the below-threshold-a11y known gap',
     },

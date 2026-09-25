@@ -56,6 +56,7 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptVaultKey: vi.fn(),
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
+    encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
     generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
@@ -73,6 +74,7 @@ vi.mock('../src/services/api/authApi', () => ({
 
 vi.mock('../src/services/api/vaultApi', () => ({
   listItemsApi: vi.fn(),
+  getItemApi: vi.fn(),
   createItemApi: vi.fn(),
   updateItemApi: vi.fn(),
   deleteItemApi: vi.fn(),
@@ -128,6 +130,7 @@ import {
   listItemsApi,
   listTrashApi,
   listFoldersApi,
+  getItemApi,
   updateItemApi,
 } from '../src/services/api/vaultApi';
 import type { DecryptedVaultItem, DecryptedFolder } from '../src/stores/vaultStore';
@@ -136,9 +139,32 @@ import type { DecryptedVaultItem, DecryptedFolder } from '../src/stores/vaultSto
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Row and account ids are ObjectIds in production, and an edit binds its v2
+ * fields to the row id, so every id that reaches a binding is a realistic one.
+ */
+const USER_ID = '64b7f0c2a1d3e4f5a6b7c8d9';
+const ITEM_ID = '65a1b2c3d4e5f60718293a4b';
+const LOGIN_ID = '65a1b2c3d4e5f60718293a4c';
+const NOTE_ID = '65a1b2c3d4e5f60718293a4d';
+
+/**
+ * The additional data one `encryptDataWithAad` call sealed with, as text.
+ *
+ * Checked by its tag, not `instanceof`: `TextEncoder` under jsdom returns a
+ * Uint8Array from Node's realm, which fails `instanceof` against jsdom's.
+ */
+function aadText(call: readonly unknown[] | undefined): string {
+  const aad = call?.[2];
+  if (Object.prototype.toString.call(aad) !== '[object Uint8Array]') {
+    throw new Error('encryptDataWithAad was not given a Uint8Array of additional data');
+  }
+  return new TextDecoder().decode(aad as Uint8Array);
+}
+
 function makeMockItem(overrides: Partial<DecryptedVaultItem> = {}): DecryptedVaultItem {
   return {
-    id: 'item-1',
+    id: ITEM_ID,
     itemType: 'login',
     tags: [],
     favorite: false,
@@ -147,8 +173,8 @@ function makeMockItem(overrides: Partial<DecryptedVaultItem> = {}): DecryptedVau
     createdAt: '2024-01-01T00:00:00Z',
     updatedAt: '2024-01-01T00:00:00Z',
     _raw: {
-      _id: 'item-1',
-      userId: 'user-1',
+      _id: ITEM_ID,
+      userId: USER_ID,
       itemType: 'login',
       encryptedName: 'enc-name',
       nameIv: 'n-iv',
@@ -179,8 +205,8 @@ function _makeMockFolder(overrides: Partial<DecryptedFolder> = {}): DecryptedFol
 
 function makeRawItemResponse(overrides: Record<string, unknown> = {}) {
   return {
-    _id: 'item-1',
-    userId: 'user-1',
+    _id: ITEM_ID,
+    userId: USER_ID,
     itemType: 'login',
     encryptedName: 'enc-name',
     nameIv: 'n-iv',
@@ -199,7 +225,7 @@ function makeRawItemResponse(overrides: Record<string, unknown> = {}) {
 function makeRawFolderResponse(overrides: Record<string, unknown> = {}) {
   return {
     _id: 'folder-1',
-    userId: 'user-1',
+    userId: USER_ID,
     encryptedName: 'enc-folder-name',
     nameIv: 'fn-iv',
     nameTag: 'fn-tag',
@@ -253,6 +279,14 @@ function setupUnlockedVault(): void {
 describe('vaultStore — additional edge cases', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` keeps queued `mockResolvedValueOnce` values, and this file
+    // runs shuffled: a test that stops before consuming its queue would hand its
+    // leftover plaintexts to whichever test runs next, failing it for a reason
+    // that has nothing to do with it. Reset the queued crypto mocks outright.
+    vi.mocked(cryptoService.encryptData).mockReset();
+    vi.mocked(cryptoService.encryptDataWithAad).mockReset();
+    vi.mocked(cryptoService.decryptData).mockReset();
+    vi.mocked(cryptoService.generateSearchHash).mockReset();
     useVaultStore.setState(vaultInitialState);
     useAuthStore.setState(authInitialState);
   });
@@ -748,13 +782,13 @@ describe('vaultStore — additional edge cases', () => {
       setupUnlockedVault();
 
       const existingItem = makeMockItem({
-        id: 'login-1',
+        id: LOGIN_ID,
         itemType: 'login',
         name: 'My Login',
         data: { password: 'old-password', username: 'user1' },
         _raw: {
-          _id: 'login-1',
-          userId: 'user-1',
+          _id: LOGIN_ID,
+          userId: USER_ID,
           itemType: 'login',
           encryptedName: 'enc',
           nameIv: 'iv',
@@ -772,7 +806,7 @@ describe('vaultStore — additional edge cases', () => {
 
       useVaultStore.setState({ items: [existingItem] });
 
-      vi.mocked(cryptoService.encryptData)
+      vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-old-pass', iv: 'op-iv', tag: 'op-tag' });
@@ -782,7 +816,7 @@ describe('vaultStore — additional edge cases', () => {
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
-          data: makeRawItemResponse({ _id: 'login-1' }),
+          data: makeRawItemResponse({ _id: LOGIN_ID }),
         },
       } as never);
 
@@ -790,30 +824,40 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce('My Login')
         .mockResolvedValueOnce(JSON.stringify({ password: 'new-password', username: 'user1' }));
 
-      await useVaultStore.getState().updateItem('login-1', 'login', 'My Login', {
+      await useVaultStore.getState().updateItem(LOGIN_ID, 'login', 'My Login', {
         password: 'new-password',
         username: 'user1',
       });
 
+      // The retained password is sealed through the bound path to THIS row's id
+      // (role item.password-history), so its IV carries the v2 marker.
       expect(updateItemApi).toHaveBeenCalledWith(
-        'login-1',
+        LOGIN_ID,
         expect.objectContaining({
           passwordHistory: expect.arrayContaining([
             expect.objectContaining({
               encryptedPassword: 'enc-old-pass',
-              iv: 'op-iv',
+              iv: 'v2:op-iv',
               tag: 'op-tag',
             }),
           ]) as unknown,
         }),
       );
+      const sealCalls = vi.mocked(cryptoService.encryptDataWithAad).mock.calls;
+      expect(sealCalls).toHaveLength(3);
+      expect(sealCalls[2]![0]).toBe('old-password');
+      expect(sealCalls[2]![1]).toBe(mockVaultKey);
+      expect(aadText(sealCalls[2])).toBe(`hvault/vault-field/v2|item.password-history|${LOGIN_ID}`);
+      expect(cryptoService.encryptData).not.toHaveBeenCalled();
+      // The row was in the store, so its stored type needed no request.
+      expect(getItemApi).not.toHaveBeenCalled();
     });
 
     it('should not build password history when password has not changed', async () => {
       setupUnlockedVault();
 
       const existingItem = makeMockItem({
-        id: 'login-1',
+        id: LOGIN_ID,
         itemType: 'login',
         name: 'My Login',
         data: { password: 'same-password', username: 'user1' },
@@ -821,7 +865,7 @@ describe('vaultStore — additional edge cases', () => {
 
       useVaultStore.setState({ items: [existingItem] });
 
-      vi.mocked(cryptoService.encryptData)
+      vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
 
@@ -830,7 +874,7 @@ describe('vaultStore — additional edge cases', () => {
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
-          data: makeRawItemResponse({ _id: 'login-1' }),
+          data: makeRawItemResponse({ _id: LOGIN_ID }),
         },
       } as never);
 
@@ -838,20 +882,26 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce('My Login')
         .mockResolvedValueOnce(JSON.stringify({ password: 'same-password', username: 'user1' }));
 
-      await useVaultStore.getState().updateItem('login-1', 'login', 'My Login', {
+      await useVaultStore.getState().updateItem(LOGIN_ID, 'login', 'My Login', {
         password: 'same-password',
         username: 'user1',
       });
 
       const callArgs = vi.mocked(updateItemApi).mock.calls[0]![1] as Record<string, unknown>;
       expect(callArgs.passwordHistory).toBeUndefined();
+      // Only the name and the data were sealed: no history entry was.
+      const sealCalls = vi.mocked(cryptoService.encryptDataWithAad).mock.calls;
+      expect(sealCalls.map((call) => aadText(call))).toEqual([
+        `hvault/vault-field/v2|item.name|${LOGIN_ID}`,
+        `hvault/vault-field/v2|item.data|login|${LOGIN_ID}`,
+      ]);
     });
 
     it('should not build password history for non-login items', async () => {
       setupUnlockedVault();
 
       const existingItem = makeMockItem({
-        id: 'note-1',
+        id: NOTE_ID,
         itemType: 'note',
         name: 'My Note',
         data: { content: 'old content' },
@@ -859,7 +909,7 @@ describe('vaultStore — additional edge cases', () => {
 
       useVaultStore.setState({ items: [existingItem] });
 
-      vi.mocked(cryptoService.encryptData)
+      vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
 
@@ -868,7 +918,7 @@ describe('vaultStore — additional edge cases', () => {
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
-          data: makeRawItemResponse({ _id: 'note-1', itemType: 'note' }),
+          data: makeRawItemResponse({ _id: NOTE_ID, itemType: 'note' }),
         },
       } as never);
 
@@ -878,7 +928,7 @@ describe('vaultStore — additional edge cases', () => {
 
       await useVaultStore
         .getState()
-        .updateItem('note-1', 'note', 'My Note', { content: 'new content' });
+        .updateItem(NOTE_ID, 'note', 'My Note', { content: 'new content' });
 
       const callArgs = vi.mocked(updateItemApi).mock.calls[0]![1] as Record<string, unknown>;
       expect(callArgs.passwordHistory).toBeUndefined();
@@ -888,7 +938,7 @@ describe('vaultStore — additional edge cases', () => {
       setupUnlockedVault();
 
       const existingItem = makeMockItem({
-        id: 'login-1',
+        id: LOGIN_ID,
         itemType: 'login',
         name: 'My Login',
         data: { password: '', username: 'user1' },
@@ -896,7 +946,7 @@ describe('vaultStore — additional edge cases', () => {
 
       useVaultStore.setState({ items: [existingItem] });
 
-      vi.mocked(cryptoService.encryptData)
+      vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
 
@@ -905,7 +955,7 @@ describe('vaultStore — additional edge cases', () => {
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
-          data: makeRawItemResponse({ _id: 'login-1' }),
+          data: makeRawItemResponse({ _id: LOGIN_ID }),
         },
       } as never);
 
@@ -915,7 +965,7 @@ describe('vaultStore — additional edge cases', () => {
 
       await useVaultStore
         .getState()
-        .updateItem('login-1', 'login', 'My Login', { password: 'new-pass', username: 'user1' });
+        .updateItem(LOGIN_ID, 'login', 'My Login', { password: 'new-pass', username: 'user1' });
 
       const callArgs = vi.mocked(updateItemApi).mock.calls[0]![1] as Record<string, unknown>;
       expect(callArgs.passwordHistory).toBeUndefined();
@@ -924,10 +974,10 @@ describe('vaultStore — additional edge cases', () => {
     it('should update item in state when API returns success', async () => {
       setupUnlockedVault();
 
-      const existingItem = makeMockItem({ id: 'item-1', name: 'Old Name' });
+      const existingItem = makeMockItem({ id: ITEM_ID, name: 'Old Name' });
       useVaultStore.setState({ items: [existingItem] });
 
-      vi.mocked(cryptoService.encryptData)
+      vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
       vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
@@ -935,7 +985,7 @@ describe('vaultStore — additional edge cases', () => {
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
-          data: makeRawItemResponse({ _id: 'item-1' }),
+          data: makeRawItemResponse({ _id: ITEM_ID }),
         },
       } as never);
 
@@ -945,7 +995,7 @@ describe('vaultStore — additional edge cases', () => {
 
       await useVaultStore
         .getState()
-        .updateItem('item-1', 'login', 'New Name', { username: 'updated' });
+        .updateItem(ITEM_ID, 'login', 'New Name', { username: 'updated' });
 
       const { items } = useVaultStore.getState();
       expect(items).toHaveLength(1);
@@ -955,10 +1005,10 @@ describe('vaultStore — additional edge cases', () => {
     it('should not update state when API returns success: false', async () => {
       setupUnlockedVault();
 
-      const existingItem = makeMockItem({ id: 'item-1', name: 'Original' });
+      const existingItem = makeMockItem({ id: ITEM_ID, name: 'Original' });
       useVaultStore.setState({ items: [existingItem] });
 
-      vi.mocked(cryptoService.encryptData)
+      vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc', iv: 'iv', tag: 'tag' })
         .mockResolvedValueOnce({ encrypted: 'enc', iv: 'iv', tag: 'tag' });
       vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
@@ -970,7 +1020,7 @@ describe('vaultStore — additional edge cases', () => {
         },
       } as never);
 
-      await useVaultStore.getState().updateItem('item-1', 'login', 'Changed', {});
+      await useVaultStore.getState().updateItem(ITEM_ID, 'login', 'Changed', {});
 
       expect(useVaultStore.getState().items[0]!.name).toBe('Original');
     });

@@ -13,7 +13,9 @@ import { cryptoService } from '../../services/crypto/cryptoService';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
+import { FormAlert } from '../ui/FormAlert';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../ui/Card';
+import { StandalonePage } from '../layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schema                                                                    */
@@ -372,13 +374,13 @@ export function UnlockScreen() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+    <StandalonePage>
       <Card className="w-full max-w-sm">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <Lock className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Vault Locked</CardTitle>
+          <CardTitle as="h1">Vault Locked</CardTitle>
           <CardDescription>
             {user?.email ? `Signed in as ${user.email}` : 'Enter your master password to unlock'}
           </CardDescription>
@@ -413,15 +415,7 @@ export function UnlockScreen() {
               </div>
             )}
 
-            {apiError && !isLockedOut && (
-              <div
-                role="alert"
-                className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
-              >
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{apiError}</span>
-              </div>
-            )}
+            {apiError && !isLockedOut && <FormAlert message={apiError} />}
 
             <div className="space-y-2">
               <Label htmlFor="unlock-password" error={!!form.formState.errors.masterPassword}>
@@ -473,6 +467,6 @@ export function UnlockScreen() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

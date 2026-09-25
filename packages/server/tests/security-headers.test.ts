@@ -1,9 +1,40 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import request from 'supertest';
+import type { Request, Response, NextFunction } from 'express';
+import { bulkReEncryptSchema, loginSchema, restoreBackupSchema } from '@hvault/shared';
 import app from '../src/app.js';
+import { authHeader, createTestUser, getCsrf } from './helpers.js';
+
+/**
+ * What each route's `validate` middleware was handed, recorded on the way through.
+ *
+ * The sanitizer's work is invisible at the controller: every body schema is a plain
+ * `z.object()`, whose strip mode drops an unknown key such as `$gt` or `__proto__`
+ * whether or not the sanitizer ran. So the only place its absence can be observed is
+ * the input to validation, which is what this records. The wrapper calls straight
+ * through, so every route under test behaves exactly as it does in production.
+ */
+const { validatedBodies } = vi.hoisted(() => ({
+  validatedBodies: [] as { schema: unknown; body: unknown }[],
+}));
+
+vi.mock('../src/middleware/validate.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/middleware/validate.js')>();
+  return {
+    ...actual,
+    validate: (...args: Parameters<typeof actual.validate>) => {
+      const inner = actual.validate(...args);
+      const [schema, location = 'body'] = args;
+      return (req: Request, res: Response, next: NextFunction): void => {
+        if (location === 'body') validatedBodies.push({ schema, body: req.body as unknown });
+        inner(req, res, next);
+      };
+    },
+  };
+});
 
 /**
  * Split a `Content-Security-Policy` header into `directive -> source list`.
@@ -337,129 +368,137 @@ describe('Security Headers & Middleware', () => {
   // ── MongoDB Injection Prevention ───────────────────────────────────
 
   describe('MongoDB injection prevention', () => {
-    it('should strip $-prefixed keys from request body', async () => {
-      // We need a CSRF token for POST requests
-      const csrfRes = await request(app).get('/api/v1/csrf-token');
-      const csrfToken: string = csrfRes.body.data.csrfToken;
-      const setCookies: string[] = (csrfRes.headers['set-cookie'] as string[] | undefined) ?? [];
-      const csrfCookieRaw = setCookies.find((c) => c.startsWith('__csrf='));
-      const csrfCookie = csrfCookieRaw ? csrfCookieRaw.split(';')[0]! : '';
+    /**
+     * The three routes the sanitizer must cover, and the schema each validates with.
+     *
+     * `/auth/login` is parsed by the GLOBAL 2 MB parser, so the app-level sanitizer
+     * sees its body. The other two are the custom-limit routes: the global parser
+     * skips them (`CUSTOM_BODY_LIMIT_PATHS`), so their body is still `undefined` when
+     * the app-level sanitizer runs and is parsed later, by the route's own 30 MB
+     * parser. They are covered only if the route sanitizes after that parser, which
+     * is the defect these cases pin. Login is the control: the two paths must agree.
+     */
+    const SANITIZED_ROUTES = [
+      { path: '/api/v1/auth/login', schema: loginSchema },
+      { path: '/api/v1/backup/restore', schema: restoreBackupSchema },
+      { path: '/api/v1/vault/items/bulk-reencrypt', schema: bulkReEncryptSchema },
+    ] as const;
 
-      // Send a login request with $-prefixed keys that should be stripped
-      // The $gt key should be stripped before any controller logic runs
-      const res = await request(app)
-        .post('/api/v1/auth/login')
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({
-          email: 'test@example.com',
-          authHash: 'some-hash',
-          $gt: '1',
-        });
+    /**
+     * Each planted body is RAW JSON on purpose. Written as an object literal,
+     * `{ __proto__: {...} }` sets the literal's prototype rather than creating a key,
+     * and `JSON.stringify` then sends nothing at all, so a test built that way passes
+     * against a server with no sanitizer. `JSON.parse` is what creates `__proto__` as
+     * an own key, exactly as the body parser does.
+     *
+     * Every body also carries `keep` fields, so a sanitizer that blanked the whole
+     * body, or stripped a `$`-prefixed VALUE instead of a key, fails too. None of them
+     * satisfies the route's schema, so every request stops at validation with a 400
+     * and no handler runs.
+     */
+    const INJECTION_CASES = [
+      {
+        name: 'a top-level $-prefixed key',
+        raw: '{"$gt":"1","keep":"$value-not-a-key"}',
+        expected: { keep: '$value-not-a-key' },
+      },
+      {
+        name: 'a nested $-prefixed key, in an object and inside an array',
+        raw: '{"nested":{"$gt":"","keep":"v"},"list":[{"$where":"this.owner == 1","keep":1}]}',
+        expected: { nested: { keep: 'v' }, list: [{ keep: 1 }] },
+      },
+      {
+        name: 'a __proto__ key',
+        raw: '{"__proto__":{"isAdmin":true},"keep":"v"}',
+        expected: { keep: 'v' },
+      },
+      {
+        name: 'a constructor key',
+        raw: '{"constructor":{"prototype":{"isAdmin":true}},"keep":"v"}',
+        expected: { keep: 'v' },
+      },
+      {
+        name: 'a prototype key, top-level and nested',
+        raw: '{"prototype":{"polluted":true},"nested":{"prototype":{"polluted":true},"keep":2}}',
+        expected: { nested: { keep: 2 } },
+      },
+    ] as const;
 
-      // The request should still process (not crash) — 401 because user doesn't exist
-      // If the $gt wasn't stripped, it could cause unexpected behavior in MongoDB queries
-      expect(res.status).toBe(401);
+    let accessToken = '';
+
+    beforeEach(async () => {
+      validatedBodies.length = 0;
+      ({ accessToken } = await createTestUser());
     });
 
-    it('should strip nested $-prefixed keys from request body', async () => {
-      const csrfRes = await request(app).get('/api/v1/csrf-token');
-      const csrfToken: string = csrfRes.body.data.csrfToken;
-      const setCookies: string[] = (csrfRes.headers['set-cookie'] as string[] | undefined) ?? [];
-      const csrfCookieRaw = setCookies.find((c) => c.startsWith('__csrf='));
-      const csrfCookie = csrfCookieRaw ? csrfCookieRaw.split(';')[0]! : '';
+    /** POSTs a raw JSON body as a signed-in user with a valid CSRF pair. */
+    async function postRaw(route: string, raw: string): Promise<request.Response> {
+      const agent = request.agent(app);
+      const csrf = await getCsrf(agent);
+      return agent
+        .post(route)
+        .set('Authorization', authHeader(accessToken))
+        .set('Cookie', csrf.cookie)
+        .set('x-csrf-token', csrf.token)
+        .set('Content-Type', 'application/json')
+        .send(raw);
+    }
 
-      const res = await request(app)
-        .post('/api/v1/auth/login')
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({
-          email: { $gt: '' },
-          authHash: 'some-hash',
+    for (const route of SANITIZED_ROUTES) {
+      describe(`on ${route.path}`, () => {
+        for (const injection of INJECTION_CASES) {
+          it(`strips ${injection.name} before validation sees the body`, async () => {
+            const res = await postRaw(route.path, injection.raw);
+
+            // Stopped at validation, and by the flat error envelope: no handler ran.
+            expect(res.status).toBe(400);
+            expect(res.body).toMatchObject({ success: false, statusCode: 400 });
+
+            // Exactly one body reached validation, and it was THIS route's schema.
+            expect(validatedBodies).toHaveLength(1);
+            const [seen] = validatedBodies;
+            expect(seen!.schema).toBe(route.schema);
+
+            // The whole sanitized body, not a spot check: every dangerous key gone at
+            // every depth, every legitimate one intact.
+            expect(seen!.body).toStrictEqual(injection.expected);
+            expect(Object.hasOwn(seen!.body as object, '__proto__')).toBe(false);
+            // A `__proto__` copied by assignment would not be an own key at all; it
+            // would have become the body's prototype, and this is what catches that.
+            expect(Object.getPrototypeOf(seen!.body)).toBe(Object.prototype);
+          });
+        }
+
+        it('refuses a body nested past the depth bound with 400, before validation', async () => {
+          // 10,000 levels is 20 KB, well inside every parser limit, and deep enough
+          // to overflow the stack of a recursive walk. That overflow used to surface
+          // as a 500; a malformed body is the client's error.
+          const depth = 10_000;
+          const raw = `${'{"a":'.repeat(depth)}1${'}'.repeat(depth)}`;
+
+          const res = await postRaw(route.path, raw);
+
+          expect(res.status).toBe(400);
+          expect(res.body).toMatchObject({
+            success: false,
+            statusCode: 400,
+            message: 'Request body is nested too deeply',
+          });
+          expect(validatedBodies).toHaveLength(0);
         });
+      });
+    }
 
-      // The $gt inside email should be stripped, making email an empty object
-      // This should result in a 400 validation error (invalid email) not a MongoDB operator injection
-      expect([400, 401]).toContain(res.status);
-    });
-
-    it('should strip __proto__ keys from request body (prototype pollution prevention)', async () => {
-      const csrfRes = await request(app).get('/api/v1/csrf-token');
-      const csrfToken: string = csrfRes.body.data.csrfToken;
-      const setCookies: string[] = (csrfRes.headers['set-cookie'] as string[] | undefined) ?? [];
-      const csrfCookieRaw = setCookies.find((c) => c.startsWith('__csrf='));
-      const csrfCookie = csrfCookieRaw ? csrfCookieRaw.split(';')[0]! : '';
-
-      // Send a login request with __proto__ key that should be stripped
-      const res = await request(app)
-        .post('/api/v1/auth/login')
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({
-          email: 'test@example.com',
-          authHash: 'some-hash',
-          __proto__: { isAdmin: true },
-        });
-
-      // Should process normally without prototype pollution — 401 because user doesn't exist
-      expect(res.status).toBe(401);
-    });
-
-    it('should strip constructor keys from request body (prototype pollution prevention)', async () => {
-      const csrfRes = await request(app).get('/api/v1/csrf-token');
-      const csrfToken: string = csrfRes.body.data.csrfToken;
-      const setCookies: string[] = (csrfRes.headers['set-cookie'] as string[] | undefined) ?? [];
-      const csrfCookieRaw = setCookies.find((c) => c.startsWith('__csrf='));
-      const csrfCookie = csrfCookieRaw ? csrfCookieRaw.split(';')[0]! : '';
-
-      // Send a login request with constructor key that should be stripped
-      const res = await request(app)
-        .post('/api/v1/auth/login')
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({
-          email: 'test@example.com',
-          authHash: 'some-hash',
-          constructor: { prototype: { isAdmin: true } },
-        });
-
-      // Should process normally without prototype pollution — 401 because user doesn't exist
-      expect(res.status).toBe(401);
-    });
-
-    it('should strip prototype keys from request body (prototype pollution prevention)', async () => {
-      const csrfRes = await request(app).get('/api/v1/csrf-token');
-      const csrfToken: string = csrfRes.body.data.csrfToken;
-      const setCookies: string[] = (csrfRes.headers['set-cookie'] as string[] | undefined) ?? [];
-      const csrfCookieRaw = setCookies.find((c) => c.startsWith('__csrf='));
-      const csrfCookie = csrfCookieRaw ? csrfCookieRaw.split(';')[0]! : '';
-
-      const res = await request(app)
-        .post('/api/v1/auth/login')
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
-        .send({
-          email: 'test@example.com',
-          authHash: 'some-hash',
-          prototype: { polluted: true },
-        });
-
-      // Should process normally without prototype pollution — 401 because user doesn't exist
-      expect(res.status).toBe(401);
-    });
-
-    it('should handle arrays in request body without stripping valid data', async () => {
-      const csrfRes = await request(app).get('/api/v1/csrf-token');
-      const csrfToken: string = csrfRes.body.data.csrfToken;
-      const setCookies: string[] = (csrfRes.headers['set-cookie'] as string[] | undefined) ?? [];
-      const csrfCookieRaw = setCookies.find((c) => c.startsWith('__csrf='));
-      const csrfCookie = csrfCookieRaw ? csrfCookieRaw.split(';')[0]! : '';
-
-      // Arrays should be preserved (sanitized element-by-element)
+    it('sanitizes an array element by element, keeping it an array and every valid element', async () => {
+      // Observed at the input to validation, like the cases above: the registration
+      // schema strips the unknown `probe` key afterwards whatever the sanitizer did.
+      // A walk that rebuilt an array as an object of indices, dropped an element, or
+      // stopped at the array instead of entering it, fails here.
+      const csrf = await getCsrf(request.agent(app));
       const res = await request(app)
         .post('/api/v1/auth/register')
-        .set('x-csrf-token', csrfToken)
-        .set('Cookie', csrfCookie)
+        .set('x-csrf-token', csrf.token)
+        .set('Cookie', csrf.cookie)
         .send({
           email: 'test@example.com',
           authHash: 'my-hash',
@@ -469,10 +508,15 @@ describe('Security Headers & Middleware', () => {
           kdfIterations: 600000,
           kdfAlgorithm: 'PBKDF2-SHA256',
           encryptionVersion: 1,
+          probe: ['plain', 7, { $gt: '', keep: 'x' }, ['nested', { $where: '1', keep: 2 }]],
         });
 
-      // Should process normally (201 for new registration)
-      expect(res.status).toBe(201);
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(validatedBodies).toHaveLength(1);
+      const seen = validatedBodies[0]!.body as Record<string, unknown>;
+      expect(Array.isArray(seen.probe)).toBe(true);
+      expect(seen.probe).toStrictEqual(['plain', 7, { keep: 'x' }, ['nested', { keep: 2 }]]);
+      expect(seen).toMatchObject({ email: 'test@example.com', kdfIterations: 600000 });
     });
   });
 

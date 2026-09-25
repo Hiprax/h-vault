@@ -1,6 +1,11 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
-import { SANDBOX_ASSETS_DIR, SANDBOX_HTML, sandboxManualChunks } from './vite.config.helpers.ts';
+import {
+  SANDBOX_ASSETS_DIR,
+  SANDBOX_HTML,
+  sandboxDocumentPlugin,
+  sandboxManualChunks,
+} from './vite.config.helpers.ts';
 
 /**
  * The document sandbox's build — a SECOND build, not a second input.
@@ -52,12 +57,26 @@ import { SANDBOX_ASSETS_DIR, SANDBOX_HTML, sandboxManualChunks } from './vite.co
  *     decision here: `sandbox.css` must be authored as PLAIN CSS, because with
  *     no Tailwind plugin in this config a file of utility classes ships
  *     unstyled and reports no error at all.
+ *
+ * The ONE plugin this config does carry is first-party and is described below.
  */
 export default defineConfig({
+  // The document leaves `dist/` and lands in `dist-sandbox/`, a sibling no
+  // static root serves. That is the sandbox's isolation made structural rather
+  // than ordered: `express.static` and Nginx cannot serve a file they do not
+  // have, under any URL spelling, and four spellings were measured reaching the
+  // file past the Express route that was supposed to claim it. The full argument
+  // lives on `SANDBOX_DOCUMENT_OUT_DIR` in `vite.config.helpers.ts`.
+  //
+  // Only `sandbox.html` moves. `sandbox-assets/` stays in `dist/`, where both
+  // servers must be able to hand it to the frame.
+  plugins: [sandboxDocumentPlugin()],
   build: {
-    // The same directory the app builds into: one `public/` tree ships, and the
-    // Express static root, the Nginx document root and the smoke gate's staged
-    // artifact all keep exactly one layout to know about.
+    // The same directory the app builds into, so the chunks and the stylesheet
+    // land beside the application's: one `public/` tree ships, and the Express
+    // static root, the Nginx document root and the smoke gate's staged artifact
+    // all keep exactly one layout to know about. The DOCUMENT is the exception,
+    // and the plugin above is what makes it one.
     outDir: 'dist',
     // MANDATORY. Vite's `resolveEmptyOutDir` returns true whenever `outDir` is
     // inside the project root, so the default would make this build DELETE the

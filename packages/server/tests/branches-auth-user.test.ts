@@ -10,8 +10,11 @@
  *     gone, and a wrong code against an account with no backup codes left.
  *   • login2fa backup-code single-use under a genuine concurrent race (the
  *     `$pull` loser must NOT be issued tokens).
- *   • the unlock email is sent exactly ONCE per lockout-threshold crossing —
- *     a further failure on an already-over-threshold account re-locks silently.
+ *   • at most one NEW unlock link per lock EPISODE — a re-lock extends the
+ *     episode and stays silent while the link already mailed for it still covers
+ *     the new deadline, and that link is proven to still work.
+ *   • login refuses an account whose cascade delete is still outstanding,
+ *     writing no session and no audit row.
  *   • refresh: the new-token write failing AFTER the old token was claimed must
  *     clear the cookie, 500, and leave reuse detection guarding the old token.
  *   • verify2fa: a pending 2FA setup is only usable with BOTH halves present.
@@ -55,7 +58,7 @@ import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
-import { BACKUP_CODES_COUNT } from '@hvault/shared';
+import { BACKUP_CODES_COUNT, LOCKOUT_DURATION_MINUTES } from '@hvault/shared';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
@@ -73,6 +76,7 @@ import { config } from '../src/config/index.js';
 import {
   createTestUser,
   authHeader,
+  generateStateHash,
   getCsrf,
   deriveTestPurposeKey,
   seedItem,
@@ -168,6 +172,15 @@ async function post2fa(
     .send({ tempToken, code });
 }
 
+async function postUnlock(agent: request.Agent, token: string): Promise<request.Response> {
+  const { token: csrf, cookie } = await getCsrf(agent);
+  return agent
+    .post(`${API}/auth/unlock-account`)
+    .set('x-csrf-token', csrf)
+    .set('Cookie', cookie)
+    .send({ token });
+}
+
 async function postLogin(
   agent: request.Agent,
   email: string,
@@ -254,7 +267,7 @@ describe('authController — a backup code is consumed exactly once under a conc
   });
 });
 
-describe('authController — the unlock email fires once per lockout-threshold crossing', () => {
+describe('authController — at most one new unlock link per lock episode', () => {
   let agent: request.Agent;
   let user: TestUser;
 
@@ -281,13 +294,34 @@ describe('authController — the unlock email fires once per lockout-threshold c
     expect(after!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
   });
 
-  it('re-locks without a second email when the counter is already past the threshold', async () => {
+  it('re-locks without a second email while the outstanding link still covers the lockout', async () => {
     // An expired lockout whose counter was never reset (the user never logged in
-    // again). A further failure must re-lock — but must NOT re-mail: a duplicate
-    // unlock link is both a mail-flood vector and a second live unlock token.
+    // again), with the link mailed when it began still live. A further failure
+    // must re-lock — and must NOT re-mail, because a link that already covers the
+    // new deadline is outstanding and re-mailing is then pure flood.
+    //
+    // This case used to assert the same silence for an account with NO live link,
+    // which is the specification the phase corrects: `failedLoginAttempts` is
+    // cleared only where an authentication completes, so an abandoned lockout sits
+    // at the threshold for ever and every later failure was "past" it. Silence
+    // there meant the victim was mailed once, ever, while each of those failures
+    // rewrote `lockoutUntil` and killed the link bound to it. The anti-flood
+    // property is kept; it is now keyed on whether a usable link exists rather
+    // than on an equality that could only ever be true once.
+    const episode = crypto.randomUUID();
     await User.findByIdAndUpdate(user.id, {
-      $set: { failedLoginAttempts: 10, lockoutUntil: new Date(Date.now() - 60_000) },
+      $set: {
+        failedLoginAttempts: 10,
+        lockoutUntil: new Date(Date.now() - 60_000),
+        lockoutEpisodeId: episode,
+        lockoutNotifiedAt: new Date(),
+      },
     });
+    const outstandingLink = jwt.sign(
+      { userId: user.id, purpose: 'account_unlock', stateHash: generateStateHash(episode) },
+      deriveTestPurposeKey('account_unlock'),
+      { algorithm: 'HS256', expiresIn: '1h' },
+    );
 
     const res = await postLogin(agent, user.email, 'wrong-auth-hash');
 
@@ -295,9 +329,22 @@ describe('authController — the unlock email fires once per lockout-threshold c
     expect(res.body.message).toBe('Invalid email or password');
     expect(mockedUnlockEmail).not.toHaveBeenCalled();
 
-    const after = await User.findById(user.id);
+    // `select: false` on the episode fields, so they are asked for by name;
+    // without that the identity assertion below would pass on `undefined`.
+    const after = await User.findById(user.id).select('+lockoutEpisodeId');
     expect(after!.failedLoginAttempts).toBe(11);
     expect(after!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
+    // The re-lock extended the episode instead of starting a new one…
+    expect(after!.lockoutEpisodeId).toBe(episode);
+
+    // …which is what makes the silence safe: the link the owner already holds
+    // still ends the lockout. Suppressing the mail without this would be the
+    // permanent lockout.
+    const unlocked = await postUnlock(agent, outstandingLink);
+    expect(unlocked.status).toBe(200);
+    const recovered = await User.findById(user.id);
+    expect(recovered!.lockoutUntil).toBeUndefined();
+    expect(recovered!.failedLoginAttempts).toBe(0);
   });
 
   it('sends the unlock email when a wrong 2FA code is the attempt that crosses the threshold', async () => {
@@ -315,9 +362,23 @@ describe('authController — the unlock email fires once per lockout-threshold c
     expect(after!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
   });
 
-  it('re-locks the 2FA step without a second email when already past the threshold', async () => {
+  it('re-locks the 2FA step without a second email while its link still covers the lockout', async () => {
+    // Same correction as the password step above: silence is conditioned on a
+    // usable link existing, and the link is proven usable rather than assumed.
     const { user: twoFaUser, secretObj } = await create2faUser(['abcdef0123456789']);
-    await User.findByIdAndUpdate(twoFaUser.id, { $set: { failedLoginAttempts: 10 } });
+    const episode = crypto.randomUUID();
+    await User.findByIdAndUpdate(twoFaUser.id, {
+      $set: {
+        failedLoginAttempts: 10,
+        lockoutEpisodeId: episode,
+        lockoutNotifiedAt: new Date(),
+      },
+    });
+    const outstandingLink = jwt.sign(
+      { userId: twoFaUser.id, purpose: 'account_unlock', stateHash: generateStateHash(episode) },
+      deriveTestPurposeKey('account_unlock'),
+      { algorithm: 'HS256', expiresIn: '1h' },
+    );
 
     const res = await post2fa(agent, makeTempToken(twoFaUser.id), definitelyWrongCode(secretObj));
 
@@ -325,9 +386,110 @@ describe('authController — the unlock email fires once per lockout-threshold c
     expect(res.body.message).toBe('TWO_FA_INVALID');
     expect(mockedUnlockEmail).not.toHaveBeenCalled();
 
-    const after = await User.findById(twoFaUser.id);
+    const after = await User.findById(twoFaUser.id).select('+lockoutEpisodeId');
     expect(after!.failedLoginAttempts).toBe(11);
     expect(after!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
+    expect(after!.lockoutEpisodeId).toBe(episode);
+
+    const unlocked = await postUnlock(agent, outstandingLink);
+    expect(unlocked.status).toBe(200);
+    const recovered = await User.findById(twoFaUser.id);
+    expect(recovered!.lockoutUntil).toBeUndefined();
+  });
+});
+
+describe('authController — an account mid-erasure cannot sign in', () => {
+  let agent: request.Agent;
+  let user: TestUser;
+
+  beforeEach(async () => {
+    agent = request.agent(app);
+    user = await createTestUser({ emailVerified: true });
+  });
+
+  /**
+   * `deletionPending` survives only a FAILED cascade delete, and it is the sole
+   * durable record that the account's data still needs erasing. The Passport
+   * strategy and the refresh handler have always refused such a record; `login`
+   * did not, so a zombie could complete a full sign-in — minting a session and
+   * writing rows under an account being deleted — for the whole six-hour
+   * `tokenCleanup` window.
+   */
+  it('refuses the correct password with the generic 401 and writes nothing', async () => {
+    await User.findByIdAndUpdate(user.id, { $set: { deletionPending: true } });
+    const auditBefore = await AuditLog.countDocuments({ userId: user.id });
+
+    const res = await postLogin(agent, user.email, user.rawPassword);
+
+    // Exactly the answer a wrong password gets: no new signal about an address
+    // that is registered AND closing.
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toBe('Invalid email or password');
+    expect(res.body.data).toBeUndefined();
+    expect(res.headers['set-cookie']).toBeUndefined();
+
+    // Nothing was created under the dying account: no session, and not even a
+    // `login_failed` row, because writing under an account mid-erasure is the
+    // thing being refused.
+    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(1); // the seeded one
+    expect(await AuditLog.countDocuments({ userId: user.id })).toBe(auditBefore);
+
+    // And the refusal is not a disguised lockout: the counter is untouched, so
+    // the cleanup job still finds the record exactly as it left it.
+    const after = await User.findById(user.id);
+    expect(after!.failedLoginAttempts).toBe(0);
+    expect(after!.lockoutUntil).toBeUndefined();
+    expect(after!.deletionPending).toBe(true);
+  });
+
+  it('answers a wrong password on a dying account identically', async () => {
+    await User.findByIdAndUpdate(user.id, { $set: { deletionPending: true } });
+
+    const res = await postLogin(agent, user.email, 'wrong-auth-hash');
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('Invalid email or password');
+    // The two answers must be the same shape, or the pair of them is an oracle
+    // for "this address exists and is being deleted".
+    expect(res.body.data).toBeUndefined();
+    const after = await User.findById(user.id);
+    expect(after!.failedLoginAttempts).toBe(0);
+  });
+
+  it('refuses a 2FA temp token minted before the deletion was requested', async () => {
+    // `login` now refuses the account outright, but a temp token issued in the
+    // five minutes before the deletion request is still signed and still valid,
+    // and spending it would complete exactly the sign-in the refusal exists to
+    // prevent.
+    const { user: twoFaUser, secretObj } = await create2faUser([]);
+    const tempToken = makeTempToken(twoFaUser.id);
+    await User.findByIdAndUpdate(twoFaUser.id, { $set: { deletionPending: true } });
+
+    const res = await post2fa(agent, tempToken, totpFor(secretObj).generate());
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_INVALID');
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect(await RefreshToken.countDocuments({ userId: twoFaUser.id })).toBe(1);
+    expect(await AuditLog.countDocuments({ userId: twoFaUser.id, action: 'login' })).toBe(0);
+  });
+
+  it.each([
+    ['unset', { $unset: { deletionPending: 1 } }],
+    // What the cleanup job writes when a deletion is ABORTED, and the reason the
+    // predicate tests `=== true` rather than truthiness: a `false` here must not
+    // read as "still being deleted" or the abort would lock the owner out.
+    ['set to false', { $set: { deletionPending: false } }],
+  ])('still signs the account in once the flag is %s', async (_label, clear) => {
+    await User.findByIdAndUpdate(user.id, { $set: { deletionPending: true } });
+    expect((await postLogin(agent, user.email, user.rawPassword)).status).toBe(401);
+
+    await User.findByIdAndUpdate(user.id, clear);
+
+    const res = await postLogin(agent, user.email, user.rawPassword);
+    expect(res.status).toBe(200);
+    expect(res.body.data.accessToken).toBeDefined();
   });
 });
 
@@ -802,6 +964,147 @@ describe('transactional (replica-set) auth branches', () => {
     // No replacement minted; the expired row was removed.
     const rows = await RefreshToken.find({ userId: user.id });
     expect(rows).toHaveLength(0);
+  });
+
+  it('rolls the claim back when the account is locked, keeping the cookie', async () => {
+    // The production topology is a replica set, so this is the path that
+    // actually runs in production. Here the account gate lives INSIDE the
+    // transaction, BETWEEN the claim and the successor: a refusal throws from the
+    // callback and `withTransaction` rolls the claim back. No successor is ever
+    // created on this path — the gate runs before `RefreshToken.create` — which is
+    // a stronger property than aborting one, and the assertions below say so by
+    // counting rows.
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const user = await createTestUser({ emailVerified: true });
+    const absolute = new Date(Date.now() + config.REFRESH_TOKEN_REMEMBER_DAYS * DAY_MS);
+    await RefreshToken.updateOne(
+      { tokenHash: hashToken(user.refreshToken) },
+      { $set: { absoluteExpiresAt: absolute, expiresAt: absolute } },
+    );
+    await User.updateOne(
+      { _id: user.id },
+      { $set: { lockoutUntil: new Date(Date.now() + LOCKOUT_DURATION_MINUTES * 60 * 1000) } },
+    );
+
+    const sessionSpy = vi.spyOn(mongoose, 'startSession');
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe('ACCOUNT_LOCKED');
+    // Proves the branch: the sequential fallback never opens a session.
+    expect(sessionSpy).toHaveBeenCalled();
+
+    // The abort undid the claim: one row, unspent, deadline intact.
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tokenHash).toBe(hashToken(user.refreshToken));
+    expect(rows[0]!.usedAt == null).toBe(true);
+    expect(Math.abs(rows[0]!.absoluteExpiresAt!.getTime() - absolute.getTime())).toBeLessThan(1000);
+
+    // And the browser keeps the cookie — no clear directive, no replacement.
+    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+    expect(setCookie.some((c) => c.startsWith('refreshToken='))).toBe(false);
+  });
+
+  it('aborts the claim for an account mid-erasure, answering 401 and clearing the cookie', async () => {
+    const user = await createTestUser({ emailVerified: true });
+    await User.updateOne({ _id: user.id }, { $set: { deletionPending: true } });
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_INVALID');
+
+    // A dead session's cookie IS cleared — the opposite treatment to the lockout
+    // above, and the whole reason the two refusals are kept apart.
+    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
+    expect(setCookie.some((c) => /^refreshToken=;/.test(c))).toBe(true);
+
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.usedAt == null).toBe(true);
+  });
+
+  it('transactional reuse detection still outranks a lockout', async () => {
+    const user = await createTestUser({ emailVerified: true });
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const first = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+    expect(first.status).toBe(200);
+
+    await User.updateOne(
+      { _id: user.id },
+      { $set: { lockoutUntil: new Date(Date.now() + LOCKOUT_DURATION_MINUTES * 60 * 1000) } },
+    );
+
+    const agent2 = request.agent(app);
+    const csrf2 = await getCsrf(agent2, `refreshToken=${user.refreshToken}`);
+    const replay = await agent2
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf2.token)
+      .set('Cookie', `${csrf2.cookie}; refreshToken=${user.refreshToken}`);
+
+    // The spent row never reaches the gate, so the compromise signal still wins
+    // and the family still goes — a lockout must not be a place to hide a replay.
+    expect(replay.status).toBe(401);
+    expect(replay.body.message).toBe('TOKEN_REUSE_DETECTED');
+    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(0);
+  });
+
+  it('lets a non-refusal failure out of the transaction with the claim rolled back', async () => {
+    // The other exit from the new `catch`: an error that is NOT a refusal is
+    // re-thrown unchanged, so a genuine fault still becomes a 500 rather than
+    // being mistaken for an account refusal. On this path the transaction aborts
+    // too, which is the transactional branch's whole advantage over the
+    // sequential one — the presented token is NOT left spent with no successor.
+    const user = await createTestUser({ emailVerified: true });
+    const createSpy = vi
+      .spyOn(RefreshToken, 'create')
+      .mockRejectedValueOnce(new Error('transient mongo failure') as never);
+
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
+
+    expect(createSpy).toHaveBeenCalled();
+    expect(res.status).toBe(500);
+    expect(res.body.success).toBe(false);
+    // NOT an account refusal: neither refusal's message may be borrowed by a fault.
+    expect(res.body.message).not.toBe('ACCOUNT_LOCKED');
+    expect(res.body.message).not.toBe('TOKEN_INVALID');
+
+    createSpy.mockRestore();
+    // The abort undid the claim, so the session is still usable — retrying with
+    // the same cookie succeeds instead of reading as a replay.
+    const rows = await RefreshToken.find({ userId: user.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.usedAt == null).toBe(true);
+
+    const agent2 = request.agent(app);
+    const csrf2 = await getCsrf(agent2, `refreshToken=${user.refreshToken}`);
+    const retry = await agent2
+      .post(`${API}/auth/refresh`)
+      .set('x-csrf-token', csrf2.token)
+      .set('Cookie', `${csrf2.cookie}; refreshToken=${user.refreshToken}`);
+    expect(retry.status).toBe(200);
   });
 
   it('commits the password change and the session revocation together', async () => {

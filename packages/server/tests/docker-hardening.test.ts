@@ -31,6 +31,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { DOCUMENT_CIPHERTEXT_CHUNK_BYTES } from '@hvault/shared';
+import { SANDBOX_DOCUMENT_PATH } from '../src/config/clientArtifacts.js';
 import { resolveComposeImage, STORAGE_COMPOSE_SERVICE } from '../../../tests/harness/s3Server.js';
 
 interface HealthCheck {
@@ -1492,25 +1493,25 @@ describe('Docker deployment', () => {
     });
 
     it('bounds nginx worker_processes to the CPU limit instead of the host core count', () => {
-      // nginx's shipped `worker_processes auto` resolves through
-      // sysconf(_SC_NPROCESSORS_ONLN), which reports the HOST's cores and ignores
-      // the container's CFS quota. Measured: on a 4-core host the service spawned
-      // 4 workers while capped at `cpus: '0.5'`; on a 32-core host that is 32
-      // workers in the same half-core, 256 MB box, and past ~99 cores they cannot
-      // all be forked under `pids_limit: 100`. The pin has to be baked into the
-      // image — the runtime autotune hook rewrites nginx.conf on boot, which the
-      // service's read-only root filesystem forbids.
-      // Directives only: the comment above the fix quotes `worker_processes auto`
-      // to explain what is being replaced, and prose must not trip the guard.
-      const webStageDirectives = dockerfile
-        .slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'))
+      // nginx's shipped `worker_processes auto` resolves through sysconf, which
+      // reports the HOST's cores rather than the cgroup quota: one worker per host
+      // core inside a `cpus: '0.5'` service. The golden nginx.conf this image
+      // installs OVER the base image's own carries an explicit count, and the
+      // Dockerfile has to actually install it there: a COPY to conf.d alone would
+      // leave the base image's `auto` in force.
+      const goldenNginxConf = readFileSync(
+        path.join(repoRoot, 'docker', 'nginx', 'nginx.conf'),
+        'utf-8',
+      );
+      const directives = goldenNginxConf
         .split('\n')
         .filter((line) => !line.trimStart().startsWith('#'))
         .join('\n');
-      expect(webStageDirectives).toMatch(/worker_processes \d+;/);
-      expect(webStageDirectives).not.toMatch(/worker_processes\s+auto/);
-      // ...and the cap only means something while the CPU limit it was chosen for
-      // is still in place.
+      expect(directives).toMatch(/^worker_processes\s+\d+;/m);
+      expect(directives).not.toMatch(/worker_processes\s+auto/);
+      expect(dockerfile).toMatch(
+        /COPY --chmod=0444 docker\/nginx\/nginx\.conf\s+\/etc\/nginx\/nginx\.conf/,
+      );
       expect(nginx?.cpus).toBeDefined();
     });
 
@@ -1520,6 +1521,40 @@ describe('Docker deployment', () => {
       // index.html sitting in Nginx's root would be a header-free copy of the app one
       // URL away. Nginx cannot serve what it does not have.
       expect(dockerfile).toMatch(/rm -f \/app\/packages\/client\/dist\/index\.html/);
+    });
+
+    it('lands the sandbox document OUTSIDE the Express static root', () => {
+      // The Express half of the same argument the next test makes for Nginx, and
+      // the half that was missing. `packages/server/public` is the
+      // `express.static` root; the isolated document's whole containment is the
+      // per-response Content-Security-Policy Express attaches to it
+      // (src/config/sandboxCsp.ts). While the document sat inside that root,
+      // four URL spellings reached it off disk under helmet's APPLICATION policy
+      // — `/sandbox%2Ehtml`, `//sandbox.html`, `/sandbox.htm%6C` and
+      // `/%73andbox.html` — because Express 5 matches the RAW pathname while
+      // `send` decodes and normalises it, so none of them hit the route that was
+      // supposed to claim the document. Ordering is a control a spelling walks
+      // around; a directory the static mount does not serve is not.
+      //
+      // Asserted as the COPY pair rather than as one line, because the failure
+      // this guards is the destination drifting back under `public/` — which
+      // would leave every other assertion in this file green.
+      const publicCopy =
+        /COPY --from=build-client \/app\/packages\/client\/dist \.\/packages\/server\/public(?:\s|$)/m;
+      const documentCopy =
+        /COPY --from=build-client \/app\/packages\/client\/dist-sandbox \.\/packages\/server\/(\S+)/m;
+      expect(dockerfile).toMatch(publicCopy);
+      const destination = documentCopy.exec(dockerfile)?.[1];
+      expect(destination, 'the sandbox document is not copied into the image').toBeDefined();
+      // The negative that is the whole point: the destination is not the static
+      // root, and not anything beneath it.
+      expect(destination).not.toBe('public');
+      expect(destination?.startsWith('public/')).toBe(false);
+      // And it is the directory the server actually reads, so the image layout
+      // and `config/clientArtifacts.ts` cannot drift apart.
+      expect(path.join('/', String(destination))).toBe(
+        path.join('/', path.basename(path.dirname(SANDBOX_DOCUMENT_PATH))),
+      );
     });
 
     it('removes sandbox.html from the Nginx document root too', () => {
@@ -1561,24 +1596,19 @@ describe('Docker deployment', () => {
       expect(webStage).toMatch(/^USER 0$[\s\S]*RUN apk upgrade --no-cache[\s\S]*^USER 101$/m);
     });
 
-    it('upgrades BEFORE it edits nginx.conf, in one RUN that fixes that order', () => {
-      // An nginx package upgrade rewrites /etc/nginx/nginx.conf and takes
-      // `worker_processes 2;` with it, so the sed has to come second. As two
-      // separate RUN instructions that order was a convention a reordering edit
-      // could break silently — the image still builds, and the only symptom is
-      // nginx forking one worker per HOST core inside a `cpus: '0.5'` service.
-      // `&&` makes the order the instruction rather than the layout, and it is
-      // also what clears hadolint DL3059 (which fires on two consecutive RUNs
-      // only when NEITHER already chains).
+    it('never edits the base image nginx.conf in place: the golden one replaces it', () => {
+      // The previous shape was `apk upgrade && sed -i worker_processes` in ONE
+      // RUN, because an nginx package upgrade rewrites /etc/nginx/nginx.conf and
+      // would take a prior edit with it. The golden nginx.conf is now COPYed
+      // after the upgrade, so the order is the layout's, and no sed may come
+      // back: an in-place edit of a file a later upgrade rewrites is exactly the
+      // silent regression the chained RUN existed to prevent.
       const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
-      expect(webStage).toMatch(
-        /RUN apk upgrade --no-cache \\\n \&\& sed -i 's\/\^worker_processes \.\*\/worker_processes 2;\/' \/etc\/nginx\/nginx\.conf/,
-      );
-      // NEGATIVE: the sed must not ALSO exist as an instruction of its own, which
-      // is what a half-applied revert would leave behind — the second copy would
-      // run after the upgrade either way today, and stop doing so the moment
-      // anything is inserted between them.
-      expect(webStage).not.toMatch(/^RUN sed -i/m);
+      expect(webStage).not.toMatch(/sed -i/);
+      const upgradeAt = webStage.indexOf('RUN apk upgrade --no-cache');
+      const copyAt = webStage.indexOf('COPY --chmod=0444 docker/nginx/nginx.conf');
+      expect(upgradeAt).toBeGreaterThanOrEqual(0);
+      expect(copyAt).toBeGreaterThan(upgradeAt);
     });
 
     it('names both node runtime users by the uid their tmpfs mounts are pinned to', () => {
@@ -1684,9 +1714,9 @@ describe('Docker deployment', () => {
       expect(governed.every((copy) => /--chmod=0444\b/.test(copy.line))).toBe(true);
     });
 
-    it('creates /etc/nginx/hvault before copying into it, or the directory inherits 0444', () => {
+    it('creates /etc/nginx/snippets before copying into it, or the directory inherits 0444', () => {
       // The other half of the same trap, and it only appears once the --chmod
-      // above exists. `/etc/nginx/hvault` does NOT exist in the
+      // above exists. `/etc/nginx/snippets` does NOT exist in the
       // nginx-unprivileged base (verified against the image), so BuildKit creates
       // it for the COPY — and when the COPY carries --chmod, the created parent
       // gets that same mode. Measured: `dr--r--r--`, and uid 101 gets
@@ -1696,7 +1726,7 @@ describe('Docker deployment', () => {
       // image only in combination with the fix above.
       const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
       expect(webStage).toMatch(
-        /RUN mkdir -p \/etc\/nginx\/hvault[\s\S]*COPY --chmod=0444 \S*proxy_app\.conf \/etc\/nginx\/hvault\//,
+        /RUN mkdir -p \/etc\/nginx\/snippets[\s\S]*COPY --chmod=0444 \S*headers\.conf \S*proxy\.conf \/etc\/nginx\/snippets\//,
       );
     });
 
@@ -1808,6 +1838,48 @@ describe('Docker deployment', () => {
       );
     });
 
+    it('ships no TypeScript compiler in the one-shot bootstrap image', () => {
+      // The stage derives from `build-server`, so it inherits every dev
+      // dependency, and since the build moved to TypeScript 7 that includes a
+      // NATIVE compiler: a Go binary whose embedded standard library the image
+      // scan reported as carrying fixable HIGH findings. Nothing in the container
+      // runs it (`tsx` transpiles through esbuild), so the stage deletes it, the
+      // TypeScript 6 compatibility package and their `.bin` links in the same
+      // layer as npm. The scan alone would not hold that line: it goes red only
+      // while the compiler happens to embed a Go release with an open advisory,
+      // so a revert would pass silently the day upstream ships a patched build.
+      const start = dockerfile.indexOf('AS bootstrap\n');
+      expect(start).toBeGreaterThan(-1);
+      const stage = dockerfile.slice(start, dockerfile.indexOf('\nFROM ', start + 1));
+      // Comments stripped for the reason given in the test above, then each
+      // backslash continuation folded so one RUN reads as one line.
+      const directives = stage
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n')
+        .replace(/\\\n\s*/g, ' ');
+      const removal = directives
+        .split('\n')
+        .find((line) => line.startsWith('RUN rm -rf /usr/local/lib/node_modules/npm'));
+      expect(removal, 'the bootstrap stage lost its removal RUN').toBeDefined();
+      const removed = new Set((removal as string).split(/\s+/).slice(3));
+      for (const path of [
+        '/app/node_modules/@typescript',
+        '/app/node_modules/typescript',
+        '/app/node_modules/.bin/tsc',
+        '/app/node_modules/.bin/tsc6',
+        '/app/node_modules/.bin/tsserver',
+      ]) {
+        expect(removed.has(path), `bootstrap must remove ${path}`).toBe(true);
+      }
+      // And nothing after the removal brings a compiler back in or runs one.
+      const afterRemoval = directives.slice(
+        directives.indexOf(removal as string) + (removal as string).length,
+      );
+      expect(afterRemoval).not.toMatch(/\bCOPY\b[^\n]*node_modules/);
+      expect(afterRemoval).not.toMatch(/\btsc\b/);
+    });
+
     it('pins the node base image to an explicit Alpine minor, not the floating tag', () => {
       // The floating `node:24-alpine` tag rolled onto Alpine 3.24, whose musl
       // userspace SIGSEGVs npm at process launch under the WSL2 kernel used for
@@ -1903,7 +1975,7 @@ describe('Docker deployment', () => {
         return nginxConf.slice(start, end);
       };
 
-      const sandboxBlock = locationBlock('location /sandbox-assets/ {');
+      const sandboxBlock = locationBlock('location ^~ /sandbox-assets/ {');
       expect(sandboxBlock).toMatch(/add_header\s+Access-Control-Allow-Origin\s+"\*"\s+always;/);
       expect(sandboxBlock).toMatch(
         /add_header\s+Cross-Origin-Resource-Policy\s+"cross-origin"\s+always;/,
@@ -1915,7 +1987,7 @@ describe('Docker deployment', () => {
       // NOT readable by an opaque origin. Widening /assets/ would be the easy
       // "fix" for a blank frame and would hand any sandboxed document on the
       // internet read access to the app's own bundle.
-      const appAssetsBlock = locationBlock('location /assets/ {');
+      const appAssetsBlock = locationBlock('location ^~ /assets/ {');
       expect(appAssetsBlock).not.toMatch(/Access-Control-Allow-Origin/);
       expect(appAssetsBlock).not.toMatch(/Cross-Origin-Resource-Policy/);
     });
@@ -1924,8 +1996,8 @@ describe('Docker deployment', () => {
       // Compressing a response that mixes a secret (a CSRF or bearer token) with
       // attacker-influenced content is the precondition for a compression oracle.
       const apiBlock = nginxConf.slice(
-        nginxConf.indexOf('location /api/'),
-        nginxConf.indexOf('location /assets/'),
+        nginxConf.indexOf('location ^~ /api/'),
+        nginxConf.indexOf('location ^~ /assets/'),
       );
       expect(apiBlock).toMatch(/gzip off;/);
     });
@@ -1933,18 +2005,47 @@ describe('Docker deployment', () => {
     it("allows a body larger than the app's own 30 MB route cap", () => {
       // So an oversized backup restore or key rotation is rejected by the app, with a
       // structured JSON error, rather than cut off here with an opaque 413.
-      const match = /client_max_body_size\s+(\d+)m;/.exec(nginxConf);
+      // The ceiling lives in the golden nginx.conf (http context), where the
+      // Dockerfile installs it; internal.conf inherits it.
+      const goldenNginxConf = readFileSync(
+        path.join(repoRoot, 'docker', 'nginx', 'nginx.conf'),
+        'utf-8',
+      );
+      const match = /^\s*client_max_body_size\s+(\d+)m;/m.exec(goldenNginxConf);
       expect(match).not.toBeNull();
       expect(Number(match?.[1])).toBeGreaterThan(30);
+      expect(nginxConf).not.toMatch(/client_max_body_size/);
     });
 
     it('re-resolves the app through Docker DNS instead of pinning one IP', () => {
-      // Nginx resolves a static `upstream` hostname once, at config load, and holds
-      // that address forever — recreate only the app container and every request 502s
-      // until someone restarts Nginx. A variable defers the lookup to request time.
-      expect(nginxConf).toMatch(/resolver\s+127\.0\.0\.11/);
-      expect(nginxConf).toMatch(/proxy_pass\s+http:\/\/\$hvault_app;/);
-      expect(nginxConf).not.toMatch(/^upstream\s/m);
+      // A static `upstream` hostname is resolved once, at config load, and held
+      // forever: recreate only the app container and every request 502s until
+      // someone restarts nginx. The golden answer is `server ... resolve` in a
+      // zoned upstream (open-source nginx since 1.27.3): re-resolved in the
+      // background, and, unlike the variable-proxy_pass form this file carried
+      // before, with a keepalive pool to the app.
+      const goldenNginxConf = readFileSync(
+        path.join(repoRoot, 'docker', 'nginx', 'nginx.conf'),
+        'utf-8',
+      );
+      expect(goldenNginxConf).toMatch(/resolver\s+127\.0\.0\.11/);
+      expect(goldenNginxConf).toMatch(
+        /upstream app \{[\s\S]*?zone app 64k;[\s\S]*?server hvault-app:5000 resolve;[\s\S]*?keepalive 32;/,
+      );
+      expect(nginxConf).toMatch(/proxy_pass\s+http:\/\/app;/);
+      expect(nginxConf).not.toMatch(/\$hvault_app/);
+    });
+
+    it('listens on IPv4 only, so the image builds on a host with IPv6 disabled', () => {
+      // `RUN nginx -t` genuinely opens every listening socket, and socket(AF_INET6)
+      // fails with EAFNOSUPPORT under ipv6.disable=1. Nothing is lost: the compose
+      // network is IPv4 and the one published port forwards into it over IPv4.
+      const directives = nginxConf
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .join('\n');
+      expect(directives).toMatch(/^\s*listen\s+8080;/m);
+      expect(directives).not.toMatch(/listen\s+\[::\]/);
     });
   });
 });

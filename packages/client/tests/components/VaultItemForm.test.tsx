@@ -489,7 +489,18 @@ describe('VaultItemForm', () => {
     it('shows "Edit Item" heading', () => {
       renderForm({ item: existingItem as unknown as FormItem });
 
-      expect(screen.getByText('Edit Item')).toBeInTheDocument();
+      // h2 by default: the form's usual home is the create dialog on a page whose
+      // own h1 already names it.
+      expect(screen.getByRole('heading', { level: 2, name: 'Edit Item' })).toBeInTheDocument();
+    });
+
+    it('renders its title as the page h1 when it is the page', () => {
+      renderForm({ item: existingItem as unknown as FormItem, titleLevel: 'h1' });
+
+      expect(screen.getByRole('heading', { level: 1, name: 'Edit Item' })).toBeInTheDocument();
+      // One title, moved up a level, never a second heading added beside it.
+      expect(screen.queryByRole('heading', { level: 2, name: 'Edit Item' })).toBeNull();
+      expect(screen.getAllByRole('heading', { name: 'Edit Item' })).toHaveLength(1);
     });
 
     it('populates the form with existing item data', () => {

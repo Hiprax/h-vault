@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 import baseConfig from './vitest.config.js';
+import { MutationRunLedger, mutationSequence } from '../../tests/harness/mutationSequencer.js';
 
 /**
  * The vitest configuration Stryker's runner drives for the `shared` leg of
@@ -10,7 +11,8 @@ import baseConfig from './vitest.config.js';
  * It NARROWS NOTHING. `include` is inherited untouched, because the whole point
  * of the oracle is to ask the suite that runs on every push whether it asserts
  * anything — a mutation run against a subset would answer a question nobody
- * asked. Two things are removed and both are pure plumbing:
+ * asked. Besides the pinned `root` (below), three things differ from the base
+ * config, and all three are plumbing:
  *
  *   - the JUnit reporter. Stryker re-runs the suite once per mutant, so this
  *     config would rewrite `.testfortress/reports/junit-shared.xml` thousands of
@@ -19,6 +21,20 @@ import baseConfig from './vitest.config.js';
  *   - coverage. Stryker's runner disables the collector anyway (it installs its
  *     own per-test coverage), and leaving it enabled would race the real run's
  *     `coverage/.tmp` directory.
+ *   - the ORDER of the test FILES (`mutationSequence` and `MutationRunLedger`,
+ *     from `tests/harness/mutationSequencer.ts`), with `cache: false` beside
+ *     it. Stryker drives a single vitest worker that bails at the first
+ *     failure, so a static mutant, which runs every related test, pays for
+ *     every file ahead of its killer; under the base config's seeded file
+ *     shuffle that was a random share of the suite per mutant. Here the files
+ *     go killer-first, then direct importers of the mutated file, then
+ *     cheapest-first. This is NOT the base config's order-independence check
+ *     switched off: that check runs, unchanged, in the suite this config is
+ *     derived from and ten times over in `test:flake`, and the file order here
+ *     decides only how many passing files run before a failing one, never
+ *     whether one fails, so it cannot change a verdict. Tests inside each file
+ *     are still shuffled with the pinned seed. `cache: false` keeps vitest's
+ *     per-machine results file out of the order and out of the run.
  *
  * `dot` rather than `default`, because the human-readable reporter's per-file
  * output is written once per mutant and drowns Stryker's progress bar.
@@ -38,7 +54,9 @@ export default defineConfig({
   test: {
     ...baseTest,
     root: path.dirname(fileURLToPath(import.meta.url)),
-    reporters: ['dot'],
+    reporters: ['dot', new MutationRunLedger()],
     coverage: { ...baseTest.coverage, enabled: false },
+    sequence: mutationSequence(baseTest.sequence),
+    cache: false,
   },
 });

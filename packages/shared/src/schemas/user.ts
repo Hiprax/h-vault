@@ -12,6 +12,7 @@ import {
   MAX_TAGS_PER_ITEM,
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_ENCRYPTED_DATA_LENGTH,
+  MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   PASSWORD_HISTORY_MAX,
   ITEM_TYPES,
   HIBP_BATCH_MAX_PREFIXES,
@@ -23,7 +24,7 @@ import {
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
 } from '../constants/index.js';
-import { objectIdSchema } from './common.js';
+import { objectIdSchema, optionalVaultKeyVersionSchema, rowIdNonceSchema } from './common.js';
 
 /**
  * How many characters of a class the generator must guarantee, counting only the
@@ -198,6 +199,13 @@ export const backupSetupSchema = z
     bwkEncryptedVaultKey: z.string().min(1).max(500).optional(),
     bwkVaultKeyIv: z.string().min(1).max(24).optional(),
     bwkVaultKeyTag: z.string().min(1).max(32).optional(),
+    // `bwkEncryptedVaultKey` is the account's VAULT KEY, wrapped under the backup
+    // key instead of under the MEK — the copy a CROSS-ACCOUNT restore unwraps. A
+    // session on a superseded generation that configures backup encryption
+    // replaces the re-wrap the rotation performed and stores the old key, and
+    // nothing fails until somebody restores a later backup into another account
+    // and every row fails to decrypt. See `optionalVaultKeyVersionSchema`.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   .superRefine((data, ctx) => {
     const hasKey = data.bwkEncryptedVaultKey !== undefined;
@@ -228,6 +236,10 @@ export const backupChangePasswordSchema = z
     newBwkEncryptedVaultKey: z.string().min(1).max(500).optional(),
     newBwkVaultKeyIv: z.string().min(1).max(24).optional(),
     newBwkVaultKeyTag: z.string().min(1).max(32).optional(),
+    // Same wrapper, same reason as `backupSetupSchema`: re-keying backup
+    // encryption re-seals the account's vault key, so the request has to say
+    // which vault key it sealed.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   .refine(
     (data) => {
@@ -277,6 +289,12 @@ export const restoreBackupSchema = z.object({
   // backup row to this account's current vault key before sending, so restore is a
   // plain, unprivileged add of rows already under the account's key — no vault-key
   // adoption and no master-password re-auth are accepted here.
+  //
+  // Which is exactly why the generation matters here as much as on a create: the
+  // rows arrive sealed under whichever vault key the client re-encrypted them
+  // with, and a rotation that commits between that re-encryption and this request
+  // strands every one of them. See `optionalVaultKeyVersionSchema`.
+  vaultKeyVersion: optionalVaultKeyVersionSchema,
 });
 
 export const exportSchema = z.object({
@@ -315,10 +333,11 @@ export const exportSchema = z.object({
  * (not just by the model validators, which fire only under `runValidators`)
  * because `assertImportFieldLengths` walks only top-level string fields and would
  * not catch an oversized nested history array. The per-entry caps mirror
- * `models/VaultItem.ts` (`encryptedPassword` maxlength 5_000, iv 24, tag 32).
+ * `models/VaultItem.ts` (`encryptedPassword` maxlength
+ * `MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH`, iv 24, tag 32).
  */
 export const importPasswordHistoryEntrySchema = z.object({
-  encryptedPassword: z.string().min(1).max(5_000),
+  encryptedPassword: z.string().min(1).max(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH),
   iv: z.string().min(1).max(24),
   tag: z.string().min(1).max(32),
   // Accept both UTC (Z) and timezone offsets (+05:00), matching vault.ts.
@@ -355,6 +374,9 @@ export const importInsertItemSchema = z.object({
   favorite: z.boolean().default(false),
   folderId: objectIdSchema.optional(),
   passwordHistory: z.array(importPasswordHistoryEntrySchema).max(PASSWORD_HISTORY_MAX).optional(),
+  // The nonce the inserted row's id is derived from, so its fields can be bound to
+  // that id before it exists. See `rowIdNonceSchema`.
+  idNonce: rowIdNonceSchema.optional(),
 });
 
 /**
@@ -384,10 +406,28 @@ export const importUpdateItemSchema = z.object({
  * `MAX_IMPORT_ITEMS`) is enforced on `importSchema` itself, so it can produce a
  * clear message when `operations` carries no work at all.
  */
-export const importOperationsSchema = z.object({
-  inserts: z.array(importInsertItemSchema).default([]),
-  updates: z.array(importUpdateItemSchema).default([]),
-});
+export const importOperationsSchema = z
+  .object({
+    inserts: z.array(importInsertItemSchema).default([]),
+    updates: z.array(importUpdateItemSchema).default([]),
+  })
+  // Two inserts naming one nonce would derive one id: the second insert collides
+  // with the first, and on a server without transactions the first is already
+  // stored by then. Refused here, at 400, before anything is written.
+  .superRefine((operations, ctx) => {
+    const seen = new Set<string>();
+    for (const [index, insert] of operations.inserts.entries()) {
+      if (insert.idNonce === undefined) continue;
+      if (seen.has(insert.idNonce)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['inserts', index, 'idNonce'],
+          message: 'inserts contain a repeated idNonce',
+        });
+      }
+      seen.add(insert.idNonce);
+    }
+  });
 
 export const importSchema = z
   .object({
@@ -411,6 +451,13 @@ export const importSchema = z
     conflictStrategy: z.enum(['skip', 'overwrite', 'keep_both']).optional().default('skip'),
     // Explicit inserts/updates the server validates and executes.
     operations: importOperationsSchema,
+    // The vault-key generation every ciphertext field in `operations` was sealed
+    // under. It sits on the REQUEST envelope rather than inside `operations`,
+    // beside `inserts` and `updates`, because it is a property of the request as a
+    // whole and not one of the work items — the same place
+    // `completeDocumentUploadSchema` puts it. See
+    // `optionalVaultKeyVersionSchema`.
+    vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   // The combined item count must be in range. There is no byte cap on the
   // structured shape: the real server-side byte bound is the global 2 MB body

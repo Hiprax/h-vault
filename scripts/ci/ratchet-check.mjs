@@ -78,7 +78,7 @@
  *     field family into existence. That is not a theoretical gap: `test:mutation`
  *     shipped at tier 2, its gate fails by design until `mutation.overall` is
  *     recorded, and the procedure three documents prescribed for recording it
- *     could not work. `--seed <prefix>` closes it, and every one of its four
+ *     could not work. `--seed <prefix>` closes it, and every one of its
  *     refusals exists because seeding is the one operation here that writes a
  *     floor without comparing it to anything:
  *
@@ -100,6 +100,25 @@
  *     `improvements`: a floor compared against nothing and a floor that moved up
  *     are different claims and a reader of the diff has to be able to tell them
  *     apart.
+ *
+ *     A fifth refusal arrived with per-leg mutation floors: a seed may not WRITE a
+ *     baseline the required-field check would reject. Naming a sub-family is how
+ *     the second leg is banked once the first exists (`--seed
+ *     mutation.legs.client`), and a sub-family can also be one field — a score
+ *     with no measured file set behind it — so the document about to be written
+ *     is checked, not just the one that was read.
+ *
+ *  i. A MUTATION FLOOR IS RAISED ONLY FROM EVIDENCE MEASURED FROM SCRATCH.
+ *     Stryker's incremental mode reuses a mutant's earlier result whenever its
+ *     code and its killing test are unchanged, and it cannot see anything else
+ *     that moved: a dependency, the harness, the toolchain, or the load the
+ *     machine was under when the result was first recorded — and a CPU-starved
+ *     Timeout counts as a kill. So `--accept` (improvements and seeds alike)
+ *     refuses to move any `mutation.*` field whose report does not say
+ *     `incremental: false`, which is what `mutation-gate.mjs --full` writes. The
+ *     comparison itself still reads incremental evidence: ENFORCING a floor from
+ *     a warm cache is what makes the campaign re-runnable at all; RECORDING one
+ *     from it is what would make the floor a fiction.
  *
  * ---------------------------------------------------------------------------
  * PORT NOTES — deliberate differences from the reference implementation.
@@ -156,7 +175,15 @@ import { RESOURCE_BUDGETS } from './lib/resource-budgets.mjs';
 // a baseline key may not contain a dot. Imported rather than restated so the
 // gate that writes `mutation.modules.*` and the gate that reads it cannot
 // disagree about what a module key is, nor about WHICH modules are core.
-import { CORE_MODULES, moduleKey } from './lib/mutation-scope.mjs';
+import {
+  CORE_MODULES,
+  MUTATION_DIFF_BUDGETS,
+  MUTATION_DIFF_FLOOR,
+  MUTATION_LEG_IDS,
+  legOfReport,
+  legReportFor,
+  moduleKey,
+} from './lib/mutation-scope.mjs';
 // The one parser for an LCOV document, shared with `coverage-check.mjs` — see
 // `fromLcov` below. `pct` comes with it for the same reason.
 import { parseLcov, pct } from './lib/lcov.mjs';
@@ -198,6 +225,30 @@ const DIRECTION = {
   'mutation.filesMutated': 'superset',
   'mutation.scopeGlobs': 'info',
   'mutation.modules.*': 'higher',
+  // The same four fields, per leg, so a leg can hold a floor before the slowest
+  // leg has ever completed (see `mutation-gate.mjs` decision (f)). GENERATED from
+  // the declared legs rather than matched by a wildcard in the middle of a path:
+  // a leg that is removed from `MUTATION_LEGS` while the baseline still records
+  // it then has no direction, which is blocking under (b) — so a leg cannot be
+  // retired by deleting its declaration and leaving its floor to be ignored.
+  ...Object.fromEntries(
+    MUTATION_LEG_IDS.flatMap((id) => [
+      [`mutation.legs.${id}.overall`, 'higher'],
+      [`mutation.legs.${id}.totalMutants`, 'higher'],
+      [`mutation.legs.${id}.filesMutated`, 'superset'],
+      [`mutation.legs.${id}.modules.*`, 'higher'],
+    ]),
+  ),
+  // The per-change mutation leg's committed floor and per-leg sample budgets,
+  // read from source like the bundle budgets (see where `cur` is filled in). Both
+  // are higher-is-better: a floor may rise, and a budget may grow — a larger
+  // budget always tests a SUPERSET of a smaller one's mutants, so the budget is
+  // this gate's denominator and shrinking it would be the narrowing (a) exists to
+  // catch. The per-run SCORE is deliberately not a field: it belongs to one
+  // change, not to the suite, and ratcheting it would let whichever change was
+  // measured last set the bar for every change after it.
+  'mutationDiff.floor': 'higher',
+  'mutationDiff.budget.*': 'higher',
   'tests.count': 'higher',
   // Duplication and unused code: every one of these is lower-is-better, and
   // `duplication.ceiling` is here deliberately. It mirrors `.jscpd.json`'s
@@ -237,16 +288,17 @@ const DIRECTION = {
   // the same commit, which oasdiff then compares against a base that already
   // agrees with it. Refreshing the base now costs a written `--accept` reason.
   'openapi.snapshotHash': 'pin',
-  // Accessibility. The two impacts that FAIL the gate are ratcheted at zero, so
-  // the number cannot creep; `viewsScanned` is higher-is-better because an axe
-  // run over nothing reports zero violations exactly like an axe run over a
+  // Accessibility. The three impacts that FAIL the gate are ratcheted at zero,
+  // so the number cannot creep; `viewsScanned` is higher-is-better because an
+  // axe run over nothing reports zero violations exactly like an axe run over a
   // clean page — a shrinking surface is the one regression the violation counts
-  // themselves can never show. The `moderate` and `minor` findings are recorded
-  // in `a11y.json` and deliberately NOT ratcheted: gating them would mean a new
-  // view could not be added until its unrelated landmark debt was paid off,
-  // which prices scanning MORE of the application as a regression.
+  // themselves can never show. `moderate` joined the blocking set once its debt
+  // (landmarks, `main`, `h1`, heading order) had been paid down to zero, and
+  // not before: a gate moves up only, from a measured value. `minor` findings
+  // are still recorded in `a11y.json` and deliberately NOT ratcheted.
   'a11y.critical': 'lower',
   'a11y.serious': 'lower',
+  'a11y.moderate': 'lower',
   'a11y.viewsScanned': 'higher',
   // Size and volume budgets. These are CEILINGS, not measurements, so
   // lower-is-better means "a budget may be tightened, never quietly raised".
@@ -299,6 +351,12 @@ const REQUIRED_FIELDS = [
   'tasks', // a disappearing gate is a regression
   'meta.fields', // a disappearing baseline field is a regression
   'integrity', // the scanner's blind-spot fingerprints
+  // Unconditional, unlike the mutation campaign's pair: these come from SOURCE,
+  // so they are measurable in every run and there is no bootstrap to wait for.
+  // A per-change floor that never entered the baseline would be one `--accept`
+  // could never raise and nothing would ever compare.
+  'mutationDiff.floor',
+  'mutationDiff.budget',
 ];
 
 /**
@@ -319,6 +377,37 @@ const REQUIRED_FIELDS = [
  * that was once recorded is itself a regression.
  */
 const MUTATION_REQUIRED_FIELDS = ['mutation.overall', 'mutation.filesMutated'];
+
+/**
+ * The same pair, required PER BANKED UNIT, now that a unit is either the merged
+ * campaign or one leg (`mutation.legs.<id>`, see `mutation-gate.mjs` decision
+ * (f)).
+ *
+ * A leg that carries a score without its measured file set is exactly the
+ * half-gate the rule above exists to refuse, one level down, so every leg the
+ * baseline records owes both fields. The merged pair keeps its original trigger
+ * — a `mutation` block exists — with one exception that the per-leg shape makes
+ * necessary: a block holding NOTHING BUT `legs` is a repository whose slowest
+ * leg has never completed, and demanding merged figures there would be demanding
+ * a number nobody can yet measure, which is the permanently-red gate port note 1
+ * exists to avoid. An EMPTY block still owes the merged pair, as it always did.
+ *
+ * @param {Record<string, unknown> | undefined} block the baseline's `mutation` object
+ * @returns {string[]}
+ */
+function mutationRequiredFields(block) {
+  if (!block || typeof block !== 'object') return [];
+  const { legs, ...merged } = /** @type {Record<string, unknown>} */ (block);
+  const legEntries = Object.entries(legs && typeof legs === 'object' ? legs : {}).filter(
+    ([, leg]) => leg && typeof leg === 'object' && Object.keys(leg).length > 0,
+  );
+  const out =
+    Object.keys(merged).length > 0 || legEntries.length === 0 ? [...MUTATION_REQUIRED_FIELDS] : [];
+  for (const [id] of legEntries) {
+    out.push(`mutation.legs.${id}.overall`, `mutation.legs.${id}.filesMutated`);
+  }
+  return out;
+}
 
 /**
  * The flake hunt's three load-bearing fields, required as soon as the baseline
@@ -395,6 +484,18 @@ const TIER0_REPORTS = ['integrity.json'];
  * observed flake can never quietly be normalised into the baseline.
  */
 const DEFERRABLE = [
+  // One entry per leg, BEFORE the merged one: a field is matched to the first
+  // entry whose prefix it carries, and a leg's floor is supplied by the leg's own
+  // report rather than by `mutation.json`. The conditions are the merged entry's,
+  // unchanged — same owner, same tier — so a leg's floor is deferred exactly as
+  // long as the campaign is still a registered tier-2 gate and not a moment
+  // longer.
+  ...MUTATION_LEG_IDS.map((id) => ({
+    prefix: `mutation.legs.${id}.`,
+    report: legReportFor(id),
+    owner: 'test:mutation',
+    tier: 2,
+  })),
   { prefix: 'mutation.', report: 'mutation.json', owner: 'test:mutation', tier: 2 },
   { prefix: 'flake.', report: 'flake.json', owner: 'test:flake', tier: 2 },
 ];
@@ -543,7 +644,7 @@ function fromJunit(xml) {
  *    fail as having no direction. Sanitising both sides cannot change which
  *    files a module claims.
  */
-function fromMutationJson(json, moduleIds) {
+function fromMutationJson(json, moduleIds, prefix = 'mutation') {
   const out = {};
   if (!json.files || typeof json.files !== 'object') return out;
   const perFile = new Map();
@@ -562,9 +663,9 @@ function fromMutationJson(json, moduleIds) {
     total += t;
     killed += k;
   }
-  out['mutation.filesMutated'] = [...perFile.keys()].sort();
-  out['mutation.totalMutants'] = total;
-  if (total) out['mutation.overall'] = pct(killed, total);
+  out[`${prefix}.filesMutated`] = [...perFile.keys()].sort();
+  out[`${prefix}.totalMutants`] = total;
+  if (total) out[`${prefix}.overall`] = pct(killed, total);
   for (const mod of moduleIds) {
     let t = 0;
     let k = 0;
@@ -574,7 +675,7 @@ function fromMutationJson(json, moduleIds) {
         k += v.k;
       }
     }
-    if (t) out[`mutation.modules.${moduleKey(mod)}`] = pct(k, t);
+    if (t) out[`${prefix}.modules.${moduleKey(mod)}`] = pct(k, t);
   }
   return out;
 }
@@ -621,9 +722,13 @@ const baselineModules = Object.keys(baselineRaw.mutation?.modules ?? {});
  * common: `CORE_MODULES` holds raw paths and a baseline key has already been
  * through `moduleKey`, which is idempotent.
  */
-const mutationModuleIds = [
-  ...new Map([...CORE_MODULES, ...baselineModules].map((mod) => [moduleKey(mod), mod])).values(),
+const unionModules = (remembered) => [
+  ...new Map([...CORE_MODULES, ...remembered].map((mod) => [moduleKey(mod), mod])).values(),
 ];
+const mutationModuleIds = unionModules(baselineModules);
+/** The same union for one leg: the declaration, plus whatever that leg's floor remembers. */
+const legModuleIds = (id) =>
+  unionModules(Object.keys(baselineRaw.mutation?.legs?.[id]?.modules ?? {}));
 const baselinePackages = Object.keys(baselineRaw.packages ?? {});
 const manifestRaw = existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, 'utf8')) : null;
 
@@ -687,6 +792,13 @@ function collect() {
   const seen = [];
   const stale = [];
   const notes = [];
+  /** Deferrable reports that WERE fresh in this run, by name. See the compare loop. */
+  const freshDeferrable = new Set();
+  /**
+   * Mutation evidence that was not produced from scratch, as `{ prefix, rel }`.
+   * `--accept` refuses to raise a floor from it; see (i).
+   */
+  const incrementalEvidence = [];
   const newestSrc = newestSourceMtime();
 
   const freshness = (abs, rel) => {
@@ -724,6 +836,7 @@ function collect() {
       // code. The cheapest exit from that is deleting the staleness check, which
       // is the one defence that stops a report describing a different tree.
       base === 'mutation.json' ||
+      legOfReport(base) !== undefined ||
       base === 'flake.json';
     if (!known) continue;
     // A deferrable report is checked for freshness WITHOUT being recorded as
@@ -735,6 +848,7 @@ function collect() {
     if (deferrable) {
       const st = safeStat(p);
       if (!st || (newestSrc && st.mtimeMs < newestSrc)) continue;
+      freshDeferrable.add(base);
     } else if (freshness(p, rel) !== 'fresh') continue;
 
     let j;
@@ -782,10 +896,11 @@ function collect() {
       }
       if (typeof snap.hash === 'string') got['openapi.snapshotHash'] = snap.hash;
     } else if (base === 'a11y.json') {
-      // Only the two gated impacts and the size of the scanned surface. The
+      // Only the three gated impacts and the size of the scanned surface. The
       // gate's own report carries the rest.
       if (typeof j.violations?.critical === 'number') got['a11y.critical'] = j.violations.critical;
       if (typeof j.violations?.serious === 'number') got['a11y.serious'] = j.violations.serious;
+      if (typeof j.violations?.moderate === 'number') got['a11y.moderate'] = j.violations.moderate;
       if (typeof j.viewsScanned === 'number') got['a11y.viewsScanned'] = j.viewsScanned;
     } else if (base === 'coverage.json') {
       // ONLY the patch-coverage number. The per-package percentages, the
@@ -803,8 +918,19 @@ function collect() {
       // `null` means UNMEASURED in warnings.json and is deliberately not `0`;
       // passing it through as a number would fabricate a clean result.
       for (const [k, v] of Object.entries(j)) if (typeof v === 'number') got[`warnings.${k}`] = v;
-    } else if (base.includes('mutation')) {
+    } else if (base === 'mutation.json') {
       got = fromMutationJson(j, mutationModuleIds);
+      if (j.incremental !== false) incrementalEvidence.push({ prefix: 'mutation.', rel });
+    } else if (legOfReport(base) !== undefined) {
+      // A leg's own evidence, under the leg's own prefix. EXACT names on both
+      // branches: `mutation-shared.json` contains the substring `mutation`, and
+      // the substring dispatch this replaced would have read one leg's file as the
+      // MERGED campaign — a smaller file set, reported as a scope regression.
+      const id = /** @type {string} */ (legOfReport(base));
+      got = fromMutationJson(j, legModuleIds(id), `mutation.legs.${id}`);
+      if (j.incremental !== false) {
+        incrementalEvidence.push({ prefix: `mutation.legs.${id}.`, rel });
+      }
     } else if (base.includes('flake')) {
       got = fromFlakeJson(j);
     }
@@ -815,7 +941,7 @@ function collect() {
     }
   }
 
-  if (tier0) return { cur, seen, stale, notes };
+  if (tier0) return { cur, seen, stale, notes, freshDeferrable, incrementalEvidence };
 
   // --- test counts, per declared JUnit artifact (port note 4) -------------
   const { junit, coverage } = declaredArtifacts();
@@ -867,7 +993,7 @@ function collect() {
     }
   }
 
-  return { cur, seen, stale, notes };
+  return { cur, seen, stale, notes, freshDeferrable, incrementalEvidence };
 }
 
 // ---------------------------------------------------------------------------
@@ -887,7 +1013,7 @@ function flatten(obj, prefix = '', out = {}) {
 }
 
 const base = flatten(baselineRaw);
-const { cur, seen, stale, notes } = collect();
+const { cur, seen, stale, notes, freshDeferrable, incrementalEvidence } = collect();
 
 if (manifestRaw?.tasks) cur['tasks'] = Object.keys(manifestRaw.tasks).sort();
 
@@ -912,6 +1038,10 @@ if (!tier0) {
   cur['bundle.defaultChunkBudgetKb'] = DEFAULT_CHUNK_BUDGET_KB;
   cur['bundle.initialPayloadBudgetKb'] = INITIAL_PAYLOAD_BUDGET_KB;
   cur['bundle.htmlShellBudgetKb'] = HTML_SHELL_BUDGET_KB;
+  cur['mutationDiff.floor'] = MUTATION_DIFF_FLOOR;
+  for (const [leg, budget] of Object.entries(MUTATION_DIFF_BUDGETS)) {
+    cur[`mutationDiff.budget.${leg}`] = budget;
+  }
   for (const [scenario, budget] of Object.entries(RESOURCE_BUDGETS)) {
     cur[`resource.budgetMs.${scenario}`] = budget.durationMs;
     cur[`resource.budgetRssMb.${scenario}`] = budget.rssGrowthMb;
@@ -935,25 +1065,34 @@ const undeclared = [];
 const absent = [];
 
 // (d) + port note 2: required fields must be present, per package or plainly.
-const requiredFields = [
-  ...REQUIRED_FIELDS,
-  ...(baselineRaw.mutation ? MUTATION_REQUIRED_FIELDS : []),
-  ...(baselineRaw.flake ? FLAKE_REQUIRED_FIELDS : []),
-];
-for (const req of requiredFields) {
-  const present = Object.keys(base).some(
-    (p) =>
-      p === req ||
-      p.startsWith(`${req}.`) ||
-      (p.startsWith('packages.') && (p.endsWith(`.${req}`) || p.includes(`.${req}.`))),
+/**
+ * The required fields a baseline document owes, and which of them it lacks.
+ * A function of the document rather than of `baselineRaw`, because (h) asks the
+ * same question of the baseline an `--accept --seed` is ABOUT to write.
+ */
+function absentRequiredFields(raw) {
+  const flat = flatten(raw);
+  const required = [
+    ...REQUIRED_FIELDS,
+    ...mutationRequiredFields(raw.mutation),
+    ...(raw.flake ? FLAKE_REQUIRED_FIELDS : []),
+  ];
+  return required.filter(
+    (req) =>
+      !Object.keys(flat).some(
+        (p) =>
+          p === req ||
+          p.startsWith(`${req}.`) ||
+          (p.startsWith('packages.') && (p.endsWith(`.${req}`) || p.includes(`.${req}.`))),
+      ),
   );
-  if (!present) {
-    absent.push({
-      path: req,
-      detail:
-        'required baseline field is absent, so its gate does not exist; a metric that never enters the baseline is never checked',
-    });
-  }
+}
+for (const req of absentRequiredFields(baselineRaw)) {
+  absent.push({
+    path: req,
+    detail:
+      'required baseline field is absent, so its gate does not exist; a metric that never enters the baseline is never checked',
+  });
 }
 
 for (const [path, want] of Object.entries(base)) {
@@ -989,18 +1128,30 @@ for (const [path, want] of Object.entries(base)) {
     // is DEFERRED, not unmeasured — see the DEFERRABLE table. Anything else,
     // including a deferrable field whose owning task has been deleted or moved,
     // is the hard failure decision (c) requires.
+    //
+    // Deferral is a property of the RUN, and only of a run in which the field's
+    // own report was absent or stale. A report that IS fresh and simply does not
+    // carry the field — a leg in which a core module scored no mutants, a run
+    // that tested none at all and so emitted no `overall` — measured this tree
+    // and did not find the thing the floor names. That is the hard failure (c)
+    // describes, not a tier-2 gate that has yet to run, and deferring it would
+    // leave the gate as the only reader of a regression the ratchet exists to
+    // catch a second time.
     const deferrable = deferrableForField(path);
     const owner = deferrable ? manifestRaw?.tasks?.[deferrable.owner] : undefined;
-    if (deferrable && owner?.tier === deferrable.tier) {
+    const reportRan = deferrable ? freshDeferrable.has(deferrable.report) : false;
+    if (deferrable && owner?.tier === deferrable.tier && !reportRan) {
       deferred.push({ path, want, owner: deferrable.owner, report: deferrable.report });
       continue;
     }
     missing.push({
       path,
       want,
-      detail: deferrable
-        ? `${deferrable.owner} is no longer a registered tier-${String(deferrable.tier)} task, so nothing produces ${deferrable.report}`
-        : 'no fresh report supplies this field; a metric that stops being measured stops being a gate',
+      detail: !deferrable
+        ? 'no fresh report supplies this field; a metric that stops being measured stops being a gate'
+        : reportRan
+          ? `${deferrable.report} is fresh and does not measure this field, so the floor it names was not found in this tree`
+          : `${deferrable.owner} is no longer a registered tier-${String(deferrable.tier)} task, so nothing produces ${deferrable.report}`,
     });
     continue;
   }
@@ -1103,8 +1254,15 @@ if (seedPrefixes.length > 0) {
   }
 }
 
+// (h) An ABSENT required field is the one blocking finding a seed is the cure
+// for: refusing to seed `mutationDiff` because `mutationDiff.floor` is absent
+// would make a new required family impossible to record at all. Only a field
+// this very run seeds is released, and the document about to be written is
+// checked for completeness before it is written (see the accept branch).
+const seededUnder = (req) => seeded.some((s) => s.path === req || s.path.startsWith(`${req}.`));
+const blockingAbsent = absent.filter((a) => !seededUnder(a.path));
 const blocking =
-  regressions.length + missing.length + absent.length + undeclared.length + stale.length;
+  regressions.length + missing.length + blockingAbsent.length + undeclared.length + stale.length;
 
 // ---------------------------------------------------------------------------
 // accept, or report
@@ -1134,7 +1292,7 @@ if (has('--accept')) {
       );
     }
     for (const m of missing) console.error(`  UNMEASURED ${m.path}`);
-    for (const a of absent) console.error(`  ABSENT     ${a.path}`);
+    for (const a of blockingAbsent) console.error(`  ABSENT     ${a.path}`);
     // Printed because (h) made it reachable from an accept run: a seeded family
     // carrying a field with no declared direction blocks here, and a refusal
     // that names nothing is a refusal nobody can act on.
@@ -1144,6 +1302,38 @@ if (has('--accept')) {
       'A justified reduction needs a BASELINE-REDUCTION ledger entry and judge sign-off, then re-run.',
     );
     process.exit(1);
+  }
+  // (i) A mutation floor is banked ONLY from evidence measured from scratch.
+  // Stryker's incremental mode reuses a mutant's previous result whenever its
+  // code and its killing test are unchanged — and it does not see a change to
+  // anything else: a dependency, the harness, the toolchain, or the load the
+  // machine was under when the result was first recorded. A CPU-starved Timeout
+  // counts as a kill, so an incremental run can carry a busy machine's inflated
+  // score straight into a floor that is then permanent. The gate records
+  // `incremental` in every report it writes; anything other than an explicit
+  // `false` is refused here, which also covers a report too old to say.
+  const raisedFromIncremental = [...improvements.map((i) => i.path), ...seeded.map((x) => x.path)]
+    .map((path) => ({
+      path,
+      // The field's OWN evidence: a leg's fields come from that leg's report, so
+      // the merged report's `mutation.` prefix must not claim them — an
+      // incremental campaign run says nothing about a leg measured from scratch.
+      evidence: incrementalEvidence.find(
+        (e) =>
+          path.startsWith(e.prefix) &&
+          (e.prefix !== 'mutation.' || !path.startsWith('mutation.legs.')),
+      ),
+    }))
+    .filter((entry) => entry.evidence);
+  if (raisedFromIncremental.length > 0) {
+    const first = /** @type {{ path: string, evidence: { rel: string } }} */ (
+      raisedFromIncremental[0]
+    );
+    fail(
+      `refusing to raise ${first.path} (and ${String(raisedFromIncremental.length - 1)} more) from ` +
+        `${first.evidence.rel}, which was not measured from scratch. Re-run the gate with --full ` +
+        '(npm run test:mutation -- --full, optionally with --leg=<id>) and accept from that run.',
+    );
   }
   const next = JSON.parse(JSON.stringify(baselineRaw));
   const setPath = (o, p, v) => {
@@ -1159,6 +1349,24 @@ if (has('--accept')) {
   // read; the difference is that nothing was compared, which is why it is
   // reported separately below rather than counted as an improvement.
   for (const s of seeded) setPath(next, s.path, s.value);
+  // (h) A seed may not WRITE the half-gate the required-field rule refuses to
+  // READ. Seeding a sub-family is legitimate — once one leg is banked, the next
+  // leg is `--seed mutation.legs.<id>`, because `mutation` is then partly present
+  // — but a sub-family can also be `mutation.legs.client.overall` alone, and that
+  // would record a score with no measured file set behind it. Checked on the
+  // document about to be written, and fatal before anything is written.
+  if (seeded.length > 0) {
+    const incomplete = absentRequiredFields(next).filter(
+      (req) => !absentRequiredFields(baselineRaw).includes(req),
+    );
+    if (incomplete.length > 0) {
+      fail(
+        `--seed would record a baseline missing required field(s) ${incomplete.join(', ')}: ` +
+          'a floor without its measured file set is a gate with its scope defence switched off. ' +
+          'Seed the whole unit (for a leg, --seed mutation.legs.<id>).',
+      );
+    }
+  }
   next.recordedAt = new Date().toISOString().slice(0, 10);
   next.reason = reason;
   try {

@@ -1,4 +1,4 @@
-import { MAX_IN_FLIGHT_PART_UPLOADS } from '@hvault/shared';
+import { MAX_IN_FLIGHT_PART_UPLOADS, MAX_IN_FLIGHT_PART_UPLOADS_PER_USER } from '@hvault/shared';
 
 /**
  * A counting semaphore, and the one instance of it that bounds how many document
@@ -33,13 +33,27 @@ import { MAX_IN_FLIGHT_PART_UPLOADS } from '@hvault/shared';
  * deliberate trade, because the alternative caps a healthy transfer to protect
  * against an unhealthy engine; it is not an impossible case.
  *
+ * TWO THINGS BOUND THAT WINDOW, and neither of them is the queue. The first is
+ * {@link partUploadUserQuota} below: one identity may hold at most
+ * `MAX_IN_FLIGHT_PART_UPLOADS_PER_USER` of these slots, so a single account can
+ * never be every waiter's reason for waiting. The second is the part route's own
+ * body deadline (`DOCUMENT_PART_BODY_TIMEOUT_MS`, 64 s by default, armed by
+ * `middleware/documentPartBody.ts` when a slot is granted), which turns "a client
+ * that stops sending" from an indefinite hold into a bounded one; the server-wide
+ * receive deadline in `utils/httpTimeouts.ts` is only its ceiling. Before the pair
+ * existed, four requests from one account that declared a `Content-Length` and
+ * then dribbled held the whole budget for as long as Node's default
+ * `requestTimeout` of five minutes, without sending a byte, naming a valid upload
+ * id, or spending a unit of quota.
+ *
  * THE ORDERING RULE THIS EXISTS TO ENFORCE, which is easy to get wrong and
  * invisible when wrong: a slot must be taken **before the body parser runs**, and
  * held **across the storage call**. Express runs a route's parser before its
  * handler, so a slot acquired inside the handler is acquired after 8 MiB has
  * already been buffered and bounds nothing at all. The middleware that mounts this
  * therefore sits AHEAD of `express.raw` (see `middleware/documentPartBody.ts`) and
- * releases only when the response closes.
+ * releases only once the response has closed AND the handler has settled, since a
+ * handler whose client went away still holds the part until its storage call returns.
  *
  * The API is CALLBACK-based rather than promise-based on purpose. A promise here
  * would be a promise nobody awaits, resolved from inside an Express middleware; if
@@ -135,3 +149,87 @@ export function createSemaphore(permits: number): Semaphore {
  * to fit in memory.
  */
 export const partUploadSemaphore: Semaphore = createSemaphore(MAX_IN_FLIGHT_PART_UPLOADS);
+
+// ---------------------------------------------------------------------------
+// The per-identity share of that budget
+// ---------------------------------------------------------------------------
+
+/**
+ * A counting quota held PER KEY, with no queue: a key at its limit is REFUSED
+ * rather than made to wait.
+ *
+ * The difference from the semaphore above is the whole design, not an
+ * implementation detail. A caller past the PROCESS budget is queued, because the
+ * condition clears in milliseconds and refusing would fail a transfer that was
+ * already halfway through. A caller past its OWN share is refused, because the
+ * condition clears only when that same caller finishes something — so queueing it
+ * would let one identity convert a refusal it has earned into a growing pile of
+ * sockets, which is the shape of the problem rather than a fix for it.
+ */
+export interface KeyedQuota {
+  /** How many charges one key may hold at a time. Fixed at construction. */
+  readonly limit: number;
+  /** How many keys are charged at all. Zero when nothing is in flight. */
+  readonly keys: number;
+  /** Charges currently held by `key`. */
+  heldBy(key: string): number;
+  /**
+   * Charges one unit to `key` and returns the release, or `null` when `key`
+   * already holds {@link limit}.
+   *
+   * The release is idempotent, exactly as the semaphore's is and for the same
+   * reason: the one caller wires it to an event that may fire alongside its own
+   * cleanup path.
+   */
+  charge(key: string): (() => void) | null;
+}
+
+export function createKeyedQuota(limit: number): KeyedQuota {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new RangeError('limit must be a safe integer of at least 1');
+  }
+
+  // Keyed by user id, and the DELETE at zero is load-bearing rather than tidy:
+  // this map would otherwise grow by one entry per account that has ever uploaded
+  // a part and never shrink, which is the same unbounded growth the semaphore
+  // exists to prevent, moved one layer up.
+  const held = new Map<string, number>();
+
+  return {
+    limit,
+    get keys() {
+      return held.size;
+    },
+    heldBy(key: string): number {
+      return held.get(key) ?? 0;
+    },
+    charge(key: string): (() => void) | null {
+      const current = held.get(key) ?? 0;
+      if (current >= limit) return null;
+      held.set(key, current + 1);
+
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const remaining = (held.get(key) ?? 1) - 1;
+        if (remaining <= 0) held.delete(key);
+        else held.set(key, remaining);
+      };
+    },
+  };
+}
+
+/**
+ * How much of {@link partUploadSemaphore} any ONE identity may hold.
+ *
+ * Module-level for the same reason the semaphore is: the budget it shares out is
+ * per PROCESS, so the share has to be counted in the same process. Under pm2's two
+ * instances an account may therefore hold this many parts on each — which is the
+ * honest description of a per-process memory budget, not a hole, because the
+ * number that has to fit in memory is still `MAX_IN_FLIGHT_PART_UPLOADS` per
+ * process.
+ */
+export const partUploadUserQuota: KeyedQuota = createKeyedQuota(
+  MAX_IN_FLIGHT_PART_UPLOADS_PER_USER,
+);

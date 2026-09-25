@@ -21,7 +21,7 @@
     // from a host, holding relative paths and hashes of files whose `.js.map`s ship
     // beside it anyway.
     "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo",
-    // TypeScript 6 defaults `types` to `[]` (no auto-loading of `@types/*`).
+    // TypeScript 6 and 7 default `types` to `[]` (no auto-loading of `@types/*`).
     // The shared utils use the Web Crypto `crypto` global (available in both
     // Node and the browser); `@types/node` provides its `Crypto` global type.
     "types": ["node"]

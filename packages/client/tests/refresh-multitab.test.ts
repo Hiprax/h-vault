@@ -540,12 +540,33 @@ describe('a transient refresh failure must not destroy the session', () => {
     expect(mockLogout).not.toHaveBeenCalled();
   });
 
-  it('DOES log out on a 403 the server raised on its merits', async () => {
-    // The control for the case above: `/auth/refresh` answers 403 ACCOUNT_LOCKED,
-    // and that one genuinely ends the session.
+  it('does NOT log out when the refresh is refused because the account is locked', async () => {
+    // `/auth/refresh` now evaluates the account BEFORE it claims the presented
+    // token, so an `ACCOUNT_LOCKED` refusal leaves the refresh row unspent and
+    // sends no cookie directive: the session on the other side of the lockout is
+    // the same session. Logging out here would `POST /auth/logout` and delete the
+    // row the server had just declined to touch — the client finishing the
+    // destruction the server was careful to avoid, over a thirty-minute
+    // condition the owner can clear from their inbox.
     refreshShouldFail = true;
     refreshFailStatus = 403;
     refreshFailMessage = 'ACCOUNT_LOCKED';
+    installLocks();
+    const { api } = await loadClient();
+
+    await expect(api.get('/protected')).rejects.toBeInstanceOf(AxiosError);
+
+    expect(refreshCount).toBe(1);
+    expect(mockLogout).not.toHaveBeenCalled();
+  });
+
+  it('DOES log out on a 403 the server raised on other merits', async () => {
+    // The control for BOTH exclusions above: only a CSRF complaint and the exact
+    // `ACCOUNT_LOCKED` code are spared, and every other authoritative 403 still
+    // ends the session.
+    refreshShouldFail = true;
+    refreshFailStatus = 403;
+    refreshFailMessage = 'FORBIDDEN';
     installLocks();
     const { api } = await loadClient();
 

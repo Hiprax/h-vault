@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { SANDBOX_PERMISSIONS_POLICY } from './permissionsPolicy.js';
 
 /**
  * The Content-Security-Policy carried by `/sandbox.html`, the isolated document
@@ -203,7 +204,8 @@ export function applySandboxAssetHeaders(res: HeaderSink, filePath: string): voi
  *
  * `setHeader` REPLACES rather than appends, which is what makes exactly one
  * `Content-Security-Policy` reach the client even though helmet already set the
- * application's. That matters: two policies on one response are INTERSECTED by
+ * application's (and exactly one `Permissions-Policy`, over the application's
+ * own from `app.ts`). That matters: two policies on one response are INTERSECTED by
  * the browser, which would kill `blob:` media and `data:` images in one stroke.
  *
  * No nonce is injected, unlike the SPA shell. The document carries no inline
@@ -218,6 +220,9 @@ export function createSandboxDocumentHandler(
     res.setHeader('Content-Security-Policy', SANDBOX_CSP_HEADER);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', SANDBOX_DOCUMENT_CACHE_CONTROL);
+    // Replaces the application's value, which allows the camera for the
+    // authenticator import; this document never needs a device.
+    res.setHeader('Permissions-Policy', SANDBOX_PERMISSIONS_POLICY);
     res.send(html);
   };
 }
@@ -242,13 +247,16 @@ export function createSandboxDocumentHandler(
  * the build again and hope".
  *
  * It takes a THUNK rather than a path, and that is not indirection for its own
- * sake. `eslint-plugin-security`'s `detect-non-literal-fs-filename` accepts
- * `path.join(variable, 'literal')` and refuses `path.join(variable, variable)`,
- * so a helper that joined the name itself would have to be silenced — and an
- * analyzer suppression is exactly what this project refuses to add. Leaving the
- * read at the call site, with its filename written out, keeps the check
- * meaningful and puts only the error mapping here, which is the part worth
- * sharing anyway.
+ * sake. `eslint-plugin-security`'s `detect-non-literal-fs-filename` accepts a
+ * filename only when it can trace the WHOLE expression to literals inside ONE
+ * module — it follows a local `const` to its initializer and understands
+ * `path.join`, `fileURLToPath` and `import.meta.url`, but an IMPORTED binding is
+ * none of those. A helper that took a directory and joined the name would
+ * therefore have to be silenced, and an analyzer suppression is exactly what this
+ * project refuses to add. So each read lives beside the chain that builds its
+ * path (`config/clientArtifacts.ts`, `readApplicationShell` and
+ * `readSandboxDocument`), where the analyzer can verify it end to end, and only
+ * the error mapping is shared here — which is the part worth sharing anyway.
  */
 export function requireBuildArtifact(read: () => string, missing: string): string {
   try {

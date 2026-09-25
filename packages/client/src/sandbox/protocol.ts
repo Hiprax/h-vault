@@ -1,4 +1,5 @@
 import type {
+  SandboxFailureCode,
   SandboxFrameMessage,
   SandboxQrRequest,
   SandboxRenderRequest,
@@ -163,12 +164,20 @@ export function parseQrScanRequest(data: unknown): SandboxQrRequest | null {
  */
 export const frameMessage = {
   rendered: (): SandboxFrameMessage => ({ kind: 'rendered' }),
-  failed: (reason: string): SandboxFrameMessage => ({ kind: 'failed', reason }),
+  // A CODE, never a sentence: the application words every refusal itself,
+  // because the words land in ITS chrome. `detectedFormat` is added only when
+  // there is one, so an ordinary refusal carries no empty field to misread.
+  failed: (code: SandboxFailureCode, detectedFormat?: string): SandboxFrameMessage =>
+    detectedFormat === undefined
+      ? { kind: 'failed', code }
+      : { kind: 'failed', code, detectedFormat },
   link: (href: string): SandboxFrameMessage => ({ kind: 'link', href }),
-  // There is deliberately NO `transformed` builder. The engine returns a
-  // complete, discriminated reply of its own and the frame forwards it
-  // untouched; a builder here would exist only to be a second place that shape
-  // is written down, and an unused one at that.
+  // There is deliberately NO `transformed` builder, and no `qrFound`/`qrMiss`/
+  // `qrFailed` one either. The transform engine returns a complete,
+  // discriminated reply of its own and the frame forwards it untouched, and
+  // `qrScan.ts` builds all four of its replies as literals beside the checks
+  // that decide them. A builder here would exist only to be a second place those
+  // shapes are written down, and an unused one at that.
   transformFailed: (
     failure: Omit<SandboxTransformFailedMessage, 'kind'>,
   ): SandboxTransformFailedMessage => ({ kind: 'transformFailed', ...failure }),

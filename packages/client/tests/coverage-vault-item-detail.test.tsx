@@ -54,7 +54,8 @@ vi.hoisted(() => {
   });
 });
 
-const { mockToast, mockDecryptData } = vi.hoisted(() => ({
+const { mockToast, mockDecryptData, mockDecryptDataWithAad } = vi.hoisted(() => ({
+  mockDecryptDataWithAad: vi.fn(),
   mockToast: vi.fn(),
   mockDecryptData: vi.fn(),
 }));
@@ -75,6 +76,7 @@ vi.mock('../src/stores/encryptedStorage', () => ({
 vi.mock('../src/services/crypto/cryptoService', () => ({
   cryptoService: {
     decryptData: mockDecryptData,
+    decryptDataWithAad: mockDecryptDataWithAad,
     encryptData: vi.fn(),
     generateSearchHash: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
@@ -1094,6 +1096,46 @@ describe('VaultItemDetail / password history', () => {
     });
   });
 
+  it('opens a format-v2 entry against the item it belongs to, and nothing else', async () => {
+    // The section used to receive the entries alone. A bound entry cannot be
+    // opened without its row, so the item's id is what it is opened against, and
+    // an entry bound to another item is refused rather than shown here.
+    const itemId = '66c0f1a2b3c4d5e6f7a8b9c0';
+    const boundEntries = [
+      { encryptedPassword: 'b1', iv: 'v2:bi1', tag: 'bt1', changedAt: '2025-03-01T00:00:00.000Z' },
+      { encryptedPassword: 'b2', iv: 'v2:bi2', tag: 'bt2', changedAt: '2025-02-01T00:00:00.000Z' },
+    ];
+    const own = `hvault/vault-field/v2|item.password-history|${itemId}`;
+    mockDecryptDataWithAad.mockImplementation(
+      (enc: string, _iv: string, _tag: string, _key: CryptoKey, aad: Uint8Array) =>
+        // b2 was sealed for ANOTHER item: its additional data never matches here.
+        enc === 'b1' && new TextDecoder().decode(aad) === own
+          ? Promise.resolve('bound-older')
+          : Promise.reject(new Error('OperationError')),
+    );
+
+    renderDetail(makeItem({ id: itemId, passwordHistory: boundEntries }));
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Password History (2)'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/Previous password/)).toHaveLength(1);
+    });
+    expect(
+      mockDecryptDataWithAad.mock.calls.map(([enc, iv, , , aad]) => [
+        enc,
+        iv,
+        new TextDecoder().decode(aad as Uint8Array),
+      ]),
+    ).toEqual([
+      ['b1', 'bi1', own],
+      ['b2', 'bi2', own],
+    ]);
+    expect(mockDecryptData).not.toHaveBeenCalled();
+  });
+
   it('does not attempt decryption while the vault key is absent', async () => {
     useAuthStore.setState({ vaultKey: null } as never);
 
@@ -1810,7 +1852,8 @@ describe('VaultItemDetail / rename for an undecodable item', () => {
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Failed to rename item', type: 'error' }),
     );
-    expect(screen.getByRole('dialog', { name: 'Rename item' })).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog', { name: 'Rename item' });
+    expect(dialog).toContainElement(screen.getByRole('heading', { level: 2, name: 'Rename Item' }));
   });
 
   it('closes without saving on Cancel', () => {

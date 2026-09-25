@@ -164,7 +164,13 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
       expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
 
-    it('accepts the same >2 MB body on /backup/restore and actually restores it', async () => {
+    it.each([
+      ['/api/v1/backup/restore'],
+      // Express routes case-insensitively and with an optional trailing slash, so
+      // this spelling reaches the same handler; the global 2 MB parser must skip it
+      // too, or it answers 413 before authentication and the route's own limiter.
+      ['/api/v1/Backup/Restore/'],
+    ])('accepts the same >2 MB body on %s and actually restores it', async (path) => {
       // 7 × 400 KB ≈ 2.8 MB on the wire — comfortably over the global 2 MB
       // parser limit and comfortably under the route-level 30 MB one. Each row
       // is individually within MAX_ENCRYPTED_DATA_LENGTH (500 000).
@@ -181,12 +187,12 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
       const data = JSON.stringify({ items, folders: [] });
       expect(data.length).toBeGreaterThan(2 * 1024 * 1024);
 
-      const res = await post(agent, '/api/v1/backup/restore', user.accessToken, {
+      const res = await post(agent, path, user.accessToken, {
         conflictStrategy: 'skip',
         data,
       });
 
-      expect(res.status).toBe(200);
+      expect(res.status, JSON.stringify(res.body).slice(0, 200)).toBe(200);
       expect(res.body.data.itemsRestored).toBe(7);
       expect(await VaultItem.countDocuments({ userId: user.id })).toBe(7);
     });

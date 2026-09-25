@@ -12,12 +12,20 @@
  * publishes.
  *
  * It is also the ONLY gate where the real Nginx, the real image layout and the
- * real header set meet, which makes it the only place two things are actually
- * proven: that the `web-root` stage's deletion of `sandbox.html` leaves the
- * isolated render document to Express with its own far stricter policy, and that
- * the two CORS-ish headers an opaque origin needs are scoped to
+ * real header set meet, which makes it the only place three things are actually
+ * proven: that the isolated render document reaches a client from Express with
+ * its own far stricter policy and from neither document root on disk; that no
+ * route-missing URL spelling hands that document out under any other policy; and
+ * that the two CORS-ish headers an opaque origin needs are scoped to
  * `sandbox-assets/`. The E2E and a11y suites drive the Vite dev server, which
  * has neither helmet nor Nginx.
+ *
+ * And it is the only place a BROWSER meets that header set: step 7c runs
+ * `playwright.sandbox.config.ts` — the specs `test:sandbox` runs against the
+ * artifact Express serves on its own — through this stack's published port, so
+ * every preview renders with `sandbox-assets/` answered by Nginx's own literal
+ * header set and the document carrying Nginx's header floor. `test:sandbox`
+ * cannot reach either: in a pm2 deployment and in that gate, Express serves both.
  *
  *   node scripts/ci/deploy-drill.mjs            the gate (what the pipeline runs)
  *   npm run test:deploy                         the same thing
@@ -85,14 +93,15 @@
  *     read is what makes the whole sequence an assertion about the bucket rather
  *     than about a container's exit code.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { captureExe, hasExe, repoRoot, runExe } from './lib/proc.mjs';
+import { captureExe, hasExe, repoRoot, runExe, runNpm } from './lib/proc.mjs';
 import { color, note, symbol, warn } from './lib/ui.mjs';
-import { ensureReportDir, writeJsonReport } from './lib/reports.mjs';
+import { ensureReportDir, reportPath, writeJsonReport } from './lib/reports.mjs';
+import { SANDBOX_NGINX_JUNIT, SANDBOX_SUITE, sandboxRunProblems } from './lib/sandbox-browser.mjs';
 import {
   SERVICE_EXPECTATIONS,
   parseComposePs,
@@ -115,13 +124,16 @@ import {
 } from './lib/vault-flow.mjs';
 import {
   SANDBOX_ASSET_HEADERS_EXPECTED,
+  SANDBOX_BYPASS_SPELLINGS,
   SANDBOX_CSP_EXPECTED,
   SANDBOX_DOCUMENT_CACHE_CONTROL,
   appAssetProblems,
   assetResponseProblems,
+  bypassUrl,
   cspProblems,
   sandboxAssetProblems,
   sandboxAssetUrls,
+  sandboxBypassProblems,
 } from './lib/sandbox-headers.mjs';
 
 /** (a) Everything about the drill's stack is namespaced away from a real one. */
@@ -728,6 +740,50 @@ try {
         { cspDiff: sandboxCspDiff },
       );
 
+      // The spellings that miss the Express route, asked through the whole
+      // stack. Express 5 matches the RAW pathname while `send` decodes and
+      // normalises it, so each of these reached `express.static`; the document is
+      // now emitted outside every static root, so neither server has it to give.
+      //
+      // Through Nginx there is a SECOND question, and this is the only gate that
+      // can answer it: `try_files $uri @app` matches on the NORMALISED, decoded
+      // `$uri`, but `proxy_pass` with no URI part may forward either the raw
+      // request line or the rewritten one. The answer is observable rather than
+      // assumed — if Express receives the normalised `/sandbox.html` it answers
+      // from the ROUTE, document and full policy; if it receives the raw
+      // spelling it answers with the SPA shell. Both are correct outcomes; the
+      // one that is not is the document under any other policy, which is what
+      // `sandboxBypassProblems` judges. What reached Express is RECORDED, since
+      // it is a property of the proxy that nothing else here pins.
+      const bypassProblems = [];
+      const bypassSeen = [];
+      for (const spelling of SANDBOX_BYPASS_SPELLINGS) {
+        const probe = await fetch(bypassUrl(baseUrl, spelling));
+        const body = await probe.text();
+        bypassProblems.push(...sandboxBypassProblems(spelling, probe, body));
+        // Three outcomes, and each says something different about the proxy
+        // hop. The document means Nginx forwarded the NORMALISED `/sandbox.html`
+        // and Express answered from the route; the SPA shell means it forwarded
+        // the RAW spelling and Express fell through to the catch-all; anything
+        // else was refused before either — which is where Nginx's own handling
+        // of the traversal spelling shows up, since Express never sees that one
+        // as a refusal (`serve-static` falls through and the shell answers).
+        const reached = /<script[^>]+src="\/sandbox-assets\//.test(body)
+          ? 'normalised (Express saw /sandbox.html and served the document)'
+          : /<script[^>]+nonce="/i.test(body)
+            ? 'raw (Express saw the spelling and served the SPA shell)'
+            : `refused before either (${String(probe.status)})`;
+        bypassSeen.push(`${spelling} -> ${String(probe.status)}, ${reached}`);
+      }
+      record(
+        'sandbox-spellings',
+        bypassProblems.length === 0,
+        bypassProblems.length === 0
+          ? `none of the ${String(SANDBOX_BYPASS_SPELLINGS.length)} route-missing spellings hands out the isolated document through the published port — ${bypassSeen.join('; ')}`
+          : bypassProblems.join('; '),
+        { proxiedUri: bypassSeen },
+      );
+
       // The two headers an opaque origin's fetches need, on the SCRIPT and on the
       // STYLESHEET — and NOT on `/assets/`, which is the half that keeps the
       // widening scoped.
@@ -742,8 +798,15 @@ try {
       // Under this stack both directories are served from the Nginx document root
       // rather than by Express, so the negative half names what THAT block sends:
       // no `Access-Control-Allow-Origin` at all (Nginx adds none for `/assets/`)
-      // and no CORP. On the smoke gate the same negative names Express's own two
-      // values instead, which is why `appAssetProblems` takes them as arguments.
+      // and the header floor's `Cross-Origin-Resource-Policy: same-origin`, which
+      // `location ^~ /assets/` includes from `snippets/headers.conf` because a
+      // location that adds any header inherits none. `same-origin` is the value
+      // the widening would REPLACE, not the widening, and it is the same value
+      // helmet sends for `/assets/` on the smoke gate — so both gates now name one
+      // expectation for the application bundle. (This read `null` until the inner
+      // Nginx moved to the golden policy, which is what a run after that move
+      // measured.) `appAssetProblems` takes the two values as arguments because
+      // the ACAO half still differs between the two servers.
       const { script: sandboxAsset, stylesheet: sandboxStyle } = sandboxAssetUrls(sandboxHtml);
       const appAsset = /<script[^>]+src="(\/assets\/[^"]+)"/.exec(html)?.[1];
       if (!sandboxAsset || !sandboxStyle || !appAsset) {
@@ -778,14 +841,14 @@ try {
           ...sandboxAssetProblems(sandboxStyle, (name) => styleRes.headers.get(name)),
           ...appAssetProblems(appAsset, (name) => appRes.headers.get(name), {
             acao: null,
-            corp: null,
+            corp: 'same-origin',
           }),
         ];
         record(
           'sandbox-assets',
           assetProblems.length === 0,
           assetProblems.length === 0
-            ? `sandbox-assets/ carries the ${String(Object.keys(SANDBOX_ASSET_HEADERS_EXPECTED).length)} headers an opaque origin needs on its script AND its stylesheet; /assets/ carries neither`
+            ? `sandbox-assets/ carries the ${String(Object.keys(SANDBOX_ASSET_HEADERS_EXPECTED).length)} headers an opaque origin needs on its script AND its stylesheet; /assets/ carries no CORS header and the floor's same-origin CORP`
             : assetProblems.join('; '),
         );
       }
@@ -872,6 +935,56 @@ try {
                   },
                 }),
             );
+
+      // ---------------------------------------------------------------------
+      // 7c. The isolated document in a real browser, behind this stack's Nginx
+      // ---------------------------------------------------------------------
+      // The same specs, the same config and the same verdict as `test:sandbox`,
+      // pointed at the published port instead of at a bare Express. What changes
+      // is the one thing that gate cannot reach: `sandbox-assets/` is answered by
+      // Nginx from disk with its own literal header set, and the document by
+      // Express with Nginx's header floor added on the way out. So a header the
+      // inner Nginx gets wrong — a CORS or CORP value, a Permissions-Policy entry —
+      // is judged by an engine here and nowhere else.
+      //
+      // The database publishes no port, and the drill asserts that above, so the
+      // specs verify their accounts INSIDE the container (`E2E_DB_CONTAINER`, read
+      // by `e2e/helpers.ts`), with the root credential passed through the
+      // environment rather than on any argument vector. The report gets its own
+      // name (`HVAULT_SANDBOX_LEG=nginx`), so this run cannot overwrite the push
+      // tier's evidence.
+      const sandboxJunit = reportPath(SANDBOX_NGINX_JUNIT);
+      rmSync(sandboxJunit, { force: true });
+      const browserExit = await runNpm(
+        [
+          'exec',
+          '--',
+          'playwright',
+          'test',
+          '--config',
+          'playwright.sandbox.config.ts',
+          '--forbid-only',
+        ],
+        {
+          env: {
+            E2E_BASE_URL: baseUrl,
+            HVAULT_SANDBOX_LEG: 'nginx',
+            E2E_DB_CONTAINER: `${STACK_NAME}-db`,
+            E2E_DB_ROOT_USERNAME: drillEnv.MONGO_ROOT_USERNAME,
+            E2E_DB_ROOT_PASSWORD: drillEnv.MONGO_ROOT_PASSWORD,
+          },
+        },
+      );
+      const browserProblems = sandboxRunProblems(
+        existsSync(sandboxJunit) ? readFileSync(sandboxJunit, 'utf8') : null,
+      );
+      record(
+        'sandbox-browser',
+        browserExit === 0 && browserProblems.length === 0,
+        browserExit === 0 && browserProblems.length === 0
+          ? `${SANDBOX_SUITE.join(' and ')} rendered every preview through Nginx under the served policy`
+          : [`playwright exited ${String(browserExit)}`, ...browserProblems].join('; '),
+      );
 
       // ---------------------------------------------------------------------
       // 8. (e) Restart the whole stack; the vault must survive it
@@ -1200,6 +1313,6 @@ if (failures.length > 0) {
 
 console.log(
   color.green(
-    `\n${symbol.pass} deployment clean room: ${String(steps.length)} checks passed — stack healthy, one published port, the isolated render document served through it with its own policy, a vault item and a document round-tripped byte for byte, both survived a restart, redeploy idempotent, and the storage credential rotation behaves as measured`,
+    `\n${symbol.pass} deployment clean room: ${String(steps.length)} checks passed — stack healthy, one published port, the isolated render document served through it with its own policy and rendered there by a browser, a vault item and a document round-tripped byte for byte, both survived a restart, redeploy idempotent, and the storage credential rotation behaves as measured`,
   ),
 );

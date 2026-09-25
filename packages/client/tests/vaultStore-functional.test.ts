@@ -50,6 +50,7 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptVaultKey: vi.fn(),
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
+    encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
     generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
@@ -67,6 +68,7 @@ vi.mock('../src/services/api/authApi', () => ({
 
 vi.mock('../src/services/api/vaultApi', () => ({
   listItemsApi: vi.fn(),
+  getItemApi: vi.fn(),
   createItemApi: vi.fn(),
   updateItemApi: vi.fn(),
   deleteItemApi: vi.fn(),
@@ -132,6 +134,7 @@ import { cryptoService } from '../src/services/crypto/cryptoService';
 import {
   createItemApi,
   updateItemApi,
+  getItemApi,
   deleteItemApi,
   restoreItemApi,
   createFolderApi,
@@ -140,7 +143,7 @@ import {
   listFoldersApi,
   listTrashApi,
 } from '../src/services/api/vaultApi';
-import { loginDataSchema, MAX_ENCRYPTED_NAME_LENGTH } from '@hvault/shared';
+import { deriveRowId, loginDataSchema, MAX_ENCRYPTED_NAME_LENGTH } from '@hvault/shared';
 import type { DecryptedVaultItem, DecryptedFolder } from '../src/stores/vaultStore';
 
 // ---------------------------------------------------------------------------
@@ -149,7 +152,7 @@ import type { DecryptedVaultItem, DecryptedFolder } from '../src/stores/vaultSto
 
 function makeMockItem(overrides: Partial<DecryptedVaultItem> = {}): DecryptedVaultItem {
   return {
-    id: 'item-1',
+    id: ITEM_1,
     itemType: 'login',
     tags: [],
     favorite: false,
@@ -164,7 +167,7 @@ function makeMockItem(overrides: Partial<DecryptedVaultItem> = {}): DecryptedVau
 
 function makeMockFolder(overrides: Partial<DecryptedFolder> = {}): DecryptedFolder {
   return {
-    id: 'folder-1',
+    id: FOLDER_1,
     name: 'Test Folder',
     sortOrder: 0,
     createdAt: '2024-01-01T00:00:00Z',
@@ -197,7 +200,7 @@ function makeRawItemResponse(overrides: Record<string, unknown> = {}) {
 /** Standard raw API folder returned by create/update endpoints. */
 function makeRawFolderResponse(overrides: Record<string, unknown> = {}) {
   return {
-    _id: 'folder-1',
+    _id: FOLDER_1,
     userId: 'user-1',
     encryptedName: 'enc-folder-name',
     nameIv: 'fn-iv',
@@ -233,6 +236,10 @@ const vaultInitialState = {
 
 const authInitialState = {
   accessToken: null,
+  // Present so the reset is COMPLETE: `setState` merges, so a field left out of
+  // this snapshot would carry over from whichever test ran last — and every
+  // ciphertext write now sends this number.
+  vaultKeyVersion: 0,
   user: null,
   isAuthenticated: false,
   isLocked: false,
@@ -251,8 +258,51 @@ const authInitialState = {
 
 const mockVaultKey = {} as CryptoKey;
 
+/**
+ * Row and account ids as production has them: ObjectIds. A field is now sealed
+ * to its row's id (format v2), and the binding refuses anything else, so an id
+ * that reaches a write must be one.
+ */
+const USER_ID = '64f1a2b3c4d5e6f708192a3b';
+const ITEM_1 = '64f1a2b3c4d5e6f700000001';
+const FOLDER_1 = '64f1a2b3c4d5e6f700000f01';
+const GHOST = '64f1a2b3c4d5e6f700000666';
+
 function setupUnlockedVault(): void {
-  useAuthStore.setState({ vaultKey: mockVaultKey });
+  useAuthStore.setState({
+    vaultKey: mockVaultKey,
+    user: { userId: USER_ID, email: 'u@example.com' },
+  });
+}
+
+/** The additional data a sealed field was bound to, decoded from a sealer call. */
+function aadOf(call: unknown[] | undefined): string {
+  return new TextDecoder().decode(call?.[2] as Uint8Array);
+}
+
+/**
+ * Answers a create with the row stored under the id its nonce derives, as the
+ * server does, so the store's `assertStoredUnder` check passes exactly when the
+ * request carried a nonce. Returns the promise of that id for assertions.
+ */
+function respondToCreate(
+  api: typeof createItemApi | typeof createFolderApi,
+  response: unknown,
+): { createdId: () => Promise<string> } {
+  const answer = response as { data: { success: boolean; data?: Record<string, unknown> } };
+  let nonce: string | undefined;
+  vi.mocked(api).mockImplementation((async (body: { idNonce?: string }) => {
+    nonce = body.idNonce;
+    if (!answer.data.success || answer.data.data === undefined) return answer;
+    return {
+      ...answer,
+      data: {
+        ...answer.data,
+        data: { ...answer.data.data, _id: await deriveRowId(USER_ID, body.idNonce ?? '') },
+      },
+    };
+  }) as never);
+  return { createdId: () => deriveRowId(USER_ID, nonce ?? '') };
 }
 
 // ---------------------------------------------------------------------------
@@ -278,18 +328,34 @@ describe('vaultStore – CRUD actions', () => {
       ).rejects.toThrow('Vault is locked');
     });
 
+    it('refuses to seal a create with no signed-in user, before anything is encrypted or sent', async () => {
+      // A vault key with no user id is a torn session: the row id the fields
+      // would be sealed to is derived from the user id, so sealing without one
+      // would bind the row to an id the server can never agree with.
+      useAuthStore.setState({ vaultKey: mockVaultKey, user: null });
+      await expect(
+        useVaultStore.getState().createItem('login', 'My Login', { username: 'u' }),
+      ).rejects.toThrow('Vault is locked');
+      await expect(useVaultStore.getState().createFolder('Work')).rejects.toThrow(
+        'Vault is locked',
+      );
+      expect(cryptoService.encryptDataWithAad).not.toHaveBeenCalled();
+      expect(createItemApi).not.toHaveBeenCalled();
+      expect(createFolderApi).not.toHaveBeenCalled();
+    });
+
     it('should encrypt name and data, call createItemApi, decrypt response, and add to items', async () => {
       setupUnlockedVault();
 
       // Encrypt mocks: first call is for name, second call is for data
-      vi.mocked(cryptoService.encryptData)
+      vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
 
       vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('mock-search-hash');
 
       // API response
-      vi.mocked(createItemApi).mockResolvedValue({
+      const created = respondToCreate(createItemApi, {
         data: {
           success: true,
           data: makeRawItemResponse(),
@@ -302,15 +368,31 @@ describe('vaultStore – CRUD actions', () => {
         .mockResolvedValueOnce(JSON.stringify({ username: 'user1' }));
 
       await useVaultStore.getState().createItem('login', 'My Login', { username: 'user1' });
+      const rowId = await created.createdId();
 
-      // Verify encryption calls
-      expect(cryptoService.encryptData).toHaveBeenCalledTimes(2);
-      expect(cryptoService.encryptData).toHaveBeenNthCalledWith(1, 'My Login', mockVaultKey);
-      expect(cryptoService.encryptData).toHaveBeenNthCalledWith(
+      // Verify encryption calls: both fields sealed BOUND to the id the new row
+      // will be stored under (derived from the nonce the request carries), the
+      // data to its type as well; nothing sealed unbound.
+      expect(cryptoService.encryptDataWithAad).toHaveBeenCalledTimes(2);
+      expect(cryptoService.encryptDataWithAad).toHaveBeenNthCalledWith(
+        1,
+        'My Login',
+        mockVaultKey,
+        expect.anything(),
+      );
+      expect(aadOf(vi.mocked(cryptoService.encryptDataWithAad).mock.calls[0])).toBe(
+        `hvault/vault-field/v2|item.name|${rowId}`,
+      );
+      expect(cryptoService.encryptDataWithAad).toHaveBeenNthCalledWith(
         2,
         JSON.stringify({ username: 'user1' }),
         mockVaultKey,
+        expect.anything(),
       );
+      expect(aadOf(vi.mocked(cryptoService.encryptDataWithAad).mock.calls[1])).toBe(
+        `hvault/vault-field/v2|item.data|login|${rowId}`,
+      );
+      expect(cryptoService.encryptData).not.toHaveBeenCalled();
 
       // Verify search hash generation
       expect(cryptoService.generateSearchHash).toHaveBeenCalledWith('My Login', mockVaultKey);
@@ -319,20 +401,25 @@ describe('vaultStore – CRUD actions', () => {
       expect(createItemApi).toHaveBeenCalledWith({
         itemType: 'login',
         encryptedName: 'enc-name',
-        nameIv: 'n-iv',
+        // The format marker, on the IV, is what tells every reader the field is bound.
+        nameIv: 'v2:n-iv',
         nameTag: 'n-tag',
         encryptedData: 'enc-data',
-        dataIv: 'd-iv',
+        dataIv: 'v2:d-iv',
         dataTag: 'd-tag',
         searchHash: 'mock-search-hash',
         tags: [],
         favorite: false,
+        idNonce: expect.stringMatching(/^[0-9a-f]{40}$/),
+        // The generation the six ciphertext fields above were sealed under.
+        // Zero is this account's: it has never rotated.
+        vaultKeyVersion: 0,
       });
 
-      // Verify the item was added to state
+      // Verify the item was added to state, under the id its fields were sealed to
       const { items } = useVaultStore.getState();
       expect(items).toHaveLength(1);
-      expect(items[0]!.id).toBe('new-item-1');
+      expect(items[0]!.id).toBe(rowId);
       expect(items[0]!.itemType).toBe('login');
       expect(items[0]!.name).toBe('My Login');
     });
@@ -340,14 +427,14 @@ describe('vaultStore – CRUD actions', () => {
     it('should pass folderId, tags, and favorite options to createItemApi', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
       vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
-      vi.mocked(createItemApi).mockResolvedValue({
+      respondToCreate(createItemApi, {
         data: {
           success: true,
           data: makeRawItemResponse({
@@ -389,17 +476,17 @@ describe('vaultStore – CRUD actions', () => {
       const existing = makeMockItem({ id: 'existing-1', name: 'Existing' });
       useVaultStore.setState({ items: [existing] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
       vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
-      vi.mocked(createItemApi).mockResolvedValue({
+      const created = respondToCreate(createItemApi, {
         data: {
           success: true,
-          data: makeRawItemResponse({ _id: 'new-item-2' }),
+          data: makeRawItemResponse(),
         },
       } as unknown as Awaited<ReturnType<typeof createItemApi>>);
 
@@ -412,21 +499,21 @@ describe('vaultStore – CRUD actions', () => {
       const { items } = useVaultStore.getState();
       expect(items).toHaveLength(2);
       // New item is prepended
-      expect(items[0]!.id).toBe('new-item-2');
+      expect(items[0]!.id).toBe(await created.createdId());
       expect(items[1]!.id).toBe('existing-1');
     });
 
     it('should not add item to state when API returns success: false', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
       vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
-      vi.mocked(createItemApi).mockResolvedValue({
+      respondToCreate(createItemApi, {
         data: {
           success: false,
           error: { code: 'VALIDATION_ERROR', message: 'Bad input' },
@@ -438,10 +525,34 @@ describe('vaultStore – CRUD actions', () => {
       expect(useVaultStore.getState().items).toHaveLength(0);
     });
 
+    it('refuses a create the server stored under an id other than the one it sealed to', async () => {
+      // A server that ignored the nonce (an older one, after a downgrade) stores the
+      // row under an id of its own, and every field of it is sealed to a different
+      // one: that row can never be opened. It is reported, and nothing unreadable
+      // is put in the list or decrypted.
+      setupUnlockedVault();
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
+        encrypted: 'enc',
+        iv: 'iv',
+        tag: 'tag',
+      });
+      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
+      vi.mocked(createItemApi).mockResolvedValue({
+        data: { success: true, data: makeRawItemResponse({ _id: GHOST }) },
+      } as unknown as Awaited<ReturnType<typeof createItemApi>>);
+
+      await expect(
+        useVaultStore.getState().createItem('login', 'Name', { username: 'u' }),
+      ).rejects.toThrow('The server stored this entry under an unexpected id');
+
+      expect(useVaultStore.getState().items).toHaveLength(0);
+      expect(cryptoService.decryptData).not.toHaveBeenCalled();
+    });
+
     it('should propagate API errors', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
@@ -477,14 +588,14 @@ describe('vaultStore – CRUD actions', () => {
   describe('shared-schema pre-flight', () => {
     /** Stub just enough crypto/API for a save to succeed if it gets that far. */
     function armSave(): void {
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
       vi.mocked(cryptoService.decryptData).mockResolvedValue('{}');
       vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
-      vi.mocked(createItemApi).mockResolvedValue({
+      respondToCreate(createItemApi, {
         data: { success: true, data: makeRawItemResponse() },
       } as unknown as Awaited<ReturnType<typeof createItemApi>>);
       vi.mocked(updateItemApi).mockResolvedValue({
@@ -506,7 +617,7 @@ describe('vaultStore – CRUD actions', () => {
       ).rejects.toThrow(VaultItemDataInvalidError);
 
       // Nothing was encrypted and nothing was sent.
-      expect(cryptoService.encryptData).not.toHaveBeenCalled();
+      expect(cryptoService.encryptDataWithAad).not.toHaveBeenCalled();
       expect(createItemApi).not.toHaveBeenCalled();
       expect(useVaultStore.getState().items).toHaveLength(0);
     });
@@ -557,13 +668,13 @@ describe('vaultStore – CRUD actions', () => {
       // caller is. The row is set up anyway so this differs from the next test only
       // in that respect.
       useVaultStore.setState({
-        items: [makeMockItem({ id: 'item-1', itemType: 'identity', data: { firstName: 'Ada' } })],
+        items: [makeMockItem({ id: ITEM_1, itemType: 'identity', data: { firstName: 'Ada' } })],
       });
 
       await expect(
         useVaultStore
           .getState()
-          .updateItem('item-1', 'identity', 'Ada', { passport: 'p'.repeat(200) }),
+          .updateItem(ITEM_1, 'identity', 'Ada', { passport: 'p'.repeat(200) }),
       ).rejects.toThrow(VaultItemDataInvalidError);
       expect(updateItemApi).not.toHaveBeenCalled();
     });
@@ -596,11 +707,11 @@ describe('vaultStore – CRUD actions', () => {
         notes: 'note',
         customFields: [{ name: 'Recovery', value: 'v', type: 'text' }],
       });
-      useVaultStore.setState({ items: [makeMockItem({ id: 'item-1', itemType: 'login' })] });
+      useVaultStore.setState({ items: [makeMockItem({ id: ITEM_1, itemType: 'login' })] });
 
       // Exactly what the section sends: the parsed blob minus one code.
       const nextData: Record<string, unknown> = { ...parsed, backupCodes: ['AAAA-1111'] };
-      await useVaultStore.getState().updateItem('item-1', 'login', 'GitHub', nextData);
+      await useVaultStore.getState().updateItem(ITEM_1, 'login', 'GitHub', nextData);
 
       expect(updateItemApi).toHaveBeenCalledTimes(1);
     });
@@ -617,7 +728,7 @@ describe('vaultStore – CRUD actions', () => {
       await expect(
         useVaultStore
           .getState()
-          .updateItem('ghost', 'login', 'Name', { password: 'p'.repeat(10_001) }),
+          .updateItem(GHOST, 'login', 'Name', { password: 'p'.repeat(10_001) }),
       ).rejects.toThrow(VaultItemDataInvalidError);
       expect(updateItemApi).not.toHaveBeenCalled();
     });
@@ -625,12 +736,38 @@ describe('vaultStore – CRUD actions', () => {
     it('updateItem proceeds for a VALID payload with the row absent from the store', async () => {
       // The other half: an absent row must not be treated as a failure either — the
       // password-history build is the only thing that needs it, and it is optional.
+      //
+      // What an absent row DOES cost now is one read: the data is sealed to the
+      // item type it will be read under, so the stored type is fetched and
+      // compared before anything is sealed.
       setupUnlockedVault();
       armSave();
+      vi.mocked(getItemApi).mockResolvedValue({
+        data: { success: true, data: makeRawItemResponse({ _id: GHOST, itemType: 'login' }) },
+      } as unknown as Awaited<ReturnType<typeof getItemApi>>);
 
-      await useVaultStore.getState().updateItem('ghost', 'login', 'Name', { username: 'u' });
+      await useVaultStore.getState().updateItem(GHOST, 'login', 'Name', { username: 'u' });
 
+      expect(getItemApi).toHaveBeenCalledWith(GHOST);
       expect(updateItemApi).toHaveBeenCalledTimes(1);
+    });
+
+    it('updateItem refuses a type other than the stored one, before sealing anything', async () => {
+      // Bound to the wrong type, the data would never open again: every schema is
+      // lenient enough to accept another type's data, so the binding is the only
+      // thing that notices, and it notices by refusing to decrypt.
+      setupUnlockedVault();
+      armSave();
+      vi.mocked(getItemApi).mockResolvedValue({
+        data: { success: true, data: makeRawItemResponse({ _id: GHOST, itemType: 'note' }) },
+      } as unknown as Awaited<ReturnType<typeof getItemApi>>);
+
+      await expect(
+        useVaultStore.getState().updateItem(GHOST, 'login', 'Name', { username: 'u' }),
+      ).rejects.toThrow('This entry is stored as a note, so it cannot be saved as a login.');
+
+      expect(cryptoService.encryptDataWithAad).not.toHaveBeenCalled();
+      expect(updateItemApi).not.toHaveBeenCalled();
     });
   });
 
@@ -640,9 +777,7 @@ describe('vaultStore – CRUD actions', () => {
 
   describe('restoreItem', () => {
     it('should throw when vault is locked', async () => {
-      await expect(useVaultStore.getState().restoreItem('item-1')).rejects.toThrow(
-        'Vault is locked',
-      );
+      await expect(useVaultStore.getState().restoreItem(ITEM_1)).rejects.toThrow('Vault is locked');
     });
 
     it('should call restoreItemApi, decrypt, remove from trashItems, and add to items', async () => {
@@ -729,7 +864,7 @@ describe('vaultStore – CRUD actions', () => {
 
       vi.mocked(restoreItemApi).mockRejectedValue(new Error('Server error'));
 
-      await expect(useVaultStore.getState().restoreItem('item-1')).rejects.toThrow('Server error');
+      await expect(useVaultStore.getState().restoreItem(ITEM_1)).rejects.toThrow('Server error');
     });
   });
 
@@ -747,38 +882,49 @@ describe('vaultStore – CRUD actions', () => {
     it('should encrypt name, compute sortOrder, call createFolderApi, decrypt and add to folders', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc-folder-name',
         iv: 'fn-iv',
         tag: 'fn-tag',
       });
 
-      vi.mocked(createFolderApi).mockResolvedValue({
+      const created = respondToCreate(createFolderApi, {
         data: {
           success: true,
-          data: makeRawFolderResponse({ _id: 'folder-new', sortOrder: 0 }),
+          data: makeRawFolderResponse({ sortOrder: 0 }),
         },
       } as unknown as Awaited<ReturnType<typeof createFolderApi>>);
 
       vi.mocked(cryptoService.decryptData).mockResolvedValueOnce('My Folder');
 
       await useVaultStore.getState().createFolder('My Folder');
+      const rowId = await created.createdId();
 
-      // Verify encryption
-      expect(cryptoService.encryptData).toHaveBeenCalledWith('My Folder', mockVaultKey);
+      // Verify encryption: the name is sealed BOUND to the id the folder will get.
+      expect(cryptoService.encryptDataWithAad).toHaveBeenCalledWith(
+        'My Folder',
+        mockVaultKey,
+        expect.anything(),
+      );
+      expect(aadOf(vi.mocked(cryptoService.encryptDataWithAad).mock.calls[0])).toBe(
+        `hvault/vault-field/v2|folder.name|${rowId}`,
+      );
+      expect(cryptoService.encryptData).not.toHaveBeenCalled();
 
       // Verify API call - sortOrder is max(-1) + 1 = 0 when no folders exist
       expect(createFolderApi).toHaveBeenCalledWith({
         encryptedName: 'enc-folder-name',
-        nameIv: 'fn-iv',
+        nameIv: 'v2:fn-iv',
         nameTag: 'fn-tag',
         sortOrder: 0,
+        idNonce: expect.stringMatching(/^[0-9a-f]{40}$/),
+        vaultKeyVersion: 0,
       });
 
       // Verify state
       const { folders } = useVaultStore.getState();
       expect(folders).toHaveLength(1);
-      expect(folders[0]!.id).toBe('folder-new');
+      expect(folders[0]!.id).toBe(rowId);
       expect(folders[0]!.name).toBe('My Folder');
     });
 
@@ -794,13 +940,13 @@ describe('vaultStore – CRUD actions', () => {
         ],
       });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
 
-      vi.mocked(createFolderApi).mockResolvedValue({
+      respondToCreate(createFolderApi, {
         data: {
           success: true,
           data: makeRawFolderResponse({ _id: 'folder-new', sortOrder: 8 }),
@@ -818,13 +964,13 @@ describe('vaultStore – CRUD actions', () => {
     it('should pass parentId, icon, and color options', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
 
-      vi.mocked(createFolderApi).mockResolvedValue({
+      respondToCreate(createFolderApi, {
         data: {
           success: true,
           data: makeRawFolderResponse({
@@ -857,16 +1003,16 @@ describe('vaultStore – CRUD actions', () => {
       const existing = makeMockFolder({ id: 'existing-folder' });
       useVaultStore.setState({ folders: [existing] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
 
-      vi.mocked(createFolderApi).mockResolvedValue({
+      const created = respondToCreate(createFolderApi, {
         data: {
           success: true,
-          data: makeRawFolderResponse({ _id: 'new-folder' }),
+          data: makeRawFolderResponse(),
         },
       } as unknown as Awaited<ReturnType<typeof createFolderApi>>);
 
@@ -877,19 +1023,19 @@ describe('vaultStore – CRUD actions', () => {
       const { folders } = useVaultStore.getState();
       expect(folders).toHaveLength(2);
       expect(folders[0]!.id).toBe('existing-folder');
-      expect(folders[1]!.id).toBe('new-folder');
+      expect(folders[1]!.id).toBe(await created.createdId());
     });
 
     it('should not add folder when API returns success: false', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
 
-      vi.mocked(createFolderApi).mockResolvedValue({
+      respondToCreate(createFolderApi, {
         data: {
           success: false,
           error: { code: 'VALIDATION_ERROR', message: 'Bad input' },
@@ -904,7 +1050,7 @@ describe('vaultStore – CRUD actions', () => {
     it('should propagate API errors', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
@@ -922,9 +1068,30 @@ describe('vaultStore – CRUD actions', () => {
   // updateFolder
   // =========================================================================
 
+  describe('createFolder id check', () => {
+    it('refuses a folder the server stored under an id other than the one it sealed to', async () => {
+      setupUnlockedVault();
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
+        encrypted: 'enc',
+        iv: 'iv',
+        tag: 'tag',
+      });
+      vi.mocked(createFolderApi).mockResolvedValue({
+        data: { success: true, data: makeRawFolderResponse({ _id: GHOST }) },
+      } as unknown as Awaited<ReturnType<typeof createFolderApi>>);
+
+      await expect(useVaultStore.getState().createFolder('Folder')).rejects.toThrow(
+        'The server stored this entry under an unexpected id',
+      );
+
+      expect(useVaultStore.getState().folders).toHaveLength(0);
+      expect(cryptoService.decryptData).not.toHaveBeenCalled();
+    });
+  });
+
   describe('updateFolder', () => {
     it('should throw when vault is locked', async () => {
-      await expect(useVaultStore.getState().updateFolder('folder-1', 'Renamed')).rejects.toThrow(
+      await expect(useVaultStore.getState().updateFolder(FOLDER_1, 'Renamed')).rejects.toThrow(
         'Vault is locked',
       );
     });
@@ -932,10 +1099,10 @@ describe('vaultStore – CRUD actions', () => {
     it('should encrypt name, call updateFolderApi, decrypt response, and replace folder in state', async () => {
       setupUnlockedVault();
 
-      const existing = makeMockFolder({ id: 'folder-1', name: 'Old Name', sortOrder: 5 });
+      const existing = makeMockFolder({ id: FOLDER_1, name: 'Old Name', sortOrder: 5 });
       useVaultStore.setState({ folders: [existing] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc-new-name',
         iv: 'new-iv',
         tag: 'new-tag',
@@ -944,37 +1111,45 @@ describe('vaultStore – CRUD actions', () => {
       vi.mocked(updateFolderApi).mockResolvedValue({
         data: {
           success: true,
-          data: makeRawFolderResponse({ _id: 'folder-1', sortOrder: 5 }),
+          data: makeRawFolderResponse({ _id: FOLDER_1, sortOrder: 5 }),
         },
       } as unknown as Awaited<ReturnType<typeof updateFolderApi>>);
 
       vi.mocked(cryptoService.decryptData).mockResolvedValueOnce('Renamed Folder');
 
-      await useVaultStore.getState().updateFolder('folder-1', 'Renamed Folder');
+      await useVaultStore.getState().updateFolder(FOLDER_1, 'Renamed Folder');
 
-      // Verify encryption
-      expect(cryptoService.encryptData).toHaveBeenCalledWith('Renamed Folder', mockVaultKey);
+      // Verify encryption: bound to the folder's own id.
+      expect(cryptoService.encryptDataWithAad).toHaveBeenCalledWith(
+        'Renamed Folder',
+        mockVaultKey,
+        expect.anything(),
+      );
+      expect(aadOf(vi.mocked(cryptoService.encryptDataWithAad).mock.calls[0])).toBe(
+        `hvault/vault-field/v2|folder.name|${FOLDER_1}`,
+      );
 
       // Verify API call
-      expect(updateFolderApi).toHaveBeenCalledWith('folder-1', {
+      expect(updateFolderApi).toHaveBeenCalledWith(FOLDER_1, {
         encryptedName: 'enc-new-name',
-        nameIv: 'new-iv',
+        nameIv: 'v2:new-iv',
         nameTag: 'new-tag',
+        vaultKeyVersion: 0,
       });
 
       // Verify state replacement
       const { folders } = useVaultStore.getState();
       expect(folders).toHaveLength(1);
-      expect(folders[0]!.id).toBe('folder-1');
+      expect(folders[0]!.id).toBe(FOLDER_1);
       expect(folders[0]!.name).toBe('Renamed Folder');
     });
 
     it('should pass color and sortOrder options to updateFolderApi', async () => {
       setupUnlockedVault();
 
-      useVaultStore.setState({ folders: [makeMockFolder({ id: 'folder-1' })] });
+      useVaultStore.setState({ folders: [makeMockFolder({ id: FOLDER_1 })] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
@@ -983,7 +1158,7 @@ describe('vaultStore – CRUD actions', () => {
       vi.mocked(updateFolderApi).mockResolvedValue({
         data: {
           success: true,
-          data: makeRawFolderResponse({ _id: 'folder-1', color: '#0000ff', sortOrder: 10 }),
+          data: makeRawFolderResponse({ _id: FOLDER_1, color: '#0000ff', sortOrder: 10 }),
         },
       } as unknown as Awaited<ReturnType<typeof updateFolderApi>>);
 
@@ -991,25 +1166,26 @@ describe('vaultStore – CRUD actions', () => {
 
       await useVaultStore
         .getState()
-        .updateFolder('folder-1', 'Folder', { color: '#0000ff', sortOrder: 10 });
+        .updateFolder(FOLDER_1, 'Folder', { color: '#0000ff', sortOrder: 10 });
 
-      expect(updateFolderApi).toHaveBeenCalledWith('folder-1', {
+      expect(updateFolderApi).toHaveBeenCalledWith(FOLDER_1, {
         encryptedName: 'enc',
-        nameIv: 'iv',
+        nameIv: 'v2:iv',
         nameTag: 'tag',
         color: '#0000ff',
         sortOrder: 10,
+        vaultKeyVersion: 0,
       });
     });
 
     it('should only replace the target folder, leaving others unchanged', async () => {
       setupUnlockedVault();
 
-      const folder1 = makeMockFolder({ id: 'folder-1', name: 'Folder A' });
+      const folder1 = makeMockFolder({ id: FOLDER_1, name: 'Folder A' });
       const folder2 = makeMockFolder({ id: 'folder-2', name: 'Folder B' });
       useVaultStore.setState({ folders: [folder1, folder2] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
@@ -1018,13 +1194,13 @@ describe('vaultStore – CRUD actions', () => {
       vi.mocked(updateFolderApi).mockResolvedValue({
         data: {
           success: true,
-          data: makeRawFolderResponse({ _id: 'folder-1' }),
+          data: makeRawFolderResponse({ _id: FOLDER_1 }),
         },
       } as unknown as Awaited<ReturnType<typeof updateFolderApi>>);
 
       vi.mocked(cryptoService.decryptData).mockResolvedValueOnce('Updated A');
 
-      await useVaultStore.getState().updateFolder('folder-1', 'Updated A');
+      await useVaultStore.getState().updateFolder(FOLDER_1, 'Updated A');
 
       const { folders } = useVaultStore.getState();
       expect(folders).toHaveLength(2);
@@ -1035,10 +1211,10 @@ describe('vaultStore – CRUD actions', () => {
     it('should not modify state when API returns success: false', async () => {
       setupUnlockedVault();
 
-      const folder = makeMockFolder({ id: 'folder-1', name: 'Original' });
+      const folder = makeMockFolder({ id: FOLDER_1, name: 'Original' });
       useVaultStore.setState({ folders: [folder] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
@@ -1051,7 +1227,7 @@ describe('vaultStore – CRUD actions', () => {
         },
       } as unknown as Awaited<ReturnType<typeof updateFolderApi>>);
 
-      await useVaultStore.getState().updateFolder('folder-1', 'New Name');
+      await useVaultStore.getState().updateFolder(FOLDER_1, 'New Name');
 
       // State unchanged
       expect(useVaultStore.getState().folders[0]!.name).toBe('Original');
@@ -1060,9 +1236,9 @@ describe('vaultStore – CRUD actions', () => {
     it('should propagate API errors', async () => {
       setupUnlockedVault();
 
-      useVaultStore.setState({ folders: [makeMockFolder({ id: 'folder-1' })] });
+      useVaultStore.setState({ folders: [makeMockFolder({ id: FOLDER_1 })] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
@@ -1070,7 +1246,7 @@ describe('vaultStore – CRUD actions', () => {
 
       vi.mocked(updateFolderApi).mockRejectedValue(new Error('Update failed'));
 
-      await expect(useVaultStore.getState().updateFolder('folder-1', 'Name')).rejects.toThrow(
+      await expect(useVaultStore.getState().updateFolder(FOLDER_1, 'Name')).rejects.toThrow(
         'Update failed',
       );
     });
@@ -1082,7 +1258,7 @@ describe('vaultStore – CRUD actions', () => {
 
   describe('deleteFolder', () => {
     it('should call deleteFolderApi and remove the folder from state', async () => {
-      const folder1 = makeMockFolder({ id: 'folder-1', name: 'Folder A' });
+      const folder1 = makeMockFolder({ id: FOLDER_1, name: 'Folder A' });
       const folder2 = makeMockFolder({ id: 'folder-2', name: 'Folder B' });
       useVaultStore.setState({ folders: [folder1, folder2] });
 
@@ -1090,9 +1266,9 @@ describe('vaultStore – CRUD actions', () => {
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1');
+      await useVaultStore.getState().deleteFolder(FOLDER_1);
 
-      expect(deleteFolderApi).toHaveBeenCalledWith('folder-1', undefined);
+      expect(deleteFolderApi).toHaveBeenCalledWith(FOLDER_1, undefined);
 
       const { folders } = useVaultStore.getState();
       expect(folders).toHaveLength(1);
@@ -1100,8 +1276,8 @@ describe('vaultStore – CRUD actions', () => {
     });
 
     it('should clear folderId on items that belonged to the deleted folder', async () => {
-      const folder = makeMockFolder({ id: 'folder-1' });
-      const item1 = makeMockItem({ id: 'item-1', folderId: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
+      const item1 = makeMockItem({ id: ITEM_1, folderId: FOLDER_1 });
       const item2 = makeMockItem({ id: 'item-2', folderId: 'folder-2' });
       const item3 = makeMockItem({ id: 'item-3' }); // no folderId
       useVaultStore.setState({
@@ -1113,11 +1289,11 @@ describe('vaultStore – CRUD actions', () => {
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1');
+      await useVaultStore.getState().deleteFolder(FOLDER_1);
 
       const { items } = useVaultStore.getState();
       // item-1 should have folderId cleared
-      expect(items.find((i) => i.id === 'item-1')!.folderId).toBeUndefined();
+      expect(items.find((i) => i.id === ITEM_1)!.folderId).toBeUndefined();
       // item-2 should be unchanged
       expect(items.find((i) => i.id === 'item-2')!.folderId).toBe('folder-2');
       // item-3 should still have no folderId
@@ -1130,13 +1306,13 @@ describe('vaultStore – CRUD actions', () => {
       // the change for items only would leave every document in the folder
       // pointing at a folder that no longer exists, with its counts wrong until
       // the next full reload.
-      const folder = makeMockFolder({ id: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
       useVaultStore.setState({ folders: [folder], items: [] });
       useDocumentsStore.setState({
         documents: [
           {
             id: 'doc-1',
-            folderId: 'folder-1',
+            folderId: FOLDER_1,
             favorite: false,
             createdAt: 'x',
             updatedAt: 'x',
@@ -1159,7 +1335,7 @@ describe('vaultStore – CRUD actions', () => {
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1');
+      await useVaultStore.getState().deleteFolder(FOLDER_1);
 
       const docs = useDocumentsStore.getState().documents;
       expect(docs.find((d) => d.id === 'doc-1')?.folderId).toBeUndefined();
@@ -1168,13 +1344,13 @@ describe('vaultStore – CRUD actions', () => {
     });
 
     it('takes documents out of the list when the folder is deleted WITH its contents', async () => {
-      const folder = makeMockFolder({ id: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
       useVaultStore.setState({ folders: [folder], items: [] });
       useDocumentsStore.setState({
         documents: [
           {
             id: 'doc-1',
-            folderId: 'folder-1',
+            folderId: FOLDER_1,
             favorite: false,
             createdAt: 'x',
             updatedAt: 'x',
@@ -1188,7 +1364,7 @@ describe('vaultStore – CRUD actions', () => {
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1', 'delete');
+      await useVaultStore.getState().deleteFolder(FOLDER_1, 'delete');
 
       // The action reaches the document store as itself. Passing a constant here
       // — the easy slip — would clear `folderId` instead of removing the row, and
@@ -1197,23 +1373,23 @@ describe('vaultStore – CRUD actions', () => {
     });
 
     it('should reset selectedFolder when the deleted folder was selected', async () => {
-      const folder = makeMockFolder({ id: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
       useVaultStore.setState({
         folders: [folder],
-        selectedFolder: 'folder-1',
+        selectedFolder: FOLDER_1,
       });
 
       vi.mocked(deleteFolderApi).mockResolvedValue({
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1');
+      await useVaultStore.getState().deleteFolder(FOLDER_1);
 
       expect(useVaultStore.getState().selectedFolder).toBeNull();
     });
 
     it('should NOT reset selectedFolder when a different folder was selected', async () => {
-      const folder = makeMockFolder({ id: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
       useVaultStore.setState({
         folders: [folder],
         selectedFolder: 'folder-other',
@@ -1223,14 +1399,14 @@ describe('vaultStore – CRUD actions', () => {
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1');
+      await useVaultStore.getState().deleteFolder(FOLDER_1);
 
       expect(useVaultStore.getState().selectedFolder).toBe('folder-other');
     });
 
     it('should pass the action parameter to deleteFolderApi', async () => {
       setupUnlockedVault();
-      const folder = makeMockFolder({ id: 'folder-1', name: 'Folder A' });
+      const folder = makeMockFolder({ id: FOLDER_1, name: 'Folder A' });
       useVaultStore.setState({ folders: [folder] });
 
       vi.mocked(deleteFolderApi).mockResolvedValue({
@@ -1244,28 +1420,28 @@ describe('vaultStore – CRUD actions', () => {
         },
       } as unknown as Awaited<ReturnType<typeof listTrashApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1', 'delete');
+      await useVaultStore.getState().deleteFolder(FOLDER_1, 'delete');
 
-      expect(deleteFolderApi).toHaveBeenCalledWith('folder-1', 'delete');
+      expect(deleteFolderApi).toHaveBeenCalledWith(FOLDER_1, 'delete');
     });
 
     it('should pass move action to deleteFolderApi', async () => {
-      const folder = makeMockFolder({ id: 'folder-1', name: 'Folder A' });
+      const folder = makeMockFolder({ id: FOLDER_1, name: 'Folder A' });
       useVaultStore.setState({ folders: [folder] });
 
       vi.mocked(deleteFolderApi).mockResolvedValue({
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1', 'move');
+      await useVaultStore.getState().deleteFolder(FOLDER_1, 'move');
 
-      expect(deleteFolderApi).toHaveBeenCalledWith('folder-1', 'move');
+      expect(deleteFolderApi).toHaveBeenCalledWith(FOLDER_1, 'move');
     });
 
     it('should propagate API errors', async () => {
       vi.mocked(deleteFolderApi).mockRejectedValue(new Error('Delete failed'));
 
-      await expect(useVaultStore.getState().deleteFolder('folder-1')).rejects.toThrow(
+      await expect(useVaultStore.getState().deleteFolder(FOLDER_1)).rejects.toThrow(
         'Delete failed',
       );
     });
@@ -1293,8 +1469,8 @@ describe('vaultStore – CRUD actions', () => {
 
     it('should remove items from active list when action is delete', async () => {
       setupUnlockedVault();
-      const folder = makeMockFolder({ id: 'folder-1' });
-      const item1 = makeMockItem({ id: 'item-1', folderId: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
+      const item1 = makeMockItem({ id: ITEM_1, folderId: FOLDER_1 });
       const item2 = makeMockItem({ id: 'item-2', folderId: 'folder-2' });
       const item3 = makeMockItem({ id: 'item-3' }); // no folderId
       useVaultStore.setState({
@@ -1313,11 +1489,11 @@ describe('vaultStore – CRUD actions', () => {
         },
       } as unknown as Awaited<ReturnType<typeof listTrashApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1', 'delete');
+      await useVaultStore.getState().deleteFolder(FOLDER_1, 'delete');
 
       const { items } = useVaultStore.getState();
       // item-1 should be removed (it belonged to the deleted folder)
-      expect(items.find((i) => i.id === 'item-1')).toBeUndefined();
+      expect(items.find((i) => i.id === ITEM_1)).toBeUndefined();
       // item-2 and item-3 should remain unchanged
       expect(items).toHaveLength(2);
       expect(items.find((i) => i.id === 'item-2')!.folderId).toBe('folder-2');
@@ -1325,8 +1501,8 @@ describe('vaultStore – CRUD actions', () => {
     });
 
     it('should clear folderId (not remove) when action is move', async () => {
-      const folder = makeMockFolder({ id: 'folder-1' });
-      const item1 = makeMockItem({ id: 'item-1', folderId: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
+      const item1 = makeMockItem({ id: ITEM_1, folderId: FOLDER_1 });
       const item2 = makeMockItem({ id: 'item-2', folderId: 'folder-2' });
       useVaultStore.setState({
         folders: [folder],
@@ -1337,20 +1513,20 @@ describe('vaultStore – CRUD actions', () => {
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1', 'move');
+      await useVaultStore.getState().deleteFolder(FOLDER_1, 'move');
 
       const { items } = useVaultStore.getState();
       // Both items should remain in the list
       expect(items).toHaveLength(2);
       // item-1 should have folderId cleared (moved to root)
-      expect(items.find((i) => i.id === 'item-1')!.folderId).toBeUndefined();
+      expect(items.find((i) => i.id === ITEM_1)!.folderId).toBeUndefined();
       // item-2 should be unchanged
       expect(items.find((i) => i.id === 'item-2')!.folderId).toBe('folder-2');
     });
 
     it('should refresh trash items after action delete', async () => {
       setupUnlockedVault();
-      const folder = makeMockFolder({ id: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
       useVaultStore.setState({ folders: [folder], items: [] });
 
       vi.mocked(deleteFolderApi).mockResolvedValue({
@@ -1364,7 +1540,7 @@ describe('vaultStore – CRUD actions', () => {
         },
       } as unknown as Awaited<ReturnType<typeof listTrashApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1', 'delete');
+      await useVaultStore.getState().deleteFolder(FOLDER_1, 'delete');
       // Wait for fire-and-forget fetchTrashItems to complete
       await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -1373,14 +1549,14 @@ describe('vaultStore – CRUD actions', () => {
     });
 
     it('should NOT refresh trash items when action is move', async () => {
-      const folder = makeMockFolder({ id: 'folder-1' });
+      const folder = makeMockFolder({ id: FOLDER_1 });
       useVaultStore.setState({ folders: [folder], items: [] });
 
       vi.mocked(deleteFolderApi).mockResolvedValue({
         data: { success: true, data: null },
       } as unknown as Awaited<ReturnType<typeof deleteFolderApi>>);
 
-      await useVaultStore.getState().deleteFolder('folder-1', 'move');
+      await useVaultStore.getState().deleteFolder(FOLDER_1, 'move');
 
       expect(listTrashApi).not.toHaveBeenCalled();
     });
@@ -1392,7 +1568,7 @@ describe('vaultStore – CRUD actions', () => {
 
   describe('deleteItem', () => {
     it('should remove the item from items after soft-delete', async () => {
-      const item1 = makeMockItem({ id: 'item-1', name: 'Login 1' });
+      const item1 = makeMockItem({ id: ITEM_1, name: 'Login 1' });
       const item2 = makeMockItem({ id: 'item-2', name: 'Login 2' });
       useVaultStore.setState({ items: [item1, item2] });
 
@@ -1400,16 +1576,16 @@ describe('vaultStore – CRUD actions', () => {
         data: { success: true, message: 'Item moved to trash' },
       } as unknown as Awaited<ReturnType<typeof deleteItemApi>>);
 
-      await useVaultStore.getState().deleteItem('item-1');
+      await useVaultStore.getState().deleteItem(ITEM_1);
 
-      expect(deleteItemApi).toHaveBeenCalledWith('item-1');
+      expect(deleteItemApi).toHaveBeenCalledWith(ITEM_1);
       const { items } = useVaultStore.getState();
       expect(items).toHaveLength(1);
       expect(items[0]!.id).toBe('item-2');
     });
 
     it('should add deleted item to trashItems when trash has been fetched', async () => {
-      const item = makeMockItem({ id: 'item-1', name: 'My Login' });
+      const item = makeMockItem({ id: ITEM_1, name: 'My Login' });
       const existingTrash = makeMockItem({ id: 'trash-old', name: 'Old Trash' });
       useVaultStore.setState({ items: [item], trashItems: [existingTrash] });
 
@@ -1417,25 +1593,25 @@ describe('vaultStore – CRUD actions', () => {
         data: { success: true, message: 'Item moved to trash' },
       } as unknown as Awaited<ReturnType<typeof deleteItemApi>>);
 
-      await useVaultStore.getState().deleteItem('item-1');
+      await useVaultStore.getState().deleteItem(ITEM_1);
 
       const state = useVaultStore.getState();
       expect(state.items).toHaveLength(0);
       expect(state.trashItems).toHaveLength(2);
       expect(state.trashItems[0]!.id).toBe('trash-old');
-      expect(state.trashItems[1]!.id).toBe('item-1');
+      expect(state.trashItems[1]!.id).toBe(ITEM_1);
       expect(state.trashItems[1]!.deletedAt).toBeDefined();
     });
 
     it('should NOT add deleted item to trashItems when trash has not been fetched (empty)', async () => {
-      const item = makeMockItem({ id: 'item-1', name: 'My Login' });
+      const item = makeMockItem({ id: ITEM_1, name: 'My Login' });
       useVaultStore.setState({ items: [item], trashItems: [] });
 
       vi.mocked(deleteItemApi).mockResolvedValue({
         data: { success: true, message: 'Item moved to trash' },
       } as unknown as Awaited<ReturnType<typeof deleteItemApi>>);
 
-      await useVaultStore.getState().deleteItem('item-1');
+      await useVaultStore.getState().deleteItem(ITEM_1);
 
       const state = useVaultStore.getState();
       expect(state.items).toHaveLength(0);
@@ -1443,17 +1619,17 @@ describe('vaultStore – CRUD actions', () => {
     });
 
     it('should propagate API errors without modifying state', async () => {
-      const item = makeMockItem({ id: 'item-1', name: 'My Login' });
+      const item = makeMockItem({ id: ITEM_1, name: 'My Login' });
       useVaultStore.setState({ items: [item], trashItems: [] });
 
       vi.mocked(deleteItemApi).mockRejectedValue(new Error('Network error'));
 
-      await expect(useVaultStore.getState().deleteItem('item-1')).rejects.toThrow('Network error');
+      await expect(useVaultStore.getState().deleteItem(ITEM_1)).rejects.toThrow('Network error');
 
       // State should remain unchanged
       const state = useVaultStore.getState();
       expect(state.items).toHaveLength(1);
-      expect(state.items[0]!.id).toBe('item-1');
+      expect(state.items[0]!.id).toBe(ITEM_1);
     });
   });
 
@@ -1499,15 +1675,25 @@ describe('vaultStore – CRUD actions', () => {
     it('createItem: does not write the item back after clearStore() mid-flight', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
       vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
-      const api = deferred<Awaited<ReturnType<typeof createItemApi>>>();
-      vi.mocked(createItemApi).mockReturnValue(api.promise);
+      // The response is held until the test releases it, and then names the id
+      // the request's nonce derives, as the server would.
+      const api = deferred<undefined>();
+      vi.mocked(createItemApi).mockImplementation((async (body: { idNonce?: string }) => {
+        await api.promise;
+        return {
+          data: {
+            success: true,
+            data: makeRawItemResponse({ _id: await deriveRowId(USER_ID, body.idNonce ?? '') }),
+          },
+        };
+      }) as never);
 
       vi.mocked(cryptoService.decryptData)
         .mockResolvedValueOnce('My Login')
@@ -1521,9 +1707,7 @@ describe('vaultStore – CRUD actions', () => {
       // mutation generation captured before the await.
       useVaultStore.getState().clearStore();
 
-      api.resolve({
-        data: { success: true, data: makeRawItemResponse() },
-      } as unknown as Awaited<ReturnType<typeof createItemApi>>);
+      api.resolve(undefined);
       await promise;
 
       // The decrypted item must NOT have been written back into the store.
@@ -1558,23 +1742,29 @@ describe('vaultStore – CRUD actions', () => {
     it('createFolder: does not write the folder back after clearStore() mid-flight', async () => {
       setupUnlockedVault();
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
       });
 
-      const api = deferred<Awaited<ReturnType<typeof createFolderApi>>>();
-      vi.mocked(createFolderApi).mockReturnValue(api.promise);
+      const api = deferred<undefined>();
+      vi.mocked(createFolderApi).mockImplementation((async (body: { idNonce?: string }) => {
+        await api.promise;
+        return {
+          data: {
+            success: true,
+            data: makeRawFolderResponse({ _id: await deriveRowId(USER_ID, body.idNonce ?? '') }),
+          },
+        };
+      }) as never);
       vi.mocked(cryptoService.decryptData).mockResolvedValueOnce('My Folder');
 
       const promise = useVaultStore.getState().createFolder('My Folder');
 
       useVaultStore.getState().clearStore();
 
-      api.resolve({
-        data: { success: true, data: makeRawFolderResponse({ _id: 'folder-new' }) },
-      } as unknown as Awaited<ReturnType<typeof createFolderApi>>);
+      api.resolve(undefined);
       await promise;
 
       expect(useVaultStore.getState().folders).toHaveLength(0);
@@ -1583,9 +1773,9 @@ describe('vaultStore – CRUD actions', () => {
     it('updateItem: does not overwrite a fresh-session item when superseded by clearStore()', async () => {
       setupUnlockedVault();
       // Pre-existing item the update targets.
-      useVaultStore.setState({ items: [makeMockItem({ id: 'item-1', name: 'Original' })] });
+      useVaultStore.setState({ items: [makeMockItem({ id: ITEM_1, name: 'Original' })] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
@@ -1601,14 +1791,14 @@ describe('vaultStore – CRUD actions', () => {
 
       const promise = useVaultStore
         .getState()
-        .updateItem('item-1', 'login', 'Stale Name', { username: 'stale' });
+        .updateItem(ITEM_1, 'login', 'Stale Name', { username: 'stale' });
 
       // Lock/logout mid-flight, then a fresh session repopulates the same id.
       useVaultStore.getState().clearStore();
-      useVaultStore.setState({ items: [makeMockItem({ id: 'item-1', name: 'Fresh Session' })] });
+      useVaultStore.setState({ items: [makeMockItem({ id: ITEM_1, name: 'Fresh Session' })] });
 
       api.resolve({
-        data: { success: true, data: makeRawItemResponse({ _id: 'item-1' }) },
+        data: { success: true, data: makeRawItemResponse({ _id: ITEM_1 }) },
       } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
       await promise;
 
@@ -1620,9 +1810,9 @@ describe('vaultStore – CRUD actions', () => {
 
     it('updateFolder: does not overwrite a fresh-session folder when superseded by clearStore()', async () => {
       setupUnlockedVault();
-      useVaultStore.setState({ folders: [makeMockFolder({ id: 'folder-1', name: 'Original' })] });
+      useVaultStore.setState({ folders: [makeMockFolder({ id: FOLDER_1, name: 'Original' })] });
 
-      vi.mocked(cryptoService.encryptData).mockResolvedValue({
+      vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
         encrypted: 'enc',
         iv: 'iv',
         tag: 'tag',
@@ -1632,15 +1822,15 @@ describe('vaultStore – CRUD actions', () => {
       vi.mocked(updateFolderApi).mockReturnValue(api.promise);
       vi.mocked(cryptoService.decryptData).mockResolvedValueOnce('Stale Folder');
 
-      const promise = useVaultStore.getState().updateFolder('folder-1', 'Stale Folder');
+      const promise = useVaultStore.getState().updateFolder(FOLDER_1, 'Stale Folder');
 
       useVaultStore.getState().clearStore();
       useVaultStore.setState({
-        folders: [makeMockFolder({ id: 'folder-1', name: 'Fresh Session' })],
+        folders: [makeMockFolder({ id: FOLDER_1, name: 'Fresh Session' })],
       });
 
       api.resolve({
-        data: { success: true, data: makeRawFolderResponse({ _id: 'folder-1' }) },
+        data: { success: true, data: makeRawFolderResponse({ _id: FOLDER_1 }) },
       } as unknown as Awaited<ReturnType<typeof updateFolderApi>>);
       await promise;
 
@@ -1704,7 +1894,7 @@ describe('vaultStore – CRUD actions', () => {
 describe('vaultStore – clearStore clears the strength score cache', () => {
   it('drops cached password-strength scores on lock/logout', () => {
     clearScoreCache();
-    const key = strengthCacheKey('item-1', '2026-07-22T00:00:00.000Z');
+    const key = strengthCacheKey(ITEM_1, '2026-07-22T00:00:00.000Z');
     setScore(key, 1);
     expect(getScore(key)).toBe(1);
 
@@ -1747,7 +1937,7 @@ describe('vaultStore – renameItem', () => {
   });
 
   function armRename(): void {
-    vi.mocked(cryptoService.encryptData).mockResolvedValue({
+    vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
       encrypted: 'new-enc-name',
       iv: 'new-n-iv',
       tag: 'new-n-tag',
@@ -1756,7 +1946,7 @@ describe('vaultStore – renameItem', () => {
     vi.mocked(updateItemApi).mockResolvedValue({
       data: {
         success: true,
-        data: makeRawItemResponse({ _id: 'item-1', updatedAt: '2030-01-01T00:00:00Z' }),
+        data: makeRawItemResponse({ _id: ITEM_1, updatedAt: '2030-01-01T00:00:00Z' }),
       },
     } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
   }
@@ -1764,11 +1954,11 @@ describe('vaultStore – renameItem', () => {
   /** An item whose decrypted payload is the undecodable placeholder. */
   function brokenItem(): DecryptedVaultItem {
     return makeMockItem({
-      id: 'item-1',
+      id: ITEM_1,
       name: 'Broken',
       data: { _validationError: true },
       _raw: {
-        _id: 'item-1',
+        _id: ITEM_1,
         itemType: 'login',
         encryptedName: 'old-enc-name',
         nameIv: 'old-n-iv',
@@ -1785,7 +1975,7 @@ describe('vaultStore – renameItem', () => {
   }
 
   it('throws when the vault is locked', async () => {
-    await expect(useVaultStore.getState().renameItem('item-1', 'New')).rejects.toThrow(
+    await expect(useVaultStore.getState().renameItem(ITEM_1, 'New')).rejects.toThrow(
       'Vault is locked',
     );
   });
@@ -1795,21 +1985,27 @@ describe('vaultStore – renameItem', () => {
     armRename();
     useVaultStore.setState({ items: [brokenItem()] });
 
-    await useVaultStore.getState().renameItem('item-1', 'Recovered');
+    await useVaultStore.getState().renameItem(ITEM_1, 'Recovered');
 
     expect(updateItemApi).toHaveBeenCalledTimes(1);
     const [id, payload] = vi.mocked(updateItemApi).mock.calls[0]!;
-    expect(id).toBe('item-1');
+    expect(id).toBe(ITEM_1);
     expect(payload).toEqual({
       encryptedName: 'new-enc-name',
-      nameIv: 'new-n-iv',
+      // Bound to the item it renames (format v2), which the marker declares.
+      nameIv: 'v2:new-n-iv',
       nameTag: 'new-n-tag',
       // Refreshed, not omitted: it is an HMAC of the NAME, and the server uses it
       // for duplicate detection.
       searchHash: 'a'.repeat(64),
+      // A rename is still a ciphertext write, so it names its generation too.
+      vaultKeyVersion: 0,
     });
     // The decisive assertion: the item's real ciphertext was never in the request.
     for (const field of DATA_CIPHERTEXT_FIELDS) expect(payload).not.toHaveProperty(field);
+    expect(aadOf(vi.mocked(cryptoService.encryptDataWithAad).mock.calls[0])).toBe(
+      `hvault/vault-field/v2|item.name|${ITEM_1}`,
+    );
   });
 
   it('leaves the stored ciphertext byte-identical afterwards', async () => {
@@ -1817,7 +2013,7 @@ describe('vaultStore – renameItem', () => {
     armRename();
     useVaultStore.setState({ items: [brokenItem()] });
 
-    await useVaultStore.getState().renameItem('item-1', 'Recovered');
+    await useVaultStore.getState().renameItem(ITEM_1, 'Recovered');
 
     const item = useVaultStore.getState().items[0]!;
     expect(item.name).toBe('Recovered');
@@ -1836,14 +2032,14 @@ describe('vaultStore – renameItem', () => {
   it('rejects a name whose ciphertext exceeds the server bound, before any request', async () => {
     setupUnlockedVault();
     armRename();
-    vi.mocked(cryptoService.encryptData).mockResolvedValue({
+    vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
       encrypted: 'n'.repeat(MAX_ENCRYPTED_NAME_LENGTH + 1),
       iv: 'iv',
       tag: 'tag',
     });
     useVaultStore.setState({ items: [brokenItem()] });
 
-    await expect(useVaultStore.getState().renameItem('item-1', 'Huge')).rejects.toThrow(
+    await expect(useVaultStore.getState().renameItem(ITEM_1, 'Huge')).rejects.toThrow(
       EncryptedFieldTooLargeError,
     );
     expect(updateItemApi).not.toHaveBeenCalled();
@@ -1856,7 +2052,7 @@ describe('vaultStore – renameItem', () => {
       items: [brokenItem(), makeMockItem({ id: 'item-2', name: 'Untouched' })],
     });
 
-    await useVaultStore.getState().renameItem('item-1', 'Recovered');
+    await useVaultStore.getState().renameItem(ITEM_1, 'Recovered');
 
     expect(useVaultStore.getState().items[1]!.name).toBe('Untouched');
   });
@@ -1869,7 +2065,7 @@ describe('vaultStore – renameItem', () => {
     } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
     useVaultStore.setState({ items: [brokenItem()] });
 
-    await useVaultStore.getState().renameItem('item-1', 'Recovered');
+    await useVaultStore.getState().renameItem(ITEM_1, 'Recovered');
 
     expect(useVaultStore.getState().items[0]!.name).toBe('Broken');
   });
@@ -1883,13 +2079,13 @@ describe('vaultStore – renameItem', () => {
     vi.mocked(updateItemApi).mockReturnValue(api.promise);
     useVaultStore.setState({ items: [brokenItem()] });
 
-    const promise = useVaultStore.getState().renameItem('item-1', 'Recovered');
+    const promise = useVaultStore.getState().renameItem(ITEM_1, 'Recovered');
 
     useVaultStore.getState().clearStore();
-    useVaultStore.setState({ items: [makeMockItem({ id: 'item-1', name: 'Fresh Session' })] });
+    useVaultStore.setState({ items: [makeMockItem({ id: ITEM_1, name: 'Fresh Session' })] });
 
     api.resolve({
-      data: { success: true, data: makeRawItemResponse({ _id: 'item-1' }) },
+      data: { success: true, data: makeRawItemResponse({ _id: ITEM_1 }) },
     } as unknown as Awaited<ReturnType<typeof updateItemApi>>);
     await promise;
 

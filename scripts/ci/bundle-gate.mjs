@@ -121,25 +121,43 @@ import {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const distDir = path.join(repoRoot, 'packages', 'client', 'dist');
 const indexHtml = path.join(distDir, 'index.html');
+/**
+ * The isolated render document is emitted OUTSIDE `dist/`, and that is a
+ * security control rather than a layout preference: `dist/` becomes both the
+ * `express.static` root and the Nginx document root, and the sandbox document's
+ * whole containment is the per-response CSP Express attaches to it, so a copy
+ * either server could answer off disk carries the application's policy instead.
+ * `packages/client/vite.config.helpers.ts` (`SANDBOX_DOCUMENT_OUT_DIR`) holds
+ * the argument and the four URL spellings that proved ordering was not enough.
+ *
+ * It matters here because this gate must keep reading the document from where it
+ * now is, while resolving the assets it NAMES against `dist/` — they did not
+ * move and must not.
+ */
+const sandboxDocumentDir = path.join(repoRoot, 'packages', 'client', 'dist-sandbox');
 
 /**
  * (e) The two documents the client build emits, and the asset directory each
  * one's chunks are routed to. Both must exist for the gate to have run at all:
  * a missing `sandbox.html` means the second build did not happen, which is a
  * "could not run" rather than a pass over half the output.
+ *
+ * Carried with their absolute paths because the two now live in different
+ * directories; every reference they hold is still resolved against `distDir`.
  */
-const HTML_SHELLS = ['index.html', 'sandbox.html'];
+const HTML_SHELLS = [
+  { file: 'index.html', absolute: indexHtml },
+  { file: 'sandbox.html', absolute: path.join(sandboxDocumentDir, 'sandbox.html') },
+];
 const SANDBOX_ASSETS_DIR = 'sandbox-assets';
 const ASSET_DIRS = ['assets', SANDBOX_ASSETS_DIR];
 
 const kb = (bytes) => Number((bytes / 1024).toFixed(2));
 
-for (const shell of HTML_SHELLS) {
-  if (existsSync(path.join(distDir, shell))) continue;
+for (const { absolute } of HTML_SHELLS) {
+  if (existsSync(absolute)) continue;
   console.error(
-    color.red(
-      `  ✖ ${path.relative(repoRoot, path.join(distDir, shell))} is missing — build the client first`,
-    ),
+    color.red(`  ✖ ${path.relative(repoRoot, absolute)} is missing — build the client first`),
   );
   process.exit(2);
 }
@@ -176,8 +194,7 @@ const problems = [];
 // moves.
 const htmlShells = [];
 let htmlShellBytes = 0;
-for (const shell of HTML_SHELLS) {
-  const absolute = path.join(distDir, shell);
+for (const { file: shell, absolute } of HTML_SHELLS) {
   const bytes = statSync(absolute).size;
   htmlShellBytes += bytes;
   htmlShells.push({ file: shell, kb: kb(bytes) });
@@ -285,9 +302,9 @@ for (const [base, dirs] of dirsByBase) {
 }
 
 // (f) Neither document may reach into the other's asset directory.
-for (const shell of HTML_SHELLS) {
+for (const { file: shell, absolute } of HTML_SHELLS) {
   const forbidden = shell === 'sandbox.html' ? 'assets' : 'sandbox-assets';
-  for (const href of referencedAssets(readFileSync(path.join(distDir, shell), 'utf8'))) {
+  for (const href of referencedAssets(readFileSync(absolute, 'utf8'))) {
     // `/assets/` is a prefix of nothing else, but `/sandbox-assets/` starts with
     // neither, so each is matched on its own leading segment rather than by
     // `includes`, which would report `/assets/x.js` for the sandbox's own

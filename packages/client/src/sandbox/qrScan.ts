@@ -43,6 +43,41 @@ import {
 
 const OTP_URI = /^otpauth(-migration)?:/i;
 
+/**
+ * This ENGINE cannot read images at all — as opposed to this IMAGE being one it
+ * will not read.
+ *
+ * The two are answered with opposite message kinds and the difference is the
+ * whole point of the split. Everything about one image (too many bytes, too many
+ * pixels, a format that will not decode) is a `qrFailed` naming that request, so
+ * a running camera keeps going and the next frame gets its chance. A browser with
+ * no usable `OffscreenCanvas` 2D context will refuse every frame it is ever
+ * handed, so answering per-image leaves the camera looping in silence for ever
+ * with nothing on screen — `TotpScanPanel.pump` swallows per-image refusals by
+ * design, because at 8 frames a second it must. That case is exactly what the
+ * session-ending `failed` exists for, and it is the only category `toImageData`
+ * raises that no later image can improve.
+ */
+class QrEngineUnavailableError extends Error {
+  constructor() {
+    super('This browser gives the scanner no way to read images.');
+    this.name = 'QrEngineUnavailableError';
+  }
+}
+
+/**
+ * THIS image was too large to decode — by its bytes or by its decoded sides.
+ *
+ * A TYPE, so the answer is chosen from what was thrown rather than from its
+ * wording: the reply carries a code, and the application words it.
+ */
+class QrImageTooLargeError extends Error {
+  constructor() {
+    super('That image is too large to read.');
+    this.name = 'QrImageTooLargeError';
+  }
+}
+
 /** Pixels, however the request carried them. */
 async function toImageData(image: unknown): Promise<ImageData> {
   let bitmap: ImageBitmap;
@@ -54,22 +89,33 @@ async function toImageData(image: unknown): Promise<ImageData> {
     // come BEFORE the decode: the decoded size is what kills the tab, and by the
     // time a bitmap exists the memory is already gone.
     if (image.size > MAX_SANDBOX_QR_IMAGE_BYTES) {
-      throw new Error('That image is too large to read.');
+      throw new QrImageTooLargeError();
     }
     bitmap = await createImageBitmap(image);
   } else {
-    throw new Error('The scan request was not understood.');
+    // Neither of the two things a scan request may carry. Refused as THIS image
+    // being unreadable, since the request itself parsed and named its id.
+    throw new Error('Not an image.');
   }
 
   try {
     // Checked after the decode as well, because a small file can declare an
     // enormous canvas.
     if (bitmap.width > MAX_SANDBOX_QR_IMAGE_SIDE || bitmap.height > MAX_SANDBOX_QR_IMAGE_SIDE) {
-      throw new Error('That image is too large to read.');
+      throw new QrImageTooLargeError();
+    }
+    // Both of these describe the ENGINE, never the image, so both are raised as
+    // {@link QrEngineUnavailableError} and end the session rather than refusing
+    // one frame. `OffscreenCanvas` is checked by name rather than left to throw a
+    // `ReferenceError`, so the refusal is the specific code the host can act on.
+    if (typeof OffscreenCanvas === 'undefined') {
+      throw new QrEngineUnavailableError();
     }
     const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
     const context = canvas.getContext('2d');
-    if (context === null) throw new Error('This browser cannot read images here.');
+    if (context === null) {
+      throw new QrEngineUnavailableError();
+    }
     context.drawImage(bitmap, 0, 0);
     return context.getImageData(0, 0, bitmap.width, bitmap.height);
   } finally {
@@ -98,7 +144,27 @@ export async function scanImage(
   try {
     pixels = await toImageData(image);
   } catch (error) {
-    return { kind: 'failed', reason: error instanceof Error ? error.message : 'Unreadable image.' };
+    // One exception: a fault in the ENGINE rather than in the image. It will
+    // refuse the next frame too, so answering per-image would leave a camera
+    // scanning in silence for ever. See {@link QrEngineUnavailableError}.
+    if (error instanceof QrEngineUnavailableError) {
+      return { kind: 'failed', code: 'engineUnavailable' };
+    }
+    // `qrFailed`, NOT `failed`, and the difference is the whole point of the
+    // two kinds. Everything else `toImageData` refuses is a property of THIS
+    // image — too many bytes, too many pixels, a format this engine cannot
+    // decode — and the next image may well be fine. Answering with the
+    // unattributable `failed` told the host the session had died, which stopped a
+    // running camera because somebody picked one oversized photograph.
+    //
+    // A CODE, chosen by what was thrown. The browser's own message for an
+    // undecodable file is not forwarded either: the application words every
+    // refusal it shows, and "too large" is the only one worth distinguishing.
+    return {
+      kind: 'qrFailed',
+      requestId,
+      code: error instanceof QrImageTooLargeError ? 'imageTooLarge' : 'imageUnreadable',
+    };
   }
 
   let text: string;

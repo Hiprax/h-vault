@@ -1122,10 +1122,27 @@ describe('Card', () => {
       </Card>,
     );
 
-    expect(screen.getByRole('heading', { name: 'Vault health' }).tagName).toBe('H3');
+    // A card is a SECTION of a page whose own h1 sits above it, so its title is
+    // one level below that: an h3 default made every such page skip a level.
+    expect(screen.getByRole('heading', { level: 2, name: 'Vault health' }).tagName).toBe('H2');
     expect(screen.getByText('3 weak passwords')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Fix now' })).toBeInTheDocument();
     expect(screen.getByTestId('card').className).toContain('custom');
+  });
+
+  it.each([
+    ['h1', 1],
+    ['h2', 2],
+    ['h3', 3],
+  ] as const)('renders the title at the level it is given (%s)', (as, level) => {
+    render(<CardTitle as={as}>Sign in</CardTitle>);
+    const heading = screen.getByRole('heading', { name: 'Sign in' });
+    expect(heading.tagName).toBe(as.toUpperCase());
+    expect(heading).not.toHaveAttribute('aria-level');
+    expect(screen.getByRole('heading', { level })).toBe(heading);
+    // Exactly one heading, and the level is carried by the element, not by ARIA.
+    expect(screen.getAllByRole('heading')).toHaveLength(1);
+    expect(heading.className).toContain('text-2xl');
   });
 });
 

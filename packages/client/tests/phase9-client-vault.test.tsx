@@ -302,7 +302,15 @@ describe('vaultStore.updateItemMeta — metadata-only update (#17)', () => {
 
     await useVaultStore.getState().updateItemMeta('item-1', { favorite: true });
 
-    expect(updateItemApi).toHaveBeenCalledWith('item-1', { favorite: true });
+    // `vaultKeyVersion` is part of every payload to this endpoint: the server
+    // guards it as a whole rather than deciding from which fields the body
+    // happens to carry, so the metadata path names the generation too. Zero is
+    // this account's: it has never rotated. Reading it needs no vault key, which
+    // is why this path can still hold none.
+    expect(updateItemApi).toHaveBeenCalledWith('item-1', {
+      favorite: true,
+      vaultKeyVersion: 0,
+    });
 
     // No ciphertext field may appear in the payload — that is the invariant.
     const payload = vi.mocked(updateItemApi).mock.calls[0]![1];
@@ -358,7 +366,7 @@ describe('vaultStore.updateItemMeta — metadata-only update (#17)', () => {
 
     await useVaultStore.getState().updateItemMeta('item-1', { folderId: null });
 
-    expect(updateItemApi).toHaveBeenCalledWith('item-1', { folderId: null });
+    expect(updateItemApi).toHaveBeenCalledWith('item-1', { folderId: null, vaultKeyVersion: 0 });
     const item = useVaultStore.getState().items[0]!;
     expect(item.folderId).toBeUndefined();
     // Fields not named in the update keep their previous values.
@@ -528,7 +536,7 @@ describe('VaultItemDetail — favorite/move never re-encrypt (#17)', () => {
       fireEvent.click(screen.getByText('Favorite'));
     });
 
-    expect(updateItemApi).toHaveBeenCalledWith('item-1', { favorite: true });
+    expect(updateItemApi).toHaveBeenCalledWith('item-1', { favorite: true, vaultKeyVersion: 0 });
     const payload = vi.mocked(updateItemApi).mock.calls[0]![1];
     for (const field of CIPHERTEXT_FIELDS) expect(payload).not.toHaveProperty(field);
 
@@ -565,7 +573,10 @@ describe('VaultItemDetail — favorite/move never re-encrypt (#17)', () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Work' }));
     });
 
-    expect(updateItemApi).toHaveBeenCalledWith('item-1', { folderId: 'folder-7' });
+    expect(updateItemApi).toHaveBeenCalledWith('item-1', {
+      folderId: 'folder-7',
+      vaultKeyVersion: 0,
+    });
     const payload = vi.mocked(updateItemApi).mock.calls[0]![1];
     for (const field of CIPHERTEXT_FIELDS) expect(payload).not.toHaveProperty(field);
 
@@ -586,7 +597,7 @@ describe('VaultItemDetail — favorite/move never re-encrypt (#17)', () => {
       fireEvent.click(screen.getByText('Favorite'));
     });
 
-    expect(updateItemApi).toHaveBeenCalledWith('item-1', { favorite: true });
+    expect(updateItemApi).toHaveBeenCalledWith('item-1', { favorite: true, vaultKeyVersion: 0 });
     expect(cryptoService.encryptData).not.toHaveBeenCalled();
     expect(useVaultStore.getState().items[0]!.favorite).toBe(true);
   });
@@ -613,7 +624,7 @@ describe('VaultList bulk tag — metadata-only, never re-encrypts (#17)', () => 
     // computes (existing tags + the new one).
     await useVaultStore.getState().updateItemMeta('item-1', { tags: ['urgent'] });
 
-    expect(updateItemApi).toHaveBeenCalledWith('item-1', { tags: ['urgent'] });
+    expect(updateItemApi).toHaveBeenCalledWith('item-1', { tags: ['urgent'], vaultKeyVersion: 0 });
     const payload = vi.mocked(updateItemApi).mock.calls[0]![1];
     expect(payload).not.toHaveProperty('encryptedData');
     expect(cryptoService.encryptData).not.toHaveBeenCalled();
@@ -649,7 +660,7 @@ describe('VaultList bulk tag — metadata-only, never re-encrypts (#17)', () => 
       fireEvent.click(screen.getByText('Apply'));
     });
 
-    expect(updateItemApi).toHaveBeenCalledWith('item-1', { tags: ['urgent'] });
+    expect(updateItemApi).toHaveBeenCalledWith('item-1', { tags: ['urgent'], vaultKeyVersion: 0 });
     const payload = vi.mocked(updateItemApi).mock.calls[0]![1];
     for (const field of ['encryptedData', 'dataIv', 'dataTag', 'encryptedName', 'searchHash']) {
       expect(payload).not.toHaveProperty(field);

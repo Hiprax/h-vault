@@ -1,4 +1,4 @@
-import type { IPasswordHistoryEntry, ItemType } from '@hvault/shared';
+import type { ItemType } from '@hvault/shared';
 
 /**
  * A source format the importer can convert into H-Vault vault items.
@@ -32,13 +32,9 @@ export interface ParseResult {
 }
 
 /**
- * The six ciphertext fields of a row that is ALREADY encrypted under the
- * CURRENT vault key — i.e. a native H-Vault export being re-imported.
- *
- * Such a row is decrypted only to compute its identity and to resolve it
- * against the vault; the original ciphertext is then re-sent verbatim rather
- * than decrypt-and-re-encrypted, so a re-import cannot perturb bytes it had no
- * reason to touch.
+ * The six ciphertext fields of a native H-Vault export row, as read from the
+ * file. They are opened to recover the row's plaintext and are never re-sent: a
+ * row is sealed again, in format v2, to the id and type of wherever it lands.
  */
 export interface NativeCiphertext {
   encryptedName: string;
@@ -50,20 +46,41 @@ export interface NativeCiphertext {
 }
 
 /**
- * A row ready for conflict resolution: the decrypted identity fields every
- * source shares, plus how the row will be sealed for the wire.
+ * A native row's content exactly as the vault stored it, decrypted.
  *
- * `cipher` is present ONLY for native re-imports (see {@link NativeCiphertext});
- * every other source is encrypted from its plaintext at send time. `folderId`
- * and `passwordHistory` likewise ride along only from a native export —
- * third-party parsers produce neither, the server strips a folder id the caller
- * does not own, and carrying the history is what stops re-importing an export
- * from erasing the previous passwords of an item it restores.
+ * `dataJson` is the decrypted data STRING, byte for byte, never re-serialised
+ * from the parsed `data`: its content was validated when it was first stored, and
+ * sealing the same string again is what guarantees a re-import cannot perturb it.
+ */
+interface NativeContent {
+  dataJson: string;
+}
+
+/** One retained previous password, decrypted, beside the time it was replaced. */
+export interface PreviousPassword {
+  password: string;
+  changedAt: string;
+}
+
+/**
+ * A row ready for conflict resolution: the decrypted identity fields every
+ * source shares, plus what sealing it needs.
+ *
+ * `native` is present ONLY for native re-imports (see {@link NativeContent});
+ * every other source is validated and encrypted from its parsed `data`.
+ * `folderId` and `previousPasswords` likewise ride along only from a native
+ * export — third-party parsers produce neither, the server strips a folder id the
+ * caller does not own, and carrying the history is what stops re-importing an
+ * export from erasing the previous passwords of an item it restores.
+ *
+ * Nothing here is ciphertext, on purpose: every field a row is sent with is sealed
+ * to the row it will be stored as, and that is decided only after resolution
+ * (a fresh id for an insert, the matched row's id for an overwrite).
  */
 export interface ResolvableImportItem extends ParsedImportItem {
-  cipher?: NativeCiphertext;
+  native?: NativeContent;
   folderId?: string;
-  passwordHistory?: IPasswordHistoryEntry[];
+  previousPasswords?: PreviousPassword[];
 }
 
 /** Column-name → H-Vault field mapping used by the generic CSV path. */

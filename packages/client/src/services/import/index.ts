@@ -13,12 +13,13 @@ export type {
   ImportSourceFormat,
   NativeCiphertext,
   ParsedImportItem,
+  PreviousPassword,
   ParseResult,
   ResolvableImportItem,
 } from './types';
 export { MAX_IMPORT_WARNINGS, validateImportItems } from './encrypt';
 export { IMPORT_BATCH_MAX_BYTES, chunkBySize, chunkImportOperations } from './batch';
-export { buildImportOperations } from './operations';
+export { assertInsertedWhereSealed, buildImportOperations } from './operations';
 export { resolveImport } from './resolve';
 
 /** Thrown when a source file cannot be parsed into vault items. */

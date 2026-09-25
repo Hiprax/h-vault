@@ -202,12 +202,9 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
         prefix: 'csrf:',
         message: 'Too many requests, please try again later',
       },
-      {
-        name: 'heavyOpLimiter',
-        limit: 10,
-        prefix: 'heavy:',
-        message: 'Too many requests, please try again later',
-      },
+      // heavyOpLimiter is deliberately ABSENT: every route it guards sits behind
+      // `authenticate`, so it keys on the user, and it is driven in the userId
+      // table below, where a rotating source IP is what the case sends.
       // healthLimiter and metricsLimiter are deliberately ABSENT from this table:
       // they are in-memory and never persist a counter. Their thresholds, prefixes
       // and isolation are covered in 'diagnostic limiters' below, which asserts the
@@ -246,22 +243,22 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
   });
 
   describe('key-prefix isolation across limiters', () => {
-    it('exhausting authLimiter does not consume heavyOpLimiter budget for the same IP', async () => {
+    it('exhausting authLimiter does not consume csrfLimiter budget for the same IP', async () => {
       const ip = '198.51.100.30';
       const authApp = createApp(limiters.authLimiter as RequestHandler);
-      const heavyApp = createApp(limiters.heavyOpLimiter as RequestHandler);
+      const csrfApp = createApp(limiters.csrfLimiter as RequestHandler);
 
       const { statuses } = await hitFromIp(authApp, ip, AUTH_OVER);
       expect(statuses[AUTH_LIMIT]).toBe(429);
 
       // Same client, different limiter: an unprefixed (shared) key would have
       // this land on an already-exhausted counter and 429 immediately.
-      const heavy = await hitFromIp(heavyApp, ip, 10);
-      expect(heavy.statuses.every((status) => status === 200)).toBe(true);
+      const csrf = await hitFromIp(csrfApp, ip, 10);
+      expect(csrf.statuses.every((status) => status === 200)).toBe(true);
 
-      expect((await storedKeys()).sort()).toEqual([`auth:${ip}`, `heavy:${ip}`]);
+      expect((await storedKeys()).sort()).toEqual([`auth:${ip}`, `csrf:${ip}`]);
       expect(await counterFor(`auth:${ip}`)).toBe(AUTH_OVER);
-      expect(await counterFor(`heavy:${ip}`)).toBe(10);
+      expect(await counterFor(`csrf:${ip}`)).toBe(10);
     });
   });
 
@@ -457,6 +454,22 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
         limit: 60,
         prefix: 'general:',
         message: 'Too many requests, please try again later',
+      },
+      // Keyed by IP until every route it guards was confirmed to sit behind
+      // `authenticate`: two accounts behind one egress address shared ten requests,
+      // and an attacker with one account bought a fresh ten per address.
+      {
+        name: 'heavyOpLimiter',
+        limit: 10,
+        prefix: 'heavy:',
+        message: 'Too many requests, please try again later',
+      },
+      // The one authenticated route that used the address-keyed token: bucket.
+      {
+        name: 'twoFactorVerifyLimiter',
+        limit: 20,
+        prefix: 'twoFactorVerify:',
+        message: 'Too many verification attempts, please try again later',
       },
     ];
 

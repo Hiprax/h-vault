@@ -53,6 +53,9 @@ import {
   checkBreachBatchSchema,
   disable2faSchema,
   importSchema,
+  backupSetupSchema,
+  backupChangePasswordSchema,
+  restoreBackupSchema,
   verify2faSchema,
 } from '../src/schemas/user.js';
 import {
@@ -92,6 +95,32 @@ const validItem = {
   dataIv: chars(16),
   dataTag: chars(24),
   ...validFolder,
+};
+const validChangePassword = {
+  currentAuthHash: chars(40),
+  newAuthHash: chars(40),
+  newEncryptedVaultKey: chars(80),
+  newVaultKeyIv: chars(16),
+  newVaultKeyTag: chars(24),
+};
+const validImport = {
+  format: 'json' as const,
+  operations: { inserts: [{ ...validItem, searchHash: HASH }], updates: [] },
+};
+const validRestore = { data: chars(64) };
+const validBackupSetup = {
+  authHash: chars(20),
+  encryptedBWK: chars(40),
+  bwkIv: chars(16),
+  bwkTag: chars(24),
+  bwkSalt: chars(24),
+};
+const validBackupChangePassword = {
+  password: chars(20),
+  newEncryptedBWK: chars(40),
+  newBwkIv: chars(16),
+  newBwkTag: chars(24),
+  newBwkSalt: chars(24),
 };
 
 /** `safeParse`, reported as the issue list a caller would actually see. */
@@ -373,6 +402,33 @@ describe('bounds hold at the limit and refuse one past it', () => {
           newVaultKeyTag: 'g',
         }),
     },
+    ...(
+      [
+        ['newPendingEncryptedVaultKey', 200],
+        ['newPendingVaultKeyIv', 24],
+        ['newPendingVaultKeyTag', 32],
+      ] as const
+    ).map(([field, max]) => ({
+      name: `changePasswordSchema.${field} max ${String(max)}`,
+      at: () =>
+        accepts(changePasswordSchema, {
+          currentAuthHash: 'c',
+          newAuthHash: 'n',
+          newEncryptedVaultKey: 'k',
+          newVaultKeyIv: 'i',
+          newVaultKeyTag: 'g',
+          [field]: chars(max),
+        }),
+      past: () =>
+        accepts(changePasswordSchema, {
+          currentAuthHash: 'c',
+          newAuthHash: 'n',
+          newEncryptedVaultKey: 'k',
+          newVaultKeyIv: 'i',
+          newVaultKeyTag: 'g',
+          [field]: chars(max + 1),
+        }),
+    })),
     {
       name: 'updateFolderSchema.icon max 50',
       at: () => accepts(updateFolderSchema, { icon: chars(50) }),
@@ -458,6 +514,21 @@ describe('bounds hold at the limit and refuse one past it', () => {
     expect(at(), 'the value AT the bound must be accepted').toBe(true);
     expect(past(), 'the value one PAST the bound must be refused').toBe(false);
   });
+
+  it.each(['newPendingEncryptedVaultKey', 'newPendingVaultKeyIv', 'newPendingVaultKeyTag'])(
+    'changePasswordSchema refuses an EMPTY %s, which would carry no wrapper at all',
+    (field) => {
+      const base = {
+        currentAuthHash: 'c',
+        newAuthHash: 'n',
+        newEncryptedVaultKey: 'k',
+        newVaultKeyIv: 'i',
+        newVaultKeyTag: 'g',
+      };
+      expect(accepts(changePasswordSchema, { ...base, [field]: 'x' })).toBe(true);
+      expect(accepts(changePasswordSchema, { ...base, [field]: '' })).toBe(false);
+    },
+  );
 });
 
 describe('the ciphertext trios are all-or-nothing', () => {
@@ -584,6 +655,132 @@ describe('a refused request says which rule refused it', () => {
   ])('names the rule for %s', (_case, run, message) => {
     const reported = run();
     expect(reported.map((i) => i.m)).toContain(message);
+  });
+});
+
+describe('vaultKeyVersion is carried, bounded, and never silently dropped', () => {
+  /**
+   * The field the server's `assertVaultKeyVersion` guard reads. It is OPTIONAL on
+   * the wire — making it required would be a breaking request-schema change — so
+   * the assertion that matters is not that a good value is accepted but that it
+   * SURVIVES the parse.
+   *
+   * These schemas are in Zod's default STRIP mode, so a schema that never
+   * declared the field would still `parse` a body carrying one, quietly, and hand
+   * the guard `undefined`. The guard fails CLOSED on `undefined`, so the symptom
+   * of dropping this one line is not a missing check: it is every write refused
+   * with a 409 for every account that has ever rotated its vault key, with the
+   * number the client needs sitting in a request the server threw away. Hence
+   * `parse(...).vaultKeyVersion` rather than `accepts(...)` for the positive half.
+   *
+   * The negative halves pin the two things a mutated bound would let through: a
+   * negative generation (no account has one; `$inc` starts at 0) and a
+   * non-integer (a generation is a counter, and `1.5` is the shape a float-typed
+   * client sends when it has lost precision).
+   */
+  const CARRIERS: {
+    name: string;
+    parse: (value: unknown) => unknown;
+    accepts: (value: unknown) => boolean;
+  }[] = [
+    {
+      name: 'changePasswordSchema',
+      parse: (vaultKeyVersion) =>
+        changePasswordSchema.parse({ ...validChangePassword, vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) =>
+        accepts(changePasswordSchema, { ...validChangePassword, vaultKeyVersion }),
+    },
+    {
+      name: 'createVaultItemSchema',
+      parse: (vaultKeyVersion) =>
+        createVaultItemSchema.parse({ ...validItem, vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) =>
+        accepts(createVaultItemSchema, { ...validItem, vaultKeyVersion }),
+    },
+    {
+      name: 'updateVaultItemSchema',
+      parse: (vaultKeyVersion) => updateVaultItemSchema.parse({ vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) => accepts(updateVaultItemSchema, { vaultKeyVersion }),
+    },
+    {
+      name: 'createFolderSchema',
+      parse: (vaultKeyVersion) =>
+        createFolderSchema.parse({ ...validFolder, vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) =>
+        accepts(createFolderSchema, { ...validFolder, vaultKeyVersion }),
+    },
+    {
+      name: 'updateFolderSchema',
+      parse: (vaultKeyVersion) => updateFolderSchema.parse({ vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) => accepts(updateFolderSchema, { vaultKeyVersion }),
+    },
+    {
+      name: 'importSchema',
+      parse: (vaultKeyVersion) =>
+        importSchema.parse({ ...validImport, vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) => accepts(importSchema, { ...validImport, vaultKeyVersion }),
+    },
+    {
+      name: 'restoreBackupSchema',
+      parse: (vaultKeyVersion) =>
+        restoreBackupSchema.parse({ ...validRestore, vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) =>
+        accepts(restoreBackupSchema, { ...validRestore, vaultKeyVersion }),
+    },
+    {
+      // The wrapper these two store is the account's VAULT KEY sealed under the
+      // backup key, so they carry the generation for the same reason every other
+      // write derived from that key does. Both wrap their object in a refinement,
+      // which is exactly the shape in which a field added to the wrong side of
+      // the `.superRefine(...)` / `.refine(...)` call would be silently stripped.
+      name: 'backupSetupSchema',
+      parse: (vaultKeyVersion) =>
+        backupSetupSchema.parse({ ...validBackupSetup, vaultKeyVersion }).vaultKeyVersion,
+      accepts: (vaultKeyVersion) =>
+        accepts(backupSetupSchema, { ...validBackupSetup, vaultKeyVersion }),
+    },
+    {
+      name: 'backupChangePasswordSchema',
+      parse: (vaultKeyVersion) =>
+        backupChangePasswordSchema.parse({ ...validBackupChangePassword, vaultKeyVersion })
+          .vaultKeyVersion,
+      accepts: (vaultKeyVersion) =>
+        accepts(backupChangePasswordSchema, { ...validBackupChangePassword, vaultKeyVersion }),
+    },
+  ];
+
+  it.each(CARRIERS)('$name carries a generation of 0 through to the handler', ({ parse }) => {
+    // Zero is the generation of an account that has never rotated, and it is the
+    // one value a truthiness check would drop.
+    expect(parse(0)).toBe(0);
+  });
+
+  it.each(CARRIERS)('$name carries a large generation through to the handler', ({ parse }) => {
+    expect(parse(4_294_967_296)).toBe(4_294_967_296);
+  });
+
+  it.each(CARRIERS)('$name leaves an absent generation absent, not zero', ({ name, parse }) => {
+    // `undefined` and `0` mean opposite things to the guard: `0` is "this account
+    // has never rotated", `undefined` is "this client cannot say", which is
+    // refused on a rotated account. A `.default(0)` here would silently convert
+    // every fail-closed refusal into a permitted write.
+    expect(parse(undefined), name).toBeUndefined();
+  });
+
+  it.each(CARRIERS)('$name refuses a negative generation', ({ accepts: takes }) => {
+    expect(takes(-1)).toBe(false);
+  });
+
+  it.each(CARRIERS)('$name refuses a non-integer generation', ({ accepts: takes }) => {
+    expect(takes(1.5)).toBe(false);
+  });
+
+  it.each(CARRIERS)('$name refuses a generation that is not a number', ({ accepts: takes }) => {
+    // A client that sends the number as a string, or sends an explicit `null`
+    // where it meant "absent", must be refused rather than coerced: `Number(null)`
+    // is 0, which is the one value that reads as "never rotated".
+    expect(takes('1')).toBe(false);
+    expect(takes(null)).toBe(false);
   });
 });
 

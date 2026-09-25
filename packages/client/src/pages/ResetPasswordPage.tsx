@@ -8,11 +8,13 @@ import { getZxcvbn } from '../lib/lazyZxcvbn';
 import { ArrowLeft, CheckCircle, AlertCircle, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { BrandLogo } from '../components/ui/BrandLogo';
 import { resetPasswordApi } from '../services/api/authApi';
-import { cn, getApiErrorMessage, hasValidEmailTld } from '../lib/utils';
+import { cn, getApiErrorMessage } from '../lib/utils';
+import { accountEmailSchema } from '../lib/accountEmail';
 import { cryptoService } from '../services/crypto/cryptoService';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Label } from '../components/ui/Label';
+import { FormAlert } from '../components/ui/FormAlert';
 import {
   Card,
   CardContent,
@@ -21,6 +23,7 @@ import {
   CardHeader,
   CardTitle,
 } from '../components/ui/Card';
+import { StandalonePage } from '../components/layout/StandalonePage';
 
 /* -------------------------------------------------------------------------- */
 /*  Schema                                                                    */
@@ -28,11 +31,7 @@ import {
 
 const resetPasswordSchema = z
   .object({
-    email: z
-      .string()
-      .min(1, 'Email is required')
-      .pipe(z.email('Enter a valid email address'))
-      .refine(hasValidEmailTld, 'Enter a valid email address'),
+    email: accountEmailSchema,
     newPassword: z.string().min(12, 'Password must be at least 12 characters'),
     confirmPassword: z.string().min(1, 'Please confirm your password'),
   })
@@ -154,13 +153,13 @@ export default function ResetPasswordPage() {
   /* ---- Missing token ---- */
   if (!token) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <Card className="w-full max-w-md">
           <CardHeader className="items-center text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-950">
               <AlertCircle className="h-6 w-6 text-red-600 dark:text-red-400" />
             </div>
-            <CardTitle>Invalid Link</CardTitle>
+            <CardTitle as="h1">Invalid Link</CardTitle>
             <CardDescription>
               No reset token found. Please check the link from your email or request a new password
               reset.
@@ -176,20 +175,20 @@ export default function ResetPasswordPage() {
             </Link>
           </CardFooter>
         </Card>
-      </div>
+      </StandalonePage>
     );
   }
 
   /* ---- Success view ---- */
   if (isSuccess) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+      <StandalonePage>
         <Card className="w-full max-w-md">
           <CardHeader className="items-center text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-100 dark:bg-green-950">
               <CheckCircle className="h-6 w-6 text-green-600 dark:text-green-400" />
             </div>
-            <CardTitle>Password Reset Complete</CardTitle>
+            <CardTitle as="h1">Password Reset Complete</CardTitle>
             <CardDescription>
               Your password has been reset successfully. You can now sign in with your new password.
             </CardDescription>
@@ -204,19 +203,19 @@ export default function ResetPasswordPage() {
             </Link>
           </CardFooter>
         </Card>
-      </div>
+      </StandalonePage>
     );
   }
 
   /* ---- Form view ---- */
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[hsl(var(--background))] px-4">
+    <StandalonePage>
       <Card className="w-full max-w-md">
         <CardHeader className="items-center text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
             <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
           </div>
-          <CardTitle>Reset Password</CardTitle>
+          <CardTitle as="h1">Reset Password</CardTitle>
           <CardDescription>Enter your email and choose a new master password.</CardDescription>
         </CardHeader>
 
@@ -234,15 +233,7 @@ export default function ResetPasswordPage() {
               </span>
             </div>
 
-            {apiError && (
-              <div
-                role="alert"
-                className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
-              >
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{apiError}</span>
-              </div>
-            )}
+            {apiError && <FormAlert message={apiError} />}
 
             {/* Email */}
             <div className="space-y-2">
@@ -380,6 +371,6 @@ export default function ResetPasswordPage() {
           </CardFooter>
         </form>
       </Card>
-    </div>
+    </StandalonePage>
   );
 }

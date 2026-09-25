@@ -341,9 +341,14 @@ describe('vault + tools controller edge branches', () => {
       const persistedUser = await User.findById(user.id).lean();
       expect(persistedUser!.encryptedVaultKey).toBe(ORIGINAL_VAULT_KEY);
       expect(persistedUser!.rotationInProgress).toBe(false);
-      expect(persistedUser!.pendingEncryptedVaultKey).toBeUndefined();
-      expect(persistedUser!.pendingVaultKeyIv).toBeUndefined();
-      expect(persistedUser!.pendingVaultKeyTag).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(persistedUser!.pendingEncryptedVaultKey).toBe('must-not-be-committed');
+      expect(persistedUser!.pendingVaultKeyIv).toBe('bad-iv');
+      expect(persistedUser!.pendingVaultKeyTag).toBe('bad-tag');
 
       // ── Every partially-written row must be back to its OLD ciphertext ──
       const p1 = await VaultItem.findById(item1._id).lean();
@@ -418,7 +423,12 @@ describe('vault + tools controller edge branches', () => {
       expect(persistedUser!.encryptedVaultKey).toBe(ORIGINAL_VAULT_KEY);
       expect(persistedUser!.vaultKeyIv).toBe('test-vault-key-iv');
       expect(persistedUser!.rotationInProgress).toBe(false);
-      expect(persistedUser!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(persistedUser!.pendingEncryptedVaultKey).toBe('must-not-be-committed');
     });
 
     it('rolls back the already-written FOLDER and item when a later folder write fails', async () => {
@@ -479,7 +489,12 @@ describe('vault + tools controller edge branches', () => {
       const persistedUser = await User.findById(user.id).lean();
       expect(persistedUser!.encryptedVaultKey).toBe(ORIGINAL_VAULT_KEY);
       expect(persistedUser!.rotationInProgress).toBe(false);
-      expect(persistedUser!.pendingEncryptedVaultKey).toBeUndefined();
+      // The pending wrapper SURVIVES the abort, deliberately: it is the only
+      // stored copy of the key this rotation was moving to, and an abort is
+      // precisely where a crash may already have sealed rows under it. Only a
+      // COMMIT drops it. The next rotation must adopt it or discard it in so
+      // many words — see the outstanding-rotation guard in `bulkReEncrypt`.
+      expect(persistedUser!.pendingEncryptedVaultKey).toBe('must-not-be-committed');
 
       // The first folder was written with new-key ciphertext, then rolled back.
       const f1 = await Folder.findById(folder1._id).lean();
@@ -543,7 +558,17 @@ describe('vault + tools controller edge branches', () => {
         })
         .expect(201);
 
-      expect(res.body.data).toEqual({ insertedCount: 1, updatedCount: 0 });
+      expect(res.body.data).toEqual({
+        insertedCount: 1,
+
+        updatedCount: 0,
+
+        insertedIds: expect.any(Array),
+      });
+
+      // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
+
+      expect(res.body.data.insertedIds).toHaveLength(1);
 
       const persisted = await VaultItem.findOne({ encryptedName: 'projected' }).lean();
       expect(persisted).not.toBeNull();

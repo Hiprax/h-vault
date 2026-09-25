@@ -294,6 +294,31 @@ export interface IUserProfile {
    * yields nothing at all rather than the schema default.
    */
   vaultKeyVersion?: number;
+  /**
+   * Whether a crashed vault key rotation is still outstanding on this account.
+   *
+   * The server derives it from the presence of the pending wrapper below, not from
+   * the `rotationInProgress` write fence: the fence says "do not write right now"
+   * and is lowered by the next login, while the wrapper says "a rotation was left
+   * half-done" and survives until one COMMITS.
+   *
+   * Optional because a client may be talking to a server that predates the field,
+   * and absence must read as "no" — offering to finish a rotation that cannot be
+   * confirmed is the wrong direction to fail in.
+   */
+  interruptedRotation?: boolean;
+  /**
+   * The in-flight vault key of an interrupted rotation, wrapped under this
+   * account's MEK. Sent ONLY while {@link IUserProfile.interruptedRotation} is
+   * true, and opaque to the server exactly as `encryptedVaultKey` is.
+   *
+   * Some rows are already sealed under this key and nothing else anywhere stores
+   * it, so a client that finishes the rotation must unwrap THIS key and re-drive
+   * `bulkReEncrypt` with it rather than mint a fresh one.
+   */
+  pendingEncryptedVaultKey?: string;
+  pendingVaultKeyIv?: string;
+  pendingVaultKeyTag?: string;
   settings: IUserSettings;
   createdAt: string;
   updatedAt: string;

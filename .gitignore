@@ -3,6 +3,11 @@ node_modules/
 
 # Build outputs
 dist/
+# The document sandbox's own output. A SIBLING of dist/ rather than a file
+# inside it, because the isolated render document must not sit in any static
+# root: its whole containment is the per-response CSP Express attaches to it,
+# and a copy served off disk would carry the application's policy instead.
+dist-sandbox/
 build/
 *.tsbuildinfo
 

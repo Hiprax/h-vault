@@ -1350,6 +1350,13 @@ interface VaultItemFormProps {
   onSaved: () => void;
   /** Called on cancel */
   onCancel: () => void;
+  /**
+   * The level of the form's own title. `h2` where the form sits on a page that
+   * is already named — the create dialog over the vault list — and `h1` where
+   * the form IS the page, as on the edit view of `/vault/:id`, which has no
+   * other heading to name it.
+   */
+  titleLevel?: 'h1' | 'h2';
 }
 
 /**
@@ -1370,6 +1377,7 @@ export function VaultItemForm({
   defaultFolderId,
   onSaved,
   onCancel,
+  titleLevel: Title = 'h2',
 }: VaultItemFormProps) {
   const { toast } = useToast();
   const createItem = useVaultStore((s) => s.createItem);
@@ -1790,9 +1798,9 @@ export function VaultItemForm({
 
   return (
     <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} className="space-y-6">
-      <h2 className="text-lg font-semibold text-[hsl(var(--foreground))]">
+      <Title className="text-lg font-semibold text-[hsl(var(--foreground))]">
         {isEditing ? 'Edit Item' : 'New Item'}
-      </h2>
+      </Title>
 
       {/* Type tabs (only for new items) */}
       {!isEditing && (

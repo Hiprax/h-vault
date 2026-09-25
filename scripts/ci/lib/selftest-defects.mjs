@@ -390,8 +390,10 @@ export const DEFECTS = {
     // a fixed-IV implementation round-trips correctly, rejects a wrong key, and
     // rejects a flipped tag. Only the freshness property notices.
     //
-    // The pattern is byte-exact against today's `encryptData`. A rewrite of that
-    // line turns `String.replace` into a no-op, which fails in the SAFE direction:
+    // The pattern is byte-exact against today's `sealAesGcm`, the one seal both
+    // `encryptData` (format v1) and `encryptDataWithAad` (format v2) run, so the
+    // planted IV reaches every vault field whichever format writes it. A rewrite
+    // of that line turns `String.replace` into a no-op, which fails in the SAFE direction:
     // the gate then stays green, the harness reports `unproven`, and the run exits
     // non-zero — provided the evidence predicate below cannot be satisfied by a
     // green report, which is why it matches the ASSERTION MESSAGE rather than a
@@ -400,14 +402,10 @@ export const DEFECTS = {
     mutate: {
       'packages/client/src/services/crypto/cryptoService.ts': (text) =>
         text.replace(
-          `  async encryptData(
-    data: string,
-    vaultKey: CryptoKey,
+          `    additionalData: Uint8Array<ArrayBuffer> | undefined,
   ): Promise<{ encrypted: string; iv: string; tag: string }> {
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));`,
-          `  async encryptData(
-    data: string,
-    vaultKey: CryptoKey,
+          `    additionalData: Uint8Array<ArrayBuffer> | undefined,
   ): Promise<{ encrypted: string; iv: string; tag: string }> {
     const iv = new Uint8Array(IV_BYTES);`,
         ),
@@ -672,8 +670,8 @@ export const DEFECTS = {
     mutate: {
       'packages/server/src/controllers/toolsController.ts': (text) =>
         text.replace(
-          'const created = await VaultItem.insertMany(insertDocs, sessionOpt);',
-          'const created = await VaultItem.insertMany(insertDocs);',
+          'created = await VaultItem.insertMany(insertDocs, sessionOpt);',
+          'created = await VaultItem.insertMany(insertDocs);',
         ),
     },
     // The assertion's own message, which a PASSING run cannot contain — the trap
@@ -791,6 +789,34 @@ export const DEFECTS = {
     evidence: (text) => /script nonce=false/.test(text),
   },
 
+  'test:sandbox': {
+    requires: ['docker'],
+    // The policy the SOURCE declares, and the policy the ARTIFACT serves, made to
+    // disagree: `media-src` stops admitting the `blob:` URL the audio and video
+    // renderers mint. The spec compares the header each preview frame was really
+    // served under, read off the browser's own response, with the server's
+    // exported constant — so the first preview goes red on the disagreement.
+    //
+    // Planted in the source rather than in the built `dist/`, deliberately and
+    // not for convenience. The registry test checks that every mutated file
+    // EXISTS, and a build output exists only after a build, so a `dist/` target
+    // would make the server suite depend on one. The stronger form of the same
+    // defect — the SAME narrowed policy in both, so the header check passes and
+    // only the engine can object — was run by hand when this gate was written:
+    // the audio preview went red because the element refused its `blob:` source,
+    // and the same with `data:` removed from `img-src` for the inline image.
+    title: 'narrow the declared sandbox policy so media-src no longer admits blob:',
+    mutate: {
+      'packages/server/src/config/sandboxCsp.ts': (text) =>
+        text.replace("'media-src': ['blob:'],", "'media-src': [\"'self'\"],"),
+    },
+    // The spec's own message, which a passing run cannot contain, beside the
+    // directive the plant changed.
+    evidence: (text) =>
+      /the policy the isolated document was served under/.test(text) &&
+      /media-src 'self'/.test(text),
+  },
+
   'test:deploy': {
     requires: ['docker'],
     // The single most dangerous edit anyone can make to this deployment, and it
@@ -847,18 +873,58 @@ export const DEFECTS = {
     // for the other direction — if the anchor below ever drifts and the replace
     // becomes a no-op, the case is killed and reported `unproven` rather than
     // mutating the whole codebase while the harness waits.
-    title: 'exclude the client import services from the declared mutation scope',
+    //
+    // The plant lands in the SHARED leg, the cheapest one and the first to hold a
+    // floor, because the pre-flight compares the declared globs against every
+    // file a recorded floor names: a plant in a leg with no floor yet would leave
+    // nothing to compare against, the gate would fall through to Stryker, and the
+    // case would be reported `unproven` for a reason that says nothing about the
+    // gate. The schemas are a core module, so this is also the costliest file set
+    // to lose quietly.
+    title: 'exclude the shared schemas, a core module, from the declared mutation scope',
     mutate: {
       'scripts/ci/lib/mutation-scope.mjs': (text) =>
         text.replace(
-          '      PRESENTATIONAL_EXCLUDE,\n',
-          "      PRESENTATIONAL_EXCLUDE,\n      '!packages/client/src/services/import/**',\n",
+          "      '!packages/shared/src/types/**',\n",
+          "      '!packages/shared/src/types/**',\n      '!packages/shared/src/schemas/**',\n",
         ),
     },
     timeoutMs: 120_000,
     // The pre-flight's own message. A green run says nothing of the kind, and
     // the file list it prints names the excluded directory.
     evidence: (text) => /scope narrowed/.test(text),
+  },
+
+  'test:mutation:diff': {
+    // The defect this gate exists for, planted exactly where it lives: new
+    // production lines that the suite EXECUTES around but never ASSERTS. The
+    // function is appended to a module the shared suite imports, so the dry run
+    // has related tests to run and Stryker starts normally — and none of them
+    // calls it, so every mutant on the changed lines survives. A brand-new file
+    // nothing imports would not do: Stryker refuses a dry run that executes no
+    // test, which is "could not run", and a case must prove the gate FAILS, not
+    // that it crashes.
+    //
+    // The workspace is a fresh repository whose HEAD is `main`, so the change is
+    // exactly the plant (the trunk rule compares against HEAD's parent, and a
+    // root commit has none, so the working tree is compared with HEAD). The
+    // shared leg is the cheap one — the run is seconds — and `timeoutMs` is the
+    // backstop should the anchor ever drift and the plant land nowhere.
+    title: 'append production lines the suite runs beside but never asserts',
+    mutate: {
+      'packages/shared/src/utils/index.ts': (text) =>
+        `${text}\nexport function selftestUnassertedClamp(value: number): number {\n` +
+        '  if (value > 10) return 10;\n' +
+        '  return value < 0 ? 0 : value;\n' +
+        '}\n',
+    },
+    timeoutMs: 600_000,
+    // The verdict's own sentence, which a passing run never prints, AND the
+    // planted file among the survivors it lists — so the failure is attributable
+    // to these lines rather than to anything else in the workspace.
+    evidence: (text) =>
+      /is below the floor of \d+%/.test(text) &&
+      /packages\/shared\/src\/utils\/index\.ts:\d+/.test(text),
   },
 
   'audit:deps': {

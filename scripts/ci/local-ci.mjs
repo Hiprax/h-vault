@@ -719,9 +719,9 @@ const GATES = [
     tier: 1,
     // The same shape as `security`, `observability`, `property` and `snapshot`:
     // a named subset of a suite that already runs, re-run under its own name so
-    // that "this application is operable by keyboard and free of serious
-    // machine-detectable accessibility defects" is a claim with a report behind
-    // it. Both specs also run inside `e2e` on every push — `playwright.config.ts`
+    // that "this application is operable by keyboard and free of moderate,
+    // serious and critical machine-detectable accessibility defects" is a claim
+    // with a report behind it. Both specs also run inside `e2e` on every push — `playwright.config.ts`
     // narrows nothing — so the task carries `countsTests: false` and the tier
     // buys separate evidence rather than separate coverage.
     //
@@ -738,6 +738,36 @@ const GATES = [
     // that harness starts.
     requires: ['build:shared', 'docker'],
     run: (options) => runExe(process.execPath, ['scripts/ci/a11y-gate.mjs'], options),
+  },
+  {
+    id: 'sandbox',
+    task: 'test:sandbox',
+    tier: 1,
+    // The one browser run against the BUILT artifact. `e2e` and `a11y` drive the
+    // dev server, which serves `/sandbox.html` with no policy at all, and `smoke`
+    // asserts the policy over HTTP without an engine to enforce it — so this is
+    // the only push-tier place a policy that is right on the wire and breaks a
+    // renderer (a refused `blob:` source, a refused `data:` image, a module
+    // refused across the opaque origin) can be seen. It boots what `smoke` boots,
+    // plus the storage engine the previews need.
+    //
+    // It runs AFTER `e2e` and `a11y`, because all three drive Playwright and the
+    // browser run below cannot share a machine with another one without making
+    // a PBKDF2 step a coin toss; it runs on its own mongod and its own port, so
+    // nothing either earlier gate left listening is adopted.
+    title: 'The isolated render document in a real browser, under the built artifact’s own headers',
+    ci: 'new — no job ever rendered a preview under the policy production sends',
+    dependsOn: ['build'],
+    // `build:server` and `build:client` for the reason `smoke` carries them (the
+    // artifact IS the subject), `build:shared` because that artifact and the
+    // index bootstrap both resolve `@hvault/shared` to its build at run time, and
+    // `docker` for the reason `e2e` carries it:
+    // without the storage engine the document store is off and every preview
+    // fails for a reason that says nothing about the policy. Any one missing is
+    // COULD NOT RUN, never red.
+    requires: ['build:shared', 'build:server', 'build:client', 'docker'],
+    run: (options) =>
+      runExe(process.execPath, ['--import', 'tsx', 'scripts/ci/sandbox-gate.mjs'], options),
   },
   {
     id: 'docker',
@@ -826,6 +856,28 @@ const GATES = [
     dependsOn: ['build'],
     requires: ['build:shared'],
     run: (options) => runExe(process.execPath, ['scripts/ci/mutation-gate.mjs'], options),
+  },
+  {
+    id: 'mutation-diff',
+    task: 'test:mutation:diff',
+    // TIER 1: the cheap half of the oracle above, split off so that it runs on
+    // every push while the campaign keeps its own floor at tier 2. Coverage
+    // proves the lines this change touched RAN; this proves they are ASSERTED.
+    // It mutates only the mutants the change owns, from scratch, within each
+    // leg's committed sample budget — see the gate's own docblock for why a
+    // budget and not a deadline bounds it.
+    //
+    // Its cost is dominated by each touched leg's DRY RUN over the tests related
+    // to the changed files, not by the mutants: measured, a change to one widely
+    // imported server file costs about six minutes before its first mutant, and
+    // a shared-only change well under a minute. A change touching no production
+    // line starts no Stryker at all.
+    tier: 1,
+    title: 'Mutation testing of the lines this change touched (Stryker, per leg, from scratch)',
+    ci: 'new — nothing asked whether the lines a change adds are asserted until the campaign ran',
+    dependsOn: ['build'],
+    requires: ['build:shared'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/mutation-diff-gate.mjs'], options),
   },
   {
     id: 'sast',

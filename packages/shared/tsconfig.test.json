@@ -50,7 +50,8 @@
     //     drive `npm run build` as well as `type-check`, and an incremental NON-BUILD
     //     `tsc` does not check whether its outputs still exist (typescript 6.0.3
     //     guards that loop with `if (!isIncremental)`, and only in build mode at
-    //     that) — so `dist/` deleted while the build info survived makes the build
+    //     that; re-measured unchanged on the native 7.0.2 compiler the build now
+    //     runs) — so `dist/` deleted while the build info survived makes the build
     //     exit 0 having emitted NOTHING, and it silences `tsc -b`'s own
     //     output-existence check for the client. Measured, both ways. The three
     //     checking passes therefore take their build info from a

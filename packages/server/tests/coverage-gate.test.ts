@@ -19,11 +19,13 @@
  *   2. WHEN an uncovered changed line is excused. Only a dated, in-date
  *      `COV-DIFF-EXEMPT` ledger entry does it, bounded by `maxHits`.
  */
-import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { describe, it, expect, afterEach } from 'vitest';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildChangedDiff } from '../../../scripts/ci/lib/changed-diff.mjs';
 import {
   COVERAGE_SCOPE_GLOBS,
   globToRegExp,
@@ -240,5 +242,292 @@ describe('the coverage gate is registered like every other gate', () => {
       'packages/server/coverage/cobertura-coverage.xml',
       'packages/shared/coverage/cobertura-coverage.xml',
     ]);
+  });
+});
+
+/**
+ * The changed-line diff the gate measures, and the one property that makes its
+ * verdict mean anything: every line number in it belongs to the SAME file the
+ * coverage report describes — the working tree.
+ *
+ * diff-cover, driving git itself, unions three diffs — `<base>...HEAD`,
+ * `git diff` and `git diff --cached` — whose `+` line numbers belong to three
+ * DIFFERENT files: HEAD, the working tree and the index. These cases run against
+ * a real throwaway repository rather than a stubbed `git`, because what is being
+ * pinned is git's own numbering; a stub would only prove that the assertions
+ * agree with the fixture.
+ */
+describe('the changed-line diff the coverage gate measures', () => {
+  const scratch: string[] = [];
+
+  afterEach(() => {
+    while (scratch.length > 0) rmSync(scratch.pop()!, { recursive: true, force: true });
+  });
+
+  /** A GitResult-shaped runner bound to one directory, as the gate injects. */
+  function gitIn(dir: string) {
+    return (args: string[]) => {
+      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', maxBuffer: 64 << 20 });
+      return {
+        status: result.error ? 127 : (result.status ?? 1),
+        stdout: result.stdout ?? '',
+        stderr: result.stderr ?? (result.error ? result.error.message : ''),
+      };
+    };
+  }
+
+  /** Setup-only git: a non-zero status here is a broken fixture, not a result. */
+  function mustGit(dir: string, args: string[]): string {
+    const result = gitIn(dir)(args);
+    if (result.status !== 0) {
+      throw new Error(`fixture: git ${args.join(' ')} failed — ${result.stderr || result.stdout}`);
+    }
+    return result.stdout.trim();
+  }
+
+  /**
+   * A commit that does not depend on the machine's git identity or signing
+   * config — a developer with `commit.gpgsign` on would otherwise fail every
+   * fixture here with an error about a missing key.
+   */
+  function commitAll(dir: string, message: string): void {
+    mustGit(dir, [
+      '-c',
+      'user.email=fixture@localhost',
+      '-c',
+      'user.name=fixture',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '-qam',
+      message,
+    ]);
+  }
+
+  /**
+   * A repository whose committed and uncommitted changes DISAGREE about where
+   * every line is — the smallest fixture that exhibits both failure directions.
+   *
+   * `src/a.ts` starts with six lines. One commit appends a seventh. The working
+   * tree then deletes the first, so the appended line is line SIX in the file the
+   * suites would have executed. Measured with git:
+   *
+   *   `<base>...HEAD`   →  `@@ -6,0 +7 @@`   adds line 7   (HEAD numbering)
+   *   `git diff`        →  `@@ -1 +0,0 @@`   adds nothing   (working-tree numbering)
+   *   `git diff <base>` →  `@@ -6,0 +6 @@`   adds line 6    (working-tree numbering)
+   *
+   * So the union reports line SEVEN of a SIX-line file — a line that does not
+   * exist, whose coverage lookup lands on whatever the report happens to say — and
+   * never mentions line six, the only line that actually changed.
+   */
+  function repoWithDriftedCoordinates(): { dir: string; base: string } {
+    const dir = mkdtempSync(path.join(tmpdir(), 'hvault-changed-diff-'));
+    scratch.push(dir);
+    mustGit(dir, ['init', '-q', '-b', 'main']);
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'base1\nbase2\nbase3\nbase4\nbase5\nbase6\n');
+    mustGit(dir, ['add', '-A']);
+    commitAll(dir, 'base');
+    const base = mustGit(dir, ['rev-parse', 'HEAD']);
+    writeFileSync(
+      path.join(dir, 'src', 'a.ts'),
+      'base1\nbase2\nbase3\nbase4\nbase5\nbase6\ncommit-added\n',
+    );
+    commitAll(dir, 'append a line');
+    // Uncommitted, and above the appended line, so every later line moves.
+    writeFileSync(
+      path.join(dir, 'src', 'a.ts'),
+      'base2\nbase3\nbase4\nbase5\nbase6\ncommit-added\n',
+    );
+    return { dir, base };
+  }
+
+  /** The `+` line numbers a unified diff claims for one path. */
+  function addedLines(diff: string, file: string): number[] {
+    const sections = diff.split(/^diff --git /m);
+    const section = sections.find((part) => part.includes(`+++ b/${file}\n`));
+    if (section === undefined) return [];
+    const lines: number[] = [];
+    for (const match of section.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
+      const start = Number(match[1]);
+      const count = match[2] === undefined ? 1 : Number(match[2]);
+      for (let i = 0; i < count; i++) lines.push(start + i);
+    }
+    return lines;
+  }
+
+  it('numbers every changed line in the working tree, never in HEAD', () => {
+    const { dir, base } = repoWithDriftedCoordinates();
+
+    const diff = buildChangedDiff({ mergeBase: base, untracked: [], git: gitIn(dir) });
+
+    // Six, because that is where the changed line IS in the file the suites run.
+    expect(addedLines(diff, 'src/a.ts')).toEqual([6]);
+    // Seven is what unioning the three diffs reports, and the file has six lines.
+    // Spelled out as its own assertion because it is the regression: a `toEqual`
+    // that happened to be rewritten around a wider set would stop saying this.
+    expect(addedLines(diff, 'src/a.ts')).not.toContain(7);
+  });
+
+  it('folds an untracked file in as a whole new file, since --diff-file hides it from diff-cover', () => {
+    const { dir, base } = repoWithDriftedCoordinates();
+    writeFileSync(path.join(dir, 'src', 'new.ts'), 'one\ntwo\nthree\n');
+
+    const diff = buildChangedDiff({
+      mergeBase: base,
+      untracked: ['src/new.ts'],
+      git: gitIn(dir),
+    });
+
+    expect(addedLines(diff, 'src/new.ts')).toEqual([1, 2, 3]);
+    // The tracked half is still there: the untracked pass appends, never replaces.
+    expect(addedLines(diff, 'src/a.ts')).toEqual([6]);
+  });
+
+  it('folds a STAGED change in, which is how the selftest plants its defect', () => {
+    const { dir, base } = repoWithDriftedCoordinates();
+    writeFileSync(path.join(dir, 'src', 'staged.ts'), 'first\nsecond\n');
+    mustGit(dir, ['add', 'src/staged.ts']);
+
+    const diff = buildChangedDiff({ mergeBase: base, untracked: [], git: gitIn(dir) });
+
+    // `git diff <commit>` reaches the working tree THROUGH the index, so a
+    // staged addition needs no separate pass — which is what lets the untracked
+    // pass above stay a pass over genuinely untracked files. `selftest.mjs`
+    // stages every planted file before running a gate, so a build that measured
+    // only committed and unstaged changes would report nothing about it.
+    expect(addedLines(diff, 'src/staged.ts')).toEqual([1, 2]);
+    expect(addedLines(diff, 'src/a.ts')).toEqual([6]);
+  });
+
+  it('numbers a renamed-and-edited file under its NEW path', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'hvault-changed-diff-'));
+    scratch.push(dir);
+    mustGit(dir, ['init', '-q', '-b', 'main']);
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(path.join(dir, 'src', 'old.ts'), 'one\ntwo\nthree\n');
+    mustGit(dir, ['add', '-A']);
+    commitAll(dir, 'base');
+    const base = mustGit(dir, ['rev-parse', 'HEAD']);
+    mustGit(dir, ['mv', 'src/old.ts', 'src/new.ts']);
+    writeFileSync(path.join(dir, 'src', 'new.ts'), 'one\ntwo\nthree\nfour\n');
+
+    const diff = buildChangedDiff({ mergeBase: base, untracked: [], git: gitIn(dir) });
+
+    // Rename detection turns this into one section headed `a/src/old.ts
+    // b/src/new.ts`, and diff-cover reads the path from the `+++` line alone.
+    // Reported under the OLD path, the added line would be attributed to a file
+    // no coverage report can have an entry for, and an unmatched path is
+    // silently full coverage over nothing.
+    expect(diff).toContain('+++ b/src/new.ts');
+    expect(addedLines(diff, 'src/new.ts')).toEqual([4]);
+    expect(addedLines(diff, 'src/old.ts')).toEqual([]);
+  });
+
+  it('drops an untracked file git cannot diff as text, rather than emitting a headerless section', () => {
+    const { dir, base } = repoWithDriftedCoordinates();
+    writeFileSync(path.join(dir, 'src', 'blob.bin'), Buffer.from([0, 1, 2, 0, 255, 0]));
+    writeFileSync(path.join(dir, 'src', 'empty.ts'), '');
+
+    const diff = buildChangedDiff({
+      mergeBase: base,
+      untracked: ['src/blob.bin', 'src/empty.ts'],
+      git: gitIn(dir),
+    });
+
+    // `git diff --no-index` exits 1 for both — the "inputs differ" status, not a
+    // failure — and emits no `+++` line for either, so neither may reach the
+    // document diff-cover parses.
+    expect(diff).not.toContain('blob.bin');
+    expect(diff).not.toContain('empty.ts');
+    expect(addedLines(diff, 'src/a.ts')).toEqual([6]);
+  });
+
+  it('keeps the a/ and b/ prefixes whatever the machine’s git config says', () => {
+    const { dir, base } = repoWithDriftedCoordinates();
+    // diff-cover anchors on `diff --git a/… b/…` and strips exactly those two
+    // prefixes. A path arriving under any other spelling matches no coverage
+    // record — and an unmatched path is not an error there, it is silently full
+    // coverage over nothing. Every setting that can move it is set here at once,
+    // because pinning four of five would look identical in this test.
+    mustGit(dir, ['config', 'diff.noprefix', 'true']);
+    mustGit(dir, ['config', 'diff.mnemonicprefix', 'true']);
+    mustGit(dir, ['config', 'diff.srcPrefix', 'SRC/']);
+    mustGit(dir, ['config', 'diff.dstPrefix', 'DST/']);
+
+    const diff = buildChangedDiff({ mergeBase: base, untracked: [], git: gitIn(dir) });
+
+    expect(diff).toContain('diff --git a/src/a.ts b/src/a.ts');
+    expect(diff).toContain('+++ b/src/a.ts');
+    expect(diff).not.toContain('DST/');
+    expect(addedLines(diff, 'src/a.ts')).toEqual([6]);
+  });
+
+  it('strips the no-newline marker, which diff-cover would count as a context line', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'hvault-changed-diff-'));
+    scratch.push(dir);
+    mustGit(dir, ['init', '-q', '-b', 'main']);
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    // No trailing newline, on purpose: that is what makes git emit the marker.
+    writeFileSync(path.join(dir, 'src', 'tail.ts'), 'alpha\nbeta');
+    mustGit(dir, ['add', '-A']);
+    commitAll(dir, 'base');
+    const base = mustGit(dir, ['rev-parse', 'HEAD']);
+    writeFileSync(path.join(dir, 'src', 'tail.ts'), 'alpha\ngamma');
+
+    const diff = buildChangedDiff({ mergeBase: base, untracked: [], git: gitIn(dir) });
+
+    // `diff_reporter.py`'s `_parse_lines` counts every line that does not begin
+    // with `+`, `-` or `@@` as CONTEXT and advances the line counter for it. With
+    // `-U0` the marker lands BETWEEN the `-` and the `+` of this one-line change,
+    // so leaving it in makes diff-cover call the changed line 3 in a two-line
+    // file. The hunk header alone cannot show that, which is why the marker's
+    // absence is asserted directly.
+    expect(diff).not.toContain('\\ No newline');
+    expect(addedLines(diff, 'src/tail.ts')).toEqual([2]);
+  });
+
+  it('throws rather than returning a partial diff when the base does not resolve', () => {
+    const { dir } = repoWithDriftedCoordinates();
+
+    expect(() =>
+      buildChangedDiff({ mergeBase: 'no-such-ref', untracked: [], git: gitIn(dir) }),
+    ).toThrow(/no-such-ref/);
+  });
+
+  it('skips an untracked path that vanished after it was enumerated, rather than failing', () => {
+    const { dir, base } = repoWithDriftedCoordinates();
+
+    // MEASURED: `--no-index` against a path that is not there exits 1 — the same
+    // status as "the inputs differ" — and writes nothing to stdout. So it is
+    // dropped by the no-hunk rule, which is the right answer for a file deleted
+    // between `git ls-files --others` and this call, and cannot hide an untested
+    // module: the gate's other half enumerates the changed production files
+    // itself and reports any that no coverage report mentions.
+    const diff = buildChangedDiff({
+      mergeBase: base,
+      untracked: ['src/absent.ts'],
+      git: gitIn(dir),
+    });
+
+    expect(diff).not.toContain('absent.ts');
+    expect(addedLines(diff, 'src/a.ts')).toEqual([6]);
+  });
+
+  it('throws when git itself fails on an untracked path, instead of measuring a short diff', () => {
+    const { dir, base } = repoWithDriftedCoordinates();
+    const real = gitIn(dir);
+    // The process boundary, and only that: every call is the real git except the
+    // `--no-index` one, which reports the status an unusable git produces. A
+    // short diff here would read as "that file changed nothing", which is the
+    // silent-pass shape this whole gate exists to remove.
+    const brokenOnNoIndex = (args: string[]) =>
+      args.includes('--no-index')
+        ? { status: 128, stdout: '', stderr: 'fatal: not a git repository' }
+        : real(args);
+
+    expect(() =>
+      buildChangedDiff({ mergeBase: base, untracked: ['src/new.ts'], git: brokenOnNoIndex }),
+    ).toThrow(/src\/new\.ts/);
   });
 });

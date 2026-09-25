@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../lib/lazyZxcvbn';
@@ -21,17 +21,117 @@ import {
 import { cn, getApiErrorMessage } from '../lib/utils';
 import { downloadText } from '../lib/download';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/Dialog';
 import { useToast } from '../components/ui/Toast';
 import { getProfileApi } from '../services/api/userApi';
 import { api } from '../services/api/client';
 import { getBackupHistoryApi } from '../services/api/backupApi';
 import { Pagination } from '../components/ui/Pagination';
 import { cryptoService } from '../services/crypto/cryptoService';
+import { decryptVaultField, isBoundField } from '../services/crypto/vaultField';
 import { useAuthStore } from '../stores/authStore';
+import { noteStaleVaultKey } from '../stores/uiStore';
+import { resolveBackupSignature, type BackupSignatureVerdict } from '../lib/backupSignature';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
-import type { IBackupLogEntry } from '@hvault/shared';
+import type { IBackupLogEntry, ItemType } from '@hvault/shared';
+
+/**
+ * Whether a backup row's retained previous passwords include a format-v2 entry.
+ *
+ * A bound field is sealed to the id of the row it was backed up from, and the
+ * server decides the restored row's id (a row this account does not own, or a
+ * `keep_both` copy, gets a fresh one). So a row with ANY bound field, this or its
+ * name or its data, is re-sealed before it is sent, even when the backup's key IS
+ * this account's key. The entries are unvalidated file content, hence the checks.
+ */
+function historyCarriesBoundEntry(history: unknown): boolean {
+  if (!Array.isArray(history)) return false;
+  return (history as unknown[]).some((entry) => {
+    const iv = typeof entry === 'object' && entry !== null ? (entry as { iv?: unknown }).iv : null;
+    return typeof iv === 'string' && isBoundField(iv);
+  });
+}
 
 const MIN_BACKUP_PASSWORD_SCORE = 3;
+
+/**
+ * The four fields that make a backup-wrapping-key wrapper usable.
+ *
+ * The same shape arrives from two places — the account's `settings.backup` and
+ * the `backupEncryption` block inside a backup file — and restore now unwraps
+ * both, so the completeness test lives here once rather than twice at the call
+ * site, where the two copies drifted apart.
+ */
+interface BwkWrapper {
+  encryptedBWK: string;
+  bwkIv: string;
+  bwkTag: string;
+  bwkSalt: string;
+}
+
+function completeBwkWrapper(block: Partial<BwkWrapper> | undefined): BwkWrapper | null {
+  if (!block?.encryptedBWK || !block.bwkIv || !block.bwkTag || !block.bwkSalt) return null;
+  return {
+    encryptedBWK: block.encryptedBWK,
+    bwkIv: block.bwkIv,
+    bwkTag: block.bwkTag,
+    bwkSalt: block.bwkSalt,
+  };
+}
+
+/** Whether two wrappers name the same key, so it is derived once and not twice. */
+function sameBwkWrapper(a: BwkWrapper, b: BwkWrapper): boolean {
+  return (
+    a.encryptedBWK === b.encryptedBWK &&
+    a.bwkIv === b.bwkIv &&
+    a.bwkTag === b.bwkTag &&
+    a.bwkSalt === b.bwkSalt
+  );
+}
+
+/**
+ * Unwrap one backup wrapping key, or `null` when this password does not open
+ * THIS wrapper.
+ *
+ * `null` rather than a throw, because restore now tries up to two wrappers and a
+ * password that opens neither is the only thing that means "incorrect backup
+ * password". A failure to DERIVE, by contrast, still propagates: that is Web
+ * Crypto refusing, or a hostile file's unparseable salt, and reporting either as
+ * a wrong password would be a lie.
+ *
+ * The salt and the derived BEK are zeroed here on every exit; the unwrapped key
+ * belongs to the caller, which zeroes it in its own `finally`.
+ */
+async function unwrapBwk(wrapper: BwkWrapper, password: string): Promise<ArrayBuffer | null> {
+  const salt = cryptoService.base64ToArrayBuffer(wrapper.bwkSalt);
+  let bek: CryptoKey | undefined;
+  try {
+    bek = await cryptoService.deriveBEK(password, salt);
+    try {
+      return await cryptoService.decryptBWK(
+        wrapper.encryptedBWK,
+        wrapper.bwkIv,
+        wrapper.bwkTag,
+        bek,
+      );
+    } catch {
+      return null;
+    }
+  } finally {
+    cryptoService.clearKey(salt);
+    if (bek) await cryptoService.clearCryptoKey(bek);
+  }
+}
+
+/** Why a restore needs an answer before it runs. */
+type UnverifiedRestoreReason = Extract<BackupSignatureVerdict, { kind: 'unconfirmed' }>['reason'];
 
 const strengthLabels: Record<number, string> = {
   0: 'Very weak',
@@ -115,6 +215,67 @@ export default function BackupSettingsPage() {
   const [restoreConflictStrategy, setRestoreConflictStrategy] = useState<
     'skip' | 'overwrite' | 'keep_both'
   >('skip');
+
+  // Restoring a file this client could not authenticate is gated on an explicit
+  // answer, driven by a promise the restore flow awaits — the same shape the
+  // import-overwrite confirmation uses on the Settings page, and for the same
+  // reason: by the time the prompt appears the decision is already computed, and
+  // the answer decides only whether it is carried out.
+  const [unverifiedRestore, setUnverifiedRestore] = useState<UnverifiedRestoreReason | null>(null);
+  const unverifiedRestoreResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  /**
+   * Whether this page is still on screen.
+   *
+   * Load-bearing, and a resolver ref alone is NOT enough. The cleanup below can
+   * only settle a resolver that has already been registered, and the restore
+   * flow registers one late — after a profile read and up to two 600k-iteration
+   * derivations, which is seconds. An auto-lock landing inside that window
+   * unmounts the page while the ref is still null, and the flow then registers a
+   * resolver nothing can ever reach: the promise never settles, `handleRestore`
+   * never reaches its `finally`, and both unwrapped backup wrapping keys stay in
+   * memory for the life of the tab with no outcome reported to anyone. Checking
+   * the flag at registration time is what closes that window.
+   */
+  const mountedRef = useRef(true);
+
+  const requestUnverifiedRestoreConfirmation = useCallback(
+    (reason: UnverifiedRestoreReason): Promise<boolean> => {
+      if (!mountedRef.current) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
+        unverifiedRestoreResolverRef.current = resolve;
+        setUnverifiedRestore(reason);
+      });
+    },
+    [],
+  );
+
+  const answerUnverifiedRestore = useCallback((confirmed: boolean) => {
+    setUnverifiedRestore(null);
+    const resolve = unverifiedRestoreResolverRef.current;
+    unverifiedRestoreResolverRef.current = null;
+    resolve?.(confirmed);
+  }, []);
+
+  // Settle a pending answer if this page goes away while the prompt is open — an
+  // auto-lock unmounts it through ProtectedRoute. Left unanswered, the awaiting
+  // restore would never reach its `finally`, holding the unwrapped backup
+  // wrapping key live for the rest of the tab's life and reporting no outcome at
+  // all. The state setter is skipped (there is nothing left to render); the toast
+  // still reaches the user because the toast provider outlives the route.
+  //
+  // The flag is lowered in the SAME cleanup, so a prompt asked for after this
+  // point is declined immediately rather than registering a resolver into the
+  // void. Two halves of one guarantee: this settles the answer already pending,
+  // the flag settles every answer asked for from now on.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const resolve = unverifiedRestoreResolverRef.current;
+      unverifiedRestoreResolverRef.current = null;
+      resolve?.(false);
+    };
+  }, []);
 
   useEffect(() => {
     const load = async () => {
@@ -217,8 +378,16 @@ export default function BackupSettingsPage() {
       // Encrypt BWK with BEK
       const encryptedBWK = await cryptoService.encryptBWK(bwk, bek);
 
-      // Encrypt vault key with BWK for cross-account restore support
-      const vaultKey = useAuthStore.getState().vaultKey;
+      // Encrypt vault key with BWK for cross-account restore support.
+      //
+      // ONE `getState()` for the key AND its generation: the number names the key
+      // the wrapper below is built from, and a pair taken from two snapshots
+      // could name a combination that never existed at the same instant. The
+      // generation is sent even when this session holds no key and writes no
+      // wrapper, because the body's `else` branch CLEARS the stored one, and a
+      // check decided from which fields a request happens to carry is one the
+      // sender can step around.
+      const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
       let bwkVaultKeyData: { encrypted: string; iv: string; tag: string } | undefined;
       if (vaultKey) {
         bwkVaultKeyData = await cryptoService.encryptVaultKeyWithBWK(vaultKey, bwk);
@@ -230,6 +399,7 @@ export default function BackupSettingsPage() {
         bwkIv: encryptedBWK.iv,
         bwkTag: encryptedBWK.tag,
         bwkSalt: cryptoService.arrayBufferToBase64(salt),
+        vaultKeyVersion,
         ...(bwkVaultKeyData
           ? {
               bwkEncryptedVaultKey: bwkVaultKeyData.encrypted,
@@ -243,8 +413,20 @@ export default function BackupSettingsPage() {
       setConfirmBackupPassword('');
       setSetupMasterPassword('');
       toast({ title: 'Backup encryption configured', type: 'success' });
-    } catch {
-      toast({ title: 'Failed to setup backup encryption', type: 'error' });
+    } catch (err) {
+      // The wrapper this request stores is the account's vault key sealed under
+      // the backup key, so the server refuses it on a superseded generation like
+      // any other write derived from that key. Raise the app-wide notice, exactly
+      // as the restore driver above does: nothing on this page refreshes
+      // `authStore.vaultKeyVersion`, so without it a retry would resend the same
+      // stale number for ever, and the server's own remedy sentence — reload —
+      // would never reach the user.
+      noteStaleVaultKey(err);
+      toast({
+        title: 'Failed to setup backup encryption',
+        description: getApiErrorMessage(err, 'An unexpected error occurred. Please try again.'),
+        type: 'error',
+      });
     } finally {
       setSettingUpEncryption(false);
       if (authKey) cryptoService.clearKey(authKey);
@@ -321,33 +503,20 @@ export default function BackupSettingsPage() {
       const profileResult = profileRes.data;
       if (!profileResult.success) throw new Error('Failed to load profile');
       const backup = profileResult.data.settings.backup;
-      if (
-        !backup.isConfigured ||
-        !backup.bwkSalt ||
-        !backup.encryptedBWK ||
-        !backup.bwkIv ||
-        !backup.bwkTag
-      ) {
+      // Through the SAME two helpers the restore path uses. They were extracted
+      // because this completeness test and this derive-and-unwrap sequence
+      // existed twice and the two copies drifted; leaving one copy behind would
+      // have made that justification false the day it was written.
+      const wrapper = backup.isConfigured ? completeBwkWrapper(backup) : null;
+      if (!wrapper) {
         toast({ title: 'Backup encryption is not configured', type: 'error' });
         return;
       }
 
-      // Derive BEK from backup password and decrypt BWK
-      const salt = cryptoService.base64ToArrayBuffer(backup.bwkSalt);
-      const bek = await cryptoService.deriveBEK(downloadBackupPassword, salt);
-      try {
-        decryptedBwk = await cryptoService.decryptBWK(
-          backup.encryptedBWK,
-          backup.bwkIv,
-          backup.bwkTag,
-          bek,
-        );
-      } catch {
+      decryptedBwk = (await unwrapBwk(wrapper, downloadBackupPassword)) ?? undefined;
+      if (!decryptedBwk) {
         toast({ title: 'Incorrect backup password', type: 'error' });
         return;
-      } finally {
-        cryptoService.clearKey(salt);
-        await cryptoService.clearCryptoKey(bek);
       }
 
       // Download backup JSON from server
@@ -427,45 +596,44 @@ export default function BackupSettingsPage() {
         [key: string]: unknown;
       };
 
-      // Determine backup encryption source: prefer backup file metadata, fall back to account profile
-      let encryptionSource: {
-        encryptedBWK: string;
-        bwkIv: string;
-        bwkTag: string;
-        bwkSalt: string;
-      } | null = null;
+      // The two places a backup wrapping key can come from, and BOTH are unwrapped
+      // wherever this password opens them, because the two jobs below want
+      // DIFFERENT ones and a single "winner" gets one of them wrong:
+      //
+      //  - the integrity signature must be checked against the ACCOUNT's key, the
+      //    only key material here that the file did not supply. Preferring the
+      //    file's block — which is what this used to do — let anyone handing you a
+      //    file plus "its" backup password supply the message AND the key that
+      //    authenticates it, so a verified signature proved only self-consistency;
+      //  - the file's own `bwkEncryptedVaultKey` is sealed under the FILE's key by
+      //    construction, so nothing else can ever open it, and plumbing the
+      //    account's key there would drop every row of a cross-account restore.
+      //
+      // For a same-account restore with an unchanged backup password the two
+      // blocks are byte-identical — the server copies the account's block into
+      // every download — so the second derivation is skipped and this path costs
+      // the one 600k-iteration PBKDF2 it has always cost.
+      const fileWrapper = completeBwkWrapper(backupData.backupEncryption);
 
-      const fileEnc = backupData.backupEncryption;
-      if (fileEnc?.encryptedBWK && fileEnc.bwkIv && fileEnc.bwkTag && fileEnc.bwkSalt) {
-        encryptionSource = {
-          encryptedBWK: fileEnc.encryptedBWK,
-          bwkIv: fileEnc.bwkIv,
-          bwkTag: fileEnc.bwkTag,
-          bwkSalt: fileEnc.bwkSalt,
-        };
-      } else {
-        // Fall back to current account's backup configuration
+      let accountWrapper: BwkWrapper | null = null;
+      try {
         const profileRes = await getProfileApi();
         const profileResult = profileRes.data;
         if (!profileResult.success) throw new Error('Failed to load profile');
         const backup = profileResult.data.settings.backup;
-        if (
-          backup.isConfigured &&
-          backup.bwkSalt &&
-          backup.encryptedBWK &&
-          backup.bwkIv &&
-          backup.bwkTag
-        ) {
-          encryptionSource = {
-            encryptedBWK: backup.encryptedBWK,
-            bwkIv: backup.bwkIv,
-            bwkTag: backup.bwkTag,
-            bwkSalt: backup.bwkSalt,
-          };
-        }
+        accountWrapper = backup.isConfigured ? completeBwkWrapper(backup) : null;
+      } catch (err) {
+        // The account's block is the TRUST ANCHOR, not the only key source, and
+        // this read is unconditional now where it used to be a fallback. A profile
+        // that will not load must therefore not take a self-describing file's
+        // restore down with it: it costs the restore its anchor, which the verdict
+        // below already answers by asking the user, and nothing more. When the
+        // file carries no block of its own the profile IS the only key source and
+        // the failure stays fatal, exactly as before.
+        if (!fileWrapper) throw err;
       }
 
-      if (!encryptionSource) {
+      if (!accountWrapper && !fileWrapper) {
         toast({
           title: 'Backup encryption is not configured and backup file has no encryption metadata',
           type: 'error',
@@ -473,58 +641,104 @@ export default function BackupSettingsPage() {
         return;
       }
 
-      // Verify the backup password client-side by deriving BEK and decrypting BWK.
-      // The raw password never leaves the client (zero-knowledge).
-      const salt = cryptoService.base64ToArrayBuffer(encryptionSource.bwkSalt);
-      let bek: CryptoKey | undefined;
-      let decryptedBwk: ArrayBuffer | undefined;
+      // Unwrapped backup wrapping keys, declared out here so `finally` zeroes them
+      // on every exit. The raw password never leaves the client (zero-knowledge).
+      let accountBwk: ArrayBuffer | null = null;
+      let fileBwk: ArrayBuffer | null = null;
       // The vault key the backup's rows are encrypted under. Recovered from the
       // backup (via MEK for same-account, or the BWK-wrapped copy for
       // cross-account) and used ONLY to decrypt-then-re-encrypt the rows to this
       // account's current key. Declared out here so `finally` can zero it.
       let backupVaultKey: CryptoKey | undefined;
       try {
-        bek = await cryptoService.deriveBEK(restorePassword, salt);
+        accountBwk = accountWrapper ? await unwrapBwk(accountWrapper, restorePassword) : null;
+        fileBwk = !fileWrapper
+          ? null
+          : accountWrapper && sameBwkWrapper(fileWrapper, accountWrapper)
+            ? // Identical blocks are the same key. Deriving it a second time would
+              // double the cost of the common case to learn nothing.
+              accountBwk
+            : await unwrapBwk(fileWrapper, restorePassword);
 
-        // Decrypt BWK to verify the password is correct
-        try {
-          decryptedBwk = await cryptoService.decryptBWK(
-            encryptionSource.encryptedBWK,
-            encryptionSource.bwkIv,
-            encryptionSource.bwkTag,
-            bek,
-          );
-        } catch {
+        // The key the REST of this handler uses, and it is the FILE's on purpose:
+        // the only thing left to unwrap with it is the file's own wrapped vault
+        // key. It falls back to the account's for a file that carried no block,
+        // where the two are the same key anyway.
+        const decryptedBwk = fileBwk ?? accountBwk;
+        if (!decryptedBwk) {
           toast({ title: 'Incorrect backup password', type: 'error' });
           return;
         }
 
-        // Verify backup integrity (HMAC) if the file includes an integrity signature.
-        // Old backups without integrity are allowed with a warning.
-        const integrityHmac =
-          typeof backupData.integrity === 'string' ? backupData.integrity : null;
-        if (integrityHmac) {
-          // Strip integrity field and re-serialize to get the original signed payload
+        // Strip the integrity field and re-serialize to recover the payload that
+        // was signed. Built ONLY when there is a signature to check it against:
+        // a restore may carry up to MAX_RESTORE_DATA_LENGTH (~25 MiB), and an
+        // unsigned file would otherwise allocate that whole string for nothing.
+        // `resolveBackupSignature` returns on a null signature before it reads
+        // this argument, so the empty string is never looked at.
+        const signature = typeof backupData.integrity === 'string' ? backupData.integrity : null;
+        let signedPayload = '';
+        if (signature !== null) {
           const dataForHmac = { ...backupData };
           delete dataForHmac.integrity;
-          const canonicalJson = JSON.stringify(dataForHmac);
-          const valid = await cryptoService.verifyBackupHmac(
-            canonicalJson,
-            integrityHmac,
-            decryptedBwk,
-          );
-          if (!valid) {
+          signedPayload = JSON.stringify(dataForHmac);
+        }
+        const verdict = await resolveBackupSignature(
+          signature,
+          signedPayload,
+          [
+            // ACCOUNT FIRST: the order is the control, not a preference. The
+            // file's key is offered only when it is a different key, so a
+            // signature that the account's key already verified is never
+            // re-checked against material the file supplied.
+            ...(accountBwk ? [{ source: 'account' as const, bwk: accountBwk }] : []),
+            ...(fileBwk && fileBwk !== accountBwk
+              ? [{ source: 'file' as const, bwk: fileBwk }]
+              : []),
+          ],
+          (data, hmac, bwk) => cryptoService.verifyBackupHmac(data, hmac, bwk),
+        );
+
+        if (verdict.kind === 'refused') {
+          // Deliberately NOT an accusation of tampering. A signature no available
+          // key agrees with is equally a file signed under a backup password other
+          // than the one entered, and nothing here can tell those two apart.
+          toast({
+            title: 'This backup’s integrity signature does not match its contents.',
+            description:
+              'It may have been modified after it was downloaded, or it may be signed under a different backup password than the one you entered. Nothing was restored.',
+            type: 'error',
+          });
+          return;
+        }
+
+        if (verdict.kind === 'unconfirmed') {
+          // LEGACY ALLOWANCE, dated 2026-09-22. Restoring a file this client could
+          // not authenticate happens only behind this answer, and it is allowed at
+          // all only because two legitimate cases land here: a backup downloaded
+          // before the signature existed, and a backup from another account (or
+          // from before the backup password was changed), whose signature can only
+          // ever be checked against key material the file itself carries. When
+          // every supported backup carries a signature verifiable against the
+          // restoring account, delete this branch and let `refused` cover it.
+          const vaultKeyAtPrompt = useAuthStore.getState().vaultKey;
+          const confirmed = await requestUnverifiedRestoreConfirmation(verdict.reason);
+          if (!confirmed) {
+            toast({ title: 'Restore cancelled. Nothing was changed.', type: 'info' });
+            return;
+          }
+          // The answer has no time limit, so re-check the key before acting on one
+          // that may be minutes old. A lock unmounts this page (which answers the
+          // prompt for the user), but a rotation in another tab does not, and every
+          // row below is re-encrypted to the key captured after this point.
+          if (useAuthStore.getState().vaultKey !== vaultKeyAtPrompt) {
             toast({
-              title: 'Backup integrity check failed. The file may have been tampered with.',
+              title: 'Your vault key changed while the restore was waiting to be confirmed.',
+              description: 'Nothing was restored. Reload the page and start the restore again.',
               type: 'error',
             });
             return;
           }
-        } else {
-          toast({
-            title: 'This backup has no integrity signature. It may be an older backup.',
-            type: 'warning',
-          });
         }
 
         // Recover the vault key the backup's rows are encrypted under, then
@@ -534,8 +748,14 @@ export default function BackupSettingsPage() {
         // not present in the backup) permanently undecryptable. Re-encryption
         // touches only the backup rows, so existing data is never endangered and
         // no privileged key-replacement / master-password re-auth is required.
-        const mek = useAuthStore.getState().mek;
-        const currentVaultKey = useAuthStore.getState().vaultKey;
+        // ONE read for all three: the generation names the key the rows below
+        // are re-encrypted to, and a pair taken from two snapshots could name a
+        // combination that never existed at the same instant.
+        const {
+          mek,
+          vaultKey: currentVaultKey,
+          vaultKeyVersion: currentVaultKeyVersion,
+        } = useAuthStore.getState();
         // Whether the backup rows must be re-encrypted: true when the backup's
         // key differs from the current key (cross-account, or a same-account
         // backup taken before a vault-key rotation). When the keys match the
@@ -631,10 +851,30 @@ export default function BackupSettingsPage() {
               filteredCount++;
               continue;
             }
+            // The row's OWN recorded id and type: a bound field was sealed to the
+            // row it was backed up from, whichever account that was.
+            const rowId = typeof item._id === 'string' ? item._id : '';
             try {
-              const data = await cryptoService.decryptData(enc, iv, tag, decryptKey);
-              const name = await cryptoService.decryptData(encName, nameIv, nameTag, decryptKey);
-              if (needsReEncryption && currentVaultKey) {
+              const data = await decryptVaultField(
+                { encrypted: enc, iv, tag },
+                { role: 'item.data', rowId, itemType: item.itemType as ItemType },
+                decryptKey,
+              );
+              const name = await decryptVaultField(
+                { encrypted: encName, iv: nameIv, tag: nameTag },
+                { role: 'item.name', rowId },
+                decryptKey,
+              );
+              // Re-sealed under this account's key when the keys differ, AND
+              // whenever the row carries a format-v2 field: the server may store
+              // a restored row under a fresh id (a row this account does not own,
+              // or `keep_both`), and a bound field sent verbatim would be kept
+              // under an id it can never open under again.
+              const bound =
+                isBoundField(nameIv) ||
+                isBoundField(iv) ||
+                historyCarriesBoundEntry(item.passwordHistory);
+              if ((needsReEncryption || bound) && currentVaultKey) {
                 const reData = await cryptoService.encryptData(data, currentVaultKey);
                 const reName = await cryptoService.encryptData(name, currentVaultKey);
                 item.encryptedData = reData.encrypted;
@@ -662,10 +902,9 @@ export default function BackupSettingsPage() {
                       continue;
                     }
                     try {
-                      const plain = await cryptoService.decryptData(
-                        entry.encryptedPassword,
-                        entry.iv,
-                        entry.tag,
+                      const plain = await decryptVaultField(
+                        { encrypted: entry.encryptedPassword, iv: entry.iv, tag: entry.tag },
+                        { role: 'item.password-history', rowId },
                         decryptKey,
                       );
                       const reEnc = await cryptoService.encryptData(plain, currentVaultKey);
@@ -707,8 +946,14 @@ export default function BackupSettingsPage() {
               continue;
             }
             try {
-              const name = await cryptoService.decryptData(encName, nameIv, nameTag, decryptKey);
-              if (needsReEncryption && currentVaultKey) {
+              const name = await decryptVaultField(
+                { encrypted: encName, iv: nameIv, tag: nameTag },
+                { role: 'folder.name', rowId: typeof folder._id === 'string' ? folder._id : '' },
+                decryptKey,
+              );
+              // Same rule as the items: a bound name is re-sealed, because a
+              // restored folder can land under a fresh id.
+              if ((needsReEncryption || isBoundField(nameIv)) && currentVaultKey) {
                 const reName = await cryptoService.encryptData(name, currentVaultKey);
                 folder.encryptedName = reName.encrypted;
                 folder.nameIv = reName.iv;
@@ -751,6 +996,12 @@ export default function BackupSettingsPage() {
         }>('/backup/restore', {
           conflictStrategy: restoreConflictStrategy,
           data: JSON.stringify(backupData),
+          // Every row above was re-encrypted to `currentVaultKey`, captured at
+          // the top of this handler. The server checks this immediately before
+          // its first write, so a rotation that commits while a large backup is
+          // being re-encrypted refuses the restore instead of storing rows
+          // sealed under a key the account has already replaced.
+          vaultKeyVersion: currentVaultKeyVersion,
         });
 
         const trashedAutoRestoredCount = (restoreResponse.data.data.itemSkipReasons ?? []).filter(
@@ -799,12 +1050,20 @@ export default function BackupSettingsPage() {
         setRestorePassword('');
         setRestoreConflictStrategy('skip');
       } finally {
-        cryptoService.clearKey(salt);
-        if (decryptedBwk) cryptoService.clearKey(decryptedBwk);
-        if (bek) await cryptoService.clearCryptoKey(bek);
+        // Both wrapping keys, and each buffer only once: when the two blocks were
+        // identical `fileBwk` IS `accountBwk`, and the identity check is what keeps
+        // that legible rather than relying on a second zeroing being harmless.
+        if (accountBwk) cryptoService.clearKey(accountBwk);
+        if (fileBwk && fileBwk !== accountBwk) cryptoService.clearKey(fileBwk);
         if (backupVaultKey) await cryptoService.clearCryptoKey(backupVaultKey);
       }
     } catch (err) {
+      // A vault-key rotation committed elsewhere while this restore was being
+      // prepared. Raise the app-wide notice, then report the failure as usual:
+      // nothing was restored, nothing is retried, and no key is re-derived —
+      // reloading is the remedy, because adopting a generation the server named
+      // is a decision about the whole session rather than about one restore.
+      noteStaleVaultKey(err);
       // Surface the server's specific error (e.g. an incorrect backup password
       // caught client-side, or a persistence-layer rejection) instead of a
       // generic failure toast.
@@ -816,7 +1075,13 @@ export default function BackupSettingsPage() {
     } finally {
       setRestoring(false);
     }
-  }, [restoreFile, restorePassword, restoreConflictStrategy, toast]);
+  }, [
+    restoreFile,
+    restorePassword,
+    restoreConflictStrategy,
+    requestUnverifiedRestoreConfirmation,
+    toast,
+  ]);
 
   const handleChangeBackupPassword = useCallback(async () => {
     if (!newBackupPassword || !changeBackupCurrentPassword) return;
@@ -852,8 +1117,10 @@ export default function BackupSettingsPage() {
       // Encrypt new BWK with new BEK
       const encryptedBWK = await cryptoService.encryptBWK(newBwk, newBek);
 
-      // Re-encrypt vault key with new BWK for cross-account restore support
-      const vaultKey = useAuthStore.getState().vaultKey;
+      // Re-encrypt vault key with new BWK for cross-account restore support. One
+      // `getState()` for the key and its generation, for the reason the setup
+      // driver above gives.
+      const { vaultKey, vaultKeyVersion } = useAuthStore.getState();
       let bwkVaultKeyData: { encrypted: string; iv: string; tag: string } | undefined;
       if (vaultKey) {
         bwkVaultKeyData = await cryptoService.encryptVaultKeyWithBWK(vaultKey, newBwk);
@@ -865,6 +1132,7 @@ export default function BackupSettingsPage() {
         newBwkIv: encryptedBWK.iv,
         newBwkTag: encryptedBWK.tag,
         newBwkSalt: cryptoService.arrayBufferToBase64(newSalt),
+        vaultKeyVersion,
         ...(bwkVaultKeyData
           ? {
               newBwkEncryptedVaultKey: bwkVaultKeyData.encrypted,
@@ -877,8 +1145,14 @@ export default function BackupSettingsPage() {
       setShowChangePassword(false);
       setNewBackupPassword('');
       setChangeBackupCurrentPassword('');
-    } catch {
-      toast({ title: 'Failed to change backup password', type: 'error' });
+    } catch (err) {
+      // Same wrapper, same refusal, same remedy as the setup driver above.
+      noteStaleVaultKey(err);
+      toast({
+        title: 'Failed to change backup password',
+        description: getApiErrorMessage(err, 'An unexpected error occurred. Please try again.'),
+        type: 'error',
+      });
     } finally {
       setChangingBackupPassword(false);
       if (authKey) cryptoService.clearKey(authKey);
@@ -1357,6 +1631,56 @@ export default function BackupSettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Unverified-restore confirmation — nothing is sent until this is answered.
+          Rendered OUTSIDE the restore panel on purpose: closing the panel would
+          otherwise unmount the prompt with no answer, stranding the awaiting
+          restore holding the unwrapped backup wrapping key and reporting nothing.
+          The primary button is deliberately not called "Restore": two suites and
+          two E2E specs already click a control by that exact name. */}
+      <Dialog
+        open={unverifiedRestore !== null}
+        onOpenChange={(open) => {
+          if (!open) answerUnverifiedRestore(false);
+        }}
+      >
+        <DialogContent className="max-w-md" onClose={() => answerUnverifiedRestore(false)}>
+          <DialogHeader>
+            <DialogTitle>Restore a backup that could not be verified</DialogTitle>
+            <DialogDescription>
+              {unverifiedRestore === 'self_signed'
+                ? 'This file’s integrity signature could only be checked against key material the file itself carries, so it shows that the file agrees with itself and nothing about where the file came from. A backup from another account, or one taken before you changed your backup password, looks exactly like this.'
+                : 'This file carries no integrity signature at all, so there is no way to tell whether it is still the file that was written. A backup that arrived by email is never signed — the server assembles it and has no backup password to sign with — and backups written before signing existed look the same way.'}
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="list-disc space-y-1 pl-5 text-sm text-[hsl(var(--foreground))]">
+            <li>
+              Its entries are added to your vault and sealed under this account&apos;s vault key, so
+              anything altered in the file since it was written is restored as the file says it.
+            </li>
+            <li>
+              Your existing entries are replaced only if you chose <strong>Overwrite</strong>.
+            </li>
+            <li>Continue only if you know where this file came from.</li>
+          </ul>
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={() => answerUnverifiedRestore(false)}
+              className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
+            >
+              Cancel Restore
+            </button>
+            <button
+              type="button"
+              onClick={() => answerUnverifiedRestore(true)}
+              className="rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90"
+            >
+              Restore Unverified Backup
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Change backup password */}
       {isConfigured && (

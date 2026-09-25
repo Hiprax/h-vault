@@ -20,7 +20,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
-import { useUIStore } from '../../stores/uiStore';
+import { isHoldingSupersededVaultKey, useUIStore } from '../../stores/uiStore';
 import { useVaultStore } from '../../stores/vaultStore';
 import { useToast } from '../ui/Toast';
 import { cn } from '../../lib/utils';
@@ -99,26 +99,26 @@ const REMAINING_NAV_ITEMS: NavItem[] = [
 const DOCUMENTS_NAV_ITEM: NavItem = { label: 'Documents', to: '/documents', icon: Files };
 
 /**
- * The navigation, with the document store's entry spliced in when this server
- * offers it.
- *
- * Two explicit lists rather than one list filtered by a predicate, because the
- * predicate would have to be evaluated for every entry in order to hide exactly
- * one of them, and a `hidden` flag on `NavItem` would be a field five entries
- * carry for the sake of the sixth. Exported so the entry's presence and its
- * position can be pinned without rendering the whole layout.
- */
-/**
  * What the user is told when the encrypted offline copy of their vault cannot be
  * written. Offline read access is a shipped feature, so a silent write failure
  * is discovered at the worst possible moment: an empty vault with no network to
  * recover from. The notice is raised while the user is still ONLINE and able to
  * act.
  *
- * The four classified causes collapse to three messages because only two of them
- * have a remedy the user owns. `unavailable` (no IndexedDB at all) and `unknown`
- * share one honest, non-prescriptive sentence rather than inviting the user to
- * distinguish situations they cannot act on differently.
+ * The five classified causes collapse to four messages because only three of
+ * them have a remedy the user owns. `unavailable` (no IndexedDB at all) and
+ * `unknown` share one honest, non-prescriptive sentence rather than inviting the
+ * user to distinguish situations they cannot act on differently.
+ *
+ * `version_conflict` covers two views of one condition, and its remedy has to
+ * work from either: this tab's upgrade is held up by a tab on an older bundle
+ * (reloading or closing that tab frees the database), or a newer bundle already
+ * upgraded it underneath this one (reloading this tab picks the newer bundle
+ * up). Hence both halves of the sentence. The one case it does not fit is a
+ * server rolled back to an OLDER bundle than the one that upgraded this
+ * browser's database: no tab is on the other version, and no reload helps
+ * until the server is upgraded again. That is an operator's condition, not a
+ * user's, and is deliberately not given a sentence of its own.
  *
  * Canned copy, keyed on the discriminant — never the underlying `message`, which
  * is engine-specific text this project has not reviewed.
@@ -131,10 +131,22 @@ const OFFLINE_CACHE_NOTICES: Record<OfflineCacheErrorType, string> = {
     'Offline access is unavailable: offline storage is full. Free up browser storage, then reload.',
   permission_denied:
     'Offline access is unavailable: your browser is blocking offline storage. Allow site data for this site, or leave private browsing, then reload.',
+  version_conflict:
+    'Offline access is unavailable: H-Vault is open in another tab or window on a different version. Reload or close your other H-Vault tabs and windows, then reload this one.',
   unavailable: OFFLINE_CACHE_UNAVAILABLE,
   unknown: OFFLINE_CACHE_UNAVAILABLE,
 };
 
+/**
+ * The navigation, with the document store's entry spliced in when this server
+ * offers it.
+ *
+ * Two explicit lists rather than one list filtered by a predicate, because the
+ * predicate would have to be evaluated for every entry in order to hide exactly
+ * one of them, and a `hidden` flag on `NavItem` would be a field five entries
+ * carry for the sake of the sixth. Exported so the entry's presence and its
+ * position can be pinned without rendering the whole layout.
+ */
 export function navItemsFor(documentsEnabled: boolean): NavItem[] {
   if (!documentsEnabled) return [VAULT_NAV_ITEM, ...REMAINING_NAV_ITEMS];
   return [VAULT_NAV_ITEM, DOCUMENTS_NAV_ITEM, ...REMAINING_NAV_ITEMS];
@@ -150,12 +162,13 @@ export function AppLayout() {
   // "your browser is blocking this", which is a different remedy.
   const [dismissedOfflineCacheError, setDismissedOfflineCacheError] =
     useState<OfflineCacheErrorType | null>(null);
-  const { user, logout, lock, isLocked } = useAuthStore();
+  const { user, logout, lock, isLocked, vaultKeyVersion } = useAuthStore();
   // `null` until the server has answered, and the entry is rendered only for an
   // explicit `true`: an entry that appeared and then vanished would be worse than
   // one that appeared a beat late.
   const documentsConfig = useDocumentsConfig();
-  const { sidebarCollapsed, toggleSidebarCollapsed, offlineCacheError } = useUIStore();
+  const { sidebarCollapsed, toggleSidebarCollapsed, offlineCacheError, staleVaultKeyVersion } =
+    useUIStore();
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
   const navigate = useNavigate();
@@ -173,6 +186,17 @@ export function AppLayout() {
     offlineCacheError !== null && offlineCacheError !== dismissedOfflineCacheError
       ? offlineCacheError
       : null;
+
+  // Whether this session is still holding a vault key the account has replaced.
+  // DERIVED from the generation the server last refused a write with and the one
+  // this session believes it holds, so it clears itself the moment those agree —
+  // see `isHoldingSupersededVaultKey`. No write anywhere has to remember to
+  // reset it, which is what stops a missed reset leaving a permanent notice in
+  // front of a healthy session.
+  const holdingSupersededVaultKey = isHoldingSupersededVaultKey(
+    staleVaultKeyVersion,
+    vaultKeyVersion,
+  );
 
   // Whether the sidebar should visually appear expanded
   const expanded = !sidebarCollapsed || hovered;
@@ -276,8 +300,18 @@ export function AppLayout() {
         />
       )}
 
-      {/* Sidebar */}
-      <aside
+      {/* Sidebar — the page's BANNER, deliberately a <header> and not an <aside>.
+
+          Everything in it is site-oriented rather than page-specific: the
+          product mark, the primary navigation, the connection indicator and the
+          account's own controls. That is the banner's definition, and it sits at
+          the top level of the document, which is the only place a <header> maps
+          to `banner`. As an <aside> it was a complementary landmark, and on
+          `/vault` and `/documents` it sat beside RailLayout's folder rail — a
+          SECOND unnamed complementary landmark, so a landmark menu listed two
+          entries nobody could tell apart (`landmark-unique`). Naming both would
+          have hidden that the sidebar was never complementary content at all. */}
+      <header
         onMouseEnter={() => {
           if (sidebarCollapsed) setHovered(true);
         }}
@@ -449,7 +483,7 @@ export function AppLayout() {
             </span>
           </button>
         </div>
-      </aside>
+      </header>
 
       {/* Main content */}
       <div className="flex flex-1 flex-col overflow-hidden">
@@ -515,6 +549,56 @@ export function AppLayout() {
             </div>
           )}
         </div>
+
+        {/* The session is holding a vault key the account has replaced.
+
+            `role="alert"` rather than the `status` region above, and rendered
+            conditionally rather than as an always-mounted live region: this is
+            an interrupting condition — every save from this tab is being
+            refused — and `alert` is the role whose announcement survives being
+            inserted along with its message.
+
+            The server has told this session which generation it is on;
+            ADOPTING that number, or re-deriving the vault key to match it,
+            would be taking a key the server chose on a session whose in-memory
+            data was all decrypted under the old one. So the remedy is to start
+            again from one consistent state. It is not dismissible for the same
+            reason: dismissing it would leave a session in which nothing can be
+            saved and nothing says so.
+
+            That remedy is a SIGN-OUT and not a reload, and the difference is
+            not cosmetic. A reload rehydrates `isAuthenticated` from persisted
+            state, so `shouldAttemptResume()` is false and no profile is read;
+            the Unlock screen then re-derives the vault key from the PERSISTED
+            `encryptedVaultKeyData`, which moves with the key this session holds
+            and is therefore exactly as superseded as the writes that were just
+            refused. The banner came straight back, and the button that promised
+            to fix it was the thing that could not. Signing in reads the live
+            wrapper and the live generation from the server unconditionally,
+            which is the only path that does. */}
+        {holdingSupersededVaultKey && (
+          <div
+            role="alert"
+            data-testid="stale-vault-key-banner"
+            className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 dark:border-red-700 dark:bg-red-900/20 dark:text-red-300 lg:mx-6"
+          >
+            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+            <span className="flex-1">
+              Your vault key was changed on another device, so changes from this tab can no longer
+              be saved. Sign in again to continue.
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                void logout();
+              }}
+              className="inline-flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-800/30"
+            >
+              <RefreshCw className="h-3 w-3" />
+              Sign out
+            </button>
+          </div>
+        )}
 
         {/* Decryption failure warning */}
         {decryptionFailureCount > 0 && (
