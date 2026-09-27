@@ -21,7 +21,6 @@ import {
   Loader2,
   RotateCcw,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
 import { cn, getApiErrorMessage, isSafeUrl } from '../../lib/utils';
 import { hasAnyValue, isUndecodableData } from '../../lib/vaultData';
 import { ErrorBoundary } from '../layout/ErrorBoundary';
@@ -32,6 +31,7 @@ import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
 import { BackupCodesSection } from './BackupCodesSection';
 import { TotpDisplay } from './TotpDisplay';
+import { NoteContent } from './NoteContent';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { copySecretToClipboard } from '../../services/clipboard/clipboardService';
 import type { ItemType } from '@hvault/shared';
@@ -469,50 +469,7 @@ function SecretDetail({ data }: { data: ISecretData }) {
 function NoteDetail({ data }: { data: INoteData }) {
   return (
     <div className="space-y-3">
-      {data.format === 'markdown' ? (
-        <div className="prose prose-sm dark:prose-invert max-w-none rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4">
-          <ReactMarkdown
-            skipHtml={true}
-            allowedElements={[
-              'p',
-              'a',
-              'strong',
-              'em',
-              'code',
-              'pre',
-              'ul',
-              'ol',
-              'li',
-              'h1',
-              'h2',
-              'h3',
-              'h4',
-              'h5',
-              'h6',
-              'blockquote',
-              'br',
-              'hr',
-            ]}
-            components={{
-              a: ({ href, children }) => (
-                <a
-                  href={href && isSafeUrl(href) ? href : '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {children}
-                </a>
-              ),
-            }}
-          >
-            {data.content}
-          </ReactMarkdown>
-        </div>
-      ) : (
-        <div className="whitespace-pre-wrap rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4 text-sm text-[hsl(var(--foreground))]">
-          {data.content}
-        </div>
-      )}
+      <NoteContent content={data.content} format={data.format} />
     </div>
   );
 }

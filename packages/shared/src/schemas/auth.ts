@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../zod.js';
 import { ENCRYPTION_VERSION } from '../constants/index.js';
 import { optionalVaultKeyVersionSchema } from './common.js';
 

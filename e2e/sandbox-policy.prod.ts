@@ -230,6 +230,14 @@ test.describe('the isolated document under the production policy', () => {
       expect(camera).toEqual({ allowed: true, stream: 'opened' });
     });
 
+    await test.step('(5) the application page itself raised no policy violation', async () => {
+      // The recorder runs in the MAIN frame too, and until now nothing read it
+      // there. The page the worker just served has built every schema its first
+      // screens need, which is the moment Zod used to probe `new Function('')`
+      // and the browser reported a script-src 'eval' refusal on every page.
+      expect(await violationsIn(page.mainFrame())).toEqual([]);
+    });
+
     await gotoDocuments(page);
     for (const fixture of [AUDIO, SVG, INLINE_IMAGE, SOURCE]) {
       await uploadDocument(page, fixture);
@@ -392,6 +400,12 @@ test.describe('the isolated document under the production policy', () => {
       await expectOnlyRemoteImagesRefused(frame);
       expect(page.url()).toBe(settled);
       expect(page.context().pages()).toHaveLength(1);
+    });
+
+    await test.step('and the application page still raised none after every preview', async () => {
+      // The same document as step (5): no full load happened since, so this also
+      // covers every schema the lazily loaded document routes constructed.
+      expect(await violationsIn(page.mainFrame())).toEqual([]);
     });
   });
 });

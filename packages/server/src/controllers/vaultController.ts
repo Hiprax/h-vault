@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { VaultItem } from '../models/VaultItem.js';
@@ -1633,7 +1633,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         // remains as whatever was last successfully committed.
         logger.error('Sequential vault key rotation failed, cleaning up rotation state', {
           userId,
-          error: rotationErr,
+          error: errorMessage(rotationErr),
         });
         try {
           // A re-seal's partial writes are left in place: they are sealed under

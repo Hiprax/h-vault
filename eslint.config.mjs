@@ -4,6 +4,15 @@ import tseslint from 'typescript-eslint';
 import globals from 'globals';
 import pluginSecurity from 'eslint-plugin-security';
 
+const ZOD_IMPORT_MESSAGE =
+  "Import z from '@hvault/shared/zod'. It turns Zod's eval probe off before any schema exists; a direct import can build a schema first, and the browser then reports a CSP violation.";
+
+/** The options of the one-Zod rule, shared by the two blocks that set it. */
+const ZOD_IMPORT_RESTRICTIONS = {
+  paths: [{ name: 'zod', message: ZOD_IMPORT_MESSAGE, allowTypeImports: true }],
+  patterns: [{ group: ['zod/*', 'zod/**'], message: ZOD_IMPORT_MESSAGE, allowTypeImports: true }],
+};
+
 export default tseslint.config(
   // Global ignores
   {
@@ -157,6 +166,52 @@ export default tseslint.config(
       globals: {
         ...globals.es2022,
       },
+    },
+  },
+
+  // ONE Zod for everything the browser builds: `@hvault/shared/zod`.
+  //
+  // That module turns Zod's compiled object parser off in every browser realm
+  // BEFORE the first schema exists. Zod otherwise probes `new Function('')`,
+  // which this application's Content-Security-Policy refuses and reports on
+  // every page. The setting only holds if it runs first, and the one ordering a
+  // bundler must keep is a dependency edge, so every schema module has to import
+  // `z` from there rather than from `zod`. Type-only imports erase at build time
+  // and stay allowed. Not covered: a dynamic `import('zod')`, which this rule
+  // cannot see. The server is not listed: Node has no CSP and keeps the faster
+  // compiled parser.
+  {
+    files: ['packages/client/src/**/*.{ts,tsx}', 'packages/shared/src/**/*.ts'],
+    ignores: ['packages/shared/src/zod.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', ZOD_IMPORT_RESTRICTIONS],
+    },
+  },
+
+  // The isolated document stays Zod-free altogether: it hand-rolls the validator
+  // for the few shapes it accepts (`src/sandbox/protocol.ts`), and a runtime
+  // schema would drag `vendor-core` into a document served under
+  // `connect-src 'none'` (see `vite.config.sandbox.ts`). Flat config REPLACES a
+  // rule's options rather than merging them, so the `zod` bans are restated here
+  // beside the one this block adds.
+  {
+    files: ['packages/client/src/sandbox/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          ...ZOD_IMPORT_RESTRICTIONS,
+          paths: [
+            ...ZOD_IMPORT_RESTRICTIONS.paths,
+            {
+              name: '@hvault/shared/zod',
+              message:
+                'The isolated document carries no Zod: validate with the hand-rolled checks in src/sandbox/protocol.ts.',
+              allowTypeImports: true,
+            },
+          ],
+        },
+      ],
     },
   },
 

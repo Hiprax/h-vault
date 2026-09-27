@@ -1826,6 +1826,7 @@ describe('machine-readable reports', () => {
       'item-form-login',
       'item-form-secret',
       'item-form-note',
+      'item-form-note-preview',
       'item-form-card',
       'item-form-card-billing',
       'item-form-address-picker',

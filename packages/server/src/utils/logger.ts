@@ -77,3 +77,23 @@ export function createModuleLogger(moduleName: string): Logger {
     includeGlobalFile: writeFiles,
   });
 }
+
+/**
+ * What a log line records about a caught error: its message, and nothing else.
+ *
+ * Pass `error: errorMessage(err)` in log metadata, never `error: err`. Since
+ * `@hiprax/logger` 1.2, an `Error` in metadata renders its name, message, stack,
+ * own fields and `cause` chain, where it used to render `{}`. A driver error's
+ * own fields can carry request data (nodemailer's `rejected` recipients, a
+ * MongoDB duplicate key's `keyValue`), which has no place in a log kept for a
+ * year. One helper also keeps the call sites branch-free.
+ *
+ * Anything that is neither an `Error` nor a string becomes `'Unknown error'`. It
+ * is never passed through `String()`, which runs arbitrary `toString` code and
+ * can throw inside a catch block.
+ */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  return 'Unknown error';
+}

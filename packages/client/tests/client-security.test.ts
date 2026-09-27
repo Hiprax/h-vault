@@ -872,21 +872,40 @@ describe('authStore - sanitized error messages (Task 4.13)', () => {
 // 8.7 — Harden markdown rendering (replace dangerouslySetInnerHTML)
 // ==========================================================================
 
+// A note's Markdown is rendered in ONE place, `NoteContent.tsx`, which both the
+// item view and the editor's Preview use. The react-markdown, `isSafeUrl` and
+// `skipHtml` checks below therefore point at that file. They used to read
+// `VaultItemDetail.tsx` and `VaultItemForm.tsx` when each carried its own copy of
+// the renderer. The two components are held to the other half: they render no
+// Markdown of their own, so there is no second renderer to drift from these
+// guarantees. The behaviour itself (raw HTML skipped, unsafe links neutralised)
+// is asserted against the real react-markdown in `components/note-content.test.tsx`.
 describe('Hardened markdown rendering (Task 8.7)', () => {
-  it('VaultItemDetail should not use dangerouslySetInnerHTML', async () => {
+  it('VaultItemDetail should not use dangerouslySetInnerHTML, and renders notes through NoteContent', async () => {
     const source = readFileSync(
       pathResolve(clientSrcDir, 'components/vault/VaultItemDetail.tsx'),
       'utf-8',
     );
 
     expect(source).not.toContain('dangerouslySetInnerHTML');
-    expect(source).toContain('ReactMarkdown');
-    expect(source).toContain("from 'react-markdown'");
+    expect(source).toContain("from './NoteContent'");
+    expect(source).not.toContain("from 'react-markdown'");
   });
 
-  it('VaultItemForm should not use dangerouslySetInnerHTML', async () => {
+  it('VaultItemForm should not use dangerouslySetInnerHTML, and previews notes through NoteContent', async () => {
     const source = readFileSync(
       pathResolve(clientSrcDir, 'components/vault/VaultItemForm.tsx'),
+      'utf-8',
+    );
+
+    expect(source).not.toContain('dangerouslySetInnerHTML');
+    expect(source).toContain("from './NoteContent'");
+    expect(source).not.toContain("from 'react-markdown'");
+  });
+
+  it('NoteContent should not use dangerouslySetInnerHTML', async () => {
+    const source = readFileSync(
+      pathResolve(clientSrcDir, 'components/vault/NoteContent.tsx'),
       'utf-8',
     );
 
@@ -925,7 +944,7 @@ describe('Hardened markdown rendering (Task 8.7)', () => {
 
   it('ReactMarkdown should sanitize links with isSafeUrl', () => {
     const source = readFileSync(
-      pathResolve(clientSrcDir, 'components/vault/VaultItemDetail.tsx'),
+      pathResolve(clientSrcDir, 'components/vault/NoteContent.tsx'),
       'utf-8',
     );
 
@@ -934,9 +953,9 @@ describe('Hardened markdown rendering (Task 8.7)', () => {
     expect(source).toContain('rel="noopener noreferrer"');
   });
 
-  it('VaultItemForm ReactMarkdown should have skipHtml enabled', () => {
+  it('NoteContent ReactMarkdown should have skipHtml enabled', () => {
     const source = readFileSync(
-      pathResolve(clientSrcDir, 'components/vault/VaultItemForm.tsx'),
+      pathResolve(clientSrcDir, 'components/vault/NoteContent.tsx'),
       'utf-8',
     );
 
@@ -946,6 +965,16 @@ describe('Hardened markdown rendering (Task 8.7)', () => {
   it('VaultItemForm should not import marked or DOMPurify', async () => {
     const source = readFileSync(
       pathResolve(clientSrcDir, 'components/vault/VaultItemForm.tsx'),
+      'utf-8',
+    );
+
+    expect(source).not.toMatch(/from ['"]marked['"]/);
+    expect(source).not.toMatch(/from ['"]dompurify['"]/);
+  });
+
+  it('NoteContent should not import marked or DOMPurify', async () => {
+    const source = readFileSync(
+      pathResolve(clientSrcDir, 'components/vault/NoteContent.tsx'),
       'utf-8',
     );
 

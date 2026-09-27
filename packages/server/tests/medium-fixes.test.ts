@@ -6,13 +6,14 @@
  * - MEDIUM-3: Lockout email sent only once (on exact threshold crossing)
  * - MEDIUM-9: Sequential rotation fallback cleans up rotationInProgress on error
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { Types } from 'mongoose';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { createAuditLog } from '../src/services/auditService.js';
+import { createModuleLogger } from '../src/utils/logger.js';
 import { createTestUser, getCsrf } from './helpers.js';
 import type { TestUser, CsrfPair } from './helpers.js';
 
@@ -76,6 +77,33 @@ describe('MEDIUM-2: audit log creation via createAuditLog()', () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]!.userId).toBeNull();
     expect(logs[0]!.metadata).toEqual({ reason: 'test' });
+  });
+
+  it('logs a persistence failure with its message, and never throws it into the request', async () => {
+    const fakeObjectId = new Types.ObjectId().toString();
+    const create = vi
+      .spyOn(AuditLog, 'create')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('audit write refused'), { keyValue: { ipAddress: '10.9.8.7' } }),
+      );
+    const logged = vi.spyOn(createModuleLogger('audit-service'), 'error');
+    try {
+      await expect(
+        createAuditLog(fakeObjectId, 'login', undefined, '10.9.8.7', 'agent'),
+      ).resolves.toBeUndefined();
+
+      // The MESSAGE only: the error object's own fields (here a driver-style
+      // `keyValue` naming the client's address) never reach the log line.
+      expect(logged).toHaveBeenCalledWith('Failed to persist audit log', {
+        userId: fakeObjectId,
+        action: 'login',
+        error: 'audit write refused',
+      });
+      expect(await AuditLog.countDocuments({ ipAddress: '10.9.8.7' })).toBe(0);
+    } finally {
+      create.mockRestore();
+      logged.mockRestore();
+    }
   });
 
   it('should preserve userAgent that is exactly 512 characters', async () => {

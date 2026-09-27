@@ -723,6 +723,31 @@ describe('VaultItemForm', () => {
       });
     });
 
+    it('previews a Plain Text note as plain text, and a Markdown note as Markdown', async () => {
+      renderForm({ defaultType: 'note' });
+      const aligned = '**Field 1:**      Test\nField 123123:   Test 2';
+      fireEvent.change(screen.getByPlaceholderText('Write your note...'), {
+        target: { value: aligned },
+      });
+
+      fireEvent.change(screen.getByLabelText('Note format'), { target: { value: 'plaintext' } });
+      fireEvent.click(screen.getByText('Preview'));
+      await waitFor(() => {
+        const box = document.querySelector('.whitespace-pre-wrap.font-mono');
+        expect(box?.textContent).toBe(aligned);
+      });
+      // Nothing was interpreted: the asterisks are text, exactly as saved.
+      expect(document.querySelector('strong')).toBeNull();
+      expect(document.querySelector('.note-markdown')).toBeNull();
+
+      fireEvent.click(screen.getByText('Edit'));
+      fireEvent.change(screen.getByLabelText('Note format'), { target: { value: 'markdown' } });
+      fireEvent.click(screen.getByText('Preview'));
+      await waitFor(() => {
+        expect(document.querySelector('.note-markdown strong')?.textContent).toBe('Field 1:');
+      });
+    });
+
     it('sanitizes data: URLs to "#" in preview', async () => {
       renderForm({ defaultType: 'note' });
 

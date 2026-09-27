@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../zod.js';
 import { objectIdSchema, optionalVaultKeyVersionSchema, rowIdNonceSchema } from './common.js';
 import { MAX_ENCRYPTED_NAME_LENGTH, MAX_SORT_ORDER } from '../constants/index.js';
 

@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 import app from '../src/app.js';
 import { Folder } from '../src/models/Folder.js';
 import { VaultItem } from '../src/models/VaultItem.js';
+import { createModuleLogger } from '../src/utils/logger.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { Document } from '../src/models/Document.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
@@ -981,6 +982,7 @@ describe('Folder Routes', () => {
         .mockImplementationOnce(
           () => Promise.reject(new Error('write concern error: no majority available')) as never,
         );
+      const logged = vi.spyOn(createModuleLogger('folder-controller'), 'warn');
 
       let res;
       try {
@@ -1005,6 +1007,11 @@ describe('Folder Routes', () => {
       const audit = await AuditLog.findOne({ userId: user.id, action: 'folder_delete' }).lean();
       expect(audit, 'the delete must still be audited').not.toBeNull();
       expect(audit!.metadata).toMatchObject({ folderId: String(folder._id) });
+      // The failed sweep is logged with the driver's MESSAGE, not the error.
+      expect(logged).toHaveBeenCalledWith('Failed to clean orphaned folderId references', {
+        error: 'write concern error: no majority available',
+      });
+      logged.mockRestore();
     });
   });
 

@@ -9,7 +9,7 @@ import {
 } from 'react-hook-form';
 import type { UseFormSetError } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
+import { z } from '@hvault/shared/zod';
 import {
   Key,
   FileText,
@@ -23,8 +23,7 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import { cn, getApiErrorMessage, isSafeUrl } from '../../lib/utils';
+import { cn, getApiErrorMessage } from '../../lib/utils';
 import { hasAnyValue, isUndecodableData } from '../../lib/vaultData';
 import {
   BASE_ADDRESS_FIELDS,
@@ -48,6 +47,7 @@ import { PasswordGenerator } from './PasswordGenerator';
 import { BackupCodesEditor } from './BackupCodesEditor';
 import { SavedAddressPicker, type SavedAddressOption } from './SavedAddressPicker';
 import { inputClass } from './formStyles';
+import { NoteContent } from './NoteContent';
 import {
   MAX_ADDRESS_CITY_LENGTH,
   MAX_ADDRESS_COUNTRY_LENGTH,
@@ -78,7 +78,7 @@ import {
   isValidUriLength,
   normalizeUri,
 } from '@hvault/shared';
-import type { ItemType } from '@hvault/shared';
+import type { INoteData, ItemType } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1502,6 +1502,9 @@ export function VaultItemForm({
   );
 
   const noteContent = watch('content') as string | undefined;
+  // The Preview shows the note the way it will be saved, so it follows the
+  // chosen format instead of always interpreting the text as Markdown.
+  const noteFormat = watch('format') as INoteData['format'];
   const watchedCardNumber = watch('number') as string | undefined;
   // A static path, so no cast gymnastics are needed on setValue. react-hook-form
   // returns the STORED array, so the reference is stable while the contents are —
@@ -2135,44 +2138,7 @@ export function VaultItemForm({
             </button>
           </div>
           {showPreview && noteContent ? (
-            <div className="prose prose-sm dark:prose-invert max-w-none rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4">
-              <ReactMarkdown
-                skipHtml
-                allowedElements={[
-                  'p',
-                  'a',
-                  'strong',
-                  'em',
-                  'code',
-                  'pre',
-                  'ul',
-                  'ol',
-                  'li',
-                  'h1',
-                  'h2',
-                  'h3',
-                  'h4',
-                  'h5',
-                  'h6',
-                  'blockquote',
-                  'br',
-                  'hr',
-                ]}
-                components={{
-                  a: ({ href, children }) => (
-                    <a
-                      href={href && isSafeUrl(href) ? href : '#'}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {children}
-                    </a>
-                  ),
-                }}
-              >
-                {noteContent}
-              </ReactMarkdown>
-            </div>
+            <NoteContent content={noteContent} format={noteFormat} />
           ) : (
             <FormField label="Content" name="content" error={errors.content?.message}>
               <textarea

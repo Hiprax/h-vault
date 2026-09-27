@@ -176,6 +176,91 @@
 }
 
 /*
+ * A secure note's Markdown (`components/vault/NoteContent.tsx`).
+ *
+ * The note is drawn like its editor: monospace, `white-space: pre-wrap`, so the
+ * spaces and line breaks the author typed are what the reader sees. These rules
+ * give the rendered elements their shape, because Preflight resets headings,
+ * lists and links to plain text, and the elements come out of the Markdown
+ * renderer rather than out of markup that could carry utility classes. They add
+ * no horizontal space inside a line, so text aligned in the editor stays aligned.
+ *
+ * One typed blank line between two blocks becomes one line of space here, and
+ * only between blocks: an inline run followed by a nested list gets none.
+ */
+@layer components {
+  .note-markdown :is(h1, h2, h3, h4, h5, h6) {
+    font-weight: 700;
+  }
+
+  .note-markdown h1 {
+    font-size: 1.375em;
+  }
+
+  .note-markdown h2 {
+    font-size: 1.25em;
+  }
+
+  .note-markdown h3 {
+    font-size: 1.125em;
+  }
+
+  .note-markdown ul {
+    list-style: disc;
+    padding-left: 2ch;
+  }
+
+  .note-markdown ol {
+    list-style: decimal;
+    padding-left: 3ch;
+  }
+
+  .note-markdown blockquote {
+    border-left: 2px solid hsl(var(--border));
+    padding-left: 1ch;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .note-markdown code {
+    border-radius: 0.25rem;
+    background-color: hsl(var(--muted));
+  }
+
+  .note-markdown pre {
+    overflow-x: auto;
+    border-radius: 0.375rem;
+    background-color: hsl(var(--muted));
+    padding: 0.75rem;
+  }
+
+  .note-markdown pre code {
+    background-color: transparent;
+  }
+
+  .note-markdown a {
+    color: hsl(var(--primary));
+    text-decoration-line: underline;
+    text-underline-offset: 2px;
+  }
+
+  .note-markdown hr {
+    border-top: 1px solid hsl(var(--border));
+  }
+
+  .note-markdown
+    :is(p, ul, ol, pre, blockquote, hr, h1, h2, h3, h4, h5, h6)
+    + :is(p, ul, ol, pre, blockquote, hr, h1, h2, h3, h4, h5, h6) {
+    margin-top: 1lh;
+  }
+
+  /* A separate rule, so a browser without `:has()` loses only this one: the
+     blank line between the items of a LOOSE list, whose items hold paragraphs. */
+  .note-markdown li:has(> p) + li {
+    margin-top: 1lh;
+  }
+}
+
+/*
  * Component animations
  */
 @keyframes slide-in-right {

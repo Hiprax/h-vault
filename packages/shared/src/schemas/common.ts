@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../zod.js';
 import { PAGINATION_DEFAULTS, ROW_ID_NONCE_PATTERN } from '../constants/index.js';
 
 export const objectIdSchema = z

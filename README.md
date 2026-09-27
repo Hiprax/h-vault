@@ -292,7 +292,7 @@ no user of a shared deployment is stuck inside it.
   live regions, and correct ARIA roles on virtualized lists (`react-window` above 50 items).
   Every page has one `main` landmark and one `h1` (a loading screen has only the `main`), headings
   never skip a level, and the `a11y` gate fails on any axe finding above minor (moderate, serious,
-  critical, or one axe gives no impact) in the thirty-four views it scans.
+  critical, or one axe gives no impact) in the thirty-five views it scans.
 - **Keyboard-first** — `Ctrl`+`L` lock, `Ctrl`+`N` new item, `Ctrl`+`K` search, `Ctrl`+`↑`/`↓`
   reorder folders (`Cmd` on macOS).
 - **Auto-lock on a wall-clock deadline** — the vault locks when your configured idle timeout has
@@ -1379,6 +1379,7 @@ h-vault/
 │   │       ├── schemas/         #   Zod: auth, vault, folder, document, user, config, common
 │   │       ├── types/           #   TypeScript interfaces for every model + the sandbox protocol
 │   │       ├── utils/           #   maskEmail, formatBytes, generateId, deriveRowId
+│   │       ├── zod.ts           #   The one Zod every browser schema is built from (no eval probe)
 │   │       └── generated/       #   APP_VERSION, injected from package.json at build time
 │   │
 │   ├── server/                  # @hvault/server
@@ -1544,7 +1545,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on both Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                                                   | _new_                      |
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                                            | _new_                      |
 | `e2e`              | T1   | Playwright against an auto-started stack (dev server, in-memory MongoDB, the pinned storage engine in a container): Chromium over every spec, and a second Firefox project over the two whose answers depend on the engine — clipboard hygiene and auto-lock                 | `e2e` job                  |
-| `a11y`             | T1   | axe-core over thirty-four primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                                           | _new_                      |
+| `a11y`             | T1   | axe-core over thirty-five primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                                           | _new_                      |
 | `sandbox`          | T1   | A real browser renders every preview mode and the committed hostile corpus under the **built artifact's** own headers, and the engine refuses nothing but remote images                                                                                                      | _new_                      |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                                                       | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                                                             | _new_                      |

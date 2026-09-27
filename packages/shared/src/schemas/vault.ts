@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../zod.js';
 import {
   objectIdSchema,
   optionalVaultKeyVersionSchema,

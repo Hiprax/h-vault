@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Changed
+
+- **Behaviour change: Markdown notes now keep your spacing and line breaks exactly as you typed them, in the editor's monospace font.** Text you line up with spaces in the note editor now lines up the same way when you view the note, a single line break stays a line break instead of joining the two lines, and a run of spaces is no longer squeezed to one. Markdown formatting still applies on top: bold, italics, headings, lists, quotes, code and links. One Markdown rule still holds: spaces at the very START of a line are not kept, and four or more of them turn the line into a code block. Use Plain Text, or a code block, when that indentation matters.
+- **The note editor's Preview now shows the format you chose.** A Plain Text note previews as plain text, exactly as it will be saved; until now Preview always interpreted the text as Markdown.
+- Upgraded `@hiprax/logger` to 1.2.1 and `hppx` to 0.4.0. See Fixed and Security for what changes for this application.
+
+### Fixed
+
+- **The browser no longer reports a Content-Security-Policy violation ("blocked a JavaScript eval") on every page.** The validation library probed whether it could compile code from a string, which this application's policy correctly refuses. The probe could only ever fail, and it is no longer run in the browser, so validation behaves exactly as before and the console stays clean. After updating, the report stops once the app update prompt has been accepted.
+- **Line numbers in the document viewer now stay level with the lines they number.** The code was drawn in the browser's default monospace font and the numbers in the viewer's own, and the difference in line height made the numbers fall a line behind about every 19 lines (a 218-line file showed number 218 beside line 206).
+- **Plain Text notes are shown in the editor's monospace font**, so text aligned with spaces stays aligned; they used the proportional reading font.
+- **Headings, lists, quotes, code blocks and links in Markdown notes are styled again.** They rendered as plain text, because the styling they relied on was never included in the build. A code block that is wider than the note now scrolls, and can be reached with the keyboard.
+- **Ten server error log lines now record what went wrong.** They logged the error as an empty object (`{}`); they now record its message, and never the error object, whose fields can carry request data.
+
+### Security
+
+- **Email delivery failures no longer write recipients' addresses into the server logs.** A mail server's refusal usually quotes the address ("550 5.1.1 <someone@example.com>: Recipient address rejected"). The failure detail the server logs now masks every address in it, the same way the recipient is already masked in the same line, and is capped in length.
+- **A request parameter repeated under a second spelling is now detected as parameter pollution** (`hppx` 0.4.0): `a` and `a[]`, or `a.b` and `a[b]`, are the same parameter, and only the last value is kept. Previously the second spelling silently overwrote the first, with no pollution warning.
+
 ## [0.14.0] - 2026-09-25
 
 ### Added

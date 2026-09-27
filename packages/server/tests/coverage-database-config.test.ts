@@ -240,13 +240,18 @@ describe('config/database.ts', () => {
       expect(mockWarn).toHaveBeenCalledWith('MongoDB disconnected');
     });
 
-    it('logs the error payload on a connection error', async () => {
+    it("logs the connection error's message, not the error object", async () => {
       const handlers = await captureHandlers();
-      const boom = new Error('topology destroyed');
+      const boom = Object.assign(new Error('topology destroyed'), { reason: { servers: {} } });
 
       handlers.get('error')!(boom);
 
-      expect(mockError).toHaveBeenCalledWith('MongoDB connection error', { error: boom });
+      // The MESSAGE, deliberately: since @hiprax/logger 1.2 an Error in metadata
+      // renders every own field and its cause chain (a driver error's `reason`
+      // is the whole topology), so the call site records `errorMessage(error)`.
+      expect(mockError).toHaveBeenCalledWith('MongoDB connection error', {
+        error: 'topology destroyed',
+      });
     });
   });
 
@@ -267,7 +272,7 @@ describe('config/database.ts', () => {
       await expect(disconnectDatabase()).rejects.toThrow('disconnect failed');
 
       expect(mockError).toHaveBeenCalledWith('Error during database disconnection', {
-        error: failure,
+        error: 'disconnect failed',
       });
     });
   });

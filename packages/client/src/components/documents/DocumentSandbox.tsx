@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { z } from 'zod';
+import { z } from '@hvault/shared/zod';
 import { MAX_SANDBOX_CODE_LENGTH, type PreviewMode, type SandboxTheme } from '@hvault/shared';
 import { parseDocumentLink } from '../../lib/utils';
 import { connectSandbox } from '../../lib/sandboxHandshake';

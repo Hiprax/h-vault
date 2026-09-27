@@ -61,6 +61,7 @@ const AUTH_LIMIT = LOGIN_RATE_LIMIT_MAX_PER_IP;
 /** One past the budget — the first request that must be refused. */
 const AUTH_OVER = AUTH_LIMIT + 1;
 import { RATE_LIMIT_COLLECTION, MongoRateLimitStore } from '../src/middleware/rateLimitStore.js';
+import { createModuleLogger } from '../src/utils/logger.js';
 // The real controller and the real error middleware, so the outage test asserts
 // what a production client would actually receive rather than a stand-in.
 import { createErrorMiddleware } from '@hiprax/errors';
@@ -714,6 +715,7 @@ describe('MongoRateLimitStore failure paths', () => {
     const createIndex = vi
       .spyOn(driverCollectionPrototype(), 'createIndex')
       .mockRejectedValue(new Error('not authorized to create index'));
+    const logged = vi.spyOn(createModuleLogger('rate-limit-store'), 'error');
 
     const store = new MongoRateLimitStore(60_000);
     const hits: number[] = [];
@@ -723,6 +725,14 @@ describe('MongoRateLimitStore failure paths', () => {
 
     // Counting is unaffected by the index failure.
     expect(hits).toEqual([1, 2, 3, 4, 5, 6]);
+
+    // Each failed attempt is logged with the driver's MESSAGE, never the error
+    // object, and the last one says the store has given up.
+    expect(logged).toHaveBeenCalledWith('Rate limit store: failed to create the TTL index', {
+      error: 'not authorized to create index',
+      attempt: 3,
+      givingUp: true,
+    });
 
     // ...and the store gave up after MAX_TTL_INDEX_ATTEMPTS rather than retrying
     // on every single request forever.

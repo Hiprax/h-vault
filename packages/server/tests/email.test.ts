@@ -19,14 +19,16 @@ vi.mock('nodemailer', () => ({
 // Prevent dotenv from throwing on re-import after vi.resetModules()
 vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
 
-// Silence logger output during tests
+// Silence logger output during tests. One shared set of spies, so a test can
+// read what the email module logged; `beforeEach` clears them.
+const mockLog = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
 vi.mock('@hiprax/logger', () => ({
-  createLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createLogger: () => mockLog,
 }));
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -132,6 +134,7 @@ describe('Email utility', () => {
     mockSendMail.mockClear();
     mockCreateTransport.mockClear();
     mockVerify.mockClear();
+    for (const spy of Object.values(mockLog)) spy.mockClear();
     mockSendMail.mockResolvedValue({ messageId: 'test-msg-id', accepted: ['test@example.com'] });
     mockVerify.mockResolvedValue(true);
   });
@@ -210,6 +213,60 @@ describe('Email utility', () => {
       expect(result.success).toBe(false);
       expect(result.message).toContain('smtp_send_failed');
       expect(result.message).toContain('SMTP connection refused');
+    });
+
+    it('masks every address inside the failure it returns and logs, and logs no error object', async () => {
+      // What a real relay answers for an unknown mailbox: the address is in the
+      // message, in `response`, and in `rejected`. Only the (masked) message may
+      // reach a caller, who logs it, or this module's own log line.
+      const refusal = Object.assign(
+        new Error(
+          "Can't send mail - all recipients were rejected: 550 5.1.1 <victim@example.com>: Recipient address rejected",
+        ),
+        {
+          code: 'EENVELOPE',
+          response: '550 5.1.1 <victim@example.com>: Recipient address rejected',
+          rejected: ['victim@example.com'],
+        },
+      );
+      mockSendMail.mockRejectedValueOnce(refusal);
+      const { sendEmail } = await importWithSmtp();
+
+      const result = await sendEmail('victim@example.com', 'Subject', '<p>Body</p>');
+
+      const detail =
+        "Can't send mail - all recipients were rejected: 550 5.1.1 <v***m@example.com>: Recipient address rejected";
+      expect(result).toEqual({ success: false, message: `smtp_send_failed: ${detail}` });
+      expect(mockLog.error).toHaveBeenCalledWith('Failed to send email', {
+        to: 'v***m@example.com',
+        subject: 'Subject',
+        error: detail,
+      });
+      expect(JSON.stringify(mockLog.error.mock.calls)).not.toContain('victim@example.com');
+    });
+
+    it('masks an address in a transporter verification failure too', async () => {
+      mockVerify.mockRejectedValueOnce(
+        new Error('Invalid login: 535 5.7.8 user@example.com: credentials rejected'),
+      );
+      const { sendEmail } = await importWithSmtp();
+
+      await sendEmail('test@example.com', 'Subject', '<p>Body</p>');
+
+      expect(mockLog.error).toHaveBeenCalledWith(
+        'SMTP transporter verification failed — sends may still work',
+        { error: 'Invalid login: 535 5.7.8 u***r@example.com: credentials rejected' },
+      );
+      expect(JSON.stringify(mockLog.error.mock.calls)).not.toContain('user@example.com');
+    });
+
+    it('caps the failure detail, however long the transport says it is', async () => {
+      mockSendMail.mockRejectedValueOnce(new Error('x'.repeat(10_000)));
+      const { sendEmail } = await importWithSmtp();
+
+      const result = await sendEmail('test@example.com', 'Subject', '<p>Body</p>');
+
+      expect(result.message).toBe(`smtp_send_failed: ${'x'.repeat(500)}`);
     });
 
     it('should return failure when email is not accepted', async () => {

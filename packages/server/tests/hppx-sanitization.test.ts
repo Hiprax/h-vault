@@ -38,6 +38,28 @@ describe('hppx sanitize() — library collapse + whitelist semantics (documentat
     expect(cleaned.tags).toEqual(['a', 'b']);
     expect(cleaned.ids).toEqual(['1', '2']);
   });
+
+  it('keeps BOTH values of a whitelisted key spelled two ways (hppx >= 0.3)', () => {
+    // `tags=a&tags[]=b` reaches hppx as two keys under Express 5's simple query
+    // parser. Up to 0.2.9 the second spelling overwrote the first during key
+    // expansion, silently; 0.3.0 detects it as the same parameter, so a
+    // whitelisted key keeps every value.
+    const cleaned = sanitize(
+      { tags: 'a', 'tags[]': 'b' },
+      { whitelist: ['tags', 'ids'], mergeStrategy: 'keepLast' },
+    );
+    expect(cleaned.tags).toEqual(['a', 'b']);
+    expect(cleaned).not.toHaveProperty(['tags[]']);
+  });
+
+  it('still keeps only the LAST value of a non-whitelisted key spelled two ways', () => {
+    const cleaned = sanitize(
+      { sortOrder: 'asc', 'sortOrder[]': 'desc' },
+      { whitelist: ['tags', 'ids'], mergeStrategy: 'keepLast' },
+    );
+    expect(cleaned.sortOrder).toBe('desc');
+    expect(cleaned).not.toHaveProperty(['sortOrder[]']);
+  });
 });
 
 describe('hppx wiring in the REAL app (app.ts)', () => {
@@ -104,5 +126,25 @@ describe('hppx wiring in the REAL app (app.ts)', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.tags).toEqual(['alpha', 'beta', 'gamma']);
+  });
+
+  it('hands validation ONE value for a query parameter spelled two ways: the last', async () => {
+    // The last spelling asks for the NON-default order, so a result in that
+    // order tells "Zod received the scalar last value" apart from "the parameter
+    // was dropped and the default applied" (descending) and from "an array
+    // reached the enum" (400).
+    const older = await seedItem(user.id, { itemType: 'login' });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const newer = await seedItem(user.id, { itemType: 'login' });
+
+    const res = await agent
+      .get(`${API}/vault/items?sortBy=createdAt&sortOrder=desc&sortOrder[]=asc`)
+      .set('Authorization', authHeader(user.accessToken));
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((item: { _id: string }) => item._id)).toEqual([
+      String(older._id),
+      String(newer._id),
+    ]);
   });
 });

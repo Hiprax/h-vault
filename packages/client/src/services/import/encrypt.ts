@@ -4,7 +4,7 @@ import {
   MAX_ENCRYPTED_NAME_LENGTH,
 } from '@hvault/shared';
 import type { ItemType } from '@hvault/shared';
-import { z } from 'zod';
+import type { z } from 'zod';
 import { cryptoService } from '../crypto/cryptoService';
 import { encryptVaultField } from '../crypto/vaultField';
 import type { ParsedImportItem } from './types';

@@ -7,6 +7,7 @@ import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { optionalAuth } from '../src/middleware/auth.js';
 import { createTestUser, authHeader, JWT_SECRET } from './helpers.js';
+import { createModuleLogger } from '../src/utils/logger.js';
 
 /**
  * Behavioral coverage for the Passport JWT strategy and the `authenticate` /
@@ -280,6 +281,7 @@ describe('authenticate: database error path', () => {
   it('returns 500 "Authentication error" when the user lookup rejects', async () => {
     const user = await createTestUser();
     mockFindByIdRejecting(new Error('mongo unavailable'));
+    const logged = vi.spyOn(createModuleLogger('auth-middleware'), 'error');
 
     const res = await request(app)
       .get('/api/v1/user/profile')
@@ -289,6 +291,9 @@ describe('authenticate: database error path', () => {
     expect(res.status).toBe(500);
     expect(res.body.success).toBe(false);
     expect(res.body.message).toBe('Authentication error');
+    // The log line records the driver's MESSAGE, never the error object, whose
+    // own fields the logger would otherwise print in full.
+    expect(logged).toHaveBeenCalledWith('Authentication error', { error: 'mongo unavailable' });
   });
 });
 
@@ -405,6 +410,7 @@ describe('optionalAuth middleware', () => {
   it('swallows a database error and continues without a user', async () => {
     const user = await createTestUser();
     mockFindByIdRejecting(new Error('mongo unavailable'));
+    const logged = vi.spyOn(createModuleLogger('auth-middleware'), 'warn');
 
     const { req, nextArgs } = await run({ authorization: `Bearer ${user.accessToken}` });
 
@@ -412,5 +418,8 @@ describe('optionalAuth middleware', () => {
     // not authenticate anyone off the back of it.
     expect(nextArgs).toHaveLength(0);
     expect(req.user).toBeUndefined();
+    expect(logged).toHaveBeenCalledWith('Optional auth encountered an error', {
+      error: 'mongo unavailable',
+    });
   });
 });

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
+import { z } from '@hvault/shared/zod';
 import { Lock, Eye, EyeOff, LogOut, AlertCircle, Shield, Clock } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
 import { api, performTokenRefresh } from '../../services/api/client';

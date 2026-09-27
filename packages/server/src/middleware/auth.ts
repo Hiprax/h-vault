@@ -3,7 +3,7 @@ import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt';
 import type { Algorithm } from 'jsonwebtoken';
 import type { Request, Response, NextFunction } from 'express';
 import { httpErrors } from '@hiprax/errors';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { User } from '../models/User.js';
 import { evaluateAccountStatus } from '../utils/accountStatus.js';
@@ -148,7 +148,7 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
       { session: false },
       (err: unknown, user: unknown, info: unknown) => {
         if (err) {
-          logger.error('Authentication error', { error: err });
+          logger.error('Authentication error', { error: errorMessage(err) });
           next(httpErrors.internalServerError('Authentication error'));
           return;
         }
@@ -179,7 +179,7 @@ export function optionalAuth(req: Request, res: Response, next: NextFunction): v
   (
     passport.authenticate('jwt', { session: false }, (err: unknown, user: unknown) => {
       if (err) {
-        logger.warn('Optional auth encountered an error', { error: err });
+        logger.warn('Optional auth encountered an error', { error: errorMessage(err) });
         next();
         return;
       }

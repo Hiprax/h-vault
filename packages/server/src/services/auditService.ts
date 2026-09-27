@@ -1,4 +1,4 @@
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import type { ClientSession } from 'mongoose';
 import type { AuditAction } from '@hvault/shared';
 import { AuditLog } from '../models/AuditLog.js';
@@ -74,7 +74,7 @@ export async function createAuditLog(
     logger.error('Failed to persist audit log', {
       userId,
       action,
-      error: err,
+      error: errorMessage(err),
     });
   }
 }

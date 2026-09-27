@@ -1,5 +1,5 @@
 import type { DocumentMeta } from '@hvault/shared';
-import { z } from 'zod';
+import { z } from '@hvault/shared/zod';
 import {
   MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH,
   MAX_SANDBOX_CODE_LENGTH,

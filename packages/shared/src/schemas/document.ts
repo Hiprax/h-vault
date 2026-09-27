@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../zod.js';
 import { objectIdSchema, paginationSchema } from './common.js';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,

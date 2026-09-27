@@ -1156,6 +1156,95 @@ export async function waitForRendered(page: Page, mode: string): Promise<void> {
   });
 }
 
+/**
+ * Assert that a text or code preview's line numbers stay level with the lines
+ * they number.
+ *
+ * The gutter is a second `<pre>` beside the code rather than one element per
+ * line (`renderers/text.ts`), so the two columns line up only while both are
+ * drawn in ONE font, size and line height. The browser's own stylesheet gives
+ * `code` its generic monospace, which beat the inherited font and drew each code
+ * line 1px taller than its number (19.75px against 18.75px), so line 218 sat
+ * beside number 206. Two checks, one per failure shape:
+ *
+ *   - the computed font family of the code equals the gutter's. That answer does
+ *     not depend on which fonts the machine has, so it goes red everywhere;
+ *   - the first glyph of every numbered line sits level with its number, which
+ *     is the drift itself. Lines are paired by LINE NUMBER; blank lines have no
+ *     glyph to measure, and a line starting with a non-ASCII character is
+ *     skipped, since a fallback font's glyph box is not the line's.
+ *
+ * It waits for the HIGHLIGHTED tree, which replaces the plain text asynchronously,
+ * so the italic and bold token runs are part of what is measured.
+ */
+export async function expectGutterAligned(frame: Frame, minComparedLines: number): Promise<void> {
+  await expect(frame.locator('.hv-lines code.hljs')).toBeVisible({ timeout: PREVIEW_TIMEOUT_MS });
+  await expect(frame.locator('.hv-lines code .hljs-comment').first()).toBeVisible();
+
+  const report = await frame.evaluate(async () => {
+    await document.fonts.ready;
+    const firstGlyphBottoms = (root: Element | null): Map<number, number> => {
+      const bottoms = new Map<number, number>();
+      if (root === null) return bottoms;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let line = 1;
+      let atLineStart = true;
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        const text = node.textContent ?? '';
+        for (let index = 0; index < text.length; index += 1) {
+          if (text[index] === '\n') {
+            line += 1;
+            atLineStart = true;
+            continue;
+          }
+          if (!atLineStart) continue;
+          atLineStart = false;
+          if (text.charCodeAt(index) > 0x7e) continue;
+          const range = document.createRange();
+          range.setStart(node, index);
+          range.setEnd(node, index + 1);
+          bottoms.set(line, range.getBoundingClientRect().bottom);
+        }
+      }
+      return bottoms;
+    };
+    const gutter = document.querySelector('.hv-gutter');
+    const code = document.querySelector('.hv-lines code');
+    const numbers = firstGlyphBottoms(gutter);
+    const lines = firstGlyphBottoms(code);
+    let compared = 0;
+    let worstDrift = 0;
+    let worstLine = 0;
+    for (const [line, bottom] of lines) {
+      const numberBottom = numbers.get(line);
+      if (numberBottom === undefined) continue;
+      compared += 1;
+      const drift = Math.abs(numberBottom - bottom);
+      if (drift > worstDrift) {
+        worstDrift = drift;
+        worstLine = line;
+      }
+    }
+    return {
+      gutterFont: gutter === null ? null : getComputedStyle(gutter).fontFamily,
+      codeFont: code === null ? null : getComputedStyle(code).fontFamily,
+      compared,
+      worstDrift,
+      worstLine,
+    };
+  });
+
+  expect(report.gutterFont, 'no line-number gutter was rendered').not.toBeNull();
+  expect(report.codeFont, 'the code is drawn in a different font from its numbers').toBe(
+    report.gutterFont,
+  );
+  expect(report.compared).toBeGreaterThanOrEqual(minComparedLines);
+  expect(
+    report.worstDrift,
+    `line ${String(report.worstLine)} drifted from its number`,
+  ).toBeLessThan(0.5);
+}
+
 /** Back to the list, then open the next document. */
 export async function openNext(page: Page, fixture: string): Promise<void> {
   await page.getByRole('link', { name: 'Back to documents' }).click();

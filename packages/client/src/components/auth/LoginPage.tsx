@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
+import { z } from '@hvault/shared/zod';
 import { Eye, EyeOff, CheckCircle, AlertTriangle } from 'lucide-react';
 import { BrandLogo } from '../ui/BrandLogo';
 import { useAuthStore } from '../../stores/authStore';

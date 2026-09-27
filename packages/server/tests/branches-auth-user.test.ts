@@ -71,6 +71,7 @@ import {
 } from '../src/utils/email.js';
 import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
 import { hashToken } from '../src/utils/token.js';
+import { createModuleLogger } from '../src/utils/logger.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
 import { config } from '../src/config/index.js';
 import {
@@ -510,6 +511,7 @@ describe('authController — refresh fails safely when the new token cannot be w
     const createSpy = vi
       .spyOn(RefreshToken, 'create')
       .mockRejectedValueOnce(new Error('transient mongo failure') as never);
+    const logged = vi.spyOn(createModuleLogger('auth'), 'error');
 
     // The CSRF token is bound to the active refresh session, so it must be
     // minted with the refresh cookie already attached.
@@ -533,6 +535,12 @@ describe('authController — refresh fails safely when the new token cannot be w
     expect(rows).toHaveLength(1);
     expect(rows[0]!.tokenHash).toBe(hashToken(user.refreshToken));
     expect(rows[0]!.usedAt).toBeInstanceOf(Date);
+
+    // The failure is logged with the driver's MESSAGE, never the error object.
+    expect(logged).toHaveBeenCalledWith(
+      'Non-transactional refresh: failed to create new token after claiming old one',
+      { userId: user.id, error: 'transient mongo failure' },
+    );
 
     // And the spent token is still guarded: presenting it again is reuse, which
     // revokes the family rather than silently minting a session.

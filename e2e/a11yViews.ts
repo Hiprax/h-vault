@@ -92,6 +92,13 @@ export const A11Y_VIEWS = [
   { id: 'item-form-login', description: 'the create dialog, Login tab' },
   { id: 'item-form-secret', description: 'the create dialog, Secret tab' },
   { id: 'item-form-note', description: 'the create dialog, Note tab' },
+  {
+    // The same tab with a Markdown note typed in and Preview on: the one place
+    // the note's own element styles (headings, lists, a quote, code, a link) are
+    // drawn, so the one place their contrast can be measured.
+    id: 'item-form-note-preview',
+    description: 'the create dialog, Note tab, previewing a note that uses every Markdown element',
+  },
   { id: 'item-form-card', description: 'the create dialog, Card tab, billing section collapsed' },
   {
     id: 'item-form-card-billing',

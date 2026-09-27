@@ -6,7 +6,7 @@ import mongoose from 'mongoose';
 import type { HydratedDocument, UpdateQuery } from 'mongoose';
 import { TOTP, Secret } from 'otpauth';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import { config, isProduction, isTest, twoFactorEncryptionKey } from '../config/index.js';
 import { REFRESH_COOKIE_NAME, TRUSTED_DEVICE_COOKIE_NAME } from '../constants/index.js';
 import { User } from '../models/User.js';
@@ -1695,7 +1695,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
         // log in again, but reuse detection still guards the old token.
         logger.error(
           'Non-transactional refresh: failed to create new token after claiming old one',
-          { userId: storedToken.userId.toString(), error: createErr },
+          { userId: storedToken.userId.toString(), error: errorMessage(createErr) },
         );
         clearRefreshCookie(res);
         throw httpErrors.internalServerError('Failed to issue new refresh token');

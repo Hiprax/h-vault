@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '@hvault/shared/zod';
 import { hasValidEmailTld } from './utils';
 
 /**

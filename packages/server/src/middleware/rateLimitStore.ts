@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import type { Store, Options, ClientRateLimitInfo } from 'express-rate-limit';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 
 const logger = createModuleLogger('rate-limit-store');
 
@@ -120,7 +120,7 @@ export class MongoRateLimitStore implements Store {
         // loop (the guard above short-circuits before we ever get here again).
         if (this.ttlIndexAttempts < MAX_TTL_INDEX_ATTEMPTS) this.ttlIndexReady = null;
         logger.error('Rate limit store: failed to create the TTL index', {
-          error,
+          error: errorMessage(error),
           attempt: this.ttlIndexAttempts,
           givingUp: this.ttlIndexAttempts >= MAX_TTL_INDEX_ATTEMPTS,
         });

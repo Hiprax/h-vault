@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import { config } from './index.js';
 
 // Import models so schema index definitions are registered before the check.
@@ -160,7 +160,7 @@ export async function connectDatabase(): Promise<typeof mongoose> {
   });
 
   mongoose.connection.on('error', (error: unknown) => {
-    logger.error('MongoDB connection error', { error });
+    logger.error('MongoDB connection error', { error: errorMessage(error) });
   });
 
   mongoose.connection.on('reconnected', () => {
@@ -214,7 +214,7 @@ export async function disconnectDatabase(): Promise<void> {
     await mongoose.disconnect();
     logger.info('MongoDB disconnected gracefully');
   } catch (error: unknown) {
-    logger.error('Error during database disconnection', { error });
+    logger.error('Error during database disconnection', { error: errorMessage(error) });
     throw error;
   }
 }

@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
+import { z } from '@hvault/shared/zod';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../lib/lazyZxcvbn';
 import { ArrowLeft, CheckCircle, AlertCircle, AlertTriangle, Eye, EyeOff } from 'lucide-react';

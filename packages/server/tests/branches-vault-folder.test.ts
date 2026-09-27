@@ -30,6 +30,7 @@ import { Folder } from '../src/models/Folder.js';
 import { User } from '../src/models/User.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
+import { createModuleLogger } from '../src/utils/logger.js';
 import { createTestUser, authHeader, getCsrf, seedFolder, seedItem } from './helpers.js';
 import type { TestUser, CsrfPair } from './helpers.js';
 import { useReplicaSetConnection } from './mongoHarness.js';
@@ -120,6 +121,7 @@ describe('vault + folder controllers — standalone branches', () => {
         }
         return (realFolderUpdateOne as unknown as (...a: unknown[]) => unknown)(...args);
       }) as unknown as typeof Folder.updateOne);
+      const logged = vi.spyOn(createModuleLogger('vault-controller'), 'error');
 
       const res = await authed('post', '/api/v1/vault/items/bulk-reencrypt', user, csrf, agent)
         .send({
@@ -163,6 +165,12 @@ describe('vault + folder controllers — standalone branches', () => {
       expect(persistedUser!.encryptedVaultKey).toBe(ORIGINAL_VAULT_KEY);
       expect(persistedUser!.vaultKeyIv).toBe('test-vault-key-iv');
       expect(persistedUser!.rotationInProgress).toBe(false);
+      // The failure is logged with its MESSAGE (the 409's own text, which the
+      // response carries too), never the error object.
+      expect(logged).toHaveBeenCalledWith(
+        'Sequential vault key rotation failed, cleaning up rotation state',
+        { userId: String(user.id), error: res.body.message },
+      );
       // The pending wrapper SURVIVES the abort, deliberately: it is the only
       // stored copy of the key this rotation was moving to, and an abort is
       // precisely where a crash may already have sealed rows under it. Only a

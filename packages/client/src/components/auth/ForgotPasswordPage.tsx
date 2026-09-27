@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
+import { z } from '@hvault/shared/zod';
 import { ArrowLeft, CheckCircle, AlertTriangle } from 'lucide-react';
 import { BrandLogo } from '../ui/BrandLogo';
 import { forgotPasswordApi } from '../../services/api/authApi';

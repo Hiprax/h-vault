@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../zod.js';
 import { MAX_DOCUMENT_EXT_LENGTH } from '../constants/index.js';
 
 // Runtime validation for the public (unauthenticated) GET /config response.

@@ -133,7 +133,7 @@ const AUDIT_PAGE_SIZE = 20;
  * there and reported here. And the interesting views are all BEHIND a sign-in
  * that involves a 600,000-iteration key derivation, a vault key held only in
  * memory, and ciphertext that has to make a round trip; a suite that scanned only
- * what a signed-out browser can reach would miss most of the thirty-four views below.
+ * what a signed-out browser can reach would miss most of the thirty-five views below.
  *
  * ## One test, one registration
  *
@@ -141,13 +141,13 @@ const AUDIT_PAGE_SIZE = 20;
  * wall clock and the suite runs single-worker, so the whole authenticated walk
  * shares one account. Each view is a `test.step`, and every scan asserts SOFTLY
  * (`expect.soft`) so one failing view does not hide the state of the other
- * thirty-three — an accessibility report that stops at the first finding is a
- * report somebody has to run thirty-four times.
+ * thirty-four — an accessibility report that stops at the first finding is a
+ * report somebody has to run thirty-five times.
  */
 
 test.describe('accessibility: every primary view and modal', () => {
   test('has no moderate, serious or critical axe violations', async ({ page }, testInfo) => {
-    // Two 600k-iteration derivations for the sign-in, thirty-four axe runs over a
+    // Two 600k-iteration derivations for the sign-in, thirty-five axe runs over a
     // fully rendered SPA, and three real documents uploaded through the browser's
     // own AES-GCM to the storage engine the harness starts.
     // `registerAndSignInViaUI` raises the timeout to its own floor; this raises it
@@ -177,7 +177,7 @@ test.describe('accessibility: every primary view and modal', () => {
     /**
      * Scans the current DOM and records it.
      *
-     * Soft, so the walk continues: thirty-three more views are worth more than
+     * Soft, so the walk continues: thirty-four more views are worth more than
      * failing fast on the first, and the run still fails at the end.
      */
     const scan = async (view: string): Promise<void> => {
@@ -303,11 +303,58 @@ test.describe('accessibility: every primary view and modal', () => {
         for (const [tab, view] of [
           ['Secret', 'item-form-secret'],
           ['Note', 'item-form-note'],
-          ['Card', 'item-form-card'],
         ] as const) {
           await dialog.getByRole('tab', { name: tab }).click();
           await scan(view);
         }
+
+        // Still on the Note tab: a Markdown note using every element a note may
+        // contain, previewed. The preview is the one place those elements'
+        // styles are drawn, so it is where their contrast is measured. It is
+        // also the one real-browser check that a note reads the way it was
+        // typed: the author's two aligned lines keep their column, in the
+        // editor's own font, with the line break kept.
+        const editor = dialog.locator('#field-content');
+        const editorFont = await editor.evaluate((field) => getComputedStyle(field).fontFamily);
+        await editor.fill(NOTE_PREVIEW_MARKDOWN);
+        await dialog.getByRole('button', { name: 'Preview', exact: true }).click();
+        const preview = dialog.locator('.note-markdown');
+        await expect(preview.getByRole('heading', { name: 'Fine print', level: 6 })).toBeVisible();
+        const layout = await preview.evaluate((box) => {
+          const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+          let node = walker.nextNode();
+          while (node !== null && !(node.textContent ?? '').includes('Field 1:')) {
+            node = walker.nextNode();
+          }
+          const text = node?.textContent ?? '';
+          const glyph = (index: number): DOMRect => {
+            const range = document.createRange();
+            range.setStart(node as Node, index);
+            range.setEnd(node as Node, index + 1);
+            return range.getBoundingClientRect();
+          };
+          const first = text.indexOf('Test');
+          const second = text.indexOf('Test', first + 1);
+          const [upper, lower] = [glyph(first), glyph(second)];
+          return {
+            found: node !== null && first >= 0 && second > first,
+            separateLines: lower.top > upper.top,
+            columnDrift: Math.abs(lower.left - upper.left),
+            font: getComputedStyle(box).fontFamily,
+            whiteSpace: getComputedStyle(box).whiteSpace,
+          };
+        });
+        expect(layout.found, 'the aligned example is not in the preview').toBe(true);
+        expect(layout.separateLines, 'the two lines were joined into one').toBe(true);
+        expect(layout.columnDrift, 'the aligned column did not survive').toBeLessThan(0.5);
+        expect(layout.font).toBe(editorFont);
+        expect(layout.whiteSpace).toBe('pre-wrap');
+        await scan('item-form-note-preview');
+        await dialog.getByRole('button', { name: 'Edit', exact: true }).click();
+        await expect(editor).toBeVisible();
+
+        await dialog.getByRole('tab', { name: 'Card' }).click();
+        await scan('item-form-card');
 
         // Still on the Card tab: expand the billing section, then open the
         // saved-address picker inside it. Both are states no other spec scans,
@@ -654,6 +701,26 @@ test.describe('accessibility: every primary view and modal', () => {
 });
 
 // ─── Fixture helpers ─────────────────────────────────────────────────────────
+
+/**
+ * The note the Note-tab preview scan renders: the operator's aligned example,
+ * then every element a note may contain. Its headings run h3 to h6, one level at
+ * a time, so they nest under the dialog's own `h2` and the scan measures styling
+ * rather than an outline the note's author chose.
+ */
+const NOTE_PREVIEW_MARKDOWN = [
+  'Field 1:        Test\nField 123123:   Test 2',
+  '### Section',
+  '#### Sub-section',
+  '##### Detail',
+  '###### Fine print',
+  'Text with **bold**, *emphasis*, `inline code` and a [link](https://example.com).',
+  '- first\n- second',
+  '1. one\n2. two',
+  '> A quoted line',
+  '```\ncode block\n```',
+  '---',
+].join('\n\n');
 
 /**
  * Gives the signed-in account an audit history long enough to page.

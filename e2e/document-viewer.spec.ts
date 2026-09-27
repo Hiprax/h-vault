@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import {
   PREVIEW_TIMEOUT_MS,
+  expectGutterAligned,
   gotoDocuments,
   openDocument,
   openNext,
@@ -59,6 +60,7 @@ const README = 'README.md';
 const PNG = 'checker.png';
 const CSV = 'contacts.csv';
 const JSON_DOC = 'settings.json';
+const LINE_NUMBERS = 'line-numbers.py';
 const PDF = 'handbook.pdf';
 const HOSTILE = 'hostile.md';
 
@@ -66,7 +68,7 @@ test.describe('document viewer: rendering inside the isolated frame', () => {
   test('renders each supported format, refuses a PDF, and neutralises a hostile document', async ({
     page,
   }) => {
-    // Six uploads and six previews after a sign-in that costs two 600,000-iteration
+    // Seven uploads and seven previews after a sign-in that costs two 600,000-iteration
     // derivations, on a single worker, against a dev server transforming a renderer
     // per format on demand.
     test.setTimeout(600_000);
@@ -74,7 +76,7 @@ test.describe('document viewer: rendering inside the isolated frame', () => {
     await registerAndSignInViaUI(page);
     await gotoDocuments(page);
 
-    for (const fixture of [README, PNG, CSV, JSON_DOC, PDF, HOSTILE]) {
+    for (const fixture of [README, PNG, CSV, JSON_DOC, LINE_NUMBERS, PDF, HOSTILE]) {
       await uploadDocument(page, fixture);
     }
 
@@ -204,6 +206,15 @@ test.describe('document viewer: rendering inside the isolated frame', () => {
       const frame = previewFrame(page);
       await expect(frame.locator('.hv-source code')).toContainText('"autoLockMinutes": 15');
       await expect(frame.getByRole('button', { name: 'Show original' })).toBeVisible();
+    });
+
+    await test.step('line numbers stay level with the lines they number', async () => {
+      // 223 lines of highlighted Python: comments, docstrings, blank lines, tabs,
+      // and emoji and CJK text later in the lines. The drift this pins grew by a
+      // pixel a line, so by line 218 the number sat twelve lines above its code.
+      await openNext(page, LINE_NUMBERS);
+      await waitForRendered(page, 'text');
+      await expectGutterAligned(await sandboxFrame(page), 150);
     });
 
     await test.step('the PDF is download-only and gets no frame at all', async () => {

@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import { Folder } from '../models/Folder.js';
 import { VaultItem } from '../models/VaultItem.js';
 import { Document } from '../models/Document.js';
@@ -455,7 +455,7 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
     // cosmetic inconsistency that the client's tree builder and the next delete
     // both tolerate. Turning it into a 500 would report the whole operation as
     // failed when the part the caller asked for succeeded.
-    logger.warn('Failed to clean orphaned folderId references', { error: err });
+    logger.warn('Failed to clean orphaned folderId references', { error: errorMessage(err) });
   }
 
   const deleteCtx = getRequestContext(req);

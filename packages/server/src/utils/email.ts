@@ -110,6 +110,36 @@ let transporterVerified = false;
  * Runs transporter.verify() once on first sendEmail call.
  * Logs the result but never blocks the send attempt.
  */
+/** How much of a transport's failure text is kept; its replies can run long. */
+const MAX_SMTP_FAILURE_DETAIL_LENGTH = 500;
+
+/**
+ * An email address inside free text: a run of address characters on each side
+ * of one `@`. The lookbehind starts a match only at a token boundary, so each
+ * character is scanned a bounded number of times and a long reply with no `@`
+ * costs linear time, not quadratic.
+ */
+const EMBEDDED_ADDRESS = /(?<![^\s<>()[\]{},;:"'])[^\s<>()[\]{},;:"'@]+@[^\s<>()[\]{},;:"'@]+/g;
+
+/**
+ * What this module says about a transport failure, in its log line AND in the
+ * `smtp_send_failed: <details>` it returns (which every caller logs).
+ *
+ * A relay's refusal quotes the recipient ("550 5.1.1 <someone@example.com>:
+ * Recipient address rejected"), and the error object carries it again in
+ * `response` and `rejected`. So only the MESSAGE is used, every address in it
+ * goes through the shared `maskEmail` (the form this module already logs `to`
+ * in), and the result is capped.
+ */
+function smtpFailureDetail(err: unknown): string {
+  // A transport that rejects with anything but an Error has always been
+  // reported as 'Unknown error'; that part of the contract is unchanged.
+  const text = err instanceof Error ? err.message : 'Unknown error';
+  return text
+    .replace(EMBEDDED_ADDRESS, (address) => maskEmail(address))
+    .slice(0, MAX_SMTP_FAILURE_DETAIL_LENGTH);
+}
+
 async function verifyTransporterOnce(mailer: Transporter): Promise<void> {
   if (transporterVerified) return;
   transporterVerified = true;
@@ -118,8 +148,9 @@ async function verifyTransporterOnce(mailer: Transporter): Promise<void> {
     await mailer.verify();
     logger.info('SMTP transporter verification succeeded');
   } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : 'Unknown error';
-    logger.error('SMTP transporter verification failed — sends may still work', { error: errMsg });
+    logger.error('SMTP transporter verification failed — sends may still work', {
+      error: smtpFailureDetail(err),
+    });
   }
 }
 
@@ -169,9 +200,9 @@ export async function sendEmail(
     logger.info('Email sent', { to: maskEmail(to), subject });
     return { success: true, message: 'Email sent successfully.' };
   } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : 'Unknown error';
-    logger.error('Failed to send email', { to: maskEmail(to), subject, error: err });
-    return { success: false, message: `smtp_send_failed: ${errMsg}` };
+    const detail = smtpFailureDetail(err);
+    logger.error('Failed to send email', { to: maskEmail(to), subject, error: detail });
+    return { success: false, message: `smtp_send_failed: ${detail}` };
   }
 }
 

@@ -121,8 +121,19 @@ body {
  * The gutter is a SECOND `<pre>` beside the source rather than one element per
  * line: 50,000 lines would otherwise be 50,000 elements, and it is the node
  * count rather than the byte count that stops a tab responding. The two columns
- * stay aligned because they share a font, a size and a line height, and because
- * neither wraps.
+ * stay aligned only while EVERY inline box in both is drawn in one font, size
+ * and line height, and while neither wraps.
+ *
+ * The code sits in a `<code>` inside `.hv-lines`, and the browser's own
+ * stylesheet gives `code` `font-family: monospace`, which beats inheritance. So
+ * the code was drawn in the engine's default monospace while its `<pre>` (the
+ * line's strut) and the gutter used `--hv-mono`. Two fonts with different ascent
+ * and descent on one baseline make a taller line box: 19.75px against the
+ * gutter's 18.75px, measured, so the numbers fell a line behind every ~19 lines
+ * (218 sat beside 206). `.hv-lines code` below restores the one font; with it
+ * the drift is 0px over 220 lines in Chromium and Firefox at every device pixel
+ * ratio tried, emoji and CJK lines included (a fallback glyph does not grow a
+ * line box whose line height is fixed).
  * ----------------------------------------------------------------------- */
 
 .hv-source {
@@ -162,6 +173,11 @@ body {
   overflow-x: auto;
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* Undo the user agent's `code { font-family: monospace }` (see above). */
+.hv-lines code {
+  font: inherit;
 }
 
 .hv-plain .hv-lines {
