@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-27
+
 ### Changed
 
 - **Behaviour change: Markdown notes now keep your spacing and line breaks exactly as you typed them, in the editor's monospace font.** Text you line up with spaces in the note editor now lines up the same way when you view the note, a single line break stays a line break instead of joining the two lines, and a run of spaces is no longer squeezed to one. Markdown formatting still applies on top: bold, italics, headings, lists, quotes, code and links. One Markdown rule still holds: spaces at the very START of a line are not kept, and four or more of them turn the line into a code block. Use Plain Text, or a code block, when that indentation matters.
@@ -834,7 +836,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/Hiprax/h-vault/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/Hiprax/h-vault/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Hiprax/h-vault/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Hiprax/h-vault/compare/v0.11.0...v0.12.0
