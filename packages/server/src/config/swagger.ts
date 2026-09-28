@@ -10,6 +10,26 @@ import {
   MAX_PASSWORD_CLASS_MINIMUM,
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
+  MAX_RELEASE_CHANGES,
+  MAX_RELEASE_HIGHLIGHTS,
+  MAX_RELEASE_HIGHLIGHT_TITLE_LENGTH,
+  MIN_RELEASE_CHANGES,
+  MIN_RELEASE_HIGHLIGHTS,
+  MIN_RELEASE_HIGHLIGHT_TITLE_LENGTH,
+  MIN_RELEASE_SUMMARY_LENGTH,
+  MIN_RELEASE_TEXT_LENGTH,
+  MIN_RELEASE_TITLE_LENGTH,
+  MAX_RELEASE_NOTES_LISTED,
+  MAX_RELEASE_SUMMARY_LENGTH,
+  MAX_RELEASE_TEXT_LENGTH,
+  MAX_RELEASE_TITLE_LENGTH,
+  MAX_RELEASE_URL_LENGTH,
+  MAX_RELEASE_VERSION_LENGTH,
+  MAX_RELEASE_WIRE_CODE_LENGTH,
+  RELEASE_AUDIENCES,
+  RELEASE_CHANGE_KINDS,
+  RELEASE_ICONS,
+  UPDATE_STATES,
 } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
@@ -443,6 +463,11 @@ export const swaggerSpec: JsonObject = {
       name: 'Documents',
       description:
         'Encrypted document store. Present on every server; usable only where the operator has configured object storage, which GET /config advertises.',
+    },
+    {
+      name: 'Releases',
+      description:
+        'The version this server runs, its release notes, and whether a newer release is published. Signed-in only: the running version is never part of an unauthenticated response.',
     },
   ],
 
@@ -1046,6 +1071,211 @@ export const swaggerSpec: JsonObject = {
           },
           theme: { type: 'string', enum: ['light', 'dark', 'system'] },
           language: { type: 'string' },
+          showReleaseNotes: {
+            type: 'boolean',
+            description:
+              'Open the release notes by themselves on the first visit after the server is updated (default true). When false they stay one click away.',
+          },
+        },
+      },
+      ReleaseVersion: {
+        type: 'string',
+        maxLength: MAX_RELEASE_VERSION_LENGTH,
+        pattern: '^(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})$',
+        description: 'A release version, MAJOR.MINOR.PATCH, with no prefix or suffix.',
+        example: '0.15.0',
+      },
+      ReleaseHighlight: {
+        type: 'object',
+        required: ['icon', 'title', 'body'],
+        properties: {
+          icon: {
+            type: 'string',
+            maxLength: MAX_RELEASE_WIRE_CODE_LENGTH,
+            description: `One of: ${RELEASE_ICONS.join(', ')}. A client shows a neutral picture for a value it does not know, so the list may grow without breaking older clients.`,
+          },
+          title: {
+            type: 'string',
+            minLength: MIN_RELEASE_HIGHLIGHT_TITLE_LENGTH,
+            maxLength: MAX_RELEASE_HIGHLIGHT_TITLE_LENGTH,
+          },
+          body: {
+            type: 'string',
+            minLength: MIN_RELEASE_TEXT_LENGTH,
+            maxLength: MAX_RELEASE_TEXT_LENGTH,
+          },
+          audience: {
+            type: 'string',
+            enum: [...RELEASE_AUDIENCES],
+            description:
+              'Absent for everyone. `administrators` items are sent only to accounts in the update audience.',
+          },
+        },
+      },
+      ReleaseChange: {
+        type: 'object',
+        required: ['kind', 'text'],
+        properties: {
+          kind: {
+            type: 'string',
+            maxLength: MAX_RELEASE_WIRE_CODE_LENGTH,
+            description: `One of: ${RELEASE_CHANGE_KINDS.join(', ')}. May grow; a client treats an unknown kind neutrally.`,
+          },
+          text: {
+            type: 'string',
+            minLength: MIN_RELEASE_TEXT_LENGTH,
+            maxLength: MAX_RELEASE_TEXT_LENGTH,
+          },
+          audience: { type: 'string', enum: [...RELEASE_AUDIENCES] },
+        },
+      },
+      ReleaseNote: {
+        type: 'object',
+        description: 'One release, as this caller may read it. Plain text throughout.',
+        required: ['version', 'date', 'title', 'summary', 'highlights', 'changes', 'isNew'],
+        properties: {
+          version: { $ref: '#/components/schemas/ReleaseVersion' },
+          date: {
+            type: 'string',
+            format: 'date',
+            description: 'Release date (UTC), as in CHANGELOG.md.',
+          },
+          title: {
+            type: 'string',
+            minLength: MIN_RELEASE_TITLE_LENGTH,
+            maxLength: MAX_RELEASE_TITLE_LENGTH,
+          },
+          summary: {
+            type: 'string',
+            minLength: MIN_RELEASE_SUMMARY_LENGTH,
+            maxLength: MAX_RELEASE_SUMMARY_LENGTH,
+          },
+          highlights: {
+            type: 'array',
+            minItems: MIN_RELEASE_HIGHLIGHTS,
+            maxItems: MAX_RELEASE_HIGHLIGHTS,
+            items: { $ref: '#/components/schemas/ReleaseHighlight' },
+          },
+          changes: {
+            type: 'array',
+            minItems: MIN_RELEASE_CHANGES,
+            maxItems: MAX_RELEASE_CHANGES,
+            items: { $ref: '#/components/schemas/ReleaseChange' },
+          },
+          isNew: {
+            type: 'boolean',
+            description: 'Newer than the release notes this account last acknowledged.',
+          },
+        },
+      },
+      UpdateStatus: {
+        type: 'object',
+        description:
+          'What the server last learned from GitHub about newer releases. Sent only to accounts in the update audience (UPDATE_NOTIFY_EMAILS, or every account when it is unset).',
+        required: [
+          'state',
+          'latestVersion',
+          'publishedAt',
+          'releaseUrl',
+          'lastCheckedAt',
+          'lastSuccessAt',
+          'canCheckNow',
+        ],
+        properties: {
+          state: {
+            type: 'string',
+            maxLength: MAX_RELEASE_WIRE_CODE_LENGTH,
+            description: `One of: ${UPDATE_STATES.join(', ')}. \`current\` requires a successful check within the last 72 hours; an older or absent success reads \`unknown\`.`,
+          },
+          latestVersion: {
+            type: 'string',
+            nullable: true,
+            maxLength: MAX_RELEASE_VERSION_LENGTH,
+            description: 'The newest release the last successful check found.',
+          },
+          publishedAt: { type: 'string', format: 'date-time', nullable: true },
+          releaseUrl: {
+            type: 'string',
+            nullable: true,
+            maxLength: MAX_RELEASE_URL_LENGTH,
+            description: 'The release page, built by the server from its configuration.',
+          },
+          lastCheckedAt: { type: 'string', format: 'date-time', nullable: true },
+          lastSuccessAt: { type: 'string', format: 'date-time', nullable: true },
+          canCheckNow: { type: 'boolean', description: 'False while checks are turned off.' },
+        },
+      },
+      ReleaseStatus: {
+        type: 'object',
+        required: ['version', 'releaseUrl', 'releaseNotes', 'update'],
+        properties: {
+          version: { $ref: '#/components/schemas/ReleaseVersion' },
+          releaseUrl: {
+            type: 'string',
+            maxLength: MAX_RELEASE_URL_LENGTH,
+            description: "The running version's release page.",
+          },
+          releaseNotes: {
+            type: 'object',
+            required: ['seenVersion', 'unseenCount', 'showOnUpdate'],
+            properties: {
+              seenVersion: { $ref: '#/components/schemas/ReleaseVersion' },
+              unseenCount: { type: 'integer', minimum: 0 },
+              showOnUpdate: { type: 'boolean', description: 'The showReleaseNotes setting.' },
+            },
+          },
+          update: {
+            // `type` beside `nullable`: OpenAPI 3.0.3 gives `nullable` no effect without it.
+            type: 'object',
+            allOf: [{ $ref: '#/components/schemas/UpdateStatus' }],
+            nullable: true,
+            description: 'Null for an account outside the update audience.',
+          },
+        },
+      },
+      ReleaseNotesList: {
+        type: 'object',
+        required: ['version', 'seenVersion', 'releases'],
+        properties: {
+          version: { $ref: '#/components/schemas/ReleaseVersion' },
+          seenVersion: { $ref: '#/components/schemas/ReleaseVersion' },
+          releases: {
+            type: 'array',
+            maxItems: MAX_RELEASE_NOTES_LISTED,
+            description: 'Newest first.',
+            items: { $ref: '#/components/schemas/ReleaseNote' },
+          },
+        },
+      },
+      MarkReleaseNotesSeenRequest: {
+        type: 'object',
+        required: ['version'],
+        properties: {
+          version: {
+            allOf: [{ $ref: '#/components/schemas/ReleaseVersion' }],
+            description:
+              'The newest release whose notes were shown. A version newer than the server is stored as the server version; an older one than already stored changes nothing.',
+          },
+        },
+      },
+      ReleaseNotesSeen: {
+        type: 'object',
+        required: ['seenVersion', 'unseenCount'],
+        properties: {
+          seenVersion: { $ref: '#/components/schemas/ReleaseVersion' },
+          unseenCount: { type: 'integer', minimum: 0 },
+        },
+      },
+      UpdateCheckResult: {
+        type: 'object',
+        required: ['update', 'fetched'],
+        properties: {
+          update: { $ref: '#/components/schemas/UpdateStatus' },
+          fetched: {
+            type: 'boolean',
+            description:
+              'False when the answer came from the stored state: a check ran within the last five minutes, or one is running now.',
+          },
         },
       },
       ChangePasswordRequest: {
@@ -3662,6 +3892,78 @@ export const swaggerSpec: JsonObject = {
           409: staleVaultKeyConflict(
             'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress; a backup carrying a field sealed to its row (an IV beginning `v2:`), which only a client that could not open it sends unchanged and which a restore under a fresh id would leave unreadable; and, before the body is read, a restore or key rotation this account already has in flight.' +
               RESEAL_LOCK_BUSY,
+          ),
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/releases/status': {
+      get: {
+        operationId: 'getReleaseStatus',
+        tags: ['Releases'],
+        summary: 'Get the running version and release-notes state',
+        description:
+          'The version this server runs, how many releases this account has not yet read the notes of, whether they open by themselves, and, for accounts in the update audience only, what the server last learned about newer releases. Rate limited: 60 req/user per minute (shared).',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: jsonEnvelope('Release status', { $ref: '#/components/schemas/ReleaseStatus' }),
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/releases/notes': {
+      get: {
+        operationId: 'listReleaseNotes',
+        tags: ['Releases'],
+        summary: 'List the release notes',
+        description:
+          'Every release up to the running version, newest first, as this account may read them: administrator-only items are left out for accounts outside the update audience, and a release left with no highlight to show is left out whole. Rate limited: 60 req/user per minute (shared).',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: jsonEnvelope('Release notes', { $ref: '#/components/schemas/ReleaseNotesList' }),
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/releases/seen': {
+      post: {
+        operationId: 'markReleaseNotesSeen',
+        tags: ['Releases'],
+        summary: 'Acknowledge the release notes',
+        description:
+          'Records that this account read the notes up to `version`. Moves forward only and never past the running version. Rate limited: 60 req/user per minute (shared).',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: jsonRequestBody('MarkReleaseNotesSeenRequest'),
+        responses: {
+          200: jsonEnvelope('The stored watermark', {
+            $ref: '#/components/schemas/ReleaseNotesSeen',
+          }),
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/releases/update-check': {
+      post: {
+        operationId: 'checkForUpdateNow',
+        tags: ['Releases'],
+        summary: 'Check GitHub for a newer release now',
+        description:
+          'For accounts in the update audience. Asks GitHub at most once every five minutes, whoever calls it, and otherwise answers from the stored state. Rate limited: 60 req/user per minute (shared).',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        responses: {
+          200: jsonEnvelope('The update status', {
+            $ref: '#/components/schemas/UpdateCheckResult',
+          }),
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: errorResponse(
+            "The account is not one of this server's administrators for release news",
+          ),
+          409: errorResponse(
+            'Update checks are turned off on this server (UPDATE_CHECK_ENABLED=false)',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },

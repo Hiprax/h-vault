@@ -168,6 +168,9 @@ export function productionEnv({ port, mongoUri, origin, extra = {} }) {
     SMTP_HOST: '',
     SMTP_USER: '',
     SMTP_PASS: '',
+    // The booted artifact asks GitHub for the newest release unless told not to;
+    // a gate must neither depend on nor contact a host on the internet.
+    UPDATE_CHECK_ENABLED: 'false',
     ...extra,
   };
 }

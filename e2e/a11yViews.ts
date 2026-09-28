@@ -212,6 +212,14 @@ export const A11Y_VIEWS = [
     description:
       'the documents page after a bulk export run offline, settled on its summary with the failure list showing',
   },
+  {
+    id: 'about-page',
+    description: 'About H-Vault: the version, the what-is-new preference and the release history',
+  },
+  {
+    id: 'whats-new-dialog',
+    description: 'the What is new dialog, opened from the version in the sidebar',
+  },
   { id: 'unlock-screen', description: 'the unlock screen, vault locked' },
   {
     // THE ONE ENTRY THAT IS NOT A VIEW OF THIS APPLICATION, and its reason is a

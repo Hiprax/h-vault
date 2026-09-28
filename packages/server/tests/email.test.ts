@@ -583,6 +583,103 @@ describe('Email utility', () => {
       expect(mockSendMail).not.toHaveBeenCalled();
     });
   });
+
+  // ── isEmailConfigured ────────────────────────────────────────────────────
+
+  describe('isEmailConfigured', () => {
+    it('is true for SMTP with a host, and for Gmail with both credentials', async () => {
+      expect((await importWithSmtp()).isEmailConfigured()).toBe(true);
+      expect((await importWithGmail()).isEmailConfigured()).toBe(true);
+    });
+
+    it('is false with no provider configured, and builds no transport and logs nothing', async () => {
+      const { isEmailConfigured } = await importWithoutEmail();
+      expect(isEmailConfigured()).toBe(false);
+      expect(mockCreateTransport).not.toHaveBeenCalled();
+      expect(mockLog.warn).not.toHaveBeenCalled();
+    });
+
+    it('is false for Gmail without its credentials', async () => {
+      process.env['EMAIL_PROVIDER'] = 'gmail';
+      delete process.env['GMAIL_USERNAME'];
+      delete process.env['GMAIL_PASSWORD'];
+      delete process.env['SMTP_HOST'];
+      delete process.env['SMTP_USER'];
+      delete process.env['SMTP_PASS'];
+      const { isEmailConfigured } = await freshImport();
+      expect(isEmailConfigured()).toBe(false);
+    });
+  });
+
+  // ── sendUpdateAvailableEmail ─────────────────────────────────────────────
+
+  describe('sendUpdateAvailableEmail', () => {
+    const update = {
+      current: '0.15.0',
+      latest: '0.16.0',
+      publishedAt: new Date('2026-10-02T08:30:00Z'),
+      releaseUrl: 'https://github.com/Hiprax/h-vault/releases/tag/v0.16.0',
+    };
+
+    it('sends one message naming both versions, the date, the release and the update steps', async () => {
+      const { sendUpdateAvailableEmail } = await importWithSmtp();
+
+      const result = await sendUpdateAvailableEmail('admin@example.com', update);
+
+      expect(result.success).toBe(true);
+      expect(mockSendMail).toHaveBeenCalledTimes(1);
+      const message = (mockSendMail as Mock).mock.calls[0]?.[0] as {
+        to: string;
+        subject: string;
+        html: string;
+      };
+      expect(message.to).toBe('admin@example.com');
+      expect(message.subject).toBe('H-Vault 0.16.0 is available');
+      expect(message.html).toContain(
+        '<h1 style="margin: 0 0 12px; font-size: 20px;">H-Vault 0.16.0 is available</h1>',
+      );
+      expect(message.html).toContain(
+        'This server runs H-Vault 0.15.0. A newer release, 0.16.0, is out.',
+      );
+      expect(message.html).toContain('It was published on 2026-10-02.');
+      expect(message.html).toContain(`href="${update.releaseUrl}"`);
+      expect(message.html).toContain('# set HVAULT_VERSION=0.16.0 in .env, then:');
+      expect(message.html).toContain('docker compose up -d --build --wait');
+      expect(message.html).toContain('href="http://localhost:5000/settings/about"');
+      expect(message.html).toContain('listed in UPDATE_NOTIFY_EMAILS');
+    });
+
+    it('leaves the date sentence out when the release has no publication time', async () => {
+      const { sendUpdateAvailableEmail } = await importWithSmtp();
+      await sendUpdateAvailableEmail('admin@example.com', { ...update, publishedAt: null });
+      const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+      expect(html).toContain('A newer release, 0.16.0, is out.\n');
+      expect(html).not.toContain('published on');
+    });
+
+    it('escapes every interpolated value', async () => {
+      const { sendUpdateAvailableEmail } = await importWithSmtp();
+      await sendUpdateAvailableEmail('admin@example.com', {
+        current: '<i>1</i>',
+        latest: '<b>2</b>',
+        publishedAt: null,
+        releaseUrl: 'https://github.com/x/y/releases/tag/v2" onmouseover="alert(1)',
+      });
+      const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+      expect(html).not.toContain('<b>2</b>');
+      expect(html).not.toContain('<i>1</i>');
+      expect(html).toContain('&lt;b&gt;2&lt;/b&gt;');
+      expect(html).toContain('&lt;i&gt;1&lt;/i&gt;');
+      expect(html).not.toContain('" onmouseover="');
+    });
+
+    it('reports a failure when email is not configured', async () => {
+      const { sendUpdateAvailableEmail } = await importWithoutEmail();
+      const result = await sendUpdateAvailableEmail('admin@example.com', update);
+      expect(result).toEqual({ success: false, message: 'transporter_not_configured' });
+      expect(mockSendMail).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ── escapeHtml utility ──────────────────────────────────────────────────

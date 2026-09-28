@@ -73,6 +73,10 @@ const E2E_ENV: Record<string, string> = {
   GMAIL_PASSWORD: '',
   MAX_DOCUMENT_SIZE_MB: String(MAX_DOCUMENT_SIZE_MB),
   DOCUMENT_STORAGE_QUOTA_MB_PER_USER: String(DOCUMENT_STORAGE_QUOTA_MB_PER_USER),
+  // No release check against GitHub from a test run: the suites drive the update
+  // notice through a stubbed status response, and a test run must not depend on,
+  // or send anything to, a host on the internet.
+  UPDATE_CHECK_ENABLED: 'false',
 };
 
 /**

@@ -24,6 +24,7 @@ import { Migration } from '../src/models/Migration.js';
 import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
 import { Document } from '../src/models/Document.js';
 import { DocumentUpload } from '../src/models/DocumentUpload.js';
+import { UpdateCheckState } from '../src/models/UpdateCheckState.js';
 
 export const indexedModels = [
   { name: 'User', model: User },
@@ -38,4 +39,5 @@ export const indexedModels = [
   { name: 'PwnedRangeCache', model: PwnedRangeCache },
   { name: 'Document', model: Document },
   { name: 'DocumentUpload', model: DocumentUpload },
+  { name: 'UpdateCheckState', model: UpdateCheckState },
 ];

@@ -7,7 +7,13 @@ import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   MAX_DOCUMENT_EXT_LENGTH,
   MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
+  emailSchema,
 } from '@hvault/shared';
+import {
+  DEFAULT_UPDATE_CHECK_REPOSITORY,
+  GITHUB_REPOSITORY_PATTERN,
+  MAX_UPDATE_NOTIFY_EMAILS,
+} from '../constants/index.js';
 import { createModuleLogger } from '../utils/logger.js';
 
 // Resolve .env from the monorepo root (4 levels up from packages/server/src/config/).
@@ -457,6 +463,54 @@ const envSchema = z
       .enum(['true', 'false', ''])
       .optional()
       .transform((val) => val === 'true'),
+
+    // Release check (`jobs/updateCheck.ts`). Whether the server asks GitHub, twice
+    // a day, for the newest published release. ON by default, like
+    // S3_FORCE_PATH_STYLE: only the explicit string `false` turns it off, an empty
+    // assignment keeps the default, and anything else refuses to boot rather than
+    // guessing what `0` or `off` was meant to say.
+    UPDATE_CHECK_ENABLED: z
+      .enum(['true', 'false', ''])
+      .optional()
+      .transform((val) => val !== 'false'),
+    // The GitHub repository whose releases the check reads, as `owner/name`; a fork
+    // points it at itself. Only this PATH is configurable: the host is a constant,
+    // so no setting can aim the server's outbound request anywhere but GitHub.
+    UPDATE_CHECK_REPOSITORY: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z
+        .string()
+        .regex(GITHUB_REPOSITORY_PATTERN, {
+          message: 'UPDATE_CHECK_REPOSITORY must be owner/name, for example Hiprax/h-vault',
+        })
+        .refine((v) => !['.', '..'].includes(v.split('/')[1] ?? ''), {
+          message: 'UPDATE_CHECK_REPOSITORY must name a repository, not . or ..',
+        })
+        .default(DEFAULT_UPDATE_CHECK_REPOSITORY),
+    ),
+    // Comma-separated account emails that count as this server's administrators
+    // for release news. When set, only these accounts see update information in
+    // the app and the administrator-only release notes, and each receives one email
+    // per newer release (when SMTP is configured). When unset, every signed-in
+    // account sees update information and nobody is emailed. Normalised before
+    // validation: blanks around commas and empty entries are dropped, then each
+    // address is lower-cased (as account emails are stored) and duplicates removed.
+    UPDATE_NOTIFY_EMAILS: z.preprocess(
+      (v) =>
+        typeof v === 'string'
+          ? v
+              .split(',')
+              .map((entry) => entry.trim())
+              .filter((entry) => entry !== '')
+          : v,
+      z
+        .array(emailSchema)
+        .max(MAX_UPDATE_NOTIFY_EMAILS, {
+          message: `UPDATE_NOTIFY_EMAILS accepts at most ${String(MAX_UPDATE_NOTIFY_EMAILS)} addresses`,
+        })
+        .default([])
+        .transform((list) => [...new Set(list)]),
+    ),
 
     // Metrics authentication token (min 16 chars when set).
     // When set, the /metrics endpoint requires an `x-metrics-token` header matching this value.

@@ -32,6 +32,12 @@ export const AUTO_LOCK_MAX_MINUTES = 1440;
 export const LOCK_ON_HIDDEN_DEFAULT = false;
 export const LOCK_ON_HIDDEN_DELAY_MINUTES = 1;
 
+// Whether the release notes open by themselves on the first visit after the
+// server is updated. On by default: the notes are how a user learns that a
+// behaviour they rely on changed. The user can turn it off; the notes then stay
+// one click away, behind the version in the sidebar.
+export const SHOW_RELEASE_NOTES_DEFAULT = true;
+
 export const CLIPBOARD_CLEAR_SECONDS = 30;
 // Bounds for the user-configurable `clipboardClearTimeout` setting. Exported so
 // the wire schema (`updateSettingsSchema`) and the client-side erase scheduler
@@ -1200,3 +1206,105 @@ export const PAGINATION_DEFAULTS = {
   LIMIT: 50,
   MAX_LIMIT: 200,
 } as const;
+
+// ── Release notes and update checks ──────────────────────────────────
+
+/**
+ * A release version as this project names them: MAJOR.MINOR.PATCH, digits only,
+ * no leading zero, at most six digits a part, and no prerelease or build suffix
+ * (the release pipeline refuses to cut one, see `scripts/ci/lib/version.mjs`).
+ *
+ * The ONE definition, read by `parseReleaseVersion`, by every wire schema that
+ * carries a version, and by the server's release-notes content test. Anything it
+ * refuses is refused everywhere; nothing downstream is left to interpret "1.2",
+ * "v1.2.3" or "1.2.3-rc.1" in its own way.
+ */
+export const RELEASE_VERSION_PATTERN = /^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/;
+/** The longest string that can match {@link RELEASE_VERSION_PATTERN}, with room to spare. */
+export const MAX_RELEASE_VERSION_LENGTH = 20;
+
+/**
+ * What a release-notes item describes. Mirrors the CHANGELOG headings, with
+ * `Changed` split in two: `improved` is the same thing done better, `changed` is
+ * behaviour a user will notice is different.
+ */
+export const RELEASE_CHANGE_KINDS = ['added', 'improved', 'changed', 'fixed', 'security'] as const;
+export type ReleaseChangeKind = (typeof RELEASE_CHANGE_KINDS)[number];
+
+/** The closed set of pictures a release-notes highlight may carry. */
+export const RELEASE_ICONS = [
+  'sparkles',
+  'shield',
+  'key',
+  'lock',
+  'file',
+  'folder',
+  'clock',
+  'bell',
+  'gauge',
+  'eye',
+  'scan',
+  'note',
+  'upload',
+  'download',
+  'refresh',
+  'server',
+  'palette',
+  'search',
+  'wrench',
+  'smartphone',
+  'mail',
+  'clipboard',
+  'timer',
+  'database',
+] as const;
+export type ReleaseIcon = (typeof RELEASE_ICONS)[number];
+
+/**
+ * Who a release-notes item is for. `administrators` marks what only the person
+ * running the server acts on (configuration, deployment, logs); those items are
+ * withheld from accounts outside the update audience.
+ */
+export const RELEASE_AUDIENCES = ['everyone', 'administrators'] as const;
+export type ReleaseAudience = (typeof RELEASE_AUDIENCES)[number];
+
+/**
+ * What the server can say about newer releases:
+ *
+ *  - `current`   a recent check found nothing newer than this server;
+ *  - `available` a recent check found a newer release;
+ *  - `unknown`   no recent successful check, so nothing is claimed either way;
+ *  - `disabled`  the operator turned the check off.
+ *
+ * `current` is never inferred from silence: a check that last succeeded long ago
+ * reads as `unknown`, because "you are up to date" is a claim, not a default.
+ */
+export const UPDATE_STATES = ['current', 'available', 'unknown', 'disabled'] as const;
+export type UpdateState = (typeof UPDATE_STATES)[number];
+
+// Bounds on one release-notes entry. Every text has a MINIMUM as well as a
+// maximum and every list at least one element, so an entry that has lost its
+// content is refused rather than rendered as an empty card.
+export const MIN_RELEASE_TITLE_LENGTH = 3;
+export const MAX_RELEASE_TITLE_LENGTH = 90;
+export const MIN_RELEASE_SUMMARY_LENGTH = 10;
+export const MAX_RELEASE_SUMMARY_LENGTH = 400;
+export const MIN_RELEASE_HIGHLIGHT_TITLE_LENGTH = 3;
+export const MAX_RELEASE_HIGHLIGHT_TITLE_LENGTH = 70;
+export const MIN_RELEASE_TEXT_LENGTH = 10;
+export const MAX_RELEASE_TEXT_LENGTH = 320;
+export const MIN_RELEASE_HIGHLIGHTS = 1;
+export const MAX_RELEASE_HIGHLIGHTS = 4;
+export const MIN_RELEASE_CHANGES = 1;
+export const MAX_RELEASE_CHANGES = 16;
+/**
+ * The longest kind, icon or update-state code the client accepts. Those travel
+ * as bounded STRINGS rather than as enums, so a tab still running the previous
+ * release can read a newer server's notes: an unknown code gets a neutral
+ * fallback instead of failing the whole response.
+ */
+export const MAX_RELEASE_WIRE_CODE_LENGTH = 32;
+/** The most entries one release-notes response may carry. */
+export const MAX_RELEASE_NOTES_LISTED = 500;
+/** The longest release link the client accepts. */
+export const MAX_RELEASE_URL_LENGTH = 300;

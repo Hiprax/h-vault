@@ -309,7 +309,8 @@ services:
     networks:
       # This is the ONE container on both tiers, so it is also the one whose DEFAULT
       # ROUTE decides how its outbound traffic leaves — SMTP (verification, reset,
-      # unlock and backup mail) and the HIBP breach-check API.
+      # unlock and backup mail), the HIBP breach-check API and the GitHub release
+      # check (UPDATE_CHECK_ENABLED).
       #
       # The field is `gw_priority`, NOT `priority`, and the difference is the whole
       # point: `priority` only orders the network ATTACHMENTS and has no say in which
@@ -326,7 +327,8 @@ services:
       # silently moves to whichever gateway Docker picks — as the measurement above
       # shows it does.
       #
-      # edge: reachable by Nginx, and the route out for SMTP + the HIBP breach API.
+      # edge: reachable by Nginx, and the route out for SMTP, the HIBP breach API
+      #       and the GitHub release check.
       # data: reach MongoDB (which has no egress of its own).
       edge:
         gw_priority: 100
@@ -731,7 +733,8 @@ services:
 
 # --- networks ----------------------------------------------------------------
 # Two networks separate the public-facing edge from the data tier:
-#   edge — Nginx <-> app, plus the app's outbound route (SMTP, the HIBP breach API).
+#   edge — Nginx <-> app, plus the app's outbound route (SMTP, the HIBP breach API,
+#          the GitHub release check).
 #          Nginx never joins `data`, so it cannot reach MongoDB.
 #   data — app/bootstrap <-> MongoDB, and app <-> the object storage engine.
 #          `internal: true` denies this tier any route to the internet, so neither

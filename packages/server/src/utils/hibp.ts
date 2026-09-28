@@ -43,8 +43,9 @@ export function stripPaddingRows(body: string): string {
  * and a bounded timeout. The caller is responsible for validating `prefix`
  * against the 5-hex-char format before calling.
  *
- * The response is also SIZE-bounded. This is the server's only outbound HTTP
- * call, its whole body is buffered into a string before anything inspects it,
+ * The response is also SIZE-bounded. This is one of the server's two outbound
+ * HTTP calls (the other, the release check in `updateCheck.ts`, is bounded the
+ * same way), its whole body is buffered into a string before anything inspects it,
  * and the batch endpoint runs `HIBP_FANOUT_CONCURRENCY` of them at once — so an
  * anomalous or hostile upstream body is a memory-exhaustion vector against a
  * container with a 1g limit. `axios` defaults both length limits to `-1` and

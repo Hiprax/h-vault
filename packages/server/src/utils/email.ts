@@ -154,6 +154,19 @@ async function verifyTransporterOnce(mailer: Transporter): Promise<void> {
   }
 }
 
+/**
+ * Whether an email provider is configured at all, WITHOUT building a transport or
+ * logging. For a background sender that must stay silent when email is off,
+ * rather than warning on every run the way {@link sendEmail} does for a send that
+ * a user asked for.
+ */
+export function isEmailConfigured(): boolean {
+  if (config.EMAIL_PROVIDER === 'gmail') {
+    return Boolean(config.GMAIL_USERNAME && config.GMAIL_PASSWORD);
+  }
+  return Boolean(config.SMTP_HOST);
+}
+
 // ── Generic send ───────────────────────────────────────────────────────
 
 /**
@@ -370,4 +383,66 @@ export async function sendAccountUnlockEmail(email: string, token: string): Prom
   `.trim();
 
   return sendEmail(email, 'Your H-Vault account has been locked', html);
+}
+
+/** What the update-available email says. */
+export interface UpdateAvailableEmail {
+  /** The version this server runs. */
+  current: string;
+  /** The newer release the check found. */
+  latest: string;
+  publishedAt: Date | null;
+  /** The release page, built by the server from configuration. */
+  releaseUrl: string;
+}
+
+/**
+ * Tells one of the server's administrators (`UPDATE_NOTIFY_EMAILS`) that a newer
+ * release is published. Sent at most once per release, by the release check.
+ * Every interpolated value is escaped, although each one is either a validated
+ * version or a URL the server built itself.
+ */
+export async function sendUpdateAvailableEmail(
+  email: string,
+  update: UpdateAvailableEmail,
+): Promise<EmailResult> {
+  const latest = escapeHtml(update.latest);
+  const current = escapeHtml(update.current);
+  const releaseUrl = escapeHtml(update.releaseUrl);
+  const aboutUrl = escapeHtml(`${config.APP_URL}/settings/about`);
+  const published =
+    update.publishedAt === null
+      ? ''
+      : ` It was published on ${escapeHtml(update.publishedAt.toISOString().slice(0, 10))}.`;
+
+  const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head><meta charset="UTF-8"><title>H-Vault ${latest} is available</title></head>
+    <body style="margin: 0; padding: 24px; background: #f6f7f9; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; color: #1f2937;">
+      <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 28px;">
+        <h1 style="margin: 0 0 12px; font-size: 20px;">H-Vault ${latest} is available</h1>
+        <p style="margin: 0 0 16px; line-height: 1.6;">
+          This server runs H-Vault ${current}. A newer release, ${latest}, is out.${published}
+        </p>
+        <p style="margin: 0 0 24px;">
+          <a href="${releaseUrl}" style="display: inline-block; padding: 10px 22px; border-radius: 6px; background: #1d4ed8; color: #ffffff; font-weight: 600; text-decoration: none;">Read the release notes</a>
+        </p>
+        <p style="margin: 0 0 8px; line-height: 1.6;">To update a Docker installation, run these in its directory:</p>
+        <pre style="margin: 0 0 16px; padding: 12px 14px; border-radius: 6px; background: #111827; color: #f9fafb; font-size: 13px; line-height: 1.6; white-space: pre-wrap;">git pull
+# set HVAULT_VERSION=${latest} in .env, then:
+docker compose up -d --build --wait</pre>
+        <p style="margin: 0 0 16px; line-height: 1.6;">
+          H-Vault also shows this under <a href="${aboutUrl}" style="color: #1d4ed8;">Settings, About H-Vault</a>.
+        </p>
+        <p style="margin: 0; font-size: 12px; line-height: 1.6; color: #6b7280;">
+          You receive this because your address is listed in UPDATE_NOTIFY_EMAILS on this server.
+          Remove it there to stop these emails. The server sends one per release.
+        </p>
+      </div>
+    </body>
+    </html>
+  `.trim();
+
+  return sendEmail(email, `H-Vault ${update.latest} is available`, html);
 }

@@ -9,6 +9,8 @@ import {
   CLIPBOARD_CLEAR_SECONDS,
   DEFAULT_PASSWORD_LENGTH,
   MAX_BACKUP_EMAILS,
+  MAX_RELEASE_VERSION_LENGTH,
+  SHOW_RELEASE_NOTES_DEFAULT,
 } from '@hvault/shared';
 import type { Theme, BackupStatus } from '@hvault/shared';
 
@@ -52,6 +54,7 @@ export interface IUserSettings {
   defaultPasswordOptions: IPasswordGenOptions;
   theme: Theme;
   language: string;
+  showReleaseNotes: boolean;
   backup: IBackupSettingsDoc;
 }
 
@@ -132,6 +135,22 @@ export interface IUser {
    * `?? 0`.
    */
   vaultKeyVersion?: number | undefined;
+  /**
+   * The newest release whose notes this account has acknowledged: the "what's
+   * new" watermark.
+   *
+   * Written at registration (to the release the account was created on, so a new
+   * account is never shown the history it arrived after) and afterwards only by
+   * `POST /releases/seen`, which moves it FORWARD only and never past the running
+   * version. An account created before the field existed has none, and reads as
+   * `RELEASE_NOTES_BASELINE_VERSION`: the release before the notes shipped, so it
+   * is shown them once.
+   *
+   * `select: false` because exactly one controller reads it and the profile route
+   * spreads the whole document: this keeps the watermark out of the profile
+   * response instead of relying on every future reader to drop it.
+   */
+  releaseNotesSeenVersion?: string | undefined;
   deletionPending?: boolean | undefined;
   passwordChangedAt: Date;
   settings: IUserSettings;
@@ -255,6 +274,7 @@ const userSettingsSchema = new Schema<IUserSettings>(
     },
     theme: { type: String, enum: ['light', 'dark', 'system'], default: 'system' },
     language: { type: String, default: 'en' },
+    showReleaseNotes: { type: Boolean, default: SHOW_RELEASE_NOTES_DEFAULT },
     backup: { type: backupSettingsSchema, default: () => ({}) },
   },
   { _id: false },
@@ -321,6 +341,16 @@ const userSchema = new Schema<IUser>(
     // indistinguishable from one that has never rotated — which is exactly what it
     // is. See the field's docblock on `IUser` for why it is typed optional anyway.
     vaultKeyVersion: { type: Number, default: 0 },
+    // No schema default, deliberately: a HYDRATED read applies defaults, so a
+    // default here would make every legacy account look as if it had seen the
+    // current notes, and the next `save()` of such a document would persist that.
+    // Registration writes the value explicitly instead.
+    releaseNotesSeenVersion: {
+      type: String,
+      select: false,
+      maxlength: MAX_RELEASE_VERSION_LENGTH,
+      default: undefined,
+    },
     deletionPending: { type: Boolean, default: undefined },
     passwordChangedAt: { type: Date, required: true, default: () => new Date(0) },
     settings: { type: userSettingsSchema, default: () => ({}) },

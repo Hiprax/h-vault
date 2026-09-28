@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **What's new, after every update.** The first time you sign in after the server is updated, H-Vault shows what changed in plain words: the new release in full, every release you missed marked "New for you", and older releases below. Closing it records on the server that you have read it, so it does not open again on another device; a new account starts caught up and is never shown history it did not live through. Accounts created before this release are shown this release's notes once. A setting, "Show what's new after an update", turns the automatic opening off; the notes then stay one click away, and a dot beside the version marks anything unread.
+- **The version, in the sidebar and on a new About H-Vault page.** The version at the foot of the sidebar opens "What's new". Settings, About H-Vault shows the version, its release date and its release page on GitHub, the "What's new" preference, and the full release history, searchable and filterable by kind of change. The version reaches the browser only after sign-in; no unauthenticated response and no public script carries it.
+- **The server now tells its administrators when a newer release is published.** It asks the GitHub API twice a day for the newest published release (a fixed request that carries no user data and not the running version). When one is newer, administrators see a notice with the update steps, the version in the sidebar says "New release", the server logs it, and About H-Vault offers "Check now". Three settings control it: `UPDATE_CHECK_ENABLED` (on by default), `UPDATE_CHECK_REPOSITORY` (the repository to read, `Hiprax/h-vault` by default, for forks) and `UPDATE_NOTIFY_EMAILS` (up to ten account emails; when set, only those accounts see update information and the administrator-only release notes, and each is emailed once per newer release if email is configured; when unset, every signed-in account sees update information and nobody is emailed). "Up to date" is only ever said after a successful check within the last 72 hours.
+- **Four API routes under `/api/v1/releases`**, all signed-in only: `GET /status`, `GET /notes`, `POST /seen` and `POST /update-check`. `PUT /user/settings` accepts `showReleaseNotes`.
+
+### Changed
+
+- **Behaviour change: the server now contacts `api.github.com` twice a day to check for a newer release.** It is on by default after this update. Set `UPDATE_CHECK_ENABLED=false` in `.env` to turn it off; the app then says that update checks are turned off. The Docker stack's app container already has the outbound route this needs.
+- **The update prompt names the version that is ready** when the server was updated while a tab was open, and such a tab now fetches the new build as soon as it notices, instead of at its next hourly check.
+
+### Fixed
+
+- **Dark-theme colours now follow the app's theme setting everywhere.** Some colours (the connection indicator, status text, banners) followed the operating system's light or dark mode instead, so with the app set to dark on a light system, or the reverse, parts of a screen showed the other theme's colours.
+
 ## [0.14.1] - 2026-09-27
 
 ### Changed

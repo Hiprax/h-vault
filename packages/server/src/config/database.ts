@@ -23,6 +23,7 @@ import '../models/PwnedRangeCache.js';
 import '../models/Migration.js';
 import '../models/Document.js';
 import '../models/DocumentUpload.js';
+import '../models/UpdateCheckState.js';
 
 const logger = createModuleLogger('database');
 

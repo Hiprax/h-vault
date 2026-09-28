@@ -119,6 +119,7 @@ import VerifyEmailPage from '../../src/pages/VerifyEmailPage';
 import UnlockAccountPage from '../../src/pages/UnlockAccountPage';
 import NotFoundPage from '../../src/pages/NotFoundPage';
 import VaultPage from '../../src/pages/VaultPage';
+import AboutPage from '../../src/pages/AboutPage';
 import { LoadingSpinner } from '../../src/App';
 import { AppLayout } from '../../src/components/layout/AppLayout';
 import { ProtectedRoute } from '../../src/components/layout/ProtectedRoute';
@@ -458,5 +459,15 @@ describe('the application shell', () => {
     // The h1 names the page, and it is outside the rail it sits beside.
     expect(rail).not.toContainElement(screen.getByRole('heading', { level: 1 }));
     await waitFor(() => expect(screen.getByText('vault rows')).toBeInTheDocument());
+  });
+
+  it('gives the About page one h1, its cards and the named release history below it', async () => {
+    renderShell('/settings/about', <AboutPage />);
+    await settleMountEffects();
+    expectSoundOutline('About H-Vault');
+    expect(screen.getByRole('region', { name: 'Release history' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'This installation' }),
+    ).toBeInTheDocument();
   });
 });

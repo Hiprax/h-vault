@@ -1847,6 +1847,8 @@ describe('machine-readable reports', () => {
       'document-viewer-expanded',
       'documents-trash',
       'documents-download-all',
+      'about-page',
+      'whats-new-dialog',
       'unlock-screen',
       'sandbox-rendered',
     ]);

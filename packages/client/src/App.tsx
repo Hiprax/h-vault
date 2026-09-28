@@ -20,6 +20,7 @@ const VaultItemPage = lazy(() => import('./pages/VaultItemPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const BackupSettingsPage = lazy(() => import('./pages/BackupSettingsPage'));
 const SessionsPage = lazy(() => import('./pages/SessionsPage'));
+const AboutPage = lazy(() => import('./pages/AboutPage'));
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
 const ExportDataPage = lazy(() => import('./pages/ExportDataPage'));
 const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
@@ -127,6 +128,7 @@ export function App() {
                   <Route path="/settings" element={<SettingsPage />} />
                   <Route path="/settings/backup" element={<BackupSettingsPage />} />
                   <Route path="/settings/sessions" element={<SessionsPage />} />
+                  <Route path="/settings/about" element={<AboutPage />} />
                   <Route path="/settings/audit" element={<AuditLogPage />} />
                   <Route path="/settings/export-data" element={<ExportDataPage />} />
                 </Route>

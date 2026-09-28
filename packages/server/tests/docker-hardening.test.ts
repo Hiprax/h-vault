@@ -457,7 +457,8 @@ describe('Docker deployment', () => {
 
     it('pins the app default route to edge with gw_priority — NOT priority', () => {
       // The app is the one container on both tiers, so it is the one whose default
-      // gateway decides how its outbound traffic (SMTP, the HIBP breach API) leaves.
+      // gateway decides how its outbound traffic (SMTP, the HIBP breach API, the
+      // GitHub release check) leaves.
       //
       // The field name is the entire finding here. `priority` only orders network
       // ATTACHMENTS and has no say in gateway selection; `gw_priority` is what

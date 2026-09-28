@@ -23,6 +23,7 @@ import {
   AlertTriangle,
   LogOut,
   EyeOff,
+  Info,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type zxcvbnType from 'zxcvbn';
@@ -690,6 +691,12 @@ const THEME_OPTIONS = [
   { value: 'light' as const, label: 'Light', icon: Sun },
   { value: 'dark' as const, label: 'Dark', icon: Moon },
   { value: 'system' as const, label: 'System', icon: Monitor },
+];
+
+/** The Account card's links, in the order they are shown. */
+const ACCOUNT_LINKS = [
+  { to: '/settings/backup', label: 'Backup Settings', icon: History },
+  { to: '/settings/about', label: 'About H-Vault', icon: Info },
 ];
 
 export default function SettingsPage() {
@@ -3605,16 +3612,19 @@ export default function SettingsPage() {
           <CardTitle>Account</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2">
-          <Link
-            to="/settings/backup"
-            className="flex items-center justify-between rounded-lg p-3 hover:bg-[hsl(var(--accent))] transition-colors"
-          >
-            <div className="flex items-center gap-3">
-              <History className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
-              <span className="text-sm text-[hsl(var(--foreground))]">Backup Settings</span>
-            </div>
-            <ChevronRight className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
-          </Link>
+          {ACCOUNT_LINKS.map(({ to, label, icon: Icon }) => (
+            <Link
+              key={to}
+              to={to}
+              className="flex items-center justify-between rounded-lg p-3 hover:bg-[hsl(var(--accent))] transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <Icon className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
+                <span className="text-sm text-[hsl(var(--foreground))]">{label}</span>
+              </div>
+              <ChevronRight className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
+            </Link>
+          ))}
         </CardContent>
       </Card>
 

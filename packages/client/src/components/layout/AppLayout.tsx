@@ -29,6 +29,9 @@ import { useDocumentsConfig } from '../../hooks/useDocumentsConfig';
 import { useClipboardCountdown } from '../../hooks/useClipboardCountdown';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { OnboardingGuide } from './OnboardingGuide';
+import { VersionBadge } from '../releases/VersionBadge';
+import { ReleaseNotesHost } from '../releases/ReleaseNotesHost';
+import { releaseStatusFor, useReleaseStore } from '../../stores/releaseStore';
 import { isStorageDegraded } from '../../stores/encryptedStorage';
 import { BrandLogo } from '../ui/BrandLogo';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
@@ -171,6 +174,8 @@ export function AppLayout() {
     useUIStore();
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
+  const releaseStatus = useReleaseStore((s) => releaseStatusFor(s, user?.userId));
+  const openReleaseNotes = useReleaseStore((s) => s.openDialog);
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
@@ -482,6 +487,8 @@ export function AppLayout() {
               Logout
             </span>
           </button>
+
+          <VersionBadge expanded={expanded} status={releaseStatus} onOpen={openReleaseNotes} />
         </div>
       </header>
 
@@ -630,6 +637,9 @@ export function AppLayout() {
             </button>
           </div>
         )}
+
+        {/* The newer-release notice, and "What's new" (a portal) */}
+        <ReleaseNotesHost />
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">

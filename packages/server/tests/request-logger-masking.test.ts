@@ -266,6 +266,8 @@ const LOGGABLE_BODY_KEYS = new Map<string, string>([
   // An HMAC of the item NAME, stored server-side for duplicate detection; it reveals
   // nothing the stored row does not.
   ['searchHash', METADATA],
+  // Whether the release notes open by themselves after an update.
+  ['showReleaseNotes', METADATA],
   ['sortOrder', METADATA],
   ['streamSalt', PUBLIC_PARAMETER],
   ['symbols', METADATA],
@@ -280,6 +282,8 @@ const LOGGABLE_BODY_KEYS = new Map<string, string>([
   ['vaultKeyIv', PUBLIC_PARAMETER],
   ['vaultKeyTag', PUBLIC_PARAMETER],
   ['vaultKeyVersion', METADATA],
+  // A release version (`POST /releases/seen`): public, the same for every account.
+  ['version', METADATA],
 ]);
 
 /**

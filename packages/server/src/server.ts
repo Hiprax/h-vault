@@ -10,6 +10,7 @@ import { startDocumentCleanupJob } from './jobs/documentCleanup.js';
 import { startTokenCleanupJob } from './jobs/tokenCleanup.js';
 import { startBackupScheduler } from './jobs/backupScheduler.js';
 import { initBreachRangeCache } from './jobs/breachSeed.js';
+import { startUpdateCheckJob } from './jobs/updateCheck.js';
 import { closeRateLimitStore } from './middleware/rateLimiter.js';
 import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
@@ -48,6 +49,10 @@ async function startServer(): Promise<void> {
     // never enabled the document store schedules nothing at all rather than a
     // lock acquisition an hour for ever.
     const documentCleanupTask = isPrimaryWorker ? startDocumentCleanupJob() : null;
+    // The release check (is a newer H-Vault published?). Null when the operator
+    // turned it off with UPDATE_CHECK_ENABLED=false. Its result is stored in the
+    // database, so every worker answers from it, not only this one.
+    const updateCheckTask = isPrimaryWorker ? startUpdateCheckJob() : null;
     if (!isPrimaryWorker) {
       logger.info(
         'Skipping background jobs on worker instance ' +
@@ -113,6 +118,8 @@ async function startServer(): Promise<void> {
         // tick from firing during the drain, after the database connection has
         // already been closed underneath it.
         documentCleanupTask,
+        // Stops its cron AND clears the pending boot check.
+        updateCheckTask,
       ],
       server,
       activeConnections,

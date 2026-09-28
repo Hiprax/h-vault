@@ -751,6 +751,7 @@ vi.mock('../src/pages/DocumentsPage', () => pageStub('documents'));
 vi.mock('../src/pages/SettingsPage', () => pageStub('settings'));
 vi.mock('../src/pages/BackupSettingsPage', () => pageStub('backup'));
 vi.mock('../src/pages/SessionsPage', () => pageStub('sessions'));
+vi.mock('../src/pages/AboutPage', () => pageStub('about'));
 vi.mock('../src/pages/AuditLogPage', () => pageStub('audit'));
 vi.mock('../src/pages/VerifyEmailPage', () => pageStub('verify-email'));
 vi.mock('../src/pages/ResetPasswordPage', () => pageStub('reset-password'));
@@ -851,6 +852,7 @@ describe('App route table', () => {
     ['/settings', 'page-settings'],
     ['/settings/backup', 'page-backup'],
     ['/settings/sessions', 'page-sessions'],
+    ['/settings/about', 'page-about'],
     ['/settings/audit', 'page-audit'],
   ])('renders %s behind ProtectedRoute + AppLayout', async (path, testId) => {
     await renderAppAt(path);

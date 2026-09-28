@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Shield, Lock, Clock, ArrowRight, X, KeyRound } from 'lucide-react';
 import { useInlineDialog } from '../ui/Dialog';
+import { useUIStore } from '../../stores/uiStore';
 
 const ONBOARDING_KEY = 'hvault_onboarding_completed';
 
@@ -61,6 +62,15 @@ export function OnboardingGuide() {
       setVisible(true);
     }
   }, []);
+
+  // Tell the rest of the shell while the guide is on screen, so the release notes
+  // wait for it instead of opening on top of it.
+  useEffect(() => {
+    useUIStore.getState().setOnboardingActive(visible);
+    return () => {
+      useUIStore.getState().setOnboardingActive(false);
+    };
+  }, [visible]);
 
   const handleNext = () => {
     if (currentStep < steps.length - 1) {

@@ -133,6 +133,24 @@ import {
 } from '../src/index.js';
 import type { SandboxFrameMessage, SandboxRenderRequest, SandboxTheme } from '../src/index.js';
 import {
+  RELEASE_VERSION_PATTERN,
+  RELEASE_CHANGE_KINDS,
+  RELEASE_ICONS,
+  RELEASE_AUDIENCES,
+  UPDATE_STATES,
+  SHOW_RELEASE_NOTES_DEFAULT,
+  releaseVersionSchema,
+  releaseNoteSchema,
+  releaseStatusResponseSchema,
+  releaseNotesResponseSchema,
+  releaseNotesSeenResponseSchema,
+  updateCheckResponseSchema,
+  markReleaseNotesSeenSchema,
+  parseReleaseVersion,
+  compareReleaseVersions,
+  isReleaseVersion,
+} from '../src/index.js';
+import {
   MAX_SANDBOX_CODE_LENGTH,
   SANDBOX_QR_IMAGE_FAILURE_CODES,
   SANDBOX_QR_SESSION_FAILURE_CODES,
@@ -144,6 +162,25 @@ import {
 } from '../src/index.js';
 
 describe('barrel exports (src/index.ts)', () => {
+  it('exports the release-notes schemas, constants and version helpers', () => {
+    expect(RELEASE_VERSION_PATTERN.test('0.15.0')).toBe(true);
+    expect(RELEASE_CHANGE_KINDS).toEqual(['added', 'improved', 'changed', 'fixed', 'security']);
+    expect(RELEASE_ICONS).toContain('sparkles');
+    expect(RELEASE_AUDIENCES).toEqual(['everyone', 'administrators']);
+    expect(UPDATE_STATES).toEqual(['current', 'available', 'unknown', 'disabled']);
+    expect(SHOW_RELEASE_NOTES_DEFAULT).toBe(true);
+    expect(releaseVersionSchema.parse('1.0.0')).toBe('1.0.0');
+    expect(releaseNoteSchema).toBeDefined();
+    expect(releaseStatusResponseSchema).toBeDefined();
+    expect(releaseNotesResponseSchema).toBeDefined();
+    expect(releaseNotesSeenResponseSchema).toBeDefined();
+    expect(updateCheckResponseSchema).toBeDefined();
+    expect(markReleaseNotesSeenSchema).toBeDefined();
+    expect(parseReleaseVersion('1.2.3')).toEqual([1, 2, 3]);
+    expect(compareReleaseVersions('1.2.3', '1.2.4')).toBe(-1);
+    expect(isReleaseVersion('1.2')).toBe(false);
+  });
+
   it('exports all common schemas', () => {
     expect(objectIdSchema).toBeDefined();
     expect(paginationSchema).toBeDefined();

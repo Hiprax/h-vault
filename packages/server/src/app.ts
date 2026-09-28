@@ -37,6 +37,7 @@ import vaultRoutes from './routes/vault.js';
 import documentRoutes from './routes/documents.js';
 import folderRoutes from './routes/folders.js';
 import userRoutes from './routes/user.js';
+import releaseRoutes from './routes/releases.js';
 import toolsRoutes from './routes/tools.js';
 import backupRoutes from './routes/backup.js';
 import healthRoutes from './routes/health.js';
@@ -302,6 +303,7 @@ app.use('/api/v1/folders', folderRoutes);
 app.use('/api/v1/user', userRoutes);
 app.use('/api/v1/tools', toolsRoutes);
 app.use('/api/v1/backup', backupRoutes);
+app.use('/api/v1/releases', releaseRoutes);
 app.use('/api/v1', healthRoutes);
 app.use('/api/v1', configRoutes);
 

@@ -133,7 +133,7 @@ const AUDIT_PAGE_SIZE = 20;
  * there and reported here. And the interesting views are all BEHIND a sign-in
  * that involves a 600,000-iteration key derivation, a vault key held only in
  * memory, and ciphertext that has to make a round trip; a suite that scanned only
- * what a signed-out browser can reach would miss most of the thirty-five views below.
+ * what a signed-out browser can reach would miss most of the thirty-seven views below.
  *
  * ## One test, one registration
  *
@@ -141,13 +141,13 @@ const AUDIT_PAGE_SIZE = 20;
  * wall clock and the suite runs single-worker, so the whole authenticated walk
  * shares one account. Each view is a `test.step`, and every scan asserts SOFTLY
  * (`expect.soft`) so one failing view does not hide the state of the other
- * thirty-four — an accessibility report that stops at the first finding is a
- * report somebody has to run thirty-five times.
+ * thirty-six — an accessibility report that stops at the first finding is a
+ * report somebody has to run thirty-seven times.
  */
 
 test.describe('accessibility: every primary view and modal', () => {
   test('has no moderate, serious or critical axe violations', async ({ page }, testInfo) => {
-    // Two 600k-iteration derivations for the sign-in, thirty-five axe runs over a
+    // Two 600k-iteration derivations for the sign-in, thirty-seven axe runs over a
     // fully rendered SPA, and three real documents uploaded through the browser's
     // own AES-GCM to the storage engine the harness starts.
     // `registerAndSignInViaUI` raises the timeout to its own floor; this raises it
@@ -177,7 +177,7 @@ test.describe('accessibility: every primary view and modal', () => {
     /**
      * Scans the current DOM and records it.
      *
-     * Soft, so the walk continues: thirty-four more views are worth more than
+     * Soft, so the walk continues: thirty-six more views are worth more than
      * failing fast on the first, and the run still fails at the end.
      */
     const scan = async (view: string): Promise<void> => {
@@ -649,6 +649,38 @@ test.describe('accessibility: every primary view and modal', () => {
         await page.getByRole('button', { name: 'Dismiss' }).click();
         await page.context().setOffline(false);
         await expect(page.getByTestId('documents-offline')).toHaveCount(0, { timeout: 60_000 });
+      });
+
+      // The release notes: the About page, then the dialog over it, opened from
+      // the version at the foot of the sidebar. Closed with Escape, which hands
+      // focus back to that button, so the next step starts from a button as its
+      // shortcut requires.
+      await test.step('about page', async () => {
+        await page.getByRole('link', { name: 'Settings', exact: true }).click();
+        await page.getByRole('link', { name: 'About H-Vault' }).click();
+        await expect(page.getByRole('heading', { level: 1, name: 'About H-Vault' })).toBeVisible({
+          timeout: 60_000,
+        });
+        await expect(
+          page.getByRole('heading', { level: 2, name: 'Release history' }),
+        ).toBeVisible();
+        await expect(page.getByRole('searchbox', { name: 'Search the release notes' })).toBeVisible(
+          {
+            timeout: 60_000,
+          },
+        );
+        await scan('about-page');
+      });
+
+      await test.step('what is new dialog', async () => {
+        await page.getByRole('button', { name: /^H-Vault \d+\.\d+\.\d+\./ }).click();
+        const dialog = page.getByRole('dialog', { name: /What's new in H-Vault/ });
+        await expect(dialog).toBeVisible({ timeout: 60_000 });
+        await expect(dialog.getByRole('button', { name: 'Done' })).toBeVisible();
+        await expect(dialog.getByRole('article').first()).toBeVisible({ timeout: 60_000 });
+        await scan('whats-new-dialog');
+        await page.keyboard.press('Escape');
+        await expect(dialog).toHaveCount(0);
       });
 
       // Near-last, because reaching it locks the vault: the key lives in memory

@@ -54,7 +54,7 @@ const observedByKey = new Map(observed.routes.map((route) => [rowKey(route), rou
 const LIMITER_NAMES_SET = new Set(LIMITER_NAMES.values());
 
 /** Routes declared in `src/routes/*.ts`, i.e. everything under a router mount. */
-const ROUTER_FILE_ROUTES = 73;
+const ROUTER_FILE_ROUTES = 77;
 
 describe('the route table matches the real Express router stack', () => {
   it('resolves every mounted router and every path-scoped middleware', () => {
@@ -98,7 +98,7 @@ describe('the route table matches the real Express router stack', () => {
     expect(missing, 'route(s) the table declares that the app does not mount').toEqual([]);
   });
 
-  it('still covers all 73 routes declared in src/routes/*.ts', () => {
+  it('still covers all 77 routes declared in src/routes/*.ts', () => {
     // A count, beside the set comparison, because the set comparison alone stays
     // green when a route is deleted from a router AND its row from the table in
     // the same change. The routers are the product's whole API surface, so the

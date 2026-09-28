@@ -43,6 +43,7 @@ import {
   MAX_PASSWORD_CLASS_MINIMUM,
   LOCK_ON_HIDDEN_DEFAULT,
   LOCK_ON_HIDDEN_DELAY_MINUTES,
+  SHOW_RELEASE_NOTES_DEFAULT,
 } from '@hvault/shared';
 import type {
   UpdateSettingsInput,
@@ -91,6 +92,7 @@ function withSettingsDefaults<T extends IUserSettings>(settings: T): T {
     lockOnHidden: raw.lockOnHidden ?? LOCK_ON_HIDDEN_DEFAULT,
     lockOnHiddenDelay: raw.lockOnHiddenDelay ?? LOCK_ON_HIDDEN_DELAY_MINUTES,
     clipboardClearTimeout: raw.clipboardClearTimeout ?? CLIPBOARD_CLEAR_SECONDS,
+    showReleaseNotes: raw.showReleaseNotes ?? SHOW_RELEASE_NOTES_DEFAULT,
     defaultPasswordLength: clampLength(raw.defaultPasswordLength),
     defaultPasswordOptions: normalisePasswordGenOptions(raw.defaultPasswordOptions),
   };
@@ -266,6 +268,9 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
   }
   if (body.language !== undefined) {
     setFields['settings.language'] = body.language;
+  }
+  if (body.showReleaseNotes !== undefined) {
+    setFields['settings.showReleaseNotes'] = body.showReleaseNotes;
   }
 
   if (Object.keys(setFields).length === 0) {

@@ -136,6 +136,10 @@ export const updateSettingsSchema = z.object({
   defaultPasswordOptions: passwordGenOptionsSchema.optional(),
   theme: z.enum(THEMES).optional(),
   language: z.string().min(2).max(10).optional(),
+  // Whether the release notes open by themselves after an update (default
+  // `SHOW_RELEASE_NOTES_DEFAULT`). Turning it off only stops the automatic
+  // opening; the notes stay one click away.
+  showReleaseNotes: z.boolean().optional(),
 });
 
 export const setup2faSchema = z.object({

@@ -58,6 +58,12 @@ interface UIState {
    * remedy, so surviving one would be exactly wrong.
    */
   staleVaultKeyVersion: number | null;
+  /**
+   * Whether the first-run guide is on screen. The release notes wait while it is,
+   * so two modals never open on top of each other; they open once it closes.
+   * Not persisted: it describes what is on screen now.
+   */
+  onboardingActive: boolean;
 
   setTheme: (theme: ThemeValue) => void;
   toggleSidebar: () => void;
@@ -65,6 +71,7 @@ interface UIState {
   toggleCommandPalette: () => void;
   setOfflineCacheError: (error: OfflineCacheErrorType | null) => void;
   setStaleVaultKeyVersion: (vaultKeyVersion: number | null) => void;
+  setOnboardingActive: (active: boolean) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +130,7 @@ export const useUIStore = create<UIState>()(
       commandPaletteOpen: false,
       offlineCacheError: null,
       staleVaultKeyVersion: null,
+      onboardingActive: false,
 
       setTheme: (theme: ThemeValue): void => {
         applyThemeToDocument(theme);
@@ -147,6 +155,10 @@ export const useUIStore = create<UIState>()(
 
       setStaleVaultKeyVersion: (vaultKeyVersion: number | null): void => {
         set({ staleVaultKeyVersion: vaultKeyVersion });
+      },
+
+      setOnboardingActive: (active: boolean): void => {
+        set({ onboardingActive: active });
       },
     }),
     {

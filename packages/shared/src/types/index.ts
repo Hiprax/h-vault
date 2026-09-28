@@ -68,7 +68,25 @@ import type {
   updateDocumentSchema,
 } from '../schemas/document.js';
 import type { paginationSchema } from '../schemas/common.js';
-import type { ItemType, AuditAction, BackupStatus, ErrorCode, Theme } from '../constants/index.js';
+import type {
+  ItemType,
+  AuditAction,
+  BackupStatus,
+  ErrorCode,
+  ReleaseAudience,
+  ReleaseChangeKind,
+  ReleaseIcon,
+  Theme,
+} from '../constants/index.js';
+import type {
+  markReleaseNotesSeenSchema,
+  releaseNoteViewSchema,
+  releaseNotesDataSchema,
+  releaseNotesSeenDataSchema,
+  releaseStatusDataSchema,
+  updateCheckDataSchema,
+  updateStatusSchema,
+} from '../schemas/releases.js';
 
 // Auth types
 export type RegisterInput = z.infer<typeof registerSchema>;
@@ -340,6 +358,8 @@ export interface IUserSettings {
   defaultPasswordOptions: PasswordGenOptions;
   theme: Theme;
   language: string;
+  /** Whether the release notes open by themselves after an update. */
+  showReleaseNotes: boolean;
   backup: IBackupSettings;
 }
 
@@ -634,3 +654,45 @@ export interface TwoFactorSetupResponse {
 export interface TwoFactorVerifyResponse {
   backupCodes: string[];
 }
+
+// ── Release notes and update status ──────────────────────────────────
+
+/**
+ * One release's notes as the server AUTHORS them (`content/releaseNotes.ts`):
+ * the closed lists are enforced by the types here and again by the content test.
+ * What travels to the browser is {@link ReleaseNoteView}, whose codes are plain
+ * strings so an older tab tolerates a newer server.
+ */
+export interface ReleaseNote {
+  readonly version: string;
+  /** `YYYY-MM-DD`, equal to the release's CHANGELOG heading. */
+  readonly date: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly highlights: readonly {
+    readonly icon: ReleaseIcon;
+    readonly title: string;
+    readonly body: string;
+    readonly audience?: ReleaseAudience;
+  }[];
+  readonly changes: readonly {
+    readonly kind: ReleaseChangeKind;
+    readonly text: string;
+    readonly audience?: ReleaseAudience;
+  }[];
+}
+
+/** One release's notes as a viewer receives them. */
+export type ReleaseNoteView = z.infer<typeof releaseNoteViewSchema>;
+/** What the server knows about newer releases (update audience only). */
+export type UpdateStatus = z.infer<typeof updateStatusSchema>;
+/** `GET /releases/status`. */
+export type ReleaseStatus = z.infer<typeof releaseStatusDataSchema>;
+/** `GET /releases/notes`. */
+export type ReleaseNotesList = z.infer<typeof releaseNotesDataSchema>;
+/** Body of `POST /releases/seen`. */
+export type MarkReleaseNotesSeenInput = z.infer<typeof markReleaseNotesSeenSchema>;
+/** `POST /releases/seen`. */
+export type ReleaseNotesSeen = z.infer<typeof releaseNotesSeenDataSchema>;
+/** `POST /releases/update-check`. */
+export type UpdateCheckResult = z.infer<typeof updateCheckDataSchema>;

@@ -49,6 +49,8 @@ import { VaultItem } from '../../src/models/VaultItem.js';
 import { Folder } from '../../src/models/Folder.js';
 import { RefreshToken } from '../../src/models/RefreshToken.js';
 import { hashToken } from '../../src/utils/token.js';
+import { RELEASE_NOTES } from '../../src/content/releaseNotes.js';
+import { RELEASE_NOTES_BASELINE_VERSION } from '../../src/constants/index.js';
 import { generateAccessToken, getCsrf } from '../helpers.js';
 import {
   deriveMasterKeys,
@@ -487,9 +489,10 @@ describe('the current models accept the documents the previous release persisted
     expect(String(child?.parentId)).toBe(seeded.folderIds.get('folder-root'));
   });
 
-  it('fills in the two settings the current release added, without a migration', async () => {
-    // The v0.7.0 user document carries no `lockOnHidden` and no
-    // `lockOnHiddenDelay`; both were added afterwards. Nothing backfills them,
+  it('fills in the three settings added since v0.7.0, without a migration', async () => {
+    // The v0.7.0 user document carries no `lockOnHidden`, no `lockOnHiddenDelay`
+    // and no `showReleaseNotes`; all three were added afterwards (the last in
+    // 0.15.0, with the release notes). Nothing backfills them,
     // and the profile route reads with `.lean()` — which returns raw BSON, so
     // Mongoose's schema defaults are NOT applied. `withSettingsDefaults` is the
     // one boundary that makes the declared type true, and this is what fails if
@@ -498,13 +501,18 @@ describe('the current models accept the documents the previous release persisted
     // Derived from the fixture, and asserted rather than assumed: if the current
     // model ever stopped having settings the previous release lacked, this test
     // would still pass while proving nothing, so the list itself is pinned.
-    expect(seeded.settingsRemoved.sort()).toEqual(['lockOnHidden', 'lockOnHiddenDelay']);
+    expect(seeded.settingsRemoved.sort()).toEqual([
+      'lockOnHidden',
+      'lockOnHiddenDelay',
+      'showReleaseNotes',
+    ]);
 
     const persisted = await User.findById(seeded.userId).lean();
     expect(persisted).not.toBeNull();
     const persistedSettings = persisted!.settings as unknown as Record<string, unknown>;
     expect(Object.keys(persistedSettings)).not.toContain('lockOnHidden');
     expect(Object.keys(persistedSettings)).not.toContain('lockOnHiddenDelay');
+    expect(Object.keys(persistedSettings)).not.toContain('showReleaseNotes');
 
     const res = await request(app)
       .get(`${API}/user/profile`)
@@ -515,9 +523,46 @@ describe('the current models accept the documents the previous release persisted
     expect(typeof settings.lockOnHidden).toBe('boolean');
     expect(typeof settings.lockOnHiddenDelay).toBe('number');
     expect(Number.isNaN(settings.lockOnHiddenDelay)).toBe(false);
+    // Absent on the older document, so the default: the notes open by themselves.
+    expect(settings.showReleaseNotes).toBe(true);
     // The values the older document DID carry are its own, not re-defaulted.
     expect(settings.autoLockTimeout).toBe(15);
     expect(settings.clipboardClearTimeout).toBe(30);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The release-notes watermark an older account never had
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('an account from the previous release reads its release-notes state, with no migration', () => {
+  it('reads as caught up to the baseline, is shown what came after, and a read writes nothing', async () => {
+    // The v0.7.0 document has no `releaseNotesSeenVersion`: the watermark did not
+    // exist, and nothing backfills it. Such an account must be treated as having
+    // read up to the release BEFORE the notes shipped, so it is shown every
+    // release after that exactly once, rather than nothing or the whole history.
+    const seeded = await seedNMinusOneVault();
+
+    const res = await request(app)
+      .get(`${API}/releases/status`)
+      .set('Authorization', `Bearer ${seeded.accessToken}`)
+      .expect(200);
+
+    const notes = res.body.data.releaseNotes as Record<string, unknown>;
+    expect(notes.seenVersion).toBe(RELEASE_NOTES_BASELINE_VERSION);
+    expect(notes.showOnUpdate).toBe(true);
+    // The entries above the baseline in the newest-first content, which is how
+    // many releases this account has not read (every item is visible here: the
+    // test configuration names no administrator list).
+    const newerThanBaseline = RELEASE_NOTES.findIndex(
+      (note) => note.version === RELEASE_NOTES_BASELINE_VERSION,
+    );
+    expect(newerThanBaseline).toBeGreaterThanOrEqual(0);
+    expect(notes.unseenCount).toBe(newerThanBaseline);
+
+    const persisted = await User.findById(seeded.userId).select('+releaseNotesSeenVersion').lean();
+    expect(persisted).not.toBeNull();
+    expect(persisted!).not.toHaveProperty('releaseNotesSeenVersion');
   });
 });
 

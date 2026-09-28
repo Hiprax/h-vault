@@ -1,7 +1,8 @@
 /**
- * The HIBP range fetch is the ONLY outbound HTTP call this server makes, and
- * every one of its responses is buffered whole into a string before anything
- * looks at it. These tests hold the bound on that body.
+ * The HIBP range fetch is one of the two outbound HTTP calls this server makes
+ * (the release check, `update-check.test.ts`, is bounded the same way), and every
+ * one of its responses is buffered whole into a string before anything looks at
+ * it. These tests hold the bound on that body.
  *
  * They are deliberately NOT written against a hand-rolled rejection. `axios`
  * silently ignores a size limit it was never given (both `maxContentLength` and

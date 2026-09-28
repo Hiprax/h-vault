@@ -7,9 +7,10 @@
  * would let a future suite quietly start talking to `api.pwnedpasswords.com` and
  * make a unit gate depend on a third party's uptime.
  *
- * `api.pwnedpasswords.com` is used as the host on purpose: it is the ONE outbound
- * dependency this codebase really has (`utils/hibp.ts`), so these tests name the
- * thing being prevented rather than an abstract example.
+ * `api.pwnedpasswords.com` is used as the host on purpose: it is an outbound
+ * dependency this codebase really has (`utils/hibp.ts`; the other is the GitHub
+ * release check), so these tests name the thing being prevented rather than an
+ * abstract example.
  */
 import axios from 'axios';
 import http from 'node:http';

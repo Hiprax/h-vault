@@ -261,7 +261,7 @@ because the obvious way past each of them is the wrong one.
   pinned object-storage engine, in a container. **Both declare the `docker` CLI**, and
   the reason is worth stating because it is not obvious from the gate names: with no
   engine the server reports `documents: { enabled: false }`, the client hides the whole
-  section, and the document journeys plus seven of the thirty-five scanned accessibility views
+  section, and the document journeys plus seven of the thirty-seven scanned accessibility views
   fail with symptoms that say nothing about the code. Without a daemon both report **could
   not run** rather than passing quietly. `flake` inherits the same requirement, because
   the Playwright suite is three of the runs it makes. **`a11y` blocks on every axe finding
@@ -460,6 +460,19 @@ hatches above mean an unchecked commit can reach `main`.
 A push to `main` releases only when the root `package.json` version has been bumped and
 `CHANGELOG.md` has a matching `## [X.Y.Z]` section; that section becomes the Release body.
 An ordinary push publishes nothing and says so.
+
+A release also needs its **in-app release notes**: one entry at the top of
+`packages/server/src/content/releaseNotes.ts`, with the same version and date as the new
+`CHANGELOG.md` heading. That is what users see in "What's new" the first time they sign in
+after the update, so it is written for them rather than for developers: what changed for the
+person using the app, in plain words, with no environment variables, file paths or gate
+names. Anything only the person running the server acts on (a setting, a deployment step, a
+log) goes in an item marked `audience: 'administrators'`, which is shown only to the
+server's administrators. The text is plain (no Markdown, no links), and a release either
+gives everyone at least one highlight and one change or is entirely for administrators.
+`packages/server/tests/release-notes-content.test.ts` enforces every one of those rules,
+and fails the push when a released version has no entry, so a release cannot ship without
+its notes. Released entries are never deleted or re-dated; fixing their wording is fine.
 
 ## Project layout
 

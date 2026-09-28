@@ -21,6 +21,13 @@ vi.mock('virtual:pwa-register/react', () => ({
   },
 }));
 
+const releaseApi = vi.hoisted(() => ({ status: vi.fn() }));
+vi.mock('../../src/services/api/releaseStatusApi', () => ({
+  getReleaseStatusApi: releaseApi.status,
+  markReleaseNotesSeenApi: vi.fn(),
+  checkForUpdateNowApi: vi.fn(),
+}));
+
 describe('ReloadPrompt', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -98,5 +105,74 @@ describe('ReloadPrompt', () => {
 
     vi.advanceTimersByTime(60 * 60 * 1000);
     expect(mockUpdate).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ReloadPrompt and the server version', () => {
+  beforeEach(async () => {
+    mockNeedRefresh = false;
+    capturedOnRegisteredSW = undefined;
+    releaseApi.status.mockReset();
+    releaseApi.status.mockReturnValue(new Promise(() => undefined));
+    const { _resetReleaseStoreForTests } = await import('../../src/stores/releaseStore');
+    _resetReleaseStoreForTests();
+  });
+
+  afterEach(async () => {
+    cleanup();
+    const { useAuthStore } = await import('../../src/stores/authStore');
+    useAuthStore.setState({ user: null, isLocked: true });
+  });
+
+  it('names the version the waiting build belongs to, once the server is known to have moved', async () => {
+    mockNeedRefresh = true;
+    const { useReleaseStore } = await import('../../src/stores/releaseStore');
+    useReleaseStore.setState({ serverUpdatedTo: '0.16.0' });
+    const { ReloadPrompt } = await import('../../src/components/layout/ReloadPrompt');
+    render(<ReloadPrompt />);
+    expect(screen.getByText('H-Vault 0.16.0 is ready. Update to start using it.')).toBeDefined();
+    expect(screen.queryByText('A new version of H-Vault is ready.')).toBeNull();
+  });
+
+  it('re-reads the server version for an unlocked session when a new build is waiting', async () => {
+    mockNeedRefresh = true;
+    const { useAuthStore } = await import('../../src/stores/authStore');
+    useAuthStore.setState({ user: { userId: 'user-a', email: 'a@example.com' }, isLocked: false });
+    const { ReloadPrompt } = await import('../../src/components/layout/ReloadPrompt');
+    render(<ReloadPrompt />);
+    expect(releaseApi.status).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a locked session', { user: { userId: 'user-a', email: 'a@example.com' }, isLocked: true }],
+    ['no session', { user: null, isLocked: false }],
+  ])('does not read the server version for %s', async (_label, auth) => {
+    mockNeedRefresh = true;
+    const { useAuthStore } = await import('../../src/stores/authStore');
+    useAuthStore.setState(auth);
+    const { ReloadPrompt } = await import('../../src/components/layout/ReloadPrompt');
+    render(<ReloadPrompt />);
+    expect(releaseApi.status).not.toHaveBeenCalled();
+  });
+
+  it('does not read the server version while no new build is waiting', async () => {
+    mockNeedRefresh = false;
+    const { useAuthStore } = await import('../../src/stores/authStore');
+    useAuthStore.setState({ user: { userId: 'user-a', email: 'a@example.com' }, isLocked: false });
+    const { ReloadPrompt } = await import('../../src/components/layout/ReloadPrompt');
+    render(<ReloadPrompt />);
+    expect(releaseApi.status).not.toHaveBeenCalled();
+  });
+
+  it('hands the registration to the release store, so a server update fetches the new build at once', async () => {
+    const { ReloadPrompt } = await import('../../src/components/layout/ReloadPrompt');
+    render(<ReloadPrompt />);
+    const update = vi.fn().mockResolvedValue(undefined);
+    act(() => {
+      capturedOnRegisteredSW!('sw.js', { update });
+    });
+    const { requestServiceWorkerUpdate } = await import('../../src/lib/serviceWorkerUpdate');
+    requestServiceWorkerUpdate();
+    expect(update).toHaveBeenCalledTimes(1);
   });
 });

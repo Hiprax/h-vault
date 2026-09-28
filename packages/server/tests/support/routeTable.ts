@@ -125,6 +125,7 @@ export const ROUTER_MOUNTS = [
   '/api/v1/tools',
   '/api/v1/backup',
   '/api/v1/documents',
+  '/api/v1/releases',
   // Last: `healthRoutes` and `configRoutes` mount here, and a longer prefix
   // must be preferred when both would match. `collectAppRoutes` requires the
   // matched span to equal the candidate, so order is not load-bearing — but
@@ -962,6 +963,43 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'none',
     csrf: 'exempt',
     limiters: ['healthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  // ── Releases: the running version, release notes, update status ──
+  {
+    method: 'get',
+    path: '/api/v1/releases/status',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'get',
+    path: '/api/v1/releases/notes',
+    auth: 'required',
+    csrf: 'exempt',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'post',
+    path: '/api/v1/releases/seen',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['generalAuthLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'post',
+    path: '/api/v1/releases/update-check',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['generalAuthLimiter'],
     owned: null,
     when: 'always',
   },

@@ -218,6 +218,9 @@ const drillEnv = {
   APP_NAME: 'H-Vault',
   BCRYPT_ROUNDS: '12',
   SMTP_FROM: 'noreply@hvault.test',
+  // The drilled stack must not ask GitHub for the newest release: the drill
+  // proves the deployment, and a run must not depend on a host on the internet.
+  UPDATE_CHECK_ENABLED: 'false',
   // Object storage. All four are `${...:?}`-guarded in docker-compose.yml, so
   // Compose refuses to resolve the stack without them and the drill would fail
   // before a container existed — the same reason the two Mongo passwords are

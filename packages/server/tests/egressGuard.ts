@@ -1,9 +1,10 @@
 /**
  * Harness-level outbound-network block for the server suite.
  *
- * Today the only outbound call in production is the HIBP range lookup, and the
- * two suites that exercise it intercept `axios.get` per test — correctly, and
- * with negative `not.toHaveBeenCalled()` assertions. But a per-test stub is a
+ * Today the outbound calls in production are the HIBP range lookup and the
+ * GitHub release check. The suites that exercise the first intercept `axios.get`
+ * per test, and the second's answer from a loopback stub — correctly, and with
+ * negative `not.toHaveBeenCalled()` assertions. But a per-test stub is a
  * promise each test makes individually: the next suite that forgets one reaches
  * `https://api.pwnedpasswords.com` for real, and then the verdict of a "unit"
  * gate depends on a third party's uptime, rate limits and DNS. A test that

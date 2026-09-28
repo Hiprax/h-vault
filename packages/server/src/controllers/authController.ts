@@ -41,6 +41,7 @@ import { readStringCookie } from '../utils/cookies.js';
 import { evaluateAccountStatus } from '../utils/accountStatus.js';
 import { clearCsrfCookie } from '../middleware/csrf.js';
 import {
+  APP_VERSION,
   ERROR_CODES,
   LOCKOUT_DURATION_MINUTES,
   MAX_LOGIN_ATTEMPTS,
@@ -646,6 +647,11 @@ export const register = catchAsync(async (req: Request, res: Response): Promise<
   const user = await User.create({
     ...sanitized,
     authHash: hashedAuth,
+    // A new account starts caught up: the release notes are for what changed
+    // since someone last used the app, and this account has not used it yet.
+    // Written by the server, never taken from the body (the allowlist above
+    // would drop it anyway).
+    releaseNotesSeenVersion: APP_VERSION,
   });
 
   const registerCtx = getRequestContext(req);

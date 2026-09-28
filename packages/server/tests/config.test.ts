@@ -754,6 +754,100 @@ describe('Server Config Validation', () => {
     });
 
     // -------------------------------------------------------------------------
+    // The release check
+    // -------------------------------------------------------------------------
+
+    describe('the release check settings', () => {
+      it.each([
+        [undefined, true],
+        ['', true],
+        ['true', true],
+        ['false', false],
+      ])('UPDATE_CHECK_ENABLED=%s resolves to %s (it defaults ON)', async (value, expected) => {
+        const { config } = await loadConfigWithEnv({ UPDATE_CHECK_ENABLED: value });
+        expect(config.UPDATE_CHECK_ENABLED).toBe(expected);
+      });
+
+      it.each(['0', 'off', 'no', 'FALSE'])(
+        'refuses UPDATE_CHECK_ENABLED=%s rather than guessing what it meant',
+        async (value) => {
+          await expect(loadConfigWithEnv({ UPDATE_CHECK_ENABLED: value })).rejects.toThrow(
+            'UPDATE_CHECK_ENABLED',
+          );
+        },
+      );
+
+      it.each([
+        ['unset', undefined, 'Hiprax/h-vault'],
+        ['an empty assignment', '', 'Hiprax/h-vault'],
+        ['a fork', 'someone/h-vault-fork', 'someone/h-vault-fork'],
+        ['dots and underscores in the name', 'my-org/h_vault.v2', 'my-org/h_vault.v2'],
+        ['a 39-character owner', `${'a'.repeat(39)}/repo`, `${'a'.repeat(39)}/repo`],
+      ])('UPDATE_CHECK_REPOSITORY with %s resolves to %s', async (_label, value, expected) => {
+        const { config } = await loadConfigWithEnv({ UPDATE_CHECK_REPOSITORY: value });
+        expect(config.UPDATE_CHECK_REPOSITORY).toBe(expected);
+      });
+
+      it.each([
+        ['no slash', 'h-vault'],
+        ['a path beyond owner/name', 'Hiprax/h-vault/releases'],
+        ['a full URL', 'https://github.com/Hiprax/h-vault'],
+        ['a 40-character owner', `${'a'.repeat(40)}/repo`],
+        ['an owner starting with a hyphen', '-owner/repo'],
+        ['a space', 'Hiprax/h vault'],
+        ['a query string', 'Hiprax/h-vault?x=1'],
+      ])('refuses UPDATE_CHECK_REPOSITORY with %s', async (_label, value) => {
+        await expect(loadConfigWithEnv({ UPDATE_CHECK_REPOSITORY: value })).rejects.toThrow(
+          'UPDATE_CHECK_REPOSITORY must be owner/name',
+        );
+      });
+
+      it.each(['Hiprax/.', 'Hiprax/..'])('refuses UPDATE_CHECK_REPOSITORY=%s', async (value) => {
+        await expect(loadConfigWithEnv({ UPDATE_CHECK_REPOSITORY: value })).rejects.toThrow(
+          'UPDATE_CHECK_REPOSITORY must name a repository, not . or ..',
+        );
+      });
+
+      it.each([
+        ['unset', undefined, []],
+        ['an empty assignment', '', []],
+        ['one address', 'admin@example.com', ['admin@example.com']],
+        [
+          'blanks around commas and an empty entry',
+          ' admin@example.com , ,second@example.com,',
+          ['admin@example.com', 'second@example.com'],
+        ],
+        ['mixed case, lower-cased like account emails', 'Admin@Example.COM', ['admin@example.com']],
+        ['a duplicate after lower-casing', 'a@example.com,A@example.com', ['a@example.com']],
+      ])('UPDATE_NOTIFY_EMAILS with %s resolves to %j', async (_label, value, expected) => {
+        const { config } = await loadConfigWithEnv({ UPDATE_NOTIFY_EMAILS: value });
+        expect(config.UPDATE_NOTIFY_EMAILS).toEqual(expected);
+      });
+
+      it('refuses an UPDATE_NOTIFY_EMAILS entry that is not an address', async () => {
+        await expect(
+          loadConfigWithEnv({ UPDATE_NOTIFY_EMAILS: 'admin@example.com,not-an-email' }),
+        ).rejects.toThrow('UPDATE_NOTIFY_EMAILS');
+      });
+
+      // One load per test: modules are reset between tests, not between calls, so
+      // a second load in the same test would return the first one's config.
+      const addressList = (count: number) =>
+        Array.from({ length: count }, (_, index) => `admin${String(index)}@example.com`).join(',');
+
+      it('accepts ten administrator addresses', async () => {
+        const { config } = await loadConfigWithEnv({ UPDATE_NOTIFY_EMAILS: addressList(10) });
+        expect(config.UPDATE_NOTIFY_EMAILS).toHaveLength(10);
+      });
+
+      it('refuses eleven administrator addresses', async () => {
+        await expect(loadConfigWithEnv({ UPDATE_NOTIFY_EMAILS: addressList(11) })).rejects.toThrow(
+          'UPDATE_NOTIFY_EMAILS accepts at most 10 addresses',
+        );
+      });
+    });
+
+    // -------------------------------------------------------------------------
     // The production endpoint rule
     // -------------------------------------------------------------------------
 

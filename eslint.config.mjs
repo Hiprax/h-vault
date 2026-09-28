@@ -7,9 +7,20 @@ import pluginSecurity from 'eslint-plugin-security';
 const ZOD_IMPORT_MESSAGE =
   "Import z from '@hvault/shared/zod'. It turns Zod's eval probe off before any schema exists; a direct import can build a schema first, and the browser then reports a CSP violation.";
 
-/** The options of the one-Zod rule, shared by the two blocks that set it. */
-const ZOD_IMPORT_RESTRICTIONS = {
-  paths: [{ name: 'zod', message: ZOD_IMPORT_MESSAGE, allowTypeImports: true }],
+const APP_VERSION_IMPORT_MESSAGE =
+  'The running version reaches the browser only through GET /api/v1/releases/status, after sign-in. Importing it would put it in every public script, which is the disclosure the health endpoint refuses in production.';
+
+/**
+ * The import rules for code the browser runs, shared by the two blocks that set
+ * them: the one-Zod rule, and no `APP_VERSION` (see its message). One object, so
+ * a block that restates the rule cannot drop half of it: flat config REPLACES a
+ * rule's options rather than merging them.
+ */
+const BROWSER_IMPORT_RESTRICTIONS = {
+  paths: [
+    { name: 'zod', message: ZOD_IMPORT_MESSAGE, allowTypeImports: true },
+    { name: '@hvault/shared', importNames: ['APP_VERSION'], message: APP_VERSION_IMPORT_MESSAGE },
+  ],
   patterns: [{ group: ['zod/*', 'zod/**'], message: ZOD_IMPORT_MESSAGE, allowTypeImports: true }],
 };
 
@@ -184,7 +195,7 @@ export default tseslint.config(
     files: ['packages/client/src/**/*.{ts,tsx}', 'packages/shared/src/**/*.ts'],
     ignores: ['packages/shared/src/zod.ts'],
     rules: {
-      '@typescript-eslint/no-restricted-imports': ['error', ZOD_IMPORT_RESTRICTIONS],
+      '@typescript-eslint/no-restricted-imports': ['error', BROWSER_IMPORT_RESTRICTIONS],
     },
   },
 
@@ -200,9 +211,9 @@ export default tseslint.config(
       '@typescript-eslint/no-restricted-imports': [
         'error',
         {
-          ...ZOD_IMPORT_RESTRICTIONS,
+          ...BROWSER_IMPORT_RESTRICTIONS,
           paths: [
-            ...ZOD_IMPORT_RESTRICTIONS.paths,
+            ...BROWSER_IMPORT_RESTRICTIONS.paths,
             {
               name: '@hvault/shared/zod',
               message:

@@ -6,6 +6,7 @@ export * from './schemas/folder.js';
 export * from './schemas/user.js';
 export * from './schemas/config.js';
 export * from './schemas/document.js';
+export * from './schemas/releases.js';
 
 // Types
 export * from './types/index.js';
@@ -18,3 +19,4 @@ export * from './constants/index.js';
 export * from './utils/index.js';
 export * from './utils/backupCodes.js';
 export * from './utils/rowId.js';
+export * from './utils/releaseVersion.js';

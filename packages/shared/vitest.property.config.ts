@@ -27,7 +27,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * the include set matches NOTHING, so renaming one file would leave the others
  * running and this gate quietly smaller.
  */
-export const SHARED_PROPERTY_SUITE = ['tests/property/schemas.property.test.ts'];
+export const SHARED_PROPERTY_SUITE = [
+  'tests/property/schemas.property.test.ts',
+  'tests/property/releaseVersion.property.test.ts',
+];
 
 /**
  * Its OWN JUnit report, per package AND per zone — see

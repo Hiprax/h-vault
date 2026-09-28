@@ -422,8 +422,9 @@ to HIBP set `Add-Padding` (so the queried prefix cannot be inferred from the res
 size on the wire), follow no redirects, and are **size-bounded**: the reply is capped at
 1 MiB — roughly ten times the largest legitimate padded range — enforced incrementally so
 the connection is dropped on the chunk that crosses the cap rather than after the body is
-already resident. This is the only outbound HTTP call the server makes, its reply is
-buffered whole before anything parses it, and the batch endpoint opens eight at once, so
+already resident. This is one of the two outbound HTTP calls the server makes (the other
+is the release check, below, bounded the same way), its reply is buffered whole before
+anything parses it, and the batch endpoint opens eight at once, so
 an unbounded reply from an unhealthy or hostile upstream would be a memory-exhaustion
 vector against a container with a 1 GB limit. An oversized reply is refused and reported
 as a failed check — never as a "not breached" result. The stored copy carries the same
@@ -439,7 +440,8 @@ bound.
   preserved. An operator may optionally pre-seed the full corpus for offline /
   zero-third-party-dependency operation — locally with `npm run seed-breaches -w
 packages/server`, or inside the production image (which has no `npm`) with
-  `docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js`. The cache is **fail-safe**: a miss
+  `docker compose exec hvault-app node packages/server/dist/cli/seedBreaches.js` (and set
+  `UPDATE_CHECK_ENABLED=false` too, for a server that contacts no third party at all). The cache is **fail-safe**: a miss
   falls through to HIBP, and an upstream failure with no cached fallback surfaces as an
   error, never as a "not breached" result.
 - **On-device saved results.** The breach findings and weak-password scores shown on the
@@ -452,6 +454,42 @@ packages/server`, or inside the production image (which has no `npm`) with
   finishes without erasing them rather than hanging, and the encrypted results stay
   until a later logout clears them. The same holds for the encrypted offline copy of
   the vault. Neither is readable without the vault key, which logout discards.
+
+### The release check, and who sees which version
+
+**What the server sends.** Unless `UPDATE_CHECK_ENABLED=false`, the server asks the GitHub
+API twice a day (and once shortly after it starts, when the last check is stale) for the
+newest published release of the repository in `UPDATE_CHECK_REPOSITORY`. The request is
+fixed: a `GET` to `https://api.github.com/repos/<owner>/<name>/releases/latest` with only
+fixed headers (`User-Agent: H-Vault-Update-Check`, GitHub's JSON `Accept` type, the API
+version, and the HTTP client's own `Host`, `Connection` and `Accept-Encoding`) and no
+credentials. It carries no user data, no account count and **not the running version**; what
+GitHub learns is that a server at that IP address runs H-Vault. The host cannot be
+configured, only the repository path, so no setting can aim this request at another server.
+
+**How the answer is treated.** Like the breach check, the request follows no redirect (a
+renamed repository is reported in the log instead), is capped at 1 MiB and at a 15-second
+deadline even when data trickles in, and never throws. Only a tag that is exactly
+`v` followed by a plain release version, on a release that is neither a draft nor a
+prerelease, is recorded; the link the app shows is built by the server from its own
+configuration, and the browser refuses to render one that is not an `https://github.com/`
+address. "Up to date" (or "a newer release is available") is claimed only when the last
+successful check is less than 72 hours old; when there is no such check, the app says it
+could not check, however recently a check failed. "Check now" asks GitHub at most once every
+five minutes however often, and by however many people, it is pressed.
+
+**Who is told.** With `UPDATE_NOTIFY_EMAILS` unset, every signed-in account is shown update
+information, which on a typical self-hosted installation is its one owner. With it set, only
+the listed accounts see it (and the administrator-only release notes), and each receives one
+email per newer release when email is configured.
+
+**The running version.** The version reaches the browser only through the authenticated
+`GET /api/v1/releases/status` and `GET /api/v1/releases/notes`: no unauthenticated response
+carries it, and the client bundle does not contain it (a lint rule refuses to import it in
+browser code). "Authenticated" means any account that can sign in, which on an installation
+with open registration is anyone who registers. The one pre-existing exception is unchanged:
+with `ENABLE_SWAGGER=true` in production, the unauthenticated OpenAPI document states the
+version, which is one more reason to leave it off.
 
 ### Portable plaintext export ("Leave H-Vault")
 
@@ -1067,7 +1105,8 @@ Work through the **Deployment security checklist** in the [README](README.md) be
 put an instance in front of real data — in particular: set a dedicated
 `TWO_FACTOR_ENCRYPTION_KEY`, generate every secret randomly, terminate TLS, set
 `TRUST_PROXY_HOPS` to the true number of proxies, and keep the single published port bound
-to `127.0.0.1`.
+to `127.0.0.1`. If the server must make no request to a third party it was not asked to,
+set `UPDATE_CHECK_ENABLED=false`; the release check is then off, and the app says so.
 
 ### The object storage service
 

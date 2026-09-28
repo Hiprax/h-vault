@@ -1,6 +1,16 @@
 @import 'tailwindcss';
 
 /*
+ * `dark:` utilities follow the `.dark` class the theme setting puts on <html>,
+ * exactly like the colour tokens below. Without this line Tailwind v4 compiles
+ * `dark:` into a `prefers-color-scheme` media query, so with the app set to dark
+ * on a light system (or the reverse) a component's tokens and its `dark:`
+ * classes followed different themes. Pinned in a real browser by
+ * `e2e/theme-variant.spec.ts`.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
  * H-Vault Design System
  *
  * CSS custom properties for light and dark themes.
@@ -87,6 +97,17 @@
   --sidebar-accent: 214 60% 92%;
   --sidebar-accent-foreground: 221.2 83.2% 30%;
   --sidebar-ring: 221.2 83.2% 53.3%;
+
+  /* Release notes: one colour per kind of change, as TEXT on a 12% tint of
+   * itself. Each hue sits away from the blue primary so a kind is never read as
+   * a link, and each clears 5:1 on its own tint (checked by
+   * `tests/release-kind-contrast.test.ts`). A kind is never told by colour
+   * alone: its label and picture travel with it. */
+  --release-added: 262 58% 46%;
+  --release-improved: 190 95% 26%;
+  --release-changed: 30 95% 30%;
+  --release-fixed: 346 72% 40%;
+  --release-security: 152 76% 25%;
 }
 
 .dark {
@@ -134,6 +155,13 @@
   --sidebar-accent: 217.2 32.6% 17.5%;
   --sidebar-accent-foreground: 210 40% 98%;
   --sidebar-ring: 224.3 76.3% 48%;
+
+  /* Release-note kinds on the dark surfaces, as TEXT on a 16% tint of itself. */
+  --release-added: 262 90% 78%;
+  --release-improved: 190 80% 62%;
+  --release-changed: 38 92% 60%;
+  --release-fixed: 346 90% 74%;
+  --release-security: 152 62% 56%;
 }
 
 /*
@@ -320,5 +348,110 @@
   .animate-slide-in-right,
   .animate-in {
     animation: none;
+  }
+}
+
+/*
+ * Release notes ("What's new" and the About page).
+ *
+ * A kind class sets `--release-kind`; `.release-chip` paints any element in that
+ * kind's colour on a tint of itself. The dial is the one piece of motion the
+ * notes have: its ring turns once into place when the dialog opens, while the
+ * version fades in beneath it. The unseen-notes dot beside the version in the
+ * sidebar carries a slow ring for as long as there is something unread.
+ */
+@layer components {
+  .release-kind-added {
+    --release-kind: var(--release-added);
+  }
+  .release-kind-improved {
+    --release-kind: var(--release-improved);
+  }
+  .release-kind-changed {
+    --release-kind: var(--release-changed);
+  }
+  .release-kind-fixed {
+    --release-kind: var(--release-fixed);
+  }
+  .release-kind-security {
+    --release-kind: var(--release-security);
+  }
+  .release-kind-other {
+    --release-kind: var(--muted-foreground);
+  }
+
+  .release-chip {
+    color: hsl(var(--release-kind));
+    background-color: hsl(var(--release-kind) / 0.12);
+  }
+  .dark .release-chip {
+    background-color: hsl(var(--release-kind) / 0.16);
+  }
+
+  .release-hero-glow {
+    background: radial-gradient(closest-side, hsl(var(--primary) / 0.16), transparent);
+  }
+
+  .release-dial-ring {
+    transform-origin: 50% 50%;
+    animation: release-dial-turn 700ms cubic-bezier(0.22, 0.9, 0.24, 1) both;
+  }
+  .release-dial-numerals {
+    animation: release-numerals-in 420ms ease-out 260ms both;
+  }
+
+  .release-unseen-dot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background-color: hsl(var(--primary));
+    animation: release-unseen-ring 2.4s ease-out infinite;
+  }
+}
+
+@keyframes release-dial-turn {
+  from {
+    transform: rotate(-90deg);
+    opacity: 0.4;
+  }
+  to {
+    transform: rotate(0deg);
+    opacity: 1;
+  }
+}
+
+@keyframes release-numerals-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes release-unseen-ring {
+  from {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+/* Hand-written classes, so the reduced-motion guard is written against them
+ * directly, for the reason given above `.animate-in`'s guard. */
+@media (prefers-reduced-motion: reduce) {
+  .release-dial-ring,
+  .release-dial-numerals {
+    animation: none;
+  }
+  .release-unseen-dot::after {
+    animation: none;
+    display: none;
   }
 }
