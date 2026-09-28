@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-28
+
 ### Added
 
 - **What's new, after every update.** The first time you sign in after the server is updated, H-Vault shows what changed in plain words: the new release in full, every release you missed marked "New for you", and older releases below. Closing it records on the server that you have read it, so it does not open again on another device; a new account starts caught up and is never shown history it did not live through. Accounts created before this release are shown this release's notes once. A setting, "Show what's new after an update", turns the automatic opening off; the notes then stay one click away, and a dot beside the version marks anything unread.
@@ -852,7 +854,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/Hiprax/h-vault/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/Hiprax/h-vault/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/Hiprax/h-vault/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Hiprax/h-vault/compare/v0.12.0...v0.13.0

@@ -2,6 +2,64 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.15.0',
+    date: '2026-09-28',
+    title: 'See what changed after every update',
+    summary:
+      'H-Vault now shows the version it runs, explains each update in plain words the first time you sign in after it, and keeps the whole release history one click away. Whoever runs the server is told when a newer release is out.',
+    highlights: [
+      {
+        icon: 'sparkles',
+        title: "What's new, once, after each update",
+        body: 'The first time you sign in after an update, this window shows what changed, with every release you missed marked New for you. Once you close it, it does not open again, on any of your devices.',
+      },
+      {
+        icon: 'clock',
+        title: 'The version and every release, one click away',
+        body: 'The version at the foot of the sidebar opens these notes at any time. Settings, About H-Vault has the full history, which you can search and filter by kind of change.',
+      },
+      {
+        icon: 'bell',
+        title: 'Told when a newer release is out',
+        body: 'Twice a day the server checks GitHub for a newer H-Vault. When there is one, administrators see a notice with the update steps, and, when email is set up, each address in UPDATE_NOTIFY_EMAILS gets one email per release.',
+        audience: 'administrators',
+      },
+    ],
+    changes: [
+      {
+        kind: 'added',
+        text: "A setting, Show what's new after an update, turns the automatic opening off. The notes then stay behind the version in the sidebar, and a dot tells you something is unread.",
+      },
+      {
+        kind: 'added',
+        text: 'A new account starts caught up, so it is never shown the history of releases from before it existed.',
+      },
+      {
+        kind: 'improved',
+        text: 'When the server is updated while H-Vault is open, the app notices the next time you unlock it or return to it after a few minutes away, and the update prompt says which version is ready.',
+      },
+      {
+        kind: 'fixed',
+        text: "A few colours that followed your system's light or dark mode, instead of the theme you chose in H-Vault, now follow your choice.",
+      },
+      {
+        kind: 'changed',
+        text: 'The server now contacts api.github.com twice a day to check for a newer release. It sends no user data and not the version it runs. Set UPDATE_CHECK_ENABLED to false to turn it off.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'added',
+        text: 'Settings, About H-Vault shows administrators whether this server runs the latest release, the update steps when it does not, and a Check now button.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'added',
+        text: 'UPDATE_CHECK_REPOSITORY points the check at a fork, and UPDATE_NOTIFY_EMAILS names the accounts that are told about new releases. Without it, every account sees update information and nobody is emailed.',
+        audience: 'administrators',
+      },
+    ],
+  },
+  {
     version: '0.14.1',
     date: '2026-09-27',
     title: 'Notes keep your spacing, and viewer line numbers line up',
